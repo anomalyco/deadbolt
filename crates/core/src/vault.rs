@@ -8,6 +8,10 @@ use crate::id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 use crate::item::Field;
 use crate::membership::{self, Membership};
 
+/// Approximate field data per entry written by [`Vault::create_items`],
+/// well under the sync frame limit.
+pub const CREATE_BATCH_BYTES: usize = 1024 * 1024;
+
 /// Per log, the highest seq in an entry's causal past (inclusive).
 pub(crate) type Clock = BTreeMap<LogId, u64>;
 
@@ -371,6 +375,48 @@ impl Vault {
     ) -> Result<(ItemId, Entry), Error> {
         let entry = self.write(secret, vec![DataOp::create(kind, name, fields)])?;
         Ok((ItemId::of_create(&entry.hash(), 0), entry))
+    }
+
+    /// Creates many items (an import) in as few entries as fit about
+    /// [`CREATE_BATCH_BYTES`] of field data each. Every item is checked
+    /// before anything is written, so either all are created or none.
+    pub fn create_items(
+        &mut self,
+        secret: &DeviceSecret,
+        items: impl IntoIterator<Item = (String, Option<String>, Vec<(String, Field)>)>,
+    ) -> Result<(Vec<ItemId>, Vec<Entry>), Error> {
+        if !self.is_member(&secret.device_id()) {
+            return Err(Error::NotMember);
+        }
+        let mut batches: Vec<Vec<DataOp>> = Vec::new();
+        let mut size = 0;
+        for (kind, name, fields) in items {
+            let bytes = kind.len()
+                + name.as_ref().map_or(0, String::len)
+                + fields
+                    .iter()
+                    .map(|(n, f)| n.len() + f.kind.as_str().len() + f.value.len() + 16)
+                    .sum::<usize>();
+            let op = DataOp::create(kind, name, fields);
+            data::check(&self.items, &op)?;
+            match batches.last_mut() {
+                Some(batch) if size + bytes <= CREATE_BATCH_BYTES => batch.push(op),
+                _ => {
+                    batches.push(vec![op]);
+                    size = 0;
+                }
+            }
+            size += bytes;
+        }
+        let mut ids = Vec::new();
+        let mut entries = Vec::new();
+        for ops in batches {
+            let count = ops.len();
+            let entry = self.write(secret, ops)?;
+            ids.extend((0..count).map(|i| ItemId::of_create(&entry.hash(), i)));
+            entries.push(entry);
+        }
+        Ok((ids, entries))
     }
 
     /// An item, including deleted ones.

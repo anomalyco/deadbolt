@@ -761,6 +761,43 @@ fn item_ids_derive_from_the_creating_op() {
 }
 
 #[test]
+fn create_items_batches_entries_and_is_all_or_nothing() {
+    let mut a = Dev::create();
+    let big = "x".repeat(CREATE_BATCH_BYTES / 4);
+    let login = |password: &str| {
+        (
+            "login".to_string(),
+            None,
+            vec![
+                ("password".to_string(), secret(password)),
+                (
+                    "notes".to_string(),
+                    Field::new(FieldType::Note, big.clone()),
+                ),
+            ],
+        )
+    };
+    let items: Vec<_> = (0..10).map(|i| login(&i.to_string())).collect();
+    let (ids, entries) = a.vault.create_items(&a.secret, items).unwrap();
+    assert_eq!(ids.len(), 10);
+    assert!(
+        (3..10).contains(&entries.len()),
+        "{} entries",
+        entries.len()
+    );
+    assert_eq!(value(&a.vault.item(&ids[9]).unwrap(), "password"), "9");
+    assert_eq!(a.vault.items().len(), 10);
+
+    let mut items: Vec<_> = (0..10).map(|i| login(&i.to_string())).collect();
+    items.push(("card".into(), None, vec![]));
+    assert_eq!(
+        a.vault.create_items(&a.secret, items).unwrap_err(),
+        Error::Item(ItemError::MissingField("number"))
+    );
+    assert_eq!(a.vault.items().len(), 10);
+}
+
+#[test]
 fn schema_is_enforced_at_commit() {
     let mut a = Dev::create();
     let item_err = |e: ItemError| Err(Error::Item(e));

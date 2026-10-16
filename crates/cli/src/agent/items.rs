@@ -12,7 +12,7 @@ use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultI
 
 use super::session::Session;
 use crate::items::line;
-use crate::protocol::{FieldInfo, FieldInput, ItemInfo};
+use crate::protocol::{FieldInfo, FieldInput, ItemInfo, NewItem};
 
 const MIN_SHORT: usize = 4;
 
@@ -309,6 +309,28 @@ pub fn create(
         .create_item(secret, kind, name, fields)?;
     s.persist(&[entry])?;
     Ok(info(s, vault, &id))
+}
+
+/// Creates all `items` or none; returns how many items and entries.
+pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Result<(usize, usize)> {
+    let vault = s.resolve(vault)?;
+    let items = items
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| {
+            let fields = fields(&item.kind, None, item.fields)
+                .map_err(|e| e.context(format!("item {}", i + 1)))?;
+            Ok((item.kind, item.name.filter(|n| !n.is_empty()), fields))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let secret = &s.secret;
+    let (ids, entries) = s
+        .vaults
+        .get_mut(&vault)
+        .expect("resolved")
+        .create_items(secret, items)?;
+    s.persist(&entries)?;
+    Ok((ids.len(), entries.len()))
 }
 
 pub fn set(

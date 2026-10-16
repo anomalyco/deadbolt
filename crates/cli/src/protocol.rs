@@ -109,6 +109,19 @@ pub enum Command {
         vault: Option<String>,
         query: Vec<String>,
     },
+    /// Creates all items or none, in as few entries as fit; replies `imported`.
+    ItemImport {
+        vault: Option<String>,
+        items: Vec<NewItem>,
+    },
+}
+
+/// An item to create, as in `item-new`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NewItem {
+    pub kind: String,
+    pub name: Option<String>,
+    pub fields: Vec<FieldInput>,
 }
 
 /// A field as typed by the user. Without `kind`, the agent uses the item
@@ -194,6 +207,10 @@ pub enum Reply {
     },
     Items {
         items: Vec<ItemInfo>,
+    },
+    Imported {
+        items: usize,
+        entries: usize,
     },
 }
 

@@ -4,6 +4,7 @@ compile_error!("deadbolt currently supports Unix platforms only");
 mod agent;
 mod client;
 mod config;
+mod import;
 mod items;
 mod paths;
 mod prompt;
@@ -94,6 +95,9 @@ enum Commands {
     },
     #[command(flatten)]
     Item(items::ItemCommand),
+    /// Import items from another password manager into the vault.
+    #[command(subcommand)]
+    Import(import::ImportCommand),
 }
 
 #[derive(Args)]
@@ -183,6 +187,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Item(command) => {
             client::ensure_running(&paths).await?;
             items::run(&paths, command, vault, from_stdin).await?;
+        }
+        Commands::Import(command) => {
+            client::ensure_running(&paths).await?;
+            import::run(&paths, command, vault, from_stdin).await?;
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
         Commands::Agent {

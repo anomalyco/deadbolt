@@ -87,7 +87,7 @@ pub use entry::{Change, DataOp, Entry, Log, LogId, MembershipOp, Payload, valid_
 pub use error::{DecodeError, Error};
 pub use id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 pub use item::{Field, FieldType, ItemError, Schema, SchemaField, schema, schemas};
-pub use vault::{Heads, Vault};
+pub use vault::{CREATE_BATCH_BYTES, Heads, Vault};
 
 #[cfg(test)]
 mod tests;

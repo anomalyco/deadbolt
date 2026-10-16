@@ -679,3 +679,141 @@ fn concurrent_item_edits_on_two_devices() {
         pa == pb && (pa == "from-a\n" || pa == "from-b\n")
     });
 }
+
+/// A Bitwarden unencrypted JSON export (web vault: Tools > Export vault).
+const BITWARDEN_EXPORT: &str = r#"{
+  "encrypted": false,
+  "folders": [{ "id": "4f5e2a3b-0c1d-4e2f-9a8b-7c6d5e4f3a2b", "name": "Work" }],
+  "items": [
+    {
+      "passwordHistory": [{ "lastUsedDate": "2024-01-02T03:04:05.000Z", "password": "old-pw-111" }],
+      "revisionDate": "2024-05-06T07:08:09.123Z",
+      "creationDate": "2023-01-01T00:00:00.000Z",
+      "deletedDate": null,
+      "id": "0b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e",
+      "organizationId": null,
+      "folderId": "4f5e2a3b-0c1d-4e2f-9a8b-7c6d5e4f3a2b",
+      "type": 1,
+      "reprompt": 0,
+      "name": "GitHub",
+      "notes": "notes-secret-222",
+      "favorite": true,
+      "fields": [{ "name": "Recovery Code", "value": "recovery-secret-333", "type": 1, "linkedId": null }],
+      "login": {
+        "fido2Credentials": [],
+        "uris": [{ "match": null, "uri": "https://github.com/login" }, { "match": null, "uri": "gh.io" }],
+        "username": "dax",
+        "password": "github-secret-444",
+        "totp": "JBSWY3DPEHPK3PXP"
+      },
+      "collectionIds": null
+    },
+    {
+      "id": "3b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e",
+      "organizationId": null,
+      "folderId": null,
+      "type": 3,
+      "reprompt": 0,
+      "name": null,
+      "notes": null,
+      "favorite": false,
+      "card": {
+        "cardholderName": "Dax Raad",
+        "brand": "Visa",
+        "number": "4242 4242 4242 4242",
+        "expMonth": "4",
+        "expYear": "2027",
+        "code": "555"
+      },
+      "collectionIds": null
+    },
+    { "id": "6b1c", "type": 2, "name": "Wifi", "notes": "wifi-secret-666", "favorite": false, "secureNote": { "type": 0 } },
+    { "id": "7b1c", "type": 1, "name": "Nopass", "favorite": false, "login": { "username": "x", "password": null } }
+  ]
+}"#;
+
+#[test]
+fn import_bitwarden() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let file = a.path("export.json");
+    std::fs::write(&file, BITWARDEN_EXPORT).unwrap();
+    let secrets = [
+        "old-pw-111",
+        "notes-secret-222",
+        "recovery-secret-333",
+        "github-secret-444",
+        "JBSWY3DPEHPK3PXP",
+        "4242",
+        "555",
+        "wifi-secret-666",
+    ];
+    let no_secrets = |output: &Output| {
+        for text in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(text);
+            for secret in secrets {
+                assert!(!text.contains(secret), "{secret} leaked: {text}");
+            }
+        }
+    };
+
+    let output = a.try_run(&["import", "bitwarden", file.to_str().unwrap()]);
+    assert!(output.status.success());
+    no_secrets(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "imported 2 (logins 1, cards 1)\n\
+         skipped 1 login without password\n\
+         skipped 1 secure note\n\
+         dropped: 1 folder, 1 favorite, password history on 1 item\n"
+    );
+
+    let ls = a.run(&["ls"]);
+    let lines: Vec<&str> = ls.lines().map(|l| l.split_once('\t').unwrap().1).collect();
+    assert_eq!(lines, ["GitHub\tdax", "Visa •••• 4242\t04/27"]);
+    assert_eq!(a.run(&["get", "github"]), "github-secret-444\n");
+    assert_eq!(
+        a.run(&["get", "github", "-f", "recovery-code"]),
+        "recovery-secret-333\n"
+    );
+    assert_eq!(a.run(&["get", "github", "-f", "url-2"]), "https://gh.io\n");
+    assert_eq!(a.run(&["get", "visa"]), "4242424242424242\n");
+    assert_eq!(a.run(&["get", "visa", "-f", "cvv"]), "555\n");
+    let show = a.try_run(&["show", "github"]);
+    assert!(show.status.success());
+    // Secret fields are masked (notes are not secret; ids are hex, so
+    // digit-only values could appear by chance).
+    let show = String::from_utf8(show.stdout).unwrap();
+    assert!(
+        !secrets
+            .iter()
+            .filter(|s| s.len() > 4 && !s.starts_with("notes"))
+            .any(|s| show.contains(s)),
+        "{show}"
+    );
+
+    // From stdin, into another vault; no dedupe, so re-running imports again.
+    a.run(&["init", "work"]);
+    for _ in 0..2 {
+        let output = a.try_run_stdin(
+            &["-v", "work", "import", "bitwarden", "-"],
+            BITWARDEN_EXPORT,
+        );
+        assert!(output.status.success());
+        no_secrets(&output);
+    }
+    assert_eq!(a.run(&["-v", "work", "ls"]).lines().count(), 4);
+    assert_eq!(a.run(&["ls"]).lines().count(), 2);
+
+    let encrypted = a.path("encrypted.json");
+    std::fs::write(
+        &encrypted,
+        r#"{"encrypted": true, "passwordProtected": true, "salt": "x", "data": "2.y"}"#,
+    )
+    .unwrap();
+    let err = a.fail(&["import", "bitwarden", encrypted.to_str().unwrap()]);
+    assert!(
+        err.contains("this is an encrypted export; export as unencrypted .json"),
+        "{err}"
+    );
+}

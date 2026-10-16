@@ -272,7 +272,7 @@ fn check_value(name: &str, field: &Field) -> Result<(), ItemError> {
 }
 
 /// Checks one field of an item of type `schema` (known type, name, value).
-pub(crate) fn check_field(schema: &Schema, name: &str, field: &Field) -> Result<(), ItemError> {
+pub fn check_field(schema: &Schema, name: &str, field: &Field) -> Result<(), ItemError> {
     if !valid_field_name(name) {
         return Err(ItemError::InvalidFieldName(name.into()));
     }
@@ -314,7 +314,7 @@ pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError>
 }
 
 /// Checks a `Create` op.
-pub(crate) fn check_create(
+pub fn check_create(
     kind: &str,
     name: Option<&str>,
     fields: &BTreeMap<String, Field>,

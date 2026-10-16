@@ -33,7 +33,8 @@ use crate::protocol::{
 };
 use session::{Loaded, Session, clean_name};
 
-const MAX_LINE: usize = 64 * 1024;
+/// Large enough for `item-import` of a big vault.
+const MAX_LINE: usize = 64 * 1024 * 1024;
 
 pub struct Agent {
     paths: Paths,
@@ -395,6 +396,11 @@ impl Agent {
             } => self.item_write(|s| items::unset(s, vault.as_deref(), &query, &field)),
             Command::ItemRemove { vault, query } => {
                 self.item_write(|s| items::remove(s, vault.as_deref(), &query))
+            }
+            Command::ItemImport { vault, items } => {
+                let (items, entries) = self.with(|s| items::import(s, vault.as_deref(), items))?;
+                self.sync_now.notify_one();
+                Ok(Reply::Imported { items, entries })
             }
         }
     }

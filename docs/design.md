@@ -63,6 +63,7 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 - Agent-first: every command works from flags, env (`DEADBOLT_PASSPHRASE`) and stdin (`field=-`, `--passphrase-stdin`) and never waits for a human without a TTY.
 - On a TTY (stdin and stderr), it prompts only for what would otherwise be an error: passphrase, `field=-` values, missing required fields, and confirming the pairing code (`--yes` skips).
 - A background agent (`deadbolt agent`, auto-started) holds the unlocked store and the iroh node; commands talk to it over a user-only Unix socket.
+- `deadbolt import bitwarden [FILE]` (stdin if omitted or `-`) reads Bitwarden's unencrypted JSON export into the vault: logins and cards only; other item types, folders, favorites, attachments and password history are skipped and counted. All items are checked first, then created together in as few entries as fit (~1 MiB each). No dedupe: running it again imports everything again. Prints only a summary, never values.
 - Basics only for now; convenience features (picker, history, generate, TOTP codes, `run`, clipboard, JSON output) get decided together later.
 
 ## Pairing
