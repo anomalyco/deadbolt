@@ -34,7 +34,7 @@ function Landing() {
     <main>
       <Masthead />
 
-      <div className="bleed"><MeshScene quiet /></div>
+      <div className="bleed"><MeshScene /></div>
 
       <Justified className="description" text="a password manager with no server. your devices hold the vault and sync with each other directly, end-to-end encrypted. a new device joins only by pairing with one you already have. no accounts. nothing of ours to breach." />
 
@@ -42,7 +42,7 @@ function Landing() {
 
       <section>
         <h2>cli</h2>
-        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on your laptop\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt pair DBPAIRAGMRLX…\n`}{out("code 411308: adding device laptop\nconfirm code 411308 matches the other device? [y/N] y\nadded laptop to personal")}</pre>
+        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on a new device\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt pair DBPAIRAGMRLX…\n`}{out("code 411308: adding device octahedron\nconfirm code 411308 matches the other device? [y/N] y\nadded octahedron to personal")}</pre>
       </section>
 
       <section>
