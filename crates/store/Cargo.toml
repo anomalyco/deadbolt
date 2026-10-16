@@ -1,0 +1,18 @@
+[package]
+name = "deadbolt-store"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[dependencies]
+argon2 = { version = "0.6", default-features = false, features = ["zeroize"] }
+blake3 = "1"
+chacha20poly1305 = { version = "0.11", default-features = false, features = ["alloc", "zeroize"] }
+getrandom = "0.4"
+redb = "4"
+thiserror = "2"
+zeroize = "1"
+
+[dev-dependencies]
+tempfile = "3"
