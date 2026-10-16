@@ -15,6 +15,6 @@ Status: design. No code yet.
 
 ## Site
 
-[`site/index.html`](site/index.html) is a mock marketing page in the style of opentunnel.xyz — a single static file (fonts are Anton and IBM Plex Mono, OFL; licences in `site/fonts/`). Copy and product details on it are placeholders.
+`site/` is the website: a landing page (`/`) and an animated architecture walkthrough (`/architecture/`), in the style of opentunnel.xyz (Vite, React, Motion, WebGL2 prints; fonts are Anton and IBM Plex Mono, OFL, licences in `site/public/fonts/`). `cd site && bun install && bun run dev` serves it on http://127.0.0.1:5197. The original static mock is kept at [`site/mock.html`](site/mock.html).
 
 ![deadbolt](site/screenshots/above-the-fold.png)
