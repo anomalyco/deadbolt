@@ -353,14 +353,15 @@ impl Agent {
                 self.sync_now.notify_one();
                 Ok(Reply::Removed { vault, device })
             }
-            Command::Sync => {
-                self.with(|_| Ok(()))?;
+            Command::Sync { vault } => {
+                let only =
+                    self.with(|s| vault.as_deref().map(|v| s.resolve(Some(v))).transpose())?;
                 let deadline = Instant::now() + sync::SYNC_TIMEOUT * 2;
                 while !self.ready.load(Ordering::SeqCst) && Instant::now() < deadline {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
                 Ok(Reply::Sync {
-                    peers: sync::sync_all(&self).await?,
+                    peers: sync::sync_all(&self, only).await?,
                 })
             }
             Command::Join { confirm } => pairing::join(&self, conv, confirm).await,

@@ -62,7 +62,9 @@ pub enum Command {
         vault: Option<String>,
         device: String,
     },
-    Sync,
+    Sync {
+        vault: Option<String>,
+    },
     /// Emits `ticket`, then `joining` (answered if `confirm`), then replies `joined`.
     Join {
         confirm: bool,

@@ -159,11 +159,19 @@ fn receive(s: &mut Session, peer: &DeviceId, entries: Vec<Vec<u8>>) -> Result<us
     Ok(added.len())
 }
 
-/// Syncs with every member of every vault, concurrently.
-pub async fn sync_all(agent: &Arc<Agent>) -> Result<Vec<PeerSync>> {
+/// Syncs with every member of every vault, or only of `only`, concurrently.
+pub async fn sync_all(agent: &Arc<Agent>, only: Option<VaultId>) -> Result<Vec<PeerSync>> {
     let (node, targets) = agent.with(|s| {
-        let targets: Vec<_> = s
-            .peer_set()
+        let peers = match only {
+            Some(id) => s
+                .vault(&id)
+                .members()
+                .filter(|member| *member != s.id)
+                .map(|member| *member.as_bytes())
+                .collect(),
+            None => s.peer_set(),
+        };
+        let targets: Vec<_> = peers
             .into_iter()
             .map(|id| s.addr_of(&DeviceId::from_bytes(id)))
             .collect();
@@ -222,12 +230,12 @@ pub async fn sync_all(agent: &Arc<Agent>) -> Result<Vec<PeerSync>> {
 /// every reachable member, then full syncs every [`SYNC_INTERVAL`] and
 /// whenever something changed.
 pub async fn run(agent: Arc<Agent>) {
-    if let Err(error) = sync_all(&agent).await {
+    if let Err(error) = sync_all(&agent, None).await {
         warn!("startup sync failed: {error:#}");
     }
     agent.ready.store(true, Ordering::SeqCst);
     loop {
-        if let Err(error) = sync_all(&agent).await {
+        if let Err(error) = sync_all(&agent, None).await {
             warn!("sync failed: {error:#}");
         }
         tokio::select! {

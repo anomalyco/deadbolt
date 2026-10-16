@@ -2,18 +2,12 @@
 //! assignments, filling in missing input, and printing.
 
 use anyhow::{Result, anyhow, bail};
-use clap::{Args, Subcommand};
+use clap::Subcommand;
 use deadbolt_core::{FieldType, schema, schemas};
 
 use crate::paths::Paths;
 use crate::prompt;
 use crate::protocol::{Command, FieldInput, ItemInfo, Reply};
-
-#[derive(Args)]
-pub struct VaultArg {
-    #[arg(short, long)]
-    vault: Option<String>,
-}
 
 #[derive(Subcommand)]
 pub enum ItemCommand {
@@ -37,8 +31,6 @@ pub enum ItemCommand {
         /// Generate a password of letters and digits only.
         #[arg(long)]
         no_symbols: bool,
-        #[command(flatten)]
-        vault: VaultArg,
     },
     /// Print one field's raw value (default: login password, card number).
     Get {
@@ -47,8 +39,6 @@ pub enum ItemCommand {
         query: Vec<String>,
         #[arg(short, long)]
         field: Option<String>,
-        #[command(flatten)]
-        vault: VaultArg,
     },
     /// Show an item's fields, secrets masked.
     Show {
@@ -57,8 +47,6 @@ pub enum ItemCommand {
         /// Show secret values.
         #[arg(long)]
         reveal: bool,
-        #[command(flatten)]
-        vault: VaultArg,
     },
     /// List items: short id, label, username or card expiry.
     Ls {
@@ -67,8 +55,6 @@ pub enum ItemCommand {
         /// Only items of this type.
         #[arg(long = "type", value_name = "TYPE")]
         kind: Option<String>,
-        #[command(flatten)]
-        vault: VaultArg,
     },
     /// Set fields and/or the name. Arguments containing `=` are
     /// assignments, the others are the query.
@@ -80,8 +66,6 @@ pub enum ItemCommand {
         /// Set the name; an empty name clears it.
         #[arg(long)]
         name: Option<String>,
-        #[command(flatten)]
-        vault: VaultArg,
     },
     /// Remove a field that is not required.
     Unset {
@@ -89,15 +73,11 @@ pub enum ItemCommand {
         query: Vec<String>,
         #[arg(short, long)]
         field: String,
-        #[command(flatten)]
-        vault: VaultArg,
     },
     /// Delete an item.
     Rm {
         #[arg(required = true, value_name = "QUERY")]
         query: Vec<String>,
-        #[command(flatten)]
-        vault: VaultArg,
     },
 }
 
@@ -237,7 +217,12 @@ fn show(item: &ItemInfo, reveal: bool) {
     }
 }
 
-pub async fn run(paths: &Paths, command: ItemCommand, from_stdin: bool) -> Result<()> {
+pub async fn run(
+    paths: &Paths,
+    command: ItemCommand,
+    vault: Option<String>,
+    from_stdin: bool,
+) -> Result<()> {
     match command {
         ItemCommand::New {
             kind,
@@ -245,7 +230,6 @@ pub async fn run(paths: &Paths, command: ItemCommand, from_stdin: bool) -> Resul
             name,
             length,
             no_symbols,
-            vault,
         } => {
             let mut fields = assignments(&fields, Some(&kind))?;
             fill_required(&kind, &mut fields)?;
@@ -257,22 +241,15 @@ pub async fn run(paths: &Paths, command: ItemCommand, from_stdin: bool) -> Resul
                 });
             }
             let command = Command::ItemNew {
-                vault: vault.vault,
+                vault,
                 kind,
                 name,
                 fields,
             };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
-        ItemCommand::Get {
-            query,
-            field,
-            vault,
-        } => {
-            let command = Command::ItemGet {
-                vault: vault.vault,
-                query,
-            };
+        ItemCommand::Get { query, field } => {
+            let command = Command::ItemGet { vault, query };
             let item = item(paths, command, from_stdin).await?;
             let name = match field.as_deref() {
                 Some(name) => name,
@@ -289,23 +266,12 @@ pub async fn run(paths: &Paths, command: ItemCommand, from_stdin: bool) -> Resul
                 .ok_or_else(|| anyhow!("{} has no field {name}", item.label))?;
             println!("{}", field.value);
         }
-        ItemCommand::Show {
-            query,
-            reveal,
-            vault,
-        } => {
-            let command = Command::ItemGet {
-                vault: vault.vault,
-                query,
-            };
+        ItemCommand::Show { query, reveal } => {
+            let command = Command::ItemGet { vault, query };
             show(&item(paths, command, from_stdin).await?, reveal);
         }
-        ItemCommand::Ls { query, kind, vault } => {
-            let command = Command::ItemList {
-                vault: vault.vault,
-                query,
-                kind,
-            };
+        ItemCommand::Ls { query, kind } => {
+            let command = Command::ItemList { vault, query, kind };
             let Reply::Items { items } = crate::request(paths, command, from_stdin).await? else {
                 bail!("unexpected reply");
             };
@@ -313,7 +279,7 @@ pub async fn run(paths: &Paths, command: ItemCommand, from_stdin: bool) -> Resul
                 println!("{}", line(item));
             }
         }
-        ItemCommand::Set { args, name, vault } => {
+        ItemCommand::Set { args, name } => {
             let (assigns, query): (Vec<&String>, Vec<&String>) =
                 args.iter().partition(|a| a.contains('='));
             if query.is_empty() {
@@ -323,30 +289,23 @@ pub async fn run(paths: &Paths, command: ItemCommand, from_stdin: bool) -> Resul
                 bail!("nothing to change: give field=value assignments or --name");
             }
             let command = Command::ItemSet {
-                vault: vault.vault,
+                vault,
                 query: query.into_iter().cloned().collect(),
                 fields: assignments(assigns, None)?,
                 name,
             };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
-        ItemCommand::Unset {
-            query,
-            field,
-            vault,
-        } => {
+        ItemCommand::Unset { query, field } => {
             let command = Command::ItemUnset {
-                vault: vault.vault,
+                vault,
                 query,
                 field,
             };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
-        ItemCommand::Rm { query, vault } => {
-            let command = Command::ItemRemove {
-                vault: vault.vault,
-                query,
-            };
+        ItemCommand::Rm { query } => {
+            let command = Command::ItemRemove { vault, query };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
     }

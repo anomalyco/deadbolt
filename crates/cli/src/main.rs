@@ -34,6 +34,9 @@ struct Cli {
     /// DEADBOLT_PASSPHRASE (init, join, unlock).
     #[arg(long, global = true)]
     passphrase_stdin: bool,
+    /// Vault to act on (default: this device's default vault).
+    #[arg(short, long, global = true)]
+    vault: Option<String>,
     #[command(subcommand)]
     command: Commands,
 }
@@ -58,15 +61,10 @@ enum Commands {
         /// This device's name, shown to your other devices (default: hostname).
         #[arg(long)]
         device_name: Option<String>,
-        /// Accept the confirmation code without asking, even on a terminal.
-        #[arg(short, long)]
-        yes: bool,
     },
     /// Admit a new device into a vault, using the ticket `deadbolt join` shows.
     Pair {
         ticket: String,
-        #[arg(short, long)]
-        vault: Option<String>,
         /// Accept the confirmation code without asking, even on a terminal.
         #[arg(short, long)]
         yes: bool,
@@ -87,7 +85,7 @@ enum Commands {
     Lock,
     /// Show the agent, this device, its vaults and peers.
     Status,
-    /// Sync with every device now.
+    /// Sync now with every device (or only the devices in --vault).
     Sync,
     /// Run the background agent in the foreground, or manage it.
     Agent {
@@ -100,8 +98,6 @@ enum Commands {
 
 #[derive(Args)]
 struct DevicesArgs {
-    #[arg(short, long, global = true)]
-    vault: Option<String>,
     #[command(subcommand)]
     command: Option<DevicesCommand>,
 }
@@ -168,10 +164,25 @@ fn main() -> ExitCode {
 async fn run(cli: Cli) -> Result<ExitCode> {
     let paths = Paths::get();
     let from_stdin = cli.passphrase_stdin;
+    let vault = cli.vault;
+    if vault.is_some()
+        && matches!(
+            cli.command,
+            Commands::Init { .. }
+                | Commands::Join { .. }
+                | Commands::Unlock { .. }
+                | Commands::Lock
+                | Commands::Status
+                | Commands::Agent { .. }
+                | Commands::Vault(_)
+        )
+    {
+        bail!("--vault does not apply to this command");
+    }
     match cli.command {
         Commands::Item(command) => {
             client::ensure_running(&paths).await?;
-            items::run(&paths, command, from_stdin).await?;
+            items::run(&paths, command, vault, from_stdin).await?;
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
         Commands::Agent {
@@ -202,19 +213,18 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let default = if vault.default { " (default)" } else { "" };
             println!("created vault {}{default}", vault.name);
         }
-        Commands::Join { device_name, yes } => {
+        Commands::Join { device_name } => {
             let status = client::ensure_running(&paths).await?;
             if !status.initialized {
                 setup(&paths, device_name, from_stdin).await?;
             }
-            let confirm = !yes && prompt::interactive();
-            let reply = pairing(&paths, Command::Join { confirm }, from_stdin).await?;
+            let reply = pairing(&paths, Command::Join { confirm: false }, from_stdin).await?;
             let Reply::Joined { vault } = reply else {
                 bail!("unexpected reply");
             };
             println!("joined vault {}", vault.name);
         }
-        Commands::Pair { ticket, vault, yes } => {
+        Commands::Pair { ticket, yes } => {
             client::ensure_running(&paths).await?;
             let confirm = !yes && prompt::interactive();
             let command = Command::Pair {
@@ -232,8 +242,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             client::ensure_running(&paths).await?;
             match args.command {
                 None => {
-                    let reply =
-                        request(&paths, Command::Devices { vault: args.vault }, from_stdin).await?;
+                    let reply = request(&paths, Command::Devices { vault }, from_stdin).await?;
                     let Reply::Devices { devices, .. } = reply else {
                         bail!("unexpected reply");
                     };
@@ -247,10 +256,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                     }
                 }
                 Some(DevicesCommand::Remove { device }) => {
-                    let command = Command::DeviceRemove {
-                        vault: args.vault,
-                        device,
-                    };
+                    let command = Command::DeviceRemove { vault, device };
                     let Reply::Removed { vault, device } =
                         request(&paths, command, from_stdin).await?
                     else {
@@ -319,7 +325,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Commands::Sync => {
             client::ensure_running(&paths).await?;
-            let Reply::Sync { peers } = request(&paths, Command::Sync, from_stdin).await? else {
+            let Reply::Sync { peers } =
+                request(&paths, Command::Sync { vault }, from_stdin).await?
+            else {
                 bail!("unexpected reply");
             };
             if peers.is_empty() {
