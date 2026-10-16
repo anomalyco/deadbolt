@@ -66,15 +66,16 @@ function sdBox([px, py]: Point, [x, y, w, h]: Box) {
 
 // How much of a light the border takes: a head at full strength lifts the nearest point of a resting frame to about
 // 155 grey (explainer-motion's reflection), and a flood lights it from the socket outward. The inset rule takes less.
-const CATCH = { head: .9, flood: .8, inset: .4 }
+const CATCH = { head: .75, flood: .8, inset: .4 }
 const HEAD_STOPS = [0, .15, .3, .5, .7, .85, 1]
 const FLOOD_STOPS = [0, .2, .4, .6, .72, .8, .86, .9, .94, 1, 1.08, 1.16]
 
 /** The light a card's border catches, drawn on the card's own frame and inset rule (and their dashes): each head,
  *  spark or ember near it lights the lines around it, and a flood into the card (or arriving at a socket on its
- *  edge, if the card has since grown) lights them from there outward. Each source is one copy of the two lines stroked with a radial gradient, so the border itself
- *  catches the light, crisp, instead of a second border glowing beside it. A layer's opacity is 1 − e^(−energy), so
- *  overlapping layers stack the way the light layer tone-maps a sum. */
+ *  edge, if the card has since grown) lights them from there outward. Each source is one copy of the two lines
+ *  stroked with a radial gradient, so the border itself catches the light, crisp, instead of a second border glowing
+ *  beside it. A layer's opacity is 1 − e^(−energy), so overlapping layers stack the way the light layer tone-maps a
+ *  sum. */
 export function BorderLight({ light, box, dash }: { light: Light; box: Box; dash?: string }) {
   const id = useId().replace(/[^\w-]/g, "")
   const { exposure, reflection: heads, flood: floods } = lightParams()
@@ -106,8 +107,9 @@ export function BorderLight({ light, box, dash }: { light: Light; box: Box; dash
 const dashes = (amount: number) => amount <= 0 ? undefined : `${(7 - 4 * Math.min(1, amount)).toFixed(2)} ${(4 * Math.min(1, amount)).toFixed(2)}`
 
 /** A double-ruled card (a 1px frame and an inset rule 3px inside it) whose lines catch the scene's light
- *  (BorderLight) and respond to focus, flashes and tone. `toned` blends from the ivory inks to the tone's (1 is fully toned), so a
- *  card can blush red and cool back without switching colours in one frame. `dashed` (0..1) closes up the same way. */
+ *  (BorderLight) and respond to focus, flashes and tone. `toned` blends from the ivory inks to the tone's (1 is fully
+ *  toned), so a card can blush red and cool back without switching colours in one frame. `dashed` (0..1) closes up
+ *  the same way. */
 export function Frame({ id, box, t, story, light, label, detail, glyph, impulses, tone = "ivory", toned = 1, heat = 0, broken = 0, dashed, appearAt, headerY, children }: {
   id: string
   box: Box

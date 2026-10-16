@@ -250,7 +250,8 @@ fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
     col += tone(c.x) * inside * (wash * 0.32 + print * wash * 0.4);
   }
 
-  // Prints: the card's own ink. Ciphertext is words of square bits; a hatch is diagonal strokes broken by noise.
+  // Prints: the card's own ink. Ciphertext is words of square bits, and the edge of a clearing in it glows, dimming as
+  // the clearing shrinks to nothing; a hatch is diagonal strokes broken by noise.
   var ink = vec3f(0.0);
   for (var i = 0; i < i32(more.x); i++) {
     let box = u.v[${BASE.prints} + i * 3];
@@ -270,7 +271,7 @@ fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
       let dist = length(box.xy + (id + 0.5) * cell - o.xy);
       let open = step(0.5, o.z);
       mark = word * bit * square * mix(1.0, smoothstep(o.z - 3.0, o.z + 1.0, dist), open);
-      front = word * bit * square * open * exp(-(dist - o.z) * (dist - o.z) / 12.25);
+      front = word * bit * square * open * exp(-(dist - o.z) * (dist - o.z) / 12.25) * smoothstep(0.0, 3.0, o.z);
     } else {
       let s = (local.x + local.y - o.w) / 3.4;
       let stroke = 1.0 - smoothstep(0.16, 0.16 + px / 3.4 * 2.0, abs(fract(s) - 0.5));
@@ -423,7 +424,7 @@ void main() {
       float dist = length(box.xy + (id + 0.5) * cell - o.xy);
       float open = step(0.5, o.z);
       mark = word * bit * square * mix(1.0, smoothstep(o.z - 3.0, o.z + 1.0, dist), open);
-      front = word * bit * square * open * exp(-(dist - o.z) * (dist - o.z) / 12.25);
+      front = word * bit * square * open * exp(-(dist - o.z) * (dist - o.z) / 12.25) * smoothstep(0.0, 3.0, o.z);
     } else {
       float s = (local.x + local.y - o.w) / 3.4;
       float stroke = 1.0 - smoothstep(0.16, 0.16 + px / 3.4 * 2.0, abs(fract(s) - 0.5));
