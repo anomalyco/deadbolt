@@ -7,9 +7,7 @@ use crate::error::{Error, Result};
 /// Argon2id cost parameters for deriving the local unlock key.
 ///
 /// They are stored (authenticated, not secret) next to the encrypted key set,
-/// so they can be raised later with
-/// [`Unlocked::change_passphrase_with_params`](crate::Unlocked::change_passphrase_with_params)
-/// without breaking existing stores.
+/// so they can be raised later without breaking existing stores.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct KdfParams {
     /// Memory cost in KiB.

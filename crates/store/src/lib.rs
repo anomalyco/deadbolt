@@ -9,8 +9,8 @@
 //! # fn main() -> deadbolt_store::Result<()> {
 //! # let dir = std::path::Path::new("/tmp/deadbolt");
 //! let store = deadbolt_store::init(dir, b"passphrase", [7; 32])?;
-//! store.append(&[1; 32], b"signed entry bytes")?;
-//! store.lock();
+//! store.append_batch([(&[1; 32], &b"signed entry bytes"[..])])?;
+//! drop(store);
 //!
 //! let store = deadbolt_store::unlock(dir, b"passphrase")?;
 //! assert_eq!(store.device_secret(), &[7; 32]);
@@ -53,8 +53,8 @@
 //!   sealed together with XChaCha20-Poly1305 under the unlock key. AAD is
 //!   `"deadbolt-store/v1/keyset" ‖ format version ‖ KDF header`. A wrong
 //!   passphrase fails this AEAD check ([`Error::WrongPassphrase`]); no
-//!   passphrase hash is stored or compared. Changing the passphrase only
-//!   re-seals this record.
+//!   passphrase hash is stored or compared. Changing the passphrase would
+//!   only re-seal this record.
 //! - **Data**: subkeys are derived from the data key with BLAKE3's KDF mode:
 //!   one XChaCha20-Poly1305 key for all data records, and one BLAKE3 keyed-hash
 //!   key each for the log index and meta names, so entry hashes and meta
@@ -100,7 +100,7 @@
 //!
 //! Keys, the device secret, and decrypted values are kept in
 //! [`zeroize::Zeroizing`] buffers and wiped on drop, as is Argon2's working
-//! memory. Dropping [`Unlocked`] (or calling [`Unlocked::lock`]) locks the store.
+//! memory. Dropping [`Unlocked`] locks the store.
 //!
 //! # OS keychain
 //!

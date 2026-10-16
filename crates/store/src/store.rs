@@ -131,8 +131,9 @@ pub fn init_with_params(
 // OS keychain unlock (design.md, "Keys"): store a second copy of the key set
 // under a header slot such as "keyset.keychain", wrapped with a random 256-bit
 // key that lives in a device-only, biometry-gated keychain item, and add an
-// `unlock_with_keychain(dir, key)` that tries that slot. `change_passphrase`
-// would leave that slot untouched; removing the keychain item drops the slot.
+// `unlock_with_keychain(dir, key)` that tries that slot. Changing the
+// passphrase would leave that slot untouched; removing the keychain item drops
+// the slot.
 pub fn unlock(dir: &Path, passphrase: &[u8]) -> Result<Unlocked> {
     let db_path = dir.join(DB_FILE);
     if !db_path.is_file() {
@@ -170,28 +171,14 @@ impl fmt::Debug for Unlocked {
 }
 
 impl Unlocked {
-    /// The data directory this store lives in.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// The 32-byte device secret (Ed25519 seed) given to [`init`].
     pub fn device_secret(&self) -> &[u8; 32] {
         &self.keys.keyset.device_secret
     }
 
-    /// Wipes keys from memory and releases the database lock.
-    pub fn lock(self) {}
-
-    /// Appends one entry. Returns `false` (and writes nothing) if an entry with
-    /// this hash is already stored; the bytes are not compared.
-    pub fn append(&self, hash: &EntryHash, bytes: &[u8]) -> Result<bool> {
-        Ok(self.append_batch([(hash, bytes)])? == 1)
-    }
-
     /// Appends several entries in one durable transaction, skipping hashes that
-    /// are already stored. Returns how many were added. Either all new entries
-    /// are written or none are.
+    /// are already stored (the bytes are not compared). Returns how many were
+    /// added. Either all new entries are written or none are.
     pub fn append_batch<'a>(
         &self,
         entries: impl IntoIterator<Item = (&'a EntryHash, &'a [u8])>,
@@ -230,42 +217,6 @@ impl Unlocked {
         Ok(added as usize)
     }
 
-    /// Looks up an entry by hash.
-    pub fn get(&self, hash: &EntryHash) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        let txn = self.db.begin_read()?;
-        let index = txn.open_table(LOG_INDEX)?;
-        let Some(seq) = index.get(&self.keys.log_blind(hash))? else {
-            return Ok(None);
-        };
-        let seq = seq.value();
-        let log = txn.open_table(LOG)?;
-        let row = log
-            .get(seq)?
-            .ok_or_else(|| Error::corrupt("index points to a missing log entry"))?;
-        let (stored_hash, bytes) = self.keys.open_log_row(seq, row.value())?;
-        if &stored_hash != hash {
-            return Err(Error::corrupt("index points to the wrong log entry"));
-        }
-        Ok(Some(bytes))
-    }
-
-    /// Whether an entry with this hash is stored.
-    pub fn contains(&self, hash: &EntryHash) -> Result<bool> {
-        let txn = self.db.begin_read()?;
-        let index = txn.open_table(LOG_INDEX)?;
-        Ok(index.get(&self.keys.log_blind(hash))?.is_some())
-    }
-
-    /// Number of stored entries.
-    pub fn len(&self) -> Result<u64> {
-        let txn = self.db.begin_read()?;
-        read_log_len(&self.keys, &txn.open_table(HEADER)?)
-    }
-
-    pub fn is_empty(&self) -> Result<bool> {
-        Ok(self.len()? == 0)
-    }
-
     /// Iterates all entries in append order over a consistent snapshot.
     /// Yields an error (and then stops) on any tampering, including missing
     /// or reordered entries.
@@ -301,61 +252,6 @@ impl Unlocked {
         let sealed = crypto::seal(&self.keys.data, &meta_aad(&blinded), &[value])?;
         let txn = begin_write(&self.db)?;
         txn.open_table(META)?.insert(&blinded, sealed.as_slice())?;
-        txn.commit()?;
-        Ok(())
-    }
-
-    /// Removes a meta value. Returns whether it existed.
-    pub fn meta_remove(&self, name: &str) -> Result<bool> {
-        let txn = begin_write(&self.db)?;
-        let existed = txn
-            .open_table(META)?
-            .remove(&self.keys.meta_blind(name))?
-            .is_some();
-        txn.commit()?;
-        Ok(existed)
-    }
-
-    /// The KDF parameters currently protecting the store.
-    pub fn kdf_params(&self) -> Result<KdfParams> {
-        let txn = self.db.begin_read()?;
-        let header = Header::read(&txn.open_table(HEADER)?)?;
-        Ok(header.kdf.params)
-    }
-
-    /// Re-wraps the key set under a new passphrase, keeping the current KDF
-    /// parameters (with a fresh salt). Only the small key set is rewritten.
-    pub fn change_passphrase(&self, old: &[u8], new: &[u8]) -> Result<()> {
-        self.change_passphrase_with_params(old, new, self.kdf_params()?)
-    }
-
-    /// Like [`change_passphrase`](Self::change_passphrase), also switching to
-    /// new KDF parameters. Passing the same passphrase twice just re-tunes the
-    /// KDF.
-    pub fn change_passphrase_with_params(
-        &self,
-        old: &[u8],
-        new: &[u8],
-        params: KdfParams,
-    ) -> Result<()> {
-        params.validate()?;
-        // Everything happens inside one write transaction so concurrent
-        // changes serialize and the swap is atomic.
-        let txn = begin_write(&self.db)?;
-        {
-            let mut table = txn.open_table(HEADER)?;
-            let header = Header::read(&table)?;
-            let current = KeySet::unwrap(&header.kdf, &header.keyset, old)?;
-            if current.encode() != self.keys.keyset.encode() {
-                return Err(Error::corrupt(
-                    "key set on disk differs from the open store",
-                ));
-            }
-            let kdf = KdfHeader::generate(params)?;
-            let wrapped = current.wrap(&kdf, new)?;
-            table.insert(H_KDF, kdf.encode().as_slice())?;
-            table.insert(H_KEYSET, wrapped.as_slice())?;
-        }
         txn.commit()?;
         Ok(())
     }
