@@ -131,9 +131,8 @@ pub fn init_with_params(
 // OS keychain unlock (design.md, "Keys"): store a second copy of the key set
 // under a header slot such as "keyset.keychain", wrapped with a random 256-bit
 // key that lives in a device-only, biometry-gated keychain item, and add an
-// `unlock_with_keychain(dir, key)` that tries that slot. Changing the
-// passphrase would leave that slot untouched; removing the keychain item drops
-// the slot.
+// `unlock_with_keychain(dir, key)` that tries that slot. `change_passphrase`
+// would leave that slot untouched; removing the keychain item drops the slot.
 pub fn unlock(dir: &Path, passphrase: &[u8]) -> Result<Unlocked> {
     let db_path = dir.join(DB_FILE);
     if !db_path.is_file() {
@@ -252,6 +251,50 @@ impl Unlocked {
         let sealed = crypto::seal(&self.keys.data, &meta_aad(&blinded), &[value])?;
         let txn = begin_write(&self.db)?;
         txn.open_table(META)?.insert(&blinded, sealed.as_slice())?;
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// The KDF parameters currently protecting the store.
+    pub fn kdf_params(&self) -> Result<KdfParams> {
+        let txn = self.db.begin_read()?;
+        let header = Header::read(&txn.open_table(HEADER)?)?;
+        Ok(header.kdf.params)
+    }
+
+    /// Re-wraps the key set under a new passphrase, keeping the current KDF
+    /// parameters (with a fresh salt). Only the small key set is rewritten.
+    pub fn change_passphrase(&self, old: &[u8], new: &[u8]) -> Result<()> {
+        self.change_passphrase_with_params(old, new, self.kdf_params()?)
+    }
+
+    /// Like [`change_passphrase`](Self::change_passphrase), also switching to
+    /// new KDF parameters. Passing the same passphrase twice just re-tunes the
+    /// KDF.
+    pub fn change_passphrase_with_params(
+        &self,
+        old: &[u8],
+        new: &[u8],
+        params: KdfParams,
+    ) -> Result<()> {
+        params.validate()?;
+        // Everything happens inside one write transaction so concurrent
+        // changes serialize and the swap is atomic.
+        let txn = begin_write(&self.db)?;
+        {
+            let mut table = txn.open_table(HEADER)?;
+            let header = Header::read(&table)?;
+            let current = KeySet::unwrap(&header.kdf, &header.keyset, old)?;
+            if current.encode() != self.keys.keyset.encode() {
+                return Err(Error::corrupt(
+                    "key set on disk differs from the open store",
+                ));
+            }
+            let kdf = KdfHeader::generate(params)?;
+            let wrapped = current.wrap(&kdf, new)?;
+            table.insert(H_KDF, kdf.encode().as_slice())?;
+            table.insert(H_KEYSET, wrapped.as_slice())?;
+        }
         txn.commit()?;
         Ok(())
     }

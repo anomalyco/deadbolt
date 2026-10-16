@@ -365,7 +365,7 @@ impl Agent {
                     peers: sync::sync_all(&self, only).await?,
                 })
             }
-            Command::Join => pairing::join(&self, conv).await,
+            Command::Join { confirm } => pairing::join(&self, conv, confirm).await,
             Command::Pair {
                 ticket,
                 vault,

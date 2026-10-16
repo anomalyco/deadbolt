@@ -10,7 +10,7 @@
 //! agent  -> client  Message   {"type":"ok",...} | {"type":"error",...}   final
 //! ```
 //!
-//! The `pairing` event asks for an answer only when `pair` set `confirm`;
+//! Pairing events ask for an answer only when the request set `confirm`;
 //! otherwise the code is accepted automatically. A client hanging up cancels
 //! a pending `join`/`pair`.
 //!
@@ -67,8 +67,10 @@ pub enum Command {
     Sync {
         vault: Option<String>,
     },
-    /// Emits `ticket`, then `joining`, then replies `vault`.
-    Join,
+    /// Emits `ticket`, then `joining` (answered if `confirm`), then replies `vault`.
+    Join {
+        confirm: bool,
+    },
     /// Emits `pairing` (answered if `confirm`), then replies `device`.
     Pair {
         ticket: String,

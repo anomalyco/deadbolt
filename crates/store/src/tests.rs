@@ -279,6 +279,50 @@ fn second_open_is_in_use() {
     drop(unlock(tmp.path()));
 }
 
+#[test]
+fn change_passphrase() {
+    let tmp = TempDir::new().unwrap();
+    let store = init(tmp.path());
+    append(&store, &hash(1), b"data").unwrap();
+    store.meta_set("k", b"v").unwrap();
+
+    assert!(matches!(
+        store.change_passphrase(b"not it", b"new"),
+        Err(Error::WrongPassphrase)
+    ));
+    store.change_passphrase(PASS, b"new pass").unwrap();
+    // The open handle keeps working.
+    append(&store, &hash(2), b"more").unwrap();
+    drop(store);
+
+    assert!(matches!(
+        crate::unlock(tmp.path(), PASS),
+        Err(Error::WrongPassphrase)
+    ));
+    let store = crate::unlock(tmp.path(), b"new pass").unwrap();
+    assert_eq!(store.device_secret(), &SECRET);
+    assert_eq!(
+        all(&store),
+        vec![(hash(1), b"data".to_vec()), (hash(2), b"more".to_vec())]
+    );
+    assert_eq!(store.meta_get("k").unwrap().unwrap().as_slice(), b"v");
+    assert_eq!(store.kdf_params().unwrap(), FAST);
+
+    let stronger = KdfParams {
+        m_cost_kib: 64,
+        t_cost: 2,
+        p_cost: 2,
+    };
+    store
+        .change_passphrase_with_params(b"new pass", b"new pass", stronger)
+        .unwrap();
+    assert_eq!(store.kdf_params().unwrap(), stronger);
+    drop(store);
+    let store = crate::unlock(tmp.path(), b"new pass").unwrap();
+    assert_eq!(store.kdf_params().unwrap(), stronger);
+    assert_eq!(all(&store).len(), 2);
+}
+
 /// Rewrites one stored value with a byte flipped, through redb, so page
 /// checksums stay valid and only the AEAD layer can notice.
 fn flip_value<K: redb::Key + 'static>(
