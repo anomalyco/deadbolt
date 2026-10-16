@@ -1,0 +1,36 @@
+.sound-toggle {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  gap: .5em;
+  margin: 0;
+  padding: 4px 0;
+  border: 0;
+  background: none;
+  color: #fff;
+  font: 400 11px/1 var(--font-text, "IBM Plex Mono", ui-monospace, monospace);
+  letter-spacing: .02em;
+  text-transform: lowercase;
+  cursor: pointer;
+  opacity: .45;
+  transition: opacity .2s;
+}
+.sound-toggle:hover, .sound-toggle[aria-pressed="true"] { opacity: .9; }
+.sound-toggle:focus-visible { outline: 1px dotted var(--red, #ff2a2a); outline-offset: 3px; }
+.sound-toggle svg { flex: none; overflow: visible; }
+.sound-toggle-body { fill: currentColor; }
+.sound-toggle-waves { fill: none; stroke: currentColor; stroke-width: 1.4; stroke-linecap: round; stroke-linejoin: round; }
+.sound-toggle[aria-pressed="true"] .sound-toggle-waves { stroke: var(--red, #ff2a2a); }
+.sound-toggle-state { min-width: 3ch; }
+
+.sound-audition { display: grid; gap: var(--s3, 24px); margin: var(--s4, 32px) 0; font: 400 12px/1.6 var(--font-text, "IBM Plex Mono", ui-monospace, monospace); }
+.sound-audition-head { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.sound-audition-head h2 { margin: 0; font-size: 13px; font-weight: 500; letter-spacing: .02em; }
+.sound-audition ol { display: grid; margin: 0; padding: 0; list-style: none; border-top: 1px dotted #383838; }
+.sound-audition li { border-bottom: 1px dotted #383838; }
+.sound-audition button { appearance: none; margin: 0; padding: 0; border: 0; background: none; color: #fff; font: inherit; cursor: pointer; }
+.sound-audition li button { display: grid; grid-template-columns: 12ch 1fr; gap: 16px; width: 100%; padding: 7px 0; text-align: left; opacity: .55; transition: opacity .2s; }
+.sound-audition li button:hover, .sound-audition li button[data-playing] { opacity: 1; }
+.sound-audition li button b { font-weight: 500; color: var(--red, #ff2a2a); }
+.sound-audition-head button { opacity: .7; text-decoration: underline dotted; text-underline-offset: 3px; }
+.sound-audition-head button:hover { opacity: 1; }
