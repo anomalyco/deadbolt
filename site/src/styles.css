@@ -102,5 +102,7 @@ footer { margin-top: var(--s5); padding-top: var(--s3); border-top: 1px dotted #
 @media (max-width: 600px) {
   :root { --s4: 48px; --s5: 80px; }
   main { width: min(100% - 32px, 760px); }
+  /* Diagrams take nearly the whole screen width; they scale to fit and caption under themselves. */
+  .bleed { --bleed: calc(100vw - 16px); }
   h1 { grid-column: 1 / -1; font-size: 11px; }
 }

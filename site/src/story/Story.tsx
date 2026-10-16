@@ -1,16 +1,19 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react"
+import { Knobs } from "knobs/react"
 import { useCues, type Flight, type SceneCue } from "../sound"
 import { createRenderer, emptyLight, pack, packedLength, type Light, type Renderer } from "./light"
 import { clamp01, ease, smoothstep, span, springAt, springs, type Point } from "./motion"
 import { onFrame } from "./ticker"
+import { lightParams, lightTuning } from "./tuning"
 import "./story.css"
 
 // A story: one diagram that tells itself. Each step plays one action and puts one short caption beside the thing
 // it's about, joined by a leader line. Under the stage there's a thin step bar with no text: one tick per step.
 // Hovering the bar holds the story, clicking a tick plays that step, dragging scrubs the clock 1:1. Every frame
-// is a pure function of the clock, so scrubbing and replaying are exact.
+// is a pure function of the clock, so scrubbing and replaying are exact. On a narrow stage the captions move to a
+// rail under it and the leader shrinks to its anchor dot.
 //
-// The SVG carries everything crisp (frames, text, wires, 3D device solids). Light is a WebGPU canvas over it.
+// The SVG carries everything crisp (frames, text, wires, device glyphs). Light is a WebGPU canvas over it.
 
 export type Caption = {
   text: string
@@ -22,6 +25,8 @@ export type Caption = {
   align?: "start" | "end" | "above" | "below"
   /** Seconds after the step starts. Step 0 defaults to 0 (resting on first paint). */
   delay?: number
+  /** Widest line, in characters (default 30). The text wraps into balanced lines. */
+  width?: number
 }
 
 export type Step = {
@@ -58,8 +63,14 @@ export type StoryApi = {
   reduced: boolean
 }
 
-const FADE = .8
+/** The loop: the scene dims out over FADE after its last step, then comes back up at its first pose over REFADE
+ *  (negative clock time), like house lights. The very first paint is already up. */
+const FADE = .8, REFADE = .5
 const reducedQuery = () => matchMedia("(prefers-reduced-motion: reduce)")
+
+/** How far up the scene's lights are at time t. */
+const sceneFade = (t: number, duration: number) =>
+  t < 0 ? smoothstep(span(t, -REFADE, 0)) : 1 - smoothstep(span(t, duration, duration + FADE))
 
 export function storyApi(scene: StoryScene, reduced = false): StoryApi {
   const step = (t: number) => {
@@ -137,7 +148,7 @@ export function Story({ scene }: { scene: StoryScene }) {
       if (c.mode === "held" || (c.mode === "auto" && c.hover)) return
       let next = c.t + dt
       if (c.mode === "step" && next >= c.stopAt) { next = c.stopAt; c.mode = "held" }
-      if (next > scene.duration + FADE) next = 0
+      if (next > scene.duration + FADE) next = -REFADE
       seek(next)
     })
   }, [live, reduced, scene])
@@ -155,24 +166,30 @@ export function Story({ scene }: { scene: StoryScene }) {
   }, [])
 
   const light = emptyLight()
-  const fade = 1 - smoothstep(span(t, scene.duration, scene.duration + FADE))
-  const drawn = scene.draw(Math.min(t, scene.duration), light, story)
+  const fade = sceneFade(t, scene.duration)
+  const at = Math.max(0, Math.min(t, scene.duration))
+  const drawn = scene.draw(at, light, story)
   const frame = useRef({ light, fade })
   frame.current = { light, fade }
   const data = useRef(new Float32Array(packedLength))
+  const last = useRef(new Float32Array(packedLength))
+  // The canvas's CSS size, kept by a ResizeObserver so a frame never reads layout after React has written to it.
+  const size = useRef<{ width: number; height: number } | null>(null)
 
-  const cleared = useRef(false)
+  const blank = useRef(false)
   const paint = () => {
     const element = canvas.current, r = renderer
     if (!element || !r || r === "pending") return
+    const box = size.current ??= { width: element.clientWidth, height: element.clientHeight }
     const scale = Math.min(window.devicePixelRatio || 1, 2)
-    const width = Math.max(1, Math.round(element.clientWidth * scale)), height = Math.max(1, Math.round(element.clientHeight * scale))
+    const width = Math.max(1, Math.round(box.width * scale)), height = Math.max(1, Math.round(box.height * scale))
     const resized = element.width !== width || element.height !== height
     if (resized) { element.width = width; element.height = height }
-    const packed = pack(frame.current.light, data.current, { width, height, scale: width / scene.width }, frame.current.fade)
-    // Quiet at rest: once the canvas is clear, leave it until something lights up again.
-    if (!packed && cleared.current && !resized) return
-    cleared.current = !packed
+    const packed = pack(frame.current.light, data.current, { width, height, scale: width / scene.width }, lightParams(), frame.current.fade)
+    // Quiet at rest: a frame identical to the last one (nothing lit, or only still prints) isn't drawn again.
+    if (!resized && (packed ? !blank.current && same(packed, last.current) : blank.current)) return
+    blank.current = !packed
+    if (packed) last.current.set(packed)
     r.draw(packed)
   }
   const painter = useRef(paint)
@@ -180,12 +197,16 @@ export function Story({ scene }: { scene: StoryScene }) {
   useLayoutEffect(paint)
   useEffect(() => {
     if (!stage.current) return
-    const observer = new ResizeObserver(() => painter.current())
+    const observer = new ResizeObserver(([entry]) => {
+      if (entry) size.current = { width: entry.contentRect.width, height: entry.contentRect.height }
+      painter.current()
+    })
     observer.observe(stage.current)
-    return () => observer.disconnect()
+    const unsubscribe = lightTuning.subscribe(() => painter.current())
+    return () => { observer.disconnect(); unsubscribe() }
   }, [])
 
-  const current = story.step(Math.min(t, scene.duration))
+  const current = story.step(at)
 
   const playStep = (i: number) => {
     const index = Math.max(0, Math.min(scene.steps.length - 1, i))
@@ -240,37 +261,42 @@ export function Story({ scene }: { scene: StoryScene }) {
 
   const backend = renderer === "pending" ? undefined : renderer?.backend ?? "svg"
 
-  return <figure className="story" ref={host} data-reduced={reduced || undefined} data-light={backend}>
-    <div className="story-scroll">
-      <div className="story-stage" ref={stage} style={{ aspectRatio: `${scene.width} / ${scene.height}` }}>
-        <svg viewBox={`0 0 ${scene.width} ${scene.height}`} role="img" aria-label={scene.label}>
-          <g opacity={fade}>
-            {drawn}
-            {scene.steps.map((_, i) => <Leader key={i} scene={scene} index={i} t={t} reduced={reduced} current={current} />)}
-            {backend === "svg" && <FallbackLight light={light} />}
-          </g>
-        </svg>
-        <canvas ref={canvas} className="story-light" aria-hidden="true" />
-        {scene.steps.map((_, i) => <CaptionText key={i} scene={scene} index={i} t={t} reduced={reduced} current={current} />)}
-      </div>
+  return <Knobs controls={lightTuning}><figure className="story" ref={host} data-reduced={reduced || undefined} data-light={backend}>
+    <div className="story-stage" ref={stage} style={{ aspectRatio: `${scene.width} / ${scene.height}` }}>
+      <svg viewBox={`0 0 ${scene.width} ${scene.height}`} role="img" aria-label={scene.label}>
+        <g opacity={fade}>
+          {drawn}
+          {scene.steps.map((_, i) => <Leader key={i} scene={scene} index={i} t={at} reduced={reduced} current={current} />)}
+          {backend === "svg" && <FallbackLight light={light} />}
+        </g>
+      </svg>
+      <canvas ref={canvas} className="story-light" aria-hidden="true" />
+      {scene.steps.map((_, i) => <CaptionText key={i} scene={scene} index={i} t={at} fade={fade} reduced={reduced} current={current} />)}
     </div>
     <div ref={bar} className="story-bar" role="slider" tabIndex={0} aria-label="step" aria-valuemin={1} aria-valuemax={scene.steps.length}
       aria-valuenow={current + 1} aria-valuetext={scene.steps[current]!.caption.text} {...bindings}>
       {scene.steps.map((step, i) => {
         const length = stepEnd(scene, i) - step.at
         const fill = t >= scene.duration ? 1 : clamp01((t - step.at) / length)
+        // The fills dim out with the scene at the end of the loop, so they're dark when they reset.
         return <span key={i} className="story-tick" data-state={i < current ? "past" : i === current ? "current" : undefined} style={{ flexGrow: length }}>
-          <i style={{ transform: `scaleX(${i < current ? 1 : i === current ? fill : 0})` }} />
+          <i style={{ transform: `scaleX(${i < current ? 1 : i === current ? fill : 0})`, opacity: t > scene.duration ? fade : undefined }} />
         </span>
       })}
     </div>
-  </figure>
+  </figure></Knobs>
+}
+
+/** Two packed frames that would draw the same pixels. */
+function same(a: Float32Array, b: Float32Array) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false
+  return true
 }
 
 /** How far a caption has entered (0..1) and left (0..1) at time t. Exits run 25% shorter than entrances. */
 function captionPhase(scene: StoryScene, index: number, t: number, reduced: boolean, current: number) {
   const step = scene.steps[index]!
-  const delay = step.caption.delay ?? (index === 0 ? 0 : .18)
+  const delay = step.caption.delay ?? (index === 0 ? 0 : .22)
   const at = step.at + delay, end = stepEnd(scene, index)
   if (reduced) return { at, enter: index === current ? 1 : 0, scaleIn: index === current ? 1 : 0, exit: 0 }
   const firstAtRest = index === 0 && delay === 0
@@ -295,18 +321,21 @@ function Leader({ scene, index, t, reduced, current }: { scene: StoryScene; inde
   </g>
 }
 
-function CaptionText({ scene, index, t, reduced, current }: { scene: StoryScene; index: number; t: number; reduced: boolean; current: number }) {
-  const { text, place, align = "start" } = scene.steps[index]!.caption
+function CaptionText({ scene, index, t, fade, reduced, current }: { scene: StoryScene; index: number; t: number; fade: number; reduced: boolean; current: number }) {
+  const { text, place, align = "start", width } = scene.steps[index]!.caption
   const { enter, scaleIn, exit } = captionPhase(scene, index, t, reduced, current)
   const e = reduced ? enter : ease.enter(enter), x = reduced ? 0 : ease.exit(exit)
-  const opacity = e * (1 - x)
-  const style: CSSProperties = {
-    left: `${(place[0] / scene.width) * 100}%`, top: `${(place[1] / scene.height) * 100}%`, opacity,
+  // The scene dimming at the end of the loop takes the caption with it, as an exit.
+  const out = reduced ? 0 : Math.max(x, 1 - fade)
+  const opacity = e * (1 - out)
+  const style = {
+    "--x": `${(place[0] / scene.width) * 100}%`, "--y": `${(place[1] / scene.height) * 100}%`, opacity,
     visibility: opacity <= 0 && !reduced ? "hidden" : undefined,
-  }
+    "--w": width ? `${width}ch` : undefined,
+  } as CSSProperties
   if (!reduced) {
-    style.filter = `blur(${(3.5 * (1 - e) + 3 * x).toFixed(2)}px)`
-    style.scale = String((.96 + .04 * scaleIn - .035 * x).toFixed(4))
+    style.filter = `blur(${(3.5 * (1 - e) + 3 * out).toFixed(2)}px)`
+    style.scale = String((.96 + .04 * scaleIn - .035 * out).toFixed(4))
   }
   return <p className="story-caption" data-align={align} style={style} aria-hidden={index !== current || undefined}>{text}</p>
 }

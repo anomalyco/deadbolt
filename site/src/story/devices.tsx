@@ -49,8 +49,20 @@ export function DeviceGlyph({ kind, cx, cy, t, impulses = [], stroke = "#e8e4dc"
   </g>
 }
 
-/** A double-ruled card that registers with the GPU light layer and responds to focus, flashes, and tone. */
-export function Frame({ id, box, t, story, light, label, detail, glyph, impulses, tone = "ivory", heat = 0, broken = 0, dashed, appearAt, headerY, children }: {
+const PALETTE = {
+  ivory: { frame: "#383838", lit: "#a8a49c", hot: "#fff1dc", label: "#767676", labelLit: "#e8e4dc" },
+  hot: { frame: "#383838", lit: "#a8a49c", hot: "#fff1dc", label: "#767676", labelLit: "#e8e4dc" },
+  red: { frame: "#5a1c1c", lit: "#ff2a2a", hot: "#ff6a4a", label: "#9a3434", labelLit: "#ff4a3a" },
+  amber: { frame: "#5a3d18", lit: "#ffb347", hot: "#ffd08a", label: "#8a6430", labelLit: "#ffb347" },
+} satisfies Record<Tone, Record<string, string>>
+
+/** Dashes that close up as `amount` goes from 1 to 0, keeping their period, like a zip. */
+const dashes = (amount: number) => amount <= 0 ? undefined : `${(7 - 4 * Math.min(1, amount)).toFixed(2)} ${(4 * Math.min(1, amount)).toFixed(2)}`
+
+/** A double-ruled card (a 1px frame and an inset rule 3px inside it) that registers with the GPU light layer and
+ *  responds to focus, flashes and tone. `toned` blends from the ivory inks to the tone's (1 is fully toned), so a
+ *  card can blush red and cool back without switching colours in one frame. `dashed` (0..1) closes up the same way. */
+export function Frame({ id, box, t, story, light, label, detail, glyph, impulses, tone = "ivory", toned = 1, heat = 0, broken = 0, dashed, appearAt, headerY, children }: {
   id: string
   box: Box
   t: number
@@ -61,9 +73,10 @@ export function Frame({ id, box, t, story, light, label, detail, glyph, impulses
   glyph?: DeviceKind
   impulses?: readonly number[]
   tone?: Tone
+  toned?: number
   heat?: number
   broken?: number
-  dashed?: boolean
+  dashed?: boolean | number
   appearAt?: number
   headerY?: number
   children?: ReactNode
@@ -82,25 +95,23 @@ export function Frame({ id, box, t, story, light, label, detail, glyph, impulses
   const lit = clamp01((level - .32) / .68)
   const dim = clamp01((.32 - level) / .32) * .6
 
-  const isRed = tone === "red"
-  const isAmber = tone === "amber"
-  const baseFrame = isRed ? "#5a1c1c" : isAmber ? "#5a3d18" : "#383838"
-  const litFrame = isRed ? "#ff2a2a" : isAmber ? "#ffb347" : "#a8a49c"
-  const hotTint = isRed ? "#ff6a4a" : isAmber ? "#ffd08a" : "#fff1dc"
+  const k = clamp01(toned)
+  const ink = (key: keyof typeof PALETTE.ivory) => k <= 0 ? PALETTE.ivory[key] : shade(PALETTE.ivory[key], [PALETTE[tone][key], k])
 
-  const frameColor = shade(baseFrame, [litFrame, lit], ["#000000", dim], ["#ffb347", broken * .85], [hotTint, hot * .78])
+  const frameColor = shade(ink("frame"), [ink("lit"), lit], ["#000000", dim], ["#ffb347", broken * .85], [ink("hot"), hot * .78])
   const insetColor = shade("#242424", ["#383838", lit * .4], ["#000000", dim], ["#5a3d18", broken * .5])
-  const labelColor = shade(isRed ? "#9a3434" : "#767676", [isRed ? "#ff4a3a" : isAmber ? "#ffb347" : "#e8e4dc", lit], ["#000000", dim], ["#ffb347", broken * .9], ["#fff1dc", hot * .85])
+  const labelColor = shade(ink("label"), [ink("labelLit"), lit], ["#000000", dim], ["#ffb347", broken * .9], ["#fff1dc", hot * .85])
   const detailColor = shade("#5e5e5e", ["#9e9a92", lit], ["#000000", dim], ["#ffb347", broken * .85], ["#e8e4dc", hot * .5])
 
   light.frames.push(box)
   const cx = x + w / 2, cy = y + h / 2
   const hy = headerY ?? (h <= 60 ? y + h / 2 : y + 24)
   const labelX = glyph ? x + 36 : x + 14
+  const dash = dashes(typeof dashed === "number" ? dashed : dashed ? 1 : 0)
 
   return <g opacity={appear} transform={scale === 1 ? undefined : `translate(${cx} ${cy}) scale(${scale}) translate(${-cx} ${-cy})`}>
-    <rect x={x + .5} y={y + .5} width={w - 1} height={h - 1} fill="#050505" stroke={frameColor} strokeDasharray={dashed ? "3 4" : undefined} />
-    <rect x={x + 3.5} y={y + 3.5} width={w - 7} height={h - 7} fill="none" stroke={insetColor} strokeDasharray={dashed ? "3 4" : undefined} />
+    <rect x={x + .5} y={y + .5} width={w - 1} height={h - 1} fill="#050505" stroke={frameColor} strokeDasharray={dash} />
+    <rect x={x + 3.5} y={y + 3.5} width={w - 7} height={h - 7} fill="none" stroke={insetColor} strokeDasharray={dash} />
     {glyph && <DeviceGlyph kind={glyph} cx={x + 20} cy={hy} t={t} impulses={impulses} stroke={labelColor} screenGlow={hot} />}
     {label && <text x={labelX} y={hy + .5} dominantBaseline="middle" className="story-card-label" fill={labelColor}>{label}</text>}
     {detail && <text x={x + w - 14} y={hy + .5} dominantBaseline="middle" textAnchor="end" className="story-card-detail" fill={detailColor}>{detail}</text>}
@@ -108,14 +119,18 @@ export function Frame({ id, box, t, story, light, label, detail, glyph, impulses
   </g>
 }
 
-/** Words riding a packet head along a path. */
-export function Carried({ shot, t, label, dy = -10 }: { shot: Send; t: number; label?: string; dy?: number }) {
+/** Words riding a packet head along a path: above it, or beside it on a vertical hop. */
+export function Carried({ shot, t, label, side = "above" }: { shot: Send; t: number; label?: string; side?: "above" | "left" | "right" }) {
   const { launch, lands } = timing(shot)
   if (!label || t < launch - .08 || t > lands + .26) return null
   const f = travelled(shot, t), [x, y] = shot.path.at(shot.reverse ? 1 - f : f)
   const opacity = Math.min(span(t, launch - .08, launch + .14), 1 - span(t, lands - .08, lands + .18))
   const fill = shot.tone === "red" ? "#ff5242" : shot.tone === "amber" ? "#ffb347" : "#e8e4dc"
-  return <text x={x} y={y + dy} textAnchor="middle" className="story-carried" fill={fill} opacity={opacity}>{label}</text>
+  if (side !== "above") {
+    return <text x={x + (side === "left" ? -9 : 9)} y={y} dominantBaseline="middle" textAnchor={side === "left" ? "end" : "start"}
+      className="story-carried" fill={fill} opacity={opacity}>{label}</text>
+  }
+  return <text x={x} y={y - 10} textAnchor="middle" className="story-carried" fill={fill} opacity={opacity}>{label}</text>
 }
 
 /** A refusal stamp on a gate or keyset: slams down on a snappy spring and cools from hot red. */

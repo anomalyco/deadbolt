@@ -1,10 +1,11 @@
 import type { Light, Tone } from "./light"
 import type { Flight, SceneCue } from "../sound"
 import { clamp01, ease, flash, smootherInverse, smootherstep, smoothstep, span, type Box, type Point } from "./motion"
+import { coolingScale, shutter } from "./tuning"
 
 // The story vocabulary (explainer-motion's Send & Connect): light gathers at a port, a head flies along a path
 // leaving a trail that cools behind it, an ember cools where it left, it lands as a small opening ring, and
-// floods into whatever it reached. Every function takes the scene time and pushes lights; none keeps state.
+// wicks into whatever it reached. Every function takes the scene time and pushes lights; none keeps state.
 
 export type Path = {
   d: string
@@ -111,11 +112,15 @@ function crossings(path: Path) {
   return cached
 }
 
+/** A filament `a` (0..1) of the way through its cooling time (Newton's law, cut to cold at the end): it drops fast,
+ *  then holds a long dim tail. */
+export const temperature = (a: number) => a >= 1 ? 0 : Math.exp(-2.6 * Math.max(0, a)) * (1 - a * a)
+
 /** Pushes the lights of one send at time t. */
 export function send(light: Light, s: Send, t: number) {
   const { gather, flight, launch, lands } = timing(s)
   if (t < s.at) return
-  const tone = s.tone ?? "ivory", k = s.strength ?? 1, cool = s.cool ?? .42
+  const tone = s.tone ?? "ivory", k = s.strength ?? 1, cool = (s.cool ?? .55) * coolingScale()
   const point = (f: number) => s.path.at(s.reverse ? 1 - f : f)
   const origin = point(0)
 
@@ -126,14 +131,14 @@ export function send(light: Light, s: Send, t: number) {
     if (ember > .01) light.dots.push({ at: origin, radius: 2.2, intensity: ember, tone })
   }
 
-  // The trail: each point heats as the head crosses it and cools after.
+  // The trail: each point heats white as the head crosses it, then cools through the signal's tone to dark.
   const inverse = crossings(s.path)
   const count = s.path.points.length
   const heat = (i: number) => {
     const f = s.reverse ? 1 - s.path.fractions[count - 1 - i]! : s.path.fractions[i]!
     const crossed = launch + flight * (s.reverse ? smootherInverse(f) : inverse[i]!)
     const age = t - crossed
-    return age < 0 ? -1 : .8 * Math.pow(1 - clamp01(age / cool), 1.7)
+    return age < 0 ? -1 : temperature(age / cool)
   }
   const ordered = s.reverse ? [...s.path.points].reverse() : s.path.points
   const progress = travelled(s, t)
@@ -142,7 +147,7 @@ export function send(light: Light, s: Send, t: number) {
       const h0 = heat(i)
       if (h0 < 0) break
       let h1 = heat(i + 1), b = ordered[i + 1]!
-      if (h1 < 0) { h1 = .8; b = point(progress) }
+      if (h1 < 0) { h1 = 1; b = point(progress) }
       if (h0 > 0 || h1 > 0) light.segments.push({ a: ordered[i]!, b, heat: [h0 * k, h1 * k], width: 1.6, tone })
     }
   }
@@ -154,7 +159,8 @@ export function send(light: Light, s: Send, t: number) {
     return
   }
   if (t < lands) {
-    light.dots.push({ at: point(progress), radius: 3, intensity: k, tone })
+    // Exposed over a short shutter, so a fast head smears along its path instead of strobing.
+    light.dots.push({ at: point(progress), from: point(travelled(s, t - shutter())), radius: 3, intensity: k, tone })
     return
   }
   const q = (t - lands) / LAND, end = point(1)
@@ -174,19 +180,31 @@ export function drawOn(light: Light, path: Path, t: number, at: number, duration
   const p = ease.draw(raw)
   if (raw > 0 && raw < 1) {
     const bead = smoothstep(p / .08) * (1 - smoothstep((p - .92) / .08))
-    if (bead > .01) light.dots.push({ at: path.at(p), radius: 2.3, intensity: bead * strength, tone })
+    const from = path.at(ease.draw(span(t - shutter(), at, at + duration)))
+    if (bead > .01) light.dots.push({ at: path.at(p), from, radius: 2.3, intensity: bead * strength, tone })
   }
   return p
 }
 
-/** Light seeping into a box from a point on its edge, `age` seconds after it arrived. */
+/** Light wicking into a box from a point on its edge, `age` seconds after it arrived. Like ink into paper
+ *  (Washburn), the wet front advances as √t until it has crossed most of the card, then the whole stain cools. */
 export function flood(light: Light, box: Box, from: Point, age: number, tone: Tone, strength = 1, duration = FLOOD) {
   const t = age / duration
   if (t < 0 || t >= 1) return
-  const travel = 1 - Math.pow(1 - t, 4)
-  const reach = (.07 + .6 * Math.sqrt(travel)) * Math.max(box[2], box[3])
+  const reach = (.06 + .66 * Math.sqrt(Math.min(1, t / .8))) * Math.max(box[2], box[3])
   const fade = Math.exp(-.9 * t) * (1 - smoothstep((t - .65) / .35)) * smoothstep(t / .07)
   light.floods.push({ box, from, reach, intensity: .9 * fade * strength, tone })
+}
+
+/** Sealed ciphertext printed in a card's free band. It clears from `open.from` as light wicks in, and its bits
+ *  change while `churn` changes. */
+export function cipher(light: Light, box: Box, options: { tone?: Tone; level?: number; seed?: number; open?: { from: Point; radius: number }; churn?: number } = {}) {
+  light.prints.push({ box, kind: "cipher", tone: options.tone ?? "ivory", level: options.level ?? 1, seed: options.seed ?? 1, open: options.open, churn: options.churn })
+}
+
+/** Hatched noise printed in a card's free band; `churn` scrolls it along the hatching. */
+export function hatch(light: Light, box: Box, options: { tone?: Tone; level?: number; seed?: number; churn?: number } = {}) {
+  light.prints.push({ box, kind: "hatch", tone: options.tone ?? "ivory", level: options.level ?? 1, seed: options.seed ?? 1, churn: options.churn })
 }
 
 /** A spark: instant attack, convex decay. For a seal stamping down or a gate refusal. */

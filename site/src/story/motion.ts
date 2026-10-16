@@ -25,6 +25,7 @@ export function bezier(x1: number, y1: number, x2: number, y2: number) {
   const at = (a: number, b: number, s: number) => 3 * a * s * (1 - s) * (1 - s) + 3 * b * s * s * (1 - s) + s * s * s
   return (x: number) => {
     const p = clamp01(x)
+    if (p === 0 || p === 1) return p
     let lo = 0, hi = 1
     for (let i = 0; i < 22; i++) { const m = (lo + hi) / 2; if (at(x1, x2, m) < p) lo = m; else hi = m }
     return at(y1, y2, (lo + hi) / 2)
@@ -94,9 +95,11 @@ export function working(final: string, t: number, from: number, to: number, seed
   }).join("")
 }
 
-const rgb = (hex: string) => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16))
+const rgb = (color: string) => color.startsWith("rgb(")
+  ? color.slice(4, -1).split(" ").map(Number)
+  : [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16))
 
-/** A #rrggbb colour mixed toward each layer in turn: `shade(base, [toward, amount], …)`. */
+/** A colour (#rrggbb, or an `rgb(r g b)` from shade) mixed toward each layer in turn: `shade(base, [toward, amount], …)`. */
 export function shade(base: string, ...layers: (readonly [string, number])[]) {
   let color = rgb(base)
   for (const [toward, amount] of layers) {
