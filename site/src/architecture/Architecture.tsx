@@ -3,7 +3,7 @@ import { Ink } from "../print/Ink"
 import { Masthead } from "../print/Masthead"
 import { MeshStory } from "./stories/MeshStory"
 import { AgentStory } from "./stories/AgentStory"
-import { KeysScene } from "./scenes/KeysScene"
+import { KeysStory } from "./stories/KeysStory"
 import { LogsStory } from "./stories/LogsStory"
 import { SyncScene } from "./scenes/SyncScene"
 import { MergeScene } from "./scenes/MergeScene"
@@ -43,7 +43,7 @@ const chapters: Chapter[] = [
       <p>each device has exactly two keys. the <b>device key</b> (ed25519) is the device's identity: it signs everything the device writes, and its public half is the device's iroh address. the <b>local unlock key</b> comes from your passphrase through argon2id, and it's what seals the device key and the database on disk.</p>
       <p>there's no shared vault key in v1. data only moves over encrypted iroh connections between current members, and at rest each device seals its own copy under its own unlock key.</p>
     </>,
-    scene: <KeysScene />,
+    scene: <KeysStory />,
     why: <p>why not separate keys for signing and networking? neither could live in the secure enclave (it only does p-256), and both have to be in memory while the agent runs. two keys there would add a key without adding protection.</p>,
     code: [["crates/store/src/lib.rs", "the file layout, keys and integrity, documented at the top"], ["crates/store/src/kdf.rs", "argon2id parameters"], ["crates/store/src/crypto.rs", "xchacha20-poly1305 sealing"]],
   },
