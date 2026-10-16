@@ -1,7 +1,9 @@
 import { useEffect, useRef } from "react"
+import { onFrame } from "../story/ticker"
 
 // A full-screen fragment shader on a canvas, as opentunnel's prints do it: WebGL2, one triangle, rendered at the
-// display's density (capped at 2x), paused offscreen and in hidden tabs, one still frame under reduced motion.
+// display's density (capped at 2x), paused offscreen and in hidden tabs, one still frame under reduced motion. It
+// runs on the page's one shared frame loop (the stories' ticker).
 
 const vertex = `#version 300 es
 in vec2 position;
@@ -75,9 +77,10 @@ export function ShaderCanvas({ fragment, className, setup, frame, redraw, still 
     const scale = Math.min(window.devicePixelRatio || 1, 2)
     callbacks.current.setup?.(gl, uniform, scale)
 
-    let sized = ""
+    // The CSS size comes from the ResizeObserver, so a frame never forces layout.
+    let sized = "", box = { width: element.clientWidth, height: element.clientHeight }
     const resize = () => {
-      const width = Math.max(1, Math.round(element.clientWidth * scale)), height = Math.max(1, Math.round(element.clientHeight * scale))
+      const width = Math.max(1, Math.round(box.width * scale)), height = Math.max(1, Math.round(box.height * scale))
       const size = `${width}x${height}`
       if (sized === size) return
       sized = size
@@ -86,7 +89,7 @@ export function ShaderCanvas({ fragment, className, setup, frame, redraw, still 
       gl.uniform2f(uniform("resolution"), width, height)
     }
     const media = matchMedia("(prefers-reduced-motion: reduce)")
-    let visible = false, hidden = document.hidden, raf = 0, previous = performance.now(), time = still
+    let visible = false, hidden = document.hidden, stop: (() => void) | undefined, previous = performance.now(), time = still
     const draw = (now: number) => {
       const dt = Math.min(.1, (now - previous) / 1000)
       time += dt
@@ -99,23 +102,26 @@ export function ShaderCanvas({ fragment, className, setup, frame, redraw, still 
       gl.drawArrays(gl.TRIANGLES, 0, 3)
     }
     const once = () => { previous = performance.now(); draw(previous) }
-    const tick = (now: number) => { draw(now); raf = requestAnimationFrame(tick) }
     const run = () => {
-      cancelAnimationFrame(raf)
+      stop?.()
+      stop = undefined
       if (media.matches) { once(); return }
-      if (visible && !hidden) { previous = performance.now(); raf = requestAnimationFrame(tick) }
+      if (visible && !hidden) { previous = performance.now(); stop = onFrame(draw) }
     }
     const observer = new IntersectionObserver(([entry]) => { visible = entry!.isIntersecting; run() })
     observer.observe(element)
     const visibility = () => { hidden = document.hidden; run() }
     document.addEventListener("visibilitychange", visibility)
     media.addEventListener("change", run)
-    const sizing = new ResizeObserver(() => { if (media.matches || !visible) once() })
+    const sizing = new ResizeObserver(([entry]) => {
+      if (entry) box = { width: entry.contentRect.width, height: entry.contentRect.height }
+      if (media.matches || !visible) once()
+    })
     sizing.observe(element)
     const unsubscribe = callbacks.current.redraw?.(() => { if (media.matches) once() })
     once()
     return () => {
-      cancelAnimationFrame(raf); observer.disconnect(); sizing.disconnect(); unsubscribe?.()
+      stop?.(); observer.disconnect(); sizing.disconnect(); unsubscribe?.()
       document.removeEventListener("visibilitychange", visibility); media.removeEventListener("change", run)
       gl.deleteProgram(program); gl.deleteBuffer(quad)
     }
