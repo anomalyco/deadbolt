@@ -6,7 +6,7 @@ import { AgentStory } from "./stories/AgentStory"
 import { KeysStory } from "./stories/KeysStory"
 import { LogsStory } from "./stories/LogsStory"
 import { SyncStory } from "./stories/SyncStory"
-import { MergeScene } from "./scenes/MergeScene"
+import { MergeStory } from "./stories/MergeStory"
 import { PairScene } from "./scenes/PairScene"
 import { RemoveScene } from "./scenes/RemoveScene"
 
@@ -73,7 +73,7 @@ const chapters: Chapter[] = [
       <p>an item (a login or a card) is a set of typed fields. each field behaves like a register: an edit replaces the value it was based on. if two edits were made apart and both replace the same value, the one in the entry with the higher hash wins. the other isn't lost: it goes into the item's history.</p>
       <p>the core also enforces the item rules on every device: an item is created with all its required fields in one entry, a known field always keeps its type, required fields can't be removed and the type can't change. a device refuses to write an entry that breaks them, and when one arrives anyway it skips just the bad ops, in the same way on every device.</p>
     </>,
-    scene: <MergeScene />,
+    scene: <MergeStory />,
     code: [["crates/core/src/data.rs", "items, versions and history"], ["crates/core/src/item.rs", "item types, field types and the rules"]],
   },
   {
