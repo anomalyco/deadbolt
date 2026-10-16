@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
 
 use super::session::Session;
-use crate::items::line;
+use crate::items::{format_month, line, with_scheme};
 use crate::protocol::{FieldInfo, FieldInput, ItemInfo, NewItem};
 
 const MIN_SHORT: usize = 4;
@@ -204,21 +204,12 @@ fn normalize(kind: &str, name: &str, field: &FieldType, value: String) -> String
     }
     match field {
         FieldType::Month => {
-            let parsed = value.split_once('/').and_then(|(month, year)| {
-                let month: u8 = month.trim().parse().ok()?;
-                let year = year.trim();
-                let year = match year.len() {
-                    2 => format!("20{year}"),
-                    4 => year.to_string(),
-                    _ => return None,
-                };
-                year.bytes()
-                    .all(|b| b.is_ascii_digit())
-                    .then(|| format!("{year}-{month:02}"))
-            });
+            let parsed = value
+                .split_once('/')
+                .and_then(|(month, year)| format_month(month.trim().parse().ok()?, year));
             parsed.unwrap_or(value)
         }
-        FieldType::Url if !value.contains("://") && !value.is_empty() => format!("https://{value}"),
+        FieldType::Url => with_scheme(value),
         _ => value,
     }
 }
@@ -453,10 +444,15 @@ mod tests {
         assert_eq!(n("card", "expiry", FieldType::Month, "4/27"), "2027-04");
         assert_eq!(n("card", "expiry", FieldType::Month, "12/2031"), "2031-12");
         assert_eq!(n("card", "expiry", FieldType::Month, "2031-12"), "2031-12");
+        assert_eq!(n("card", "expiry", FieldType::Month, " 4 / 27 "), "2027-04");
+        for bad in ["4/2x", "4/203", "x/27"] {
+            assert_eq!(n("card", "expiry", FieldType::Month, bad), bad);
+        }
         assert_eq!(
             n("login", "url", FieldType::Url, "github.com"),
             "https://github.com"
         );
         assert_eq!(n("login", "url", FieldType::Url, "ftp://x"), "ftp://x");
+        assert_eq!(n("login", "url", FieldType::Url, ""), "");
     }
 }
