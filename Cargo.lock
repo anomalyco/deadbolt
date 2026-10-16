@@ -594,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -618,7 +618,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "ed25519-dalek",
@@ -629,7 +629,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-net"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "data-encoding",
  "getrandom 0.4.3",
@@ -644,7 +644,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "blake3",
