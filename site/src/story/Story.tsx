@@ -169,7 +169,9 @@ export function Story({ scene }: { scene: StoryScene }) {
 
   const light = emptyLight()
   const fade = sceneFade(t, scene.duration)
-  const at = Math.max(0, Math.min(t, scene.duration))
+  // The scene's clock keeps running while the house lights dim, so a glow still cooling at the end keeps cooling
+  // instead of freezing; before the first step (the lights coming up) it holds the first pose.
+  const at = Math.max(0, t)
   const drawn = scene.draw(at, light, story)
   const frame = useRef({ light, fade })
   frame.current = { light, fade }
