@@ -32,6 +32,32 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 - Sync = "here are my heads, send me what I'm missing", over iroh. Entries are signed; confidentiality in transit comes from iroh.
 - No compaction in v1. Deleted items stay in the history on your own devices, encrypted at rest under the local unlock key. (Later: snapshots.)
 
+## Items
+- Every item has a **type**, fixed at creation. Built-in types in v1: `login` and `card`. User-defined types come later; keep the type an open identifier, not a closed enum on the wire.
+- A type defines its known fields, each with a fixed field type, and which of them are required. Items may carry extra fields of any field type on top.
+- Field types: `text`, `secret` (hidden unless asked), `url`, `email`, `otp` (TOTP secret; shown as the current code), `month` (stored `YYYY-MM`), `note` (multi-line).
+- Guarantees, enforced in core on every device: an item is created in one entry that contains all required fields; a known field always has its fixed field type; required fields can't be removed; the type can't change. Ops that would break this are rejected at commit and ignored (deterministically, op by op, without rejecting the entry) at apply.
+
+| type | field | field type | required |
+|---|---|---|---|
+| login | password | secret | yes |
+| | username | text | |
+| | url | url | |
+| | otp | otp | |
+| | notes | note | |
+| card | number | secret (12–19 digits) | yes |
+| | expiry | month | |
+| | cvv | secret (3–4 digits) | |
+| | cardholder | text | |
+| | pin | secret | |
+| | brand | text | |
+| | notes | note | |
+
+- Card brand: if the `brand` field is set it wins; otherwise it's derived on display from the number's prefix using a table of major networks (Visa, Mastercard, Amex, Discover, JCB, Diners, UnionPay). Unknown prefixes display as `Card`, never a guess. The Luhn check is a CLI warning (`--force` to override), not a core rule.
+- **Names are optional labels on every item** (alongside the type, not one of its fields), **not identifiers**, and need not be unique. Without a name, an item displays as a derived label (login: the URL's host without `www.`; card: brand + last four digits). Identity is the item id; the CLI shows a short id prefix.
+- **Lookup is search**: query words are ANDed, case-insensitive, over name, URL host, username, and for cards cardholder, brand and last four (never secret values). An id prefix also matches. One match: use it. Several: pick from a list on a TTY, otherwise fail listing the candidates (label, username, short id). Scripts that must be unambiguous use the id.
+- Two Google accounts are just two logins with the same URL and different usernames; nobody has to invent a naming scheme.
+
 ## Pairing
 - New device shows a QR: its device public key + a one-time secret (+ relay hint).
 - Existing device (unlocked) scans, dials it, both prove the secret, new device signs "join vault V", existing device signs `Add`, sends the membership log + data over the same connection.
