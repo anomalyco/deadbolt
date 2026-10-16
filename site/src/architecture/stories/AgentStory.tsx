@@ -1,10 +1,10 @@
 import type { Light } from "../../story/light"
 import { across, between, polyline, send, timing, type Send } from "../../story/beats"
-import { Carried, Frame, Solid, edge } from "../../story/devices"
+import { Carried, DeviceGlyph, Frame, edge } from "../../story/devices"
 import { clamp01, flashes, shade, working, type Box, type Point } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
-// On one device (the cube), the `deadbolt` command is a thin client. It talks over a user-only Unix socket to
+// On one device (the desktop), the `deadbolt` command is a thin client. It talks over a user-only Unix socket to
 // the background agent, which alone opens store.redb, keeps the vault unlocked in memory, and runs the iroh node.
 
 const W = 940, H = 330
@@ -40,8 +40,8 @@ const sSync: Shot = { id: "toPeer", path: netToPeer, at: timing(sNetWake).lands 
 
 const SHOTS: readonly Shot[] = [sAsk, sReq, sRead, sUnseal, sReply, sAnswer, sNetWake, sSync]
 
-const CUBE_IMPULSES = [sAsk.at, sReq.at, sRead.at, sReply.at, sSync.at]
-const PYRAMID_IMPULSES = [timing(sSync).lands]
+const DESKTOP_IMPULSES = [sAsk.at, sReq.at, sRead.at, sReply.at, sSync.at]
+const LAPTOP_IMPULSES = [timing(sSync).lands]
 
 export const agentScene: StoryScene = {
   label: "The cli sends one JSON line over a user-only Unix socket to the background agent, which alone opens store.redb and runs the iroh node.",
@@ -116,17 +116,17 @@ function Agent({ t, light, story }: { t: number; light: Light; story: StoryApi }
 
     <rect x={AGENT[0] + .5} y={AGENT[1] + .5} width={AGENT[2] - 1} height={AGENT[3] - 1}
       fill="none" stroke={shade("#222222", ["#444444", agentLit])} />
-    <Solid kind="cube" cx={AGENT[0] + 10} cy={AGENT[1] - 12} r={6.8} t={t} impulses={CUBE_IMPULSES}
-      stroke={shade("#666666", ["#e8e4dc", agentLit])} reduced={story.reduced} />
+    <DeviceGlyph kind="desktop" cx={AGENT[0] + 10} cy={AGENT[1] - 12} t={t} impulses={DESKTOP_IMPULSES}
+      stroke={shade("#666666", ["#e8e4dc", agentLit])} />
     <text x={AGENT[0] + 24} y={AGENT[1] - 11.5} dominantBaseline="middle" className="story-note"
-      fill={shade("#666666", ["#cfcac1", agentLit])}>cube · background agent</text>
+      fill={shade("#666666", ["#cfcac1", agentLit])}>desktop · background agent</text>
 
     <Frame id="core" box={CORE} t={t} story={story} light={light} label="vault state" detail="deadbolt-core" heat={coreHeat} />
     <Frame id="store" box={STORE} t={t} story={story} light={light} label="store.redb" detail="deadbolt-store" tone="red" heat={storeHeat} />
     <Frame id="net" box={NET} t={t} story={story} light={light} label="iroh node" detail="deadbolt-net" heat={netHeat} />
 
-    <Frame id="peer" box={PEER} t={t} story={story} light={light} glyph="pyramid" impulses={PYRAMID_IMPULSES}
-      label="pyramid" heat={peerHeat} />
+    <Frame id="peer" box={PEER} t={t} story={story} light={light} glyph="laptop" impulses={LAPTOP_IMPULSES}
+      label="laptop" heat={peerHeat} />
 
     {SHOTS.map(shot => <Carried key={shot.id} shot={shot} t={t} label={shot.label} />)}
   </>

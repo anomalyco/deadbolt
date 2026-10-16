@@ -4,111 +4,48 @@ import { timing, travelled, type Send } from "./beats"
 import { clamp01, flashes, inkFlash, shade, span, springAt, springs, type Box, type Point } from "./motion"
 import type { StoryApi } from "./Story"
 
-// Consistent device identities across the site: each device has a 3D wireframe polyhedron and a short matching
-// name ("cube", "pyramid", "octahedron"). The solid idles very slowly at rest and turns with momentum on a
-// zero-bounce spring whenever the device acts (writing, signing, sending, receiving).
+// Plain device identities across the site: "desktop", "laptop", "phone" (plus "tablet" when four devices appear).
+// Each device has a crisp 1px line drawing in the site's inks. It stays still and quiet at rest, its screen
+// lights up like a filament when the device acts, and it keeps its glyph when joining or when revoked (turning red).
 
-export type DeviceKind = "cube" | "pyramid" | "octahedron" | "prism"
+export type DeviceKind = "desktop" | "laptop" | "phone" | "tablet"
 
-type Vec3 = readonly [number, number, number]
-type Mesh = { verts: readonly Vec3[]; edges: readonly (readonly [number, number])[]; baseYaw: number; pitch: number }
-
-const MESHES: Record<DeviceKind, Mesh> = {
-  cube: {
-    verts: [
-      [-1, -1, -1], [1, -1, -1], [1, 1, -1], [-1, 1, -1],
-      [-1, -1, 1], [1, -1, 1], [1, 1, 1], [-1, 1, 1],
-    ],
-    edges: [
-      [0, 1], [1, 2], [2, 3], [3, 0],
-      [4, 5], [5, 6], [6, 7], [7, 4],
-      [0, 4], [1, 5], [2, 6], [3, 7],
-    ],
-    baseYaw: .62,
-    pitch: .44,
-  },
-  pyramid: {
-    verts: [
-      [0, -1.22, 0],
-      [-1.08, .82, -1.08], [1.08, .82, -1.08], [1.08, .82, 1.08], [-1.08, .82, 1.08],
-    ],
-    edges: [
-      [0, 1], [0, 2], [0, 3], [0, 4],
-      [1, 2], [2, 3], [3, 4], [4, 1],
-    ],
-    baseYaw: .48,
-    pitch: .38,
-  },
-  octahedron: {
-    verts: [
-      [0, -1.32, 0], [0, 1.32, 0],
-      [-1.18, 0, 0], [0, 0, -1.18], [1.18, 0, 0], [0, 0, 1.18],
-    ],
-    edges: [
-      [0, 2], [0, 3], [0, 4], [0, 5],
-      [1, 2], [1, 3], [1, 4], [1, 5],
-      [2, 3], [3, 4], [4, 5], [5, 2],
-    ],
-    baseYaw: .36,
-    pitch: .42,
-  },
-  prism: {
-    verts: [
-      [0, -1.1, -1], [-1.05, .8, -1], [1.05, .8, -1],
-      [0, -1.1, 1], [-1.05, .8, 1], [1.05, .8, 1],
-    ],
-    edges: [
-      [0, 1], [1, 2], [2, 0],
-      [3, 4], [4, 5], [5, 3],
-      [0, 3], [1, 4], [2, 5],
-    ],
-    baseYaw: .52,
-    pitch: .4,
-  },
-}
-
-/** Deterministic rotation angle: slow drift at rest + critically-damped momentum turns on each action impulse. */
-export function solidYaw(kind: DeviceKind, t: number, impulses: readonly number[] = [], reduced = false) {
-  const base = MESHES[kind].baseYaw
-  if (reduced) return base
-  let angle = base + t * .12
-  for (const at of impulses) {
-    if (t > at) angle += .78 * springAt(t - at, springs.smooth)
-  }
-  return angle
-}
-
-export function Solid({ kind, cx, cy, r = 7.5, t, impulses = [], stroke = "#e8e4dc", reduced = false }: {
+export function DeviceGlyph({ kind, cx, cy, t, impulses = [], stroke = "#e8e4dc", screenGlow = 0 }: {
   kind: DeviceKind
   cx: number
   cy: number
-  r?: number
   t: number
   impulses?: readonly number[]
   stroke?: string
-  reduced?: boolean
+  screenGlow?: number
 }) {
-  const mesh = MESHES[kind]
-  const yaw = solidYaw(kind, t, impulses, reduced)
-  const cyaw = Math.cos(yaw), syaw = Math.sin(yaw)
-  const cp = Math.cos(mesh.pitch), sp = Math.sin(mesh.pitch)
+  const pulse = Math.max(screenGlow, flashes(t, impulses, .95))
+  const screenFill = pulse > .02 ? shade("#050505", [stroke, Math.min(.42, pulse * .45)]) : "none"
 
-  const projected = mesh.verts.map(([x, y, z]) => {
-    const x1 = x * cyaw + z * syaw
-    const z1 = -x * syaw + z * cyaw
-    const y2 = y * cp - z1 * sp
-    const z2 = y * sp + z1 * cp
-    const perspective = 1 / (1 - z2 * .12)
-    return [cx + x1 * r * .58 * perspective, cy + y2 * r * .58 * perspective, z2] as const
-  })
-
-  return <g stroke={stroke} strokeWidth={1.05} strokeLinecap="round" strokeLinejoin="round" fill="none">
-    {mesh.edges.map(([i, j], idx) => {
-      const a = projected[i]!, b = projected[j]!
-      const depth = (a[2] + b[2]) * .5
-      return <line key={idx} x1={a[0].toFixed(2)} y1={a[1].toFixed(2)} x2={b[0].toFixed(2)} y2={b[1].toFixed(2)}
-        strokeOpacity={depth < -.15 ? .38 : .95} />
-    })}
+  if (kind === "desktop") {
+    return <g transform={`translate(${cx} ${cy})`} stroke={stroke} strokeWidth={1.1} fill="none" strokeLinecap="square">
+      <rect x={-7.5} y={-6.5} width={15} height={10} fill={screenFill} />
+      <line x1={0} y1={3.5} x2={0} y2={6.5} />
+      <line x1={-4.5} y1={6.5} x2={4.5} y2={6.5} />
+    </g>
+  }
+  if (kind === "laptop") {
+    return <g transform={`translate(${cx} ${cy})`} stroke={stroke} strokeWidth={1.1} fill="none" strokeLinecap="square">
+      <rect x={-6.5} y={-6} width={13} height={8.5} fill={screenFill} />
+      <path d="M-8.5 2.5H8.5L7 5H-7Z" fill="#050505" />
+    </g>
+  }
+  if (kind === "tablet") {
+    return <g transform={`translate(${cx} ${cy})`} stroke={stroke} strokeWidth={1.1} fill="none" strokeLinecap="square">
+      <rect x={-5.5} y={-7} width={11} height={14} rx={1} fill={screenFill} />
+      <line x1={-1.5} y1={5} x2={1.5} y2={5} />
+    </g>
+  }
+  // phone
+  return <g transform={`translate(${cx} ${cy})`} stroke={stroke} strokeWidth={1.1} fill="none" strokeLinecap="square">
+    <rect x={-4.2} y={-7} width={8.4} height={14} rx={1} fill={screenFill} />
+    <line x1={-1.4} y1={-5} x2={1.4} y2={-5} />
+    <circle cx={0} cy={4.8} r={.6} fill={stroke} stroke="none" />
   </g>
 }
 
@@ -164,7 +101,7 @@ export function Frame({ id, box, t, story, light, label, detail, glyph, impulses
   return <g opacity={appear} transform={scale === 1 ? undefined : `translate(${cx} ${cy}) scale(${scale}) translate(${-cx} ${-cy})`}>
     <rect x={x + .5} y={y + .5} width={w - 1} height={h - 1} fill="#050505" stroke={frameColor} strokeDasharray={dashed ? "3 4" : undefined} />
     <rect x={x + 3.5} y={y + 3.5} width={w - 7} height={h - 7} fill="none" stroke={insetColor} strokeDasharray={dashed ? "3 4" : undefined} />
-    {glyph && <Solid kind={glyph} cx={x + 20} cy={hy} r={7.2} t={t} impulses={impulses} stroke={labelColor} reduced={story.reduced} />}
+    {glyph && <DeviceGlyph kind={glyph} cx={x + 20} cy={hy} t={t} impulses={impulses} stroke={labelColor} screenGlow={hot} />}
     {label && <text x={labelX} y={hy + .5} dominantBaseline="middle" className="story-card-label" fill={labelColor}>{label}</text>}
     {detail && <text x={x + w - 14} y={hy + .5} dominantBaseline="middle" textAnchor="end" className="story-card-detail" fill={detailColor}>{detail}</text>}
     {children}

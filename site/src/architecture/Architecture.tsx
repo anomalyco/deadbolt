@@ -5,7 +5,7 @@ import { MeshStory } from "./stories/MeshStory"
 import { AgentStory } from "./stories/AgentStory"
 import { KeysStory } from "./stories/KeysStory"
 import { LogsStory } from "./stories/LogsStory"
-import { SyncScene } from "./scenes/SyncScene"
+import { SyncStory } from "./stories/SyncStory"
 import { MergeScene } from "./scenes/MergeScene"
 import { PairScene } from "./scenes/PairScene"
 import { RemoveScene } from "./scenes/RemoveScene"
@@ -64,7 +64,7 @@ const chapters: Chapter[] = [
       <p>sync is one simple exchange: "here's what i have, send me what i'm missing". each side sends its heads (the latest entry it holds from every log), works out from the other's heads what to send, and sends it. the protocol in <code>deadbolt-net</code> treats all of this as opaque bytes; the agent decides what heads and entries mean.</p>
       <p>membership always goes first. when the agent unlocks, it first syncs membership with every member it can reach, and only sends membership entries until that round is done. that shrinks the window in which a device that was offline for a while still trusts a device someone removed.</p>
     </>,
-    scene: <SyncScene />,
+    scene: <SyncStory />,
     code: [["crates/net/src/sync.rs", "the deadbolt/sync/1 protocol"], ["crates/cli/src/agent/sync.rs", "what the agent puts in heads and how it orders entries"]],
   },
   {

@@ -4,9 +4,9 @@ import { Carried, Frame, RefusalMark, edge } from "../../story/devices"
 import { clamp01, flashes, shade, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
-// Two keys on the cube: the passphrase stretches through Argon2id (64 MiB, 3 passes) into the local unlock key,
+// Two keys on the desktop: the passphrase stretches through Argon2id (64 MiB, 3 passes) into the local unlock key,
 // which opens the sealed keyset holding the random data key (seals store.redb) and the Ed25519 device key (the
-// cube's identity for signing entries and dialing over iroh). A wrong passphrase fails AEAD on the keyset.
+// desktop's identity for signing entries and dialing over iroh). A wrong passphrase fails AEAD on the keyset.
 
 const W = 940, H = 330
 
@@ -41,10 +41,10 @@ const sWrong: Shot = { id: "wrong", path: wrongPath, at: 14.0, flight: 1.45, lab
 const REFUSED = timing(sWrong).lands
 
 const SHOTS: readonly Shot[] = [sPass, sKey, sOpen, sSeal, sWrong]
-const CUBE_IMPULSES = [REVEAL, SIGN_AT]
+const DESKTOP_IMPULSES = [REVEAL, SIGN_AT]
 
 export const keysScene: StoryScene = {
-  label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the sealed keyset holding the data key and the cube's device key.",
+  label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the sealed keyset holding the data key and the desktop's device key.",
   width: W, height: H, duration: 18.0, poster: 4,
   steps: [
     {
@@ -70,7 +70,7 @@ export const keysScene: StoryScene = {
     {
       at: 11.0,
       focus: { device: 1, data: .6, store: .6, keyset: .5 },
-      caption: { text: "the device key signs entries and is the cube's iroh address", anchor: [DEVICE[0] + DEVICE[2], DEVICE[1] + DEVICE[3] / 2], place: [796, 259], align: "start", delay: .2 },
+      caption: { text: "the device key signs entries and is the desktop's iroh address", anchor: [DEVICE[0] + DEVICE[2], DEVICE[1] + DEVICE[3] / 2], place: [796, 259], align: "start", delay: .2 },
     },
     {
       at: 13.8,
@@ -127,7 +127,7 @@ function Keys({ t, light, story }: { t: number; light: Light; story: StoryApi })
 
     <Frame id="store" box={STORE} t={t} story={story} light={light} label="store.redb" detail="log · index · meta" heat={storeHeat} />
     <Frame id="data" box={DATA} t={t} story={story} light={light} label="data key" detail="256-bit" tone="red" heat={dataHeat} appearAt={REVEAL} />
-    <Frame id="device" box={DEVICE} t={t} story={story} light={light} glyph="cube" impulses={CUBE_IMPULSES}
+    <Frame id="device" box={DEVICE} t={t} story={story} light={light} glyph="desktop" impulses={DESKTOP_IMPULSES}
       label="device key" detail="ed25519 · iroh id" tone="red" heat={deviceHeat} appearAt={REVEAL + .06} />
 
     <RefusalMark x={652} y={KEYSET[1]} t={t} at={REFUSED} light={light} />
