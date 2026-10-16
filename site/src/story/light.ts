@@ -222,7 +222,8 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
   }
 
   // Floods: light wicking in from the socket. The wet region grows from the socket with a ragged front and a
-  // brighter tide line; it's printed in a stipple, and the frame and its inset rule catch it where it reaches.
+  // brighter tide line, brightest near the socket; it's printed mostly as a stipple over a faint wash, and the
+  // frame and its inset rule catch it in proportion, so the border lights from the socket outward.
   for (var i = 0; i < i32(counts.w); i++) {
     let box = u.v[${BASE.floods} + i * 3];
     let s = u.v[${BASE.floods} + i * 3 + 1];
@@ -237,7 +238,7 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
     let wash = (body * 0.6 + tide * 0.4) * s.w * feel.y;
     let print = step(ign(floor(frag.xy / 2.0)), wash * 2.4);
     let edge = rule(q, box, 0.5, px) * 0.5 + rule(q, box, 3.5, px) * 0.3;
-    col += tone(c.x) * (inside * (wash * 0.3 + print * wash * 0.24) + edge * s.w * feel.y * (1.0 - smoothstep(0.8, 1.05, r)) * 0.9);
+    col += tone(c.x) * (inside * (wash * 0.16 + print * wash * 0.2) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 0.8);
   }
 
   // Borders near a head catch its light.
@@ -412,7 +413,7 @@ void main() {
     float wash = (body * 0.6 + tide * 0.4) * s.w * feel.y;
     float print = step(ign(floor(fragXY / 2.0)), wash * 2.4);
     float edge = rule(q, box, 0.5, px) * 0.5 + rule(q, box, 3.5, px) * 0.3;
-    col += tone(c.x) * (inside * (wash * 0.3 + print * wash * 0.24) + edge * s.w * feel.y * (1.0 - smoothstep(0.8, 1.05, r)) * 0.9);
+    col += tone(c.x) * (inside * (wash * 0.16 + print * wash * 0.2) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 0.8);
   }
 
   for (int f = 0; f < int(more.x); f++) {
