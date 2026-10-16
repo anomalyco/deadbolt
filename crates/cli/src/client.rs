@@ -21,7 +21,8 @@ const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 /// This binary's version. `DEADBOLT_TEST_VERSION` overrides it so tests can
 /// run an agent that looks outdated.
 pub fn version() -> String {
-    std::env::var("DEADBOLT_TEST_VERSION").unwrap_or_else(|_| env!("CARGO_PKG_VERSION").into())
+    std::env::var("DEADBOLT_TEST_VERSION")
+        .unwrap_or_else(|_| concat!(env!("CARGO_PKG_VERSION"), "+", env!("DEADBOLT_BUILD")).into())
 }
 
 /// An error reported by the agent.

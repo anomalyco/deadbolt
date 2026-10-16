@@ -392,7 +392,7 @@ fn replaces_agent_of_another_version() {
     assert!(status.contains("state\tnot set up"), "{status}");
     let out = a.run(&["agent", "status"]);
     assert!(
-        out.ends_with(&format!("version {}\n", env!("CARGO_PKG_VERSION"))),
+        out.contains(&format!("version {}+", env!("CARGO_PKG_VERSION"))),
         "{out}"
     );
     assert_ne!(a.agent_pid().unwrap(), old_pid);

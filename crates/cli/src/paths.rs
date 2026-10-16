@@ -8,7 +8,10 @@
 //! $XDG_RUNTIME_DIR/deadbolt<suffix>/agent.lock    single-instance lock
 //! ```
 //!
-//! Without `XDG_RUNTIME_DIR` the runtime dir is `$TMPDIR/deadbolt<suffix>-<uid>`.
+//! Without `XDG_RUNTIME_DIR` (e.g. a non-login ssh session) the runtime dir is
+//! `/run/user/<uid>/deadbolt<suffix>` if that directory exists, so every
+//! session of the same user finds the same agent; otherwise
+//! `$TMPDIR/deadbolt<suffix>-<uid>`.
 //! `<suffix>` is empty by default and `-<hash of DEADBOLT_HOME>` when
 //! `DEADBOLT_HOME` is set, so every store gets its own agent.
 
@@ -54,9 +57,10 @@ impl Paths {
         let suffix = suffix();
         let data = var("DEADBOLT_HOME")
             .unwrap_or_else(|| xdg("XDG_DATA_HOME", &[".local", "share"]).join("deadbolt"));
-        let runtime = match var("XDG_RUNTIME_DIR") {
+        let uid = user_id();
+        let runtime = match var("XDG_RUNTIME_DIR").or_else(|| user_runtime_dir(uid)) {
             Some(dir) => dir.join(format!("deadbolt{suffix}")),
-            None => env::temp_dir().join(format!("deadbolt{suffix}-{}", user_id())),
+            None => env::temp_dir().join(format!("deadbolt{suffix}-{uid}")),
         };
         let state = xdg("XDG_STATE_HOME", &[".local", "state"]).join(format!("deadbolt{suffix}"));
         Self {
@@ -69,6 +73,14 @@ impl Paths {
             log: state.join("agent.log"),
         }
     }
+}
+
+/// `/run/user/<uid>`, if it exists and belongs to `uid`.
+fn user_runtime_dir(uid: u32) -> Option<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let dir = PathBuf::from(format!("/run/user/{uid}"));
+    let meta = std::fs::metadata(&dir).ok()?;
+    (meta.is_dir() && meta.uid() == uid).then_some(dir)
 }
 
 fn user_id() -> u32 {
