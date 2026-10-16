@@ -1,9 +1,9 @@
 //! Item commands: lookup, labels, input normalization and writes.
 //!
 //! Lookup is search. Every query word must match (case-insensitively) part
-//! of the item's name, label, URL host, username, or for cards the
-//! cardholder, brand field or last four digits; a word of 4+ hex digits also
-//! matches an id prefix. Secret values are never searched.
+//! of the item's name, URL host, username, or for cards the cardholder,
+//! brand field or last four digits; a word of 4+ hex digits also matches an
+//! id prefix. Secret values and the derived label are never searched.
 
 use std::collections::BTreeSet;
 
@@ -11,7 +11,7 @@ use anyhow::{Result, bail};
 use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
 
 use super::session::Session;
-use crate::items::line;
+use crate::items::{format_month, line, with_scheme};
 use crate::protocol::{FieldInfo, FieldInput, ItemInfo, NewItem};
 
 const MIN_SHORT: usize = 4;
@@ -68,7 +68,7 @@ fn detail(item: &Item) -> Option<String> {
 }
 
 fn searchable(item: &Item) -> Vec<String> {
-    let mut texts = vec![label(item)];
+    let mut texts = Vec::new();
     texts.extend(item.name.clone());
     texts.extend(value(item, "url").map(host));
     let fields: &[&str] = match item.kind.as_str() {
@@ -165,7 +165,6 @@ impl Listing {
             short: short_id(&self.ids, &id),
             id,
             kind: item.kind.clone(),
-            name: item.name.clone(),
             label: label(item),
             detail: detail(item),
             fields,
@@ -205,21 +204,12 @@ fn normalize(kind: &str, name: &str, field: &FieldType, value: String) -> String
     }
     match field {
         FieldType::Month => {
-            let parsed = value.split_once('/').and_then(|(month, year)| {
-                let month: u8 = month.trim().parse().ok()?;
-                let year = year.trim();
-                let year = match year.len() {
-                    2 => format!("20{year}"),
-                    4 => year.to_string(),
-                    _ => return None,
-                };
-                year.bytes()
-                    .all(|b| b.is_ascii_digit())
-                    .then(|| format!("{year}-{month:02}"))
-            });
+            let parsed = value
+                .split_once('/')
+                .and_then(|(month, year)| format_month(month.trim().parse().ok()?, year));
             parsed.unwrap_or(value)
         }
-        FieldType::Url if !value.contains("://") && !value.is_empty() => format!("https://{value}"),
+        FieldType::Url => with_scheme(value),
         _ => value,
     }
 }
@@ -311,8 +301,8 @@ pub fn create(
     Ok(info(s, vault, &id))
 }
 
-/// Creates all `items` or none; returns how many items and entries.
-pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Result<(usize, usize)> {
+/// Creates all `items` or none.
+pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Result<()> {
     let vault = s.resolve(vault)?;
     let items = items
         .into_iter()
@@ -324,13 +314,12 @@ pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Resu
         })
         .collect::<Result<Vec<_>>>()?;
     let secret = &s.secret;
-    let (ids, entries) = s
+    let (_, entries) = s
         .vaults
         .get_mut(&vault)
         .expect("resolved")
         .create_items(secret, items)?;
-    s.persist(&entries)?;
-    Ok((ids.len(), entries.len()))
+    s.persist(&entries)
 }
 
 pub fn set(
@@ -399,6 +388,43 @@ mod tests {
         }
     }
 
+    fn item(kind: &str, name: Option<&str>, fields: &[(&str, &str)]) -> Item {
+        Item {
+            id: ItemId::from_bytes([0xee; 16]),
+            kind: kind.into(),
+            name: name.map(Into::into),
+            fields: fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), Field::new(FieldType::Text, *v)))
+                .collect(),
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn search_skips_the_derived_label() {
+        let q = |words: &[&str]| -> Vec<String> { words.iter().map(|w| w.to_string()).collect() };
+        let unbranded = item("card", None, &[("number", "4242424242424242")]);
+        let branded = item(
+            "card",
+            None,
+            &[("number", "5555555555554444"), ("brand", "Visa")],
+        );
+        let named = item("card", Some("Travel"), &[("number", "6011000990139424")]);
+        let login = item("login", None, &[("password", "x")]);
+        assert_eq!(label(&unbranded), "card •••• 4242");
+        assert_eq!(label(&login), "login");
+        // The type word and the label's filler match no item, branded or not.
+        for words in [&["card"][..], &["login"], &["••••"]] {
+            for it in [&unbranded, &branded, &named, &login] {
+                assert!(!matches(it, &q(words)), "{words:?} matched {}", label(it));
+            }
+        }
+        assert!(matches(&branded, &q(&["visa", "4444"])));
+        assert!(matches(&unbranded, &q(&["4242"])));
+        assert!(matches(&named, &q(&["travel", "9424"])));
+    }
+
     #[test]
     fn short_ids_are_unique_prefixes() {
         let mut ids = vec!["abcd1234".to_string(), "abcd5678".into(), "ffff0000".into()];
@@ -418,10 +444,15 @@ mod tests {
         assert_eq!(n("card", "expiry", FieldType::Month, "4/27"), "2027-04");
         assert_eq!(n("card", "expiry", FieldType::Month, "12/2031"), "2031-12");
         assert_eq!(n("card", "expiry", FieldType::Month, "2031-12"), "2031-12");
+        assert_eq!(n("card", "expiry", FieldType::Month, " 4 / 27 "), "2027-04");
+        for bad in ["4/2x", "4/203", "x/27"] {
+            assert_eq!(n("card", "expiry", FieldType::Month, bad), bad);
+        }
         assert_eq!(
             n("login", "url", FieldType::Url, "github.com"),
             "https://github.com"
         );
         assert_eq!(n("login", "url", FieldType::Url, "ftp://x"), "ftp://x");
+        assert_eq!(n("login", "url", FieldType::Url, ""), "");
     }
 }

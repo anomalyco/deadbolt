@@ -170,28 +170,14 @@ impl fmt::Debug for Unlocked {
 }
 
 impl Unlocked {
-    /// The data directory this store lives in.
-    pub fn dir(&self) -> &Path {
-        &self.dir
-    }
-
     /// The 32-byte device secret (Ed25519 seed) given to [`init`].
     pub fn device_secret(&self) -> &[u8; 32] {
         &self.keys.keyset.device_secret
     }
 
-    /// Wipes keys from memory and releases the database lock.
-    pub fn lock(self) {}
-
-    /// Appends one entry. Returns `false` (and writes nothing) if an entry with
-    /// this hash is already stored; the bytes are not compared.
-    pub fn append(&self, hash: &EntryHash, bytes: &[u8]) -> Result<bool> {
-        Ok(self.append_batch([(hash, bytes)])? == 1)
-    }
-
     /// Appends several entries in one durable transaction, skipping hashes that
-    /// are already stored. Returns how many were added. Either all new entries
-    /// are written or none are.
+    /// are already stored (the bytes are not compared). Returns how many were
+    /// added. Either all new entries are written or none are.
     pub fn append_batch<'a>(
         &self,
         entries: impl IntoIterator<Item = (&'a EntryHash, &'a [u8])>,
@@ -228,42 +214,6 @@ impl Unlocked {
             txn.abort()?;
         }
         Ok(added as usize)
-    }
-
-    /// Looks up an entry by hash.
-    pub fn get(&self, hash: &EntryHash) -> Result<Option<Zeroizing<Vec<u8>>>> {
-        let txn = self.db.begin_read()?;
-        let index = txn.open_table(LOG_INDEX)?;
-        let Some(seq) = index.get(&self.keys.log_blind(hash))? else {
-            return Ok(None);
-        };
-        let seq = seq.value();
-        let log = txn.open_table(LOG)?;
-        let row = log
-            .get(seq)?
-            .ok_or_else(|| Error::corrupt("index points to a missing log entry"))?;
-        let (stored_hash, bytes) = self.keys.open_log_row(seq, row.value())?;
-        if &stored_hash != hash {
-            return Err(Error::corrupt("index points to the wrong log entry"));
-        }
-        Ok(Some(bytes))
-    }
-
-    /// Whether an entry with this hash is stored.
-    pub fn contains(&self, hash: &EntryHash) -> Result<bool> {
-        let txn = self.db.begin_read()?;
-        let index = txn.open_table(LOG_INDEX)?;
-        Ok(index.get(&self.keys.log_blind(hash))?.is_some())
-    }
-
-    /// Number of stored entries.
-    pub fn len(&self) -> Result<u64> {
-        let txn = self.db.begin_read()?;
-        read_log_len(&self.keys, &txn.open_table(HEADER)?)
-    }
-
-    pub fn is_empty(&self) -> Result<bool> {
-        Ok(self.len()? == 0)
     }
 
     /// Iterates all entries in append order over a consistent snapshot.
@@ -303,17 +253,6 @@ impl Unlocked {
         txn.open_table(META)?.insert(&blinded, sealed.as_slice())?;
         txn.commit()?;
         Ok(())
-    }
-
-    /// Removes a meta value. Returns whether it existed.
-    pub fn meta_remove(&self, name: &str) -> Result<bool> {
-        let txn = begin_write(&self.db)?;
-        let existed = txn
-            .open_table(META)?
-            .remove(&self.keys.meta_blind(name))?
-            .is_some();
-        txn.commit()?;
-        Ok(existed)
     }
 
     /// The KDF parameters currently protecting the store.

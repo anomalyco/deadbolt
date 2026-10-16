@@ -227,7 +227,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 setup(&paths, device_name, from_stdin).await?;
             }
             let reply = pairing(&paths, Command::Join { confirm: false }, from_stdin).await?;
-            let Reply::Joined { vault } = reply else {
+            let Reply::Vault { vault } = reply else {
                 bail!("unexpected reply");
             };
             println!("joined vault {}", vault.name);
@@ -241,7 +241,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 confirm,
             };
             let reply = pairing(&paths, command, from_stdin).await?;
-            let Reply::Paired { vault, device } = reply else {
+            let Reply::Device { vault, device } = reply else {
                 bail!("unexpected reply");
             };
             println!("added {} to {}", device_name(&device), vault.name);
@@ -251,7 +251,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             match args.command {
                 None => {
                     let reply = request(&paths, Command::Devices { vault }, from_stdin).await?;
-                    let Reply::Devices { devices, .. } = reply else {
+                    let Reply::Devices { devices } = reply else {
                         bail!("unexpected reply");
                     };
                     for device in &devices {
@@ -265,7 +265,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 Some(DevicesCommand::Remove { device }) => {
                     let command = Command::DeviceRemove { vault, device };
-                    let Reply::Removed { vault, device } =
+                    let Reply::Device { vault, device } =
                         request(&paths, command, from_stdin).await?
                     else {
                         bail!("unexpected reply");

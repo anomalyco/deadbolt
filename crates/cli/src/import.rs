@@ -18,6 +18,7 @@ use deadbolt_core::item::{check_create, check_field, valid_item_name};
 use deadbolt_core::{Field, FieldType, Schema, schema};
 use serde_json::Value;
 
+use crate::items::{format_month, with_scheme};
 use crate::paths::Paths;
 use crate::protocol::{Command, FieldInput, NewItem, Reply};
 
@@ -66,7 +67,7 @@ pub async fn run(
         Some(crate::request(paths, Command::ItemImport { vault, items }, from_stdin).await?)
     };
     match reply {
-        None | Some(Reply::Imported { .. }) => {}
+        None | Some(Reply::Done) => {}
         Some(_) => bail!("unexpected reply"),
     }
     for line in summary.lines() {
@@ -260,20 +261,12 @@ fn item_name(item: &Value) -> Option<String> {
 fn expiry(card: &Value) -> Option<Result<String, ()>> {
     let month = text(card, "expMonth")?;
     let year = text(card, "expYear")?;
-    let (month, year) = (month.trim(), year.trim());
+    let month = month.trim();
     let month = month
         .parse::<u8>()
         .ok()
         .filter(|m| (1..=12).contains(m) && month.bytes().all(|b| b.is_ascii_digit()));
-    let Some(month) = month.filter(|_| year.bytes().all(|b| b.is_ascii_digit())) else {
-        return Some(Err(()));
-    };
-    let year = match year.len() {
-        2 => format!("20{year}"),
-        4 => year.to_string(),
-        _ => return Some(Err(())),
-    };
-    Some(Ok(format!("{year}-{month:02}")))
+    Some(month.and_then(|m| format_month(m, &year)).ok_or(()))
 }
 
 /// Builds one item's fields, tracking names so extras never collide.
@@ -348,12 +341,7 @@ impl Builder {
 }
 
 fn url_field(uri: &str) -> Field {
-    let value = if uri.contains("://") {
-        uri.to_string()
-    } else {
-        format!("https://{uri}")
-    };
-    let field = Field::new(FieldType::Url, value);
+    let field = Field::new(FieldType::Url, with_scheme(uri.to_string()));
     let login = schema("login").expect("built-in type");
     if check_field(login, "url", &field).is_ok() {
         field
@@ -750,9 +738,11 @@ mod tests {
         let card = |m: &str, y: &str| serde_json::json!({ "expMonth": m, "expYear": y });
         assert_eq!(expiry(&card("4", "27")), Some(Ok("2027-04".into())));
         assert_eq!(expiry(&card("12", "2031")), Some(Ok("2031-12".into())));
+        assert_eq!(expiry(&card(" 04 ", " 27 ")), Some(Ok("2027-04".into())));
         assert_eq!(expiry(&card("", "2031")), None);
         assert_eq!(expiry(&serde_json::json!({ "expMonth": "1" })), None);
         assert_eq!(expiry(&card("1", "203")), Some(Err(())));
+        assert_eq!(expiry(&card("1", "2x")), Some(Err(())));
         assert_eq!(expiry(&card("13", "2031")), Some(Err(())));
         assert_eq!(expiry(&card("+1", "2031")), Some(Err(())));
     }

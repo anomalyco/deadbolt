@@ -117,8 +117,8 @@ pub async fn ensure_running(paths: &Paths) -> Result<Status> {
         .process_group(0)
         .spawn()
         .context("starting the agent")?;
-    for _ in 0..50 {
-        tokio::time::sleep(Duration::from_millis(100)).await;
+    for _ in 0..250 {
+        tokio::time::sleep(Duration::from_millis(20)).await;
         if let Some(status) = status(paths).await {
             return Ok(status);
         }

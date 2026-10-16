@@ -38,6 +38,11 @@ fn body(n: u64) -> Vec<u8> {
         .into_bytes()
 }
 
+/// Appends one entry; `false` if its hash is already stored.
+fn append(store: &Unlocked, hash: &EntryHash, bytes: &[u8]) -> Result<bool, Error> {
+    Ok(store.append_batch([(hash, bytes)])? == 1)
+}
+
 fn all(store: &Unlocked) -> Vec<(EntryHash, Vec<u8>)> {
     store
         .iter_all()
@@ -97,18 +102,12 @@ fn roundtrip() {
     let store = init(&dir);
     assert!(crate::is_initialized(&dir));
     assert_eq!(store.device_secret(), &SECRET);
-    assert!(store.is_empty().unwrap());
+    assert!(all(&store).is_empty());
 
     for n in 0..20 {
-        assert!(store.append(&hash(n), &body(n)).unwrap());
+        assert!(append(&store, &hash(n), &body(n)).unwrap());
     }
-    assert!(store.append(&hash(100), b"").unwrap());
-    assert_eq!(store.len().unwrap(), 21);
-    assert_eq!(store.get(&hash(3)).unwrap().unwrap().as_slice(), body(3));
-    assert_eq!(store.get(&hash(100)).unwrap().unwrap().as_slice(), b"");
-    assert!(store.get(&hash(999)).unwrap().is_none());
-    assert!(store.contains(&hash(19)).unwrap());
-    assert!(!store.contains(&hash(999)).unwrap());
+    assert!(append(&store, &hash(100), b"").unwrap());
 
     let entries = all(&store);
     assert_eq!(entries.len(), 21);
@@ -116,6 +115,7 @@ fn roundtrip() {
         assert_eq!(h, &hash(n as u64));
         assert_eq!(b, &body(n as u64));
     }
+    assert_eq!(entries[20], (hash(100), Vec::new()));
 
     store.meta_set("vault_id", b"v-123").unwrap();
     store.meta_set("theme", b"dark").unwrap();
@@ -129,9 +129,6 @@ fn roundtrip() {
         b"light"
     );
     assert!(store.meta_get("missing").unwrap().is_none());
-    assert!(store.meta_remove("theme").unwrap());
-    assert!(!store.meta_remove("theme").unwrap());
-    assert!(store.meta_get("theme").unwrap().is_none());
 
     #[cfg(unix)]
     {
@@ -143,7 +140,7 @@ fn roundtrip() {
     // Only the database file remains; the init temp file is gone.
     assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
 
-    store.lock();
+    drop(store);
     let store = unlock(&dir);
     assert_eq!(store.device_secret(), &SECRET);
     assert_eq!(all(&store), entries);
@@ -158,7 +155,7 @@ fn plaintext_never_on_disk() {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
     let marker = b"SUPER-SECRET-PASSWORD-MARKER";
-    store.append(&hash(1), marker).unwrap();
+    append(&store, &hash(1), marker).unwrap();
     store.meta_set("vault_name", marker).unwrap();
     drop(store);
     let file = std::fs::read(db_path(tmp.path())).unwrap();
@@ -173,8 +170,8 @@ fn plaintext_never_on_disk() {
 fn duplicate_appends_are_skipped() {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
-    assert!(store.append(&hash(1), b"one").unwrap());
-    assert!(!store.append(&hash(1), b"other").unwrap());
+    assert!(append(&store, &hash(1), b"one").unwrap());
+    assert!(!append(&store, &hash(1), b"other").unwrap());
     let (h2, h3) = (hash(2), hash(3));
     let added = store
         .append_batch([
@@ -186,9 +183,14 @@ fn duplicate_appends_are_skipped() {
         .unwrap();
     assert_eq!(added, 2);
     assert_eq!(store.append_batch([]).unwrap(), 0);
-    assert_eq!(store.len().unwrap(), 3);
-    assert_eq!(store.get(&hash(1)).unwrap().unwrap().as_slice(), b"one");
-    assert_eq!(store.get(&h2).unwrap().unwrap().as_slice(), b"two");
+    assert_eq!(
+        all(&store),
+        [
+            (hash(1), b"one".to_vec()),
+            (h2, b"two".to_vec()),
+            (h3, b"three".to_vec())
+        ]
+    );
 }
 
 #[test]
@@ -197,9 +199,9 @@ fn reopen_after_append() {
     drop(init(tmp.path()));
     for round in 0..5u64 {
         let store = unlock(tmp.path());
-        assert_eq!(store.len().unwrap(), round * 10);
+        assert_eq!(all(&store).len() as u64, round * 10);
         for n in round * 10..round * 10 + 10 {
-            store.append(&hash(n), &body(n)).unwrap();
+            append(&store, &hash(n), &body(n)).unwrap();
         }
     }
     let store = unlock(tmp.path());
@@ -244,7 +246,7 @@ fn missing_store() {
 fn init_over_existing_refused() {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
-    store.append(&hash(1), b"keep me").unwrap();
+    append(&store, &hash(1), b"keep me").unwrap();
     drop(store);
     let before = std::fs::read(db_path(tmp.path())).unwrap();
 
@@ -255,7 +257,7 @@ fn init_over_existing_refused() {
 
     let store = unlock(tmp.path());
     assert_eq!(store.device_secret(), &SECRET);
-    assert_eq!(store.get(&hash(1)).unwrap().unwrap().as_slice(), b"keep me");
+    assert_eq!(all(&store), [(hash(1), b"keep me".to_vec())]);
 }
 
 #[test]
@@ -273,7 +275,7 @@ fn second_open_is_in_use() {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
     assert!(matches!(crate::unlock(tmp.path(), PASS), Err(Error::InUse)));
-    store.lock();
+    drop(store);
     drop(unlock(tmp.path()));
 }
 
@@ -281,7 +283,7 @@ fn second_open_is_in_use() {
 fn change_passphrase() {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
-    store.append(&hash(1), b"data").unwrap();
+    append(&store, &hash(1), b"data").unwrap();
     store.meta_set("k", b"v").unwrap();
 
     assert!(matches!(
@@ -290,7 +292,7 @@ fn change_passphrase() {
     ));
     store.change_passphrase(PASS, b"new pass").unwrap();
     // The open handle keeps working.
-    store.append(&hash(2), b"more").unwrap();
+    append(&store, &hash(2), b"more").unwrap();
     drop(store);
 
     assert!(matches!(
@@ -299,8 +301,10 @@ fn change_passphrase() {
     ));
     let store = crate::unlock(tmp.path(), b"new pass").unwrap();
     assert_eq!(store.device_secret(), &SECRET);
-    assert_eq!(store.get(&hash(1)).unwrap().unwrap().as_slice(), b"data");
-    assert_eq!(store.get(&hash(2)).unwrap().unwrap().as_slice(), b"more");
+    assert_eq!(
+        all(&store),
+        vec![(hash(1), b"data".to_vec()), (hash(2), b"more".to_vec())]
+    );
     assert_eq!(store.meta_get("k").unwrap().unwrap().as_slice(), b"v");
     assert_eq!(store.kdf_params().unwrap(), FAST);
 
@@ -341,7 +345,7 @@ fn store_with_entries(n: u64) -> TempDir {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
     for i in 0..n {
-        store.append(&hash(i), &body(i)).unwrap();
+        append(&store, &hash(i), &body(i)).unwrap();
     }
     store.meta_set("vault_id", b"v-1").unwrap();
     tmp
@@ -371,8 +375,6 @@ fn tampered_log_entry() {
         flip_value(tmp.path(), raw::LOG, 2, index);
 
         let store = unlock(tmp.path());
-        assert!(matches!(store.get(&hash(2)), Err(Error::Corrupt(_))));
-        assert_eq!(store.get(&hash(1)).unwrap().unwrap().as_slice(), body(1));
         let results: Vec<_> = store.iter_all().unwrap().collect();
         assert_eq!(results.len(), 3, "two good entries, then one error");
         assert!(results[0].is_ok() && results[1].is_ok());
@@ -383,8 +385,8 @@ fn tampered_log_entry() {
     let len = raw_value(tmp.path(), raw::LOG, 0).len();
     flip_value(tmp.path(), raw::LOG, 0, len - 1);
     assert!(matches!(
-        unlock(tmp.path()).get(&hash(0)),
-        Err(Error::Corrupt(_))
+        unlock(tmp.path()).iter_all().unwrap().next(),
+        Some(Err(Error::Corrupt(_)))
     ));
 }
 
@@ -405,10 +407,9 @@ fn tampered_log_len() {
     let tmp = store_with_entries(3);
     flip_value(tmp.path(), raw::HEADER, "log_len", 30);
     let store = unlock(tmp.path());
-    assert!(matches!(store.len(), Err(Error::Corrupt(_))));
     assert!(matches!(store.iter_all(), Err(Error::Corrupt(_))));
     assert!(matches!(
-        store.append(&hash(9), b""),
+        append(&store, &hash(9), b""),
         Err(Error::Corrupt(_))
     ));
 }
@@ -478,7 +479,7 @@ fn deleted_swapped_or_truncated_entries_detected() {
         let tmp = TempDir::new().unwrap();
         let store = init(tmp.path());
         for n in 0..4 {
-            store.append(&hash(n), &body(n)).unwrap();
+            append(&store, &hash(n), &body(n)).unwrap();
         }
         tmp
     };
@@ -496,10 +497,6 @@ fn deleted_swapped_or_truncated_entries_detected() {
         txn.open_table(raw::LOG).unwrap().remove(1).unwrap();
     });
     assert!(fails(tmp.path()));
-    assert!(matches!(
-        unlock(tmp.path()).get(&hash(1)),
-        Err(Error::Corrupt(_))
-    ));
 
     // Delete the last entry. Appending must refuse rather than reuse its slot.
     let tmp = setup();
@@ -508,7 +505,7 @@ fn deleted_swapped_or_truncated_entries_detected() {
     });
     assert!(fails(tmp.path()));
     assert!(matches!(
-        unlock(tmp.path()).append(&hash(9), b""),
+        append(&unlock(tmp.path()), &hash(9), b""),
         Err(Error::Corrupt(_))
     ));
 
@@ -522,10 +519,6 @@ fn deleted_swapped_or_truncated_entries_detected() {
         t.insert(1, a.as_slice()).unwrap();
     });
     assert!(fails(tmp.path()));
-    assert!(matches!(
-        unlock(tmp.path()).get(&hash(0)),
-        Err(Error::Corrupt(_))
-    ));
 }
 
 /// Flip bytes all over the file: every outcome must be an error or the
@@ -535,7 +528,7 @@ fn random_bit_flips_never_yield_garbage() {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
     for n in 0..30 {
-        store.append(&hash(n), &body(n)).unwrap();
+        append(&store, &hash(n), &body(n)).unwrap();
     }
     store.meta_set("vault_id", b"abc").unwrap();
     let expected = all(&store);
@@ -601,16 +594,17 @@ fn survives_kill_mid_write() {
         child.kill().unwrap();
         child.wait().unwrap();
 
-        let store = unlock(tmp.path());
-        let entries = all(&store);
-        assert_eq!(entries.len() as u64, store.len().unwrap());
+        // `all` fails unless the entries match the sealed log length.
+        let entries = all(&unlock(tmp.path()));
         for (n, (h, b)) in entries.iter().enumerate() {
             assert_eq!(h, &hash(n as u64));
             assert_eq!(b, &body(n as u64));
         }
     }
-    let store = unlock(tmp.path());
-    assert!(store.len().unwrap() > 0, "child never committed anything");
+    assert!(
+        !all(&unlock(tmp.path())).is_empty(),
+        "child never committed anything"
+    );
 }
 
 /// Helper process for `survives_kill_mid_write`; a no-op unless spawned by it.
@@ -621,7 +615,7 @@ fn crash_child() {
     };
     let store = unlock(Path::new(&dir));
     println!("crash-child-writing");
-    let mut n = store.len().unwrap();
+    let mut n = all(&store).len() as u64;
     loop {
         let batch: Vec<_> = (n..n + 1 + n % 5).map(|i| (hash(i), body(i))).collect();
         n += store
@@ -634,9 +628,9 @@ fn crash_child() {
 #[test]
 fn default_kdf_params_roundtrip() {
     let tmp = TempDir::new().unwrap();
-    let store = crate::init(tmp.path(), PASS, SECRET).unwrap();
-    assert_eq!(store.kdf_params().unwrap(), KdfParams::DEFAULT);
-    drop(store);
+    drop(crate::init(tmp.path(), PASS, SECRET).unwrap());
+    let kdf = KdfHeader::decode(&raw_value(tmp.path(), raw::HEADER, "kdf")).unwrap();
+    assert_eq!(kdf.params, KdfParams::DEFAULT);
     assert_eq!(unlock(tmp.path()).device_secret(), &SECRET);
 }
 

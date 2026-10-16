@@ -8,9 +8,8 @@
 //!
 //! Both sides report the confirmation code to the client. With `confirm` the
 //! client is asked to accept it; otherwise holding the ticket is the
-//! authorization and the code is accepted automatically. The new device
-//! reports once it has the offer, so the vault name is shown with the code,
-//! and only then signs its consent.
+//! authorization and the code is accepted automatically. The new device reports once it has the offer, so
+//! the vault name is shown with the code, and only then signs its consent.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -192,7 +191,7 @@ pub async fn join(agent: &Arc<Agent>, conv: &Conversation, confirm: bool) -> Res
         .ok_or_else(|| anyhow!("pairing finished without a vault"))?;
     info!(vault = %vault.name, "joined vault");
     agent.sync_now.notify_one();
-    Ok(Reply::Joined { vault })
+    Ok(Reply::Vault { vault })
 }
 
 struct ExistingDevice<'a> {
@@ -322,5 +321,5 @@ pub async fn pair(
     let vault = agent.with(|s| Ok(s.vault_info(&vault)))?;
     info!(vault = %vault.name, device = %device.id, "paired");
     agent.sync_now.notify_one();
-    Ok(Reply::Paired { vault, device })
+    Ok(Reply::Device { vault, device })
 }
