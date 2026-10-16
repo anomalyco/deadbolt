@@ -39,29 +39,60 @@ export const ease = {
 
 export type Spring = { duration: number; bounce: number }
 
-/** Kit's palette, as visual duration and bounce. */
+/** Kit's palette, as visual duration and bounce (bounce 0 by default). */
 export const springs = {
+  instant: { duration: .1, bounce: 0 },
   snappy: { duration: .25, bounce: 0 },
+  default: { duration: .3, bounce: 0 },
   calm: { duration: .4, bounce: 0 },
   smooth: { duration: .45, bounce: 0 },
+  morph: { duration: .42, bounce: .16 },
+  settle: { duration: .55, bounce: .12 },
   slow: { duration: .85, bounce: 0 },
 } satisfies Record<string, Spring>
 
 /** Closed-form step response (0 → 1) of a spring `seconds` after it starts. ω = 2π / duration, ζ = 1 − bounce. */
-export function springAt(seconds: number, s: Spring) {
+export function springAt(seconds: number, s: Spring = springs.default) {
   if (seconds <= 0) return 0
   const w = (2 * Math.PI) / Math.max(.01, s.duration)
   const z = Math.max(.05, 1 - s.bounce)
-  if (z >= 1) return 1 - (1 + w * seconds) * Math.exp(-w * seconds)
-  const wd = w * Math.sqrt(1 - z * z)
-  return 1 - Math.exp(-z * w * seconds) * (Math.cos(wd * seconds) + ((z * w) / wd) * Math.sin(wd * seconds))
+  const raw = z >= 1
+    ? 1 - (1 + w * seconds) * Math.exp(-w * seconds)
+    : (() => {
+      const wd = w * Math.sqrt(1 - z * z)
+      return 1 - Math.exp(-z * w * seconds) * (Math.cos(wd * seconds) + ((z * w) / wd) * Math.sin(wd * seconds))
+    })()
+  return seconds > s.duration && Math.abs(1 - raw) < .0008 ? 1 : raw
 }
 
-/** A flash: instant attack at `age` 0, then a convex decay over `decay` seconds. */
+/** Filament / flashbulb cooling: instant attack at `age` 0, then convex decay over `decay` seconds. */
 export const flash = (age: number, decay = 1.2) => age < 0 ? 0 : Math.pow(1 - clamp01(age / decay), 2)
 
+/** Hot stamp / ink soaking into paper: fast exponential drop with a bounded tail over 0.75s. */
+export const inkFlash = (age: number) =>
+  age < 0 ? 0 : Math.exp(-age / .234) * (1 - Math.min(1, Math.pow(age / .75, 2)))
+
 /** The brightest of several flashes. */
-export const flashes = (t: number, times: readonly number[], decay = 1.2) => times.reduce((heat, at) => Math.max(heat, flash(t - at, decay)), 0)
+export const flashes = (t: number, times: readonly number[], decay = 1.2) =>
+  times.reduce((heat, at) => Math.max(heat, flash(t - at, decay)), 0)
+
+/** Sliding plate / shutter wipe: linear across the plate's travel window, softened at the stops. */
+export const wipe = (t: number, from: number, duration = .32) => smoothstep(span(t, from, from + duration))
+
+const CHARS = "0123456789abcdef"
+const hashNoise = (n: number) => { const x = Math.sin(n * 91.345) * 47453.5453; return x - Math.floor(x) }
+
+/** Cipher wheel / odometer: characters lock in left to right between `from` and `to`. */
+export function working(final: string, t: number, from: number, to: number, seed = 1) {
+  if (t < from) return null
+  if (t >= to) return final
+  return [...final].map((c, i) => {
+    if (c === " " || c === "·" || c === ":") return c
+    return t >= from + (to - from) * (i + 1) / final.length
+      ? c
+      : CHARS[Math.floor(hashNoise(Math.floor(t * 28) * 13 + i * 7 + seed) * 16)]
+  }).join("")
+}
 
 const rgb = (hex: string) => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16))
 

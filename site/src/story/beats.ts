@@ -1,9 +1,9 @@
 import type { Light, Tone } from "./light"
-import { clamp01, flash, smootherInverse, smootherstep, smoothstep, type Box, type Point } from "./motion"
+import { clamp01, ease, flash, smootherInverse, smootherstep, smoothstep, span, type Box, type Point } from "./motion"
 
-// The story vocabulary (explainer-motion's Send): light gathers at a port, a head flies along a path leaving a
-// trail that cools behind it, lands as a small opening ring, and floods into whatever it reached. Every function
-// takes the scene time and pushes lights; none keeps state.
+// The story vocabulary (explainer-motion's Send & Connect): light gathers at a port, a head flies along a path
+// leaving a trail that cools behind it, an ember cools where it left, it lands as a small opening ring, and
+// floods into whatever it reached. Every function takes the scene time and pushes lights; none keeps state.
 
 export type Path = {
   d: string
@@ -14,15 +14,10 @@ export type Path = {
   at(u: number): Point
 }
 
-/** A cubic Bézier, flattened for the light layer. */
-export function cubic(p0: Point, c1: Point, c2: Point, p3: Point, samples = 18): Path {
-  const raw: Point[] = Array.from({ length: samples + 1 }, (_, i) => {
-    const s = i / samples, r = 1 - s
-    return [0, 1].map(k => r * r * r * p0[k]! + 3 * r * r * s * c1[k]! + 3 * r * s * s * c2[k]! + s * s * s * p3[k]!) as unknown as Point
-  })
+function buildPath(raw: Point[], d: string): Path {
   const lengths = [0]
   for (let i = 1; i < raw.length; i++) lengths.push(lengths[i - 1]! + Math.hypot(raw[i]![0] - raw[i - 1]![0], raw[i]![1] - raw[i - 1]![1]))
-  const length = lengths[lengths.length - 1]!
+  const length = Math.max(1e-3, lengths[lengths.length - 1]!)
   const fractions = lengths.map(l => l / length)
   const at = (u: number): Point => {
     const target = clamp01(u)
@@ -31,8 +26,34 @@ export function cubic(p0: Point, c1: Point, c2: Point, p3: Point, samples = 18):
     const a = raw[i - 1]!, b = raw[i]!, f = (target - fractions[i - 1]!) / Math.max(1e-6, fractions[i]! - fractions[i - 1]!)
     return [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
   }
+  return { d, length, points: raw, fractions, at }
+}
+
+/** A cubic Bézier, flattened for the light layer. */
+export function cubic(p0: Point, c1: Point, c2: Point, p3: Point, samples = 18): Path {
+  const raw: Point[] = Array.from({ length: samples + 1 }, (_, i) => {
+    const s = i / samples, r = 1 - s
+    return [0, 1].map(k => r * r * r * p0[k]! + 3 * r * r * s * c1[k]! + 3 * r * s * s * c2[k]! + s * s * s * p3[k]!) as unknown as Point
+  })
   const n = (p: Point) => `${+p[0].toFixed(2)} ${+p[1].toFixed(2)}`
-  return { d: `M${n(p0)}C${n(c1)} ${n(c2)} ${n(p3)}`, length, points: raw, fractions, at }
+  return buildPath(raw, `M${n(p0)}C${n(c1)} ${n(c2)} ${n(p3)}`)
+}
+
+/** A straight or multi-segment polyline, subdivided so trail cooling is smooth along every segment. */
+export function polyline(corners: readonly Point[], step = 18): Path {
+  const raw: Point[] = [corners[0]!]
+  for (let i = 0; i < corners.length - 1; i++) {
+    const a = corners[i]!, b = corners[i + 1]!
+    const segLen = Math.hypot(b[0] - a[0], b[1] - a[1])
+    const n = Math.max(2, Math.ceil(segLen / step))
+    for (let k = 1; k <= n; k++) {
+      const f = k / n
+      raw.push([a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f])
+    }
+  }
+  const fmt = (p: Point) => `${+p[0].toFixed(2)} ${+p[1].toFixed(2)}`
+  const d = corners.map((p, i) => `${i ? "L" : "M"}${fmt(p)}`).join("")
+  return buildPath(raw, d)
 }
 
 /** A bridge between two points on the same side of a row, lifting `lift` units (negative bows downward). */
@@ -43,6 +64,12 @@ export const bridge = (from: Point, to: Point, lift: number) =>
 export function between(from: Point, to: Point, bend = .55) {
   const k = (to[1] - from[1]) * bend
   return cubic(from, [from[0], from[1] + k], [to[0], to[1] - k], to)
+}
+
+/** A horizontal S-curve between columns: leaves and arrives horizontally. */
+export function across(from: Point, to: Point, bend = .52) {
+  const k = (to[0] - from[0]) * bend
+  return cubic(from, [from[0] + k, from[1]], [to[0] - k, to[1]], to)
 }
 
 export type Send = {
@@ -89,6 +116,14 @@ export function send(light: Light, s: Send, t: number) {
   if (t < s.at) return
   const tone = s.tone ?? "ivory", k = s.strength ?? 1, cool = s.cool ?? .42
   const point = (f: number) => s.path.at(s.reverse ? 1 - f : f)
+  const origin = point(0)
+
+  // Origin ember: hot port filament cooling over 1.1s after launch.
+  if (t >= launch && t < launch + 1.1) {
+    const e = (t - launch) / 1.1
+    const ember = .28 * Math.min(e / .05, 1) * Math.pow(1 - e, 1.4) * k
+    if (ember > .01) light.dots.push({ at: origin, radius: 2.2, intensity: ember, tone })
+  }
 
   // The trail: each point heats as the head crosses it and cools after.
   const inverse = crossings(s.path)
@@ -113,7 +148,6 @@ export function send(light: Light, s: Send, t: number) {
 
   if (t < launch) {
     const g = 1 - Math.pow(1 - (t - s.at) / gather, 3)
-    const origin = point(0)
     light.dots.push({ at: origin, radius: Math.max(.01, 3 * g), intensity: Math.pow(g, 1.5) * k, tone })
     light.rings.push({ at: origin, radius: 4 + 14 * (1 - g), width: 5, intensity: .5 * Math.sin(Math.PI * g) * k, tone })
     return
@@ -133,6 +167,17 @@ export function send(light: Light, s: Send, t: number) {
   if (s.into) flood(light, s.into.box, end, t - lands, s.into.tone ?? tone, k)
 }
 
+/** Draws a wire on `cubic-bezier(.45, 0, .2, 1)` and pushes a bright bead at the leading tip while drawing. */
+export function drawOn(light: Light, path: Path, t: number, at: number, duration = .55, tone: Tone = "ivory", strength = .85) {
+  const raw = span(t, at, at + duration)
+  const p = ease.draw(raw)
+  if (raw > 0 && raw < 1) {
+    const bead = smoothstep(p / .08) * (1 - smoothstep((p - .92) / .08))
+    if (bead > .01) light.dots.push({ at: path.at(p), radius: 2.3, intensity: bead * strength, tone })
+  }
+  return p
+}
+
 /** Light seeping into a box from a point on its edge, `age` seconds after it arrived. */
 export function flood(light: Light, box: Box, from: Point, age: number, tone: Tone, strength = 1, duration = FLOOD) {
   const t = age / duration
@@ -143,7 +188,7 @@ export function flood(light: Light, box: Box, from: Point, age: number, tone: To
   light.floods.push({ box, from, reach, intensity: .9 * fade * strength, tone })
 }
 
-/** A spark: instant attack, convex decay. For a seal stamping down. */
+/** A spark: instant attack, convex decay. For a seal stamping down or a gate refusal. */
 export function spark(light: Light, at: Point, age: number, tone: Tone, strength = 1) {
   const k = flash(age, .55) * strength
   if (k <= 0) return

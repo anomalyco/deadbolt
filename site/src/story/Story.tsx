@@ -1,6 +1,6 @@
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react"
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react"
 import { createRenderer, emptyLight, pack, packedLength, type Light, type Renderer } from "./light"
-import { clamp01, ease, smoothstep, span, type Point } from "./motion"
+import { clamp01, ease, smoothstep, span, springAt, springs, type Point } from "./motion"
 import { onFrame } from "./ticker"
 import "./story.css"
 
@@ -9,7 +9,7 @@ import "./story.css"
 // Hovering the bar holds the story, clicking a tick plays that step, dragging scrubs the clock 1:1. Every frame
 // is a pure function of the clock, so scrubbing and replaying are exact.
 //
-// The SVG carries everything crisp (frames, text, wires). Light is a WebGPU canvas over it that adds to it.
+// The SVG carries everything crisp (frames, text, wires, 3D device solids). Light is a WebGPU canvas over it.
 
 export type Caption = {
   text: string
@@ -19,7 +19,7 @@ export type Caption = {
   place: Point
   /** Which way the text runs from `place`. */
   align?: "start" | "end" | "above" | "below"
-  /** Seconds after the step starts. */
+  /** Seconds after the step starts. Step 0 defaults to 0 (resting on first paint). */
   delay?: number
 }
 
@@ -45,16 +45,18 @@ export type StoryScene = {
 
 /** What a scene can ask the story while drawing. */
 export type StoryApi = {
-  /** How lit an element is at time t, cross-fading between steps' focus maps. */
+  /** How lit an element is at time t, settling on a calm zero-bounce spring between steps' focus maps. */
   focus(t: number, id: string, rest?: number): number
   /** Index of the step playing at time t. */
   step(t: number): number
+  /** True when prefers-reduced-motion is active. */
+  reduced: boolean
 }
 
 const FADE = .8
 const reducedQuery = () => matchMedia("(prefers-reduced-motion: reduce)")
 
-export function storyApi(scene: StoryScene): StoryApi {
+export function storyApi(scene: StoryScene, reduced = false): StoryApi {
   const step = (t: number) => {
     let index = 0
     scene.steps.forEach((s, i) => { if (t >= s.at) index = i })
@@ -62,10 +64,12 @@ export function storyApi(scene: StoryScene): StoryApi {
   }
   return {
     step,
+    reduced,
     focus(t, id, rest = .32) {
       const k = step(t)
-      const level = (i: number) => i < 0 ? rest : scene.steps[i]!.focus?.[id] ?? rest
-      return level(k - 1) + (level(k) - level(k - 1)) * smoothstep(span(t, scene.steps[k]!.at, scene.steps[k]!.at + .45))
+      const level = (i: number) => i < 0 ? (scene.steps[0]?.focus?.[id] ?? rest) : scene.steps[i]!.focus?.[id] ?? rest
+      if (reduced || k === 0) return level(k)
+      return level(k - 1) + (level(k) - level(k - 1)) * springAt(t - scene.steps[k]!.at, springs.calm)
     },
   }
 }
@@ -88,7 +92,7 @@ export function Story({ scene }: { scene: StoryScene }) {
   const bar = useRef<HTMLDivElement>(null)
   const drag = useRef<{ x: number; moved: boolean } | null>(null)
   const [renderer, setRenderer] = useState<Renderer | null | "pending">("pending")
-  const [story] = useState(() => storyApi(scene))
+  const story = useMemo(() => storyApi(scene, reduced), [scene, reduced])
 
   const seek = (time: number) => { clock.current.t = time; setT(time) }
 
@@ -186,6 +190,7 @@ export function Story({ scene }: { scene: StoryScene }) {
     return { index: 0, time: 0 }
   }
 
+  // Hover pauses only on the step bar; dragging scrubs 1:1 without spring lag ("don't animate my own hand").
   const bindings = {
     onPointerEnter: () => { clock.current.hover = true },
     onPointerLeave: () => { clock.current.hover = false; if (!drag.current) clock.current.mode = "auto" },
@@ -227,12 +232,12 @@ export function Story({ scene }: { scene: StoryScene }) {
         <svg viewBox={`0 0 ${scene.width} ${scene.height}`} role="img" aria-label={scene.label}>
           <g opacity={fade}>
             {drawn}
-            {scene.steps.map((step, i) => <Leader key={i} scene={scene} index={i} t={t} reduced={reduced} current={current} />)}
+            {scene.steps.map((_, i) => <Leader key={i} scene={scene} index={i} t={t} reduced={reduced} current={current} />)}
             {backend === "svg" && <FallbackLight light={light} />}
           </g>
         </svg>
         <canvas ref={canvas} className="story-light" aria-hidden="true" />
-        {scene.steps.map((step, i) => <CaptionText key={i} scene={scene} index={i} t={t} reduced={reduced} current={current} />)}
+        {scene.steps.map((_, i) => <CaptionText key={i} scene={scene} index={i} t={t} reduced={reduced} current={current} />)}
       </div>
     </div>
     <div ref={bar} className="story-bar" role="slider" tabIndex={0} aria-label="step" aria-valuemin={1} aria-valuemax={scene.steps.length}
@@ -248,18 +253,26 @@ export function Story({ scene }: { scene: StoryScene }) {
   </figure>
 }
 
-/** How far a caption has entered (0..1) and left (0..1) at time t. */
+/** How far a caption has entered (0..1) and left (0..1) at time t. Exits run 25% shorter than entrances. */
 function captionPhase(scene: StoryScene, index: number, t: number, reduced: boolean, current: number) {
   const step = scene.steps[index]!
-  const at = step.at + (step.caption.delay ?? .2), end = stepEnd(scene, index)
-  if (reduced) return { at, enter: index === current ? 1 : 0, exit: 0 }
-  return { at, enter: span(t, at, at + .34), exit: index === scene.steps.length - 1 ? 0 : span(t, end, end + .24) }
+  const delay = step.caption.delay ?? (index === 0 ? 0 : .18)
+  const at = step.at + delay, end = stepEnd(scene, index)
+  if (reduced) return { at, enter: index === current ? 1 : 0, scaleIn: index === current ? 1 : 0, exit: 0 }
+  const firstAtRest = index === 0 && delay === 0
+  return {
+    at,
+    enter: firstAtRest ? 1 : span(t, at, at + .28),
+    scaleIn: firstAtRest ? 1 : springAt(t - at, springs.default),
+    exit: index === scene.steps.length - 1 ? 0 : span(t, end, end + .21),
+  }
 }
 
 function Leader({ scene, index, t, reduced, current }: { scene: StoryScene; index: number; t: number; reduced: boolean; current: number }) {
   const { anchor, place } = scene.steps[index]!.caption
   const phase = captionPhase(scene, index, t, reduced, current)
-  const drawn = reduced ? 1 : ease.draw(span(t, phase.at - .12, phase.at + .22)) * (1 - ease.exit(phase.exit))
+  const firstAtRest = index === 0 && (scene.steps[0]!.caption.delay ?? 0) === 0
+  const drawn = (reduced || firstAtRest ? phase.enter : ease.draw(span(t, phase.at - .1, phase.at + .22))) * (1 - ease.exit(phase.exit))
   if (!reduced && drawn <= 0) return null
   const x = anchor[0] + (place[0] - anchor[0]) * drawn, y = anchor[1] + (place[1] - anchor[1]) * drawn
   return <g className="story-leader" style={{ opacity: reduced ? phase.enter : Math.min(1, drawn * 4) }}>
@@ -270,7 +283,7 @@ function Leader({ scene, index, t, reduced, current }: { scene: StoryScene; inde
 
 function CaptionText({ scene, index, t, reduced, current }: { scene: StoryScene; index: number; t: number; reduced: boolean; current: number }) {
   const { text, place, align = "start" } = scene.steps[index]!.caption
-  const { enter, exit } = captionPhase(scene, index, t, reduced, current)
+  const { enter, scaleIn, exit } = captionPhase(scene, index, t, reduced, current)
   const e = reduced ? enter : ease.enter(enter), x = reduced ? 0 : ease.exit(exit)
   const opacity = e * (1 - x)
   const style: CSSProperties = {
@@ -278,8 +291,8 @@ function CaptionText({ scene, index, t, reduced, current }: { scene: StoryScene;
     visibility: opacity <= 0 && !reduced ? "hidden" : undefined,
   }
   if (!reduced) {
-    style.filter = `blur(${(4 * (1 - e) + 3 * x).toFixed(2)}px)`
-    style.scale = String(.96 + .04 * e - .03 * x)
+    style.filter = `blur(${(3.5 * (1 - e) + 3 * x).toFixed(2)}px)`
+    style.scale = String((.96 + .04 * scaleIn - .035 * x).toFixed(4))
   }
   return <p className="story-caption" data-align={align} style={style} aria-hidden={index !== current || undefined}>{text}</p>
 }
