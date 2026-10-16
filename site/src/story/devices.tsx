@@ -1,8 +1,9 @@
-import type { ReactNode } from "react"
-import type { Light, Tone } from "./light"
+import { Fragment, useId, type ReactNode } from "react"
+import { REACH, floodEdge, reflection, toneColor, type Light, type Tone } from "./light"
 import { timing, travelled, type Send } from "./beats"
 import { clamp01, flashes, inkFlash, shade, span, springAt, springs, type Box, type Point } from "./motion"
 import type { StoryApi } from "./Story"
+import { lightParams } from "./tuning"
 
 // Plain device identities across the site: "desktop", "laptop", "phone" (plus "tablet" when four devices appear).
 // Each device has a crisp 1px line drawing in the site's inks. It stays still and quiet at rest, its screen
@@ -56,11 +57,55 @@ const PALETTE = {
   amber: { frame: "#5a3d18", lit: "#ffb347", hot: "#ffd08a", label: "#8a6430", labelLit: "#ffb347" },
 } satisfies Record<Tone, Record<string, string>>
 
+/** Signed distance from a point to a box's edge (negative inside). */
+function sdBox([px, py]: Point, [x, y, w, h]: Box) {
+  const dx = Math.abs(px - (x + w / 2)) - w / 2, dy = Math.abs(py - (y + h / 2)) - h / 2
+  return Math.hypot(Math.max(dx, 0), Math.max(dy, 0)) + Math.min(Math.max(dx, dy), 0)
+}
+
+// How much of a light the border takes: a head at full strength lifts the nearest point of a resting frame to about
+// 155 grey (explainer-motion's reflection), and a flood lights it from the socket outward. The inset rule takes less.
+const CATCH = { head: .9, flood: .8, inset: .4 }
+const HEAD_STOPS = [0, .15, .3, .5, .7, .85, 1]
+const FLOOD_STOPS = [0, .2, .4, .6, .72, .8, .86, .9, .94, 1, 1.08, 1.16]
+
+/** The light a card's border catches, drawn on the card's own frame and inset rule (and their dashes): each head,
+ *  spark or ember near it lights the lines around it, and a flood into the card (or arriving at a socket on its
+ *  edge, if the card has since grown) lights them from there outward. Each source is one copy of the two lines stroked with a radial gradient, so the border itself
+ *  catches the light, crisp, instead of a second border glowing beside it. A layer's opacity is 1 − e^(−energy), so
+ *  overlapping layers stack the way the light layer tone-maps a sum. */
+export function BorderLight({ light, box, dash }: { light: Light; box: Box; dash?: string }) {
+  const id = useId().replace(/[^\w-]/g, "")
+  const { exposure, reflection: heads, flood: floods } = lightParams()
+  const layers: { key: string; at: Point; radius: number; color: string; stops: [number, number][] }[] = []
+  light.dots.forEach((d, i) => {
+    const energy = d.intensity * CATCH.head * heads * exposure
+    if (energy < .002 || sdBox(d.at, box) >= REACH) return
+    layers.push({ key: `d${i}`, at: d.at, radius: REACH, color: shade(toneColor[d.tone], [toneColor.hot, .3]), stops: HEAD_STOPS.map(r => [r, 1 - Math.exp(-energy * reflection(r))]) })
+  })
+  light.floods.forEach((f, i) => {
+    const energy = f.intensity * CATCH.flood * floods * exposure
+    const own = f.box.every((v, k) => Math.abs(v - box[k]!) < 1) || Math.abs(sdBox(f.from, box)) < 1.5
+    if (energy < .002 || !own) return
+    const end = FLOOD_STOPS[FLOOD_STOPS.length - 1]!
+    layers.push({ key: `f${i}`, at: f.from, radius: f.reach * end, color: toneColor[f.tone], stops: FLOOD_STOPS.map(r => [r / end, 1 - Math.exp(-energy * floodEdge(r))]) })
+  })
+  if (!layers.length) return null
+  const [x, y, w, h] = box
+  return <g fill="none">{layers.map(l => <Fragment key={l.key}>
+    <radialGradient id={id + l.key} gradientUnits="userSpaceOnUse" cx={l.at[0]} cy={l.at[1]} r={l.radius}>
+      {l.stops.map(([offset, alpha], i) => <stop key={i} offset={+offset.toFixed(4)} stopColor={l.color} stopOpacity={+alpha.toFixed(4)} />)}
+    </radialGradient>
+    <rect x={x + .5} y={y + .5} width={w - 1} height={h - 1} stroke={`url(#${id + l.key})`} strokeDasharray={dash} />
+    <rect x={x + 3.5} y={y + 3.5} width={w - 7} height={h - 7} stroke={`url(#${id + l.key})`} strokeOpacity={CATCH.inset} strokeDasharray={dash} />
+  </Fragment>)}</g>
+}
+
 /** Dashes that close up as `amount` goes from 1 to 0, keeping their period, like a zip. */
 const dashes = (amount: number) => amount <= 0 ? undefined : `${(7 - 4 * Math.min(1, amount)).toFixed(2)} ${(4 * Math.min(1, amount)).toFixed(2)}`
 
-/** A double-ruled card (a 1px frame and an inset rule 3px inside it) that registers with the GPU light layer and
- *  responds to focus, flashes and tone. `toned` blends from the ivory inks to the tone's (1 is fully toned), so a
+/** A double-ruled card (a 1px frame and an inset rule 3px inside it) whose lines catch the scene's light
+ *  (BorderLight) and respond to focus, flashes and tone. `toned` blends from the ivory inks to the tone's (1 is fully toned), so a
  *  card can blush red and cool back without switching colours in one frame. `dashed` (0..1) closes up the same way. */
 export function Frame({ id, box, t, story, light, label, detail, glyph, impulses, tone = "ivory", toned = 1, heat = 0, broken = 0, dashed, appearAt, headerY, children }: {
   id: string
@@ -112,6 +157,7 @@ export function Frame({ id, box, t, story, light, label, detail, glyph, impulses
   return <g opacity={appear} transform={scale === 1 ? undefined : `translate(${cx} ${cy}) scale(${scale}) translate(${-cx} ${-cy})`}>
     <rect x={x + .5} y={y + .5} width={w - 1} height={h - 1} fill="#050505" stroke={frameColor} strokeDasharray={dash} />
     <rect x={x + 3.5} y={y + 3.5} width={w - 7} height={h - 7} fill="none" stroke={insetColor} strokeDasharray={dash} />
+    <BorderLight light={light} box={box} dash={dash} />
     {glyph && <DeviceGlyph kind={glyph} cx={x + 20} cy={hy} t={t} impulses={impulses} stroke={labelColor} screenGlow={hot} />}
     {label && <text x={labelX} y={hy + .5} dominantBaseline="middle" className="story-card-label" fill={labelColor}>{label}</text>}
     {detail && <text x={x + w - 14} y={hy + .5} dominantBaseline="middle" textAnchor="end" className="story-card-detail" fill={detailColor}>{detail}</text>}

@@ -7,9 +7,10 @@ import type { Box, Point } from "./motion"
 // The model, emitter by emitter:
 // - Heads bloom; nothing else does. A head is smeared along its motion over a short shutter, like a photograph.
 // - Trails are filaments cooling behind the head: white-hot where fresh, the signal's tone as they cool, then dark.
-// - Floods wick into a card from the socket they arrived at, with a ragged front like ink soaking into paper; the
-//   card's frame and inset rule catch the light where the front reaches them.
-// - Borders near a head catch its light.
+// - Floods wick into a card from the socket they arrived at, with a ragged front like ink soaking into paper.
+// - Borders catch light from nearby heads and from a flood's socket outward, but not here: the card's own SVG frame
+//   draws it (BorderLight in devices.tsx, from `reflection` and `floodEdge` below), so a border is one crisp line
+//   catching light rather than a second, dithered border glowing beside it.
 // - Prints are the card's own ink, not light: sealed ciphertext as a field of dithered bits, a relay as hatched
 //   noise. They clear or churn on cue.
 // - All light catches the paper's tooth (a static grain in scene units, so it never crawls).
@@ -19,6 +20,25 @@ import type { Box, Point } from "./motion"
 
 export type Tone = "ivory" | "red" | "amber" | "hot"
 const TONES: Record<Tone, number> = { ivory: 0, red: 1, amber: 2, hot: 3 }
+/** Each tone as the SVG inks draw it (the shader's `tone`). */
+export const toneColor: Record<Tone, string> = { ivory: "#e8e4dc", red: "#ff2a2a", amber: "#ffb347", hot: "#fff1dc" }
+
+/** How far a head's light reaches along nearby borders, in scene units. */
+export const REACH = 80
+/** A head's light on a border at `r` of REACH from it: 1, .65, .16, 0 at 0, .3, .7, 1. */
+export function reflection(r: number) {
+  if (r >= 1) return 0
+  if (r < .3) return 1 - .35 * r / .3
+  if (r < .7) return .65 - .49 * (r - .3) / .4
+  return .16 * (1 - (r - .7) / .3)
+}
+/** How much of a flood a border catches at `r` of its reach from the socket: most at the socket, falling off across
+ *  the wet region, with the brighter tide line at the front (the shader's flood body and tide). */
+export function floodEdge(r: number) {
+  const s = Math.min(1, Math.max(0, (r - .72) / .28)), z = (r - .9) / .09
+  const body = (1 - s * s * (3 - 2 * s)) * (1 - .6 * Math.min(1, Math.max(0, r)))
+  return body * .55 + Math.exp(-z * z) * .45
+}
 
 export type Print = {
   box: Box
@@ -41,9 +61,9 @@ export type Light = {
   /** A packet head or a spark: a solid core that blooms, smeared back to `from` over the shutter. */
   dots: { at: Point; from?: Point; radius: number; intensity: number; tone: Tone }[]
   rings: { at: Point; radius: number; width: number; intensity: number; tone: Tone }[]
-  /** Light wicking into a box from a point on its edge; its border catches it where the front reaches. */
+  /** Light wicking into a box from a point on its edge (the frame whose edge it is catches it from there outward). */
   floods: { box: Box; from: Point; reach: number; intensity: number; tone: Tone }[]
-  /** Frames whose borders catch light from nearby heads. */
+  /** The frames on the stage. Each draws the light its border catches itself (BorderLight); the GPU doesn't. */
   frames: Box[]
   prints: Print[]
 }
@@ -64,15 +84,14 @@ export type LightParams = {
   bleed: number
 }
 
-const MAX = { segments: 96, dots: 12, rings: 12, floods: 8, frames: 16, prints: 6 }
+const MAX = { segments: 96, dots: 12, rings: 12, floods: 8, prints: 6 }
 const HEAD = 5
 const BASE = {
   segments: HEAD,
   dots: HEAD + MAX.segments * 2,
   rings: HEAD + MAX.segments * 2 + MAX.dots * 2,
   floods: HEAD + MAX.segments * 2 + MAX.dots * 2 + MAX.rings * 2,
-  frames: HEAD + MAX.segments * 2 + MAX.dots * 2 + MAX.rings * 2 + MAX.floods * 3,
-  prints: HEAD + MAX.segments * 2 + MAX.dots * 2 + MAX.rings * 2 + MAX.floods * 3 + MAX.frames,
+  prints: HEAD + MAX.segments * 2 + MAX.dots * 2 + MAX.rings * 2 + MAX.floods * 3,
 }
 const VEC4S = BASE.prints + MAX.prints * 3
 
@@ -92,11 +111,10 @@ export function pack(light: Light, data: Float32Array, size: { width: number; he
   const floods = light.floods.filter(f => f.intensity * fade > LIVE).slice(0, MAX.floods)
   const prints = light.prints.filter(p => p.level * fade > LIVE).slice(0, MAX.prints)
   if (!segments.length && !dots.length && !rings.length && !floods.length && !prints.length) return null
-  const frames = dots.length ? light.frames.slice(0, MAX.frames) : []
   data.set([
     size.width, size.height, size.scale, fade,
     segments.length, dots.length, rings.length, floods.length,
-    frames.length, prints.length, 0, 0,
+    prints.length, 0, 0, 0,
     params.exposure, params.bloom, params.grain, params.glow,
     params.reflection, params.flood, params.ink, params.bleed,
   ], 0)
@@ -104,7 +122,6 @@ export function pack(light: Light, data: Float32Array, size: { width: number; he
   dots.forEach((d, i) => data.set([d.at[0], d.at[1], d.radius, d.intensity, ...(d.from ?? d.at), TONES[d.tone]], (BASE.dots + i * 2) * 4))
   rings.forEach((r, i) => data.set([r.at[0], r.at[1], r.radius, r.width, r.intensity, TONES[r.tone]], (BASE.rings + i * 2) * 4))
   floods.forEach((f, i) => data.set([...f.box, f.from[0], f.from[1], f.reach, f.intensity, TONES[f.tone]], (BASE.floods + i * 3) * 4))
-  frames.forEach((b, i) => data.set(b, (BASE.frames + i) * 4))
   prints.forEach((p, i) => data.set([
     ...p.box, p.kind === "hatch" ? 1 : 0, TONES[p.tone], p.level, p.seed,
     ...(p.open?.from ?? [0, 0]), p.open?.radius ?? 0, p.churn ?? 0,
@@ -154,17 +171,6 @@ fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
   let ba = b - a;
   let h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
   return length(pa - ba * h);
-}
-// Reflection falloff: 1, .65, .16, 0 at 0, .3, .7, 1 of the radius.
-fn falloff(r: f32) -> f32 {
-  if (r >= 1.0) { return 0.0; }
-  if (r < 0.3) { return mix(1.0, 0.65, r / 0.3); }
-  if (r < 0.7) { return mix(0.65, 0.16, (r - 0.3) / 0.4); }
-  return mix(0.16, 0.0, (r - 0.7) / 0.3);
-}
-fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
-  let e = abs(sdBox(p, vec4f(b.xy + vec2f(inset), b.zw - vec2f(inset * 2.0))));
-  return 1.0 - smoothstep(0.5 * px, 1.5 * px, e);
 }
 
 @fragment fn fs(@builtin(position) frag: vec4f) -> @location(0) vec4f {
@@ -222,8 +228,8 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
   }
 
   // Floods: light wicking in from the socket. The wet region grows from the socket with a ragged front and a
-  // brighter tide line, brightest near the socket; it's printed mostly as a stipple over a faint wash, and the
-  // frame and its inset rule catch it in proportion, so the border lights from the socket outward.
+  // brighter tide line, brightest near the socket; it's printed mostly as a stipple over a faint wash. (The frame
+  // catches it on its own SVG lines.)
   for (var i = 0; i < i32(counts.w); i++) {
     let box = u.v[${BASE.floods} + i * 3];
     let s = u.v[${BASE.floods} + i * 3 + 1];
@@ -237,25 +243,12 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
     let tide = exp(-z * z);
     let wash = (body * 0.6 + tide * 0.4) * s.w * feel.y;
     let print = step(ign(floor(frag.xy / 2.0)), wash * 2.4);
-    let edge = rule(q, box, 0.5, px) * 0.5 + rule(q, box, 3.5, px) * 0.3;
-    col += tone(c.x) * (inside * (wash * 0.32 + print * wash * 0.4) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 1.6);
-  }
-
-  // Borders near a head catch its light.
-  for (var f = 0; f < i32(more.x); f++) {
-    let box = u.v[${BASE.frames} + f];
-    let edge = rule(q, box, 0.5, px) + rule(q, box, 3.5, px) * 0.4;
-    if (edge <= 0.0) { continue; }
-    for (var i = 0; i < i32(counts.y); i++) {
-      let a = u.v[${BASE.dots} + i * 2];
-      let b = u.v[${BASE.dots} + i * 2 + 1];
-      col += mix(tone(b.z), hot, 0.3) * a.w * falloff(length(q - a.xy) / 80.0) * 0.6 * feel.x * edge;
-    }
+    col += tone(c.x) * inside * (wash * 0.32 + print * wash * 0.4);
   }
 
   // Prints: the card's own ink. Ciphertext is words of square bits; a hatch is diagonal strokes broken by noise.
   var ink = vec3f(0.0);
-  for (var i = 0; i < i32(more.y); i++) {
+  for (var i = 0; i < i32(more.x); i++) {
     let box = u.v[${BASE.prints} + i * 3];
     let m = u.v[${BASE.prints} + i * 3 + 1];
     let o = u.v[${BASE.prints} + i * 3 + 2];
@@ -335,16 +328,6 @@ float sdSegment(vec2 p, vec2 a, vec2 b) {
   float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
   return length(pa - ba * h);
 }
-float falloff(float r) {
-  if (r >= 1.0) return 0.0;
-  if (r < 0.3) return mix(1.0, 0.65, r / 0.3);
-  if (r < 0.7) return mix(0.65, 0.16, (r - 0.3) / 0.4);
-  return mix(0.16, 0.0, (r - 0.7) / 0.3);
-}
-float rule(vec2 p, vec4 b, float inset, float px) {
-  float e = abs(sdBox(p, vec4(b.xy + vec2(inset), b.zw - vec2(inset * 2.0))));
-  return 1.0 - smoothstep(0.5 * px, 1.5 * px, e);
-}
 
 void main() {
   // WebGL's origin is bottom-left; the scene's is top-left.
@@ -412,23 +395,11 @@ void main() {
     float tide = exp(-z * z);
     float wash = (body * 0.6 + tide * 0.4) * s.w * feel.y;
     float print = step(ign(floor(fragXY / 2.0)), wash * 2.4);
-    float edge = rule(q, box, 0.5, px) * 0.5 + rule(q, box, 3.5, px) * 0.3;
-    col += tone(c.x) * (inside * (wash * 0.32 + print * wash * 0.4) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 1.6);
-  }
-
-  for (int f = 0; f < int(more.x); f++) {
-    vec4 box = v[${BASE.frames} + f];
-    float edge = rule(q, box, 0.5, px) + rule(q, box, 3.5, px) * 0.4;
-    if (edge <= 0.0) continue;
-    for (int i = 0; i < int(counts.y); i++) {
-      vec4 a = v[${BASE.dots} + i * 2];
-      vec4 b = v[${BASE.dots} + i * 2 + 1];
-      col += mix(tone(b.z), hot, 0.3) * a.w * falloff(length(q - a.xy) / 80.0) * 0.6 * feel.x * edge;
-    }
+    col += tone(c.x) * inside * (wash * 0.32 + print * wash * 0.4);
   }
 
   vec3 ink = vec3(0.0);
-  for (int i = 0; i < int(more.y); i++) {
+  for (int i = 0; i < int(more.x); i++) {
     vec4 box = v[${BASE.prints} + i * 3];
     vec4 m = v[${BASE.prints} + i * 3 + 1];
     vec4 o = v[${BASE.prints} + i * 3 + 2];

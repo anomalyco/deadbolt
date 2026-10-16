@@ -1,7 +1,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react"
 import { Knobs } from "knobs/react"
 import { useCues, type Flight, type SceneCue } from "../sound"
-import { createRenderer, emptyLight, pack, packedLength, type Light, type Renderer } from "./light"
+import { createRenderer, emptyLight, pack, packedLength, toneColor, type Light, type Renderer } from "./light"
 import { clamp01, ease, smoothstep, span, springAt, springs, type Point } from "./motion"
 import { onFrame } from "./ticker"
 import { lightParams, lightTuning } from "./tuning"
@@ -342,8 +342,6 @@ function CaptionText({ scene, index, t, fade, reduced, current }: { scene: Story
   return <p className="story-caption" data-align={align} style={style} aria-hidden={index !== current || undefined}>{text}</p>
 }
 
-const TONE = { ivory: "#e8e4dc", red: "#ff2a2a", amber: "#ffb347", hot: "#fff1dc" } as const
-
 /** Without WebGPU or WebGL2: the same lights as plain SVG under one soft glow. */
 function FallbackLight({ light }: { light: Light }) {
   return <g className="story-fallback" filter="url(#story-glow)">
@@ -351,9 +349,9 @@ function FallbackLight({ light }: { light: Light }) {
       <feGaussianBlur stdDeviation={2.4} result="blur" />
       <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
     </filter></defs>
-    {light.floods.map((f, i) => <circle key={`f${i}`} cx={f.from[0]} cy={f.from[1]} r={f.reach * 1.4} fill={TONE[f.tone]} opacity={f.intensity * .25} />)}
-    {light.segments.map((s, i) => <line key={`s${i}`} x1={s.a[0]} y1={s.a[1]} x2={s.b[0]} y2={s.b[1]} stroke={TONE[s.tone]} strokeWidth={s.width} strokeOpacity={Math.max(s.heat[0], s.heat[1])} />)}
-    {light.rings.map((r, i) => <circle key={`r${i}`} cx={r.at[0]} cy={r.at[1]} r={r.radius} fill="none" stroke={TONE[r.tone]} strokeWidth={r.width} opacity={Math.min(1, r.intensity)} />)}
-    {light.dots.map((d, i) => <circle key={`d${i}`} cx={d.at[0]} cy={d.at[1]} r={d.radius} fill={TONE.hot} opacity={Math.min(1, d.intensity)} />)}
+    {light.floods.map((f, i) => <circle key={`f${i}`} cx={f.from[0]} cy={f.from[1]} r={f.reach * 1.4} fill={toneColor[f.tone]} opacity={f.intensity * .25} />)}
+    {light.segments.map((s, i) => <line key={`s${i}`} x1={s.a[0]} y1={s.a[1]} x2={s.b[0]} y2={s.b[1]} stroke={toneColor[s.tone]} strokeWidth={s.width} strokeOpacity={Math.max(s.heat[0], s.heat[1])} />)}
+    {light.rings.map((r, i) => <circle key={`r${i}`} cx={r.at[0]} cy={r.at[1]} r={r.radius} fill="none" stroke={toneColor[r.tone]} strokeWidth={r.width} opacity={Math.min(1, r.intensity)} />)}
+    {light.dots.map((d, i) => <circle key={`d${i}`} cx={d.at[0]} cy={d.at[1]} r={d.radius} fill={toneColor.hot} opacity={Math.min(1, d.intensity)} />)}
   </g>
 }
