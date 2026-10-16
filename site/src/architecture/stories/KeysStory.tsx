@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, between, cipher, drawOn, drawProgress, panX, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
 import { Carried, Frame, RefusalMark, edge, refusal } from "../../story/devices"
-import { clamp01, flashes, shade, span, wipe, working, type Box } from "../../story/motion"
+import { clamp01, flashes, shade, span, rolling, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Two keys on the desktop: the passphrase stretches through Argon2id (64 MiB, 3 passes) into the local unlock key,
@@ -112,7 +112,8 @@ function keysLights(t: number, light: Light) {
 
   // The keyset's ciphertext wicks clear from the socket the unseal arrived at (√t). When the vault locks again
   // the clearing closes back over it like an iris, before the wrong passphrase arrives.
-  const clearing = Math.sqrt(span(t, OPENED, OPENED + 1.1)) * (1 - wipe(t, RESEAL, .6))
+  const opening = span(t, OPENED, OPENED + 1.1)
+  const clearing = Math.sqrt(opening) * (3 - opening) / 2 * (1 - wipe(t, RESEAL, .6))
   cipher(light, KEYSET_BAND, { tone: "red", level: .8, seed: 3, open: clearing > .005 ? { from: SOCKET, radius: 250 * clearing } : undefined })
   // Sealing strikes the store's bits like a cipher wheel: it turns at once, 24 clicks a second, and runs down on
   // friction (its angle is 24τ(1 − e^(−t/τ)), the integral of that speed), so the last clicks come further and further
@@ -149,13 +150,7 @@ function Keys({ t, light, story }: { t: number; light: Light; story: StoryApi })
     : (t >= timing(sWrong).lands && t < sWrongKey.at)
       ? working("64 MiB · 3 passes", t, timing(sWrong).lands, sWrongKey.at - .05, 9) ?? "64 MiB · 3 passes"
       : "64 MiB · 3 passes"
-  const keysetDetail = t < OPENED
-    ? "sealed"
-    : t < RESEAL
-      ? working("opened", t, OPENED, OPENED + .3, 2) ?? "opened"
-      : t < REFUSED
-        ? working("sealed", t, RESEAL, RESEAL + .3, 4) ?? "sealed"
-        : working("aead tag failed", t, REFUSED, REFUSED + .4, 6) ?? "aead tag failed"
+  const keysetDetail = rolling(t, [[0, "sealed"], [OPENED, "opened"], [RESEAL, "sealed"], [REFUSED, "aead tag failed"]], 2, .32)
 
   return <>
     <Wire id="toKdf" d={toKdf.d} t={t} story={story} />

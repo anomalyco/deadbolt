@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, between, panX, polyline, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
 import { Carried, Frame, RefusalMark, edge, refusal } from "../../story/devices"
-import { clamp01, ease, flashes, shade, span, wipe, working, type Box } from "../../story/motion"
+import { clamp01, ease, flashes, shade, span, rolling, wipe, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Removal and the membership gate: the desktop signs Remove(phone) and immediately closes its connection. The
@@ -111,21 +111,9 @@ function Remove({ t, light, story }: { t: number; light: Light; story: StoryApi 
   // Continuous identity on the phone: it keeps its card and glyph, blushes red and its frame opens into dashes.
   // The members blush red when they apply the removal and cool back.
   const removed = wipe(t, REMOVE_AT, .35)
-  const phoneDetail = t < REMOVE_AT
-    ? "member"
-    : t >= NEW_ENTRY_AT
-      ? working("removed · old copy", t, NEW_ENTRY_AT, NEW_ENTRY_AT + .4, 8) ?? "removed · old copy"
-      : working("removed", t, REMOVE_AT, REMOVE_AT + .32, 6) ?? "removed"
-  const deskDetail = t < REMOVE_AT
-    ? "member"
-    : t < SPREAD_LANDS
-      ? working("signed Remove", t, REMOVE_AT, REMOVE_AT + .32, 3) ?? "signed Remove"
-      : working("member", t, SPREAD_LANDS, SPREAD_LANDS + .3, 5) ?? "member"
-  const lapDetail = t < SPREAD_LANDS
-    ? "member"
-    : t < REFUSE_LAP
-      ? working("applied Remove", t, SPREAD_LANDS, SPREAD_LANDS + .32, 4) ?? "applied Remove"
-      : working("member", t, REFUSE_LAP, REFUSE_LAP + .3, 2) ?? "member"
+  const phoneDetail = rolling(t, [[0, "member"], [REMOVE_AT, "removed"], [NEW_ENTRY_AT, "removed · old copy"]], 6, .36)
+  const deskDetail = rolling(t, [[0, "member"], [REMOVE_AT, "signed Remove"], [SPREAD_LANDS, "member"]], 3, .32)
+  const lapDetail = rolling(t, [[0, "member"], [SPREAD_LANDS, "applied Remove"], [REFUSE_LAP, "member"]], 4, .32)
 
   const spreadLit = clamp01((story.focus(t, "wSpread", .22) - .22) / .78)
 

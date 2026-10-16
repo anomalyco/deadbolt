@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, between, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
-import { clamp01, flashes, shade, span, springAt, springs, wipe, working, type Box } from "../../story/motion"
+import { clamp01, flashes, shade, span, springAt, springs, rolling, wipe, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Concurrent edits: the desktop and the laptop both change the `github` password while apart. Both edits replace
@@ -97,19 +97,11 @@ function Merge({ t, light, story }: { t: number; light: Light; story: StoryApi }
   const deskHeat = flashes(t, [EDIT_AT, timing(sSyncBA).lands, NEXT_AT], 1.1)
   const lapHeat = flashes(t, [EDIT_AT + .16, timing(sSyncAB).lands], 1.1)
 
-  const passwordVal = t < SETTLE_AT
-    ? "v1 · ••••••••"
-    : t < NEXT_LANDS
-      ? working("blue-whale", t, SETTLE_AT, SETTLE_AT + .35, 4) ?? "blue-whale"
-      : working("green-fox", t, NEXT_LANDS, NEXT_LANDS + .35, 8) ?? "green-fox"
+  const passwordVal = rolling(t, [[0, "v1 · ••••••••"], [SETTLE_AT, "blue-whale"], [NEXT_LANDS, "green-fox"]], 4, .35)
 
-  const deskLine1 = t < NEXT_AT
-    ? "password = red-panda"
-    : working("password = green-fox", t, NEXT_AT, NEXT_AT + .32, 5) ?? "password = green-fox"
-  const deskLine2 = t < NEXT_AT
-    ? "replaces v1 · hash 7c1e…"
-    : working("replaces blue-whale · hash c30a…", t, NEXT_AT, NEXT_AT + .4, 6) ?? "replaces blue-whale · hash c30a…"
-  const deskEntry = t < NEXT_AT ? "entry 7c1e" : working("entry c30a", t, NEXT_AT, NEXT_AT + .3, 2) ?? "entry c30a"
+  const deskLine1 = rolling(t, [[0, "password = red-panda"], [NEXT_AT, "password = green-fox"]], 5, .32)
+  const deskLine2 = rolling(t, [[0, "replaces v1 · hash 7c1e…"], [NEXT_AT, "replaces blue-whale · hash c30a…"]], 6, .4)
+  const deskEntry = rolling(t, [[0, "entry 7c1e"], [NEXT_AT, "entry c30a"]], 2, .3)
 
   const itemLit = clamp01((story.focus(t, "item", .35) - .35) / .65)
   const deskLit = clamp01((story.focus(t, "desktop", .35) - .35) / .65)

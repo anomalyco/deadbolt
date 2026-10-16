@@ -216,7 +216,9 @@ export function flood(light: Light, box: Box, from: Point, age: number, tone: To
   if (t < 0) return
   const intensity = .9 * soaking(t) * strength
   if (intensity < DARK) return
-  const reach = (.06 + .66 * Math.sqrt(Math.min(1, t / .8))) * Math.max(box[2], box[3])
+  // Wicks in as √t, then slows to rest at full reach instead of stopping dead.
+  const w = Math.min(1, t / .8)
+  const reach = (.06 + .66 * Math.sqrt(w) * (3 - w) / 2) * Math.max(box[2], box[3])
   light.floods.push({ box, from, reach, intensity, tone })
 }
 

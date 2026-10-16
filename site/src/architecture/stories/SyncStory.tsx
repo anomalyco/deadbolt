@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
-import { clamp01, flashes, shade, wipe, working, type Box } from "../../story/motion"
+import { clamp01, flashes, shade, rolling, wipe, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Sync (`deadbolt/sync/1`): the desktop and the laptop exchange their heads, work out what the other is missing,
@@ -161,18 +161,10 @@ function Sync({ t, light, story }: { t: number; light: Light; story: StoryApi })
     { name: "laptop · data", value: "3" },
   ]
 
-  const deskFooter = t < DIFF_AT
-    ? "heads ready"
-    : t < LAP_DATA_LANDS
-      ? "send desktop data 3, 4"
-      : working("all logs at head · ok", t, LAP_DATA_LANDS, LAP_DATA_LANDS + .35, 2) ?? "all logs at head · ok"
+  const deskFooter = rolling(t, [[0, "heads ready"], [DIFF_AT, "send desktop data 3, 4"], [LAP_DATA_LANDS, "all logs at head · ok"]], 2, .35)
   const deskFooterAt = t < DIFF_AT ? 0 : t < LAP_DATA_LANDS ? DIFF_AT : LAP_DATA_LANDS
 
-  const lapFooter = t < DIFF_AT
-    ? "heads ready"
-    : t < DESK_DATA_LANDS
-      ? "send mem 1, then data 2, 3"
-      : working("all logs at head · ok", t, DESK_DATA_LANDS, DESK_DATA_LANDS + .35, 6) ?? "all logs at head · ok"
+  const lapFooter = rolling(t, [[0, "heads ready"], [DIFF_AT, "send mem 1, then data 2, 3"], [DESK_DATA_LANDS, "all logs at head · ok"]], 6, .35)
   const lapFooterAt = t < DIFF_AT ? 0 : t < DESK_DATA_LANDS ? DIFF_AT : DESK_DATA_LANDS
 
   return <>

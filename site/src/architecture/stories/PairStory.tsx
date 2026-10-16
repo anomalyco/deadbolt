@@ -130,7 +130,7 @@ function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi })
   // Same phone card keeps its identity from listening newcomer to admitted member.
   const phoneDetail = rolling(t, [[0, "new · listening"], [timing(sDial).lands, "pairing…"], [ADMITTED, "member · synced"]], 3)
 
-  const codeText = working("411 308", t, CODE_AT, CODE_AT + .38, 7)
+  const codeText = working("411 308", t, CODE_AT, CODE_AT + .38, 7, "")
   // The hints under the codes print in once the digits have locked.
   const hinted = span(t, CODE_AT + .3, CODE_AT + .6)
   const phoneNote = rolling(t, [[0, "public key · secret · hint"], [sConsent.at, "signed consent · personal"], [ADMITTED, "vault history applied"]], 5)

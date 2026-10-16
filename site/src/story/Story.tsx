@@ -6,6 +6,7 @@ import { clamp01, ease, smoothstep, span, springAt, springs, type Point } from "
 import { onFrame } from "./ticker"
 import { lightParams, lightTuning } from "./tuning"
 import "./story.css"
+import "../dev/motion-lint"
 
 // A story: one diagram that tells itself. Each step plays one action and puts one short caption beside the thing
 // it's about, joined by a leader line. Under the stage there's a thin step bar with no text: one tick per step.

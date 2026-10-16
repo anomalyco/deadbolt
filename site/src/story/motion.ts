@@ -113,12 +113,15 @@ const CHARS = "0123456789abcdef"
 const hashNoise = (n: number) => { const x = Math.sin(n * 91.345) * 47453.5453; return x - Math.floor(x) }
 
 /** Cipher wheel / odometer: characters lock in left to right between `from` and `to`. */
-export function working(final: string, t: number, from: number, to: number, seed = 1) {
+export function working(final: string, t: number, from: number, to: number, seed = 1, previous = final) {
   if (t < from) return null
   if (t >= to) return final
-  return [...final].map((c, i) => {
+  // The board widens or narrows from the old text's length over the roll, so the label never snaps in width.
+  const length = Math.round(previous.length + (final.length - previous.length) * (t - from) / (to - from))
+  return Array.from({ length }, (_, i) => {
+    const c = final[i]
     if (c === " " || c === "·" || c === ":") return c
-    return t >= from + (to - from) * (i + 1) / final.length
+    return c !== undefined && t >= from + (to - from) * (i + 1) / final.length
       ? c
       : CHARS[Math.floor(hashNoise(Math.floor(t * 28) * 13 + i * 7 + seed) * 16)]
   }).join("")
@@ -130,7 +133,7 @@ export function rolling(t: number, states: readonly (readonly [number, string])[
   let index = 0
   states.forEach(([at], i) => { if (t >= at) index = i })
   const [at, text] = states[index]!
-  return index === 0 ? text : working(text, t, at, at + roll, seed + index) ?? text
+  return index === 0 ? text : working(text, t, at, at + roll, seed + index, states[index - 1]![1]) ?? text
 }
 
 const rgb = (color: string) => color.startsWith("rgb(")

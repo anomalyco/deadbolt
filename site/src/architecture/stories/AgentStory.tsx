@@ -108,7 +108,7 @@ function Agent({ t, light, story }: { t: number; light: Light; story: StoryApi }
   const agentLit = clamp01((story.focus(t, "agent", .35) - .35) / .65)
   const sockLit = clamp01((story.focus(t, "sock", .3) - .3) / .7)
   const termDetail = t >= timing(sAnswer).lands
-    ? working("Xk2mv9Qp…", t, timing(sAnswer).lands, timing(sAnswer).lands + .35, 5) ?? "Xk2mv9Qp…"
+    ? working("Xk2mv9Qp…", t, timing(sAnswer).lands, timing(sAnswer).lands + .35, 5, "$ get github") ?? "Xk2mv9Qp…"
     : "$ get github"
 
   return <>
