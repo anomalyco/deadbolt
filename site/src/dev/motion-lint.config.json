@@ -1,0 +1,13 @@
+{
+  "$comment": "motion-lint thresholds for the architecture stories (merged over motion-lint's defaults). Units are scene units, about a CSS pixel on a desktop column; frames are 1/60 s of scene time. Used by motion-sweep.ts.",
+  "global": {
+    "launchSettleMs": 0,
+    "minSide": 2,
+    "minArea": 16,
+    "screenMargin": 40,
+    "maxCandidatesPerTest": 60
+  },
+  "ignore": [
+    { "match": "BorderLight", "why": "a card's border light is drawn in layers keyed by light index; the card's `glow` channel measures what shows" }
+  ]
+}
