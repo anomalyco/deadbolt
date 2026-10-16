@@ -1,7 +1,7 @@
 import type { ReactNode } from "react"
 import { Ink } from "../print/Ink"
 import { Masthead } from "../print/Masthead"
-import { MeshScene } from "../landing/MeshScene"
+import { MeshStory } from "./stories/MeshStory"
 import { AgentScene } from "./scenes/AgentScene"
 import { KeysScene } from "./scenes/KeysScene"
 import { LogsStory } from "./stories/LogsStory"
@@ -23,7 +23,7 @@ const chapters: Chapter[] = [
       <p>deadbolt is a password manager where your devices are the whole system. each one holds a full copy of the vault, and they sync with each other directly. there's no account and no deadbolt server, so there's nothing of ours to breach and nothing to keep running.</p>
       <p>networking is <a className="link" href="https://www.iroh.computer">iroh</a>: a device's public key is its address, and iroh connects two devices directly when it can. when it can't, one of n0's public relays forwards the stream. that stream is end-to-end encrypted, so the relay only ever sees ciphertext.</p>
     </>,
-    scene: <MeshScene />,
+    scene: <MeshStory />,
     why: <p>the cost of no server: there's no recovery. lose every device and the vault is gone. that was a deliberate call for v1.</p>,
     code: [["docs/design.md", "the v1 design, two pages"], ["crates/net/src/node.rs", "NodeConfig: relays, address lookup, port mapping"]],
   },
@@ -110,7 +110,7 @@ export function Architecture() {
     <main>
       <nav className="nav"><a href="/">← deadbolt</a><span>architecture</span></nav>
       <Masthead />
-      <p className="description">how deadbolt works, one moving diagram at a time. each diagram loops while it's on screen; pick any line under it to jump there.</p>
+      <p className="description">how deadbolt works, one moving diagram at a time. each diagram loops while it's on screen; hover the bar under it to hold, click a segment to jump, or drag to scrub.</p>
       <ol className="toc">
         {chapters.map(c => <li key={c.id}><a href={`#${c.id}`}>{c.title}</a></li>)}
         <li><a href="#code">the code</a></li>
