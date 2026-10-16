@@ -86,7 +86,7 @@ export type LightParams = {
   bleed: number
 }
 
-const MAX = { segments: 96, dots: 16, rings: 12, floods: 12, prints: 6 }
+const MAX = { segments: 96, dots: 20, rings: 12, floods: 12, prints: 6 }
 const HEAD = 5
 const BASE = {
   segments: HEAD,

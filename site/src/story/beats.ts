@@ -203,7 +203,7 @@ export function drawOn(light: Light, path: Path, t: number, at: number, duration
   if (raw > 0 && raw < 1) {
     const bead = smoothstep(p / .08) * (1 - smoothstep((p - .92) / .08))
     const from = path.at(ease.draw(span(t - shutter(), at, at + duration)))
-    if (bead > .01) light.dots.push({ at: path.at(p), from, radius: 2.3, intensity: bead * strength, tone })
+    if (bead * strength > DARK) light.dots.push({ at: path.at(p), from, radius: 2.3, intensity: bead * strength, tone })
   }
   return p
 }
