@@ -165,7 +165,6 @@ impl Listing {
             short: short_id(&self.ids, &id),
             id,
             kind: item.kind.clone(),
-            name: item.name.clone(),
             label: label(item),
             detail: detail(item),
             fields,
@@ -311,8 +310,8 @@ pub fn create(
     Ok(info(s, vault, &id))
 }
 
-/// Creates all `items` or none; returns how many items and entries.
-pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Result<(usize, usize)> {
+/// Creates all `items` or none.
+pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Result<()> {
     let vault = s.resolve(vault)?;
     let items = items
         .into_iter()
@@ -324,13 +323,12 @@ pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Resu
         })
         .collect::<Result<Vec<_>>>()?;
     let secret = &s.secret;
-    let (ids, entries) = s
+    let (_, entries) = s
         .vaults
         .get_mut(&vault)
         .expect("resolved")
         .create_items(secret, items)?;
-    s.persist(&entries)?;
-    Ok((ids.len(), entries.len()))
+    s.persist(&entries)
 }
 
 pub fn set(

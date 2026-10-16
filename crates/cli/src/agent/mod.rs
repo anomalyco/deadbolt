@@ -318,7 +318,7 @@ impl Agent {
                 Ok(Reply::Vault { vault })
             }
             Command::Devices { vault } => {
-                let (vault, devices) = self.with(|s| {
+                let devices = self.with(|s| {
                     let id = s.resolve(vault.as_deref())?;
                     let connected: HashSet<PeerId> = s.node.connected_peers().into_iter().collect();
                     let mut devices: Vec<_> = s
@@ -328,9 +328,9 @@ impl Agent {
                         .collect();
                     devices
                         .sort_by(|a, b| (!a.this, &a.name, &a.id).cmp(&(!b.this, &b.name, &b.id)));
-                    Ok((s.vault_info(&id), devices))
+                    Ok(devices)
                 })?;
-                Ok(Reply::Devices { vault, devices })
+                Ok(Reply::Devices { devices })
             }
             Command::DeviceRemove { vault, device } => {
                 let (node, removed, vault, device) = self.with(|s| {
@@ -352,7 +352,7 @@ impl Agent {
                 })?;
                 self.enforce(&node, &removed);
                 self.sync_now.notify_one();
-                Ok(Reply::Removed { vault, device })
+                Ok(Reply::Device { vault, device })
             }
             Command::Sync { vault } => {
                 let only =
@@ -365,7 +365,7 @@ impl Agent {
                     peers: sync::sync_all(&self, only).await?,
                 })
             }
-            Command::Join { confirm } => pairing::join(&self, conv, confirm).await,
+            Command::Join => pairing::join(&self, conv).await,
             Command::Pair {
                 ticket,
                 vault,
@@ -398,9 +398,9 @@ impl Agent {
                 self.item_write(|s| items::remove(s, vault.as_deref(), &query))
             }
             Command::ItemImport { vault, items } => {
-                let (items, entries) = self.with(|s| items::import(s, vault.as_deref(), items))?;
+                self.with(|s| items::import(s, vault.as_deref(), items))?;
                 self.sync_now.notify_one();
-                Ok(Reply::Imported { items, entries })
+                Ok(Reply::Done)
             }
         }
     }

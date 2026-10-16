@@ -6,11 +6,11 @@
 //! welcome = [JSON WelcomeMeta {hints about the other members}, entry*]   (genesis first)
 //! ```
 //!
-//! Both sides report the confirmation code to the client. With `confirm` the
-//! client is asked to accept it; otherwise holding the ticket is the
-//! authorization and the code is accepted automatically. The new device
-//! reports once it has the offer, so the vault name is shown with the code,
-//! and only then signs its consent.
+//! Both sides report the confirmation code to the client. On the inviting
+//! side, `confirm` asks the client to accept it; otherwise, and always on the
+//! new device, holding the ticket is the authorization and the code is
+//! accepted automatically. The new device reports once it has the offer, so
+//! the vault name is shown with the code, and only then signs its consent.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -64,7 +64,6 @@ async fn report(conv: &Conversation, event: Event, confirm: bool) -> bool {
 struct NewDevice<'a> {
     agent: &'a Arc<Agent>,
     conv: &'a Conversation,
-    confirm: bool,
     offer: Mutex<Option<Offer>>,
     joined: Mutex<Option<VaultInfo>>,
 }
@@ -103,7 +102,7 @@ impl Joiner for NewDevice<'_> {
             vault: offer.vault_name.clone(),
             inviter,
         };
-        if !report(self.conv, event, self.confirm).await {
+        if self.conv.event(event).await.is_err() {
             return Err("declined".into());
         }
         *self.offer.lock().unwrap_or_else(|e| e.into_inner()) = Some(offer);
@@ -166,7 +165,7 @@ impl NewDevice<'_> {
 }
 
 /// `deadbolt join`: show a ticket and wait for an existing device to pair.
-pub async fn join(agent: &Arc<Agent>, conv: &Conversation, confirm: bool) -> Result<Reply> {
+pub async fn join(agent: &Arc<Agent>, conv: &Conversation) -> Result<Reply> {
     let node = agent.with(|s| Ok(s.node.clone()))?;
     let listener = node.start_pairing(PairingOptions::default()).await?;
     conv.event(Event::Ticket {
@@ -176,7 +175,6 @@ pub async fn join(agent: &Arc<Agent>, conv: &Conversation, confirm: bool) -> Res
     let device = NewDevice {
         agent,
         conv,
-        confirm,
         offer: Mutex::default(),
         joined: Mutex::default(),
     };
@@ -192,7 +190,7 @@ pub async fn join(agent: &Arc<Agent>, conv: &Conversation, confirm: bool) -> Res
         .ok_or_else(|| anyhow!("pairing finished without a vault"))?;
     info!(vault = %vault.name, "joined vault");
     agent.sync_now.notify_one();
-    Ok(Reply::Joined { vault })
+    Ok(Reply::Vault { vault })
 }
 
 struct ExistingDevice<'a> {
@@ -322,5 +320,5 @@ pub async fn pair(
     let vault = agent.with(|s| Ok(s.vault_info(&vault)))?;
     info!(vault = %vault.name, device = %device.id, "paired");
     agent.sync_now.notify_one();
-    Ok(Reply::Paired { vault, device })
+    Ok(Reply::Device { vault, device })
 }

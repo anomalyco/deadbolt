@@ -10,12 +10,14 @@
 //! agent  -> client  Message   {"type":"ok",...} | {"type":"error",...}   final
 //! ```
 //!
-//! Pairing events ask for an answer only when the request set `confirm`;
+//! The `pairing` event asks for an answer only when `pair` set `confirm`;
 //! otherwise the code is accepted automatically. A client hanging up cancels
 //! a pending `join`/`pair`.
 //!
 //! `status` and `stop` are answered whatever `v` says, so a client can always
-//! find and replace an agent of another version.
+//! find and replace an agent of another version. They are the only messages
+//! exchanged between different builds, so `Request` and `Status` must stay
+//! readable by older and newer ones.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,11 +67,9 @@ pub enum Command {
     Sync {
         vault: Option<String>,
     },
-    /// Emits `ticket`, then `joining` (answered if `confirm`), then replies `joined`.
-    Join {
-        confirm: bool,
-    },
-    /// Emits `pairing` (answered if `confirm`), then replies `paired`.
+    /// Emits `ticket`, then `joining`, then replies `vault`.
+    Join,
+    /// Emits `pairing` (answered if `confirm`), then replies `device`.
     Pair {
         ticket: String,
         vault: Option<String>,
@@ -109,7 +109,7 @@ pub enum Command {
         vault: Option<String>,
         query: Vec<String>,
     },
-    /// Creates all items or none, in as few entries as fit; replies `imported`.
+    /// Creates all items or none, in as few entries as fit; replies `done`.
     ItemImport {
         vault: Option<String>,
         items: Vec<NewItem>,
@@ -184,33 +184,22 @@ pub enum Reply {
     Vaults {
         vaults: Vec<VaultInfo>,
     },
-    Devices {
+    /// A device added to (`pair`) or removed from (`device-remove`) a vault.
+    Device {
         vault: VaultInfo,
+        device: DeviceInfo,
+    },
+    Devices {
         devices: Vec<DeviceInfo>,
     },
     Sync {
         peers: Vec<PeerSync>,
-    },
-    Joined {
-        vault: VaultInfo,
-    },
-    Paired {
-        vault: VaultInfo,
-        device: DeviceInfo,
-    },
-    Removed {
-        vault: VaultInfo,
-        device: DeviceInfo,
     },
     Item {
         item: ItemInfo,
     },
     Items {
         items: Vec<ItemInfo>,
-    },
-    Imported {
-        items: usize,
-        entries: usize,
     },
 }
 
@@ -220,7 +209,6 @@ pub struct ItemInfo {
     /// Shortest unique id prefix, at least 4 characters.
     pub short: String,
     pub kind: String,
-    pub name: Option<String>,
     /// The name, or one derived from the fields.
     pub label: String,
     /// Login username or card expiry, if any.

@@ -226,8 +226,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             if !status.initialized {
                 setup(&paths, device_name, from_stdin).await?;
             }
-            let reply = pairing(&paths, Command::Join { confirm: false }, from_stdin).await?;
-            let Reply::Joined { vault } = reply else {
+            let reply = pairing(&paths, Command::Join, from_stdin).await?;
+            let Reply::Vault { vault } = reply else {
                 bail!("unexpected reply");
             };
             println!("joined vault {}", vault.name);
@@ -241,7 +241,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 confirm,
             };
             let reply = pairing(&paths, command, from_stdin).await?;
-            let Reply::Paired { vault, device } = reply else {
+            let Reply::Device { vault, device } = reply else {
                 bail!("unexpected reply");
             };
             println!("added {} to {}", device_name(&device), vault.name);
@@ -251,7 +251,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             match args.command {
                 None => {
                     let reply = request(&paths, Command::Devices { vault }, from_stdin).await?;
-                    let Reply::Devices { devices, .. } = reply else {
+                    let Reply::Devices { devices } = reply else {
                         bail!("unexpected reply");
                     };
                     for device in &devices {
@@ -265,7 +265,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 }
                 Some(DevicesCommand::Remove { device }) => {
                     let command = Command::DeviceRemove { vault, device };
-                    let Reply::Removed { vault, device } =
+                    let Reply::Device { vault, device } =
                         request(&paths, command, from_stdin).await?
                     else {
                         bail!("unexpected reply");
@@ -413,16 +413,13 @@ async fn request_with(
 }
 
 /// Runs a pairing request: the ticket goes to stdout, the QR code and the
-/// confirmation code to stderr. The code is asked about only if the request
-/// set `confirm`.
+/// confirmation code to stderr. The code is asked about only if a `pair`
+/// request set `confirm`.
 async fn pairing(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply> {
     let confirm =
         |code: &str| prompt::confirm(&format!("confirm code {code} matches the other device?"));
     request_with(paths, command.clone(), from_stdin, &mut |event| {
-        let ask = matches!(
-            command,
-            Command::Join { confirm: true } | Command::Pair { confirm: true, .. }
-        );
+        let ask = matches!(command, Command::Pair { confirm: true, .. });
         Ok(match event {
             Event::Ticket { ticket } => {
                 if let Ok(qr) = ticket
@@ -446,7 +443,7 @@ async fn pairing(paths: &Paths, command: Command, from_stdin: bool) -> Result<Re
                     device_name(&inviter),
                     short(&inviter.id)
                 );
-                if ask { Some(confirm(&code)?) } else { None }
+                None
             }
             Event::Pairing { code, device } => {
                 eprintln!("code {code}: adding device {device}");

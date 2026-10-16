@@ -66,7 +66,7 @@ pub async fn run(
         Some(crate::request(paths, Command::ItemImport { vault, items }, from_stdin).await?)
     };
     match reply {
-        None | Some(Reply::Imported { .. }) => {}
+        None | Some(Reply::Done) => {}
         Some(_) => bail!("unexpected reply"),
     }
     for line in summary.lines() {
