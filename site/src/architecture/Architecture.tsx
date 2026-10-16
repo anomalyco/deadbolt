@@ -8,7 +8,7 @@ import { LogsStory } from "./stories/LogsStory"
 import { SyncStory } from "./stories/SyncStory"
 import { MergeStory } from "./stories/MergeStory"
 import { PairStory } from "./stories/PairStory"
-import { RemoveScene } from "./scenes/RemoveScene"
+import { RemoveStory } from "./stories/RemoveStory"
 
 const repo = "https://github.com/anomalyco/deadbolt/blob/main/"
 const Src = ({ path, children }: { path: string; children?: ReactNode }) =>
@@ -91,7 +91,7 @@ const chapters: Chapter[] = [
       <p>removal rests on one small, security-critical check: is this device in the current member set? the network layer runs it before dialing a peer and again right after the tls handshake on both sides, and a refused connection is closed before the application reads or writes a byte. when a removal arrives, open connections to that device are closed immediately.</p>
       <p>a removed device keeps whatever it already had; no system can take that back. what it can't do is get anything new.</p>
     </>,
-    scene: <RemoveScene />,
+    scene: <RemoveStory />,
     why: <p>the trade-off: without a shared vault key there's nothing to re-key, so removal has no ciphertext backstop. if the membership check had a bug, there'd be nothing behind it. the design accepts that and asks for dedicated tests of the gate.</p>,
     code: [["crates/net/src/node.rs", "the gate: before_connect and after_handshake hooks, revoke"], ["crates/core/src/membership.rs", "add, remove, and concurrent removals"]],
   },
