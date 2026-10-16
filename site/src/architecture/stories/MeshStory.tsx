@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, cubic, hatch, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame, edge } from "../../story/devices"
-import { clamp01, flashes, rolling, shade, span, wipe, type Box } from "../../story/motion"
+import { belt, clamp01, flashes, rolling, shade, wipe, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // No server: entries move directly between your devices (desktop, laptop, tablet, phone). When two devices
@@ -39,6 +39,9 @@ const sCatchUp: Shot = { id: "catchUp", path: catchUp, at: WAKE + .45, flight: .
 const SYNCED = timing(sCatchUp).lands
 
 const SHOTS: readonly Shot[] = [sDirect, sRelayIn, sRelayOut, sCatchUp]
+/** The relay's belt runs while ciphertext is passing through: from its arrival until it has left again. */
+const RELAY_DRIVE = [RELAYING, timing(sRelayOut).launch + .25] as const
+const BELT_SPEED = 70
 
 const DESKTOP_IMPULSES = [sDirect.at, sRelayIn.at]
 const LAPTOP_IMPULSES = [timing(sDirect).lands, sCatchUp.at]
@@ -79,11 +82,13 @@ export const meshScene: StoryScene = {
 function meshLights(t: number, light: Light) {
   for (const shot of SHOTS) send(light, shot, t)
 
-  // The relay's band: hatched noise at rest. While the stream passes through, it brightens and runs along the
-  // hatching at the stream's speed (a belt moving under a fixed window).
-  const relaying = span(t, RELAYING - .1, RELAYING + .15) * (1 - span(t, timing(sRelayOut).launch, timing(sRelayOut).launch + .5))
-  const run = Math.max(0, Math.min(t, timing(sRelayOut).launch + .5) - (RELAYING - .1)) * 70
-  hatch(light, RELAY_BAND, { tone: relaying > .02 ? "red" : "ivory", level: .55 + .6 * relaying, seed: 4, churn: run })
+  // The relay's band: hatched noise on a belt under a fixed window. From the moment the ciphertext arrives until it
+  // has left again, the belt is driven along the stream (left to right); it has mass, so it spins up and coasts to a
+  // stop on a zero-bounce spring, and its ink warms from ivory to red with its speed.
+  const { travel, speed } = belt(t, [RELAY_DRIVE], BELT_SPEED, .6)
+  const running = clamp01(speed / BELT_SPEED)
+  hatch(light, RELAY_BAND, { tone: "ivory", level: .55 * (1 - running), seed: 4, churn: travel })
+  hatch(light, RELAY_BAND, { tone: "red", level: 1.15 * running, seed: 4, churn: travel })
 }
 
 function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; story: StoryApi; dashed?: boolean }) {

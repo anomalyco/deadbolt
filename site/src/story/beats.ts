@@ -226,7 +226,7 @@ export function cipher(light: Light, box: Box, options: { tone?: Tone; level?: n
   light.prints.push({ box, kind: "cipher", tone: options.tone ?? "ivory", level: options.level ?? 1, seed: options.seed ?? 1, open: options.open, churn: options.churn })
 }
 
-/** Hatched noise printed in a card's free band; `churn` scrolls it along the hatching. */
+/** Hatched noise printed in a card's free band; `churn` is how far it has moved to the right (see `belt`). */
 export function hatch(light: Light, box: Box, options: { tone?: Tone; level?: number; seed?: number; churn?: number } = {}) {
   light.prints.push({ box, kind: "hatch", tone: options.tone ?? "ivory", level: options.level ?? 1, seed: options.seed ?? 1, churn: options.churn })
 }

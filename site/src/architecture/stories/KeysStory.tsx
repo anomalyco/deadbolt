@@ -114,9 +114,11 @@ function keysLights(t: number, light: Light) {
   // the clearing closes back over it like an iris, before the wrong passphrase arrives.
   const clearing = Math.sqrt(span(t, OPENED, OPENED + 1.1)) * (1 - wipe(t, RESEAL, .6))
   cipher(light, KEYSET_BAND, { tone: "red", level: .8, seed: 3, open: clearing > .005 ? { from: SOCKET, radius: 250 * clearing } : undefined })
-  // Sealing spins the store's bits like a cipher wheel for a moment, then they lock.
-  const spinning = t >= SEALED && t < SEALED + .7
-  cipher(light, STORE_BAND, { level: .7, seed: 11, churn: spinning ? 1 + Math.floor((t - SEALED) * 24) : t >= SEALED + .7 ? 40 : 0 })
+  // Sealing strikes the store's bits like a cipher wheel: it turns at once, 24 clicks a second, and runs down on
+  // friction (its angle is 24τ(1 − e^(−t/τ)), the integral of that speed), so the last clicks come further and further
+  // apart until the bits lock, about a second later.
+  const reel = t < SEALED ? 0 : 1 + Math.floor(24 * .35 * (1 - Math.exp(-(t - SEALED) / .35)))
+  cipher(light, STORE_BAND, { level: .7, seed: 11, churn: reel })
 
   drawOn(light, toData, t, REVEAL, .45, "red", .7)
   drawOn(light, toDevice, t, REVEAL + .06, .45, "red", .7)

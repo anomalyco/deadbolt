@@ -66,6 +66,23 @@ export function springAt(seconds: number, s: Spring = springs.default) {
   return seconds > s.duration && Math.abs(1 - raw) < .0008 ? 1 : raw
 }
 
+/** A belt with mass, driven at `speed` (units per second) during each `[from, to]` run. Its speed follows the drive
+ *  through a zero-bounce spring of `duration` seconds, so it spins up and coasts to a stop instead of starting and
+ *  stopping dead, and how far it has moved is the exact integral of that speed. Both are closed-form in t (the runs
+ *  superpose), so any frame is exact when scrubbed. */
+export function belt(t: number, runs: readonly (readonly [number, number])[], speed: number, duration = .6) {
+  const w = (2 * Math.PI) / duration
+  // The spring's step response S(s) = 1 − (1 + ws)·e^(−ws), and its integral.
+  const response = (s: number) => s <= 0 ? 0 : 1 - (1 + w * s) * Math.exp(-w * s)
+  const integral = (s: number) => s <= 0 ? 0 : s - 2 * (1 - Math.exp(-w * s)) / w + s * Math.exp(-w * s)
+  let travel = 0, velocity = 0
+  for (const [from, to] of runs) {
+    travel += speed * (integral(t - from) - integral(t - to))
+    velocity += speed * (response(t - from) - response(t - to))
+  }
+  return { travel, speed: velocity }
+}
+
 /** Below this a light or a heat is under one 8-bit step on every ink, so a decay can stop here with no visible end. */
 export const DARK = .001
 

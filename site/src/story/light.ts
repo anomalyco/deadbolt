@@ -50,7 +50,9 @@ export type Print = {
   seed: number
   /** A cleared disc growing from a point (the cipher unsealing from its socket). */
   open?: { from: Point; radius: number }
-  /** Changes the bits (cipher) or scrolls the hatching (hatch). Derive it from the scene clock. */
+  /** Cipher: which set of bits is showing (each whole number is a new set). Hatch: how far the hatching has moved to
+   *  the right, in scene units. Derive it from the scene clock, as a distance (the integral of a speed), never as
+   *  t × speed, or a change of speed makes the pattern jump. */
   churn?: number
 }
 
@@ -270,7 +272,7 @@ fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
       mark = word * bit * square * mix(1.0, smoothstep(o.z - 3.0, o.z + 1.0, dist), open);
       front = word * bit * square * open * exp(-(dist - o.z) * (dist - o.z) / 12.25);
     } else {
-      let s = (local.x + local.y + o.w) / 3.4;
+      let s = (local.x + local.y - o.w) / 3.4;
       let stroke = 1.0 - smoothstep(0.16, 0.16 + px / 3.4 * 2.0, abs(fract(s) - 0.5));
       let broken = step(0.4, noise(vec2f(floor(s) * 1.7 + m.w, (local.y - local.x) * 0.16)));
       mark = stroke * broken;
@@ -423,7 +425,7 @@ void main() {
       mark = word * bit * square * mix(1.0, smoothstep(o.z - 3.0, o.z + 1.0, dist), open);
       front = word * bit * square * open * exp(-(dist - o.z) * (dist - o.z) / 12.25);
     } else {
-      float s = (local.x + local.y + o.w) / 3.4;
+      float s = (local.x + local.y - o.w) / 3.4;
       float stroke = 1.0 - smoothstep(0.16, 0.16 + px / 3.4 * 2.0, abs(fract(s) - 0.5));
       float broken = step(0.4, noise(vec2(floor(s) * 1.7 + m.w, (local.y - local.x) * 0.16)));
       mark = stroke * broken;
