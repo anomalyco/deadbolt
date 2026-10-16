@@ -126,14 +126,32 @@ pub async fn ensure_running(paths: &Paths) -> Result<Status> {
     bail!("the agent did not start; see {}", paths.log.display())
 }
 
+/// True when no process holds the agent lock file.
+fn lock_free(paths: &Paths) -> bool {
+    match fs::File::options()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(&paths.lock)
+    {
+        Ok(file) => file.try_lock().is_ok(),
+        Err(_) => false,
+    }
+}
+
 /// Stops the agent. Returns whether one was running.
+///
+/// Waits until the lock file is really free before returning, so a new agent
+/// started right after `stop` (e.g. `deadbolt agent stop && deadbolt unlock`)
+/// doesn't fail with "the agent is already running" while the old process is
+/// still releasing the lock.
 pub async fn stop(paths: &Paths) -> Result<bool> {
     if status(paths).await.is_none() {
         return Ok(false);
     }
     simple(paths, Command::Stop).await?;
     for _ in 0..150 {
-        if status(paths).await.is_none() {
+        if status(paths).await.is_none() && lock_free(paths) {
             return Ok(true);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
