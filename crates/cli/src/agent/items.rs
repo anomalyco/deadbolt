@@ -1,9 +1,9 @@
 //! Item commands: lookup, labels, input normalization and writes.
 //!
 //! Lookup is search. Every query word must match (case-insensitively) part
-//! of the item's name, label, URL host, username, or for cards the
-//! cardholder, brand field or last four digits; a word of 4+ hex digits also
-//! matches an id prefix. Secret values are never searched.
+//! of the item's name, URL host, username, or for cards the cardholder,
+//! brand field or last four digits; a word of 4+ hex digits also matches an
+//! id prefix. Secret values and the derived label are never searched.
 
 use std::collections::BTreeSet;
 
@@ -68,7 +68,7 @@ fn detail(item: &Item) -> Option<String> {
 }
 
 fn searchable(item: &Item) -> Vec<String> {
-    let mut texts = vec![label(item)];
+    let mut texts = Vec::new();
     texts.extend(item.name.clone());
     texts.extend(value(item, "url").map(host));
     let fields: &[&str] = match item.kind.as_str() {
@@ -397,6 +397,43 @@ mod tests {
         ] {
             assert_eq!(host(url), host_);
         }
+    }
+
+    fn item(kind: &str, name: Option<&str>, fields: &[(&str, &str)]) -> Item {
+        Item {
+            id: ItemId::from_bytes([0xee; 16]),
+            kind: kind.into(),
+            name: name.map(Into::into),
+            fields: fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), Field::new(FieldType::Text, *v)))
+                .collect(),
+            deleted: false,
+        }
+    }
+
+    #[test]
+    fn search_skips_the_derived_label() {
+        let q = |words: &[&str]| -> Vec<String> { words.iter().map(|w| w.to_string()).collect() };
+        let unbranded = item("card", None, &[("number", "4242424242424242")]);
+        let branded = item(
+            "card",
+            None,
+            &[("number", "5555555555554444"), ("brand", "Visa")],
+        );
+        let named = item("card", Some("Travel"), &[("number", "6011000990139424")]);
+        let login = item("login", None, &[("password", "x")]);
+        assert_eq!(label(&unbranded), "card •••• 4242");
+        assert_eq!(label(&login), "login");
+        // The type word and the label's filler match no item, branded or not.
+        for words in [&["card"][..], &["login"], &["••••"]] {
+            for it in [&unbranded, &branded, &named, &login] {
+                assert!(!matches(it, &q(words)), "{words:?} matched {}", label(it));
+            }
+        }
+        assert!(matches(&branded, &q(&["visa", "4444"])));
+        assert!(matches(&unbranded, &q(&["4242"])));
+        assert!(matches(&named, &q(&["travel", "9424"])));
     }
 
     #[test]
