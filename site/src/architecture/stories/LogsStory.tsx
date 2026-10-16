@@ -1,6 +1,6 @@
 import type { Light, Tone } from "../../story/light"
 import type { SceneCue } from "../../sound"
-import { between, bridge, drawOn, flood, panX, send, soundOfSend, spark, timing, travelled, type Path, type Send } from "../../story/beats"
+import { between, bridge, drawOn, drawProgress, flood, panX, send, soundOfSend, spark, timing, travelled, type Path, type Send } from "../../story/beats"
 import { Carried, DeviceGlyph, type DeviceKind } from "../../story/devices"
 import { clamp01, flashes, inkFlash, shade, span, springAt, springs, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -150,7 +150,30 @@ export const logsScene: StoryScene = {
     { at: 25.6, focus: { d1: 1, l0: .7, d3: .7, l1: .7, d4: .7, d0: .2, d2: .2, "d3>d1": .55, "l0>d1": .55, "l1>l0": .55, "d4>d3": .55, "d4>l1": .55 },
       caption: { text: "rewrite one, and everything that saw it breaks", anchor: top("d1"), place: [304, 44], align: "above", delay: .4 } },
   ],
-  draw: (t, light, story) => <Logs t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    logsLights(t, light)
+    return <Logs t={t} light={light} story={story} />
+  },
+}
+
+function logsLights(t: number, light: Light) {
+  for (const shot of SHOTS) send(light, shot, t)
+  for (const key of Object.keys(LINKS)) {
+    const see = SHOTS.find(s => s.kind === "see" && s.key === key)!
+    drawOn(light, LINKS[key]!, t, see.at, .55, ENTRIES[key.split(">")[0] as Id].membership ? "red" : "ivory", .6)
+  }
+  for (const id of IDS) {
+    const e = ENTRIES[id], y = LANE[e.lane], age = t - e.at
+    if (age < 0) continue
+    const red = e.membership
+    // The seal: the author's signature, stamped on the right edge once the entry is written.
+    const seal: readonly [number, number] = [e.x + EW / 2, y]
+    if (e.at > 0 && age < 1.6) spark(light, seal, age - .3, red ? "red" : "hot", .7)
+    if (id === "d4") spark(light, seal, t - SIGNED, "hot", 1)
+    if (brokenAt[id] !== undefined) spark(light, seal, t - brokenAt[id]!, "amber", .8)
+    if (e.at > 0) flood(light, box(id), [e.x, y], age, red ? "red" : "ivory", .55, .9)
+    light.frames.push(box(id))
+  }
 }
 
 /** Light in an entry's ink: hot-stamp flash when written, then filament cooling each time light lands in it. */
@@ -177,15 +200,9 @@ function Card({ id, t, story, light }: { id: Id; t: number; story: StoryApi; lig
   if (id === "d4") label = working(e.label, t, hashed - .05, hashed + .45, 4) ?? label
   if (id === "d1") label = working("d07e", t, TAMPER_AT, TAMPERED, 9) ?? label
 
-  // The seal: the author's signature, stamped on the right edge once the entry is written.
+  // The seal: the author's signature, stamped on the right edge once the entry is written (its spark is in logsLights).
   const sealAge = e.at === 0 ? 99 : age - .24
   const sealScale = sealAge < 0 ? 0 : e.at === 0 ? 1 : 1.65 - .65 * springAt(sealAge, springs.snappy)
-  const seal: readonly [number, number] = [e.x + EW / 2, y]
-  if (e.at > 0 && age < 1.6) spark(light, seal, sealAge - .06, red ? "red" : "hot", .7)
-  if (id === "d4") spark(light, seal, t - SIGNED, "hot", 1)
-  if (brokenAt[id] !== undefined) spark(light, seal, t - brokenAt[id]!, "amber", .8)
-  if (e.at > 0) flood(light, box(id), [e.x, y], age, red ? "red" : "ivory", .55, .9)
-  light.frames.push(box(id))
 
   return <g opacity={appear} transform={`translate(${e.x} ${y}) scale(${scale})`}>
     <rect x={-EW / 2 + .5} y={-EH / 2 + .5} width={EW - 1} height={EH - 1} fill="#050505" stroke={frame} />
@@ -197,11 +214,11 @@ function Card({ id, t, story, light }: { id: Id; t: number; story: StoryApi; lig
   </g>
 }
 
-function Link({ id, t, story, light }: { id: string; t: number; story: StoryApi; light: Light }) {
+function Link({ id, t, story }: { id: string; t: number; story: StoryApi }) {
   const see = SHOTS.find(s => s.kind === "see" && s.key === id)!
   const path = LINKS[id]!
   const red = ENTRIES[id.split(">")[0] as Id].membership
-  const drawn = drawOn(light, path, t, see.at, .55, red ? "red" : "ivory", .6)
+  const drawn = drawProgress(t, see.at, .55)
   if (drawn <= 0) return null
   const level = story.focus(t, id, .2), lit = clamp01((level - .2) / .8)
   const stroke = shade(red ? "#3a1414" : "#262626", [red ? "#c4302a" : "#8d8a84", lit])
@@ -230,10 +247,9 @@ function Lanes({ t, story }: { t: number; story: StoryApi }) {
 }
 
 function Logs({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
-  for (const shot of SHOTS) send(light, shot, t)
   return <>
     <Lanes t={t} story={story} />
-    {Object.keys(LINKS).map(id => <Link key={id} id={id} t={t} story={story} light={light} />)}
+    {Object.keys(LINKS).map(id => <Link key={id} id={id} t={t} story={story} />)}
     {IDS.map(id => <Card key={id} id={id} t={t} story={story} light={light} />)}
     {SHOTS.map((shot, i) => <Carried key={i} shot={shot} t={t} label={shot.label} />)}
   </>

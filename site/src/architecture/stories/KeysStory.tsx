@@ -1,6 +1,6 @@
 import type { Light } from "../../story/light"
-import { across, between, cipher, drawOn, panX, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
-import { Carried, Frame, RefusalMark, edge } from "../../story/devices"
+import { across, between, cipher, drawOn, drawProgress, panX, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
+import { Carried, Frame, RefusalMark, edge, refusal } from "../../story/devices"
 import { clamp01, flashes, shade, span, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
@@ -99,26 +99,14 @@ export const keysScene: StoryScene = {
       caption: { text: "a wrong passphrase simply fails to open the keyset", anchor: [SOCKET[0] + 12, SOCKET[1] - 6], place: [700, 112], align: "start", delay: .4 },
     },
   ],
-  draw: (t, light, story) => <Keys t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    keysLights(t, light)
+    return <Keys t={t} light={light} story={story} />
+  },
 }
 
-function Wire({ id, d, t, story, drawn = 1 }: { id: string; d: string; t: number; story: StoryApi; drawn?: number }) {
-  if (drawn <= 0) return null
-  const level = story.focus(t, id, .22)
-  const lit = clamp01((level - .22) / .78)
-  return <path d={d} fill="none" stroke={shade("#252525", ["#7c7972", lit])} pathLength={1} strokeDasharray={`${drawn} 2`} />
-}
-
-function Keys({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
+function keysLights(t: number, light: Light) {
   for (const shot of SHOTS) send(light, shot, t)
-
-  const kdfPulses = [timing(sPass).lands, timing(sPass).lands + .45, timing(sPass).lands + .9, timing(sWrong).lands, timing(sWrong).lands + .3]
-  const kdfHeat = flashes(t, kdfPulses, .75)
-  const unlockHeat = flashes(t, [timing(sKey).lands, timing(sWrongKey).lands], 1.3)
-  const keysetHeat = flashes(t, [OPENED, REFUSED], 1.3)
-  const dataHeat = flashes(t, [REVEAL + .3, sSeal.at + .25], 1.1)
-  const storeHeat = flashes(t, [SEALED], 1.3)
-  const deviceHeat = flashes(t, [REVEAL + .35, SIGN_AT], 1.3)
 
   if (t >= SIGN_AT && t < SIGN_AT + 1.2) {
     spark(light, edge.right(DEVICE), t - SIGN_AT, "red", .85)
@@ -132,8 +120,29 @@ function Keys({ t, light, story }: { t: number; light: Light; story: StoryApi })
   const spinning = t >= SEALED && t < SEALED + .7
   cipher(light, STORE_BAND, { level: .7, seed: 11, churn: spinning ? 1 + Math.floor((t - SEALED) * 24) : t >= SEALED + .7 ? 40 : 0 })
 
-  const dData = drawOn(light, toData, t, REVEAL, .45, "red", .7)
-  const dDevice = drawOn(light, toDevice, t, REVEAL + .06, .45, "red", .7)
+  drawOn(light, toData, t, REVEAL, .45, "red", .7)
+  drawOn(light, toDevice, t, REVEAL + .06, .45, "red", .7)
+  refusal(light, SOCKET, t, REFUSED)
+}
+
+function Wire({ id, d, t, story, drawn = 1 }: { id: string; d: string; t: number; story: StoryApi; drawn?: number }) {
+  if (drawn <= 0) return null
+  const level = story.focus(t, id, .22)
+  const lit = clamp01((level - .22) / .78)
+  return <path d={d} fill="none" stroke={shade("#252525", ["#7c7972", lit])} pathLength={1} strokeDasharray={`${drawn} 2`} />
+}
+
+function Keys({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
+  const kdfPulses = [timing(sPass).lands, timing(sPass).lands + .45, timing(sPass).lands + .9, timing(sWrong).lands, timing(sWrong).lands + .3]
+  const kdfHeat = flashes(t, kdfPulses, .75)
+  const unlockHeat = flashes(t, [timing(sKey).lands, timing(sWrongKey).lands], 1.3)
+  const keysetHeat = flashes(t, [OPENED, REFUSED], 1.3)
+  const dataHeat = flashes(t, [REVEAL + .3, sSeal.at + .25], 1.1)
+  const storeHeat = flashes(t, [SEALED], 1.3)
+  const deviceHeat = flashes(t, [REVEAL + .35, SIGN_AT], 1.3)
+
+  const dData = drawProgress(t, REVEAL, .45)
+  const dDevice = drawProgress(t, REVEAL + .06, .45)
 
   const kdfDetail = (t >= timing(sPass).lands && t < sKey.at)
     ? working("64 MiB · 3 passes", t, timing(sPass).lands, sKey.at - .1, 7) ?? "64 MiB · 3 passes"
@@ -167,7 +176,7 @@ function Keys({ t, light, story }: { t: number; light: Light; story: StoryApi })
     <Frame id="device" box={DEVICE} t={t} story={story} light={light} glyph="desktop" impulses={DESKTOP_IMPULSES}
       label="device key" detail="ed25519 · iroh id" tone="red" heat={deviceHeat} appearAt={REVEAL + .06} />
 
-    <RefusalMark x={SOCKET[0]} y={SOCKET[1]} t={t} at={REFUSED} light={light} />
+    <RefusalMark x={SOCKET[0]} y={SOCKET[1]} t={t} at={REFUSED} />
 
     {SHOTS.map(shot => <Carried key={shot.id} shot={shot} t={t} label={shot.label} side={shot.side} />)}
   </>

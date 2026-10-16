@@ -174,10 +174,13 @@ export function send(light: Light, s: Send, t: number) {
   if (s.into) flood(light, s.into.box, end, t - lands, s.into.tone ?? tone, k)
 }
 
+/** How much of a wire drawn by `drawOn` is drawn at time t. */
+export const drawProgress = (t: number, at: number, duration = .55) => ease.draw(span(t, at, at + duration))
+
 /** Draws a wire on `cubic-bezier(.45, 0, .2, 1)` and pushes a bright bead at the leading tip while drawing. */
 export function drawOn(light: Light, path: Path, t: number, at: number, duration = .55, tone: Tone = "ivory", strength = .85) {
   const raw = span(t, at, at + duration)
-  const p = ease.draw(raw)
+  const p = drawProgress(t, at, duration)
   if (raw > 0 && raw < 1) {
     const bead = smoothstep(p / .08) * (1 - smoothstep((p - .92) / .08))
     const from = path.at(ease.draw(span(t - shutter(), at, at + duration)))

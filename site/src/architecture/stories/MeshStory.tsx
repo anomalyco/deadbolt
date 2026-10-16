@@ -70,7 +70,20 @@ export const meshScene: StoryScene = {
       caption: { text: "a phone that was asleep catches up from any member", anchor: edge.left(PHONE), place: [646, 247], align: "end", delay: .35 },
     },
   ],
-  draw: (t, light, story) => <Mesh t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    meshLights(t, light)
+    return <Mesh t={t} light={light} story={story} />
+  },
+}
+
+function meshLights(t: number, light: Light) {
+  for (const shot of SHOTS) send(light, shot, t)
+
+  // The relay's band: hatched noise at rest. While the stream passes through, it brightens and runs along the
+  // hatching at the stream's speed (a belt moving under a fixed window).
+  const relaying = span(t, RELAYING - .1, RELAYING + .15) * (1 - span(t, timing(sRelayOut).launch, timing(sRelayOut).launch + .5))
+  const run = Math.max(0, Math.min(t, timing(sRelayOut).launch + .5) - (RELAYING - .1)) * 70
+  hatch(light, RELAY_BAND, { tone: relaying > .02 ? "red" : "ivory", level: .55 + .6 * relaying, seed: 4, churn: run })
 }
 
 function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; story: StoryApi; dashed?: boolean }) {
@@ -81,19 +94,11 @@ function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; s
 }
 
 function Mesh({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
-  for (const shot of SHOTS) send(light, shot, t)
-
   const desktopHeat = flashes(t, [sDirect.at + .3, sRelayIn.at + .3], .9)
   const laptopHeat = flashes(t, [timing(sDirect).lands, sCatchUp.at + .3], 1.1)
   const tabletHeat = flashes(t, [timing(sRelayOut).lands], 1.1)
   const relayHeat = flashes(t, [RELAYING], 1.3)
   const phoneHeat = flashes(t, [WAKE, SYNCED], 1.2)
-
-  // The relay's band: hatched noise at rest. While the stream passes through, it brightens and runs along the
-  // hatching at the stream's speed (a belt moving under a fixed window).
-  const relaying = span(t, RELAYING - .1, RELAYING + .15) * (1 - span(t, timing(sRelayOut).launch, timing(sRelayOut).launch + .5))
-  const run = Math.max(0, Math.min(t, timing(sRelayOut).launch + .5) - (RELAYING - .1)) * 70
-  hatch(light, RELAY_BAND, { tone: relaying > .02 ? "red" : "ivory", level: .55 + .6 * relaying, seed: 4, churn: run })
 
   // The phone keeps its card: it wakes (its dashes close up like a zip) and its detail rolls over to synced.
   const asleep = 1 - wipe(t, WAKE, .4)

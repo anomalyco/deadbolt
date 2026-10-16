@@ -96,7 +96,13 @@ export const pairScene: StoryScene = {
       caption: { text: "the desktop signs Add(phone) and streams the vault", anchor: lane3.at(.5), place: [470, 220], align: "below", delay: .25 },
     },
   ],
-  draw: (t, light, story) => <Pair t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    for (const shot of SHOTS) send(light, shot, t)
+    if (t >= ADD_AT && t < ADD_AT + 1.2) {
+      spark(light, [DESKTOP[0] + 24, DESKTOP[1] + 132], t - ADD_AT, "red", .85)
+    }
+    return <Pair t={t} light={light} story={story} />
+  },
 }
 
 function QrTicket({ x, y, t, story }: { x: number; y: number; t: number; story: StoryApi }) {
@@ -120,14 +126,8 @@ function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; s
 }
 
 function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
-  for (const shot of SHOTS) send(light, shot, t)
-
   const phoneHeat = flashes(t, [timing(sDial).lands, timing(sProofA).lands, CODE_AT, timing(sOffer).lands, ADMITTED], 1.15)
   const deskHeat = flashes(t, [timing(sCarry).lands, timing(sProofB).lands, CODE_AT, timing(sConsent).lands, ADD_AT], 1.15)
-
-  if (t >= ADD_AT && t < ADD_AT + 1.2) {
-    spark(light, [DESKTOP[0] + 24, DESKTOP[1] + 132], t - ADD_AT, "red", .85)
-  }
 
   // Same phone card keeps its identity from listening newcomer to admitted member.
   const phoneDetail = rolling(t, [[0, "new · listening"], [timing(sDial).lands, "pairing…"], [ADMITTED, "member · synced"]], 3)

@@ -75,7 +75,10 @@ export const mergeScene: StoryScene = {
       caption: { text: "a later edit that saw blue-whale replaces it cleanly", anchor: deskToItem.at(.6), place: [258, 132], align: "end", delay: .25 },
     },
   ],
-  draw: (t, light, story) => <Merge t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    for (const shot of SHOTS) send(light, shot, t)
+    return <Merge t={t} light={light} story={story} />
+  },
 }
 
 function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; story: StoryApi; dashed?: boolean }) {
@@ -85,8 +88,6 @@ function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; s
 }
 
 function Merge({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
-  for (const shot of SHOTS) send(light, shot, t)
-
   // The item card grows upward on a calm zero-bounce spring when the concurrent loser moves into history.
   const expand = story.reduced ? 1 : springAt(t - SETTLE_AT, springs.calm)
   const grow = Math.round(28 * expand * 10) / 10

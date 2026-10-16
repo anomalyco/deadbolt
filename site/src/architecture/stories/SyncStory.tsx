@@ -89,7 +89,10 @@ export const syncScene: StoryScene = {
       caption: { text: "the dialed peer answers ok once every entry is verified", anchor: lane1.at(.5), place: [470, 108], align: "above", delay: .25 },
     },
   ],
-  draw: (t, light, story) => <Sync t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    for (const shot of SHOTS) send(light, shot, t)
+    return <Sync t={t} light={light} story={story} />
+  },
 }
 
 type LogRow = { name: string; value: string; red?: boolean; flashAt?: number }
@@ -137,8 +140,6 @@ function Wire({ id, d, t, story }: { id: string; d: string; t: number; story: St
 }
 
 function Sync({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
-  for (const shot of SHOTS) send(light, shot, t)
-
   const deskHeat = flashes(t, [timing(sHeadsB).lands, MEM_LANDS, LAP_DATA_LANDS, DONE_AT], 1.1)
   const lapHeat = flashes(t, [timing(sHeadsA).lands, DESK_DATA_LANDS], 1.1)
 

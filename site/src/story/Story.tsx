@@ -49,7 +49,9 @@ export type StoryScene = {
   sounds?: readonly SceneCue[]
   /** Continuous send-voice flights along the scene clock. */
   flights?: readonly Flight[]
-  /** Draws the scene at time `t` as SVG and pushes its lights into `light`. Must be pure. */
+  /** Draws the scene at time `t` as SVG and pushes its lights into `light`. Must be pure. Push every light here,
+   *  before returning, not from inside a component: React may render a component twice (StrictMode does in
+   *  development), and frames read the finished light to catch it on their borders. */
   draw(t: number, light: Light, story: StoryApi): ReactNode
 }
 

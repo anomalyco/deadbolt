@@ -81,7 +81,14 @@ export const agentScene: StoryScene = {
       caption: { text: "while unlocked, the agent also runs the iroh node", anchor: edge.left(NET), place: [448, 257], align: "end", delay: .25 },
     },
   ],
-  draw: (t, light, story) => <Agent t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    for (const shot of SHOTS) send(light, shot, t)
+    // The read clears a window in the sealed band where it lands, wicking open (√t); once the record has gone back
+    // up to the vault state, the seal closes over it again.
+    const opening = Math.sqrt(span(t, READ, READ + .5)) * (1 - smoothstep(span(t, timing(sUnseal).launch + .15, timing(sUnseal).launch + .95)))
+    cipher(light, STORE_BAND, { tone: "red", level: .75, seed: 7, open: opening > .01 ? { from: [592, STORE[1] + STORE[3]], radius: 36 * opening } : undefined })
+    return <Agent t={t} light={light} story={story} />
+  },
 }
 
 function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; story: StoryApi; dashed?: boolean }) {
@@ -91,19 +98,12 @@ function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; s
 }
 
 function Agent({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
-  for (const shot of SHOTS) send(light, shot, t)
-
   const termHeat = flashes(t, [sAsk.at + .2, timing(sAnswer).lands], 1.0)
   const cliHeat = flashes(t, [timing(sAsk).lands, timing(sReply).lands], 1.0)
   const coreHeat = flashes(t, [timing(sReq).lands, timing(sUnseal).lands], 1.1)
   const storeHeat = flashes(t, [READ], 1.3)
   const netHeat = flashes(t, [timing(sNetWake).lands, sSync.at + .3], 1.2)
   const peerHeat = flashes(t, [timing(sSync).lands], 1.1)
-
-  // The read clears a window in the sealed band where it lands, wicking open (√t); once the record has gone back
-  // up to the vault state, the seal closes over it again.
-  const opening = Math.sqrt(span(t, READ, READ + .5)) * (1 - smoothstep(span(t, timing(sUnseal).launch + .15, timing(sUnseal).launch + .95)))
-  cipher(light, STORE_BAND, { tone: "red", level: .75, seed: 7, open: opening > .01 ? { from: [592, STORE[1] + STORE[3]], radius: 36 * opening } : undefined })
 
   const agentLit = clamp01((story.focus(t, "agent", .35) - .35) / .65)
   const sockLit = clamp01((story.focus(t, "sock", .3) - .3) / .7)

@@ -133,18 +133,22 @@ export function Carried({ shot, t, label, side = "above" }: { shot: Send; t: num
   return <text x={x} y={y - 10} textAnchor="middle" className="story-carried" fill={fill} opacity={opacity}>{label}</text>
 }
 
-/** A refusal stamp on a gate or keyset: slams down on a snappy spring and cools from hot red. */
-export function RefusalMark({ x, y, t, at, light, label }: { x: number; y: number; t: number; at: number; light: Light; label?: string }) {
+/** The light of a refusal stamp landing at `at` (push it from the scene's draw, with the other lights). */
+export function refusal(light: Light, [x, y]: Point, t: number, at: number) {
+  const age = t - at
+  if (age < 0 || age >= .9) return
+  const k = Math.pow(1 - clamp01(age / .6), 2)
+  light.dots.push({ at: [x, y], radius: 3, intensity: k * .9, tone: "red" })
+  light.rings.push({ at: [x, y], radius: 4 + 10 * (1 - Math.pow(1 - clamp01(age / .55), 2)), width: 1.8, intensity: k * .7, tone: "red" })
+}
+
+/** A refusal stamp on a gate or keyset: slams down on a snappy spring and cools from hot red. Its light is `refusal`. */
+export function RefusalMark({ x, y, t, at, label }: { x: number; y: number; t: number; at: number; label?: string }) {
   const age = t - at
   if (age < 0) return null
   const scale = 1.45 - .45 * springAt(age, springs.snappy)
   const opacity = clamp01(age / .09)
   const hot = flashes(t, [at], 1.1)
-  if (age < .9) {
-    const k = Math.pow(1 - clamp01(age / .6), 2)
-    light.dots.push({ at: [x, y], radius: 3, intensity: k * .9, tone: "red" })
-    light.rings.push({ at: [x, y], radius: 4 + 10 * (1 - Math.pow(1 - clamp01(age / .55), 2)), width: 1.8, intensity: k * .7, tone: "red" })
-  }
   const stroke = shade("#c8231f", ["#ff6a4a", hot])
   return <g opacity={opacity} transform={`translate(${x} ${y}) scale(${scale})`}>
     <circle r={9.5} fill="#050505" stroke={stroke} strokeWidth={1.3} />

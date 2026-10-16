@@ -208,8 +208,8 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
     let d = sdSegment(q, b.xy, a.xy);
     let k = a.w * mix(1.0, (2.0 * r) / (2.0 * r + smear), 0.6);
     let solid = 1.0 - smoothstep(r - px, r + px, d);
-    col += hot * k * solid * 1.4;
-    col += mix(tone(b.z), hot, 0.35) * k * look.y * (exp(-d / (1.2 * r)) * 0.45 + exp(-d / (4.0 * r)) * 0.1);
+    col += hot * k * solid * 2.8;
+    col += mix(tone(b.z), hot, 0.35) * k * look.y * (exp(-d / (1.2 * r)) * 0.9 + exp(-d / (4.0 * r)) * 0.2);
   }
 
   // Rings: a stroke that opens, thins and cools.
@@ -218,7 +218,7 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
     let b = u.v[${BASE.rings} + i * 2 + 1];
     let e = abs(length(q - a.xy) - a.z);
     let band = 1.0 - smoothstep(a.w * 0.5 - px * 0.5, a.w * 0.5 + px, e);
-    col += temper(b.y, min(1.0, 0.45 + b.x * 0.6)) * b.x * band;
+    col += temper(b.y, min(1.0, 0.45 + b.x * 0.6)) * b.x * band * 2.0;
   }
 
   // Floods: light wicking in from the socket. The wet region grows from the socket with a ragged front and a
@@ -238,7 +238,7 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
     let wash = (body * 0.6 + tide * 0.4) * s.w * feel.y;
     let print = step(ign(floor(frag.xy / 2.0)), wash * 2.4);
     let edge = rule(q, box, 0.5, px) * 0.5 + rule(q, box, 3.5, px) * 0.3;
-    col += tone(c.x) * (inside * (wash * 0.16 + print * wash * 0.2) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 0.8);
+    col += tone(c.x) * (inside * (wash * 0.32 + print * wash * 0.4) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 1.6);
   }
 
   // Borders near a head catch its light.
@@ -280,8 +280,8 @@ fn rule(p: vec2f, b: vec4f, inset: f32, px: f32) -> f32 {
       let broken = step(0.4, noise(vec2f(floor(s) * 1.7 + m.w, (local.y - local.x) * 0.16)));
       mark = stroke * broken;
     }
-    ink += temper(m.y, 0.3) * m.z * feel.z * mark * 0.2;
-    col += temper(m.y, 0.85) * m.z * feel.z * front * 0.9;
+    ink += temper(m.y, 0.3) * m.z * feel.z * mark * 0.4;
+    col += temper(m.y, 0.85) * m.z * feel.z * front * 1.8;
   }
 
   // Light (not ink) catches the paper's tooth.
@@ -387,8 +387,8 @@ void main() {
     float d = sdSegment(q, b.xy, a.xy);
     float k = a.w * mix(1.0, (2.0 * r) / (2.0 * r + smear), 0.6);
     float solid = 1.0 - smoothstep(r - px, r + px, d);
-    col += hot * k * solid * 1.4;
-    col += mix(tone(b.z), hot, 0.35) * k * look.y * (exp(-d / (1.2 * r)) * 0.45 + exp(-d / (4.0 * r)) * 0.1);
+    col += hot * k * solid * 2.8;
+    col += mix(tone(b.z), hot, 0.35) * k * look.y * (exp(-d / (1.2 * r)) * 0.9 + exp(-d / (4.0 * r)) * 0.2);
   }
 
   for (int i = 0; i < int(counts.z); i++) {
@@ -396,7 +396,7 @@ void main() {
     vec4 b = v[${BASE.rings} + i * 2 + 1];
     float e = abs(length(q - a.xy) - a.z);
     float band = 1.0 - smoothstep(a.w * 0.5 - px * 0.5, a.w * 0.5 + px, e);
-    col += temper(b.y, min(1.0, 0.45 + b.x * 0.6)) * b.x * band;
+    col += temper(b.y, min(1.0, 0.45 + b.x * 0.6)) * b.x * band * 2.0;
   }
 
   for (int i = 0; i < int(counts.w); i++) {
@@ -413,7 +413,7 @@ void main() {
     float wash = (body * 0.6 + tide * 0.4) * s.w * feel.y;
     float print = step(ign(floor(fragXY / 2.0)), wash * 2.4);
     float edge = rule(q, box, 0.5, px) * 0.5 + rule(q, box, 3.5, px) * 0.3;
-    col += tone(c.x) * (inside * (wash * 0.16 + print * wash * 0.2) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 0.8);
+    col += tone(c.x) * (inside * (wash * 0.32 + print * wash * 0.4) + edge * (body * 0.55 + tide * 0.45) * s.w * feel.y * 1.6);
   }
 
   for (int f = 0; f < int(more.x); f++) {
@@ -453,8 +453,8 @@ void main() {
       float broken = step(0.4, noise(vec2(floor(s) * 1.7 + m.w, (local.y - local.x) * 0.16)));
       mark = stroke * broken;
     }
-    ink += temper(m.y, 0.3) * m.z * feel.z * mark * 0.2;
-    col += temper(m.y, 0.85) * m.z * feel.z * front * 0.9;
+    ink += temper(m.y, 0.3) * m.z * feel.z * mark * 0.4;
+    col += temper(m.y, 0.85) * m.z * feel.z * front * 1.8;
   }
 
   col *= 1.0 - look.z * (grain - 0.35);

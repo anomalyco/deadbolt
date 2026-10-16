@@ -1,6 +1,6 @@
 import type { Light } from "../../story/light"
 import { across, between, panX, polyline, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
-import { Carried, Frame, RefusalMark, edge } from "../../story/devices"
+import { Carried, Frame, RefusalMark, edge, refusal } from "../../story/devices"
 import { clamp01, ease, flashes, shade, span, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
@@ -81,7 +81,15 @@ export const removeScene: StoryScene = {
       caption: { text: "the phone keeps its old copy; new entries stay among members", anchor: [PHONE[0] + PHONE[2] / 2, PHONE[1] + PHONE[3]], place: [793, 206], align: "below", delay: .25 },
     },
   ],
-  draw: (t, light, story) => <Remove t={t} light={light} story={story} />,
+  draw: (t, light, story) => {
+    for (const shot of SHOTS) send(light, shot, t)
+    if (t >= REMOVE_AT && t < REMOVE_AT + 1.1) {
+      spark(light, edge.right(DESKTOP), t - REMOVE_AT, "red", .9)
+    }
+    refusal(light, [GATE_X, PHONE[1] + PHONE[3] / 2 + 10], t, REFUSE_LAP)
+    refusal(light, [GATE_X, PHONE[1] + PHONE[3] / 2 - 10], t, REFUSE_DESK)
+    return <Remove t={t} light={light} story={story} />
+  },
 }
 
 function SeverableWire({ id, d, t, story, cutAt }: { id: string; d: string; t: number; story: StoryApi; cutAt: number }) {
@@ -95,15 +103,9 @@ function SeverableWire({ id, d, t, story, cutAt }: { id: string; d: string; t: n
 }
 
 function Remove({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
-  for (const shot of SHOTS) send(light, shot, t)
-
   const deskHeat = flashes(t, [REMOVE_AT, NEW_ENTRY_AT + .2], 1.2)
   const lapHeat = flashes(t, [SPREAD_LANDS, timing(sNewEntry).lands], 1.2)
   const phoneHeat = flashes(t, [timing(sNormal).lands, REFUSE_LAP, REFUSE_DESK], 1.1)
-
-  if (t >= REMOVE_AT && t < REMOVE_AT + 1.1) {
-    spark(light, edge.right(DESKTOP), t - REMOVE_AT, "red", .9)
-  }
 
   const gateLit = clamp01((story.focus(t, "gate", .35) - .35) / .65)
   const gateColor = shade("#5a1c1c", ["#ff2a2a", gateLit])
@@ -146,8 +148,8 @@ function Remove({ t, light, story }: { t: number; light: Light; story: StoryApi 
     <Frame id="phone" box={PHONE} t={t} story={story} light={light} glyph="phone" impulses={PHONE_IMPULSES}
       label="phone" detail={phoneDetail} tone="red" toned={removed} heat={phoneHeat} dashed={removed} />
 
-    <RefusalMark x={GATE_X} y={PHONE[1] + PHONE[3] / 2 + 10} t={t} at={REFUSE_LAP} light={light} />
-    <RefusalMark x={GATE_X} y={PHONE[1] + PHONE[3] / 2 - 10} t={t} at={REFUSE_DESK} light={light} />
+    <RefusalMark x={GATE_X} y={PHONE[1] + PHONE[3] / 2 + 10} t={t} at={REFUSE_LAP} />
+    <RefusalMark x={GATE_X} y={PHONE[1] + PHONE[3] / 2 - 10} t={t} at={REFUSE_DESK} />
 
     {SHOTS.map(shot => <Carried key={shot.id} shot={shot} t={t} label={shot.label} side={shot.side} />)}
   </>
