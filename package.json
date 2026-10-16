@@ -1,0 +1,23 @@
+{
+  "name": "@deadbolt/root",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deadbolt": "cargo run -q -p deadbolt-cli --",
+    "changeset": "changeset",
+    "version": "changeset version && bun packages/cli/script/version.ts && bun install",
+    "release": "bun packages/cli/script/release.ts && changeset publish",
+    "test": "cargo test --workspace"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "devDependencies": {
+    "@changesets/cli": "3.0.0"
+  },
+  "engines": {
+    "bun": ">=1.4.0"
+  },
+  "packageManager": "bun@1.4.2"
+}

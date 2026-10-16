@@ -8,7 +8,8 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
-    "motion-sweep": "bun src/dev/motion-sweep.ts"
+    "motion-sweep": "bun src/dev/motion-sweep.ts",
+    "deploy": "bun run build && bunx wrangler deploy"
   },
   "dependencies": {
     "@kitlangton/justice": "0.3.0",

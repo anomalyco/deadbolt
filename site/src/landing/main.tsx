@@ -8,15 +8,15 @@ import "../styles.css"
 
 const github = "https://github.com/anomalyco/deadbolt"
 
-// Only what works today. Packaged installs come with the first release.
 const installs = {
+  curl: "curl -fsSL https://deadbolt.pw/install | sh",
+  brew: "brew install anomalyco/tap/deadbolt",
   source: "git clone git@github.com:anomalyco/deadbolt.git && cargo install --path deadbolt/crates/cli",
-  cargo: "cargo install --git ssh://git@github.com/anomalyco/deadbolt deadbolt-cli",
 } as const
 type Manager = keyof typeof installs
 
 function Install() {
-  const [manager, setManager] = useState<Manager>("source")
+  const [manager, setManager] = useState<Manager>("curl")
   return <div className="install">
     <div className="tabs" role="tablist">
       {(Object.keys(installs) as Manager[]).map(name => <button key={name} type="button" role="tab" aria-selected={manager === name} data-current={manager === name || undefined} onClick={() => setManager(name)}>{name}</button>)}
@@ -62,7 +62,7 @@ function Landing() {
         <dl className="facts">
           <div><dt>no recovery</dt><Justified as="dd" text="lose every device and the vault is gone. there is no server holding a copy and no reset email. pair a second device early." /></div>
           <div><dt>removal is a promise about the future</dt><Justified as="dd" text="a removed device can't sync anything new, but it keeps what it already had. rotate the passwords it could see." /></div>
-          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background agent, pairing, sync and a bitwarden import. no apps, browser extension or packaged releases yet." /></div>
+          <div><dt>it's early</dt><Justified as="dd" text="deadbolt is a design with working code: a cli, a background agent, pairing, sync and a bitwarden import. no apps or browser extension yet." /></div>
         </dl>
       </section>
 

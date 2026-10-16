@@ -1,0 +1,17 @@
+{
+  "$schema": "https://unpkg.com/wrangler/config-schema.json",
+  "name": "deadbolt-site",
+  "account_id": "15d29c8639fd3733b1b5486a2acfd968",
+  "compatibility_date": "2026-10-15",
+  "assets": {
+    "directory": "./dist"
+  },
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [
+    {
+      "pattern": "deadbolt.pw",
+      "custom_domain": true
+    }
+  ]
+}
