@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, bridge, panX, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
-import { clamp01, flashes, shade, wipe, working, type Box } from "../../story/motion"
+import { clamp01, flashes, shade, span, springAt, springs, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Pairing (`deadbolt/pair/1`): a new phone shows a ticket + QR code; you give the ticket to the desktop (already a
@@ -68,32 +68,32 @@ export const pairScene: StoryScene = {
     {
       at: 0,
       focus: { phone: 1, desktop: .5 },
-      caption: { text: "the new phone shows a ticket: public key, secret and address hint", anchor: [PHONE[0] + 64, PHONE[1] + 150], place: [364, 150], align: "start", delay: 0 },
+      caption: { text: "the new phone shows its ticket as text and a qr code", anchor: [PHONE[0] + PHONE[2], 100], place: [346, 100], align: "start", delay: 0 },
     },
     {
       at: 2.5,
       focus: { phone: .9, desktop: 1, carry: 1, l1: 1 },
-      caption: { text: "you pass the ticket to the desktop, which dials the phone", anchor: carryTicket.at(.5), place: [470, 56], align: "below", delay: .25 },
+      caption: { text: "you pass the ticket to the desktop, which dials the phone", anchor: carryTicket.at(.5), place: [470, 54], align: "below", delay: .25 },
     },
     {
       at: 5.6,
       focus: { phone: 1, desktop: 1, l1: 1, l2: 1 },
-      caption: { text: "each side proves it holds the ticket's secret", anchor: lane2.at(.5), place: [470, 232], align: "below", delay: .25 },
+      caption: { text: "each side proves it holds the ticket's secret", anchor: lane2.at(.5), place: [470, 220], align: "below", delay: .25 },
     },
     {
       at: 8.3,
       focus: { phone: 1, desktop: 1 },
-      caption: { text: "both screens show the same six digits; you confirm they match", anchor: [DESKTOP[0] + 30, DESKTOP[1] + 198], place: [470, 198], align: "above", delay: .25 },
+      caption: { text: "both screens show the same six digits; you confirm they match", anchor: [DESKTOP[0] + 16, DESKTOP[1] + 194], place: [594, DESKTOP[1] + 194], align: "end", delay: .25 },
     },
     {
       at: 11.3,
       focus: { phone: 1, desktop: 1, l1: 1, l2: 1 },
-      caption: { text: "the phone signs its consent to join that vault", anchor: lane2.at(.48), place: [470, 234], align: "below", delay: .3 },
+      caption: { text: "the phone signs its consent to join that vault", anchor: lane2.at(.48), place: [470, 108], align: "above", delay: .3 },
     },
     {
       at: 14.3,
       focus: { phone: 1, desktop: 1, l1: 1, l3: 1 },
-      caption: { text: "the desktop signs Add(phone) and streams the vault", anchor: lane1.at(.5), place: [470, 96], align: "above", delay: .25 },
+      caption: { text: "the desktop signs Add(phone) and streams the vault", anchor: lane3.at(.5), place: [470, 220], align: "below", delay: .25 },
     },
   ],
   draw: (t, light, story) => <Pair t={t} light={light} story={story} />,
@@ -102,7 +102,7 @@ export const pairScene: StoryScene = {
 function QrTicket({ x, y, t, story }: { x: number; y: number; t: number; story: StoryApi }) {
   // Sliding plate wipe: prints top-to-bottom on first step, dims softly once the code takes focus.
   const print = story.reduced ? 1 : wipe(t, .05, .42)
-  const dim = t < CODE_AT ? 1 : .22
+  const dim = 1 - .78 * springAt(t - CODE_AT, springs.calm)
   return <g opacity={dim}>
     <clipPath id="pair-qr-wipe">
       <rect x={x} y={y} width={64} height={64 * print} />
@@ -155,7 +155,7 @@ function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi })
     <Wire id="l3" d={lane3.d} t={t} story={story} />
 
     <Frame id="phone" box={PHONE} t={t} story={story} light={light} glyph="phone" impulses={PHONE_IMPULSES}
-      label="phone" detail={phoneDetail} heat={phoneHeat} dashed={t < ADMITTED} headerY={PHONE[1] + 23}>
+      label="phone" detail={phoneDetail} heat={phoneHeat} dashed={1 - wipe(t, ADMITTED, .4)} headerY={PHONE[1] + 23}>
       <line x1={PHONE[0] + 14} x2={PHONE[0] + PHONE[2] - 14} y1={PHONE[1] + 44} y2={PHONE[1] + 44} stroke="#1f1f1f" />
       <text x={PHONE[0] + 18} y={PHONE[1] + 64} dominantBaseline="middle" className="story-entry" fill="#cfcac1">$ deadbolt join</text>
       <QrTicket x={PHONE[0] + 18} y={PHONE[1] + 82} t={t} story={story} />
@@ -170,7 +170,7 @@ function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi })
       label="desktop" detail="member" heat={deskHeat} headerY={DESKTOP[1] + 23}>
       <line x1={DESKTOP[0] + 14} x2={DESKTOP[0] + DESKTOP[2] - 14} y1={DESKTOP[1] + 44} y2={DESKTOP[1] + 44} stroke="#1f1f1f" />
       <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 64} dominantBaseline="middle" className="story-entry"
-        fill={t >= ADD_AT ? "#ff5242" : "#cfcac1"}>{deskNote}</text>
+        fill={shade("#cfcac1", ["#ff5242", span(t, ADD_AT, ADD_AT + .15)])}>{deskNote}</text>
       {codeText && <>
         <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 194} dominantBaseline="middle" className="story-code" fill="#e8e4dc">{codeText}</text>
         <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 220} dominantBaseline="middle" className="story-note" fill="#9e9a92">match? [y/N] y</text>

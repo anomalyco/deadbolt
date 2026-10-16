@@ -40,7 +40,7 @@ const DESK_DATA_LANDS = timing(sDeskData).lands
 const LAP_DATA_LANDS = timing(sLapData).lands
 
 const sResult: Shot = {
-  id: "result", lane: "l2", path: lane2, reverse: true, at: 12.1, flight: .9,
+  id: "result", lane: "l1", path: lane1, reverse: true, at: 12.1, flight: .9,
   label: "result · ok", into: { box: DESKTOP },
 }
 const DONE_AT = timing(sResult).lands
@@ -66,27 +66,27 @@ export const syncScene: StoryScene = {
     {
       at: 0,
       focus: { desktop: 1, laptop: 1, l1: 1, l2: 1 },
-      caption: { text: "each device sends the highest entry it holds for every log", anchor: lane1.at(.5), place: [470, 74], align: "above", delay: 0 },
+      caption: { text: "each device sends the highest entry it holds for every log", anchor: lane1.at(.5), place: [470, 108], align: "above", delay: 0 },
     },
     {
       at: 2.9,
       focus: { desktop: 1, laptop: 1, l1: .4, l2: .4 },
-      caption: { text: "comparing heads tells each side what the peer is missing", anchor: [DESKTOP[0] + DESKTOP[2], 246], place: [470, 246], align: "above", delay: .2 },
+      caption: { text: "comparing heads tells each side what the peer is missing", anchor: [DESKTOP[0] + DESKTOP[2], DESKTOP[1] + 214], place: [342, DESKTOP[1] + 214], align: "start", delay: .2 },
     },
     {
       at: 5.3,
       focus: { desktop: 1, laptop: 1, l1: 1 },
-      caption: { text: "membership entries always go first", anchor: lane1.at(.48), place: [470, 74], align: "above", delay: .25 },
+      caption: { text: "membership entries always go first", anchor: lane1.at(.48), place: [470, 108], align: "above", delay: .25 },
     },
     {
       at: 8.1,
       focus: { desktop: 1, laptop: 1, l2: 1, l3: 1 },
-      caption: { text: "missing data entries flow both ways at once", anchor: lane3.at(.5), place: [470, 248], align: "below", delay: .25 },
+      caption: { text: "missing data entries flow both ways at once", anchor: lane3.at(.5), place: [470, 220], align: "below", delay: .25 },
     },
     {
       at: 11.9,
-      focus: { desktop: 1, laptop: 1, l2: 1 },
-      caption: { text: "the dialed peer answers ok once every entry is verified", anchor: lane2.at(.5), place: [470, 144], align: "above", delay: .25 },
+      focus: { desktop: 1, laptop: 1, l1: 1 },
+      caption: { text: "the dialed peer answers ok once every entry is verified", anchor: lane1.at(.5), place: [470, 108], align: "above", delay: .25 },
     },
   ],
   draw: (t, light, story) => <Sync t={t} light={light} story={story} />,
@@ -178,7 +178,7 @@ function Sync({ t, light, story }: { t: number; light: Light; story: StoryApi })
     <Wire id="l1" d={lane1.d} t={t} story={story} />
     <Wire id="l2" d={lane2.d} t={t} story={story} />
     <Wire id="l3" d={lane3.d} t={t} story={story} />
-    <text x={W / 2} y={96} textAnchor="middle" className="story-note" fill="#5e5e5e">iroh · quic · deadbolt/sync/1</text>
+    <text x={W / 2} y={30} textAnchor="middle" className="story-note" fill="#5e5e5e">iroh · quic · deadbolt/sync/1</text>
 
     <Frame id="desktop" box={DESKTOP} t={t} story={story} light={light} glyph="desktop" impulses={DESKTOP_IMPULSES}
       label="desktop" detail="heads" heat={deskHeat} headerY={DESKTOP[1] + 23}>

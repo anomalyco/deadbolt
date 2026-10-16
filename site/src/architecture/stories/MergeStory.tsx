@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, between, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
-import { clamp01, flashes, shade, springAt, springs, wipe, working, type Box } from "../../story/motion"
+import { clamp01, flashes, shade, span, springAt, springs, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Concurrent edits: the desktop and the laptop both change the `github` password while apart. Both edits replace
@@ -12,12 +12,14 @@ const W = 940, H = 330
 
 const DESKTOP: Box = [54, 188, 286, 108]
 const LAPTOP: Box = [600, 188, 286, 108]
-const ITEM_BASE: Box = [270, 26, 400, 100]
+const ITEM_BASE: Box = [270, 40, 400, 100]
+// The item grows upward to hold its history row, so its bottom edge, where the wires land, stays put.
+const GROWN: Box = [270, 12, 400, 128]
 
 const crossAB = across([DESKTOP[0] + DESKTOP[2], 228], [LAPTOP[0], 228], .36)
 const crossBA = across([LAPTOP[0], 260], [DESKTOP[0] + DESKTOP[2], 260], .36)
-const deskToItem = between([196, DESKTOP[1]], [350, ITEM_BASE[1] + 100], .5)
-const lapToItem = between([744, LAPTOP[1]], [590, ITEM_BASE[1] + 100], .5)
+const deskToItem = between([196, DESKTOP[1]], [350, ITEM_BASE[1] + ITEM_BASE[3]], .5)
+const lapToItem = between([744, LAPTOP[1]], [590, ITEM_BASE[1] + ITEM_BASE[3]], .5)
 
 type Shot = Send & { id: string; lane: string; label?: string }
 
@@ -27,11 +29,11 @@ const sSyncBA: Shot = { id: "ba", lane: "cross", path: crossBA, at: 3.38, flight
 const SYNC_LANDS = Math.max(timing(sSyncAB).lands, timing(sSyncBA).lands)
 
 const COMPARE_AT = 6.2
-const sWinToItem: Shot = { id: "win", lane: "lapUp", path: lapToItem, at: COMPARE_AT + .25, flight: .8, label: "a94b > 7c1e", into: { box: [270, 26, 400, 126] } }
+const sWinToItem: Shot = { id: "win", lane: "lapUp", path: lapToItem, at: COMPARE_AT + .25, flight: .8, label: "a94b > 7c1e", into: { box: ITEM_BASE } }
 const SETTLE_AT = timing(sWinToItem).lands
 
 const NEXT_AT = 10.2
-const sNextToItem: Shot = { id: "next", lane: "deskUp", path: deskToItem, at: NEXT_AT + .35, flight: .85, label: "replaces blue-whale", into: { box: [270, 26, 400, 126] } }
+const sNextToItem: Shot = { id: "next", lane: "deskUp", path: deskToItem, at: NEXT_AT + .35, flight: .85, label: "replaces blue-whale", into: { box: GROWN } }
 const NEXT_LANDS = timing(sNextToItem).lands
 
 const SHOTS: readonly Shot[] = [sSyncAB, sSyncBA, sWinToItem, sNextToItem]
@@ -55,22 +57,22 @@ export const mergeScene: StoryScene = {
     {
       at: 0,
       focus: { item: .85, desktop: 1, laptop: 1 },
-      caption: { text: "the desktop and laptop both replace v1 while apart", anchor: [DESKTOP[0] + DESKTOP[2], 212], place: [470, 174], align: "above", delay: 0 },
+      caption: { text: "the desktop and laptop both replace v1 while apart", anchor: [DESKTOP[0] + DESKTOP[2], 212], place: [470, 144], align: "below", delay: 0 },
     },
     {
       at: 3.0,
       focus: { desktop: 1, laptop: 1, cross: 1, item: .55 },
-      caption: { text: "when they sync, neither edit has seen the other", anchor: crossAB.at(.5), place: [470, 298], align: "below", delay: .2 },
+      caption: { text: "when they sync, neither edit has seen the other", anchor: crossAB.at(.5), place: [470, 214], align: "above", delay: .2 },
     },
     {
       at: 6.0,
       focus: { item: 1, desktop: .85, laptop: 1, lapUp: 1 },
-      caption: { text: "the higher entry hash wins; the other value moves to history", anchor: [670, 88], place: [708, 88], align: "start", delay: .35 },
+      caption: { text: "the higher entry hash wins; the other value moves to history", width: 26, anchor: [670, 90], place: [686, 90], align: "start", delay: .35 },
     },
     {
       at: 10.0,
       focus: { item: 1, desktop: 1, laptop: .55, deskUp: 1 },
-      caption: { text: "a later edit that saw blue-whale replaces it cleanly", anchor: deskToItem.at(.55), place: [222, 138], align: "end", delay: .25 },
+      caption: { text: "a later edit that saw blue-whale replaces it cleanly", anchor: deskToItem.at(.6), place: [258, 132], align: "end", delay: .25 },
     },
   ],
   draw: (t, light, story) => <Merge t={t} light={light} story={story} />,
@@ -85,9 +87,10 @@ function Wire({ id, d, t, story, dashed }: { id: string; d: string; t: number; s
 function Merge({ t, light, story }: { t: number; light: Light; story: StoryApi }) {
   for (const shot of SHOTS) send(light, shot, t)
 
-  // The item card resizes on a calm zero-bounce spring when the concurrent loser moves into history.
+  // The item card grows upward on a calm zero-bounce spring when the concurrent loser moves into history.
   const expand = story.reduced ? 1 : springAt(t - SETTLE_AT, springs.calm)
-  const itemBox: Box = [ITEM_BASE[0], ITEM_BASE[1], ITEM_BASE[2], Math.round((100 + 28 * expand) * 10) / 10]
+  const grow = Math.round(28 * expand * 10) / 10
+  const itemBox: Box = [ITEM_BASE[0], ITEM_BASE[1] - grow, ITEM_BASE[2], ITEM_BASE[3] + grow]
 
   const itemHeat = flashes(t, [SETTLE_AT, NEXT_LANDS], 1.2)
   const deskHeat = flashes(t, [EDIT_AT, timing(sSyncBA).lands, NEXT_AT], 1.1)
@@ -104,12 +107,16 @@ function Merge({ t, light, story }: { t: number; light: Light; story: StoryApi }
     : working("password = green-fox", t, NEXT_AT, NEXT_AT + .32, 5) ?? "password = green-fox"
   const deskLine2 = t < NEXT_AT
     ? "replaces v1 · hash 7c1e…"
-    : "replaces blue-whale · hash c30a…"
+    : working("replaces blue-whale · hash c30a…", t, NEXT_AT, NEXT_AT + .4, 6) ?? "replaces blue-whale · hash c30a…"
+  const deskEntry = t < NEXT_AT ? "entry 7c1e" : working("entry c30a", t, NEXT_AT, NEXT_AT + .3, 2) ?? "entry c30a"
 
   const itemLit = clamp01((story.focus(t, "item", .35) - .35) / .65)
   const deskLit = clamp01((story.focus(t, "desktop", .35) - .35) / .65)
   const lapLit = clamp01((story.focus(t, "laptop", .35) - .35) / .65)
   const histWipe = story.reduced ? 1 : wipe(t, SETTLE_AT + .06, .34)
+  // The comparison between the wires is printed when both edits have arrived, and lifts off once a later edit
+  // makes it moot.
+  const compared = span(t, SYNC_LANDS, SYNC_LANDS + .25) * (1 - span(t, NEXT_AT, NEXT_AT + .2))
 
   return <>
     <Wire id="cross" d={crossAB.d} t={t} story={story} />
@@ -135,7 +142,7 @@ function Merge({ t, light, story }: { t: number; light: Light; story: StoryApi }
     </Frame>
 
     <Frame id="desktop" box={DESKTOP} t={t} story={story} light={light} glyph="desktop" impulses={DESKTOP_IMPULSES}
-      label="desktop" detail={t >= NEXT_AT ? "entry c30a" : "entry 7c1e"} heat={deskHeat} headerY={DESKTOP[1] + 22}>
+      label="desktop" detail={deskEntry} heat={deskHeat} headerY={DESKTOP[1] + 22}>
       <line x1={DESKTOP[0] + 14} x2={DESKTOP[0] + DESKTOP[2] - 14} y1={DESKTOP[1] + 40} y2={DESKTOP[1] + 40} stroke="#1f1f1f" />
       <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 62} dominantBaseline="middle" className="story-entry" fill={shade("#7a7a7a", ["#e8e4dc", deskLit])}>{deskLine1}</text>
       <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 84} dominantBaseline="middle" className="story-note" fill={shade("#585858", ["#9e9a92", deskLit])}>{deskLine2}</text>
@@ -148,7 +155,7 @@ function Merge({ t, light, story }: { t: number; light: Light; story: StoryApi }
       <text x={LAPTOP[0] + 18} y={LAPTOP[1] + 84} dominantBaseline="middle" className="story-note" fill={shade("#585858", ["#9e9a92", lapLit])}>replaces v1 · hash a94b…</text>
     </Frame>
 
-    {t >= SYNC_LANDS && t < NEXT_AT && <text x={W / 2} y={246} textAnchor="middle" className="story-note" fill="#8d8a84">a94b… &gt; 7c1e…</text>}
+    {compared > 0 && <text x={W / 2} y={246} textAnchor="middle" className="story-note" fill="#8d8a84" opacity={compared}>a94b… &gt; 7c1e…</text>}
 
     {SHOTS.map(shot => <Carried key={shot.id} shot={shot} t={t} label={shot.label} />)}
   </>
