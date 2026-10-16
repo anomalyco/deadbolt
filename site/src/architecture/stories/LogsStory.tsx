@@ -1,5 +1,6 @@
 import type { Light, Tone } from "../../story/light"
-import { between, bridge, drawOn, flood, send, spark, timing, travelled, type Path, type Send } from "../../story/beats"
+import type { SceneCue } from "../../sound"
+import { between, bridge, drawOn, flood, panX, send, soundOfSend, spark, timing, travelled, type Path, type Send } from "../../story/beats"
 import { Carried, DeviceGlyph, type DeviceKind } from "../../story/devices"
 import { clamp01, flashes, inkFlash, shade, span, springAt, springs, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -114,9 +115,23 @@ const DESKTOP_IMPULSES = [ENTRIES.d1.at, ENTRIES.d2.at, ENTRIES.d3.at, ENTRIES.d
 const LAPTOP_IMPULSES = [consent.at, ENTRIES.l0.at, ENTRIES.l1.at]
 
 const ALL_LINKS = Object.fromEntries(Object.keys(LINKS).map(key => [key, .35]))
+const LOG_SOUNDS: SceneCue[] = [
+  ...IDS.filter(id => ENTRIES[id].at > 0).flatMap((id): SceneCue[] => [
+    { at: ENTRIES[id].at, cue: "write", detail: { pan: panX(ENTRIES[id].x, W) } },
+    { at: ENTRIES[id].at + .24, cue: "seal", detail: { pan: panX(ENTRIES[id].x + EW / 2, W), gain: .75 } },
+  ]),
+  ...sees.map((s): SceneCue => ({ at: s.at, cue: "link", detail: { pan: panX(s.path.at(0)[0], W), gain: .7 } })),
+  ...soundOfSend(consent, W, .8).cues,
+  { at: SIGNED, cue: "seal", detail: { pan: panX(ENTRIES.d4.x + EW / 2, W) } },
+  { at: TAMPERED, cue: "break", detail: { pan: panX(ENTRIES.d1.x, W) } },
+]
+const LOG_FLIGHTS = [consent, ...hashes].map(s => soundOfSend(s, W, .75).flight)
+
 export const logsScene: StoryScene = {
   label: "Two devices (desktop and laptop) each append signed entries to their own log. Each entry points back at the entries its author had seen.",
   width: W, height: H, duration: 32.5, poster: 6,
+  sounds: LOG_SOUNDS,
+  flights: LOG_FLIGHTS,
   steps: [
     { at: 0, focus: { d0: 1, desktop: 1 },
       caption: { text: "the desktop creates the vault", anchor: top("d0"), place: [196, 58], align: "above", delay: 0 } },

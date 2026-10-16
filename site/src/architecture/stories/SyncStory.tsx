@@ -1,5 +1,5 @@
 import type { Light } from "../../story/light"
-import { across, send, timing, type Send } from "../../story/beats"
+import { across, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
 import { clamp01, flashes, shade, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -53,6 +53,15 @@ const LAPTOP_IMPULSES = [sHeadsB.at, timing(sHeadsA).lands, sMem.at, sLapData.at
 export const syncScene: StoryScene = {
   label: "The desktop and the laptop exchange log heads, send missing membership entries first, then exchange missing data entries and confirm.",
   width: W, height: H, duration: 15.6, poster: 4,
+  sounds: [
+    ...soundOfSend(sHeadsA, W, .75).cues,
+    { at: DIFF_AT, cue: "write", detail: { pan: 0, gain: .65 } },
+    ...soundOfSend(sMem, W, .85).cues,
+    ...soundOfSend(sDeskData, W, .8).cues,
+    { at: LAP_DATA_LANDS, cue: "write", detail: { pan: panX(DESKTOP[0] + DESKTOP[2] / 2, W), gain: .7 } },
+    ...soundOfSend(sResult, W, .8).cues,
+  ],
+  flights: [sHeadsA, sMem, sDeskData, sResult].map(s => soundOfSend(s, W, .75).flight),
   steps: [
     {
       at: 0,

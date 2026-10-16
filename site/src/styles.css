@@ -42,6 +42,7 @@ h1 { grid-column: 1; grid-row: 2; margin: 12px 0 0; font: 400 1.5cqw/1.75 var(--
 h1 b { display: flex; align-items: center; font-weight: 400; }
 h1 .fill { flex: 1; margin: 0 .7em; border-bottom: 1px dotted currentColor; opacity: .6; }
 h1 .tail { flex: none; margin-left: .6em; position: relative; top: .5px; }
+.masthead-sound { grid-column: 2; grid-row: 2; justify-self: end; align-self: end; margin-top: 12px; }
 h2 { margin: 0 0 var(--s3); font-size: clamp(20px, 3.2vw, 27px); font-weight: 500; letter-spacing: .02em; }
 h3 { margin: var(--s3) 0 var(--s2); font-size: var(--type); font-weight: 500; }
 

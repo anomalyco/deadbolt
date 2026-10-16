@@ -1,4 +1,4 @@
-import type { ReactNode } from "react"
+import { lazy, Suspense, type ReactNode } from "react"
 import { Ink } from "../print/Ink"
 import { Masthead } from "../print/Masthead"
 import { MeshStory } from "./stories/MeshStory"
@@ -104,6 +104,9 @@ const crates: [string, string, string][] = [
   ["deadbolt-cli", "the deadbolt binary: commands, the background agent, the socket protocol, bitwarden import.", "crates/cli"],
 ]
 
+const Audition = lazy(() => import("../sound/Audition.tsx").then(m => ({ default: m.Audition })))
+const showSounds = typeof location !== "undefined" && new URLSearchParams(location.search).has("sounds")
+
 export function Architecture() {
   return <div className="site">
     <Ink />
@@ -111,6 +114,7 @@ export function Architecture() {
       <nav className="nav"><a href="/">← deadbolt</a><span>architecture</span></nav>
       <Masthead />
       <p className="description">how deadbolt works, one moving diagram at a time. each diagram loops while it's on screen; hover the bar under it to hold, click a segment to jump, or drag to scrub.</p>
+      {showSounds && <Suspense fallback={null}><Audition /></Suspense>}
       <ol className="toc">
         {chapters.map(c => <li key={c.id}><a href={`#${c.id}`}>{c.title}</a></li>)}
         <li><a href="#code">the code</a></li>

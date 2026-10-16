@@ -1,5 +1,5 @@
 import type { Light } from "../../story/light"
-import { across, between, send, timing, type Send } from "../../story/beats"
+import { across, between, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
 import { clamp01, flashes, shade, springAt, springs, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -42,6 +42,15 @@ const LAPTOP_IMPULSES = [EDIT_AT + .16, timing(sSyncAB).lands, COMPARE_AT + .25]
 export const mergeScene: StoryScene = {
   label: "Two concurrent edits to the same field: the higher entry hash wins on every device, and the other value moves to history.",
   width: W, height: H, duration: 14.2, poster: 2,
+  sounds: [
+    { at: EDIT_AT, cue: "write", detail: { pan: panX(DESKTOP[0] + DESKTOP[2] / 2, W) } },
+    { at: EDIT_AT + .16, cue: "write", detail: { pan: panX(LAPTOP[0] + LAPTOP[2] / 2, W) } },
+    ...soundOfSend(sSyncAB, W, .8).cues,
+    ...soundOfSend(sWinToItem, W, .85).cues,
+    { at: NEXT_AT, cue: "write", detail: { pan: panX(DESKTOP[0] + DESKTOP[2] / 2, W) } },
+    ...soundOfSend(sNextToItem, W, .85).cues,
+  ],
+  flights: [sSyncAB, sWinToItem, sNextToItem].map(s => soundOfSend(s, W, .75).flight),
   steps: [
     {
       at: 0,

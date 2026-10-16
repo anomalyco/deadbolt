@@ -1,4 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent, type ReactNode } from "react"
+import { useCues, type Flight, type SceneCue } from "../sound"
 import { createRenderer, emptyLight, pack, packedLength, type Light, type Renderer } from "./light"
 import { clamp01, ease, smoothstep, span, springAt, springs, type Point } from "./motion"
 import { onFrame } from "./ticker"
@@ -39,6 +40,10 @@ export type StoryScene = {
   steps: readonly Step[]
   /** The step whose settled pose is shown under reduced motion. Defaults to the last. */
   poster?: number
+  /** Discrete sound cues along the scene clock. */
+  sounds?: readonly SceneCue[]
+  /** Continuous send-voice flights along the scene clock. */
+  flights?: readonly Flight[]
   /** Draws the scene at time `t` as SVG and pushes its lights into `light`. Must be pure. */
   draw(t: number, light: Light, story: StoryApi): ReactNode
 }
@@ -93,6 +98,15 @@ export function Story({ scene }: { scene: StoryScene }) {
   const drag = useRef<{ x: number; moved: boolean } | null>(null)
   const [renderer, setRenderer] = useState<Renderer | null | "pending">("pending")
   const story = useMemo(() => storyApi(scene, reduced), [scene, reduced])
+  const stepTimes = useMemo(() => scene.steps.map(s => s.at), [scene])
+
+  useCues(t, scene.sounds ?? [], {
+    host,
+    duration: scene.duration,
+    steps: stepTimes,
+    flights: scene.flights,
+    scrubbing: () => Boolean(drag.current?.moved),
+  })
 
   const seek = (time: number) => { clock.current.t = time; setT(time) }
 

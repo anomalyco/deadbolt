@@ -2,6 +2,7 @@ import type { CSSProperties } from "react"
 import { LockSimple, Skull } from "@phosphor-icons/react"
 import { colorHex } from "knobs"
 import { Knobs, useControls } from "knobs/react"
+import { SoundToggle } from "../sound"
 import { KeyholePrint } from "./KeyholePrint"
 import { Splatter } from "./Ink"
 import { header } from "./tuning"
@@ -29,5 +30,6 @@ export function Masthead({ subtitle }: { subtitle?: string }) {
       <b><span>secrets</span><i className="fill" /><span>kept</span><LockSimple size={11} className="tail" /></b>
       <b><span>for</span><i className="fill" /><span>ever</span><Skull size={11} className="tail" /></b>
     </h1>
+    <SoundToggle className="masthead-sound" />
   </header></Knobs>
 }

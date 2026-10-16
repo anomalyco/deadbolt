@@ -1,5 +1,6 @@
 import { useRef } from "react"
 import { colorHex, springMotion } from "knobs"
+import { createHeartbeat } from "../sound"
 import { ShaderCanvas, glslNoise } from "./ShaderCanvas"
 import { dithers, glides, header, type HeaderValues } from "./tuning"
 
@@ -95,6 +96,7 @@ const numbers = (value: HeaderValues[(typeof uniforms)[number]]): number[] =>
 
 const { omega } = springMotion({ duration: 0.5, bounce: 0 })
 const reduced = matchMedia("(prefers-reduced-motion: reduce)")
+const heartbeat = createHeartbeat()
 
 type Glide = { x: number[]; v: number[]; to: number[]; from: unknown }
 
@@ -104,7 +106,10 @@ export function KeyholePrint({ className }: { className?: string }) {
     setup={(_gl, _u, scale) => { state.current = { scale, clock: 7, glide: new Map() } }}
     frame={(gl, u, dt) => {
       const s = state.current, values = header.get()
-      if (!values.freeze) s.clock += dt * values.speed
+      if (!values.freeze) {
+        s.clock += dt * values.speed
+        heartbeat(s.clock, { rate: values.pulseRate, speed: values.speed, strength: values.beat / .35 })
+      }
       gl.uniform1f(u("time"), s.clock)
       gl.uniform1i(u("dither"), Math.max(0, dithers.indexOf(values.dither)))
       for (const key of uniforms) {

@@ -1,5 +1,5 @@
 import type { Light } from "../../story/light"
-import { across, between, polyline, send, spark, timing, type Send } from "../../story/beats"
+import { across, between, panX, polyline, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
 import { Carried, Frame, RefusalMark, edge } from "../../story/devices"
 import { clamp01, ease, flashes, shade, span, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -43,6 +43,17 @@ const PHONE_IMPULSES = [timing(sNormal).lands, sTryLap.at, sTryDesk.at]
 export const removeScene: StoryScene = {
   label: "The desktop removes the phone; the removal spreads to the laptop; the phone's attempts to sync are refused at the membership gate.",
   width: W, height: H, duration: 16.0, poster: 3,
+  sounds: [
+    ...soundOfSend(sNormal, W, .8).cues,
+    { at: REMOVE_AT, cue: "remove", detail: { pan: panX(DESKTOP[0] + DESKTOP[2] / 2, W) } },
+    ...soundOfSend(sSpread, W, .85).cues,
+    { at: timing(sTryLap).launch, cue: "send", detail: { pan: panX(PHONE[0], W), gain: .75 } },
+    { at: REFUSE_LAP, cue: "refuse", detail: { pan: panX(GATE_X, W) } },
+    { at: timing(sTryDesk).launch, cue: "send", detail: { pan: panX(PHONE[0], W), gain: .75 } },
+    { at: REFUSE_DESK, cue: "refuse", detail: { pan: panX(GATE_X, W) } },
+    ...soundOfSend(sNewEntry, W, .8).cues,
+  ],
+  flights: [sNormal, sSpread, sTryLap, sTryDesk, sNewEntry].map(s => soundOfSend(s, W, .75).flight),
   steps: [
     {
       at: 0,

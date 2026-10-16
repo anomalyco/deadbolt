@@ -1,5 +1,5 @@
 import type { Light } from "../../story/light"
-import { across, bridge, send, timing, type Send } from "../../story/beats"
+import { across, bridge, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame, edge } from "../../story/devices"
 import { clamp01, flashes, shade, span, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -57,6 +57,11 @@ const PHONE_IMPULSES = [WAKE, timing(sCatchup).lands]
 export const meshScene: StoryScene = {
   label: "Devices hold the vault and sync entries directly over iroh, using an n0 relay for encrypted ciphertext only when direct connection fails.",
   width: W, height: H, duration: 15.2, poster: 3,
+  sounds: [
+    ...SHOTS.flatMap(s => soundOfSend(s, W, .8).cues),
+    { at: WAKE, cue: "write", detail: { pan: panX(PHONE[0] + PHONE[2] / 2, W), gain: .7 } },
+  ],
+  flights: SHOTS.map(s => soundOfSend(s, W, .75).flight),
   steps: [
     {
       at: 0,

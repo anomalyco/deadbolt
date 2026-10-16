@@ -1,5 +1,5 @@
 import type { Light } from "../../story/light"
-import { across, bridge, send, spark, timing, type Send } from "../../story/beats"
+import { across, bridge, panX, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
 import { clamp01, flashes, shade, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -53,6 +53,17 @@ const QR_MODULES = (() => {
 export const pairScene: StoryScene = {
   label: "A new phone shows a ticket; the desktop dials it, both prove the secret, you compare six-digit codes, and the desktop admits the phone.",
   width: W, height: H, duration: 18.2, poster: 5,
+  sounds: [
+    { at: .15, cue: "write", detail: { pan: panX(PHONE[0] + PHONE[2] / 2, W) } },
+    ...soundOfSend(sCarry, W, .8).cues,
+    ...soundOfSend(sDial, W, .8).cues,
+    ...soundOfSend(sProofA, W, .75).cues,
+    { at: CODE_AT, cue: "codeMatch", detail: { pan: 0 } },
+    ...soundOfSend(sConsent, W, .8).cues,
+    { at: ADD_AT, cue: "seal", detail: { pan: panX(DESKTOP[0] + DESKTOP[2] / 2, W) } },
+    { at: ADMITTED, cue: "join", detail: { pan: panX(PHONE[0] + PHONE[2] / 2, W) } },
+  ],
+  flights: [sCarry, sDial, sProofA, sConsent, sMem].map(s => soundOfSend(s, W, .75).flight),
   steps: [
     {
       at: 0,

@@ -1,4 +1,5 @@
 import type { Light, Tone } from "./light"
+import type { Flight, SceneCue } from "../sound"
 import { clamp01, ease, flash, smootherInverse, smootherstep, smoothstep, span, type Box, type Point } from "./motion"
 
 // The story vocabulary (explainer-motion's Send & Connect): light gathers at a port, a head flies along a path
@@ -195,4 +196,22 @@ export function spark(light: Light, at: Point, age: number, tone: Tone, strength
   light.dots.push({ at, radius: 2.4, intensity: k, tone })
   const q = clamp01(age / .5)
   light.rings.push({ at, radius: 3 + 9 * (1 - (1 - q) * (1 - q)), width: 1.5, intensity: .6 * Math.pow(1 - q, 2) * strength, tone })
+}
+
+/** Stereo pan (−0.85..0.85) from a scene x coordinate. */
+export const panX = (x: number, width = 940) => +(((x / width) * 2 - 1) * .85).toFixed(2)
+
+/** Sound cues (`send` + `land`) and continuous `Flight` for a `Send` beat. */
+export function soundOfSend(s: Send, width = 940, gain = .85): { cues: SceneCue[]; flight: Flight } {
+  const { launch, lands } = timing(s)
+  const start = s.path.at(s.reverse ? 1 : 0)
+  const end = s.path.at(s.reverse ? 0 : 1)
+  const pan0 = panX(start[0], width), pan1 = panX(end[0], width)
+  return {
+    cues: [
+      { at: launch, cue: "send", detail: { pan: pan0, gain: gain * (s.strength ?? 1) } },
+      { at: lands, cue: "land", detail: { pan: pan1, gain: gain * (s.strength ?? 1) } },
+    ],
+    flight: { from: launch, to: lands, pan: [pan0, pan1], gain: gain * (s.strength ?? 1) },
+  }
 }

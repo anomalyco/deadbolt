@@ -1,5 +1,5 @@
 import type { Light } from "../../story/light"
-import { across, between, drawOn, polyline, send, spark, timing, type Send } from "../../story/beats"
+import { across, between, drawOn, panX, polyline, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
 import { Carried, Frame, RefusalMark, edge } from "../../story/devices"
 import { clamp01, flashes, shade, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
@@ -46,6 +46,16 @@ const DESKTOP_IMPULSES = [REVEAL, SIGN_AT]
 export const keysScene: StoryScene = {
   label: "Your passphrase is stretched by Argon2id into the unlock key, which opens the sealed keyset holding the data key and the desktop's device key.",
   width: W, height: H, duration: 18.0, poster: 4,
+  sounds: [
+    ...soundOfSend(sPass, W, .8).cues,
+    ...soundOfSend(sKey, W, .8).cues,
+    { at: timing(sOpen).lands, cue: "unlock", detail: { pan: panX(KEYSET[0] + KEYSET[2] / 2, W) } },
+    ...soundOfSend(sSeal, W, .8).cues,
+    { at: SIGN_AT, cue: "seal", detail: { pan: panX(DEVICE[0] + DEVICE[2] / 2, W) } },
+    { at: timing(sWrong).launch, cue: "send", detail: { pan: panX(PASS[0] + PASS[2], W), gain: .75 } },
+    { at: REFUSED, cue: "refuse", detail: { pan: panX(652, W) } },
+  ],
+  flights: [sPass, sKey, sOpen, sSeal, sWrong].map(s => soundOfSend(s, W, .75).flight),
   steps: [
     {
       at: 0,
