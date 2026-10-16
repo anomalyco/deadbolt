@@ -1,0 +1,31 @@
+[package]
+name = "deadbolt-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "deadbolt"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.104"
+blake3 = "1.8"
+clap = { version = "4.6.7", features = ["derive"] }
+data-encoding = "2.11.1"
+deadbolt-core = { path = "../core" }
+deadbolt-net = { path = "../net" }
+deadbolt-store = { path = "../store" }
+libc = "0.2.190"
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal"] }
+toml = "1.1.6"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+zeroize = "1.9"
+
+[dev-dependencies]
+tempfile = "3.27.0"
