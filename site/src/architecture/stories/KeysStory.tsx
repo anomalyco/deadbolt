@@ -108,9 +108,7 @@ export const keysScene: StoryScene = {
 function keysLights(t: number, light: Light) {
   for (const shot of SHOTS) send(light, shot, t)
 
-  if (t >= SIGN_AT && t < SIGN_AT + 1.2) {
-    spark(light, edge.right(DEVICE), t - SIGN_AT, "red", .85)
-  }
+  spark(light, edge.right(DEVICE), t - SIGN_AT, "red", .85)
 
   // The keyset's ciphertext wicks clear from the socket the unseal arrived at (√t). When the vault locks again
   // the clearing closes back over it like an iris, before the wrong passphrase arrives.

@@ -168,7 +168,7 @@ function logsLights(t: number, light: Light) {
     const red = e.membership
     // The seal: the author's signature, stamped on the right edge once the entry is written.
     const seal: readonly [number, number] = [e.x + EW / 2, y]
-    if (e.at > 0 && age < 1.6) spark(light, seal, age - .3, red ? "red" : "hot", .7)
+    if (e.at > 0) spark(light, seal, age - .3, red ? "red" : "hot", .7)
     if (id === "d4") spark(light, seal, t - SIGNED, "hot", 1)
     if (brokenAt[id] !== undefined) spark(light, seal, t - brokenAt[id]!, "amber", .8)
     if (e.at > 0) flood(light, box(id), [e.x, y], age, red ? "red" : "ivory", .55, .9)

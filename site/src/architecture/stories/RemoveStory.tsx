@@ -83,9 +83,7 @@ export const removeScene: StoryScene = {
   ],
   draw: (t, light, story) => {
     for (const shot of SHOTS) send(light, shot, t)
-    if (t >= REMOVE_AT && t < REMOVE_AT + 1.1) {
-      spark(light, edge.right(DESKTOP), t - REMOVE_AT, "red", .9)
-    }
+    spark(light, edge.right(DESKTOP), t - REMOVE_AT, "red", .9)
     refusal(light, [GATE_X, PHONE[1] + PHONE[3] / 2 + 10], t, REFUSE_LAP)
     refusal(light, [GATE_X, PHONE[1] + PHONE[3] / 2 - 10], t, REFUSE_DESK)
     return <Remove t={t} light={light} story={story} />

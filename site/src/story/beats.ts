@@ -1,6 +1,6 @@
 import type { Light, Tone } from "./light"
 import type { Flight, SceneCue } from "../sound"
-import { clamp01, ease, flash, smootherInverse, smootherstep, smoothstep, span, type Box, type Point } from "./motion"
+import { DARK, clamp01, cooling, ease, flash, smootherInverse, smootherstep, smoothstep, span, type Box, type Point } from "./motion"
 import { coolingScale, shutter } from "./tuning"
 
 // The story vocabulary (explainer-motion's Send & Connect): light gathers at a port, a head flies along a path
@@ -112,9 +112,27 @@ function crossings(path: Path) {
   return cached
 }
 
-/** A filament `a` (0..1) of the way through its cooling time (Newton's law, cut to cold at the end): it drops fast,
- *  then holds a long dim tail. */
-export const temperature = (a: number) => a >= 1 ? 0 : Math.exp(-2.6 * Math.max(0, a)) * (1 - a * a)
+/** A trail drawn at this heat is under one ink step, so it can stop there. */
+const TRAIL_DARK = .005
+/** How long a trail point glows, in cooling times: until its heat is TRAIL_DARK. */
+const TRAIL_END = Math.log(1 / TRAIL_DARK) / 3.4
+
+/** A filament `a` cooling times after the head crossed it (Newton's law): it drops fast, then keeps a long dim tail
+ *  that fades below an ink step (at TRAIL_END) instead of being cut to cold at a set time. */
+export const temperature = (a: number) => {
+  const k = Math.exp(-3.4 * Math.max(0, a))
+  return k < TRAIL_DARK ? 0 : k
+}
+
+/** A flood's light `t` of its duration after it arrived. It rises over 7%, soaks at e^(−.9t) while the front spreads,
+ *  then cools faster, at e^(−3.5t), easing between the two rates around t = .7. Its log only ever falls at a steady
+ *  rate, so it never seems to switch off; it stops once DARK, about 2.5 durations in. */
+function soaking(t: number) {
+  const slow = .9, fast = 3.5, knee = .7, soft = .15
+  const softplus = (x: number) => x > 20 ? x : Math.log1p(Math.exp(x))
+  const k = Math.exp(-slow * t - (fast - slow) * soft * (softplus((t - knee) / soft) - softplus(-knee / soft))) * smoothstep(t / .07)
+  return k < DARK ? 0 : k
+}
 
 /** Pushes the lights of one send at time t. */
 export function send(light: Light, s: Send, t: number) {
@@ -124,11 +142,10 @@ export function send(light: Light, s: Send, t: number) {
   const point = (f: number) => s.path.at(s.reverse ? 1 - f : f)
   const origin = point(0)
 
-  // Origin ember: hot port filament cooling over 1.1s after launch.
-  if (t >= launch && t < launch + 1.1) {
-    const e = (t - launch) / 1.1
-    const ember = .28 * Math.min(e / .05, 1) * Math.pow(1 - e, 1.4) * k
-    if (ember > .01) light.dots.push({ at: origin, radius: 2.2, intensity: ember, tone })
+  // Origin ember: the port's filament, heated by the launch, cooling (τ .5s) long after the head has gone.
+  if (t >= launch) {
+    const ember = .28 * Math.min((t - launch) / .055, 1) * cooling(t - launch, .5) * k
+    if (ember > DARK) light.dots.push({ at: origin, radius: 2.2, intensity: ember, tone })
   }
 
   // The trail: each point heats white as the head crosses it, then cools through the signal's tone to dark.
@@ -142,7 +159,7 @@ export function send(light: Light, s: Send, t: number) {
   }
   const ordered = s.reverse ? [...s.path.points].reverse() : s.path.points
   const progress = travelled(s, t)
-  if (t > launch && t < lands + cool) {
+  if (t > launch && t < lands + cool * TRAIL_END) {
     for (let i = 0; i < count - 1; i++) {
       const h0 = heat(i)
       if (h0 < 0) break
@@ -163,15 +180,17 @@ export function send(light: Light, s: Send, t: number) {
     light.dots.push({ at: point(progress), from: point(travelled(s, t - shutter())), radius: 3, intensity: k, tone })
     return
   }
-  const q = (t - lands) / LAND, end = point(1)
-  if (q < 1) {
-    const opening = smoothstep(q / .24)
-    light.rings.push({
-      at: end, radius: 2 + 2 * opening + 9.1 * (1 - (1 - q) * (1 - q)), width: 4 + (1.5 - 4) * opening,
-      intensity: (1 - .734 * opening) * Math.pow(1 - q, 2.52) * k, tone,
-    })
+  // Landing: the head's light stays where it hit and cools in a blink (τ 70ms), so its bloom and the border it lit
+  // don't switch off on the frame it lands; meanwhile the dot opens into a ring that keeps spreading as it fades.
+  const age = t - lands, q = age / LAND, end = point(1)
+  const impact = cooling(age, .07) * k
+  if (impact > DARK) light.dots.push({ at: end, radius: 3, intensity: impact, tone })
+  const opening = smoothstep(q / .24)
+  const splash = (1 - .734 * opening) * cooling(q, .345) * k
+  if (splash > DARK) {
+    light.rings.push({ at: end, radius: 2 + 2 * opening + 9.8 * (1 - Math.exp(-2.2 * q)), width: 4 + (1.5 - 4) * opening, intensity: splash, tone })
   }
-  if (s.into) flood(light, s.into.box, end, t - lands, s.into.tone ?? tone, k)
+  if (s.into) flood(light, s.into.box, end, age, s.into.tone ?? tone, k)
 }
 
 /** How much of a wire drawn by `drawOn` is drawn at time t. */
@@ -190,13 +209,15 @@ export function drawOn(light: Light, path: Path, t: number, at: number, duration
 }
 
 /** Light wicking into a box from a point on its edge, `age` seconds after it arrived. Like ink into paper
- *  (Washburn), the wet front advances as √t until it has crossed most of the card, then the whole stain cools. */
+ *  (Washburn), the wet front advances as √t until it has crossed most of the card (at .8 of `duration`), and the
+ *  stain soaks, then cools with a long tail (see `soaking`). */
 export function flood(light: Light, box: Box, from: Point, age: number, tone: Tone, strength = 1, duration = FLOOD) {
   const t = age / duration
-  if (t < 0 || t >= 1) return
+  if (t < 0) return
+  const intensity = .9 * soaking(t) * strength
+  if (intensity < DARK) return
   const reach = (.06 + .66 * Math.sqrt(Math.min(1, t / .8))) * Math.max(box[2], box[3])
-  const fade = Math.exp(-.9 * t) * (1 - smoothstep((t - .65) / .35)) * smoothstep(t / .07)
-  light.floods.push({ box, from, reach, intensity: .9 * fade * strength, tone })
+  light.floods.push({ box, from, reach, intensity, tone })
 }
 
 /** Sealed ciphertext printed in a card's free band. It clears from `open.from` as light wicks in, and its bits
@@ -210,13 +231,14 @@ export function hatch(light: Light, box: Box, options: { tone?: Tone; level?: nu
   light.prints.push({ box, kind: "hatch", tone: options.tone ?? "ivory", level: options.level ?? 1, seed: options.seed ?? 1, churn: options.churn })
 }
 
-/** A spark: instant attack, convex decay. For a seal stamping down or a gate refusal. */
+/** A spark: instant attack, then it cools like a filament while its ring keeps spreading as it fades. For a seal
+ *  stamping down or a gate refusal. */
 export function spark(light: Light, at: Point, age: number, tone: Tone, strength = 1) {
   const k = flash(age, .55) * strength
-  if (k <= 0) return
+  if (k <= DARK) return
   light.dots.push({ at, radius: 2.4, intensity: k, tone })
-  const q = clamp01(age / .5)
-  light.rings.push({ at, radius: 3 + 9 * (1 - (1 - q) * (1 - q)), width: 1.5, intensity: .6 * Math.pow(1 - q, 2) * strength, tone })
+  const q = age / .5, ring = .6 * cooling(q, .42) * strength
+  if (ring > DARK) light.rings.push({ at, radius: 3 + 9.7 * (1 - Math.exp(-2.2 * q)), width: 1.5, intensity: ring, tone })
 }
 
 /** Stereo pan (−0.85..0.85) from a scene x coordinate. */

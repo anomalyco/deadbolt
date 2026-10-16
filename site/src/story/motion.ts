@@ -66,12 +66,24 @@ export function springAt(seconds: number, s: Spring = springs.default) {
   return seconds > s.duration && Math.abs(1 - raw) < .0008 ? 1 : raw
 }
 
-/** Filament / flashbulb cooling: instant attack at `age` 0, then convex decay over `decay` seconds. */
-export const flash = (age: number, decay = 1.2) => age < 0 ? 0 : Math.pow(1 - clamp01(age / decay), 2)
+/** Below this a light or a heat is under one 8-bit step on every ink, so a decay can stop here with no visible end. */
+export const DARK = .001
 
-/** Hot stamp / ink soaking into paper: fast exponential drop with a bounded tail over 0.75s. */
-export const inkFlash = (age: number) =>
-  age < 0 ? 0 : Math.exp(-age / .234) * (1 - Math.min(1, Math.pow(age / .75, 2)))
+/** Newton's-law cooling, e^(−age/τ), from an instant attack at age 0. It never reaches zero by itself (its log falls
+ *  at a steady rate, so it never seems to switch off); it stops once it's DARK, about 7τ in. */
+export const cooling = (age: number, tau: number) => {
+  if (age < 0) return 0
+  const k = Math.exp(-age / tau)
+  return k < DARK ? 0 : k
+}
+
+/** Filament / flashbulb cooling: instant attack at `age` 0, then exponential decay with a little longer half-life
+ *  than the (1 − age/decay)² it replaced. Instead of hitting zero at `decay`, about 10% is still glowing then, 1% at
+ *  twice that, and it sinks under an ink step near three times that. */
+export const flash = (age: number, decay = 1.2) => cooling(age, .45 * decay)
+
+/** Hot stamp / ink soaking into paper: a fast exponential drop with a long, faint tail. */
+export const inkFlash = (age: number) => cooling(age, .234)
 
 /** The brightest of several flashes. */
 export const flashes = (t: number, times: readonly number[], decay = 1.2) =>

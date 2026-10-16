@@ -1,4 +1,4 @@
-import type { Box, Point } from "./motion"
+import { DARK, type Box, type Point } from "./motion"
 
 // The light layer: one full-canvas fragment pass that sums every live emitter in the story's scene units as linear
 // energy, tone-maps it (1 − e^−x) and writes premultiplied colour. The canvas sits over the crisp SVG and adds to it
@@ -84,7 +84,7 @@ export type LightParams = {
   bleed: number
 }
 
-const MAX = { segments: 96, dots: 12, rings: 12, floods: 8, prints: 6 }
+const MAX = { segments: 96, dots: 16, rings: 12, floods: 12, prints: 6 }
 const HEAD = 5
 const BASE = {
   segments: HEAD,
@@ -95,21 +95,23 @@ const BASE = {
 }
 const VEC4S = BASE.prints + MAX.prints * 3
 
-/** Light below this never reaches a visible level after tone mapping and dithering. */
-const LIVE = .004
+/** Light below this never reaches a visible level after tone mapping and dithering (decays stop there too). */
+const LIVE = DARK
 
-const hotter = (a: Light["segments"][number], b: Light["segments"][number]) => Math.max(b.heat[0], b.heat[1]) - Math.max(a.heat[0], a.heat[1])
+/** At most `max` of a list, the brightest: over budget, the dimmest go first (long, faint tails, never a new light). */
+function brightest<T>(list: T[], max: number, level: (item: T) => number) {
+  const live = list.filter(item => level(item) > LIVE)
+  return live.length <= max ? live : live.sort((a, b) => level(b) - level(a)).slice(0, max)
+}
 
 /** Packs a frame. Returns null when nothing is lit or printed, so the caller can clear once and rest. */
 export function pack(light: Light, data: Float32Array, size: { width: number; height: number; scale: number }, params: LightParams, fade = 1) {
   data.fill(0)
-  let segments = light.segments.filter(s => Math.max(s.heat[0], s.heat[1]) * fade > LIVE)
-  // Over budget, the coolest stretches go first.
-  if (segments.length > MAX.segments) segments = [...segments].sort(hotter).slice(0, MAX.segments)
-  const dots = light.dots.filter(d => d.intensity * fade > LIVE).slice(0, MAX.dots)
-  const rings = light.rings.filter(r => r.intensity * fade > LIVE).slice(0, MAX.rings)
-  const floods = light.floods.filter(f => f.intensity * fade > LIVE).slice(0, MAX.floods)
-  const prints = light.prints.filter(p => p.level * fade > LIVE).slice(0, MAX.prints)
+  const segments = brightest(light.segments, MAX.segments, s => Math.max(s.heat[0], s.heat[1]) * fade)
+  const dots = brightest(light.dots, MAX.dots, d => d.intensity * fade)
+  const rings = brightest(light.rings, MAX.rings, r => r.intensity * fade)
+  const floods = brightest(light.floods, MAX.floods, f => f.intensity * fade)
+  const prints = brightest(light.prints, MAX.prints, p => p.level * fade)
   if (!segments.length && !dots.length && !rings.length && !floods.length && !prints.length) return null
   data.set([
     size.width, size.height, size.scale, fade,
@@ -280,7 +282,9 @@ fn sdSegment(p: vec2f, a: vec2f, b: vec2f) -> f32 {
   // Light (not ink) catches the paper's tooth.
   col *= 1.0 - look.z * (grain - 0.35);
   col = (1.0 - exp(-(col + ink) * look.x)) * head.w;
-  col += (ign(frag.xy) - 0.5) / 255.0 * min(max(col.r, max(col.g, col.b)) * 60.0, 1.0);
+  // Dither the 8-bit output by half a step either way at every level, so a fading glow thins out pixel by pixel
+  // through its last steps instead of vanishing at one threshold; unlit pixels stay black (they never reach half).
+  col += (ign(frag.xy) - 0.5) / 255.0;
   col = max(col, vec3f(0.0));
   let alpha = clamp(max(col.r, max(col.g, col.b)), 0.0, 1.0);
   return vec4f(min(col, vec3f(alpha)), alpha);
@@ -430,7 +434,7 @@ void main() {
 
   col *= 1.0 - look.z * (grain - 0.35);
   col = (1.0 - exp(-(col + ink) * look.x)) * head.w;
-  col += (ign(fragXY) - 0.5) / 255.0 * min(max(col.r, max(col.g, col.b)) * 60.0, 1.0);
+  col += (ign(fragXY) - 0.5) / 255.0;
   col = max(col, vec3(0.0));
   float alpha = clamp(max(col.r, max(col.g, col.b)), 0.0, 1.0);
   outColor = vec4(min(col, vec3(alpha)), alpha);

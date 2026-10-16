@@ -98,9 +98,7 @@ export const pairScene: StoryScene = {
   ],
   draw: (t, light, story) => {
     for (const shot of SHOTS) send(light, shot, t)
-    if (t >= ADD_AT && t < ADD_AT + 1.2) {
-      spark(light, [DESKTOP[0] + 24, DESKTOP[1] + 132], t - ADD_AT, "red", .85)
-    }
+    spark(light, [DESKTOP[0] + 24, DESKTOP[1] + 132], t - ADD_AT, "red", .85)
     return <Pair t={t} light={light} story={story} />
   },
 }

@@ -1,7 +1,7 @@
 import { Fragment, useId, type ReactNode } from "react"
 import { REACH, floodEdge, reflection, toneColor, type Light, type Tone } from "./light"
 import { timing, travelled, type Send } from "./beats"
-import { clamp01, flashes, inkFlash, shade, span, springAt, springs, type Box, type Point } from "./motion"
+import { DARK, clamp01, flash, flashes, inkFlash, shade, span, springAt, springs, type Box, type Point } from "./motion"
 import type { StoryApi } from "./Story"
 import { lightParams } from "./tuning"
 
@@ -21,7 +21,8 @@ export function DeviceGlyph({ kind, cx, cy, t, impulses = [], stroke = "#e8e4dc"
   screenGlow?: number
 }) {
   const pulse = Math.max(screenGlow, flashes(t, impulses, .95))
-  const screenFill = pulse > .02 ? shade("#050505", [stroke, Math.min(.42, pulse * .45)]) : "none"
+  // The screen keeps glowing until it's under one ink step (below .004 the fill rounds to the card's own black).
+  const screenFill = pulse > .004 ? shade("#050505", [stroke, Math.min(.42, pulse * .45)]) : "none"
 
   if (kind === "desktop") {
     return <g transform={`translate(${cx} ${cy})`} stroke={stroke} strokeWidth={1.1} fill="none" strokeLinecap="square">
@@ -179,13 +180,13 @@ export function Carried({ shot, t, label, side = "above" }: { shot: Send; t: num
   return <text x={x} y={y - 10} textAnchor="middle" className="story-carried" fill={fill} opacity={opacity}>{label}</text>
 }
 
-/** The light of a refusal stamp landing at `at` (push it from the scene's draw, with the other lights). */
+/** The light of a refusal stamp landing at `at` (push it from the scene's draw, with the other lights): a red flash
+ *  that cools like a filament, and a ring that keeps spreading as it fades. */
 export function refusal(light: Light, [x, y]: Point, t: number, at: number) {
-  const age = t - at
-  if (age < 0 || age >= .9) return
-  const k = Math.pow(1 - clamp01(age / .6), 2)
+  const age = t - at, k = flash(age, .6)
+  if (k <= DARK) return
   light.dots.push({ at: [x, y], radius: 3, intensity: k * .9, tone: "red" })
-  light.rings.push({ at: [x, y], radius: 4 + 10 * (1 - Math.pow(1 - clamp01(age / .55), 2)), width: 1.8, intensity: k * .7, tone: "red" })
+  light.rings.push({ at: [x, y], radius: 4 + 10.8 * (1 - Math.exp(-4 * age)), width: 1.8, intensity: k * .7, tone: "red" })
 }
 
 /** A refusal stamp on a gate or keyset: slams down on a snappy spring and cools from hot red. Its light is `refusal`. */
