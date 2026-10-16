@@ -7,7 +7,7 @@ import { KeysStory } from "./stories/KeysStory"
 import { LogsStory } from "./stories/LogsStory"
 import { SyncStory } from "./stories/SyncStory"
 import { MergeStory } from "./stories/MergeStory"
-import { PairScene } from "./scenes/PairScene"
+import { PairStory } from "./stories/PairStory"
 import { RemoveScene } from "./scenes/RemoveScene"
 
 const repo = "https://github.com/anomalyco/deadbolt/blob/main/"
@@ -81,7 +81,7 @@ const chapters: Chapter[] = [
     body: <>
       <p>the only way into a vault is through a device that's already in it. the new device listens and shows a ticket. a member dials it with that ticket, both prove they know the ticket's secret, and both show a six-digit code derived from the connection and both keys. once you confirm the code matches, the new device signs its consent to join that particular vault, the member signs <code>Add</code>, and the vault's history flows over the same connection.</p>
     </>,
-    scene: <PairScene />,
+    scene: <PairStory />,
     why: <p>the code check is what stops a man in the middle. someone who only saw the qr code can't produce matching digits on both screens.</p>,
     code: [["crates/net/src/pair.rs", "the deadbolt/pair/1 protocol, step by step"], ["crates/cli/src/agent/pairing.rs", "offer, join and welcome"], ["crates/net/src/qr.rs", "the terminal qr code"]],
   },
