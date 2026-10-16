@@ -6,9 +6,11 @@
 //! welcome = [JSON WelcomeMeta {hints about the other members}, entry*]   (genesis first)
 //! ```
 //!
-//! The new device does not stop at the protocol's code confirmation; it asks
-//! once it has the offer, showing the code together with the vault name, and
-//! only then signs its consent.
+//! Both sides report the confirmation code to the client. With `confirm` the
+//! client is asked to accept it; otherwise holding the ticket is the
+//! authorization and the code is accepted automatically. The new device
+//! reports once it has the offer, so the vault name is shown with the code,
+//! and only then signs its consent.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -50,16 +52,26 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
 }
 
+/// Reports the code; with `confirm`, waits for the client to accept it.
+async fn report(conv: &Conversation, event: Event, confirm: bool) -> bool {
+    if confirm {
+        conv.ask(event).await
+    } else {
+        conv.event(event).await.is_ok()
+    }
+}
+
 struct NewDevice<'a> {
     agent: &'a Arc<Agent>,
     conv: &'a Conversation,
+    confirm: bool,
     offer: Mutex<Option<Offer>>,
     joined: Mutex<Option<VaultInfo>>,
 }
 
 impl Joiner for NewDevice<'_> {
     async fn confirm(&self, _ctx: &PairingContext) -> bool {
-        // Asked in `join`, once the vault name is known.
+        // Reported in `join`, once the vault name is known.
         true
     }
 
@@ -86,15 +98,12 @@ impl Joiner for NewDevice<'_> {
             connected: true,
             last_seen: None,
         };
-        let confirmed = self
-            .conv
-            .ask(Event::ConfirmJoin {
-                code: ctx.code.to_string(),
-                vault: offer.vault_name.clone(),
-                inviter,
-            })
-            .await;
-        if !confirmed {
+        let event = Event::Joining {
+            code: ctx.code.to_string(),
+            vault: offer.vault_name.clone(),
+            inviter,
+        };
+        if !report(self.conv, event, self.confirm).await {
             return Err("declined".into());
         }
         *self.offer.lock().unwrap_or_else(|e| e.into_inner()) = Some(offer);
@@ -157,7 +166,7 @@ impl NewDevice<'_> {
 }
 
 /// `deadbolt join`: show a ticket and wait for an existing device to pair.
-pub async fn join(agent: &Arc<Agent>, conv: &Conversation) -> Result<Reply> {
+pub async fn join(agent: &Arc<Agent>, conv: &Conversation, confirm: bool) -> Result<Reply> {
     let node = agent.with(|s| Ok(s.node.clone()))?;
     let listener = node.start_pairing(PairingOptions::default()).await?;
     conv.event(Event::Ticket {
@@ -167,6 +176,7 @@ pub async fn join(agent: &Arc<Agent>, conv: &Conversation) -> Result<Reply> {
     let device = NewDevice {
         agent,
         conv,
+        confirm,
         offer: Mutex::default(),
         joined: Mutex::default(),
     };
@@ -188,6 +198,7 @@ pub async fn join(agent: &Arc<Agent>, conv: &Conversation) -> Result<Reply> {
 struct ExistingDevice<'a> {
     agent: &'a Arc<Agent>,
     conv: &'a Conversation,
+    confirm: bool,
     vault: VaultId,
     ticket_addr: Addr,
     added: Mutex<Option<DeviceInfo>>,
@@ -195,12 +206,11 @@ struct ExistingDevice<'a> {
 
 impl Inviter for ExistingDevice<'_> {
     async fn confirm(&self, ctx: &PairingContext) -> bool {
-        self.conv
-            .ask(Event::ConfirmPair {
-                code: ctx.code.to_string(),
-                device: short(&ctx.remote),
-            })
-            .await
+        let event = Event::Pairing {
+            code: ctx.code.to_string(),
+            device: short(&ctx.remote),
+        };
+        report(self.conv, event, self.confirm).await
     }
 
     async fn offer(&self, _ctx: &PairingContext) -> Result<Vec<u8>, HandlerError> {
@@ -275,6 +285,7 @@ pub async fn pair(
     conv: &Conversation,
     ticket: String,
     vault: Option<String>,
+    confirm: bool,
 ) -> Result<Reply> {
     let ticket: PairingTicket = ticket.parse()?;
     let (node, vault) = agent.with(|s| {
@@ -293,6 +304,7 @@ pub async fn pair(
     let inviter = ExistingDevice {
         agent,
         conv,
+        confirm,
         vault,
         ticket_addr: Addr::from_peer(&ticket.addr()),
         added: Mutex::default(),

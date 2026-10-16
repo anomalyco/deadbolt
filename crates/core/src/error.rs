@@ -1,4 +1,5 @@
 use crate::id::{Hash, VaultId};
+use crate::item::ItemError;
 
 /// Why an entry or operation was rejected.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -23,6 +24,8 @@ pub enum Error {
     InvalidName,
     #[error("not a valid genesis entry")]
     InvalidGenesis,
+    #[error(transparent)]
+    Item(#[from] ItemError),
 }
 
 /// Why bytes failed to decode.

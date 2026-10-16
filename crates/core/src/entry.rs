@@ -1,8 +1,11 @@
+use std::collections::BTreeMap;
+
 use crate::encoding::{Reader, Writer};
 use crate::error::{DecodeError, Error};
 use crate::id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
+use crate::item::{Field, FieldType};
 
-const HASH_CONTEXT: &str = "deadbolt 2026-10-15 entry hash v1";
+const HASH_CONTEXT: &str = "deadbolt 2026-10-15 entry hash v2";
 const SIGNATURE_DOMAIN: &[u8] = b"deadbolt entry signature v1\0";
 const CONSENT_DOMAIN: &[u8] = b"deadbolt join consent v1\0";
 
@@ -83,46 +86,66 @@ pub fn valid_name(name: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'-' | b'_'))
 }
 
-/// A change to one item.
+/// One data op. See [`crate::item`] for the rules ops must follow.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct DataOp {
-    pub item: ItemId,
-    pub change: Change,
+pub enum DataOp {
+    /// Creates an item of type `kind` with all its required fields. The new
+    /// item's id is [`ItemId::of_create`] of the entry hash and op index.
+    Create {
+        kind: String,
+        name: Option<String>,
+        fields: BTreeMap<String, Field>,
+    },
+    /// Changes an existing item.
+    Edit { item: ItemId, change: Change },
 }
 
-/// A change to an item's fields or tombstone.
+/// A change to an existing item.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Change {
-    Set { field: String, value: String },
-    DeleteField { field: String },
-    DeleteItem,
+    /// Sets a field's type and value.
+    Set { field: String, value: Field },
+    /// Removes a field that is not required.
+    Remove { field: String },
+    /// Sets or clears the item's name.
+    Name(Option<String>),
+    /// Marks the item deleted. A later edit restores it.
+    Delete,
 }
 
 impl DataOp {
-    /// Sets `field` to `value`.
-    pub fn set(item: ItemId, field: impl Into<String>, value: impl Into<String>) -> Self {
-        let (field, value) = (field.into(), value.into());
-        Self {
-            item,
-            change: Change::Set { field, value },
+    pub fn create(
+        kind: impl Into<String>,
+        name: Option<String>,
+        fields: impl IntoIterator<Item = (String, Field)>,
+    ) -> Self {
+        Self::Create {
+            kind: kind.into(),
+            name,
+            fields: fields.into_iter().collect(),
         }
     }
 
-    /// Deletes `field`.
-    pub fn delete_field(item: ItemId, field: impl Into<String>) -> Self {
+    pub fn set(item: ItemId, field: impl Into<String>, value: Field) -> Self {
         let field = field.into();
-        Self {
-            item,
-            change: Change::DeleteField { field },
-        }
+        Self::edit(item, Change::Set { field, value })
     }
 
-    /// Marks the item deleted.
-    pub fn delete_item(item: ItemId) -> Self {
-        Self {
-            item,
-            change: Change::DeleteItem,
-        }
+    pub fn remove(item: ItemId, field: impl Into<String>) -> Self {
+        let field = field.into();
+        Self::edit(item, Change::Remove { field })
+    }
+
+    pub fn name(item: ItemId, name: Option<String>) -> Self {
+        Self::edit(item, Change::Name(name))
+    }
+
+    pub fn delete(item: ItemId) -> Self {
+        Self::edit(item, Change::Delete)
+    }
+
+    fn edit(item: ItemId, change: Change) -> Self {
+        Self::Edit { item, change }
     }
 }
 
@@ -323,23 +346,110 @@ fn write_body(
         Payload::Data(ops) => {
             w.u8(1);
             w.len(ops.len());
-            for op in ops {
-                w.bytes(op.item.as_bytes());
-                match &op.change {
-                    Change::Set { field, value } => {
-                        w.u8(0);
-                        w.str(field);
-                        w.str(value);
-                    }
-                    Change::DeleteField { field } => {
-                        w.u8(1);
-                        w.str(field);
-                    }
-                    Change::DeleteItem => w.u8(2),
+            ops.iter().for_each(|op| write_data_op(w, op));
+        }
+    }
+}
+
+fn write_opt_str(w: &mut Writer, v: Option<&str>) {
+    match v {
+        None => w.u8(0),
+        Some(v) => {
+            w.u8(1);
+            w.str(v);
+        }
+    }
+}
+
+fn write_field(w: &mut Writer, field: &Field) {
+    w.str(field.kind.as_str());
+    w.str(&field.value);
+}
+
+fn write_data_op(w: &mut Writer, op: &DataOp) {
+    match op {
+        DataOp::Create { kind, name, fields } => {
+            w.u8(0);
+            w.str(kind);
+            write_opt_str(w, name.as_deref());
+            w.len(fields.len());
+            for (name, field) in fields {
+                w.str(name);
+                write_field(w, field);
+            }
+        }
+        DataOp::Edit { item, change } => {
+            w.u8(1);
+            w.bytes(item.as_bytes());
+            match change {
+                Change::Set { field, value } => {
+                    w.u8(0);
+                    w.str(field);
+                    write_field(w, value);
                 }
+                Change::Remove { field } => {
+                    w.u8(1);
+                    w.str(field);
+                }
+                Change::Name(name) => {
+                    w.u8(2);
+                    write_opt_str(w, name.as_deref());
+                }
+                Change::Delete => w.u8(3),
             }
         }
     }
+}
+
+fn read_opt_str(r: &mut Reader<'_>) -> Result<Option<String>, DecodeError> {
+    match r.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(r.string()?)),
+        tag => Err(DecodeError::InvalidTag(tag)),
+    }
+}
+
+fn read_field(r: &mut Reader<'_>) -> Result<Field, DecodeError> {
+    Ok(Field {
+        kind: FieldType::parse(&r.string()?),
+        value: r.string()?,
+    })
+}
+
+fn read_data_op(r: &mut Reader<'_>) -> Result<DataOp, DecodeError> {
+    Ok(match r.u8()? {
+        0 => {
+            let kind = r.string()?;
+            let name = read_opt_str(r)?;
+            let mut fields = BTreeMap::new();
+            for _ in 0..r.u32()? {
+                let name = r.string()?;
+                if fields
+                    .last_key_value()
+                    .is_some_and(|(last, _)| *last >= name)
+                {
+                    return Err(DecodeError::NotCanonical);
+                }
+                fields.insert(name, read_field(r)?);
+            }
+            DataOp::Create { kind, name, fields }
+        }
+        1 => {
+            let item = ItemId(r.array()?);
+            let change = match r.u8()? {
+                0 => Change::Set {
+                    field: r.string()?,
+                    value: read_field(r)?,
+                },
+                1 => Change::Remove { field: r.string()? },
+                2 => Change::Name(read_opt_str(r)?),
+                3 => Change::Delete,
+                tag => return Err(DecodeError::InvalidTag(tag)),
+            };
+            DataOp::Edit { item, change }
+        }
+        tag => return Err(DecodeError::InvalidTag(tag)),
+    })
 }
 
 fn read_payload(r: &mut Reader<'_>) -> Result<Payload, DecodeError> {
@@ -368,17 +478,7 @@ fn read_payload(r: &mut Reader<'_>) -> Result<Payload, DecodeError> {
         1 => {
             let mut ops = Vec::new();
             for _ in 0..r.u32()? {
-                let item = ItemId(r.array()?);
-                let change = match r.u8()? {
-                    0 => Change::Set {
-                        field: r.string()?,
-                        value: r.string()?,
-                    },
-                    1 => Change::DeleteField { field: r.string()? },
-                    2 => Change::DeleteItem,
-                    tag => return Err(DecodeError::InvalidTag(tag)),
-                };
-                ops.push(DataOp { item, change });
+                ops.push(read_data_op(r)?);
             }
             Payload::Data(ops)
         }
@@ -402,9 +502,23 @@ mod tests {
                 Hash::from_bytes([9; 32]),
             ],
             Payload::Data(vec![
-                DataOp::set(item, "password", "hunter2"),
-                DataOp::delete_field(item, "notes"),
-                DataOp::delete_item(item),
+                DataOp::create(
+                    "login",
+                    Some("Work".into()),
+                    [
+                        ("username".into(), Field::new(FieldType::Text, "dax")),
+                        ("password".into(), Field::new(FieldType::Secret, "hunter2")),
+                    ],
+                ),
+                DataOp::set(
+                    item,
+                    "x",
+                    Field::new(FieldType::Other("future".into()), "v"),
+                ),
+                DataOp::remove(item, "notes"),
+                DataOp::name(item, None),
+                DataOp::name(item, Some("n".into())),
+                DataOp::delete(item),
             ]),
         )
     }
@@ -498,5 +612,29 @@ mod tests {
         let deps = 32 + 32 + 8 + 4;
         unsorted[deps..deps + 32].copy_from_slice(&[0xff; 32]);
         assert_eq!(Entry::decode(&unsorted), Err(DecodeError::NotCanonical));
+
+        // Create fields must be in ascending name order.
+        let mut swapped = bytes.clone();
+        let user = bytes.windows(8).position(|w| w == b"username").unwrap();
+        let pass = bytes.windows(8).position(|w| w == b"password").unwrap();
+        swapped[user..user + 8].copy_from_slice(b"password");
+        swapped[pass..pass + 8].copy_from_slice(b"username");
+        assert_eq!(Entry::decode(&swapped), Err(DecodeError::NotCanonical));
+    }
+
+    #[test]
+    fn unknown_field_types_survive_decoding() {
+        let entry = sample(&DeviceSecret::generate());
+        let Payload::Data(ops) = Entry::decode(&entry.encode()).unwrap().payload().clone() else {
+            unreachable!()
+        };
+        let DataOp::Edit {
+            change: Change::Set { value, .. },
+            ..
+        } = &ops[1]
+        else {
+            unreachable!()
+        };
+        assert_eq!(value.kind, FieldType::Other("future".into()));
     }
 }

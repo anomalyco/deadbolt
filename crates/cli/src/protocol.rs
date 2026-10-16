@@ -5,10 +5,14 @@
 //!
 //! ```text
 //! client -> agent   Request   {"v":1,"cmd":"...",...}
-//! agent  -> client  Message*  {"type":"event",...}         interactive commands only
+//! agent  -> client  Message*  {"type":"event",...}         pairing only
 //! client -> agent   Answer    {"answer":true}               after an event that asks
 //! agent  -> client  Message   {"type":"ok",...} | {"type":"error",...}   final
 //! ```
+//!
+//! Pairing events ask for an answer only when the request set `confirm`;
+//! otherwise the code is accepted automatically. A client hanging up cancels
+//! a pending `join`/`pair`.
 //!
 //! `status` and `stop` are answered whatever `v` says, so a client can always
 //! find and replace an agent of another version.
@@ -59,14 +63,59 @@ pub enum Command {
         device: String,
     },
     Sync,
-    /// Interactive: emits `ticket`, then `confirm-join` (answered), then replies `joined`.
-    Join,
-    /// Interactive: emits `confirm-pair` (answered), then replies `paired`.
+    /// Emits `ticket`, then `joining` (answered if `confirm`), then replies `joined`.
+    Join {
+        confirm: bool,
+    },
+    /// Emits `pairing` (answered if `confirm`), then replies `paired`.
     Pair {
         ticket: String,
         vault: Option<String>,
+        confirm: bool,
     },
-    // Item commands (set/get/ls/rm/history) go here, each carrying `vault: Option<String>`.
+    /// Creates an item; replies `item`.
+    ItemNew {
+        vault: Option<String>,
+        kind: String,
+        name: Option<String>,
+        fields: Vec<FieldInput>,
+    },
+    /// Finds exactly one item, with all field values; replies `item`.
+    ItemGet {
+        vault: Option<String>,
+        query: Vec<String>,
+    },
+    /// Lists matching items without field values; replies `items`.
+    ItemList {
+        vault: Option<String>,
+        query: Vec<String>,
+        kind: Option<String>,
+    },
+    /// Sets fields and/or the name (`Some("")` clears it); replies `item`.
+    ItemSet {
+        vault: Option<String>,
+        query: Vec<String>,
+        fields: Vec<FieldInput>,
+        name: Option<String>,
+    },
+    ItemUnset {
+        vault: Option<String>,
+        query: Vec<String>,
+        field: String,
+    },
+    ItemRemove {
+        vault: Option<String>,
+        query: Vec<String>,
+    },
+}
+
+/// A field as typed by the user. Without `kind`, the agent uses the item
+/// type's field type, else the field's current type, else `text`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldInput {
+    pub name: String,
+    pub kind: Option<String>,
+    pub value: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -94,14 +143,14 @@ pub enum ErrorCode {
 pub enum Event {
     /// The new device's pairing ticket.
     Ticket { ticket: String },
-    /// Asks the joining user to compare the code and accept the vault.
-    ConfirmJoin {
+    /// The joining side's confirmation code and the vault it is joining.
+    Joining {
         code: String,
         vault: String,
         inviter: DeviceInfo,
     },
-    /// Asks the inviting user to compare the code.
-    ConfirmPair { code: String, device: String },
+    /// The inviting side's confirmation code.
+    Pairing { code: String, device: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -138,6 +187,34 @@ pub enum Reply {
         vault: VaultInfo,
         device: DeviceInfo,
     },
+    Item {
+        item: ItemInfo,
+    },
+    Items {
+        items: Vec<ItemInfo>,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ItemInfo {
+    pub id: String,
+    /// Shortest unique id prefix, at least 4 characters.
+    pub short: String,
+    pub kind: String,
+    pub name: Option<String>,
+    /// The name, or one derived from the fields.
+    pub label: String,
+    /// Login username or card expiry, if any.
+    pub detail: Option<String>,
+    /// Known fields in schema order, then extra fields by name. Empty in lists.
+    pub fields: Vec<FieldInfo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldInfo {
+    pub name: String,
+    pub kind: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

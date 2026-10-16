@@ -1,7 +1,7 @@
 //! End-to-end tests: each device is a separate set of directories with its
 //! own agent process, networking over localhost only.
 
-use std::io::{BufRead, BufReader, Read};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::mpsc;
@@ -35,7 +35,6 @@ impl Device {
             .env("DEADBOLT_NET", "local")
             .env("DEADBOLT_KDF", "fast")
             .env("DEADBOLT_PASSPHRASE", PASSPHRASE)
-            .env("DEADBOLT_TEST_AUTO_CONFIRM", "1")
             .env_remove("DEADBOLT_TEST_VERSION")
             .env_remove("RUST_LOG")
             .stdin(Stdio::null());
@@ -61,6 +60,41 @@ impl Device {
         let output = self.try_run(args);
         assert!(output.status.success(), "deadbolt {args:?} failed");
         String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Runs with `input` on stdin.
+    fn try_run_stdin(&self, args: &[&str], input: &str) -> Output {
+        self.with_stdin(self.cmd(args), input)
+    }
+
+    fn with_stdin(&self, mut cmd: Command, input: &str) -> Output {
+        let mut child = cmd
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
+        eprintln!(
+            "$ {:?} < {input:?}\n{}{}",
+            cmd.get_args().collect::<Vec<_>>(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    }
+
+    /// Fails and returns stderr.
+    fn fail(&self, args: &[&str]) -> String {
+        let output = self.try_run(args);
+        assert!(!output.status.success(), "deadbolt {args:?} succeeded");
+        String::from_utf8(output.stderr).unwrap()
     }
 
     fn agent_pid(&self) -> Option<String> {
@@ -203,9 +237,16 @@ fn init_vaults_and_locking() {
     assert!(status.contains("device\talpha "), "{status}");
     assert!(status.contains("vaults\tpersonal job*\n"), "{status}");
 
-    // Locked: commands unlock inline with DEADBOLT_PASSPHRASE.
+    // Locked: without a terminal, commands fail with exit code 3 instead of
+    // unlocking inline, even with DEADBOLT_PASSPHRASE set.
     assert_eq!(a.run(&["lock"]), "locked\n");
     assert!(a.run(&["status"]).contains("state\tlocked\n"));
+    let out = a.try_run(&["vault", "ls"]);
+    assert_eq!(out.status.code(), Some(3));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("locked: run `deadbolt unlock`"));
+    assert_eq!(a.try_run(&["ls"]).status.code(), Some(3));
+    assert!(a.run(&["status"]).contains("state\tlocked\n"));
+    a.run(&["unlock"]);
     assert!(a.run(&["vault", "ls"]).contains("personal"));
     assert!(a.run(&["status"]).contains("state\tunlocked\n"));
 
@@ -297,6 +338,7 @@ fn pairing_membership_and_removal() {
 
     // Restarting the agent keeps everything (store + meta).
     a.run(&["agent", "stop"]);
+    a.run(&["unlock"]);
     assert_eq!(a.devices(), ["alpha", "beta"]);
     assert!(a.run(&["vault", "ls"]).contains("other\t"));
 }
@@ -354,4 +396,286 @@ fn replaces_agent_of_another_version() {
         "{out}"
     );
     assert_ne!(a.agent_pid().unwrap(), old_pid);
+}
+
+#[test]
+fn passphrase_from_stdin_or_env_only() {
+    let a = Device::new();
+    let init = |args: &[&str], input: &str| {
+        let mut cmd = a.cmd(args);
+        cmd.env_remove("DEADBOLT_PASSPHRASE");
+        a.with_stdin(cmd, input)
+    };
+    // No terminal, no env, no flag: an error, never a prompt.
+    let out = init(&["init", "--device-name", "alpha"], "");
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("DEADBOLT_PASSPHRASE"));
+
+    let out = init(
+        &["init", "--device-name", "alpha", "--passphrase-stdin"],
+        "from stdin\n",
+    );
+    assert!(out.status.success());
+    a.run(&["lock"]);
+    // The env passphrase is not this one.
+    assert!(!a.try_run(&["unlock"]).status.success());
+    let out = init(&["unlock", "--passphrase-stdin"], "wrong\n");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("wrong passphrase"));
+    let out = init(&["unlock", "--passphrase-stdin"], "from stdin\n");
+    assert!(out.status.success(), "unlock failed");
+    assert!(a.run(&["status"]).contains("state\tunlocked\n"));
+}
+
+/// The short id `new` prints.
+fn new(device: &Device, args: &[&str]) -> String {
+    let out = device.run(&[&["new"], args].concat());
+    let short = out.trim().to_string();
+    assert!(
+        short.len() >= 4 && short.bytes().all(|b| b.is_ascii_hexdigit()),
+        "{out}"
+    );
+    short
+}
+
+#[test]
+fn items() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+
+    let github = new(
+        &a,
+        &[
+            "login",
+            "username=dax",
+            "url=github.com",
+            "password=hunter2",
+        ],
+    );
+    let work = new(
+        &a,
+        &[
+            "login",
+            "username=dax@work.example",
+            "url=https://www.google.com/",
+        ],
+    );
+    new(
+        &a,
+        &["login", "username=dax.personal@gmail.com", "url=google.com"],
+    );
+
+    // Defaults and -f.
+    assert_eq!(a.run(&["get", "github"]), "hunter2\n");
+    assert_eq!(
+        a.run(&["get", "GitHub", "-f", "url"]),
+        "https://github.com\n"
+    );
+    assert_eq!(a.run(&["get", &github, "-f", "username"]), "dax\n");
+
+    // Two Google logins: ambiguous until a username word tells them apart.
+    let err = a.fail(&["get", "google"]);
+    assert!(err.contains("matches 2 items"), "{err}");
+    assert!(err.contains("\tgoogle.com\tdax@work.example"), "{err}");
+    assert!(
+        err.contains("\tgoogle.com\tdax.personal@gmail.com"),
+        "{err}"
+    );
+    let generated = a.run(&["get", "google", "work"]);
+    let generated = generated.trim_end_matches('\n');
+    assert_eq!(generated.len(), 24, "{generated}");
+    assert!(generated.bytes().all(|b| b.is_ascii_graphic()));
+    assert!(generated.bytes().any(|b| !b.is_ascii_alphanumeric()));
+    assert_eq!(a.run(&["get", "GOOGLE", "Personal"]).len(), 25);
+    // Id prefixes match too.
+    assert_eq!(
+        a.run(&["get", &work, "-f", "username"]),
+        "dax@work.example\n"
+    );
+    assert!(
+        a.fail(&["get", "nothing-like-this"])
+            .contains("no item matches")
+    );
+
+    // Generated password options.
+    new(
+        &a,
+        &[
+            "login",
+            "url=short.example",
+            "--length",
+            "12",
+            "--no-symbols",
+        ],
+    );
+    let short = a.run(&["get", "short.example"]);
+    assert_eq!(short.trim_end().len(), 12);
+    assert!(short.trim_end().bytes().all(|b| b.is_ascii_alphanumeric()));
+
+    // field=- reads stdin (raw, one trailing newline stripped).
+    let out = a.try_run_stdin(
+        &["new", "login", "url=stdin.example", "password=-"],
+        "from stdin\n",
+    );
+    assert!(out.status.success());
+    assert_eq!(a.run(&["get", "stdin"]), "from stdin\n");
+    let out = a.try_run_stdin(&["new", "login", "password=-", "notes=-"], "x");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("only one field"));
+
+    // Cards: number and expiry normalized; label from brand field or "card".
+    new(
+        &a,
+        &[
+            "card",
+            "number=4242 4242-4242 4242",
+            "expiry=04/27",
+            "cvv=123",
+            "cardholder=Dax Raad",
+        ],
+    );
+    new(
+        &a,
+        &[
+            "card",
+            "number=5555555555554444",
+            "brand=Mastercard",
+            "--name",
+            "Travel",
+        ],
+    );
+    new(&a, &["card", "number=6011000990139424", "brand=Discover"]);
+    assert_eq!(a.run(&["get", "4242"]), "4242424242424242\n");
+    assert_eq!(a.run(&["get", "4242", "-f", "expiry"]), "2027-04\n");
+    let cards = a.run(&["ls", "--type", "card"]);
+    let labels: Vec<&str> = cards
+        .lines()
+        .map(|l| l.split('\t').nth(1).unwrap())
+        .collect();
+    assert_eq!(
+        labels,
+        ["card •••• 4242", "Discover •••• 9424", "Travel"],
+        "{cards}"
+    );
+    assert!(cards.contains("\tcard •••• 4242\t04/27\n"), "{cards}");
+    assert_eq!(a.run(&["get", "mastercard", "-f", "brand"]), "Mastercard\n");
+
+    // Multi-word search: "dax" matches logins and the cardholder, "4242" the last four.
+    assert_eq!(
+        a.run(&["get", "dax", "4242", "-f", "cardholder"]),
+        "Dax Raad\n"
+    );
+    assert!(a.fail(&["get", "dax"]).contains("matches 4 items"));
+    // Secret values are never searched.
+    assert!(a.fail(&["get", "hunter2"]).contains("no item matches"));
+
+    // show masks secrets unless --reveal.
+    let show = a.run(&["show", "4242"]);
+    assert!(
+        show.starts_with("type        card\nlabel       card •••• 4242\nid  "),
+        "{show}"
+    );
+    assert!(show.contains("\nnumber      •••• 4242\n"), "{show}");
+    assert!(show.contains("\ncvv         ••••••••\n"), "{show}");
+    assert!(show.contains("\nexpiry      2027-04\n"), "{show}");
+    assert!(!show.contains("4242424242424242"));
+    let show = a.run(&["show", "4242", "--reveal"]);
+    assert!(show.contains("\nnumber      4242424242424242\n"), "{show}");
+    assert!(show.contains("\ncvv         123\n"), "{show}");
+
+    // Schema rejection.
+    for (args, error) in [
+        (&["new", "wifi", "password=x"][..], "unknown item type"),
+        (&["new", "card", "cvv=123"], "missing required field number"),
+        (
+            &["new", "card", "number=12ab34567890"],
+            "must be 12-19 digits",
+        ),
+        (
+            &["new", "card", "number=4242424242424242", "cvv=12"],
+            "must be 3-4 digits",
+        ),
+        (
+            &["new", "card", "number=4242424242424242", "expiry=13/27"],
+            "not a month",
+        ),
+        (
+            &["new", "login", "password:text=x"],
+            "must be of type secret",
+        ),
+        (&["new", "login", "x:blob=1"], "unknown field type"),
+        (&["new", "login", "Bad=1"], "invalid field name"),
+        (&["new", "login", "nope"], "expected field[:type]=value"),
+    ] {
+        let err = a.fail(args);
+        assert!(err.contains(error), "{args:?}: {err}");
+    }
+
+    // set / unset / rm.
+    assert_eq!(
+        a.run(&["set", "github", "password=new2", "--name", "Code"])
+            .trim(),
+        github
+    );
+    assert_eq!(a.run(&["get", "code"]), "new2\n");
+    assert!(a.run(&["ls", "code"]).contains("\tCode\tdax\n"));
+    a.run(&["set", "code", "--name", ""]);
+    assert!(a.run(&["ls", "github"]).contains("\tgithub.com\tdax\n"));
+    a.run(&["set", "github", "pin:secret=1234", "url=gitlab.com"]);
+    assert_eq!(a.run(&["get", "gitlab", "-f", "pin"]), "1234\n");
+    assert!(
+        a.run(&["show", "gitlab"])
+            .contains("\npin       ••••••••\n")
+    );
+    assert!(a.fail(&["set", "password=x"]).contains("needs a query"));
+    assert!(a.fail(&["set", "gitlab"]).contains("nothing to change"));
+    a.run(&["unset", "gitlab", "-f", "username"]);
+    assert!(
+        a.fail(&["get", "gitlab", "-f", "username"])
+            .contains("no field username")
+    );
+    assert!(
+        a.fail(&["unset", "gitlab", "-f", "password"])
+            .contains("required")
+    );
+    assert_eq!(a.run(&["rm", "gitlab"]).trim(), github);
+    assert!(a.fail(&["get", "gitlab"]).contains("no item matches"));
+    assert_eq!(a.run(&["ls", "--type", "login"]).lines().count(), 4);
+
+    // Everything survives an agent restart.
+    a.run(&["agent", "stop"]);
+    a.run(&["unlock"]);
+    assert_eq!(a.run(&["ls"]).lines().count(), 7);
+}
+
+#[test]
+fn concurrent_item_edits_on_two_devices() {
+    let a = Device::new();
+    let b = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    pair(&a, &b, "beta", None);
+    let id = new(&a, &["login", "url=example.com", "password=start"]);
+    eventually("b to receive the item", || {
+        b.run(&["sync"]);
+        b.try_run(&["get", &id]).status.success()
+    });
+
+    // Different fields: both survive.
+    a.run(&["set", "example", "username=from-a"]);
+    b.run(&["set", "example", "notes=from-b"]);
+    for device in [&a, &b] {
+        eventually("both edits to arrive", || {
+            device.run(&["sync"]);
+            let show = device.run(&["show", "example"]);
+            show.contains("from-a") && show.contains("from-b")
+        });
+    }
+
+    // Same field: both devices settle on the same one.
+    a.run(&["set", "example", "password=from-a"]);
+    b.run(&["set", "example", "password=from-b"]);
+    eventually("both devices to agree", || {
+        a.run(&["sync"]);
+        b.run(&["sync"]);
+        let (pa, pb) = (a.run(&["get", "example"]), b.run(&["get", "example"]));
+        pa == pb && (pa == "from-a\n" || pa == "from-b\n")
+    });
 }

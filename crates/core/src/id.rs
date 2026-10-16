@@ -101,6 +101,16 @@ impl ItemId {
     pub fn random() -> Self {
         Self(random())
     }
+
+    /// The id of the item created by op `index` of entry `entry`.
+    pub fn of_create(entry: &Hash, index: usize) -> Self {
+        const CONTEXT: &str = "deadbolt 2026-10-15 item id v1";
+        let mut material = [0; 40];
+        material[..32].copy_from_slice(&entry.0);
+        material[32..].copy_from_slice(&(index as u64).to_be_bytes());
+        let key = blake3::derive_key(CONTEXT, &material);
+        Self(key[..16].try_into().expect("16 bytes"))
+    }
 }
 
 /// A device's Ed25519 signing key. Zeroized on drop.

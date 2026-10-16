@@ -603,6 +603,7 @@ dependencies = [
  "deadbolt-core",
  "deadbolt-net",
  "deadbolt-store",
+ "getrandom 0.4.3",
  "libc",
  "rpassword",
  "serde",

@@ -53,10 +53,17 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 | | brand | text | |
 | | notes | note | |
 
-- Card brand: if the `brand` field is set it wins; otherwise it's derived on display from the number's prefix using a table of major networks (Visa, Mastercard, Amex, Discover, JCB, Diners, UnionPay). Unknown prefixes display as `Card`, never a guess. The Luhn check is a CLI warning (`--force` to override), not a core rule.
+- Card brand: the optional `brand` field, shown in the label when set. (Later: derive it from the number's prefix for major networks when the field is empty; a Luhn check as a CLI warning.)
 - **Names are optional labels on every item** (alongside the type, not one of its fields), **not identifiers**, and need not be unique. Without a name, an item displays as a derived label (login: the URL's host without `www.`; card: brand + last four digits). Identity is the item id; the CLI shows a short id prefix.
-- **Lookup is search**: query words are ANDed, case-insensitive, over name, URL host, username, and for cards cardholder, brand and last four (never secret values). An id prefix also matches. One match: use it. Several: pick from a list on a TTY, otherwise fail listing the candidates (label, username, short id). Scripts that must be unambiguous use the id.
+- **Lookup is search**: query words are ANDed, case-insensitive, over name, URL host, username, and for cards cardholder, brand and last four (never secret values). An id prefix also matches. One match: use it. Several: fail listing the candidates (short id, label, username). Scripts that must be unambiguous use the id.
 - Two Google accounts are just two logins with the same URL and different usernames; nobody has to invent a naming scheme.
+- `new login` without a password generates one.
+
+## CLI
+- Agent-first: every command works from flags, env (`DEADBOLT_PASSPHRASE`) and stdin (`field=-`, `--passphrase-stdin`) and never waits for a human without a TTY.
+- On a TTY (stdin and stderr), it prompts only for what would otherwise be an error: passphrase, `field=-` values, missing required fields, and confirming the pairing code (`--yes` skips).
+- A background agent (`deadbolt agent`, auto-started) holds the unlocked store and the iroh node; commands talk to it over a user-only Unix socket.
+- Basics only for now; convenience features (picker, history, generate, TOTP codes, `run`, clipboard, JSON output) get decided together later.
 
 ## Pairing
 - New device shows a QR: its device public key + a one-time secret (+ relay hint).

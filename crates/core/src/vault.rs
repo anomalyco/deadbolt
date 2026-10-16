@@ -5,6 +5,7 @@ use crate::encoding::{Reader, Writer};
 use crate::entry::{DataOp, Entry, Log, LogId, MembershipOp, Payload, consent_message, valid_name};
 use crate::error::{DecodeError, Error};
 use crate::id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
+use crate::item::Field;
 use crate::membership::{self, Membership};
 
 /// Per log, the highest seq in an entry's causal past (inclusive).
@@ -295,6 +296,11 @@ impl Vault {
             author,
             log: payload.log(),
         };
+        if let Payload::Data(ops) = &payload {
+            for op in ops {
+                data::check(&self.items, op)?;
+            }
+        }
         let tips = match log_id.log {
             Log::Membership => &self.membership_tips,
             Log::Data => &self.tips,
@@ -349,9 +355,22 @@ impl Vault {
         self.commit(secret, Payload::Membership(MembershipOp::Rename { name }))
     }
 
-    /// Writes data ops as one entry.
+    /// Writes data ops as one entry. Fails if any op breaks the item rules
+    /// (see [`crate::item`]).
     pub fn write(&mut self, secret: &DeviceSecret, ops: Vec<DataOp>) -> Result<Entry, Error> {
         self.commit(secret, Payload::Data(ops))
+    }
+
+    /// Creates an item and returns its id.
+    pub fn create_item(
+        &mut self,
+        secret: &DeviceSecret,
+        kind: impl Into<String>,
+        name: Option<String>,
+        fields: impl IntoIterator<Item = (String, Field)>,
+    ) -> Result<(ItemId, Entry), Error> {
+        let entry = self.write(secret, vec![DataOp::create(kind, name, fields)])?;
+        Ok((ItemId::of_create(&entry.hash(), 0), entry))
     }
 
     /// An item, including deleted ones.

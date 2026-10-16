@@ -32,15 +32,63 @@ impl Dev {
         (Dev { secret, vault }, add)
     }
 
+    /// Sets a login field, typed per the login schema (extra fields: text).
     fn set(&mut self, item: ItemId, field: &str, value: &str) -> Entry {
+        self.write(vec![DataOp::set(item, field, login_field(field, value))])
+    }
+
+    fn write(&mut self, ops: Vec<DataOp>) -> Entry {
+        self.vault.write(&self.secret, ops).unwrap()
+    }
+
+    fn login_entry(&mut self, password: &str) -> (ItemId, Entry) {
+        let fields = [("password".into(), secret(password))];
         self.vault
-            .write(&self.secret, vec![DataOp::set(item, field, value)])
+            .create_item(&self.secret, "login", None, fields)
             .unwrap()
+    }
+
+    fn login(&mut self, password: &str) -> ItemId {
+        self.login_entry(password).0
+    }
+
+    /// Signs `ops` as this device's next data entry, based on everything it
+    /// holds, without the commit-time checks, and applies it.
+    fn raw(&mut self, ops: Vec<DataOp>) -> Entry {
+        let log = LogId {
+            author: self.id(),
+            log: Log::Data,
+        };
+        let seq = self.vault.heads().get(&log).map_or(0, |seq| seq + 1);
+        let deps: Vec<Hash> = self.vault.entries().iter().map(|e| e.hash()).collect();
+        let entry = Entry::sign(&self.secret, self.vault.id(), seq, deps, Payload::Data(ops));
+        assert_eq!(self.vault.apply(entry.clone()), Ok(true));
+        entry
     }
 
     fn remove(&mut self, device: DeviceId) -> Entry {
         self.vault.remove(&self.secret, device).unwrap()
     }
+}
+
+fn text(value: &str) -> Field {
+    Field::new(FieldType::Text, value)
+}
+
+fn secret(value: &str) -> Field {
+    Field::new(FieldType::Secret, value)
+}
+
+fn login_field(name: &str, value: &str) -> Field {
+    let kind = schema("login")
+        .unwrap()
+        .field(name)
+        .map_or(FieldType::Text, |f| f.kind.clone());
+    Field::new(kind, value)
+}
+
+fn value(item: &Item, field: &str) -> String {
+    item.fields[field].value.clone()
 }
 
 fn sync(from: &Dev, to: &mut Dev) {
@@ -134,7 +182,7 @@ fn assert_order_independent(entries: &[Entry], items: &[ItemId]) -> Vault {
 }
 
 fn data_entry(secret: &DeviceSecret, vault: &Vault, seq: u64, deps: Vec<Hash>) -> Entry {
-    let op = DataOp::set(ItemId::from_bytes([1; 16]), "f", "v");
+    let op = DataOp::set(ItemId::from_bytes([1; 16]), "f", text("v"));
     Entry::sign(secret, vault.id(), seq, deps, Payload::Data(vec![op]))
 }
 
@@ -158,7 +206,7 @@ fn device_secret_round_trips_and_redacts() {
 #[test]
 fn rejects_tampered_entries() {
     let mut a = Dev::create();
-    let entry = a.set(ItemId::random(), "password", "hunter2");
+    let (_, entry) = a.login_entry("hunter2");
     let mut fresh = Vault::from_genesis(a.vault.entries()[0].clone()).unwrap();
 
     let mut body = entry.encode();
@@ -219,8 +267,7 @@ fn rejects_tampered_genesis() {
 #[test]
 fn rejects_seq_gaps_and_forks() {
     let mut a = Dev::create();
-    let item = ItemId::random();
-    let e0 = a.set(item, "f", "0");
+    let (item, e0) = a.login_entry("0");
     let e1 = a.set(item, "f", "1");
     let mut fresh = Vault::from_genesis(a.vault.entries()[0].clone()).unwrap();
     assert_eq!(
@@ -241,9 +288,9 @@ fn rejects_missing_deps() {
     let mut a = Dev::create();
     let mut b = a.invite();
     let mut c = Vault::load(a.vault.entries().into_iter().cloned()).unwrap();
-    let a0 = a.set(ItemId::random(), "f", "a");
+    let (_, a0) = a.login_entry("a");
     sync(&a, &mut b);
-    let b0 = b.set(ItemId::random(), "f", "b");
+    let (_, b0) = b.login_entry("b");
     assert_eq!(
         c.apply(b0.clone()),
         Err(Error::MissingDeps(vec![a0.hash()]))
@@ -255,7 +302,7 @@ fn rejects_missing_deps() {
 #[test]
 fn requires_previous_entry_in_deps() {
     let mut a = Dev::create();
-    a.set(ItemId::random(), "f", "0");
+    a.login("0");
     let entry = data_entry(&a.secret, &a.vault, 1, vec![genesis_hash(&a.vault)]);
     assert_eq!(a.vault.apply(entry), Err(Error::InvalidDeps));
 }
@@ -263,7 +310,7 @@ fn requires_previous_entry_in_deps() {
 #[test]
 fn membership_entries_cannot_depend_on_data() {
     let mut a = Dev::create();
-    let d0 = a.set(ItemId::random(), "f", "0");
+    let (_, d0) = a.login_entry("0");
     let joiner = DeviceSecret::generate();
     let op = MembershipOp::Add {
         device: joiner.device_id(),
@@ -301,7 +348,7 @@ fn rejects_non_member_authors() {
     );
     assert_eq!(a.vault.apply(entry), Err(Error::NotMember));
 
-    let op = DataOp::set(ItemId::random(), "f", "v");
+    let op = DataOp::set(ItemId::random(), "f", text("v"));
     assert_eq!(a.vault.write(&outsider, vec![op]), Err(Error::NotMember));
     assert!(!a.vault.is_member(&outsider.device_id()));
 }
@@ -364,7 +411,7 @@ fn is_member_false_after_removal_everywhere() {
         assert!(vault.is_member(&a.id()));
         assert!(vault.is_member(&c.id()));
     }
-    let op = DataOp::set(ItemId::random(), "f", "v");
+    let op = DataOp::set(ItemId::random(), "f", text("v"));
     assert_eq!(b.vault.write(&b.secret, vec![op]), Err(Error::NotMember));
     assert_eq!(b.vault.remove(&b.secret, a.id()), Err(Error::NotMember));
 }
@@ -662,37 +709,33 @@ fn one_device_key_across_vaults() {
 #[test]
 fn items_set_delete_and_restore() {
     let mut a = Dev::create();
-    let item = ItemId::random();
-    a.vault
-        .write(
-            &a.secret,
-            vec![
-                DataOp::set(item, "user", "dax"),
-                DataOp::set(item, "password", "one"),
-                DataOp::set(item, "password", "two"),
-            ],
-        )
+    let fields = [
+        ("username".into(), text("dax")),
+        ("password".into(), secret("one")),
+    ];
+    let (item, _) = a
+        .vault
+        .create_item(&a.secret, "login", None, fields)
         .unwrap();
+    a.set(item, "password", "two");
     let got = a.vault.item(&item).unwrap();
-    assert_eq!(got.fields["password"], "two");
+    assert_eq!(got.kind, "login");
+    assert_eq!(got.name, None);
+    assert_eq!(got.fields["password"], secret("two"));
     assert_eq!(a.vault.items().len(), 1);
 
-    a.vault
-        .write(&a.secret, vec![DataOp::delete_field(item, "user")])
-        .unwrap();
-    assert!(!a.vault.item(&item).unwrap().fields.contains_key("user"));
+    a.write(vec![DataOp::remove(item, "username")]);
+    assert!(!a.vault.item(&item).unwrap().fields.contains_key("username"));
 
-    a.vault
-        .write(&a.secret, vec![DataOp::delete_item(item)])
-        .unwrap();
+    a.write(vec![DataOp::delete(item)]);
     assert!(a.vault.item(&item).unwrap().deleted);
     assert!(a.vault.items().is_empty());
 
     a.set(item, "notes", "back");
     let got = a.vault.item(&item).unwrap();
     assert!(!got.deleted);
-    assert_eq!(got.fields["password"], "two");
-    assert_eq!(got.fields["notes"], "back");
+    assert_eq!(value(&got, "password"), "two");
+    assert_eq!(got.fields["notes"], Field::new(FieldType::Note, "back"));
 
     let statuses: Vec<VersionStatus> = a.vault.history(&item).iter().map(|v| v.status).collect();
     use VersionStatus::*;
@@ -705,17 +748,341 @@ fn items_set_delete_and_restore() {
 }
 
 #[test]
+fn item_ids_derive_from_the_creating_op() {
+    let mut a = Dev::create();
+    let ops = vec![
+        DataOp::create("login", None, [("password".into(), secret("1"))]),
+        DataOp::create("login", None, [("password".into(), secret("2"))]),
+    ];
+    let entry = a.write(ops);
+    let ids = [0, 1].map(|i| ItemId::of_create(&entry.hash(), i));
+    assert_ne!(ids[0], ids[1]);
+    assert_eq!(value(&a.vault.item(&ids[1]).unwrap(), "password"), "2");
+}
+
+#[test]
+fn schema_is_enforced_at_commit() {
+    let mut a = Dev::create();
+    let item_err = |e: ItemError| Err(Error::Item(e));
+    let create = |kind: &str, fields: Vec<(&str, Field)>| {
+        DataOp::create(
+            kind,
+            None,
+            fields.into_iter().map(|(n, f)| (n.to_string(), f)),
+        )
+    };
+    let card = |fields: Vec<(&str, Field)>| {
+        let mut all = vec![("number", secret("4242424242424242"))];
+        all.extend(fields);
+        create("card", all)
+    };
+    let cases = [
+        (
+            create("wifi", vec![("password", secret("x"))]),
+            ItemError::UnknownType("wifi".into()),
+        ),
+        (
+            create("login", vec![("username", text("dax"))]),
+            ItemError::MissingField("password"),
+        ),
+        (
+            create("card", vec![("cvv", secret("123"))]),
+            ItemError::MissingField("number"),
+        ),
+        (
+            create("login", vec![("password", text("x"))]),
+            ItemError::WrongFieldType {
+                field: "password".into(),
+                expected: FieldType::Secret,
+            },
+        ),
+        (
+            create("login", vec![("password", secret(""))]),
+            ItemError::InvalidValue {
+                field: "password".into(),
+                reason: "empty".into(),
+            },
+        ),
+        (
+            create(
+                "login",
+                vec![("password", secret("x")), ("Bad Name", text("x"))],
+            ),
+            ItemError::InvalidFieldName("Bad Name".into()),
+        ),
+        (
+            create(
+                "login",
+                vec![
+                    ("password", secret("x")),
+                    ("x", Field::new(FieldType::Other("future".into()), "v")),
+                ],
+            ),
+            ItemError::UnknownFieldType("future".into()),
+        ),
+    ];
+    for (op, err) in cases {
+        assert_eq!(a.vault.write(&a.secret, vec![op]), item_err(err));
+    }
+    let invalid_values = [
+        card(vec![("number", secret("4242 4242 4242 4242"))]),
+        card(vec![("number", secret("12345678901"))]),
+        card(vec![("number", secret(&"1".repeat(20)))]),
+        card(vec![("cvv", secret("12"))]),
+        card(vec![("cvv", secret("12a"))]),
+        card(vec![("expiry", Field::new(FieldType::Month, "2026-13"))]),
+        card(vec![("expiry", Field::new(FieldType::Month, "26-01"))]),
+        create(
+            "login",
+            vec![
+                ("password", secret("x")),
+                ("url", Field::new(FieldType::Url, "github.com")),
+            ],
+        ),
+        create(
+            "login",
+            vec![
+                ("password", secret("x")),
+                ("mail", Field::new(FieldType::Email, "nope")),
+            ],
+        ),
+    ];
+    for op in invalid_values {
+        let result = a.vault.write(&a.secret, vec![op.clone()]);
+        assert!(
+            matches!(result, Err(Error::Item(ItemError::InvalidValue { .. }))),
+            "{op:?}: {result:?}"
+        );
+    }
+    let named = DataOp::create(
+        "login",
+        Some(" ".into()),
+        [("password".into(), secret("x"))],
+    );
+    assert_eq!(
+        a.vault.write(&a.secret, vec![named]),
+        item_err(ItemError::InvalidItemName)
+    );
+    assert!(a.vault.items().is_empty());
+    assert_eq!(a.vault.entries().len(), 1, "nothing was committed");
+
+    // Valid: a full card and extra fields of any type.
+    let op = card(vec![
+        ("expiry", Field::new(FieldType::Month, "2027-04")),
+        ("cvv", secret("1234")),
+        ("brand", text("Visa")),
+        ("cardholder", text("Dax")),
+        ("site", Field::new(FieldType::Url, "https://bank.example")),
+        ("recovery", secret("words")),
+    ]);
+    let entry = a.write(vec![op]);
+    let card = ItemId::of_create(&entry.hash(), 0);
+    assert_eq!(a.vault.item(&card).unwrap().fields.len(), 7);
+
+    // Edits.
+    let item = a.login("pw");
+    let edits = [
+        (
+            DataOp::remove(item, "password"),
+            ItemError::RequiredField("password".into()),
+        ),
+        (
+            DataOp::remove(card, "number"),
+            ItemError::RequiredField("number".into()),
+        ),
+        (
+            DataOp::set(item, "url", text("https://x.example")),
+            ItemError::WrongFieldType {
+                field: "url".into(),
+                expected: FieldType::Url,
+            },
+        ),
+        (
+            DataOp::set(card, "number", secret("42")),
+            ItemError::InvalidValue {
+                field: "number".into(),
+                reason: "must be 12-19 digits".into(),
+            },
+        ),
+        (
+            DataOp::name(item, Some("bad\nname".into())),
+            ItemError::InvalidItemName,
+        ),
+        (
+            DataOp::set(ItemId::random(), "username", text("x")),
+            ItemError::NoSuchItem,
+        ),
+    ];
+    for (op, err) in edits {
+        assert_eq!(a.vault.write(&a.secret, vec![op]), item_err(err));
+    }
+    // One bad op rejects the whole entry.
+    let mixed = vec![
+        DataOp::set(item, "username", text("dax")),
+        DataOp::remove(item, "password"),
+    ];
+    assert!(a.vault.write(&a.secret, mixed).is_err());
+    assert!(!a.vault.item(&item).unwrap().fields.contains_key("username"));
+    // Extra fields may change type; removing optional fields is fine.
+    a.write(vec![DataOp::set(item, "extra", text("a"))]);
+    a.write(vec![DataOp::set(item, "extra", secret("b"))]);
+    a.write(vec![DataOp::remove(item, "extra")]);
+    a.write(vec![DataOp::remove(item, "never-set")]);
+}
+
+#[test]
+fn invalid_ops_are_ignored_at_apply_in_any_order() {
+    let mut a = Dev::create();
+    let item = a.login("orig");
+    let mut b = a.invite();
+    let mut c = a.invite();
+    sync(&a, &mut b);
+
+    a.raw(vec![
+        DataOp::remove(item, "password"),
+        DataOp::set(item, "username", text("dax")),
+        DataOp::set(item, "password", text("wrong type")),
+        DataOp::set(item, "url", Field::new(FieldType::Url, "not a url")),
+        DataOp::name(item, Some(String::new())),
+        DataOp::name(item, Some("Work".into())),
+        DataOp::set(
+            item,
+            "x",
+            Field::new(FieldType::Other("future".into()), "v"),
+        ),
+    ]);
+    let created = b.raw(vec![
+        DataOp::create("wifi", None, [("password".into(), secret("x"))]),
+        DataOp::create("card", None, [("cvv".into(), secret("123"))]),
+        DataOp::create(
+            "card",
+            None,
+            [("number".into(), secret("4111111111111111"))],
+        ),
+        DataOp::set(item, "otp", Field::new(FieldType::Otp, "JBSWY3DPEHPK3PXP")),
+    ]);
+    let ids: Vec<ItemId> = (0..3)
+        .map(|i| ItemId::of_create(&created.hash(), i))
+        .collect();
+    // c edits b's card without having seen its creation: ignored even when
+    // the creation happens to be applied first.
+    c.raw(vec![
+        DataOp::set(ids[2], "cvv", secret("999")),
+        DataOp::remove(item, "password"),
+        DataOp::set(item, "notes", Field::new(FieldType::Note, "from c")),
+    ]);
+
+    let all = [vec![item], ids.clone()].concat();
+    let vault = assert_order_independent(&all_entries(&[&a, &b, &c]), &all);
+    let got = vault.item(&item).unwrap();
+    assert_eq!(got.kind, "login");
+    assert_eq!(got.name.as_deref(), Some("Work"));
+    assert_eq!(got.fields["password"], secret("orig"));
+    assert_eq!(value(&got, "username"), "dax");
+    assert_eq!(value(&got, "notes"), "from c");
+    assert_eq!(got.fields["otp"].kind, FieldType::Otp);
+    assert!(!got.fields.contains_key("url") && !got.fields.contains_key("x"));
+    assert_eq!(vault.item(&ids[0]), None);
+    assert_eq!(vault.item(&ids[1]), None);
+    let card = vault.item(&ids[2]).unwrap();
+    assert_eq!(card.kind, "card");
+    assert!(!card.fields.contains_key("cvv"));
+    // Ignored ops leave no trace in the history.
+    assert!(vault.history(&item).iter().all(|v| match &v.change {
+        Change::Remove { field } => field != "password",
+        Change::Set { value, .. } => value.kind != FieldType::Text || value.value == "dax",
+        _ => true,
+    }));
+    assert_eq!(vault.items().len(), 2);
+}
+
+#[test]
+fn name_set_and_clear_resolve_like_fields() {
+    let mut a = Dev::create();
+    let mut b = a.invite();
+    let fields = [("password".into(), secret("p"))];
+    let (item, _) = a
+        .vault
+        .create_item(&a.secret, "login", Some("Personal".into()), fields)
+        .unwrap();
+    sync(&a, &mut b);
+    assert_eq!(
+        b.vault.item(&item).unwrap().name.as_deref(),
+        Some("Personal")
+    );
+
+    let clear = a.write(vec![DataOp::name(item, None)]);
+    let set = b.write(vec![DataOp::name(item, Some("Work".into()))]);
+    sync_both(&mut a, &mut b);
+    let expected = if clear.hash() > set.hash() {
+        None
+    } else {
+        Some("Work")
+    };
+    let vault = assert_order_independent(&all_entries(&[&a, &b]), &[item]);
+    for vault in [&vault, &a.vault, &b.vault] {
+        assert_eq!(vault.item(&item).unwrap().name.as_deref(), expected);
+        let conflicted = vault
+            .history(&item)
+            .into_iter()
+            .filter(|v| v.status == VersionStatus::Conflicted)
+            .count();
+        assert_eq!(conflicted, 1);
+    }
+
+    // Based on both, so it wins.
+    a.write(vec![DataOp::name(item, None)]);
+    sync(&a, &mut b);
+    assert_eq!(b.vault.item(&item).unwrap().name, None);
+    b.write(vec![DataOp::name(item, Some("Again".into()))]);
+    sync(&b, &mut a);
+    assert_eq!(a.vault.item(&item).unwrap().name.as_deref(), Some("Again"));
+}
+
+#[test]
+fn field_type_travels_with_the_winning_value() {
+    let mut a = Dev::create();
+    let item = a.login("p");
+    let mut b = a.invite();
+    let ea = a.write(vec![DataOp::set(item, "extra", text("plain"))]);
+    let eb = b.write(vec![DataOp::set(
+        item,
+        "extra",
+        Field::new(FieldType::Email, "x@y.example"),
+    )]);
+    sync_both(&mut a, &mut b);
+    let (winner, loser) = if ea.hash() > eb.hash() {
+        (text("plain"), Field::new(FieldType::Email, "x@y.example"))
+    } else {
+        (Field::new(FieldType::Email, "x@y.example"), text("plain"))
+    };
+    for vault in [&a.vault, &b.vault] {
+        assert_eq!(vault.item(&item).unwrap().fields["extra"], winner);
+        let history = vault.history(&item);
+        let find = |f: &Field| {
+            history
+                .iter()
+                .find(|v| matches!(&v.change, Change::Set { value, .. } if value == f))
+                .unwrap()
+                .status
+        };
+        assert_eq!(find(&winner), VersionStatus::Current);
+        assert_eq!(find(&loser), VersionStatus::Conflicted);
+    }
+}
+
+#[test]
 fn edit_based_on_previous_value_replaces_it() {
     let mut a = Dev::create();
     let mut b = a.invite();
-    let item = ItemId::random();
+    let item = a.login("init");
     for round in 0..8 {
         a.set(item, "password", &format!("a{round}"));
         sync(&a, &mut b);
         b.set(item, "password", &format!("b{round}"));
         sync(&b, &mut a);
         assert_eq!(
-            a.vault.item(&item).unwrap().fields["password"],
+            value(&a.vault.item(&item).unwrap(), "password"),
             format!("b{round}")
         );
     }
@@ -731,8 +1098,8 @@ fn edit_based_on_previous_value_replaces_it() {
 fn concurrent_edits_pick_hash_winner_and_keep_loser() {
     let mut a = Dev::create();
     let mut b = a.invite();
-    let item = ItemId::random();
-    a.set(item, "user", "dax");
+    let item = a.login("p0");
+    a.set(item, "username", "dax");
     sync(&a, &mut b);
     let ea = a.set(item, "password", "from-a");
     let eb = b.set(item, "password", "from-b");
@@ -743,17 +1110,20 @@ fn concurrent_edits_pick_hash_winner_and_keep_loser() {
     } else {
         (eb, ea)
     };
-    let value = |e: &Entry| match e.payload() {
-        Payload::Data(ops) => match &ops[0].change {
-            Change::Set { value, .. } => value.clone(),
+    let set_value = |e: &Entry| match e.payload() {
+        Payload::Data(ops) => match &ops[0] {
+            DataOp::Edit {
+                change: Change::Set { value, .. },
+                ..
+            } => value.value.clone(),
             _ => unreachable!(),
         },
         _ => unreachable!(),
     };
     for vault in [&a.vault, &b.vault] {
         assert_eq!(
-            vault.item(&item).unwrap().fields["password"],
-            value(&winner)
+            value(&vault.item(&item).unwrap(), "password"),
+            set_value(&winner)
         );
         let history = vault.history(&item);
         let status = |h: Hash| history.iter().find(|v| v.entry == h).unwrap().status;
@@ -765,7 +1135,7 @@ fn concurrent_edits_pick_hash_winner_and_keep_loser() {
     // A later edit based on both resolves the conflict.
     a.set(item, "password", "merged");
     sync(&a, &mut b);
-    assert_eq!(b.vault.item(&item).unwrap().fields["password"], "merged");
+    assert_eq!(value(&b.vault.item(&item).unwrap(), "password"), "merged");
     let history = b.vault.history(&item);
     assert_eq!(
         history
@@ -777,24 +1147,35 @@ fn concurrent_edits_pick_hash_winner_and_keep_loser() {
 }
 
 #[test]
+fn concurrent_edits_to_different_fields_both_survive() {
+    let mut a = Dev::create();
+    let item = a.login("p");
+    let mut b = a.invite();
+    a.set(item, "username", "dax");
+    b.set(item, "url", "https://github.com");
+    sync_both(&mut a, &mut b);
+    for vault in [&a.vault, &b.vault] {
+        let got = vault.item(&item).unwrap();
+        assert_eq!(value(&got, "username"), "dax");
+        assert_eq!(value(&got, "url"), "https://github.com");
+    }
+}
+
+#[test]
 fn concurrent_edits_are_order_independent() {
     let mut a = Dev::create();
+    let items = [a.login("x"), a.login("y")];
     let mut b = a.invite();
     let mut c = a.invite();
     sync(&a, &mut b);
-    let items = [ItemId::random(), ItemId::random()];
     for (i, dev) in [&mut a, &mut b, &mut c].into_iter().enumerate() {
         dev.set(items[0], "password", &format!("p{i}"));
         dev.set(items[1], "user", &format!("u{i}"));
-        dev.vault
-            .write(&dev.secret, vec![DataOp::delete_field(items[1], "user")])
-            .unwrap();
+        dev.write(vec![DataOp::remove(items[1], "user")]);
         dev.set(items[1], "user", &format!("again{i}"));
     }
     sync_both(&mut a, &mut b);
-    a.vault
-        .write(&a.secret, vec![DataOp::delete_item(items[0])])
-        .unwrap();
+    a.write(vec![DataOp::delete(items[0])]);
     c.set(items[1], "notes", "c");
     let vault = assert_order_independent(&all_entries(&[&a, &b, &c]), &items);
     let conflicted = vault
@@ -809,22 +1190,19 @@ fn concurrent_edits_are_order_independent() {
 fn concurrent_edit_beats_delete_item() {
     let mut a = Dev::create();
     let mut b = a.invite();
-    let item = ItemId::random();
-    a.set(item, "password", "one");
+    let item = a.login("one");
     sync(&a, &mut b);
-    a.vault
-        .write(&a.secret, vec![DataOp::delete_item(item)])
-        .unwrap();
+    a.write(vec![DataOp::delete(item)]);
     b.set(item, "password", "two");
     sync_both(&mut a, &mut b);
     for vault in [&a.vault, &b.vault] {
         let got = vault.item(&item).unwrap();
         assert!(!got.deleted);
-        assert_eq!(got.fields["password"], "two");
+        assert_eq!(value(&got, "password"), "two");
         let delete = vault
             .history(&item)
             .into_iter()
-            .find(|v| v.change == Change::DeleteItem)
+            .find(|v| v.change == Change::Delete)
             .unwrap();
         assert_eq!(delete.status, VersionStatus::Conflicted);
     }
@@ -835,11 +1213,10 @@ fn removal_cutoff_ignores_later_entries() {
     let mut a = Dev::create();
     let mut b = a.invite();
     let mut c = a.invite();
-    let item = ItemId::random();
-    b.set(item, "password", "seen");
+    let item = b.login("seen");
     sync(&b, &mut a);
     b.set(item, "password", "unseen");
-    b.set(ItemId::random(), "junk", "unseen");
+    b.login("unseen");
     let removal = a.remove(b.id());
     assert_eq!(
         removal.payload(),
@@ -851,13 +1228,14 @@ fn removal_cutoff_ignores_later_entries() {
     sync_both(&mut a, &mut b);
     sync(&a, &mut c);
     for vault in [&a.vault, &b.vault, &c.vault] {
-        assert_eq!(vault.item(&item).unwrap().fields["password"], "seen");
+        assert_eq!(value(&vault.item(&item).unwrap(), "password"), "seen");
         assert_eq!(vault.items().len(), 1);
     }
 
     // c built on b's unseen write before learning of the removal: c's own
     // edit counts, b's does not.
     let mut a2 = Dev::create();
+    let item = a2.login("orig");
     let mut b2 = a2.invite();
     let mut c2 = a2.invite();
     sync(&a2, &mut b2);
@@ -868,16 +1246,15 @@ fn removal_cutoff_ignores_later_entries() {
     sync_both(&mut a2, &mut c2);
     let vault = assert_order_independent(&all_entries(&[&a2, &b2, &c2]), &[item]);
     let got = vault.item(&item).unwrap();
-    assert_eq!(got.fields.get("password"), None);
-    assert_eq!(got.fields["notes"], "c");
+    assert_eq!(value(&got, "password"), "orig");
+    assert_eq!(value(&got, "notes"), "c");
 }
 
 #[test]
 fn removal_without_seen_entries_ignores_all() {
     let mut a = Dev::create();
     let mut b = a.invite();
-    let item = ItemId::random();
-    b.set(item, "password", "x");
+    let item = b.login("x");
     let removal = a.remove(b.id());
     assert_eq!(
         removal.payload(),
@@ -896,15 +1273,14 @@ fn concurrent_removals_keep_the_larger_cutoff() {
     let mut b = a.invite();
     let mut c = a.invite();
     sync(&a, &mut b);
-    let item = ItemId::random();
-    b.set(item, "f", "0");
+    let item = b.login("0");
     sync(&b, &mut a);
-    b.set(item, "f", "1");
+    b.set(item, "password", "1");
     sync(&b, &mut c);
     a.remove(b.id());
     c.remove(b.id());
     let vault = assert_order_independent(&all_entries(&[&a, &b, &c]), &[item]);
-    assert_eq!(vault.item(&item).unwrap().fields["f"], "1");
+    assert_eq!(value(&vault.item(&item).unwrap(), "password"), "1");
     assert!(!vault.is_member(&b.id()));
 }
 
@@ -913,8 +1289,7 @@ fn data_from_device_with_cut_admission_is_ignored() {
     let mut a = Dev::create();
     let mut b = a.invite();
     let mut d = b.invite();
-    let item = ItemId::random();
-    d.set(item, "f", "d");
+    let item = d.login("d");
     a.remove(b.id());
     sync(&d, &mut b);
     sync_both(&mut a, &mut b);
@@ -927,8 +1302,8 @@ fn data_from_device_with_cut_admission_is_ignored() {
 #[test]
 fn missing_for_sends_membership_first_and_converges() {
     let mut a = Dev::create();
+    let item = a.login("p");
     let mut b = a.invite();
-    let item = ItemId::random();
     a.set(item, "f", "a");
     b.set(item, "g", "b");
     let joiner = DeviceSecret::generate();
@@ -958,7 +1333,7 @@ fn missing_for_sends_membership_first_and_converges() {
 fn heads_encoding_round_trips() {
     let mut a = Dev::create();
     let _b = a.invite();
-    a.set(ItemId::random(), "f", "v");
+    a.login("v");
     let heads = a.vault.heads();
     assert_eq!(heads.iter().count(), 2);
     assert_eq!(Heads::decode(&heads.encode()), Ok(heads.clone()));

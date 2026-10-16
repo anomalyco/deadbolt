@@ -1,6 +1,7 @@
 //! The background agent: the only process that opens the store. Holds it
 //! unlocked, runs the iroh node while unlocked, and serves the control socket.
 
+mod items;
 mod pairing;
 mod session;
 mod sync;
@@ -362,9 +363,49 @@ impl Agent {
                     peers: sync::sync_all(&self).await?,
                 })
             }
-            Command::Join => pairing::join(&self, conv).await,
-            Command::Pair { ticket, vault } => pairing::pair(&self, conv, ticket, vault).await,
+            Command::Join { confirm } => pairing::join(&self, conv, confirm).await,
+            Command::Pair {
+                ticket,
+                vault,
+                confirm,
+            } => pairing::pair(&self, conv, ticket, vault, confirm).await,
+            Command::ItemGet { vault, query } => Ok(Reply::Item {
+                item: self.with(|s| items::get(s, vault.as_deref(), &query))?,
+            }),
+            Command::ItemList { vault, query, kind } => Ok(Reply::Items {
+                items: self.with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,
+            }),
+            Command::ItemNew {
+                vault,
+                kind,
+                name,
+                fields,
+            } => self.item_write(|s| items::create(s, vault.as_deref(), &kind, name, fields)),
+            Command::ItemSet {
+                vault,
+                query,
+                fields,
+                name,
+            } => self.item_write(|s| items::set(s, vault.as_deref(), &query, fields, name)),
+            Command::ItemUnset {
+                vault,
+                query,
+                field,
+            } => self.item_write(|s| items::unset(s, vault.as_deref(), &query, &field)),
+            Command::ItemRemove { vault, query } => {
+                self.item_write(|s| items::remove(s, vault.as_deref(), &query))
+            }
         }
+    }
+
+    /// Runs a local item write, then syncs it out right away.
+    fn item_write(
+        &self,
+        f: impl FnOnce(&mut Session) -> Result<crate::protocol::ItemInfo>,
+    ) -> Result<Reply> {
+        let item = self.with(f)?;
+        self.sync_now.notify_one();
+        Ok(Reply::Item { item })
     }
 
     /// Runs `f` on the unlocked session.
@@ -372,7 +413,7 @@ impl Agent {
         let mut guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let Some(session) = guard.as_mut() else {
             return Err(if deadbolt_store::is_initialized(&self.paths.data) {
-                fail(ErrorCode::Locked, "locked; run `deadbolt unlock`")
+                fail(ErrorCode::Locked, "locked: run `deadbolt unlock`")
             } else {
                 fail(
                     ErrorCode::NotInitialized,
