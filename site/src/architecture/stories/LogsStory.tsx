@@ -191,8 +191,8 @@ function Card({ id, t, story, light }: { id: Id; t: number; story: StoryApi; lig
     <rect x={-EW / 2 + .5} y={-EH / 2 + .5} width={EW - 1} height={EH - 1} fill="#050505" stroke={frame} />
     <rect x={-EW / 2 + 3.5} y={-EH / 2 + 3.5} width={EW - 7} height={EH - 7} fill="none" stroke={shade("#262626", ["#000000", dim])} />
     <text y={.5} textAnchor="middle" dominantBaseline="middle" className="story-entry" fill={ink}>{label}</text>
-    {sealScale > 0 && <rect x={-3.6} y={-3.6} width={7.2} height={7.2} fill={broken ? "#000" : shade(red ? "#ff2a2a" : "#c8231f", ["#000000", dim * .6])}
-      stroke={broken ? shade("#000000", ["#ffb347", broken]) : "#000"} strokeWidth={broken ? 1.2 : 1.5}
+    {sealScale > 0 && <rect x={-3.6} y={-3.6} width={7.2} height={7.2} fill={shade(red ? "#ff2a2a" : "#c8231f", ["#000000", dim * .6], ["#000000", broken])}
+      stroke={shade("#000000", ["#ffb347", broken])} strokeWidth={1.5 - .3 * broken}
       transform={`translate(${EW / 2} 0) rotate(45) scale(${sealScale})`} opacity={e.at === 0 ? 1 : clamp01(sealAge / .08)} />}
   </g>
 }

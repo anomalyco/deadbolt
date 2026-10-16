@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, bridge, panX, send, soundOfSend, spark, timing, type Send } from "../../story/beats"
 import { Carried, Frame } from "../../story/devices"
-import { clamp01, flashes, shade, span, springAt, springs, wipe, working, type Box } from "../../story/motion"
+import { clamp01, flashes, rolling, shade, span, springAt, springs, wipe, working, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // Pairing (`deadbolt/pair/1`): a new phone shows a ticket + QR code; you give the ticket to the desktop (already a
@@ -130,23 +130,13 @@ function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi })
   }
 
   // Same phone card keeps its identity from listening newcomer to admitted member.
-  const phoneDetail = t < timing(sDial).lands
-    ? "new · listening"
-    : t < ADMITTED
-      ? "pairing…"
-      : working("member · synced", t, ADMITTED, ADMITTED + .35, 3) ?? "member · synced"
+  const phoneDetail = rolling(t, [[0, "new · listening"], [timing(sDial).lands, "pairing…"], [ADMITTED, "member · synced"]], 3)
 
   const codeText = working("411 308", t, CODE_AT, CODE_AT + .38, 7)
-  const phoneNote = t < sConsent.at
-    ? "public key · secret · hint"
-    : t < ADMITTED
-      ? "signed consent · personal"
-      : "vault history applied"
-  const deskNote = t < timing(sCarry).lands
-    ? "waiting for ticket"
-    : t < ADD_AT
-      ? "$ deadbolt pair DBPAIR…"
-      : "signed Add(phone)"
+  // The hints under the codes print in once the digits have locked.
+  const hinted = span(t, CODE_AT + .3, CODE_AT + .6)
+  const phoneNote = rolling(t, [[0, "public key · secret · hint"], [sConsent.at, "signed consent · personal"], [ADMITTED, "vault history applied"]], 5)
+  const deskNote = rolling(t, [[0, "waiting for ticket"], [timing(sCarry).lands, "$ deadbolt pair DBPAIR…"], [ADD_AT, "signed Add(phone)"]], 9)
 
   return <>
     <Wire id="carry" d={carryTicket.d} t={t} story={story} dashed />
@@ -162,7 +152,7 @@ function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi })
       <text x={PHONE[0] + 92} y={PHONE[1] + 104} dominantBaseline="middle" className="story-note" fill="#8d8a84">{phoneNote}</text>
       {codeText && <>
         <text x={PHONE[0] + 18} y={PHONE[1] + 194} dominantBaseline="middle" className="story-code" fill="#e8e4dc">{codeText}</text>
-        <text x={PHONE[0] + 18} y={PHONE[1] + 220} dominantBaseline="middle" className="story-note" fill="#7a7a7a">derived from tls + keys</text>
+        <text x={PHONE[0] + 18} y={PHONE[1] + 220} dominantBaseline="middle" className="story-note" fill="#7a7a7a" opacity={hinted}>derived from tls + keys</text>
       </>}
     </Frame>
 
@@ -173,7 +163,7 @@ function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi })
         fill={shade("#cfcac1", ["#ff5242", span(t, ADD_AT, ADD_AT + .15)])}>{deskNote}</text>
       {codeText && <>
         <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 194} dominantBaseline="middle" className="story-code" fill="#e8e4dc">{codeText}</text>
-        <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 220} dominantBaseline="middle" className="story-note" fill="#9e9a92">match? [y/N] y</text>
+        <text x={DESKTOP[0] + 18} y={DESKTOP[1] + 220} dominantBaseline="middle" className="story-note" fill="#9e9a92" opacity={hinted}>match? [y/N] y</text>
       </>}
     </Frame>
 

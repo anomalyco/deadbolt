@@ -1,7 +1,7 @@
 import type { Light } from "../../story/light"
 import { across, cubic, hatch, panX, send, soundOfSend, timing, type Send } from "../../story/beats"
 import { Carried, Frame, edge } from "../../story/devices"
-import { clamp01, flashes, shade, span, wipe, working, type Box } from "../../story/motion"
+import { clamp01, flashes, rolling, shade, span, wipe, type Box } from "../../story/motion"
 import { Story, type StoryApi, type StoryScene } from "../../story/Story"
 
 // No server: entries move directly between your devices (desktop, laptop, tablet, phone). When two devices
@@ -97,11 +97,7 @@ function Mesh({ t, light, story }: { t: number; light: Light; story: StoryApi })
 
   // The phone keeps its card: it wakes (its dashes close up like a zip) and its detail rolls over to synced.
   const asleep = 1 - wipe(t, WAKE, .4)
-  const phoneDetail = t < WAKE
-    ? "asleep"
-    : t >= SYNCED
-      ? working("member · synced", t, SYNCED, SYNCED + .35, 3) ?? "member · synced"
-      : "waking…"
+  const phoneDetail = rolling(t, [[0, "asleep"], [WAKE, "waking…"], [SYNCED, "member · synced"]], 3)
 
   const groupLit = clamp01((story.focus(t, "group", .3) - .3) / .7)
 

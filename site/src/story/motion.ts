@@ -95,6 +95,15 @@ export function working(final: string, t: number, from: number, to: number, seed
   }).join("")
 }
 
+/** A label that changes over time, from `[time, text]` states in order: each new text rolls in like an odometer
+ *  over `roll` seconds instead of swapping in one frame. */
+export function rolling(t: number, states: readonly (readonly [number, string])[], seed = 1, roll = .32) {
+  let index = 0
+  states.forEach(([at], i) => { if (t >= at) index = i })
+  const [at, text] = states[index]!
+  return index === 0 ? text : working(text, t, at, at + roll, seed + index) ?? text
+}
+
 const rgb = (color: string) => color.startsWith("rgb(")
   ? color.slice(4, -1).split(" ").map(Number)
   : [1, 3, 5].map(i => parseInt(color.slice(i, i + 2), 16))
