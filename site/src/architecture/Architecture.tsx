@@ -2,7 +2,7 @@ import type { ReactNode } from "react"
 import { Ink } from "../print/Ink"
 import { Masthead } from "../print/Masthead"
 import { MeshStory } from "./stories/MeshStory"
-import { AgentScene } from "./scenes/AgentScene"
+import { AgentStory } from "./stories/AgentStory"
 import { KeysScene } from "./scenes/KeysScene"
 import { LogsStory } from "./stories/LogsStory"
 import { SyncScene } from "./scenes/SyncScene"
@@ -33,7 +33,7 @@ const chapters: Chapter[] = [
       <p>on each machine there are two processes. the <code>deadbolt</code> command you type is a thin client. the work happens in a background agent that the cli starts on first use. the agent is the only process that ever opens the store, it keeps the vault unlocked in memory, and while unlocked it runs the iroh node.</p>
       <p>the code splits along the same lines: <code>deadbolt-core</code> is the pure model (entries, membership, items, merging) with no io at all; <code>deadbolt-store</code> is the encrypted file on disk; <code>deadbolt-net</code> is iroh, sync and pairing; <code>deadbolt-cli</code> is the binary, holding both the client and the agent.</p>
     </>,
-    scene: <AgentScene />,
+    scene: <AgentStory />,
     why: <p>the cli was built agent-first: every command works from flags, env and stdin, and it never waits on a human without a terminal. an ai agent can drive it the same way you do.</p>,
     code: [["crates/cli/src/main.rs", "the commands"], ["crates/cli/src/client.rs", "starts, replaces and talks to the agent"], ["crates/cli/src/protocol.rs", "the socket protocol: one json line per request"], ["crates/cli/src/agent/mod.rs", "the agent: lock, unlock, the membership gate"], ["crates/cli/src/paths.rs", "where the socket, store and logs live"]],
   },
