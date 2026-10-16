@@ -35,7 +35,7 @@ h2 { margin: 0 0 var(--s3); font-size: clamp(20px, 3.2vw, 27px); font-weight: 50
 .just { text-align: justify; text-align-last: left; hyphens: none; }
 .install { margin-top: var(--s3); line-height: 1.7; }
 .tabs { display: flex; gap: 24px; margin-bottom: var(--s1); }
-.tabs span { opacity: .45; } .tabs span.on { opacity: 1; }
+.tabs span { opacity: .45; cursor: pointer; } .tabs span.on { opacity: 1; }
 .command { white-space: nowrap; overflow-x: auto; }
 section { margin-top: var(--s5); }
 pre { margin: 0; overflow-x: auto; color: #fff; font: clamp(14px, 2vw, 17px)/1.8 var(--font-text); }
@@ -92,22 +92,22 @@ dd { margin: 0; line-height: 1.7; opacity: .55; }
   <div class="diagram-wrap"><div class="diagram">
     <div class="box"><div><span>⌂ this machine</span><span class="dim">key</span></div></div>
     <div class="wire"><i>SEALED</i></div>
-    <div class="box"><div><span>⇅ sync.deadbolt.sh</span><span class="dim">ciphertext</span></div></div>
+    <div class="box"><div><span>⇅ iroh · direct</span><span class="dim">end-to-end</span></div></div>
     <div class="wire"><i>SEALED</i></div>
     <div class="group">
       <span class="group-label">your other devices</span>
       <span class="node" style="top:27px"></span><span class="node" style="top:calc(50% - 4px)"></span><span class="node" style="bottom:27px"></span>
       <div class="box"><div><span>laptop</span><span class="dim">deadbolt run</span></div></div>
       <div class="box"><div><span>ci runner</span><span class="dim">DEADBOLT_TOKEN</span></div></div>
-      <div class="box"><div><span>opencode</span><span class="dim">@deadbolt/client</span></div></div>
+      <div class="box"><div><span>opencode</span><span class="dim">deadbolt get</span></div></div>
     </div>
   </div></div>
 
-  <p class="description just">a cli and sdk for passwords, api keys and env files. encrypted on your machine, synced between your devices, readable by nobody else. one static binary: no runtime, no node, no ghosts.</p>
+  <p class="description just">a cli for passwords, api keys and env files. encrypted on your machine, synced between your devices, readable by nobody else. one static binary: no runtime, no node, no ghosts.</p>
 
   <div class="install">
-    <div class="tabs"><span class="on">curl</span><span>brew</span><span>arch</span><span>npm</span><span>cargo</span><span>github</span></div>
-    <div class="command">$ curl -fsSL https://deadbolt.sh/install | sh</div>
+    <div class="tabs"><span class="on" data-command="$ curl -fsSL https://deadbolt.pw/install | sh">curl</span><span data-command="$ brew install anomalyco/tap/deadbolt">brew</span><span data-command="↓ github.com/anomalyco/deadbolt/releases">github</span></div>
+    <div class="command">$ curl -fsSL https://deadbolt.pw/install | sh</div>
   </div>
 
   <section>
@@ -126,37 +126,25 @@ ready on localhost:3000</span></pre>
   </section>
 
   <section>
-    <h2>sdk</h2>
-<pre>// bun add @deadbolt/client
-import { open } from "@deadbolt/client"
-
-const vault = await open()
-const token = await vault.get("github/token")
-
-console.log(token.slice(0, 4) + "…")
-<span class="output">ghp_…</span></pre>
-  </section>
-
-  <section>
     <h2>how it works</h2>
     <ol class="steps">
       <li><p class="just">deadbolt init generates a vault key on your machine. the key never leaves it, and we never see it.</p></li>
       <li><p class="just">every secret is encrypted locally before it touches disk or the network. nothing is written in plaintext, not even the names.</p></li>
-      <li><p class="just">adding a device is a handshake between two of your machines. the old one wraps the vault key for the new one's public key, and the server only carries the envelope.</p></li>
-      <li><p class="just">sync moves ciphertext. the server stores opaque blobs and version numbers, nothing it could read.</p></li>
-      <li><p class="just">the cli and sdk decrypt in memory, hand you the secret, and forget it.</p></li>
+      <li><p class="just">adding a device is a handshake between two of your machines. the old one wraps the vault key for the new one's public key and hands it over directly.</p></li>
+      <li><p class="just">sync moves ciphertext, device to device over iroh. there is no server of ours in the middle, nothing to store your blobs and nothing to read them.</p></li>
+      <li><p class="just">the cli decrypts in memory, hand you the secret, and forget it.</p></li>
     </ol>
   </section>
 
   <section>
     <h2>the dead don't talk</h2>
     <dl>
-      <div><dt>the server can't read your secrets</dt>
-        <dd class="just">it holds encrypted blobs and nothing to open them with. a breach of the server is a breach of noise.</dd></div>
+      <div><dt>there is no server to breach</dt>
+        <dd class="just">your devices talk to each other directly. when a relay has to forward traffic, it forwards noise it has no key for.</dd></div>
       <div><dt>lose every device, lose the vault</dt>
-        <dd class="just">there is no recovery backdoor, by design. print your recovery kit and bury it somewhere safe.</dd></div>
+        <dd class="just">there is no recovery, by design. pair a second device before you need it.</dd></div>
       <div><dt>metadata is minimal, not zero</dt>
-        <dd class="just">the server knows how many blobs you have and when they changed. it doesn't know what they are.</dd></div>
+        <dd class="just">a relay can see that two of your devices are talking, when, and how much. it can't see what they say.</dd></div>
       <div><dt>a process you inject into can read it</dt>
         <dd class="just">deadbolt run puts secrets in the environment of the command you give it. only run what you trust.</dd></div>
     </dl>
@@ -190,6 +178,12 @@ for (let n = 0; n < 84; n++) { const t = r() ** 1.5, a = r() * Math.PI * 2, d = 
   const cx = 180 + Math.cos(a) * d, cy = 150 + Math.sin(a) * d * .8
   h += `<ellipse cx="${cx}" cy="${cy}" rx="${z}" ry="${z * (.6 + r() * .6)}" transform="rotate(${a * 57.3 + r() * 40} ${cx} ${cy})"/>` }
 s.innerHTML = h + "</g>"
+// install tabs
+const tabs = document.querySelectorAll(".tabs span"), command = document.querySelector(".command")
+for (const tab of tabs) tab.onclick = () => {
+  for (const t of tabs) t.classList.toggle("on", t === tab)
+  command.textContent = tab.dataset.command
+}
 </script>
 </body>
 </html>

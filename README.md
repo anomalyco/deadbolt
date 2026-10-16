@@ -4,6 +4,18 @@ A decentralized password manager, in Rust. Your devices sync directly with each 
 
 Status: design. No code yet.
 
+## Install
+
+```sh
+curl -fsSL https://deadbolt.pw/install | sh
+```
+
+```sh
+brew install anomalyco/tap/deadbolt
+```
+
+Or download a tarball from [GitHub releases](https://github.com/anomalyco/deadbolt/releases) (macOS and Linux, x64 and arm64). The install script verifies the tarball against the release's `SHA256SUMS`; set `DEADBOLT_VERSION` to pin a version and `DEADBOLT_INSTALL` to change the directory (default `~/.local/bin`).
+
 ## Docs
 
 - [`docs/design.md`](docs/design.md) — **the current v1 design** (two keys, signed membership, per-device encrypted logs, QR pairing).

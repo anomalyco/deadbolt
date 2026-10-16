@@ -1,0 +1,63 @@
+#!/bin/sh
+# Installs the deadbolt CLI.
+#
+#   curl -fsSL https://deadbolt.pw/install | sh
+#
+# DEADBOLT_VERSION   version to install (default: latest)
+# DEADBOLT_INSTALL   install directory (default: ~/.local/bin)
+set -eu
+
+repo="anomalyco/deadbolt"
+
+case "$(uname -s)" in
+  Linux) os="linux" ;;
+  Darwin) os="darwin" ;;
+  *) echo "deadbolt: unsupported operating system $(uname -s)" >&2; exit 1 ;;
+esac
+
+case "$(uname -m)" in
+  x86_64 | amd64) arch="x64" ;;
+  arm64 | aarch64) arch="arm64" ;;
+  *) echo "deadbolt: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+esac
+
+if [ -n "${DEADBOLT_VERSION:-}" ]; then
+  base="https://github.com/$repo/releases/download/v${DEADBOLT_VERSION#v}"
+else
+  base="https://github.com/$repo/releases/latest/download"
+fi
+file="deadbolt-$os-$arch.tar.gz"
+
+if command -v sha256sum >/dev/null 2>&1; then
+  sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
+elif command -v shasum >/dev/null 2>&1; then
+  sha256() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
+else
+  echo "deadbolt: sha256sum or shasum is required to verify the download" >&2; exit 1
+fi
+
+dir="${DEADBOLT_INSTALL:-$HOME/.local/bin}"
+tmp="$(mktemp -d)"
+trap 'rm -rf "$tmp"' EXIT
+
+echo "Downloading deadbolt for $os-$arch..."
+curl -fsSL -o "$tmp/$file" "$base/$file"
+curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
+expected="$(awk -v f="$file" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
+actual="$(sha256 "$tmp/$file")"
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+  echo "deadbolt: checksum mismatch for $file (expected ${expected:-none}, got $actual)" >&2; exit 1
+fi
+
+tar -xzf "$tmp/$file" -C "$tmp"
+mkdir -p "$dir"
+mv "$tmp/deadbolt" "$dir/deadbolt"
+chmod 755 "$dir/deadbolt"
+
+echo "Installed $("$dir/deadbolt" --version) to $dir/deadbolt"
+case ":$PATH:" in
+  *":$dir:"*) ;;
+  *) echo "Add $dir to your PATH to run deadbolt, for example:"
+     echo "  export PATH=\"$dir:\$PATH\"" ;;
+esac
+echo "Get started: deadbolt init"
