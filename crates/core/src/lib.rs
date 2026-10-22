@@ -11,7 +11,7 @@
 //!
 //! A device may belong to several vaults with the same device key; vault ids
 //! are derived from the creator's key and a random nonce, and join consent is
-//! bound to the vault id.
+//! bound to the vault id and the inviting device.
 //!
 //! The vault name is set by `Create` and changed by `Rename`, a membership op
 //! any member may write. Like a field edit, a rename replaces the names it was
@@ -70,8 +70,9 @@
 //! An item id is the first 16 bytes of
 //! `blake3::derive_key("deadbolt 2026-10-15 item id v1", entry_hash || op_index:u64)`.
 //! The signature is Ed25519 (strict verification) over
-//! `"deadbolt entry signature v1\0" || hash`. Join consent is a signature over
-//! `"deadbolt join consent v1\0" || vault_id`.
+//! `"deadbolt entry signature v1\0" || hash`. Join consent is the new device's
+//! signature over `"deadbolt join consent v2\0" || vault_id || inviter || device`,
+//! where the inviter is the `Add`'s author.
 
 mod data;
 mod encoding;
@@ -91,3 +92,6 @@ pub use vault::{CREATE_BATCH_BYTES, Heads, Vault};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod membership_tests;

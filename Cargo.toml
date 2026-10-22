@@ -16,3 +16,13 @@ unsafe_code = "forbid"
 lto = true
 codegen-units = 1
 strip = true
+
+# Signatures dominate debug test time; optimize the crypto crates in dev builds.
+[profile.dev.package.curve25519-dalek]
+opt-level = 3
+
+[profile.dev.package.ed25519-dalek]
+opt-level = 3
+
+[profile.dev.package.sha2]
+opt-level = 3

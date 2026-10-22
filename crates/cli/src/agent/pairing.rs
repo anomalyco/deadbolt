@@ -2,7 +2,7 @@
 //!
 //! ```text
 //! offer   = JSON Offer   {vault id, vault name, inviter name + address}
-//! join    = JSON JoinBlob {consent signature, device name + address}
+//! join    = JSON JoinBlob {consent signature (bound to the inviter), device name + address}
 //! welcome = [JSON WelcomeMeta {hints about the other members}, entry*]   (genesis first)
 //! ```
 //!
@@ -77,6 +77,7 @@ impl Joiner for NewDevice<'_> {
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let offer: Offer = serde_json::from_slice(&offer)?;
         let vault = VaultId::from_bytes(unhex(&offer.vault).map_err(handler_error)?);
+        let inviter_id = DeviceId::from_bytes(ctx.remote);
         let (consent, name, addr) = self
             .agent
             .with(|s| {
@@ -84,7 +85,7 @@ impl Joiner for NewDevice<'_> {
                     bail!("this device already holds vault {}", offer.vault_name);
                 }
                 Ok((
-                    s.secret.join_consent(&vault),
+                    s.secret.join_consent(&vault, &inviter_id),
                     s.meta.device_name.clone(),
                     s.own_addr(),
                 ))

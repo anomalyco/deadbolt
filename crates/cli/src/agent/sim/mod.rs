@@ -178,9 +178,10 @@ impl Joiner for Device {
     async fn confirm(&self, _: &PairingContext) -> bool {
         true
     }
-    async fn join(&self, _: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+    async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let id = VaultId::from_bytes(offer.try_into().map_err(|_| "bad offer")?);
-        self.with(|s| Ok(s.secret.join_consent(&id).as_bytes().to_vec()))
+        let inviter = DeviceId::from_bytes(ctx.remote);
+        self.with(|s| Ok(s.secret.join_consent(&id, &inviter).as_bytes().to_vec()))
             .map_err(|e| e.to_string().into())
     }
     async fn receive(&self, _: &PairingContext, welcome: Vec<Vec<u8>>) -> Result<(), HandlerError> {
@@ -363,13 +364,19 @@ impl World {
             |tick| {
                 if revoke_at == Some(tick) {
                     let target = DeviceId::from_bytes(self.devices[b].id);
-                    match self.devices[a]
-                        .with(|s| s.update(self.vault, |v, key| Ok(v.remove(key, target)?)))
-                    {
-                        Ok(entry) => {
+                    // Only a current member can be removed.
+                    match self.devices[a].with(|s| {
+                        if !s.vault(&self.vault).is_member(&target) {
+                            return Ok(None);
+                        }
+                        s.update(self.vault, |v, key| Ok(v.remove(key, target)?))
+                            .map(Some)
+                    }) {
+                        Ok(Some(entry)) => {
                             removal = Some(entry.hash());
                             self.devices[a].gate.revoke(&self.devices[b].id);
                         }
+                        Ok(None) => {}
                         Err(error) => failure = Some(error),
                     }
                 }

@@ -20,6 +20,8 @@ pub enum Error {
     InvalidConsent,
     #[error("author is not a member")]
     NotMember,
+    #[error("device to remove is not a member")]
+    RemoveNonMember,
     #[error("invalid vault name")]
     InvalidName,
     #[error("not a valid genesis entry")]

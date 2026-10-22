@@ -104,14 +104,26 @@ pub struct Vault {
     /// Arrival order, which is always causal.
     membership_order: Vec<Hash>,
     data_order: Vec<Hash>,
-    /// `Create`/`Add` ops naming each device, whether effective or not.
-    admissions: BTreeMap<DeviceId, Vec<Hash>>,
     /// Membership entries no membership entry depends on.
     membership_tips: BTreeSet<Hash>,
     /// Entries no entry depends on.
     tips: BTreeSet<Hash>,
     membership: Membership,
+    /// Memberships of causal pasts behind the current membership heads, keyed by
+    /// the membership heads they contain. Cleared on every membership insert.
+    past_memberships: HashMap<Frontier, Membership>,
     items: BTreeMap<ItemId, ItemState>,
+}
+
+/// The latest membership seq per author in a causal past.
+type Frontier = Vec<(DeviceId, u64)>;
+
+fn frontier(clock: &Clock) -> Frontier {
+    clock
+        .iter()
+        .filter(|(log, _)| log.log == Log::Membership)
+        .map(|(log, seq)| (log.author, *seq))
+        .collect()
 }
 
 impl Vault {
@@ -163,10 +175,10 @@ impl Vault {
             logs: BTreeMap::new(),
             membership_order: Vec::new(),
             data_order: Vec::new(),
-            admissions: BTreeMap::new(),
             membership_tips: BTreeSet::new(),
             tips: BTreeSet::new(),
             membership: Membership::default(),
+            past_memberships: HashMap::new(),
             items: BTreeMap::new(),
         };
         let clock = Clock::from([(genesis.log_id(), 0)]);
@@ -212,7 +224,7 @@ impl Vault {
     /// Validates and stores an entry. Returns `Ok(false)` if it was already present.
     ///
     /// Entries must arrive in causal order. Acceptance depends only on the
-    /// entry and its ancestors: an author must have been added in the entry's
+    /// entry and its ancestors: an author must be an active member in the entry's
     /// causal past. Entries that are valid but no longer count (a removed
     /// device's writes past its cutoff) are stored but have no effect.
     pub fn apply(&mut self, entry: Entry) -> Result<bool, Error> {
@@ -264,7 +276,7 @@ impl Vault {
                 return Err(Error::InvalidName);
             }
             Payload::Membership(MembershipOp::Add { device, consent })
-                if !device.verify(&consent_message(&self.id), consent) =>
+                if !device.verify(&consent_message(&self.id, &entry.author(), device), consent) =>
             {
                 return Err(Error::InvalidConsent);
             }
@@ -279,10 +291,16 @@ impl Vault {
             }
             depth = depth.max(dep.depth + 1);
         }
-        clock.insert(log_id, entry.seq());
-        if !self.admitted(&entry.author(), &clock) {
+        let past = self.past_membership(&clock);
+        if !past.is_member(&entry.author()) {
             return Err(Error::NotMember);
         }
+        if let Payload::Membership(MembershipOp::Remove { device, .. }) = entry.payload()
+            && !past.is_member(device)
+        {
+            return Err(Error::RemoveNonMember);
+        }
+        clock.insert(log_id, entry.seq());
         self.insert(Node {
             entry,
             depth,
@@ -318,7 +336,8 @@ impl Vault {
         Ok(entry)
     }
 
-    /// Adds `device`, given its [`DeviceSecret::join_consent`] for this vault.
+    /// Adds `device`, given its [`DeviceSecret::join_consent`] for this vault and
+    /// `secret`'s device.
     pub fn add(
         &mut self,
         secret: &DeviceSecret,
@@ -474,14 +493,36 @@ impl Vault {
         self.logs.get(&log).map_or(0, |hashes| hashes.len() as u64)
     }
 
-    /// Whether `author` was named by a `Create`/`Add` within `clock`'s past.
-    fn admitted(&self, author: &DeviceId, clock: &Clock) -> bool {
-        self.admissions.get(author).is_some_and(|ops| {
-            ops.iter().any(|hash| {
-                let op = &self.nodes[hash].entry;
-                clock.get(&op.log_id()).is_some_and(|&seq| seq >= op.seq())
+    /// Resolves the membership of the causal past `clock` covers, excluding the
+    /// entry being applied.
+    fn past_membership(&mut self, clock: &Clock) -> &Membership {
+        let frontier = frontier(clock);
+        let current = self
+            .logs
+            .iter()
+            .filter(|(log, _)| log.log == Log::Membership)
+            .map(|(log, hashes)| (log.author, hashes.len() as u64 - 1));
+        if frontier.iter().copied().eq(current) {
+            return &self.membership;
+        }
+        let nodes = &self.nodes;
+        let ops = &self.membership_order;
+        let id = &self.id;
+        self.past_memberships
+            .entry(frontier)
+            .or_insert_with_key(|frontier| {
+                let covered: BTreeMap<_, _> = frontier.iter().copied().collect();
+                let past = ops
+                    .iter()
+                    .map(|hash| &nodes[hash])
+                    .filter(|node| {
+                        covered
+                            .get(&node.entry.author())
+                            .is_some_and(|&seq| seq >= node.entry.seq())
+                    })
+                    .collect();
+                membership::resolve(id, past)
             })
-        })
     }
 
     fn insert(&mut self, node: Node) {
@@ -499,12 +540,6 @@ impl Vault {
             }
             self.membership_tips.insert(hash);
             self.membership_order.push(hash);
-            if let Payload::Membership(
-                MembershipOp::Create { device, .. } | MembershipOp::Add { device, .. },
-            ) = entry.payload()
-            {
-                self.admissions.entry(*device).or_default().push(hash);
-            }
         } else {
             self.data_order.push(hash);
         }
@@ -516,8 +551,13 @@ impl Vault {
                     .iter()
                     .map(|hash| &self.nodes[hash])
                     .collect();
-                self.membership = membership::resolve(&self.id, ops);
-                self.rebuild_items();
+                let membership = membership::resolve(&self.id, ops);
+                self.past_memberships.clear();
+                let rebuild = !membership.counts_like(&self.membership);
+                self.membership = membership;
+                if rebuild {
+                    self.rebuild_items();
+                }
             }
             Log::Data => {
                 let node = &self.nodes[&hash];

@@ -23,7 +23,7 @@ impl Dev {
 
     fn invite_with_entry(&mut self) -> (Dev, Entry) {
         let secret = DeviceSecret::generate();
-        let consent = secret.join_consent(&self.vault.id());
+        let consent = secret.join_consent(&self.vault.id(), &self.secret.device_id());
         let add = self
             .vault
             .add(&self.secret, secret.device_id(), consent)
@@ -314,7 +314,7 @@ fn membership_entries_cannot_depend_on_data() {
     let joiner = DeviceSecret::generate();
     let op = MembershipOp::Add {
         device: joiner.device_id(),
-        consent: joiner.join_consent(&a.vault.id()),
+        consent: joiner.join_consent(&a.vault.id(), &a.id()),
     };
     let entry = Entry::sign(
         &a.secret,
@@ -337,7 +337,7 @@ fn rejects_non_member_authors() {
 
     let self_add = MembershipOp::Add {
         device: outsider.device_id(),
-        consent: outsider.join_consent(&a.vault.id()),
+        consent: outsider.join_consent(&a.vault.id(), &outsider.device_id()),
     };
     let entry = Entry::sign(
         &outsider,
@@ -364,7 +364,7 @@ fn rejects_wrong_vault_bad_consent_and_second_genesis() {
     ));
 
     let joiner = DeviceSecret::generate();
-    let wrong = joiner.join_consent(&other.vault.id());
+    let wrong = joiner.join_consent(&other.vault.id(), &a.id());
     assert_eq!(
         a.vault.add(&a.secret, joiner.device_id(), wrong),
         Err(Error::InvalidConsent)
@@ -425,9 +425,20 @@ fn is_member_removed_device_cannot_be_re_added() {
     a.remove(b.id());
     sync(&a, &mut c);
 
-    let consent = b.secret.join_consent(&a.vault.id());
-    a.vault.add(&a.secret, b.id(), consent).unwrap();
-    c.vault.add(&c.secret, b.id(), consent).unwrap();
+    a.vault
+        .add(
+            &a.secret,
+            b.id(),
+            b.secret.join_consent(&a.vault.id(), &a.id()),
+        )
+        .unwrap();
+    c.vault
+        .add(
+            &c.secret,
+            b.id(),
+            b.secret.join_consent(&c.vault.id(), &c.id()),
+        )
+        .unwrap();
     sync_both(&mut a, &mut c);
     assert!(!a.vault.is_member(&b.id()));
     assert!(!c.vault.is_member(&b.id()));
@@ -439,7 +450,11 @@ fn is_member_removed_device_cannot_be_re_added() {
     sync(&d, &mut e);
     d.remove(e.id());
     f.vault
-        .add(&f.secret, e.id(), e.secret.join_consent(&d.vault.id()))
+        .add(
+            &f.secret,
+            e.id(),
+            e.secret.join_consent(&d.vault.id(), &f.id()),
+        )
         .unwrap();
     sync_both(&mut d, &mut f);
     assert!(!d.vault.is_member(&e.id()));
@@ -569,7 +584,7 @@ fn is_member_removal_seen_before_counter_removal_is_final() {
             last_seen_seq: None,
         }),
     );
-    b.vault.apply(rogue).unwrap();
+    assert_eq!(b.vault.apply(rogue), Err(Error::NotMember));
     sync(&b, &mut a);
     assert!(a.vault.is_member(&a.id()));
     assert!(!a.vault.is_member(&b.id()));
@@ -692,13 +707,17 @@ fn one_device_key_across_vaults() {
     assert_ne!(work.id(), a.vault.id());
     // Consent for one vault cannot be reused in another.
     let joiner = DeviceSecret::generate();
-    let consent = joiner.join_consent(&a.vault.id());
+    let consent = joiner.join_consent(&a.vault.id(), &secret.device_id());
     assert_eq!(
         work.add(&secret, joiner.device_id(), consent),
         Err(Error::InvalidConsent)
     );
-    work.add(&secret, joiner.device_id(), joiner.join_consent(&work.id()))
-        .unwrap();
+    work.add(
+        &secret,
+        joiner.device_id(),
+        joiner.join_consent(&work.id(), &secret.device_id()),
+    )
+    .unwrap();
     assert!(work.is_member(&joiner.device_id()));
     assert!(!a.vault.is_member(&joiner.device_id()));
     assert_eq!((a.vault.name(), work.name()), ("personal", "work"));
@@ -1348,7 +1367,7 @@ fn missing_for_sends_membership_first_and_converges() {
         .add(
             &a.secret,
             joiner.device_id(),
-            joiner.join_consent(&a.vault.id()),
+            joiner.join_consent(&a.vault.id(), &a.id()),
         )
         .unwrap();
     a.set(item, "h", "a");
