@@ -20,6 +20,7 @@ use tokio::{
     time::Instant,
 };
 use tracing::{debug, warn};
+use zeroize::Zeroizing;
 
 use crate::{
     Membership, PAIR_ALPN, PeerId, SYNC_ALPN,
@@ -46,7 +47,7 @@ pub enum Relays {
 #[derive(Clone)]
 pub struct NodeConfig {
     /// The device's Ed25519 secret key. Its public key is the node's [`PeerId`].
-    pub secret_key: [u8; 32],
+    pub secret_key: Zeroizing<[u8; 32]>,
     pub relays: Relays,
     /// Publish this node's address to, and resolve peers' addresses from, n0's DNS/pkarr
     /// servers. Required to dial a peer by id alone. Note that it makes the device id
@@ -64,7 +65,7 @@ impl NodeConfig {
     /// n0 defaults: public relays and DNS/pkarr address lookup.
     pub fn new(secret_key: [u8; 32]) -> Self {
         Self {
-            secret_key,
+            secret_key: Zeroizing::new(secret_key),
             relays: Relays::N0,
             address_lookup: true,
             bind_addr: None,
@@ -77,7 +78,7 @@ impl NodeConfig {
     /// dialed with a [`PeerAddr`] carrying direct addresses. Intended for tests.
     pub fn local_only(secret_key: [u8; 32]) -> Self {
         Self {
-            secret_key,
+            secret_key: Zeroizing::new(secret_key),
             relays: Relays::Disabled,
             address_lookup: false,
             bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], 0))),

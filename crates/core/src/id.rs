@@ -99,6 +99,7 @@ impl VaultId {
 
 impl ItemId {
     /// A fresh random item id.
+    #[cfg(test)]
     pub fn random() -> Self {
         Self(random())
     }

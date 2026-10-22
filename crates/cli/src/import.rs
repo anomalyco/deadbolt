@@ -330,10 +330,10 @@ impl Builder {
             fields: self
                 .fields
                 .into_iter()
-                .map(|(name, field)| FieldInput {
+                .map(|(name, mut field)| FieldInput {
                     name,
                     kind: Some(field.kind.to_string()),
-                    value: field.value,
+                    value: std::mem::take(&mut field.value),
                 })
                 .collect(),
         }
@@ -366,7 +366,7 @@ fn login(item: &Value, summary: &mut Summary) -> Option<NewItem> {
     // of type url, or text if they are not absolute URLs.
     let mut url_set = false;
     for uri in array(login, "uris").iter().filter_map(|u| text(u, "uri")) {
-        let field = url_field(uri.trim());
+        let mut field = url_field(uri.trim());
         if field.kind != FieldType::Url {
             *summary.warnings.entry(URL_AS_TEXT).or_default() += 1;
         } else if !url_set {
@@ -374,7 +374,7 @@ fn login(item: &Value, summary: &mut Summary) -> Option<NewItem> {
             b.fields.insert("url".into(), field);
             continue;
         }
-        b.extra("url", field.kind, field.value);
+        b.extra("url", field.kind.clone(), std::mem::take(&mut field.value));
     }
     if !array(login, "fido2Credentials").is_empty() {
         summary.passkeys += 1;

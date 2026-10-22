@@ -69,7 +69,9 @@ impl<'a> Reader<'a> {
     pub(crate) fn string(&mut self) -> Result<String, DecodeError> {
         let len = self.u32()? as usize;
         let bytes = self.take(len)?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::InvalidUtf8)
+        Ok(std::str::from_utf8(bytes)
+            .map_err(|_| DecodeError::InvalidUtf8)?
+            .to_owned())
     }
 
     pub(crate) fn finish(self) -> Result<(), DecodeError> {

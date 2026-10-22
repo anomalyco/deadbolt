@@ -38,16 +38,6 @@ pub enum FieldType {
 }
 
 impl FieldType {
-    pub const KNOWN: [FieldType; 7] = [
-        FieldType::Text,
-        FieldType::Secret,
-        FieldType::Url,
-        FieldType::Email,
-        FieldType::Otp,
-        FieldType::Month,
-        FieldType::Note,
-    ];
-
     /// Parses the wire identifier; unknown identifiers become [`FieldType::Other`].
     pub fn parse(s: &str) -> Self {
         match s {
@@ -89,10 +79,25 @@ impl fmt::Display for FieldType {
 
 /// A field's value together with its type. Concurrent edits resolve per
 /// field, and the type travels with the value.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Field {
     pub kind: FieldType,
     pub value: String,
+}
+
+impl fmt::Debug for Field {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Field")
+            .field("kind", &self.kind)
+            .field("value", &"<redacted>")
+            .finish()
+    }
+}
+
+impl Drop for Field {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.value);
+    }
 }
 
 impl Field {

@@ -32,6 +32,7 @@ use tokio::{
     time::Instant,
 };
 use tracing::{debug, warn};
+use zeroize::Zeroizing;
 
 use crate::{
     Node, PAIR_ALPN, PeerAddr, PeerId,
@@ -58,7 +59,7 @@ const CODE_LABEL: &[u8] = b"confirmation-code";
 #[derive(Clone, PartialEq, Eq)]
 pub struct PairingTicket {
     id: PeerId,
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
     relay_url: Option<String>,
     direct_addrs: Vec<SocketAddr>,
 }
@@ -96,7 +97,7 @@ impl PairingTicket {
         let mut out = Vec::with_capacity(128);
         out.push(TICKET_VERSION);
         out.extend_from_slice(&self.id);
-        out.extend_from_slice(&self.secret);
+        out.extend_from_slice(self.secret.as_ref());
         let relay = self.relay_url.as_deref().unwrap_or("").as_bytes();
         out.push(relay.len() as u8);
         out.extend_from_slice(relay);
@@ -122,8 +123,8 @@ impl PairingTicket {
         if r.take(1)?[0] != TICKET_VERSION {
             return Err(Error::InvalidTicket("unsupported version".into()));
         }
-        let id: PeerId = r.take(32)?.try_into().expect("32 bytes");
-        let secret: [u8; 32] = r.take(32)?.try_into().expect("32 bytes");
+        let id: PeerId = r.array()?;
+        let secret = Zeroizing::new(r.array()?);
         let relay_len = r.take(1)?[0] as usize;
         let relay_url = match relay_len {
             0 => None,
@@ -136,13 +137,11 @@ impl PairingTicket {
         let mut direct_addrs = Vec::with_capacity(count);
         for _ in 0..count {
             let ip = match r.take(1)?[0] {
-                4 => IpAddr::V4(Ipv4Addr::from(<[u8; 4]>::try_from(r.take(4)?).expect("4"))),
-                6 => IpAddr::V6(Ipv6Addr::from(
-                    <[u8; 16]>::try_from(r.take(16)?).expect("16"),
-                )),
+                4 => IpAddr::V4(Ipv4Addr::from(r.array::<4>()?)),
+                6 => IpAddr::V6(Ipv6Addr::from(r.array::<16>()?)),
                 _ => return Err(Error::InvalidTicket("bad address family".into())),
             };
-            let port = u16::from_be_bytes(r.take(2)?.try_into().expect("2"));
+            let port = u16::from_be_bytes(r.array()?);
             direct_addrs.push(SocketAddr::new(ip, port));
         }
         if !r.0.is_empty() {
@@ -200,6 +199,12 @@ impl FromStr for PairingTicket {
 struct Reader<'a>(&'a [u8]);
 
 impl<'a> Reader<'a> {
+    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
+        let mut bytes = [0; N];
+        bytes.copy_from_slice(self.take(N)?);
+        Ok(bytes)
+    }
+
     fn take(&mut self, n: usize) -> Result<&'a [u8]> {
         if self.0.len() < n {
             return Err(Error::InvalidTicket("truncated".into()));
@@ -347,7 +352,7 @@ struct Proven {
 pub struct PairingStream {
     local: PeerId,
     remote: PeerId,
-    secret: [u8; 32],
+    secret: Zeroizing<[u8; 32]>,
     transcript: Vec<u8>,
 }
 
@@ -370,7 +375,7 @@ impl PairingStream {
         Self {
             local,
             remote,
-            secret,
+            secret: Zeroizing::new(secret),
             transcript: transcript_bytes(&listener_id, &dialer_id, &exporter),
         }
     }
@@ -478,14 +483,14 @@ impl PairingListener {
     /// passes consumes it, whatever happens afterwards.
     pub async fn complete(mut self, joiner: &impl Joiner) -> Result<PairingOutcome> {
         let local = self.node.id();
-        let secret = self.ticket.secret;
+        let secret = self.ticket.secret.clone();
         let mut proving = JoinSet::new();
         let proven = loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(self.expires_at) => return Err(Error::PairingExpired),
                 conn = self.rx.recv() => {
                     let Some(conn) = conn else { return Err(Error::PairingCancelled) };
-                    proving.spawn(listener_prove(conn, local, secret));
+                    proving.spawn(listener_prove(conn, local, secret.clone()));
                 }
                 Some(res) = proving.join_next(), if !proving.is_empty() => match res {
                     Ok(Ok(proven)) if Instant::now() < self.expires_at => break proven,
@@ -532,7 +537,11 @@ impl PairingListener {
     }
 }
 
-async fn listener_prove(conn: Connection, local: PeerId, secret: [u8; 32]) -> Result<Proven> {
+async fn listener_prove(
+    conn: Connection,
+    local: PeerId,
+    secret: Zeroizing<[u8; 32]>,
+) -> Result<Proven> {
     let remote = *conn.remote_id().as_bytes();
     let (send, mut recv) = match tokio::time::timeout(PROOF_TIMEOUT, conn.accept_bi()).await {
         Ok(Ok(streams)) => streams,
@@ -577,8 +586,8 @@ impl Node {
             let _ =
                 tokio::time::timeout(options.online_timeout, self.inner.endpoint.online()).await;
         }
-        let mut secret = [0u8; 32];
-        getrandom::fill(&mut secret).map_err(|e| Error::Io(std::io::Error::other(e)))?;
+        let mut secret = Zeroizing::new([0u8; 32]);
+        getrandom::fill(secret.as_mut()).map_err(|e| Error::Io(std::io::Error::other(e)))?;
         let addr = self.addr();
         let ticket = PairingTicket {
             id: addr.id,
@@ -621,7 +630,7 @@ impl Node {
             return Err(Error::Protocol("connected to unexpected peer".into()));
         }
         let max = self.inner.max_frame_len;
-        let secret = ticket.secret;
+        let secret = ticket.secret.clone();
         let (mut send, mut recv) = match conn.open_bi().await {
             Ok(streams) => streams,
             Err(e) => return Err(fail_pairing(&conn, Error::Closed(e.to_string())).await),
@@ -685,8 +694,8 @@ async fn fail_pairing(conn: &Connection, err: Error) -> Error {
 /// `"deadbolt/pair/1" || listener id || dialer id || TLS exporter(32)`. The exporter value
 /// is unique to this QUIC connection, binding the proofs and the confirmation code to it.
 fn transcript(conn: &Connection, listener: &PeerId, dialer: &PeerId) -> Result<Vec<u8>> {
-    let mut ekm = [0u8; 32];
-    conn.export_keying_material(&mut ekm, EXPORTER_LABEL, b"")
+    let mut ekm = Zeroizing::new([0u8; 32]);
+    conn.export_keying_material(ekm.as_mut(), EXPORTER_LABEL, b"")
         .map_err(|_| Error::Protocol("keying material export failed".into()))?;
     Ok(transcript_bytes(listener, dialer, &ekm))
 }
@@ -732,7 +741,7 @@ mod tests {
     fn ticket() -> PairingTicket {
         PairingTicket {
             id: *iroh::SecretKey::from_bytes(&[7; 32]).public().as_bytes(),
-            secret: [9; 32],
+            secret: Zeroizing::new([9; 32]),
             relay_url: Some("https://relay.example.com./".into()),
             direct_addrs: vec![
                 "127.0.0.1:4242".parse().unwrap(),
