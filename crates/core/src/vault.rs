@@ -287,8 +287,14 @@ impl Vault {
                     .is_some_and(|&seq| seq >= node.entry.seq())
             })
             .collect();
-        if !membership::resolve(&self.id, past).is_member(&entry.author()) {
+        let past = membership::resolve(&self.id, past);
+        if !past.is_member(&entry.author()) {
             return Err(Error::NotMember);
+        }
+        if let Payload::Membership(MembershipOp::Remove { device, .. }) = entry.payload()
+            && !past.is_member(device)
+        {
+            return Err(Error::RemoveNonMember);
         }
         self.insert(Node {
             entry,
