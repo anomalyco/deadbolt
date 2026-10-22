@@ -28,12 +28,13 @@ mod sync;
 
 pub use error::{Error, HandlerError, Result};
 pub use node::{DEFAULT_MAX_FRAME_LEN, Node, NodeConfig, PeerAddr, Relays};
+pub use node::Gate as MembershipGate;
 pub use pair::{
     ConfirmationCode, DEFAULT_PAIRING_TTL, Inviter, Joiner, PairingContext, PairingListener,
-    PairingOptions, PairingOutcome, PairingTicket,
+    PairingOptions, PairingOutcome, PairingStream, PairingTicket, ProvenPairing,
 };
 pub use qr::{QrStyle, render_qr};
-pub use sync::{SyncConnection, SyncHandler, SyncOutcome};
+pub use sync::{SyncConnection, SyncHandler, SyncOutcome, run_sync_session};
 
 /// ALPN of the sync protocol. Membership-gated.
 pub const SYNC_ALPN: &[u8] = b"deadbolt/sync/1";

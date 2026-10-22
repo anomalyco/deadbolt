@@ -396,7 +396,7 @@ struct GateState {
 }
 
 /// The membership gate. Shared by the endpoint hook and the [`Node`].
-pub(crate) struct Gate {
+pub struct Gate {
     membership: Arc<dyn Membership>,
     state: Mutex<GateState>,
 }
@@ -408,7 +408,7 @@ impl fmt::Debug for Gate {
 }
 
 impl Gate {
-    fn new(membership: Arc<dyn Membership>) -> Self {
+    pub fn new(membership: Arc<dyn Membership>) -> Self {
         Self {
             membership,
             state: Mutex::default(),
@@ -419,7 +419,7 @@ impl Gate {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn check_dial(&self, peer: &PeerId) -> Result<()> {
+    pub fn check_dial(&self, peer: &PeerId) -> Result<()> {
         let st = self.lock();
         if st.revoked.contains(peer) {
             return Err(Error::Revoked(*peer));
@@ -477,7 +477,7 @@ impl Gate {
         Ok(())
     }
 
-    fn revoke(&self, peer: &PeerId) -> usize {
+    pub fn revoke(&self, peer: &PeerId) -> usize {
         let mut st = self.lock();
         st.revoked.insert(*peer);
         let closed = st

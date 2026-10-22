@@ -15,7 +15,8 @@
 
 use std::{future::Future, pin::Pin, sync::Arc};
 
-use iroh::endpoint::{Connection, RecvStream, SendStream};
+use iroh::endpoint::Connection;
+use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
 use crate::{
@@ -210,11 +211,24 @@ pub(crate) async fn serve_sync(
     }
 }
 
+/// Runs the wire protocol on an authenticated, membership-gated byte stream.
+/// The transport adapter supplies the peer identity and closes both halves on failure.
+pub async fn run_sync_session(
+    handler: &impl SyncHandler,
+    peer: PeerId,
+    send: &mut (impl AsyncWrite + Unpin),
+    recv: &mut (impl AsyncRead + Unpin),
+    max: usize,
+    initiator: bool,
+) -> Result<SyncOutcome> {
+    run_session(handler, peer, send, recv, max, initiator).await
+}
+
 async fn run_session(
     handler: &dyn DynSyncHandler,
     peer: PeerId,
-    send: &mut SendStream,
-    recv: &mut RecvStream,
+    send: &mut (impl AsyncWrite + Unpin),
+    recv: &mut (impl AsyncRead + Unpin),
     max: usize,
     initiator: bool,
 ) -> Result<SyncOutcome> {
@@ -240,14 +254,14 @@ async fn run_session(
     let local = handler.receive(peer, entries).await;
 
     if initiator {
-        let _ = send.finish();
+        let _ = send.shutdown().await;
         let remote = frame::read_result(recv, max).await;
         local.map_err(Error::Handler)?;
         remote?;
     } else {
         let report = local.as_ref().map(|_| ()).map_err(|e| e.to_string());
         frame::write_result(send, &report).await?;
-        let _ = send.finish();
+        let _ = send.shutdown().await;
         local.map_err(Error::Handler)?;
     }
     Ok(outcome)
