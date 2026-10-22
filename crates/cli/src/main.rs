@@ -10,15 +10,14 @@ mod client;
 mod config;
 mod import;
 mod items;
-mod paths;
 mod prompt;
-mod protocol;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
+use deadbolt_client::{paths, protocol};
 use deadbolt_net::{PairingTicket, QrStyle};
 
 use crate::paths::Paths;
