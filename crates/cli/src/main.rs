@@ -131,10 +131,7 @@ enum AgentCommand {
 }
 
 fn main() -> ExitCode {
-    // SAFETY: restoring the default SIGPIPE handler before any threads start.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
+    sigpipe::reset();
     let cli = Cli::parse();
     let agent = matches!(cli.command, Commands::Agent { command: None });
     tracing_subscriber::fmt()

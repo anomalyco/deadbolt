@@ -653,7 +653,7 @@ mod tests {
         );
         assert_eq!(s.parse::<PairingTicket>().unwrap(), t);
         // copy/paste tolerant
-        let messy = format!("  {}\n{} ", &s[..20].to_lowercase(), &s[20..]);
+        let messy = format!("  {}\n{} ", s[..20].to_lowercase(), &s[20..]);
         assert_eq!(messy.parse::<PairingTicket>().unwrap(), t);
 
         let bare = PairingTicket {
