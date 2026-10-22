@@ -45,8 +45,11 @@
 //! - Seniority ignores cuts. A device whose first `Add` was cut but which holds
 //!   another surviving `Add` keeps the first one's rank. A removed device that
 //!   had written a hidden `Add` of a device that another member later adds thus
-//!   lends it its early rank; that needs the device's consent to both inviters
-//!   and only changes who wins removal races
+//!   lends it its early rank. Consent commits to neither seq nor parents, so one
+//!   inviter can also do it alone with a single consent: if its own first
+//!   admission was cut and it was admitted again, it can write an early, cut
+//!   `Add` and a later, surviving one. Either way this only changes who wins
+//!   removal races
 //!   (`known_limitation_cut_first_add_keeps_seniority`).
 
 use crate::*;
