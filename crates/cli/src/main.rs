@@ -2,6 +2,10 @@
 compile_error!("deadbolt currently supports Unix platforms only");
 
 mod agent;
+#[expect(
+    clippy::disallowed_methods,
+    reason = "client version override awaits the separate client-crate extraction"
+)]
 mod client;
 mod config;
 mod import;
@@ -467,11 +471,7 @@ fn device_name(device: &DeviceInfo) -> &str {
 }
 
 fn ago(unix: u64) -> String {
-    let secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
-        .saturating_sub(unix);
+    let secs = config::now().saturating_sub(unix);
     match secs {
         0..60 => format!("{secs}s ago"),
         60..3600 => format!("{}m ago", secs / 60),

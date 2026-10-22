@@ -46,7 +46,7 @@ pub fn passphrase(from_stdin: bool, confirm: bool) -> Result<Zeroizing<String>> 
             .context("reading the passphrase from stdin")?;
         Some(Zeroizing::new(strip_newline(&line).to_string()))
     } else {
-        std::env::var("DEADBOLT_PASSPHRASE")
+        crate::config::env("DEADBOLT_PASSPHRASE")
             .ok()
             .map(Zeroizing::new)
     };
@@ -137,6 +137,10 @@ const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
 const DIGITS: &[u8] = b"0123456789";
 pub const SYMBOLS: &[u8] = b"!#$%&()*+,-./:;<=>?@[]^_{|}~";
 
+#[expect(
+    clippy::expect_used,
+    reason = "OS CSPRNG failure is unrecoverable; never substitute weak randomness"
+)]
 fn random_index(n: usize) -> usize {
     // Rejection sampling keeps every index equally likely.
     let limit = 256 - 256 % n;

@@ -13,6 +13,48 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+/// Runtime switches are read once when the agent starts.
+pub struct Environment {
+    pub local_net: bool,
+    pub kdf: deadbolt_store::KdfParams,
+}
+
+impl Environment {
+    pub fn load() -> Self {
+        Self {
+            local_net: env("DEADBOLT_NET").as_deref() == Ok("local"),
+            kdf: if env("DEADBOLT_KDF").as_deref() == Ok("fast") {
+                deadbolt_store::KdfParams {
+                    m_cost_kib: 64,
+                    t_cost: 1,
+                    p_cost: 1,
+                }
+            } else {
+                deadbolt_store::KdfParams::DEFAULT
+            },
+        }
+    }
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "configuration boundary for process environment"
+)]
+pub fn env(name: &str) -> Result<String, std::env::VarError> {
+    std::env::var(name)
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "wall-clock adapter for display and address-book timestamps"
+)]
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
