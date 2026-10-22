@@ -104,8 +104,6 @@ pub struct Vault {
     /// Arrival order, which is always causal.
     membership_order: Vec<Hash>,
     data_order: Vec<Hash>,
-    /// `Create`/`Add` ops naming each device, whether effective or not.
-    admissions: BTreeMap<DeviceId, Vec<Hash>>,
     /// Membership entries no membership entry depends on.
     membership_tips: BTreeSet<Hash>,
     /// Entries no entry depends on.
@@ -163,7 +161,6 @@ impl Vault {
             logs: BTreeMap::new(),
             membership_order: Vec::new(),
             data_order: Vec::new(),
-            admissions: BTreeMap::new(),
             membership_tips: BTreeSet::new(),
             tips: BTreeSet::new(),
             membership: Membership::default(),
@@ -212,7 +209,7 @@ impl Vault {
     /// Validates and stores an entry. Returns `Ok(false)` if it was already present.
     ///
     /// Entries must arrive in causal order. Acceptance depends only on the
-    /// entry and its ancestors: an author must have been added in the entry's
+    /// entry and its ancestors: an author must be an active member in the entry's
     /// causal past. Entries that are valid but no longer count (a removed
     /// device's writes past its cutoff) are stored but have no effect.
     pub fn apply(&mut self, entry: Entry) -> Result<bool, Error> {
@@ -280,7 +277,17 @@ impl Vault {
             depth = depth.max(dep.depth + 1);
         }
         clock.insert(log_id, entry.seq());
-        if !self.admitted(&entry.author(), &clock) {
+        let past = self
+            .membership_order
+            .iter()
+            .map(|hash| &self.nodes[hash])
+            .filter(|node| {
+                clock
+                    .get(&node.entry.log_id())
+                    .is_some_and(|&seq| seq >= node.entry.seq())
+            })
+            .collect();
+        if !membership::resolve(&self.id, past).is_member(&entry.author()) {
             return Err(Error::NotMember);
         }
         self.insert(Node {
@@ -474,16 +481,6 @@ impl Vault {
         self.logs.get(&log).map_or(0, |hashes| hashes.len() as u64)
     }
 
-    /// Whether `author` was named by a `Create`/`Add` within `clock`'s past.
-    fn admitted(&self, author: &DeviceId, clock: &Clock) -> bool {
-        self.admissions.get(author).is_some_and(|ops| {
-            ops.iter().any(|hash| {
-                let op = &self.nodes[hash].entry;
-                clock.get(&op.log_id()).is_some_and(|&seq| seq >= op.seq())
-            })
-        })
-    }
-
     fn insert(&mut self, node: Node) {
         let entry = &node.entry;
         let hash = entry.hash();
@@ -499,12 +496,6 @@ impl Vault {
             }
             self.membership_tips.insert(hash);
             self.membership_order.push(hash);
-            if let Payload::Membership(
-                MembershipOp::Create { device, .. } | MembershipOp::Add { device, .. },
-            ) = entry.payload()
-            {
-                self.admissions.entry(*device).or_default().push(hash);
-            }
         } else {
             self.data_order.push(hash);
         }

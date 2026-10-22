@@ -569,7 +569,7 @@ fn is_member_removal_seen_before_counter_removal_is_final() {
             last_seen_seq: None,
         }),
     );
-    b.vault.apply(rogue).unwrap();
+    assert_eq!(b.vault.apply(rogue), Err(Error::NotMember));
     sync(&b, &mut a);
     assert!(a.vault.is_member(&a.id()));
     assert!(!a.vault.is_member(&b.id()));
