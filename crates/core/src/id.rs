@@ -141,9 +141,11 @@ impl DeviceSecret {
         DeviceId(self.0.verifying_key().to_bytes())
     }
 
-    /// Signs this device's consent to join `vault`, carried by the `Add` op.
-    pub fn join_consent(&self, vault: &VaultId) -> Signature {
-        self.sign(&consent_message(vault))
+    /// Signs this device's consent to join `vault` through `inviter`, carried by
+    /// the `Add` op `inviter` writes. Binding the inviter keeps the consent from
+    /// backing an `Add` by any other device.
+    pub fn join_consent(&self, vault: &VaultId, inviter: &DeviceId) -> Signature {
+        self.sign(&consent_message(vault, inviter, &self.device_id()))
     }
 
     pub(crate) fn sign(&self, message: &[u8]) -> Signature {

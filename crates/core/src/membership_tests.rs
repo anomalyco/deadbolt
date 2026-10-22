@@ -347,7 +347,7 @@ fn history(devices: usize, steps: &[(u8, u8, u8, u16)]) -> Vec<Entry> {
         .add(
             &keys[0],
             keys[1].device_id(),
-            keys[1].join_consent(&vault.id()),
+            keys[1].join_consent(&vault.id(), &keys[0].device_id()),
         )
         .unwrap();
     let mut entries: Vec<_> = vault.entries().into_iter().cloned().collect();
@@ -357,7 +357,7 @@ fn history(devices: usize, steps: &[(u8, u8, u8, u16)]) -> Vec<Entry> {
         let payload = match kind % 4 {
             0 => Payload::Membership(MembershipOp::Add {
                 device: target.device_id(),
-                consent: target.join_consent(&vault.id()),
+                consent: target.join_consent(&vault.id(), &author.device_id()),
             }),
             1 => Payload::Membership(MembershipOp::Remove {
                 device: target.device_id(),
@@ -446,11 +446,11 @@ proptest! {
     fn senior_survives_delegated_race(hops in 1usize..=3, delay in 0usize..=4, salt in any::<u64>()) {
         let keys: Vec<_> = (1..=5).map(key).collect();
         let mut honest = load(&[genesis(&keys[0])]);
-        honest.add(&keys[0], keys[1].device_id(), keys[1].join_consent(&honest.id())).unwrap();
+        honest.add(&keys[0], keys[1].device_id(), keys[1].join_consent(&honest.id(), &keys[0].device_id())).unwrap();
         let mut thief = load(&honest.entries().into_iter().cloned().collect::<Vec<_>>());
         for i in 0..delay { honest.rename(&keys[0], format!("name-{salt}-{i}")).unwrap(); }
         honest.remove(&keys[0], keys[1].device_id()).unwrap();
-        for i in 1..=hops { thief.add(&keys[i], keys[i + 1].device_id(), keys[i + 1].join_consent(&thief.id())).unwrap(); }
+        for i in 1..=hops { thief.add(&keys[i], keys[i + 1].device_id(), keys[i + 1].join_consent(&thief.id(), &keys[i].device_id())).unwrap(); }
         thief.remove(&keys[hops + 1], keys[0].device_id()).unwrap();
         let mut entries: Vec<_> = honest.entries().into_iter().cloned().collect();
         for entry in thief.entries() { if !entries.iter().any(|e| e.hash() == entry.hash()) { entries.push(entry.clone()); } }
@@ -556,7 +556,7 @@ fn exhaustive_small_membership_dags() {
                     } else if !graph.admission.contains_key(&target.device_id()) {
                         MembershipOp::Add {
                             device: target.device_id(),
-                            consent: target.join_consent(&entries[0].vault()),
+                            consent: target.join_consent(&entries[0].vault(), &author.device_id()),
                         }
                     } else {
                         continue;
@@ -595,7 +595,11 @@ fn sockpuppet_bypass() {
     let (a, b, c) = (key(1), key(2), key(3));
     let mut honest = load(&[genesis(&a)]);
     honest
-        .add(&a, b.device_id(), b.join_consent(&honest.id()))
+        .add(
+            &a,
+            b.device_id(),
+            b.join_consent(&honest.id(), &a.device_id()),
+        )
         .unwrap();
     let mut thief = load(&honest.entries().into_iter().cloned().collect::<Vec<_>>());
     // Delay A's removal beyond the attack's depth, avoiding hash-order luck.
@@ -603,7 +607,11 @@ fn sockpuppet_bypass() {
     honest.rename(&a, "two").unwrap();
     honest.remove(&a, b.device_id()).unwrap();
     thief
-        .add(&b, c.device_id(), c.join_consent(&thief.id()))
+        .add(
+            &b,
+            c.device_id(),
+            c.join_consent(&thief.id(), &b.device_id()),
+        )
         .unwrap();
     thief.remove(&c, a.device_id()).unwrap();
     for entry in thief.entries() {
@@ -621,10 +629,18 @@ fn sockpuppet_bypass() {
 fn three_way_cycle() {
     let (a, b, c) = (key(1), key(2), key(3));
     let mut base = load(&[genesis(&a)]);
-    base.add(&a, b.device_id(), b.join_consent(&base.id()))
-        .unwrap();
-    base.add(&a, c.device_id(), c.join_consent(&base.id()))
-        .unwrap();
+    base.add(
+        &a,
+        b.device_id(),
+        b.join_consent(&base.id(), &a.device_id()),
+    )
+    .unwrap();
+    base.add(
+        &a,
+        c.device_id(),
+        c.join_consent(&base.id(), &a.device_id()),
+    )
+    .unwrap();
     // Force B->C, C->A, A->B replay order by causal depth, not hash grinding.
     let entries: Vec<_> = base.entries().into_iter().cloned().collect();
     let mut va = load(&entries);
@@ -666,10 +682,18 @@ fn junior_can_remove_creator_but_cannot_race_senior_survivor() {
     let (a, b, c, d) = (key(1), key(2), key(3), key(4));
     let mut honest = load(&[genesis(&a)]);
     honest
-        .add(&a, b.device_id(), b.join_consent(&honest.id()))
+        .add(
+            &a,
+            b.device_id(),
+            b.join_consent(&honest.id(), &a.device_id()),
+        )
         .unwrap();
     honest
-        .add(&a, c.device_id(), c.join_consent(&honest.id()))
+        .add(
+            &a,
+            c.device_id(),
+            c.join_consent(&honest.id(), &a.device_id()),
+        )
         .unwrap();
     honest.remove(&b, a.device_id()).unwrap();
     assert!(
@@ -679,7 +703,11 @@ fn junior_can_remove_creator_but_cannot_race_senior_survivor() {
     let mut thief = load(&honest.entries().into_iter().cloned().collect::<Vec<_>>());
     honest.remove(&b, c.device_id()).unwrap();
     thief
-        .add(&c, d.device_id(), d.join_consent(&thief.id()))
+        .add(
+            &c,
+            d.device_id(),
+            d.join_consent(&thief.id(), &c.device_id()),
+        )
         .unwrap();
     thief.remove(&d, b.device_id()).unwrap();
     for entry in thief.entries() {
@@ -693,7 +721,11 @@ fn removal_rejects_acknowledged_writes_and_neutralizes_hidden_parents() {
     let (a, b, c) = (key(1), key(2), key(3));
     let mut vault = load(&[genesis(&a)]);
     let admission = vault
-        .add(&a, b.device_id(), b.join_consent(&vault.id()))
+        .add(
+            &a,
+            b.device_id(),
+            b.join_consent(&vault.id(), &a.device_id()),
+        )
         .unwrap();
     let remove = vault.remove(&a, b.device_id()).unwrap();
     let mut entries: Vec<_> = vault.entries().into_iter().cloned().collect();
@@ -701,7 +733,7 @@ fn removal_rejects_acknowledged_writes_and_neutralizes_hidden_parents() {
         data(),
         Payload::Membership(MembershipOp::Add {
             device: c.device_id(),
-            consent: c.join_consent(&vault.id()),
+            consent: c.join_consent(&vault.id(), &b.device_id()),
         }),
         Payload::Membership(MembershipOp::Remove {
             device: a.device_id(),
@@ -719,7 +751,7 @@ fn removal_rejects_acknowledged_writes_and_neutralizes_hidden_parents() {
         [admission.hash()],
         Payload::Membership(MembershipOp::Add {
             device: c.device_id(),
-            consent: c.join_consent(&vault.id()),
+            consent: c.join_consent(&vault.id(), &b.device_id()),
         }),
     );
     for entry in [hidden_write, hidden_add.clone()] {
@@ -748,16 +780,28 @@ fn cut_admission_cannot_fall_back_to_another_add() {
     let (a, b, c) = (key(1), key(2), key(3));
     let mut vault = load(&[genesis(&a)]);
     vault
-        .add(&a, b.device_id(), b.join_consent(&vault.id()))
+        .add(
+            &a,
+            b.device_id(),
+            b.join_consent(&vault.id(), &a.device_id()),
+        )
         .unwrap();
     let mut thief = load(&vault.entries().into_iter().cloned().collect::<Vec<_>>());
     let add = thief
-        .add(&b, c.device_id(), c.join_consent(&vault.id()))
+        .add(
+            &b,
+            c.device_id(),
+            c.join_consent(&vault.id(), &b.device_id()),
+        )
         .unwrap();
     vault.remove(&a, b.device_id()).unwrap();
     vault.rename(&a, "later").unwrap();
     vault
-        .add(&a, c.device_id(), c.join_consent(&vault.id()))
+        .add(
+            &a,
+            c.device_id(),
+            c.join_consent(&vault.id(), &a.device_id()),
+        )
         .unwrap();
     vault.apply(add).unwrap();
     assert!(!vault.is_member(&c.device_id()));
@@ -765,4 +809,43 @@ fn cut_admission_cannot_fall_back_to_another_add() {
         &vault,
         &vault.entries().into_iter().cloned().collect::<Vec<_>>(),
     );
+}
+
+// Review finding: T lifted the consent from N's Add by A to re-add N with old
+// parents, so its Add became N's first and was cut by T's removal.
+#[test]
+fn lifted_consent_cannot_back_another_add() {
+    let (a, t, n) = (key(1), key(2), key(3));
+    let mut vault = load(&[genesis(&a)]);
+    let add_t = vault
+        .add(
+            &a,
+            t.device_id(),
+            t.join_consent(&vault.id(), &a.device_id()),
+        )
+        .unwrap();
+    let add_n = vault
+        .add(
+            &a,
+            n.device_id(),
+            n.join_consent(&vault.id(), &a.device_id()),
+        )
+        .unwrap();
+    let Payload::Membership(MembershipOp::Add {
+        consent: lifted, ..
+    }) = add_n.payload()
+    else {
+        unreachable!()
+    };
+    let forged = Entry::sign(
+        &t,
+        vault.id(),
+        0,
+        [add_t.hash()],
+        Payload::Membership(MembershipOp::Add {
+            device: n.device_id(),
+            consent: *lifted,
+        }),
+    );
+    assert_eq!(vault.apply(forged), Err(Error::InvalidConsent));
 }

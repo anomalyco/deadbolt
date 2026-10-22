@@ -261,7 +261,7 @@ impl Vault {
                 return Err(Error::InvalidName);
             }
             Payload::Membership(MembershipOp::Add { device, consent })
-                if !device.verify(&consent_message(&self.id), consent) =>
+                if !device.verify(&consent_message(&self.id, &entry.author(), device), consent) =>
             {
                 return Err(Error::InvalidConsent);
             }
@@ -325,7 +325,8 @@ impl Vault {
         Ok(entry)
     }
 
-    /// Adds `device`, given its [`DeviceSecret::join_consent`] for this vault.
+    /// Adds `device`, given its [`DeviceSecret::join_consent`] for this vault and
+    /// `secret`'s device.
     pub fn add(
         &mut self,
         secret: &DeviceSecret,

@@ -7,10 +7,16 @@ use crate::item::{Field, FieldType};
 
 const HASH_CONTEXT: &str = "deadbolt 2026-10-15 entry hash v2";
 const SIGNATURE_DOMAIN: &[u8] = b"deadbolt entry signature v1\0";
-const CONSENT_DOMAIN: &[u8] = b"deadbolt join consent v1\0";
+const CONSENT_DOMAIN: &[u8] = b"deadbolt join consent v2\0";
 
-pub(crate) fn consent_message(vault: &VaultId) -> Vec<u8> {
-    [CONSENT_DOMAIN, vault.as_bytes()].concat()
+pub(crate) fn consent_message(vault: &VaultId, inviter: &DeviceId, device: &DeviceId) -> Vec<u8> {
+    [
+        CONSENT_DOMAIN,
+        vault.as_bytes(),
+        inviter.as_bytes(),
+        device.as_bytes(),
+    ]
+    .concat()
 }
 
 fn signature_message(hash: &Hash) -> Vec<u8> {
@@ -61,7 +67,8 @@ pub enum MembershipOp {
         nonce: [u8; 32],
         name: String,
     },
-    /// Adds `device`; `consent` is its [`DeviceSecret::join_consent`] for this vault.
+    /// Adds `device`; `consent` is its [`DeviceSecret::join_consent`] for this
+    /// vault and the entry's author.
     Add {
         device: DeviceId,
         consent: Signature,

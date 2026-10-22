@@ -21,7 +21,7 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 
 ## Membership
 - Signed log of `Add(device)` / `Remove(device)` ops, each referencing the ops it saw (causal).
-- `Add` carries the new device's signature too (it consents to joining *this* vault).
+- `Add` carries the new device's signature too: it consents to joining *this* vault through *this* inviter (vault id, inviter, new device), so the consent can't back anyone else's `Add`.
 - `Remove(B)` records the last entry of B's log the remover had seen; anything B wrote beyond that is ignored. Removed keys can never be re-added.
 - Concurrent mutual removal: the device that was added earlier wins.
 - Sync always exchanges membership first; a device refuses connections from non-members and never accepts data whose membership dependencies it lacks. So any device holding post-removal data already knows about the removal and won't talk to the removed device.
@@ -68,7 +68,7 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 
 ## Pairing
 - New device shows a QR: its device public key + a one-time secret (+ relay hint).
-- Existing device (unlocked) scans, dials it, both prove the secret, new device signs "join vault V", existing device signs `Add`, sends the membership log + data over the same connection.
+- Existing device (unlocked) scans, dials it, both prove the secret, new device signs "join vault V, invited by this device", existing device signs `Add`, sends the membership log + data over the same connection.
 - No camera: existing device dials via a short code, and both screens show a 6-digit code derived from the connection + both keys; the user confirms they match.
 
 ## Removing a device

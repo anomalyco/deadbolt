@@ -24,9 +24,11 @@ impl Joiner for NewDevice {
 
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         *self.offer.lock().unwrap() = Some(offer.clone());
+        // Like real join consent: bound to the joining and the inviting device.
         let mut join = b"consent:".to_vec();
         join.extend_from_slice(&offer);
         join.extend_from_slice(&ctx.local);
+        join.extend_from_slice(&ctx.remote);
         Ok(join)
     }
 
@@ -65,6 +67,7 @@ impl Inviter for ExistingDevice {
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
         let mut expected = b"consent:vault-1".to_vec();
         expected.extend_from_slice(&ctx.remote);
+        expected.extend_from_slice(&ctx.local);
         if self.reject_join || join != expected {
             return Err("bad join".into());
         }
