@@ -27,12 +27,18 @@ mod qr;
 mod sync;
 
 pub use error::{Error, HandlerError, Result};
+#[cfg(feature = "sim")]
+pub use node::Gate as MembershipGate;
 pub use node::{DEFAULT_MAX_FRAME_LEN, Node, NodeConfig, PeerAddr, Relays};
 pub use pair::{
     ConfirmationCode, DEFAULT_PAIRING_TTL, Inviter, Joiner, PairingContext, PairingListener,
     PairingOptions, PairingOutcome, PairingTicket,
 };
+#[cfg(feature = "sim")]
+pub use pair::{PairingStream, ProvenPairing};
 pub use qr::{QrStyle, render_qr};
+#[cfg(feature = "sim")]
+pub use sync::run_sync_session;
 pub use sync::{SyncConnection, SyncHandler, SyncOutcome};
 
 /// ALPN of the sync protocol. Membership-gated.

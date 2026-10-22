@@ -25,7 +25,12 @@ use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, KeyInit, Mac};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
 use sha2::Sha256;
-use tokio::{sync::mpsc, task::JoinSet, time::Instant};
+use tokio::{
+    io::{AsyncRead, AsyncWrite, AsyncWriteExt},
+    sync::mpsc,
+    task::JoinSet,
+    time::Instant,
+};
 use tracing::{debug, warn};
 
 use crate::{
@@ -336,6 +341,129 @@ struct Proven {
     transcript: Vec<u8>,
 }
 
+/// Pairing over an authenticated stream. `transcript` must bind both identities and
+/// unique transport keying material; iroh obtains it from its TLS exporter.
+/// The adapter owns ticket expiry, single-use consumption and connection cancellation.
+pub struct PairingStream {
+    local: PeerId,
+    remote: PeerId,
+    secret: [u8; 32],
+    transcript: Vec<u8>,
+}
+
+impl PairingStream {
+    /// Both sides supply the same exporter, listener id and dialer id.
+    /// Simulation-only: bypasses the iroh adapter's exporter binding and ticket checks.
+    #[cfg(feature = "sim")]
+    pub fn new(
+        local: PeerId,
+        remote: PeerId,
+        secret: [u8; 32],
+        exporter: [u8; 32],
+        listener: bool,
+    ) -> Self {
+        let (listener_id, dialer_id) = if listener {
+            (local, remote)
+        } else {
+            (remote, local)
+        };
+        Self {
+            local,
+            remote,
+            secret,
+            transcript: transcript_bytes(&listener_id, &dialer_id, &exporter),
+        }
+    }
+
+    fn context(&self) -> PairingContext {
+        PairingContext {
+            local: self.local,
+            remote: self.remote,
+            code: confirmation_code(&self.secret, &self.transcript),
+        }
+    }
+
+    /// Verify the dialer before consuming the one-time ticket. No application callback
+    /// runs and no listener proof is sent until this succeeds.
+    pub async fn prove(self, recv: &mut (impl AsyncRead + Unpin)) -> Result<ProvenPairing> {
+        let proof = frame::expect(recv, tag::PROOF, 64).await?;
+        if !verify(&self.secret, DIALER_LABEL, &self.transcript, &proof) {
+            return Err(Error::PairingProofFailed);
+        }
+        Ok(ProvenPairing(self))
+    }
+
+    /// Existing-device exchange. Close the stream on error; cancel this future if
+    /// the authenticated connection closes while the user is confirming.
+    pub async fn invite(
+        self,
+        send: &mut (impl AsyncWrite + Unpin),
+        recv: &mut (impl AsyncRead + Unpin),
+        max: usize,
+        inviter: &impl Inviter,
+    ) -> Result<PairingOutcome> {
+        frame::write(
+            send,
+            tag::PROOF,
+            &mac(&self.secret, DIALER_LABEL, &self.transcript),
+        )
+        .await?;
+        let proof = frame::expect(recv, tag::PROOF, 64).await?;
+        if !verify(&self.secret, LISTENER_LABEL, &self.transcript, &proof) {
+            return Err(Error::PairingProofFailed);
+        }
+        let ctx = self.context();
+        confirm_exchange(send, recv, inviter.confirm(&ctx)).await?;
+        let offer = inviter.offer(&ctx).await.map_err(Error::Handler)?;
+        frame::write(send, tag::OFFER, &offer).await?;
+        let join = frame::expect(recv, tag::JOIN, max).await?;
+        let welcome = inviter.welcome(&ctx, join).await.map_err(Error::Handler)?;
+        frame::write_entries(send, &welcome).await?;
+        let _ = send.shutdown().await;
+        frame::read_result(recv, max).await?;
+        Ok(PairingOutcome {
+            peer: ctx.remote,
+            code: ctx.code,
+        })
+    }
+}
+
+/// A dialer has proved the ticket secret. Consume the ticket before calling `complete`.
+pub struct ProvenPairing(PairingStream);
+
+impl ProvenPairing {
+    /// New-device exchange, after the transport adapter consumes the ticket.
+    pub async fn complete(
+        self,
+        send: &mut (impl AsyncWrite + Unpin),
+        recv: &mut (impl AsyncRead + Unpin),
+        max: usize,
+        joiner: &impl Joiner,
+    ) -> Result<PairingOutcome> {
+        let ctx = self.0.context();
+        frame::write(
+            send,
+            tag::PROOF,
+            &mac(&self.0.secret, LISTENER_LABEL, &self.0.transcript),
+        )
+        .await?;
+        confirm_exchange(send, recv, joiner.confirm(&ctx)).await?;
+        let offer = frame::expect(recv, tag::OFFER, max).await?;
+        let join = joiner.join(&ctx, offer).await.map_err(Error::Handler)?;
+        frame::write(send, tag::JOIN, &join).await?;
+        let welcome = frame::read_entries(recv, max).await?;
+        let received = joiner.receive(&ctx, welcome).await;
+        let report = received.as_ref().map(|_| ()).map_err(|e| e.to_string());
+        frame::write_result(send, &report).await?;
+        let _ = send.shutdown().await;
+        received.map_err(Error::Handler)?;
+        Ok(PairingOutcome {
+            peer: ctx.remote,
+            code: ctx.code,
+        })
+    }
+}
+
 impl PairingListener {
     pub fn ticket(&self) -> &PairingTicket {
         &self.ticket
@@ -381,37 +509,23 @@ impl PairingListener {
             transcript,
         } = proven;
         let remote = *conn.remote_id().as_bytes();
-        let ctx = PairingContext {
+        let proven = ProvenPairing(PairingStream {
             local,
             remote,
-            code: confirmation_code(&secret, &transcript),
-        };
+            secret,
+            transcript,
+        });
         let max = self.node.inner.max_frame_len;
-        let result = async {
-            let proof = mac(&secret, LISTENER_LABEL, &transcript);
-            frame::write(&mut send, tag::PROOF, &proof).await?;
-            confirm_exchange(&conn, &mut send, &mut recv, joiner.confirm(&ctx)).await?;
-
-            let offer = frame::expect(&mut recv, tag::OFFER, max).await?;
-            let join = joiner.join(&ctx, offer).await.map_err(Error::Handler)?;
-            frame::write(&mut send, tag::JOIN, &join).await?;
-            let welcome = frame::read_entries(&mut recv, max).await?;
-            let received = joiner.receive(&ctx, welcome).await;
-            let report = received.as_ref().map(|_| ()).map_err(|e| e.to_string());
-            frame::write_result(&mut send, &report).await?;
-            let _ = send.finish();
-            received.map_err(Error::Handler)
-        }
-        .await;
+        let result = tokio::select! {
+            result = proven.complete(&mut send, &mut recv, max, joiner) => result,
+            _ = conn.closed() => Err(from_conn(&conn, Error::Closed("closed".into()))),
+        };
         match result {
-            Ok(()) => {
+            Ok(outcome) => {
                 // Let the dialer read RESULT; it closes the connection once it has.
                 let _ = tokio::time::timeout(LINGER_TIMEOUT, conn.closed()).await;
                 debug!(peer = %crate::fmt_id(&remote), "paired");
-                Ok(PairingOutcome {
-                    peer: remote,
-                    code: ctx.code,
-                })
+                Ok(outcome)
             }
             Err(err) => Err(fail_pairing(&conn, err).await),
         }
@@ -429,12 +543,16 @@ async fn listener_prove(conn: Connection, local: PeerId, secret: [u8; 32]) -> Re
         }
     };
     let attempt = async {
-        let proof = frame::expect(&mut recv, tag::PROOF, 64).await?;
         let transcript = transcript(&conn, &local, &remote)?;
-        if !verify(&secret, DIALER_LABEL, &transcript, &proof) {
-            return Err(Error::PairingProofFailed);
+        let proven = PairingStream {
+            local,
+            remote,
+            secret,
+            transcript,
         }
-        Ok(transcript)
+        .prove(&mut recv)
+        .await?;
+        Ok(proven.0.transcript)
     };
     match tokio::time::timeout(PROOF_TIMEOUT, attempt).await {
         Ok(Ok(transcript)) => Ok(Proven {
@@ -511,35 +629,16 @@ impl Node {
         // Streams outlive the block so a failure closes the connection (with its reason)
         // before they are dropped.
         let result = async {
-            let transcript = transcript(&conn, &ticket.id, &local)?;
-            frame::write(
-                &mut send,
-                tag::PROOF,
-                &mac(&secret, DIALER_LABEL, &transcript),
-            )
-            .await?;
-            let proof = frame::expect(&mut recv, tag::PROOF, 64).await?;
-            if !verify(&secret, LISTENER_LABEL, &transcript, &proof) {
-                return Err(Error::PairingProofFailed);
-            }
-            let ctx = PairingContext {
+            let stream = PairingStream {
                 local,
                 remote: ticket.id,
-                code: confirmation_code(&secret, &transcript),
+                secret,
+                transcript: transcript(&conn, &ticket.id, &local)?,
             };
-            confirm_exchange(&conn, &mut send, &mut recv, inviter.confirm(&ctx)).await?;
-
-            let offer = inviter.offer(&ctx).await.map_err(Error::Handler)?;
-            frame::write(&mut send, tag::OFFER, &offer).await?;
-            let join = frame::expect(&mut recv, tag::JOIN, max).await?;
-            let welcome = inviter.welcome(&ctx, join).await.map_err(Error::Handler)?;
-            frame::write_entries(&mut send, &welcome).await?;
-            let _ = send.finish();
-            frame::read_result(&mut recv, max).await?;
-            Ok(PairingOutcome {
-                peer: ticket.id,
-                code: ctx.code,
-            })
+            tokio::select! {
+                result = stream.invite(&mut send, &mut recv, max, inviter) => result,
+                _ = conn.closed() => Err(from_conn(&conn, Error::Closed("closed".into()))),
+            }
         }
         .await;
         match result {
@@ -555,15 +654,11 @@ impl Node {
 /// Runs the local confirmation (aborting if the peer goes away meanwhile), then exchanges
 /// `CONFIRM` frames.
 async fn confirm_exchange(
-    conn: &Connection,
-    send: &mut SendStream,
-    recv: &mut RecvStream,
+    send: &mut (impl AsyncWrite + Unpin),
+    recv: &mut (impl AsyncRead + Unpin),
     confirm: impl Future<Output = bool>,
 ) -> Result<()> {
-    let confirmed = tokio::select! {
-        ok = confirm => ok,
-        _ = conn.closed() => return Err(from_conn(conn, Error::Closed("closed".into()))),
-    };
+    let confirmed = confirm.await;
     if !confirmed {
         return Err(Error::PairingDeclined);
     }
@@ -593,12 +688,16 @@ fn transcript(conn: &Connection, listener: &PeerId, dialer: &PeerId) -> Result<V
     let mut ekm = [0u8; 32];
     conn.export_keying_material(&mut ekm, EXPORTER_LABEL, b"")
         .map_err(|_| Error::Protocol("keying material export failed".into()))?;
+    Ok(transcript_bytes(listener, dialer, &ekm))
+}
+
+fn transcript_bytes(listener: &PeerId, dialer: &PeerId, ekm: &[u8; 32]) -> Vec<u8> {
     let mut t = Vec::with_capacity(TRANSCRIPT_LABEL.len() + 96);
     t.extend_from_slice(TRANSCRIPT_LABEL);
     t.extend_from_slice(listener);
     t.extend_from_slice(dialer);
-    t.extend_from_slice(&ekm);
-    Ok(t)
+    t.extend_from_slice(ekm);
+    t
 }
 
 fn hmac(secret: &[u8; 32], label: &[u8], transcript: &[u8]) -> Hmac<Sha256> {

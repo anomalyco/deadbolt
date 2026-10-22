@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use anyhow::{Result, bail};
 use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
 
-use super::session::Session;
+use super::session::Loaded;
 use crate::items::{format_month, line, with_scheme};
 use crate::protocol::{FieldInfo, FieldInput, ItemInfo, NewItem};
 
@@ -242,30 +242,23 @@ fn fields(
         .collect()
 }
 
-fn write(s: &mut Session, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
-    let secret = &s.secret;
-    let entry = s
-        .vaults
-        .get_mut(&vault)
-        .expect("resolved")
-        .write(secret, ops)?;
-    s.persist(std::slice::from_ref(&entry))?;
-    Ok(entry)
+fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
+    s.update(vault, |v, secret| Ok(v.write(secret, ops)?))
 }
 
-fn info(s: &Session, vault: VaultId, id: &ItemId) -> ItemInfo {
+fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");
     Listing::new(vault).info(&item, false)
 }
 
-pub fn get(s: &Session, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+pub fn get(s: &Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
     Ok(listing.info(listing.find(query)?, true))
 }
 
 pub fn list(
-    s: &Session,
+    s: &Loaded,
     vault: Option<&str>,
     query: &[String],
     kind: Option<&str>,
@@ -282,7 +275,7 @@ pub fn list(
 }
 
 pub fn create(
-    s: &mut Session,
+    s: &mut Loaded,
     vault: Option<&str>,
     kind: &str,
     name: Option<String>,
@@ -291,18 +284,14 @@ pub fn create(
     let vault = s.resolve(vault)?;
     let fields = fields(kind, None, inputs)?;
     let name = name.filter(|n| !n.is_empty());
-    let secret = &s.secret;
-    let (id, entry) = s
-        .vaults
-        .get_mut(&vault)
-        .expect("resolved")
-        .create_item(secret, kind, name, fields)?;
-    s.persist(&[entry])?;
+    let (id, _) = s.update(vault, |v, secret| {
+        Ok(v.create_item(secret, kind, name, fields)?)
+    })?;
     Ok(info(s, vault, &id))
 }
 
 /// Creates all `items` or none.
-pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Result<()> {
+pub fn import(s: &mut Loaded, vault: Option<&str>, items: Vec<NewItem>) -> Result<()> {
     let vault = s.resolve(vault)?;
     let items = items
         .into_iter()
@@ -313,17 +302,14 @@ pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Resu
             Ok((item.kind, item.name.filter(|n| !n.is_empty()), fields))
         })
         .collect::<Result<Vec<_>>>()?;
-    let secret = &s.secret;
-    let (_, entries) = s
-        .vaults
-        .get_mut(&vault)
-        .expect("resolved")
-        .create_items(secret, items)?;
-    s.persist(&entries)
+    s.update(vault, |v, secret| {
+        v.create_items(secret, items)?;
+        Ok(())
+    })
 }
 
 pub fn set(
-    s: &mut Session,
+    s: &mut Loaded,
     vault: Option<&str>,
     query: &[String],
     inputs: Vec<FieldInput>,
@@ -346,7 +332,7 @@ pub fn set(
 }
 
 pub fn unset(
-    s: &mut Session,
+    s: &mut Loaded,
     vault: Option<&str>,
     query: &[String],
     field: &str,
@@ -360,7 +346,7 @@ pub fn unset(
     Ok(info(s, vault, &item.id))
 }
 
-pub fn remove(s: &mut Session, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;

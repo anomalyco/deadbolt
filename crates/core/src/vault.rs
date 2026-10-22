@@ -16,6 +16,7 @@ pub const CREATE_BATCH_BYTES: usize = 1024 * 1024;
 pub(crate) type Clock = BTreeMap<LogId, u64>;
 
 /// A stored entry plus derived causal metadata.
+#[derive(Clone)]
 pub(crate) struct Node {
     pub(crate) entry: Entry,
     /// Longest dependency path from the genesis.
@@ -94,6 +95,7 @@ impl FromIterator<(LogId, u64)> for Heads {
 }
 
 /// A vault's entries and the state derived from them.
+#[derive(Clone)]
 pub struct Vault {
     id: VaultId,
     nodes: HashMap<Hash, Node>,

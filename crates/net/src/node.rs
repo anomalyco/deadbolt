@@ -396,7 +396,7 @@ struct GateState {
 }
 
 /// The membership gate. Shared by the endpoint hook and the [`Node`].
-pub(crate) struct Gate {
+pub struct Gate {
     membership: Arc<dyn Membership>,
     state: Mutex<GateState>,
 }
@@ -408,7 +408,8 @@ impl fmt::Debug for Gate {
 }
 
 impl Gate {
-    fn new(membership: Arc<dyn Membership>) -> Self {
+    /// Creates a gate without opening a transport endpoint.
+    pub fn new(membership: Arc<dyn Membership>) -> Self {
         Self {
             membership,
             state: Mutex::default(),
@@ -419,7 +420,8 @@ impl Gate {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn check_dial(&self, peer: &PeerId) -> Result<()> {
+    /// Checks current membership and explicit revocations before opening a stream.
+    pub fn check_dial(&self, peer: &PeerId) -> Result<()> {
         let st = self.lock();
         if st.revoked.contains(peer) {
             return Err(Error::Revoked(*peer));
@@ -477,7 +479,9 @@ impl Gate {
         Ok(())
     }
 
-    fn revoke(&self, peer: &PeerId) -> usize {
+    /// Permanently refuses this peer and closes its tracked iroh connections.
+    /// Other transport adapters must cancel their streams when this gate refuses them.
+    pub fn revoke(&self, peer: &PeerId) -> usize {
         let mut st = self.lock();
         st.revoked.insert(*peer);
         let closed = st
@@ -669,8 +673,17 @@ mod tests {
         conn.closed().await;
         assert!(matches!(
             crate::error::from_conn(&conn, Error::Timeout),
-            Error::Rejected(r) if r == "not a member"
+            Error::MembershipRejected(r) if r == "not a member"
         ));
         assert!(a.connected_peers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_preserves_remote_membership_refusal() {
+        let a = node(|_: &PeerId| false).await;
+        let b = node(|_: &PeerId| true).await;
+        let conn = b.connect(a.addr()).await.unwrap();
+        let error = conn.sync().await.unwrap_err();
+        assert!(matches!(error, Error::MembershipRejected(_)), "{error:?}");
     }
 }

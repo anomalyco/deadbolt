@@ -215,7 +215,7 @@ impl Inviter for ExistingDevice<'_> {
     async fn offer(&self, _ctx: &PairingContext) -> Result<Vec<u8>, HandlerError> {
         let offer = self
             .agent
-            .with(|s| {
+            .with_data(|s| {
                 Ok(Offer {
                     v: 1,
                     vault: self.vault.to_string(),
@@ -238,7 +238,7 @@ impl Inviter for ExistingDevice<'_> {
         let device = DeviceId::from_bytes(ctx.remote);
         let (node, removed, blobs, info) = self
             .agent
-            .with(|s| {
+            .with_data(|s| {
                 let vault = s.vault(&self.vault);
                 if !vault.is_member(&s.id) {
                     bail!("this device is no longer a member of {}", vault.name());
@@ -246,14 +246,9 @@ impl Inviter for ExistingDevice<'_> {
                 if vault.is_member(&device) {
                     bail!("that device is already a member of {}", vault.name());
                 }
-                let secret = &s.secret;
-                let add = s
-                    .vaults
-                    .get_mut(&self.vault)
-                    .expect("held")
-                    .add(secret, device, consent)
-                    .context("adding the device")?;
-                s.persist(&[add])?;
+                s.update(self.vault, |v, secret| {
+                    v.add(secret, device, consent).context("adding the device")
+                })?;
                 let addr = join.addr.unwrap_or_else(|| self.ticket_addr.clone());
                 s.learn(&device, Some(&join.name), Some(addr), BTreeMap::new());
                 s.save_peers()?;
@@ -287,7 +282,11 @@ pub async fn pair(
     confirm: bool,
 ) -> Result<Reply> {
     let ticket: PairingTicket = ticket.parse()?;
-    let (node, vault) = agent.with(|s| {
+    tokio::select! {
+        result = agent.wait_ready() => result?,
+        _ = conv.closed() => bail!("cancelled"),
+    }
+    let (node, vault) = agent.with_data(|s| {
         if ticket.peer_id() == *s.id.as_bytes() {
             bail!("that ticket is from this device");
         }

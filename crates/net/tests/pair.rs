@@ -325,6 +325,9 @@ async fn pairing_does_not_bypass_sync_gate() {
         conn.sync().await
     })
     .await;
-    assert!(matches!(result, Err(Error::Rejected(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(Error::MembershipRejected(_))),
+        "{result:?}"
+    );
     assert_eq!(new.store.calls(), 0);
 }
