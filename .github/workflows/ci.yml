@@ -31,8 +31,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Same steps as `bun run check`; cargo-deny stays in its dedicated job below.
       - run: cargo +stable fmt --all -- --check
-      - run: cargo +stable clippy --workspace --all-targets --locked -j 2 -- -D warnings
-      - run: cargo +stable test --workspace --locked -j 2
+      - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo +stable test --workspace --locked
 
   deny:
     name: cargo-deny
