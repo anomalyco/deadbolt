@@ -541,16 +541,15 @@ proptest! {
     }
 }
 
-// Every history of up to DEADBOLT_MEMBERSHIP_DEPTH entries (default 3) over
-// three keys, starting from the genesis and from the genesis plus A's Add of B:
+// Every DAG of up to DEADBOLT_MEMBERSHIP_DEPTH entries (default 3) over three
+// keys, starting from the genesis and from the genesis plus A's Add of B:
 // every parent antichain of membership entries, every author that is a member
 // there, and every operation: Adds of any other key (duplicates and re-adds
 // included), removals of any key with either cutoff (self, non-members and
-// removed keys included), renames and data. The resolver must match the model
-// on all of them. From the genesis, histories the API accepts must also load
-// into a vault that matches the model, and it must reject the removals the
-// model rejects. The second start skips data and vaults, which only the first
-// needs, to reach one entry deeper within the default budget.
+// removed keys included), renames and data. Each DAG is built once, in one
+// causal order, by applying its newest entry to a copy of its parent's vault,
+// which must match the model. Entries the model rejects must be rejected; the
+// resolver alone must still match the model with them included.
 #[test]
 fn exhaustive_small_histories() {
     struct Search {
@@ -560,6 +559,15 @@ fn exhaustive_small_histories() {
         // Models of causal pasts by their hashes; pasts recur across siblings.
         models: RefCell<HashMap<Vec<Hash>, Model>>,
         consents: BTreeMap<(DeviceId, DeviceId), Signature>,
+        // Entries before this index are the fixed start of the search.
+        start: usize,
+    }
+
+    // A linear extension of causality: deps are always shallower. Appending
+    // only in increasing order visits each DAG once instead of once per
+    // interleaving of its concurrent entries.
+    fn order(depth: usize, author: &DeviceId, deps: &[Hash], payload: &Payload) -> (usize, String) {
+        (depth, format!("{author:?}{deps:?}{payload:?}"))
     }
 
     impl Search {
@@ -574,8 +582,15 @@ fn exhaustive_small_histories() {
                 .clone()
         }
 
-        fn check(&self, entries: &[Entry], acceptable: bool) -> Option<Vault> {
+        // Compare a vault holding `entries` with the model, or failing that the
+        // resolver itself (histories the API rejects never reach a vault).
+        fn check(&self, entries: &[Entry], vault: Option<&Vault>) {
             let graph = Graph::new(entries);
+            let expected = graph.model();
+            if let Some(vault) = vault {
+                assert_model(vault, entries, &expected);
+                return;
+            }
             let nodes: Vec<_> = graph
                 .entries
                 .iter()
@@ -595,7 +610,6 @@ fn exhaustive_small_histories() {
                 })
                 .collect();
             let actual = crate::membership::resolve(&self.vault, nodes.iter().collect());
-            let expected = graph.model();
             assert_eq!(
                 actual.members().copied().collect::<BTreeSet<_>>(),
                 expected.members
@@ -614,24 +628,20 @@ fn exhaustive_small_histories() {
                     );
                 }
             }
-            acceptable.then(|| {
-                let vault = load(entries);
-                assert_model(&vault, entries, &expected);
-                vault
-            })
         }
 
         // Each extension with the model's verdict on applying it.
-        fn extensions(
-            &self,
-            entries: &[Entry],
-            with_data: bool,
-        ) -> Vec<(Entry, Result<bool, Error>)> {
+        fn extensions(&self, entries: &[Entry]) -> Vec<(Entry, Result<bool, Error>)> {
             let graph = Graph::new(entries);
+            let last = (entries.len() > self.start).then(|| {
+                let i = graph.entries.len() - 1;
+                let e = graph.entries[i];
+                order(graph.depth[i], &e.author(), e.deps(), e.payload())
+            });
             let membership: Vec<_> = (0..entries.len())
                 .filter(|&i| entries[i].log() == Log::Membership)
                 .collect();
-            let mut extensions = Vec::new();
+            let mut candidates = Vec::new();
             for mask in 1usize..1 << membership.len() {
                 let parents: Vec<_> = (0..membership.len())
                     .filter(|bit| mask & (1 << bit) != 0)
@@ -649,12 +659,12 @@ fn exhaustive_small_histories() {
                     if !state.members.contains(&author.device_id()) {
                         continue;
                     }
-                    let mut payloads = vec![Payload::Membership(MembershipOp::Rename {
-                        name: format!("name-{}", entries.len()),
-                    })];
-                    if with_data {
-                        payloads.push(data());
-                    }
+                    let mut payloads = vec![
+                        Payload::Membership(MembershipOp::Rename {
+                            name: format!("name-{}", entries.len()),
+                        }),
+                        data(),
+                    ];
                     for target in &self.keys {
                         if target.device_id() != author.device_id() {
                             payloads.push(Payload::Membership(MembershipOp::Add {
@@ -662,7 +672,13 @@ fn exhaustive_small_histories() {
                                 consent: self.consents[&(target.device_id(), author.device_id())],
                             }));
                         }
-                        for last_seen_seq in [None, Some(0)] {
+                        // Rejected removals differ in nothing that matters.
+                        let cutoffs: &[_] = if state.members.contains(&target.device_id()) {
+                            &[None, Some(0)]
+                        } else {
+                            &[None]
+                        };
+                        for &last_seen_seq in cutoffs {
                             payloads.push(Payload::Membership(MembershipOp::Remove {
                                 device: target.device_id(),
                                 last_seen_seq,
@@ -692,52 +708,75 @@ fn exhaustive_small_histories() {
                             .chain(previous)
                             .map(|i| entries[i].hash())
                             .collect();
-                        let past = graph.closure(deps.iter().copied());
-                        let state = self.model(entries, &past);
-                        let verdict = match &payload {
-                            _ if !state.members.contains(&author.device_id()) => {
-                                Err(Error::NotMember)
-                            }
-                            Payload::Membership(MembershipOp::Remove { device, .. })
-                                if !state.members.contains(device) =>
-                            {
-                                Err(Error::RemoveNonMember)
-                            }
-                            _ => Ok(true),
-                        };
-                        let entry = Entry::sign(
-                            author,
-                            self.vault,
-                            previous.map_or(0, |p| entries[p].seq() + 1),
-                            deps,
-                            payload,
-                        );
-                        extensions.push((entry, verdict));
+                        let depth = deps
+                            .iter()
+                            .map(|hash| {
+                                let i = graph.entries.iter().position(|e| e.hash() == *hash);
+                                graph.depth[i.unwrap()] + 1
+                            })
+                            .max()
+                            .unwrap();
+                        let deps_list: Vec<_> = deps.iter().copied().collect();
+                        let author_id = author.device_id();
+                        if last.as_ref().is_some_and(|last| {
+                            order(depth, &author_id, &deps_list, &payload) <= *last
+                        }) {
+                            continue;
+                        }
+                        let candidate = (author_id, previous, deps, payload);
+                        if !candidates.contains(&candidate) {
+                            candidates.push(candidate);
+                        }
                     }
                 }
             }
-            extensions.sort_by_key(|(entry, _)| entry.hash());
-            extensions.dedup_by_key(|(entry, _)| entry.hash());
-            extensions
+            // Judge before signing: signatures dominate the cost in debug builds.
+            candidates
+                .into_iter()
+                .filter_map(|(author, previous, deps, payload)| {
+                    let past = graph.closure(deps.iter().copied());
+                    let state = self.model(entries, &past);
+                    let verdict = match &payload {
+                        // A data entry's previous write can reveal its
+                        // author's removal; such entries are not explored.
+                        _ if !state.members.contains(&author) => return None,
+                        Payload::Membership(MembershipOp::Remove { device, .. })
+                            if !state.members.contains(device) =>
+                        {
+                            Err(Error::RemoveNonMember)
+                        }
+                        _ => Ok(true),
+                    };
+                    let seq = previous.map_or(0, |p| entries[p].seq() + 1);
+                    let secret = self.keys.iter().find(|k| k.device_id() == author)?;
+                    let entry = Entry::sign(secret, self.vault, seq, deps, payload);
+                    Some((entry, verdict))
+                })
+                .collect()
         }
 
-        fn visit(&mut self, entries: &mut Vec<Entry>, acceptable: bool, left: usize) {
+        fn visit(&mut self, entries: &mut Vec<Entry>, vault: &mut Vault, left: usize) {
             self.histories += 1;
-            let mut vault = self.check(entries, acceptable);
+            self.check(entries, Some(vault));
             if left == 0 {
                 return;
             }
-            // Data entries only matter once they reach a vault.
-            for (entry, verdict) in self.extensions(entries, vault.is_some()) {
-                if let (Some(vault), Err(error)) = (&mut vault, &verdict) {
-                    assert_eq!(vault.apply(entry.clone()), Err(error.clone()));
+            for (entry, verdict) in self.extensions(entries) {
+                entries.push(entry.clone());
+                match verdict {
+                    Ok(_) => {
+                        let mut child = vault.clone();
+                        assert_eq!(child.apply(entry), Ok(true));
+                        self.visit(entries, &mut child, left - 1);
+                    }
+                    // The API rejects it, so it heads no stored history. The
+                    // resolver must still cope with it.
+                    Err(error) => {
+                        assert_eq!(vault.apply(entry), Err(error));
+                        self.histories += 1;
+                        self.check(entries, None);
+                    }
                 }
-                // A data entry's previous write can reveal its author's removal.
-                if verdict == Err(Error::NotMember) {
-                    continue;
-                }
-                entries.push(entry);
-                self.visit(entries, acceptable && verdict.is_ok(), left - 1);
                 entries.pop();
             }
         }
@@ -770,13 +809,15 @@ fn exhaustive_small_histories() {
         vault: invited[0].vault(),
         histories: 0,
         models: RefCell::default(),
+        start: 0,
     };
     let depth = std::env::var("DEADBOLT_MEMBERSHIP_DEPTH")
         .ok()
         .map(|n| n.parse().expect("depth"))
         .unwrap_or(3);
     for root in [&invited[..1], &invited[..]] {
-        search.visit(&mut root.to_vec(), root.len() == 1, depth);
+        search.start = root.len();
+        search.visit(&mut root.to_vec(), &mut load(root), depth);
     }
     eprintln!(
         "exhaustive: {} histories, up to {depth} entries after the genesis or its first Add",
