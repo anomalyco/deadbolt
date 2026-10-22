@@ -232,6 +232,10 @@ fn truncate(name: &str, max: usize) -> String {
 
 /// `base`, else `base-2`, `base-3`, ... whichever is not taken; the taken
 /// set includes every field of the item's schema.
+#[expect(
+    clippy::expect_used,
+    reason = "the finite set of imported fields cannot exhaust numeric suffixes"
+)]
 fn unique(base: &str, taken: &BTreeSet<String>) -> String {
     if !taken.contains(base) {
         return base.to_string();
@@ -277,6 +281,10 @@ struct Builder {
 }
 
 impl Builder {
+    #[expect(
+        clippy::expect_used,
+        reason = "callers pass only the built-in login and card schemas"
+    )]
     fn new(kind: &str) -> Self {
         let schema = schema(kind).expect("built-in type");
         Self {
@@ -287,6 +295,10 @@ impl Builder {
     }
 
     /// Sets a known field; `false` if the value is invalid for it.
+    #[expect(
+        clippy::expect_used,
+        reason = "mapping code passes known fields of its built-in schema"
+    )]
     fn known(&mut self, name: &str, value: Option<String>) -> bool {
         let Some(value) = value else { return true };
         let kind = self.schema.field(name).expect("known field").kind.clone();
@@ -323,8 +335,9 @@ impl Builder {
         }
     }
 
-    fn finish(self, kind: &str, name: Option<String>) -> NewItem {
-        NewItem {
+    fn finish(self, kind: &str, name: Option<String>) -> Result<NewItem> {
+        check_create(kind, name.as_deref(), &self.fields)?;
+        Ok(NewItem {
             kind: kind.into(),
             name,
             fields: self
@@ -336,10 +349,11 @@ impl Builder {
                     value: std::mem::take(&mut field.value),
                 })
                 .collect(),
-        }
+        })
     }
 }
 
+#[expect(clippy::expect_used, reason = "login is a built-in schema")]
 fn url_field(uri: &str) -> Field {
     let field = Field::new(FieldType::Url, with_scheme(uri.to_string()));
     let login = schema("login").expect("built-in type");
@@ -350,7 +364,7 @@ fn url_field(uri: &str) -> Field {
     }
 }
 
-fn login(item: &Value, summary: &mut Summary) -> Option<NewItem> {
+fn login(item: &Value, summary: &mut Summary) -> Option<Result<NewItem>> {
     let login = item.get("login").unwrap_or(&Value::Null);
     let mut b = Builder::new("login");
     let password = text(login, "password");
@@ -384,7 +398,7 @@ fn login(item: &Value, summary: &mut Summary) -> Option<NewItem> {
     Some(b.finish("login", item_name(item)))
 }
 
-fn card(item: &Value, summary: &mut Summary) -> Option<NewItem> {
+fn card(item: &Value, summary: &mut Summary) -> Option<Result<NewItem>> {
     let card = item.get("card").unwrap_or(&Value::Null);
     let mut b = Builder::new("card");
     let number = text(card, "number").map(|n| {
@@ -457,7 +471,12 @@ pub fn bitwarden(text: &str) -> Result<(Vec<NewItem>, Summary)> {
         } else {
             card(item, &mut summary)
         };
-        let Some(mapped) = mapped else { continue };
+        let Some(mapped) = mapped
+            .transpose()
+            .with_context(|| format!("mapping item {}", out.len() + 1))?
+        else {
+            continue;
+        };
         if item.get("favorite").and_then(Value::as_bool) == Some(true) {
             summary.favorites += 1;
         }
@@ -465,24 +484,9 @@ pub fn bitwarden(text: &str) -> Result<(Vec<NewItem>, Summary)> {
         if !array(item, "passwordHistory").is_empty() {
             summary.password_history += 1;
         }
-        check(&mapped).with_context(|| format!("mapping item {}", out.len() + 1))?;
         out.push(mapped);
     }
     Ok((out, summary))
-}
-
-/// The agent checks again; this keeps a mapping bug from failing late.
-fn check(item: &NewItem) -> Result<()> {
-    let fields = item
-        .fields
-        .iter()
-        .map(|f| {
-            let kind = FieldType::parse(f.kind.as_deref().unwrap_or("text"));
-            (f.name.clone(), Field::new(kind, f.value.clone()))
-        })
-        .collect();
-    check_create(&item.kind, item.name.as_deref(), &fields)?;
-    Ok(())
 }
 
 #[cfg(test)]
