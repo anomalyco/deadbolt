@@ -19,6 +19,7 @@ Or download a tarball from [GitHub releases](https://github.com/anomalyco/deadbo
 ## Docs
 
 - [`docs/design.md`](docs/design.md) — **the current v1 design** (two keys, signed membership, per-device encrypted logs, QR pairing).
+- [`docs/app.md`](docs/app.md) — the desktop app (Rune, in `app/`): plan, keyboard, motion, and the first slice.
 - `docs/research/` — prior art
   - [`01-inkandswitch.md`](docs/research/01-inkandswitch.md) — Keyhive, BeeKEM, Beelay/Subduction, Automerge
   - [`02-rust-sync-stacks.md`](docs/research/02-rust-sync-stacks.md) — iroh, p2panda, Willow, Loro/Automerge/yrs
