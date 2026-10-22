@@ -91,3 +91,6 @@ pub use vault::{CREATE_BATCH_BYTES, Heads, Vault};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod membership_tests;
