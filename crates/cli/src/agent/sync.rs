@@ -20,7 +20,7 @@ use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
 
 use super::Agent;
-use super::session::{Addr, Hint, Session, hex, now, unhex};
+use super::session::{Addr, Hint, Loaded, hex, now, unhex};
 use crate::protocol::PeerSync;
 
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(30);
@@ -46,7 +46,7 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
 impl SyncHandler for Handler {
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.0
-            .with(|s| hello(s, &DeviceId::from_bytes(peer)))
+            .with(|s| hello(s, &DeviceId::from_bytes(peer), Some(s.own_addr())))
             .map_err(handler_error)
     }
 
@@ -55,21 +55,35 @@ impl SyncHandler for Handler {
         peer: PeerId,
         peer_heads: Vec<u8>,
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
-        let ready = self.0.ready.load(Ordering::SeqCst);
         self.0
-            .with(|s| missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready))
+            .with(|s| {
+                missing_for(
+                    s,
+                    &DeviceId::from_bytes(peer),
+                    &peer_heads,
+                    self.0.ready.load(Ordering::SeqCst),
+                )
+            })
             .map_err(handler_error)
     }
 
     async fn receive(&self, peer: PeerId, entries: Vec<Vec<u8>>) -> Result<(), HandlerError> {
         let agent = &self.0;
-        let (node, removed, added) = agent
+        let (node, removed, received) = agent
             .with(|s| {
-                let added = receive(s, &DeviceId::from_bytes(peer), entries)?;
-                Ok((s.node.clone(), agent.refresh(s), added))
+                let received = receive(
+                    s,
+                    &DeviceId::from_bytes(peer),
+                    entries,
+                    agent.ready.load(Ordering::SeqCst),
+                );
+                // Earlier vault transactions may have committed even if a later
+                // vault or address-book write failed. Always enforce those removals.
+                Ok((s.node.clone(), agent.refresh(s), received))
             })
             .map_err(handler_error)?;
         agent.enforce(&node, &removed);
+        let added = received.map_err(handler_error)?;
         if added > 0 {
             // Pass news on to the other members.
             agent.sync_now.notify_one();
@@ -78,7 +92,7 @@ impl SyncHandler for Handler {
     }
 }
 
-fn hello(s: &Session, peer: &DeviceId) -> Result<Vec<u8>> {
+pub(super) fn hello(s: &Loaded, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<u8>> {
     let vaults = s
         .vaults
         .iter()
@@ -88,14 +102,14 @@ fn hello(s: &Session, peer: &DeviceId) -> Result<Vec<u8>> {
     Ok(serde_json::to_vec(&Hello {
         v: 1,
         name: s.meta.device_name.clone(),
-        addr: Some(s.own_addr()),
+        addr,
         peers: s.hints_for(peer),
         vaults,
     })?)
 }
 
-fn missing_for(
-    s: &mut Session,
+pub(super) fn missing_for(
+    s: &mut Loaded,
     peer: &DeviceId,
     bytes: &[u8],
     ready: bool,
@@ -128,8 +142,13 @@ fn missing_for(
 /// Applies entries from `peer`. Data entries are only taken from current
 /// members of their vault; signed membership entries from any member of a
 /// shared vault. Returns how many were new.
-fn receive(s: &mut Session, peer: &DeviceId, entries: Vec<Vec<u8>>) -> Result<usize> {
-    let mut added: Vec<Entry> = Vec::new();
+pub(super) fn receive(
+    s: &mut Loaded,
+    peer: &DeviceId,
+    entries: Vec<Vec<u8>>,
+    ready: bool,
+) -> Result<usize> {
+    let mut grouped: BTreeMap<VaultId, Vec<Entry>> = BTreeMap::new();
     for bytes in entries {
         let entry = match Entry::decode(&bytes) {
             Ok(entry) => entry,
@@ -138,25 +157,41 @@ fn receive(s: &mut Session, peer: &DeviceId, entries: Vec<Vec<u8>>) -> Result<us
                 continue;
             }
         };
-        let Some(vault) = s.vaults.get_mut(&entry.vault()) else {
-            continue;
-        };
-        if entry.log() == Log::Data && !vault.is_member(peer) {
+        if !s.vaults.contains_key(&entry.vault()) {
             continue;
         }
-        match vault.apply(entry.clone()) {
-            Ok(true) => added.push(entry),
-            Ok(false) => {}
-            Err(error) => debug!(peer = %peer, "rejected entry: {error}"),
+        if entry.log() == Log::Data && !ready {
+            continue;
         }
+        grouped.entry(entry.vault()).or_default().push(entry);
     }
-    s.persist(&added)?;
+    let mut added = 0;
+    for (id, entries) in grouped {
+        added += s.update(id, |vault, _| {
+            let mut added = 0;
+            for entry in entries {
+                if entry.log() == Log::Data && !vault.is_member(peer) {
+                    continue;
+                }
+                match vault.apply(entry) {
+                    Ok(true) => added += 1,
+                    Ok(false) => {}
+                    Err(error) => debug!(peer = %peer, "rejected entry: {error}"),
+                }
+            }
+            Ok(added)
+        })?;
+    }
     s.peer_mut(peer).last_seen = Some(now());
     s.save_peers()?;
-    if !added.is_empty() {
-        info!(peer = %peer, entries = added.len(), "received");
+    if added > 0 {
+        info!(peer = %peer, entries = added, "received");
     }
-    Ok(added.len())
+    Ok(added)
+}
+
+pub(super) fn barrier_complete(members: &HashSet<PeerId>, succeeded: &HashSet<PeerId>) -> bool {
+    members.is_subset(succeeded)
 }
 
 /// Syncs with every member of every vault, or only of `only`, concurrently.
@@ -192,9 +227,7 @@ pub async fn sync_all(agent: &Arc<Agent>, only: Option<VaultId>) -> Result<Vec<P
     }
     let mut results = Vec::new();
     while let Some(joined) = tasks.join_next().await {
-        if let Ok(result) = joined {
-            results.push(result);
-        }
+        results.push(joined?);
     }
     let connected: HashSet<PeerId> = node.connected_peers().into_iter().collect();
     agent.with(|s| {
@@ -227,20 +260,98 @@ pub async fn sync_all(agent: &Arc<Agent>, only: Option<VaultId>) -> Result<Vec<P
 }
 
 /// The background sync loop, running while unlocked: a membership round with
-/// every reachable member, then full syncs every [`SYNC_INTERVAL`] and
+/// every known member, then full syncs every [`SYNC_INTERVAL`] and
 /// whenever something changed.
 pub async fn run(agent: Arc<Agent>) {
-    if let Err(error) = sync_all(&agent, None).await {
-        warn!("startup sync failed: {error:#}");
-    }
-    agent.ready.store(true, Ordering::SeqCst);
     loop {
-        if let Err(error) = sync_all(&agent, None).await {
-            warn!("sync failed: {error:#}");
+        match sync_all(&agent, None).await {
+            Ok(results) if !agent.ready.load(Ordering::SeqCst) => {
+                let succeeded = results
+                    .iter()
+                    .filter(|p| p.error.is_none())
+                    .filter_map(|p| unhex(&p.device.id).ok())
+                    .collect();
+                // Re-read membership after the round: newly learned members must
+                // also complete a round. Failed/time-out attempts never open data.
+                let completed = agent
+                    .with(|s| {
+                        let complete = barrier_complete(&s.peer_set(), &succeeded);
+                        if complete {
+                            agent.ready.store(true, Ordering::SeqCst);
+                        }
+                        Ok(complete)
+                    })
+                    .unwrap_or(false);
+                if completed {
+                    continue;
+                }
+            }
+            Ok(_) => {}
+            Err(error) => warn!("sync failed: {error:#}"),
         }
         tokio::select! {
             _ = tokio::time::sleep(SYNC_INTERVAL) => {}
             _ = agent.sync_now.notified() => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::session::Meta;
+    use super::*;
+    use deadbolt_core::{DeviceSecret, Field, FieldType, Vault};
+
+    #[test]
+    fn startup_requires_success_from_current_and_newly_discovered_peers() {
+        assert!(!barrier_complete(
+            &HashSet::from([[1; 32]]),
+            &HashSet::new()
+        ));
+        assert!(!barrier_complete(
+            &HashSet::from([[1; 32], [2; 32]]),
+            &HashSet::from([[1; 32]])
+        ));
+        assert!(barrier_complete(
+            &HashSet::from([[1; 32]]),
+            &HashSet::from([[1; 32]])
+        ));
+    }
+
+    #[test]
+    fn startup_does_not_accept_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = DeviceSecret::from_bytes(&[1; 32]);
+        let store = deadbolt_store::init_with_params(
+            dir.path(),
+            b"test",
+            *secret.to_bytes(),
+            deadbolt_store::KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        let (mut source, genesis) = Vault::create(&secret, "test").unwrap();
+        let id = source.id();
+        let mut loaded = Loaded {
+            store,
+            id: secret.device_id(),
+            secret,
+            meta: Meta::default(),
+            vaults: [(id, Vault::from_genesis(genesis).unwrap())].into_iter().collect(),
+        };
+        let (_, entry) = source
+            .create_item(
+                &loaded.secret,
+                "login",
+                None,
+                [("password".into(), Field::new(FieldType::Secret, "private"))],
+            )
+            .unwrap();
+        let peer = loaded.id;
+        receive(&mut loaded, &peer, vec![entry.encode()], false).unwrap();
+        assert!(loaded.vault(&id).items().is_empty());
     }
 }

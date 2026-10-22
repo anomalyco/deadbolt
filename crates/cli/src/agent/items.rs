@@ -243,14 +243,7 @@ fn fields(
 }
 
 fn write(s: &mut Session, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
-    let secret = &s.secret;
-    let entry = s
-        .vaults
-        .get_mut(&vault)
-        .expect("resolved")
-        .write(secret, ops)?;
-    s.persist(std::slice::from_ref(&entry))?;
-    Ok(entry)
+    s.update(vault, |v, secret| Ok(v.write(secret, ops)?))
 }
 
 fn info(s: &Session, vault: VaultId, id: &ItemId) -> ItemInfo {
@@ -291,13 +284,9 @@ pub fn create(
     let vault = s.resolve(vault)?;
     let fields = fields(kind, None, inputs)?;
     let name = name.filter(|n| !n.is_empty());
-    let secret = &s.secret;
-    let (id, entry) = s
-        .vaults
-        .get_mut(&vault)
-        .expect("resolved")
-        .create_item(secret, kind, name, fields)?;
-    s.persist(&[entry])?;
+    let (id, _) = s.update(vault, |v, secret| {
+        Ok(v.create_item(secret, kind, name, fields)?)
+    })?;
     Ok(info(s, vault, &id))
 }
 
@@ -313,13 +302,10 @@ pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Resu
             Ok((item.kind, item.name.filter(|n| !n.is_empty()), fields))
         })
         .collect::<Result<Vec<_>>>()?;
-    let secret = &s.secret;
-    let (_, entries) = s
-        .vaults
-        .get_mut(&vault)
-        .expect("resolved")
-        .create_items(secret, items)?;
-    s.persist(&entries)
+    s.update(vault, |v, secret| {
+        v.create_items(secret, items)?;
+        Ok(())
+    })
 }
 
 pub fn set(

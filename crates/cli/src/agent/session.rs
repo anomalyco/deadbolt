@@ -1,6 +1,6 @@
 //! The unlocked state: store, device key, vaults and the local address book.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -10,13 +10,13 @@ use data_encoding::HEXLOWER;
 use deadbolt_core::{DeviceId, DeviceSecret, Entry, Vault, VaultId, valid_name};
 use deadbolt_net::{Node, PeerAddr, PeerId};
 use deadbolt_store::{KdfParams, Unlocked};
+use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 use crate::protocol::{DeviceInfo, VaultInfo};
 
 const META_DEVICE_NAME: &str = "cli/device-name";
-const META_VAULTS: &str = "cli/vaults";
 const META_DEFAULT_VAULT: &str = "cli/default-vault";
 const META_PEERS: &str = "cli/peers";
 
@@ -105,7 +105,6 @@ pub struct Hint {
 #[derive(Debug, Default)]
 pub struct Meta {
     pub device_name: String,
-    pub vaults: Vec<VaultId>,
     pub default_vault: Option<VaultId>,
     pub peers: BTreeMap<String, Peer>,
 }
@@ -114,8 +113,9 @@ pub struct Meta {
 pub struct Loaded {
     pub store: Unlocked,
     pub secret: DeviceSecret,
+    pub id: DeviceId,
     pub meta: Meta,
-    pub vaults: BTreeMap<VaultId, Vault>,
+    pub vaults: IndexMap<VaultId, Vault>,
 }
 
 fn get_json<T: DeserializeOwned>(store: &Unlocked, name: &str) -> Result<Option<T>> {
@@ -131,6 +131,21 @@ fn set_json<T: Serialize>(store: &Unlocked, name: &str, value: &T) -> Result<()>
 }
 
 impl Loaded {
+    /// Stage and durably publish one vault mutation.
+    pub fn update<T>(
+        &mut self,
+        id: VaultId,
+        change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T>,
+    ) -> Result<T> {
+        let store = &self.store;
+        let secret = &self.secret;
+        update(
+            self.vaults.get_mut(&id).expect("held vault"),
+            |entries| persist(store, entries),
+            |vault| change(vault, secret),
+        )
+    }
+
     /// Creates the device key and store. Blocking (Argon2).
     pub fn setup(dir: &Path, passphrase: &[u8], device_name: &str) -> Result<Self> {
         let secret = DeviceSecret::generate();
@@ -150,9 +165,10 @@ impl Loaded {
         };
         let loaded = Self {
             store,
+            id: secret.device_id(),
             secret,
             meta,
-            vaults: BTreeMap::new(),
+            vaults: IndexMap::new(),
         };
         save_meta(&loaded.store, &loaded.meta)?;
         Ok(loaded)
@@ -162,33 +178,28 @@ impl Loaded {
     pub fn open(dir: &Path, passphrase: &[u8]) -> Result<Self> {
         let store = deadbolt_store::unlock(dir, passphrase)?;
         let secret = DeviceSecret::from_bytes(store.device_secret());
-        let vault_ids: Vec<String> = get_json(&store, META_VAULTS)?.unwrap_or_default();
         let default: Option<String> = get_json(&store, META_DEFAULT_VAULT)?;
         let meta = Meta {
             device_name: get_json(&store, META_DEVICE_NAME)?.unwrap_or_default(),
-            vaults: vault_ids
-                .iter()
-                .map(|id| unhex(id).map(VaultId::from_bytes))
-                .collect::<Result<_>>()?,
             default_vault: default
                 .map(|id| unhex(&id).map(VaultId::from_bytes))
                 .transpose()?,
             peers: get_json(&store, META_PEERS)?.unwrap_or_default(),
         };
-        let mut grouped: HashMap<VaultId, Vec<Entry>> = HashMap::new();
+        let mut grouped: IndexMap<VaultId, Vec<Entry>> = IndexMap::new();
         for item in store.iter_all()? {
             let (_, bytes) = item?;
             let entry = Entry::decode(&bytes).context("decoding a stored entry")?;
             grouped.entry(entry.vault()).or_default().push(entry);
         }
-        let mut vaults = BTreeMap::new();
-        for id in &meta.vaults {
-            let entries = grouped.remove(id).unwrap_or_default();
+        let mut vaults = IndexMap::new();
+        for (id, entries) in grouped {
             let vault = Vault::load(entries).with_context(|| format!("loading vault {id}"))?;
-            vaults.insert(*id, vault);
+            vaults.insert(id, vault);
         }
         Ok(Self {
             store,
+            id: secret.device_id(),
             secret,
             meta,
             vaults,
@@ -198,8 +209,6 @@ impl Loaded {
 
 fn save_meta(store: &Unlocked, meta: &Meta) -> Result<()> {
     set_json(store, META_DEVICE_NAME, &meta.device_name)?;
-    let ids: Vec<String> = meta.vaults.iter().map(|id| id.to_string()).collect();
-    set_json(store, META_VAULTS, &ids)?;
     set_json(
         store,
         META_DEFAULT_VAULT,
@@ -209,28 +218,38 @@ fn save_meta(store: &Unlocked, meta: &Meta) -> Result<()> {
 }
 
 pub struct Session {
-    pub store: Unlocked,
-    pub secret: DeviceSecret,
-    pub id: DeviceId,
-    pub meta: Meta,
-    pub vaults: BTreeMap<VaultId, Vault>,
+    state: Loaded,
     pub node: Node,
+}
+
+impl std::ops::Deref for Session {
+    type Target = Loaded;
+    fn deref(&self) -> &Loaded {
+        &self.state
+    }
+}
+
+impl std::ops::DerefMut for Session {
+    fn deref_mut(&mut self) -> &mut Loaded {
+        &mut self.state
+    }
 }
 
 impl Session {
     pub fn new(loaded: Loaded, node: Node) -> Self {
-        let id = loaded.secret.device_id();
         Self {
-            store: loaded.store,
-            secret: loaded.secret,
-            id,
-            meta: loaded.meta,
-            vaults: loaded.vaults,
+            state: loaded,
             node,
         }
     }
 
-    pub fn save_vaults(&self) -> Result<()> {
+    pub fn own_addr(&self) -> Addr {
+        Addr::from_peer(&self.node.addr())
+    }
+}
+
+impl Loaded {
+    pub fn save_meta(&self) -> Result<()> {
         save_meta(&self.store, &self.meta)
     }
 
@@ -238,18 +257,9 @@ impl Session {
         set_json(&self.store, META_PEERS, &self.meta.peers)
     }
 
-    /// Persists entries that were just applied to a vault.
+    /// Persists validated entries before publishing their in-memory state.
     pub fn persist(&self, entries: &[Entry]) -> Result<()> {
-        if entries.is_empty() {
-            return Ok(());
-        }
-        let encoded: Vec<([u8; 32], Vec<u8>)> = entries
-            .iter()
-            .map(|e| (*e.hash().as_bytes(), e.encode()))
-            .collect();
-        self.store
-            .append_batch(encoded.iter().map(|(hash, bytes)| (hash, bytes.as_slice())))?;
-        Ok(())
+        persist(&self.store, entries)
     }
 
     /// Every other device that is a member of a vault this device holds.
@@ -280,10 +290,6 @@ impl Session {
             relay_url: addr.relay,
             direct_addrs: addr.direct,
         }
-    }
-
-    pub fn own_addr(&self) -> Addr {
-        Addr::from_peer(&self.node.addr())
     }
 
     /// Hints about the members of the vaults `peer` shares with this device.
@@ -352,25 +358,23 @@ impl Session {
             {
                 return Ok(id);
             }
-            return match self.meta.vaults.as_slice() {
-                [] => bail!(
+            return match self.vaults.len() {
+                0 => bail!(
                     "no vaults yet; create one with `deadbolt init` or join one with `deadbolt join`"
                 ),
-                [only] => Ok(*only),
+                1 => Ok(*self.vaults.keys().next().expect("one vault")),
                 _ => bail!("no default vault; pick one with --vault or `deadbolt vault default`"),
             };
         };
         let by_name: Vec<VaultId> = self
-            .meta
             .vaults
             .iter()
-            .filter(|id| self.vaults[id].name() == query)
-            .copied()
+            .filter(|(_, vault)| vault.name() == query)
+            .map(|(id, _)| *id)
             .collect();
         let matches = if by_name.is_empty() && query.len() >= 4 {
-            self.meta
-                .vaults
-                .iter()
+            self.vaults
+                .keys()
                 .filter(|id| id.to_string().starts_with(query))
                 .copied()
                 .collect()
@@ -402,11 +406,10 @@ impl Session {
         }
         self.persist(entries)?;
         self.vaults.insert(id, vault);
-        self.meta.vaults.push(id);
         if self.meta.default_vault.is_none() {
             self.meta.default_vault = Some(id);
         }
-        self.save_vaults()
+        self.save_meta()
     }
 
     pub fn create_vault(&mut self, name: &str) -> Result<VaultId> {
@@ -436,11 +439,7 @@ impl Session {
     }
 
     pub fn vault_infos(&self) -> Vec<VaultInfo> {
-        self.meta
-            .vaults
-            .iter()
-            .map(|id| self.vault_info(id))
-            .collect()
+        self.vaults.keys().map(|id| self.vault_info(id)).collect()
     }
 
     pub fn device_info(&self, id: &DeviceId, connected: &HashSet<PeerId>) -> DeviceInfo {
@@ -500,5 +499,76 @@ impl Session {
             [] => bail!("no device {query} in vault {}", self.vaults[vault].name()),
             _ => bail!("{query} matches several devices; use the device id"),
         }
+    }
+}
+
+fn persist(store: &Unlocked, entries: &[Entry]) -> Result<()> {
+    if !entries.is_empty() {
+        let encoded: Vec<_> = entries
+            .iter()
+            .map(|e| (*e.hash().as_bytes(), e.encode()))
+            .collect();
+        store.append_batch(encoded.iter().map(|(hash, bytes)| (hash, bytes.as_slice())))?;
+    }
+    Ok(())
+}
+
+pub(super) fn update<T>(
+    vault: &mut Vault,
+    persist: impl FnOnce(&[Entry]) -> Result<()>,
+    change: impl FnOnce(&mut Vault) -> Result<T>,
+) -> Result<T> {
+    let heads = vault.heads();
+    // Rebuild a private staging view. Failed validation or I/O cannot advance the
+    // live log; publishing the validated state after the durable write is infallible.
+    let mut staged = Vault::load(vault.entries().into_iter().cloned())?;
+    let result = change(&mut staged)?;
+    let entries: Vec<_> = staged.missing_for(&heads).into_iter().cloned().collect();
+    persist(&entries)?;
+    *vault = staged;
+    Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_write_does_not_advance_log() {
+        let secret = DeviceSecret::from_bytes(&[1; 32]);
+        let (mut vault, _) = Vault::create(&secret, "test").unwrap();
+        let before = vault.heads();
+        let result = update(
+            &mut vault,
+            |_| bail!("injected disk full"),
+            |v| Ok(v.rename(&secret, "lost")?),
+        );
+        assert!(result.is_err());
+        assert_eq!(vault.heads(), before);
+        assert_eq!(vault.name(), "test");
+    }
+
+    #[test]
+    fn restart_discovers_vault_from_committed_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let secret = DeviceSecret::from_bytes(&[1; 32]);
+        let store = deadbolt_store::init_with_params(
+            dir.path(),
+            b"test",
+            *secret.to_bytes(),
+            KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        let (vault, genesis) = Vault::create(&secret, "test").unwrap();
+        store.meta_set("cli/vaults", b"[]").unwrap();
+        persist(&store, &[genesis]).unwrap();
+        // Crash between committing the genesis and updating cli/vaults metadata.
+        drop(store);
+        let loaded = Loaded::open(dir.path(), b"test").unwrap();
+        assert!(loaded.vaults.contains_key(&vault.id()));
     }
 }

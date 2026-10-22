@@ -295,14 +295,9 @@ impl Agent {
                     if s.name_taken(&name, Some(id)) {
                         bail!("a vault named {name} already exists");
                     }
-                    let secret = &s.secret;
-                    let entry = s
-                        .vaults
-                        .get_mut(&id)
-                        .expect("resolved")
-                        .rename(secret, name.clone())
-                        .context("renaming")?;
-                    s.persist(&[entry])?;
+                    s.update(id, |v, secret| {
+                        v.rename(secret, name.clone()).context("renaming")
+                    })?;
                     Ok(s.vault_info(&id))
                 })?;
                 self.sync_now.notify_one();
@@ -312,7 +307,7 @@ impl Agent {
                 let vault = self.with(|s| {
                     let id = s.resolve(Some(&vault))?;
                     s.meta.default_vault = Some(id);
-                    s.save_vaults()?;
+                    s.save_meta()?;
                     Ok(s.vault_info(&id))
                 })?;
                 Ok(Reply::Vault { vault })
@@ -340,14 +335,9 @@ impl Agent {
                         bail!("cannot remove this device; remove it from another device");
                     }
                     let info = s.device_info(&target, &HashSet::new());
-                    let secret = &s.secret;
-                    let entry = s
-                        .vaults
-                        .get_mut(&id)
-                        .expect("resolved")
-                        .remove(secret, target)
-                        .context("removing device")?;
-                    s.persist(&[entry])?;
+                    s.update(id, |v, secret| {
+                        v.remove(secret, target).context("removing device")
+                    })?;
                     Ok((s.node.clone(), self.refresh(s), s.vault_info(&id), info))
                 })?;
                 self.enforce(&node, &removed);
@@ -372,10 +362,11 @@ impl Agent {
                 confirm,
             } => pairing::pair(&self, conv, ticket, vault, confirm).await,
             Command::ItemGet { vault, query } => Ok(Reply::Item {
-                item: self.with(|s| items::get(s, vault.as_deref(), &query))?,
+                item: self.with_data(|s| items::get(s, vault.as_deref(), &query))?,
             }),
             Command::ItemList { vault, query, kind } => Ok(Reply::Items {
-                items: self.with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,
+                items: self
+                    .with_data(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,
             }),
             Command::ItemNew {
                 vault,
@@ -398,7 +389,7 @@ impl Agent {
                 self.item_write(|s| items::remove(s, vault.as_deref(), &query))
             }
             Command::ItemImport { vault, items } => {
-                self.with(|s| items::import(s, vault.as_deref(), items))?;
+                self.with_data(|s| items::import(s, vault.as_deref(), items))?;
                 self.sync_now.notify_one();
                 Ok(Reply::Done)
             }
@@ -410,9 +401,19 @@ impl Agent {
         &self,
         f: impl FnOnce(&mut Session) -> Result<crate::protocol::ItemInfo>,
     ) -> Result<Reply> {
-        let item = self.with(f)?;
+        let item = self.with_data(f)?;
         self.sync_now.notify_one();
         Ok(Reply::Item { item })
+    }
+
+    /// Checks readiness under the session lock, including for local item access.
+    pub fn with_data<T>(&self, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
+        self.with(|s| {
+            if !self.ready.load(Ordering::SeqCst) {
+                bail!("waiting for membership sync");
+            }
+            f(s)
+        })
     }
 
     /// Runs `f` on the unlocked session.
@@ -569,6 +570,8 @@ impl Agent {
         let node = Node::spawn(config, gate, sync::Handler(self.clone())).await?;
         let session = Session::new(loaded, node);
         self.refresh(&session);
+        self.ready
+            .store(session.peer_set().is_empty(), Ordering::SeqCst);
         let id: DeviceId = session.id;
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
         self.set_timeout(timeout_secs)?;

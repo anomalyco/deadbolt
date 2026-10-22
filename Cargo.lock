@@ -604,6 +604,7 @@ dependencies = [
  "deadbolt-net",
  "deadbolt-store",
  "getrandom 0.4.3",
+ "indexmap",
  "rpassword",
  "rustix",
  "serde",
