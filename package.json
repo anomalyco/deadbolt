@@ -8,7 +8,8 @@
     "changeset": "changeset",
     "version": "changeset version && bun packages/cli/script/version.ts && bun install",
     "release": "bun packages/cli/script/release.ts && changeset publish",
-    "test": "cargo test --workspace"
+    "test": "cargo test --workspace",
+    "check": "cargo +stable fmt --all -- --check && cargo +stable clippy --workspace --all-targets --locked -j 2 -- -D warnings && cargo +stable test --workspace --locked -j 2 && cargo +stable deny check"
   },
   "workspaces": [
     "packages/*"

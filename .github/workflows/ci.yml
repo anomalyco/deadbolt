@@ -29,9 +29,10 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
-      - run: cargo fmt --check
-      - run: cargo clippy --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # Same steps as `bun run check`; cargo-deny stays in its dedicated job below.
+      - run: cargo +stable fmt --all -- --check
+      - run: cargo +stable clippy --workspace --all-targets --locked -j 2 -- -D warnings
+      - run: cargo +stable test --workspace --locked -j 2
 
   deny:
     name: cargo-deny
