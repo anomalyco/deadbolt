@@ -61,12 +61,8 @@ impl SyncHandler for Handler {
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
         self.0
             .with(|s| {
-                missing_for(
-                    s,
-                    &DeviceId::from_bytes(peer),
-                    &peer_heads,
-                    *self.0.ready.borrow(),
-                )
+                let ready = *self.0.ready.borrow();
+                missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready)
             })
             .map_err(handler_error)
     }
@@ -75,12 +71,8 @@ impl SyncHandler for Handler {
         let agent = &self.0;
         let (node, removed, received) = agent
             .with(|s| {
-                let received = receive(
-                    s,
-                    &DeviceId::from_bytes(peer),
-                    entries,
-                    *agent.ready.borrow(),
-                );
+                let ready = *agent.ready.borrow();
+                let received = receive(s, &DeviceId::from_bytes(peer), entries, ready);
                 // Earlier vault transactions may have committed even if a later
                 // vault or address-book write failed. Always enforce those removals.
                 Ok((s.node.clone(), agent.refresh(s), received))

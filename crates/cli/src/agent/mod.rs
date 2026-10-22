@@ -116,7 +116,7 @@ mod tests {
         request.push(b'\n');
         client.write_all(&request).await.unwrap();
         let mut connections = JoinSet::new();
-        connections.spawn(agent.clone().handle(server));
+        connections.spawn(agent.clone().handle(server, MAX_LINE));
         assert!(
             tokio::time::timeout(Duration::from_secs(1), agent.shutdown.notified())
                 .await
@@ -140,11 +140,104 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (server, _client) = UnixStream::pair().unwrap();
         let mut connections = JoinSet::new();
-        connections.spawn(locked_agent(dir.path()).handle(server));
+        connections.spawn(locked_agent(dir.path()).handle(server, MAX_LINE));
         let start = Instant::now();
         drain_connections(&mut connections).await;
         assert!(connections.is_empty());
         assert!(start.elapsed() < IO_TIMEOUT);
+    }
+
+    #[tokio::test]
+    async fn oversized_requests_finish_writing_and_receive_a_clean_error() {
+        for newline in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let agent = locked_agent(dir.path());
+            let (server, mut client) = UnixStream::pair().unwrap();
+            let exchange = async {
+                tokio::join!(agent.handle(server, 64), async {
+                    // More than the socket buffer: replying early breaks this write.
+                    for _ in 0..128 {
+                        client.write_all(&[b'x'; 8192]).await.unwrap();
+                    }
+                    if newline {
+                        client.write_all(b"\n").await.unwrap();
+                    } else {
+                        client.shutdown().await.unwrap();
+                    }
+                    let mut reply = String::new();
+                    client.read_to_string(&mut reply).await.unwrap();
+                    match serde_json::from_str::<Message>(&reply).unwrap() {
+                        Message::Error { code, message } => {
+                            assert!(matches!(code, ErrorCode::Failed));
+                            assert_eq!(message, "request too large");
+                        }
+                        _ => panic!("expected an oversized-request error"),
+                    }
+                })
+            };
+            let (handled, ()) = tokio::time::timeout(IO_TIMEOUT, exchange).await.unwrap();
+            handled.unwrap();
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stop_notifies_shutdown_when_the_client_cannot_receive_its_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = locked_agent(dir.path());
+        let (server, mut client) = UnixStream::pair().unwrap();
+        let mut request = serde_json::to_vec(&Request {
+            v: PROTOCOL_VERSION,
+            command: Command::Stop,
+        })
+        .unwrap();
+        request.push(b'\n');
+        client.write_all(&request).await.unwrap();
+        drop(client);
+        assert!(agent.clone().handle(server, MAX_LINE).await.is_err());
+        tokio::time::timeout(Duration::from_secs(1), agent.shutdown.notified())
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn locking_wakes_membership_waiters_with_the_locked_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = locked_agent(dir.path());
+        let loaded = Loaded::setup(
+            dir.path(),
+            b"test",
+            "device",
+            deadbolt_store::KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        let node = Node::spawn(
+            NodeConfig::local_only(*loaded.secret.to_bytes()),
+            Arc::new(|_: &PeerId| false),
+            sync::Handler(agent.clone()),
+        )
+        .await
+        .unwrap();
+        *agent.session.lock().unwrap() = Some(Session::new(loaded, node));
+        tokio::time::pause();
+        let (error, ()) = tokio::join!(
+            async {
+                tokio::time::timeout(Duration::from_secs(2), agent.wait_ready())
+                    .await
+                    .unwrap()
+                    .unwrap_err()
+            },
+            async {
+                tokio::time::sleep(Duration::from_secs(1)).await;
+                agent.lock().await;
+            }
+        );
+        let error = error.downcast::<AgentError>().unwrap();
+        assert!(matches!(error.code, ErrorCode::Locked));
+        assert_eq!(error.message, "locked: run `deadbolt unlock`");
     }
 
     #[tokio::test]
@@ -162,7 +255,13 @@ mod tests {
         assert!(request_line(&mut read, 7).await.is_err());
         let mut rest = String::new();
         read.read_to_string(&mut rest).await.unwrap();
-        assert_eq!(rest, "90123456");
+        assert!(rest.is_empty());
+        let mut read = BufReader::new(&b"1234567890123456\nyes\n"[..]);
+        assert!(request_line(&mut read, 7).await.is_err());
+        assert_eq!(
+            request_line(&mut read, 7).await.unwrap().as_deref(),
+            Some("yes")
+        );
     }
 
     #[tokio::test]
@@ -304,7 +403,10 @@ mod tests {
         agent.with_data(|_| Ok(())).unwrap();
         agent.ready.send_replace(false);
         let start = tokio::time::Instant::now();
-        assert!(agent.wait_ready().await.is_err());
+        assert_eq!(
+            agent.wait_ready().await.unwrap_err().to_string(),
+            "waiting for membership sync"
+        );
         assert!(start.elapsed() >= sync::STARTUP_TIMEOUT);
         // Tokio's timer wheel rounds deadlines to millisecond ticks.
         assert!(start.elapsed() <= sync::STARTUP_TIMEOUT + Duration::from_millis(1));
@@ -377,7 +479,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
             accepted = listener.accept() => {
                 let (stream, _) = accepted.context("accepting control connection")?;
                 let agent = agent.clone();
-                connections.spawn(async move { agent.handle(stream).await });
+                connections.spawn(async move { agent.handle(stream, MAX_LINE).await });
             }
             Some(result) = connections.join_next(), if !connections.is_empty() => report_connection(result),
             _ = agent.shutdown.notified() => break,
@@ -428,20 +530,38 @@ async fn request_line(
     read: &mut (impl AsyncBufRead + Unpin),
     max: usize,
 ) -> Result<Option<String>> {
-    let mut line = String::new();
-    if read.take(max as u64 + 1).read_line(&mut line).await? == 0 {
+    let mut line = Vec::new();
+    if (&mut *read)
+        .take(max as u64 + 1)
+        .read_until(b'\n', &mut line)
+        .await?
+        == 0
+    {
         return Ok(None);
     }
-    if line.ends_with('\n') {
+    let terminated = line.ends_with(b"\n");
+    if terminated {
         line.pop();
-        if line.ends_with('\r') {
+        if line.ends_with(b"\r") {
             line.pop();
         }
     }
     if line.len() > max {
-        bail!("request too large");
+        // Let a client finish its write before replying, without retaining the rest.
+        if !terminated {
+            loop {
+                let bytes = read.fill_buf().await?;
+                let newline = bytes.iter().position(|b| *b == b'\n');
+                let consumed = newline.map_or(bytes.len(), |i| i + 1);
+                read.consume(consumed);
+                if consumed == 0 || newline.is_some() {
+                    break;
+                }
+            }
+        }
+        return Err(fail(ErrorCode::Failed, "request too large"));
     }
-    Ok(Some(line))
+    Ok(Some(String::from_utf8(line)?))
 }
 
 /// One control connection: sends events and reads answers.
@@ -486,18 +606,20 @@ impl Conversation {
 }
 
 impl Agent {
-    async fn handle(self: Arc<Self>, stream: UnixStream) -> Result<()> {
+    async fn handle(self: Arc<Self>, stream: UnixStream, max_line: usize) -> Result<()> {
         let (read, write) = stream.into_split();
         let mut read = BufReader::new(read);
-        let Some(line) =
-            tokio::time::timeout(IO_TIMEOUT, request_line(&mut read, MAX_LINE)).await??
-        else {
-            return Ok(());
-        };
+        let request =
+            match tokio::time::timeout(IO_TIMEOUT, request_line(&mut read, max_line)).await? {
+                Ok(Some(line)) => serde_json::from_str::<Request>(&line)
+                    .map_err(|error| fail(ErrorCode::Failed, format!("invalid request: {error}"))),
+                Ok(None) => return Ok(()),
+                Err(error) => Err(error),
+            };
         let (answers_tx, answers) = mpsc::channel(4);
         let (closed_tx, closed) = watch::channel(false);
         let _reader = AbortOnDrop(tokio::spawn(async move {
-            while let Ok(Some(line)) = request_line(&mut read, MAX_LINE).await {
+            while let Ok(Some(line)) = request_line(&mut read, max_line).await {
                 let Ok(answer) = serde_json::from_str::<Answer>(&line) else {
                     break;
                 };
@@ -513,27 +635,23 @@ impl Agent {
             closed,
         };
         let mut stop = false;
-        let result = if line.len() > MAX_LINE {
-            Err(fail(ErrorCode::Failed, "request too large"))
-        } else {
-            match serde_json::from_str::<Request>(&line) {
-                Ok(request) => {
-                    stop = matches!(request.command, Command::Stop);
-                    let always = matches!(request.command, Command::Status | Command::Stop);
-                    if request.v != PROTOCOL_VERSION && !always {
-                        Err(fail(
-                            ErrorCode::Version,
-                            format!(
-                                "the agent speaks protocol {PROTOCOL_VERSION}, not {}; run `deadbolt agent stop`",
-                                request.v
-                            ),
-                        ))
-                    } else {
-                        self.clone().dispatch(request.command, &conversation).await
-                    }
+        let result = match request {
+            Ok(request) => {
+                stop = matches!(request.command, Command::Stop);
+                let always = matches!(request.command, Command::Status | Command::Stop);
+                if request.v != PROTOCOL_VERSION && !always {
+                    Err(fail(
+                        ErrorCode::Version,
+                        format!(
+                            "the agent speaks protocol {PROTOCOL_VERSION}, not {}; run `deadbolt agent stop`",
+                            request.v
+                        ),
+                    ))
+                } else {
+                    self.clone().dispatch(request.command, &conversation).await
                 }
-                Err(error) => Err(fail(ErrorCode::Failed, format!("invalid request: {error}"))),
             }
+            Err(error) => Err(error),
         };
         let message = match result {
             Ok(reply) => Message::Ok { reply },
@@ -548,12 +666,16 @@ impl Agent {
                 },
             },
         };
-        conversation.send(&message).await?;
-        conversation.write.lock().await.shutdown().await?;
+        let sent = async {
+            conversation.send(&message).await?;
+            conversation.write.lock().await.shutdown().await?;
+            Ok(())
+        }
+        .await;
         if stop {
             self.shutdown.notify_one();
         }
-        Ok(())
+        sent
     }
 
     async fn dispatch(self: Arc<Self>, command: Command, conv: &Conversation) -> Result<Reply> {
@@ -715,14 +837,24 @@ impl Agent {
 
     /// Waits within the startup budget; the background loop owns the fallback.
     async fn wait_ready(&self) -> Result<()> {
-        self.with(|_| Ok(()))?;
-        tokio::time::timeout(
-            sync::STARTUP_TIMEOUT,
-            self.ready.subscribe().wait_for(|ready| *ready),
-        )
-        .await
-        .context("waiting for membership sync")??;
-        self.with(|_| Ok(()))
+        let mut ready = self.ready.subscribe();
+        let deadline = Instant::now() + sync::STARTUP_TIMEOUT;
+        loop {
+            // Mark this version observed before checking the session so a lock
+            // between the check and changed() cannot be missed.
+            let is_ready = *ready.borrow_and_update();
+            self.with(|_| Ok(()))?;
+            if is_ready {
+                return Ok(());
+            }
+            match tokio::time::timeout_at(deadline, ready.changed()).await {
+                Ok(changed) => changed?,
+                Err(_) => {
+                    self.with(|_| Ok(()))?;
+                    bail!("waiting for membership sync");
+                }
+            }
+        }
     }
 
     /// Checks readiness before serving vault data to a pairing peer.
