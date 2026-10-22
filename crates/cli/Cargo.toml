@@ -35,4 +35,5 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zeroize = "1.9"
 
 [dev-dependencies]
+memchr = "2.8"
 tempfile = "3.27.0"

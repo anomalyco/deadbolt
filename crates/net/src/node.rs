@@ -408,6 +408,7 @@ impl fmt::Debug for Gate {
 }
 
 impl Gate {
+    /// Creates a gate without opening a transport endpoint.
     pub fn new(membership: Arc<dyn Membership>) -> Self {
         Self {
             membership,
@@ -419,6 +420,7 @@ impl Gate {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Checks current membership and explicit revocations before opening a stream.
     pub fn check_dial(&self, peer: &PeerId) -> Result<()> {
         let st = self.lock();
         if st.revoked.contains(peer) {
@@ -477,6 +479,8 @@ impl Gate {
         Ok(())
     }
 
+    /// Permanently refuses this peer and closes its tracked iroh connections.
+    /// Other transport adapters must cancel their streams when this gate refuses them.
     pub fn revoke(&self, peer: &PeerId) -> usize {
         let mut st = self.lock();
         st.revoked.insert(*peer);

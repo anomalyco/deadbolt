@@ -4,6 +4,8 @@
 mod items;
 mod pairing;
 mod session;
+#[cfg(test)]
+mod sim;
 mod sync;
 
 use std::collections::HashSet;

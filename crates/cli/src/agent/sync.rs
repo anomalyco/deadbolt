@@ -340,7 +340,9 @@ mod tests {
             id: secret.device_id(),
             secret,
             meta: Meta::default(),
-            vaults: [(id, Vault::from_genesis(genesis).unwrap())].into_iter().collect(),
+            vaults: [(id, Vault::from_genesis(genesis).unwrap())]
+                .into_iter()
+                .collect(),
         };
         let (_, entry) = source
             .create_item(
