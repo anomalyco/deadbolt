@@ -124,16 +124,8 @@ pub fn device_name(flag: Option<String>) -> String {
 }
 
 fn hostname() -> String {
-    let mut buffer = [0u8; 256];
-    // SAFETY: the buffer is valid for its length; gethostname NUL-terminates
-    // within it on success.
-    let ok = unsafe { libc::gethostname(buffer.as_mut_ptr().cast(), buffer.len()) } == 0;
-    let name = if ok {
-        let end = buffer.iter().position(|b| *b == 0).unwrap_or(buffer.len());
-        String::from_utf8_lossy(&buffer[..end]).trim().to_string()
-    } else {
-        String::new()
-    };
+    let uname = rustix::system::uname();
+    let name = uname.nodename().to_string_lossy().trim().to_string();
     if name.is_empty() {
         "device".into()
     } else {

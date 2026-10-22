@@ -84,6 +84,5 @@ fn user_runtime_dir(uid: u32) -> Option<PathBuf> {
 }
 
 fn user_id() -> u32 {
-    // SAFETY: getuid has no preconditions and cannot fail.
-    unsafe { libc::getuid() }
+    rustix::process::getuid().as_raw()
 }

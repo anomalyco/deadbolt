@@ -131,12 +131,13 @@ enum AgentCommand {
 }
 
 fn main() -> ExitCode {
-    // SAFETY: restoring the default SIGPIPE handler before any threads start.
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
     let cli = Cli::parse();
     let agent = matches!(cli.command, Commands::Agent { command: None });
+    // Commands die quietly when piped into `head`. The agent keeps Rust's
+    // ignored SIGPIPE: a client hanging up mid-reply must not kill it.
+    if !agent {
+        sigpipe::reset();
+    }
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
