@@ -16,6 +16,10 @@ impl Writer {
         self.0.extend_from_slice(&v.to_be_bytes());
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "wire lengths are u32; encoding larger in-memory values is a programmer error"
+    )]
     pub(crate) fn len(&mut self, len: usize) {
         self.u32(u32::try_from(len).expect("length exceeds u32::MAX"));
     }
@@ -51,7 +55,9 @@ impl<'a> Reader<'a> {
     }
 
     pub(crate) fn array<const N: usize>(&mut self) -> Result<[u8; N], DecodeError> {
-        Ok(self.take(N)?.try_into().expect("take returned N bytes"))
+        let mut bytes = [0; N];
+        bytes.copy_from_slice(self.take(N)?);
+        Ok(bytes)
     }
 
     pub(crate) fn u8(&mut self) -> Result<u8, DecodeError> {
@@ -69,7 +75,9 @@ impl<'a> Reader<'a> {
     pub(crate) fn string(&mut self) -> Result<String, DecodeError> {
         let len = self.u32()? as usize;
         let bytes = self.take(len)?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| DecodeError::InvalidUtf8)
+        Ok(std::str::from_utf8(bytes)
+            .map_err(|_| DecodeError::InvalidUtf8)?
+            .to_owned())
     }
 
     pub(crate) fn finish(self) -> Result<(), DecodeError> {

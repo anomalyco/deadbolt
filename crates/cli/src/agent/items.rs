@@ -246,6 +246,10 @@ fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
     s.update(vault, |v, secret| Ok(v.write(secret, ops)?))
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "callers just wrote this item while holding the session lock"
+)]
 fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");

@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 mod common;
 
 use std::{sync::Mutex, time::Duration};

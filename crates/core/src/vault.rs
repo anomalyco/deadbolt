@@ -134,8 +134,7 @@ impl Vault {
         if !valid_name(&name) {
             return Err(Error::InvalidName);
         }
-        let mut nonce = [0; 32];
-        getrandom::fill(&mut nonce).expect("OS random number generator failed");
+        let nonce = crate::id::random();
         let device = secret.device_id();
         let vault = VaultId::derive(&device, &nonce);
         let op = MembershipOp::Create {

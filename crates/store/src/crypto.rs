@@ -32,7 +32,7 @@ pub(crate) fn subkey(context: &str, key: &[u8; KEY_LEN]) -> SecretKey {
 
 /// Keyed hash used to turn lookup keys into opaque database keys.
 pub(crate) fn blind(key: &[u8; KEY_LEN], parts: &[&[u8]]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_keyed(key);
+    let mut hasher = Zeroizing::new(blake3::Hasher::new_keyed(key));
     for part in parts {
         hasher.update(part);
     }

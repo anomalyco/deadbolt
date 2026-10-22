@@ -36,6 +36,10 @@ async fn relay(
             return;
         };
         if n == 0 {
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "simulated connection cuts can close the destination before relay cleanup"
+            )]
             let _ = to.shutdown().await;
             return;
         }

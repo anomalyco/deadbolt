@@ -2,13 +2,12 @@
 mod network;
 
 use super::{
+    pairing,
     session::{Loaded, Meta},
     sync,
 };
 use anyhow::{Context, Result, ensure};
-use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, Hash, MembershipOp, Payload, Signature, Vault, VaultId,
-};
+use deadbolt_core::{DeviceId, DeviceSecret, Entry, Hash, MembershipOp, Payload, Vault, VaultId};
 use deadbolt_net::{
     HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PairingStream, PeerId,
     SyncHandler, run_sync_session,
@@ -35,6 +34,7 @@ struct Device {
     gate: MembershipGate,
     id: PeerId,
     ready: Arc<AtomicBool>,
+    offer: Mutex<Option<pairing::Offer>>,
 }
 
 impl Device {
@@ -75,6 +75,7 @@ impl Device {
             gate,
             id,
             ready: Arc::new(AtomicBool::new(true)),
+            offer: Mutex::default(),
         }
     }
 
@@ -152,24 +153,19 @@ impl Inviter for Invitation<'_> {
         true
     }
     async fn offer(&self, _: &PairingContext) -> Result<Vec<u8>, HandlerError> {
-        Ok(self.vault.as_bytes().to_vec())
+        self.device
+            .with(|s| pairing::offer(s, self.vault, None))
+            .map_err(|e| e.to_string().into())
     }
     async fn welcome(
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
-        let consent = Signature::from_bytes(join.try_into().map_err(|_| "bad consent")?);
         self.device
             .with(|s| {
-                s.update(self.vault, |v, key| {
-                    Ok(v.add(key, DeviceId::from_bytes(ctx.remote), consent)?)
-                })?;
-                Ok(s.vault(&self.vault)
-                    .entries()
-                    .into_iter()
-                    .map(Entry::encode)
-                    .collect())
+                pairing::welcome(s, self.vault, DeviceId::from_bytes(ctx.remote), &join, None)
+                    .map(|(blobs, _)| blobs)
             })
             .map_err(|e| e.to_string().into())
     }
@@ -179,18 +175,24 @@ impl Joiner for Device {
         true
     }
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
-        let id = VaultId::from_bytes(offer.try_into().map_err(|_| "bad offer")?);
+        let offer: pairing::Offer = serde_json::from_slice(&offer)?;
         let inviter = DeviceId::from_bytes(ctx.remote);
-        self.with(|s| Ok(s.secret.join_consent(&id, &inviter).as_bytes().to_vec()))
-            .map_err(|e| e.to_string().into())
+        let join = self
+            .with(|s| pairing::join_blob(s, inviter, &offer, None))
+            .map_err(|e| -> HandlerError { e.to_string().into() })?;
+        *self.offer.lock().unwrap() = Some(offer);
+        Ok(join)
     }
-    async fn receive(&self, _: &PairingContext, welcome: Vec<Vec<u8>>) -> Result<(), HandlerError> {
-        let entries = welcome
-            .iter()
-            .map(|e| Entry::decode(e))
-            .collect::<Result<Vec<_>, _>>()?;
-        self.with(|s| s.add_vault(Vault::load(entries.clone())?, &entries))
-            .map_err(|e| e.to_string().into())
+    async fn receive(
+        &self,
+        ctx: &PairingContext,
+        welcome: Vec<Vec<u8>>,
+    ) -> Result<(), HandlerError> {
+        let offer = self.offer.lock().unwrap().take().ok_or("no offer")?;
+        self.with(|s| {
+            pairing::apply_welcome(s, DeviceId::from_bytes(ctx.remote), &offer, welcome).map(|_| ())
+        })
+        .map_err(|e| e.to_string().into())
     }
 }
 
@@ -760,13 +762,13 @@ fn shrink(mut actions: Vec<Action>, mut fails: impl FnMut(&[Action]) -> bool) ->
 
 #[test]
 fn exploration() {
-    let count = std::env::var("DEADBOLT_SIM_SEEDS")
+    let count = crate::config::env("DEADBOLT_SIM_SEEDS")
         .map(|s| s.parse::<u64>().unwrap())
         .unwrap_or(2);
-    let first = std::env::var("DEADBOLT_SIM_SEED")
+    let first = crate::config::env("DEADBOLT_SIM_SEED")
         .map(|s| s.parse::<u64>().unwrap())
         .unwrap_or(0);
-    if let Ok(trace) = std::env::var("DEADBOLT_SIM_TRACE") {
+    if let Ok(trace) = crate::config::env("DEADBOLT_SIM_TRACE") {
         replay(&serde_json::from_str::<Vec<Action>>(&trace).unwrap()).unwrap();
         return;
     }

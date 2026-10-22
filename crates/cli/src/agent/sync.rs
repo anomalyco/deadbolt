@@ -10,7 +10,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::future::Future;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -62,12 +61,8 @@ impl SyncHandler for Handler {
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
         self.0
             .with(|s| {
-                missing_for(
-                    s,
-                    &DeviceId::from_bytes(peer),
-                    &peer_heads,
-                    self.0.ready.load(Ordering::SeqCst),
-                )
+                let ready = *self.0.ready.borrow();
+                missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready)
             })
             .map_err(handler_error)
     }
@@ -76,12 +71,8 @@ impl SyncHandler for Handler {
         let agent = &self.0;
         let (node, removed, received) = agent
             .with(|s| {
-                let received = receive(
-                    s,
-                    &DeviceId::from_bytes(peer),
-                    entries,
-                    agent.ready.load(Ordering::SeqCst),
-                );
+                let ready = *agent.ready.borrow();
+                let received = receive(s, &DeviceId::from_bytes(peer), entries, ready);
                 // Earlier vault transactions may have committed even if a later
                 // vault or address-book write failed. Always enforce those removals.
                 Ok((s.node.clone(), agent.refresh(s), received))
@@ -342,14 +333,14 @@ async fn sync_round(
 /// every reachable member (bounded by [`STARTUP_TIMEOUT`]), then full syncs every [`SYNC_INTERVAL`] and
 /// whenever something changed.
 pub async fn run(agent: Arc<Agent>) {
-    if !agent.ready.load(Ordering::SeqCst) {
+    if !*agent.ready.borrow() {
         let completed = wait_for_membership(|| async {
             let (_, attempts) = sync_round(&agent, None).await?;
             // Include members learned during this round, not just its original targets.
             agent.with(|s| {
                 let complete = barrier_complete(&s.peer_set(), &attempts);
                 if complete {
-                    agent.ready.store(true, Ordering::SeqCst);
+                    agent.ready.send_replace(true);
                 }
                 Ok(complete)
             })
@@ -359,7 +350,7 @@ pub async fn run(agent: Arc<Agent>) {
             warn!("startup membership deadline reached; continuing with known membership");
             if agent
                 .with(|_| {
-                    agent.ready.store(true, Ordering::SeqCst);
+                    agent.ready.send_replace(true);
                     Ok(())
                 })
                 .is_err()

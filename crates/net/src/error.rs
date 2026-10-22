@@ -68,6 +68,10 @@ pub(crate) mod close {
 /// `CONNECTION_CLOSE` arrives.
 pub(crate) async fn settle(conn: &Connection, err: Error) -> Error {
     if matches!(err, Error::Io(_) | Error::Closed(_)) && conn.close_reason().is_none() {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort settling ends on either peer close or its deadline"
+        )]
         let _ = tokio::time::timeout(std::time::Duration::from_millis(500), conn.closed()).await;
     }
     from_conn(conn, err)

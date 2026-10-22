@@ -11,6 +11,10 @@ fn main() {
         .filter(|out| out.status.success())
         .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".into());
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "build-time composition root stamps the binary identity"
+    )]
     let built = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())

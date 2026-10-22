@@ -20,12 +20,12 @@ use deadbolt_net::{HandlerError, Inviter, Joiner, PairingContext, PairingOptions
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use super::session::{Addr, Hint, hex, short, unhex};
+use super::session::{Addr, Hint, Loaded, hex, short, unhex};
 use super::{Agent, Conversation};
 use crate::protocol::{DeviceInfo, Event, Reply, VaultInfo};
 
 #[derive(Serialize, Deserialize)]
-struct Offer {
+pub(super) struct Offer {
     v: u32,
     vault: String,
     vault_name: String,
@@ -49,6 +49,94 @@ struct WelcomeMeta {
 
 fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
+}
+
+pub(super) fn offer(s: &Loaded, vault: VaultId, addr: Option<Addr>) -> Result<Vec<u8>> {
+    Ok(serde_json::to_vec(&Offer {
+        v: 1,
+        vault: vault.to_string(),
+        vault_name: s.vault(&vault).name().into(),
+        name: s.meta.device_name.clone(),
+        addr,
+    })?)
+}
+
+pub(super) fn join_blob(
+    s: &Loaded,
+    inviter: DeviceId,
+    offer: &Offer,
+    addr: Option<Addr>,
+) -> Result<Vec<u8>> {
+    let vault = VaultId::from_bytes(unhex(&offer.vault)?);
+    if s.vaults.contains_key(&vault) {
+        bail!("this device already holds vault {}", offer.vault_name);
+    }
+    Ok(serde_json::to_vec(&JoinBlob {
+        v: 1,
+        consent: hex(s.secret.join_consent(&vault, &inviter).as_bytes()),
+        name: s.meta.device_name.clone(),
+        addr,
+    })?)
+}
+
+pub(super) fn welcome(
+    s: &mut Loaded,
+    vault: VaultId,
+    device: DeviceId,
+    join: &[u8],
+    fallback_addr: Option<Addr>,
+) -> Result<(Vec<Vec<u8>>, DeviceInfo)> {
+    let join: JoinBlob = serde_json::from_slice(join)?;
+    let consent = Signature::from_bytes(unhex(&join.consent)?);
+    let held = s.vault(&vault);
+    if !held.is_member(&s.id) {
+        bail!("this device is no longer a member of {}", held.name());
+    }
+    if held.is_member(&device) {
+        bail!("that device is already a member of {}", held.name());
+    }
+    s.update(vault, |v, secret| {
+        v.add(secret, device, consent).context("adding the device")
+    })?;
+    s.learn(
+        &device,
+        Some(&join.name),
+        join.addr.or(fallback_addr),
+        BTreeMap::new(),
+    );
+    s.save_peers()?;
+    let mut blobs = vec![serde_json::to_vec(&WelcomeMeta {
+        v: 1,
+        peers: s.hints_for(&device),
+    })?];
+    blobs.extend(s.vault(&vault).entries().into_iter().map(Entry::encode));
+    Ok((blobs, s.device_info(&device, &HashSet::new())))
+}
+
+pub(super) fn apply_welcome(
+    s: &mut Loaded,
+    inviter: DeviceId,
+    offer: &Offer,
+    welcome: Vec<Vec<u8>>,
+) -> Result<VaultInfo> {
+    let mut blobs = welcome.into_iter();
+    let meta: WelcomeMeta =
+        serde_json::from_slice(&blobs.next().ok_or_else(|| anyhow!("empty welcome"))?)?;
+    let entries: Vec<Entry> = blobs
+        .map(|bytes| Entry::decode(&bytes))
+        .collect::<Result<_, _>>()
+        .context("decoding welcome")?;
+    let vault = Vault::load(entries.clone()).context("loading the vault")?;
+    if vault.id().to_string() != offer.vault {
+        bail!("the welcome is for another vault");
+    }
+    if !vault.is_member(&s.id) || !vault.is_member(&inviter) {
+        bail!("the welcome does not admit this device");
+    }
+    s.learn(&inviter, Some(&offer.name), offer.addr.clone(), meta.peers);
+    let id = vault.id();
+    s.add_vault(vault, &entries)?;
+    Ok(s.vault_info(&id))
 }
 
 /// Reports the code; with `confirm`, waits for the client to accept it.
@@ -76,20 +164,10 @@ impl Joiner for NewDevice<'_> {
 
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let offer: Offer = serde_json::from_slice(&offer)?;
-        let vault = VaultId::from_bytes(unhex(&offer.vault).map_err(handler_error)?);
         let inviter_id = DeviceId::from_bytes(ctx.remote);
-        let (consent, name, addr) = self
+        let join = self
             .agent
-            .with(|s| {
-                if s.vaults.contains_key(&vault) {
-                    bail!("this device already holds vault {}", offer.vault_name);
-                }
-                Ok((
-                    s.secret.join_consent(&vault, &inviter_id),
-                    s.meta.device_name.clone(),
-                    s.own_addr(),
-                ))
-            })
+            .with(|s| join_blob(s, inviter_id, &offer, Some(s.own_addr())))
             .map_err(handler_error)?;
         let inviter = DeviceInfo {
             id: hex(&ctx.remote),
@@ -107,12 +185,7 @@ impl Joiner for NewDevice<'_> {
             return Err("declined".into());
         }
         *self.offer.lock().unwrap_or_else(|e| e.into_inner()) = Some(offer);
-        Ok(serde_json::to_vec(&JoinBlob {
-            v: 1,
-            consent: hex(consent.as_bytes()),
-            name,
-            addr: Some(addr),
-        })?)
+        Ok(join)
     }
 
     async fn receive(
@@ -139,26 +212,10 @@ impl NewDevice<'_> {
         offer: Offer,
         welcome: Vec<Vec<u8>>,
     ) -> Result<VaultInfo> {
-        let mut blobs = welcome.into_iter();
-        let meta: WelcomeMeta =
-            serde_json::from_slice(&blobs.next().ok_or_else(|| anyhow!("empty welcome"))?)?;
-        let entries: Vec<Entry> = blobs
-            .map(|bytes| Entry::decode(&bytes))
-            .collect::<Result<_, _>>()
-            .context("decoding welcome")?;
-        let vault = Vault::load(entries.clone()).context("loading the vault")?;
         let inviter = DeviceId::from_bytes(ctx.remote);
         let (node, removed, info) = self.agent.with(|s| {
-            if vault.id().to_string() != offer.vault {
-                bail!("the welcome is for another vault");
-            }
-            if !vault.is_member(&s.id) || !vault.is_member(&inviter) {
-                bail!("the welcome does not admit this device");
-            }
-            s.learn(&inviter, Some(&offer.name), offer.addr, meta.peers);
-            let id = vault.id();
-            s.add_vault(vault, &entries)?;
-            Ok((s.node.clone(), self.agent.refresh(s), s.vault_info(&id)))
+            let info = apply_welcome(s, inviter, &offer, welcome)?;
+            Ok((s.node.clone(), self.agent.refresh(s), info))
         })?;
         self.agent.enforce(&node, &removed);
         Ok(info)
@@ -214,19 +271,9 @@ impl Inviter for ExistingDevice<'_> {
     }
 
     async fn offer(&self, _ctx: &PairingContext) -> Result<Vec<u8>, HandlerError> {
-        let offer = self
-            .agent
-            .with_data(|s| {
-                Ok(Offer {
-                    v: 1,
-                    vault: self.vault.to_string(),
-                    vault_name: s.vault(&self.vault).name().into(),
-                    name: s.meta.device_name.clone(),
-                    addr: Some(s.own_addr()),
-                })
-            })
-            .map_err(handler_error)?;
-        Ok(serde_json::to_vec(&offer)?)
+        self.agent
+            .with_data(|s| offer(s, self.vault, Some(s.own_addr())))
+            .map_err(handler_error)
     }
 
     async fn welcome(
@@ -234,37 +281,12 @@ impl Inviter for ExistingDevice<'_> {
         ctx: &PairingContext,
         join: Vec<u8>,
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
-        let join: JoinBlob = serde_json::from_slice(&join)?;
-        let consent = Signature::from_bytes(unhex(&join.consent).map_err(handler_error)?);
         let device = DeviceId::from_bytes(ctx.remote);
         let (node, removed, blobs, info) = self
             .agent
             .with_data(|s| {
-                let vault = s.vault(&self.vault);
-                if !vault.is_member(&s.id) {
-                    bail!("this device is no longer a member of {}", vault.name());
-                }
-                if vault.is_member(&device) {
-                    bail!("that device is already a member of {}", vault.name());
-                }
-                s.update(self.vault, |v, secret| {
-                    v.add(secret, device, consent).context("adding the device")
-                })?;
-                let addr = join.addr.unwrap_or_else(|| self.ticket_addr.clone());
-                s.learn(&device, Some(&join.name), Some(addr), BTreeMap::new());
-                s.save_peers()?;
-                let meta = WelcomeMeta {
-                    v: 1,
-                    peers: s.hints_for(&device),
-                };
-                let mut blobs = vec![serde_json::to_vec(&meta)?];
-                blobs.extend(
-                    s.vault(&self.vault)
-                        .entries()
-                        .into_iter()
-                        .map(Entry::encode),
-                );
-                let info = s.device_info(&device, &HashSet::new());
+                let (blobs, info) =
+                    welcome(s, self.vault, device, &join, Some(self.ticket_addr.clone()))?;
                 Ok((s.node.clone(), self.agent.refresh(s), blobs, info))
             })
             .map_err(handler_error)?;

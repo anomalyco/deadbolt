@@ -1,4 +1,5 @@
 #![allow(dead_code)]
+#![cfg(test)]
 
 use std::{
     collections::HashSet,

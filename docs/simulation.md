@@ -52,8 +52,9 @@ and compares its wire digest.
   membership barriers are open. Removed devices need not converge.
 
 Pairing uses the production proof, confirmation and welcome protocol with test
-exporter bytes and signed core join consent. Its test adapter omits CLI display
-and address metadata. Ticket expiry, single-use admission and TLS exporter wiring
+exporter bytes. The simulator shares the CLI's `Offer`, `JoinBlob`, `WelcomeMeta`,
+consent and welcome-admission helpers; its adapter omits display and live addresses.
+Ticket expiry, single-use admission and TLS exporter wiring
 remain covered by the real-iroh tests in `crates/net/tests/pair.rs`.
 Focused regressions also cut pairing during its exchange and check persistence
 across reopening. A cut after admission can leave the inviter with a member that

@@ -3,7 +3,6 @@
 use std::collections::{BTreeMap, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow, bail};
 use data_encoding::HEXLOWER;
@@ -14,6 +13,7 @@ use indexmap::IndexMap;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
+pub use crate::config::now;
 use crate::protocol::{DeviceInfo, VaultInfo};
 
 const META_DEVICE_NAME: &str = "cli/device-name";
@@ -22,13 +22,6 @@ const META_PEERS: &str = "cli/peers";
 
 /// A device counts as online if it synced this recently.
 pub const ONLINE_WINDOW_SECS: u64 = 90;
-
-pub fn now() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or_default()
-}
 
 pub fn hex(bytes: &[u8]) -> String {
     HEXLOWER.encode(bytes)
@@ -140,24 +133,20 @@ impl Loaded {
         let store = &self.store;
         let secret = &self.secret;
         update(
-            self.vaults.get_mut(&id).expect("held vault"),
+            self.vaults.get_mut(&id).context("vault not held")?,
             |entries| persist(store, entries),
             |vault| change(vault, secret),
         )
     }
 
     /// Creates the device key and store. Blocking (Argon2).
-    pub fn setup(dir: &Path, passphrase: &[u8], device_name: &str) -> Result<Self> {
+    pub fn setup(
+        dir: &Path,
+        passphrase: &[u8],
+        device_name: &str,
+        params: KdfParams,
+    ) -> Result<Self> {
         let secret = DeviceSecret::generate();
-        let params = match std::env::var("DEADBOLT_KDF").as_deref() {
-            // Hidden, for tests only.
-            Ok("fast") => KdfParams {
-                m_cost_kib: 64,
-                t_cost: 1,
-                p_cost: 1,
-            },
-            _ => KdfParams::DEFAULT,
-        };
         let store = deadbolt_store::init_with_params(dir, passphrase, *secret.to_bytes(), params)?;
         let meta = Meta {
             device_name: device_name.into(),
@@ -220,6 +209,7 @@ fn save_meta(store: &Unlocked, meta: &Meta) -> Result<()> {
 pub struct Session {
     state: Loaded,
     pub node: Node,
+    pub(super) sync_task: Option<super::AbortOnDrop>,
 }
 
 impl std::ops::Deref for Session {
@@ -240,6 +230,7 @@ impl Session {
         Self {
             state: loaded,
             node,
+            sync_task: None,
         }
     }
 
@@ -362,25 +353,16 @@ impl Loaded {
                 0 => bail!(
                     "no vaults yet; create one with `deadbolt init` or join one with `deadbolt join`"
                 ),
-                1 => Ok(*self.vaults.keys().next().expect("one vault")),
+                1 => self.vaults.keys().next().copied().context("no vaults"),
                 _ => bail!("no default vault; pick one with --vault or `deadbolt vault default`"),
             };
         };
-        let by_name: Vec<VaultId> = self
-            .vaults
-            .iter()
-            .filter(|(_, vault)| vault.name() == query)
-            .map(|(id, _)| *id)
-            .collect();
-        let matches = if by_name.is_empty() && query.len() >= 4 {
+        let matches = resolve_by_name_or_id(
             self.vaults
-                .keys()
-                .filter(|id| id.to_string().starts_with(query))
-                .copied()
-                .collect()
-        } else {
-            by_name
-        };
+                .iter()
+                .map(|(id, vault)| (*id, Some(vault.name()))),
+            query,
+        );
         match matches.as_slice() {
             [id] => Ok(*id),
             [] => bail!("no vault named {query}"),
@@ -472,34 +454,41 @@ impl Loaded {
 
     /// Finds a member of `vault` by name or id prefix.
     pub fn resolve_device(&self, vault: &VaultId, query: &str) -> Result<DeviceId> {
-        let members: Vec<DeviceId> = self.vaults[vault].members().collect();
-        let by_name: Vec<DeviceId> = members
-            .iter()
-            .filter(|id| {
-                let name = if **id == self.id {
+        let matches = resolve_by_name_or_id(
+            self.vaults[vault].members().map(|id| {
+                let name = if id == self.id {
                     Some(self.meta.device_name.as_str())
                 } else {
-                    self.peer(id).and_then(|p| p.name.as_deref())
+                    self.peer(&id).and_then(|p| p.name.as_deref())
                 };
-                name == Some(query)
-            })
-            .copied()
-            .collect();
-        let matches = if by_name.is_empty() && query.len() >= 4 {
-            let query = query.to_ascii_lowercase();
-            members
-                .into_iter()
-                .filter(|id| id.to_string().starts_with(&query))
-                .collect()
-        } else {
-            by_name
-        };
+                (id, name)
+            }),
+            query,
+        );
         match matches.as_slice() {
             [id] => Ok(*id),
             [] => bail!("no device {query} in vault {}", self.vaults[vault].name()),
             _ => bail!("{query} matches several devices; use the device id"),
         }
     }
+}
+
+fn resolve_by_name_or_id<'a, T: Copy + std::fmt::Display>(
+    candidates: impl Iterator<Item = (T, Option<&'a str>)>,
+    query: &str,
+) -> Vec<T> {
+    let mut names = Vec::new();
+    let mut prefixes = Vec::new();
+    let prefix = query.to_ascii_lowercase();
+    for (id, name) in candidates {
+        if name == Some(query) {
+            names.push(id);
+        }
+        if query.len() >= 4 && id.to_string().starts_with(&prefix) {
+            prefixes.push(id);
+        }
+    }
+    if names.is_empty() { prefixes } else { names }
 }
 
 fn persist(store: &Unlocked, entries: &[Entry]) -> Result<()> {
@@ -532,6 +521,50 @@ pub(super) fn update<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vault_and_device_prefixes_are_case_insensitive_but_names_win() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut loaded = Loaded::setup(
+            dir.path(),
+            b"test",
+            "device",
+            KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        let id = loaded.create_vault("personal").unwrap();
+        assert_eq!(
+            loaded
+                .resolve(Some(&id.to_string().to_uppercase()))
+                .unwrap(),
+            id
+        );
+        assert_eq!(
+            loaded
+                .resolve(Some(&id.to_string()[..8].to_uppercase()))
+                .unwrap(),
+            id
+        );
+        assert_eq!(
+            loaded
+                .resolve_device(&id, &loaded.id.to_string()[..8].to_uppercase())
+                .unwrap(),
+            loaded.id
+        );
+        assert_eq!(loaded.resolve(Some("personal")).unwrap(), id);
+        assert!(loaded.resolve(Some("PERSONAL")).is_err());
+        let first = VaultId::from_bytes([0xab; 32]);
+        let second = VaultId::from_bytes([0xab; 32].map(|b| b + 1));
+        assert_eq!(
+            resolve_by_name_or_id([(first, None), (second, Some("ABAB"))].into_iter(), "ABAB"),
+            vec![second]
+        );
+        assert!(resolve_by_name_or_id([(first, None)].into_iter(), "ABA").is_empty());
+    }
 
     #[test]
     fn failed_write_does_not_advance_log() {

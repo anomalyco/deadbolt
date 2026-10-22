@@ -9,7 +9,11 @@ fn hex(bytes: &[u8], f: &mut fmt::Formatter<'_>) -> fmt::Result {
     bytes.iter().try_for_each(|b| write!(f, "{b:02x}"))
 }
 
-fn random<const N: usize>() -> [u8; N] {
+#[expect(
+    clippy::expect_used,
+    reason = "OS CSPRNG failure is unrecoverable; never substitute weak randomness"
+)]
+pub(crate) fn random<const N: usize>() -> [u8; N] {
     let mut bytes = [0; N];
     getrandom::fill(&mut bytes).expect("OS random number generator failed");
     bytes
@@ -99,6 +103,7 @@ impl VaultId {
 
 impl ItemId {
     /// A fresh random item id.
+    #[cfg(test)]
     pub fn random() -> Self {
         Self(random())
     }
@@ -110,7 +115,9 @@ impl ItemId {
         material[..32].copy_from_slice(&entry.0);
         material[32..].copy_from_slice(&(index as u64).to_be_bytes());
         let key = blake3::derive_key(CONTEXT, &material);
-        Self(key[..16].try_into().expect("16 bytes"))
+        let mut id = [0; 16];
+        id.copy_from_slice(&key[..16]);
+        Self(id)
     }
 }
 
