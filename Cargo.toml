@@ -7,6 +7,10 @@ version = "0.0.0"
 edition = "2024"
 publish = false
 license = "UNLICENSED"
+rust-version = "1.91"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
 
 [profile.release]
 lto = true
