@@ -56,6 +56,142 @@ pub struct Agent {
     shutdown: Notify,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::protocol::FieldInput;
+    use deadbolt_core::DeviceSecret;
+
+    #[tokio::test]
+    async fn local_item_commands_work_immediately_after_unlock_with_offline_peers() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = [51; 32];
+        let store = deadbolt_store::init_with_params(
+            dir.path(),
+            b"test",
+            key,
+            deadbolt_store::KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        drop(store);
+        let mut loaded = Loaded::open(dir.path(), b"test").unwrap();
+        let id = loaded.create_vault("personal").unwrap();
+        let offline = DeviceSecret::from_bytes(&[52; 32]);
+        loaded
+            .update(id, |v, key| {
+                Ok(v.add(key, offline.device_id(), offline.join_consent(&id))?)
+            })
+            .unwrap();
+        drop(loaded);
+        let loaded = Loaded::open(dir.path(), b"test").unwrap();
+        let agent = Arc::new(Agent {
+            paths: Paths {
+                data: dir.path().into(),
+                config: dir.path().join("config"),
+                socket: dir.path().join("socket"),
+                lock: dir.path().join("lock"),
+                log: dir.path().join("log"),
+            },
+            local_net: true,
+            session: Mutex::default(),
+            members: Arc::default(),
+            ready: AtomicBool::new(false),
+            sync_now: Notify::new(),
+            sync_task: Mutex::default(),
+            transition: tokio::sync::Mutex::new(()),
+            idle: Mutex::default(),
+            busy: AtomicUsize::new(0),
+            shutdown: Notify::new(),
+        });
+        let node = Node::spawn(
+            NodeConfig::local_only(key),
+            Arc::new(|_: &PeerId| false),
+            sync::Handler(agent.clone()),
+        )
+        .await
+        .unwrap();
+        *agent.session.lock().unwrap() = Some(Session::new(loaded, node));
+        // No startup task can open readiness: any local wait/gate is a regression.
+        let (socket, _client) = UnixStream::pair().unwrap();
+        let (_, write) = socket.into_split();
+        let conv = Conversation {
+            write: tokio::sync::Mutex::new(write),
+            answers: tokio::sync::Mutex::new(mpsc::channel(1).1),
+            closed: watch::channel(false).1,
+        };
+        let fields = || {
+            vec![
+                FieldInput {
+                    name: "password".into(),
+                    kind: None,
+                    value: "offline-value".into(),
+                },
+                FieldInput {
+                    name: "notes".into(),
+                    kind: None,
+                    value: "offline note".into(),
+                },
+            ]
+        };
+        let commands = vec![
+            Command::ItemNew {
+                vault: None,
+                kind: "login".into(),
+                name: Some("offline-login".into()),
+                fields: fields(),
+            },
+            Command::ItemGet {
+                vault: None,
+                query: vec!["offline-login".into()],
+            },
+            Command::ItemList {
+                vault: None,
+                query: vec![],
+                kind: None,
+            },
+            Command::ItemSet {
+                vault: None,
+                query: vec!["offline-login".into()],
+                fields: fields(),
+                name: None,
+            },
+            Command::ItemUnset {
+                vault: None,
+                query: vec!["offline-login".into()],
+                field: "notes".into(),
+            },
+            Command::ItemImport {
+                vault: None,
+                items: vec![crate::protocol::NewItem {
+                    kind: "login".into(),
+                    name: Some("imported".into()),
+                    fields: fields(),
+                }],
+            },
+            Command::ItemRemove {
+                vault: None,
+                query: vec!["offline-login".into()],
+            },
+        ];
+        for command in commands {
+            tokio::time::timeout(Duration::from_secs(2), agent.clone().run(command, &conv))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(!agent.ready.load(Ordering::SeqCst));
+        }
+        assert!(
+            agent.with_data(|_| Ok(())).is_err(),
+            "invitations must still wait"
+        );
+        agent.lock().await;
+    }
+}
+
 #[derive(Default)]
 struct Idle {
     timeout: Option<Duration>,
@@ -349,7 +485,7 @@ impl Agent {
             Command::Sync { vault } => {
                 let only =
                     self.with(|s| vault.as_deref().map(|v| s.resolve(Some(v))).transpose())?;
-                let deadline = Instant::now() + sync::SYNC_TIMEOUT * 2;
+                let deadline = Instant::now() + sync::STARTUP_TIMEOUT;
                 while !self.ready.load(Ordering::SeqCst) && Instant::now() < deadline {
                     tokio::time::sleep(Duration::from_millis(50)).await;
                 }
@@ -364,11 +500,10 @@ impl Agent {
                 confirm,
             } => pairing::pair(&self, conv, ticket, vault, confirm).await,
             Command::ItemGet { vault, query } => Ok(Reply::Item {
-                item: self.with_data(|s| items::get(s, vault.as_deref(), &query))?,
+                item: self.with(|s| items::get(s, vault.as_deref(), &query))?,
             }),
             Command::ItemList { vault, query, kind } => Ok(Reply::Items {
-                items: self
-                    .with_data(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,
+                items: self.with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,
             }),
             Command::ItemNew {
                 vault,
@@ -391,7 +526,7 @@ impl Agent {
                 self.item_write(|s| items::remove(s, vault.as_deref(), &query))
             }
             Command::ItemImport { vault, items } => {
-                self.with_data(|s| items::import(s, vault.as_deref(), items))?;
+                self.with(|s| items::import(s, vault.as_deref(), items))?;
                 self.sync_now.notify_one();
                 Ok(Reply::Done)
             }
@@ -403,12 +538,12 @@ impl Agent {
         &self,
         f: impl FnOnce(&mut Session) -> Result<crate::protocol::ItemInfo>,
     ) -> Result<Reply> {
-        let item = self.with_data(f)?;
+        let item = self.with(f)?;
         self.sync_now.notify_one();
         Ok(Reply::Item { item })
     }
 
-    /// Checks readiness under the session lock, including for local item access.
+    /// Checks readiness before serving vault data to a pairing peer.
     pub fn with_data<T>(&self, f: impl FnOnce(&mut Session) -> Result<T>) -> Result<T> {
         self.with(|s| {
             if !self.ready.load(Ordering::SeqCst) {

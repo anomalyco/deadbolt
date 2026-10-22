@@ -18,7 +18,7 @@ use deadbolt_store::KdfParams;
 use network::{Rng, drive, link};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet, HashSet},
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
 };
 
@@ -252,6 +252,7 @@ impl World {
 
     fn pair(&mut self, to: usize) -> Result<()> {
         if to == 0
+            || !self.devices[0].ready
             || !self.devices[to].open()
             || !self.devices[0].open()
             || self.blocked.contains(&(0, to))
@@ -314,13 +315,13 @@ impl World {
         seed: u64,
         cut: Option<usize>,
         revoke_at: Option<usize>,
-    ) -> Result<bool> {
+    ) -> Result<sync::Attempt> {
         if a == b
             || self.blocked.contains(&(a.min(b), a.max(b)))
             || !self.devices[a].open()
             || !self.devices[b].open()
         {
-            return Ok(false);
+            return Ok(sync::Attempt::Unreachable);
         }
         if self.devices[a]
             .gate
@@ -331,7 +332,7 @@ impl World {
                 .check_dial(&self.devices[a].id)
                 .is_err()
         {
-            return Ok(false);
+            return Ok(sync::Attempt::Unreachable);
         }
         let (left, right, aw, bw) = link();
         let (mut ar, mut at) = tokio::io::split(left);
@@ -402,7 +403,11 @@ impl World {
         }
         self.digest.update(&wires[0]);
         self.digest.update(&wires[1]);
-        Ok(result.is_some_and(|(a, b)| a.is_ok() && b.is_ok()))
+        Ok(if result.is_some_and(|(a, b)| a.is_ok() && b.is_ok()) {
+            sync::Attempt::Complete
+        } else {
+            sync::Attempt::Interrupted
+        })
     }
 
     fn step(&mut self, action: &Action) -> Result<()> {
@@ -502,14 +507,13 @@ impl World {
     }
 
     fn can_write(&self, i: usize) -> bool {
-        self.devices[i].ready
-            && self.devices[i]
-                .with(|s| {
-                    Ok(s.vaults
-                        .get(&self.vault)
-                        .is_some_and(|v| v.is_member(&s.id)))
-                })
-                .unwrap_or(false)
+        self.devices[i]
+            .with(|s| {
+                Ok(s.vaults
+                    .get(&self.vault)
+                    .is_some_and(|v| v.is_member(&s.id)))
+            })
+            .unwrap_or(false)
     }
 
     fn check(&mut self) -> Result<()> {
@@ -603,18 +607,17 @@ impl World {
             }
         }
         for round in 0..(DEVICES * 3) {
-            let mut succeeded = vec![HashSet::new(); DEVICES];
+            let mut attempts = vec![BTreeMap::new(); DEVICES];
             for a in 0..DEVICES {
                 for b in a + 1..DEVICES {
-                    if self.sync(a, b, (round * DEVICES + b) as u64, None, None)? {
-                        succeeded[a].insert(self.devices[b].id);
-                        succeeded[b].insert(self.devices[a].id);
-                    }
+                    let attempt = self.sync(a, b, (round * DEVICES + b) as u64, None, None)?;
+                    attempts[a].insert(self.devices[b].id, attempt);
+                    attempts[b].insert(self.devices[a].id, attempt);
                 }
             }
-            for (a, succeeded) in succeeded.iter().enumerate() {
+            for (a, attempts) in attempts.iter().enumerate() {
                 let peers = self.devices[a].with(|s| Ok(s.peer_set()))?;
-                if sync::barrier_complete(&peers, succeeded) {
+                if sync::barrier_complete(&peers, attempts) {
                     self.devices[a].ready = true;
                 }
             }
@@ -800,4 +803,90 @@ fn shrinking_keeps_only_the_failure_dependencies() {
         reduced.as_slice(),
         [Action::Pair(1), Action::Remove(1)]
     ));
+}
+
+#[test]
+fn offline_unlock_keeps_local_items_available_and_failed_dials_finish_startup() {
+    let mut world = World::new().unwrap();
+    world.step(&Action::Pair(1)).unwrap();
+    world.step(&Action::Add(0, 10)).unwrap();
+    world.step(&Action::Lock(1)).unwrap();
+    world.step(&Action::Crash(0)).unwrap();
+    assert!(!world.devices[0].ready);
+    assert!(world.can_write(0));
+    world.step(&Action::Add(0, 11)).unwrap();
+    world.devices[0]
+        .with(|s| {
+            assert_eq!(s.vault(&world.vault).items().len(), 2);
+            Ok(())
+        })
+        .unwrap();
+    let result = world.sync(0, 1, 10, None, None).unwrap();
+    assert_eq!(result, sync::Attempt::Unreachable);
+    let peers = world.devices[0].with(|s| Ok(s.peer_set())).unwrap();
+    world.devices[0].ready =
+        sync::barrier_complete(&peers, &BTreeMap::from([(world.devices[1].id, result)]));
+    assert!(world.devices[0].ready);
+    world.converge().unwrap();
+}
+
+#[test]
+fn startup_retries_an_interrupted_exchange() {
+    let mut world = World::new().unwrap();
+    world.step(&Action::Pair(1)).unwrap();
+    world.step(&Action::Crash(0)).unwrap();
+    let peers = world.devices[0].with(|s| Ok(s.peer_set())).unwrap();
+    let failed = world.sync(0, 1, 31, Some(40), None).unwrap();
+    assert_eq!(failed, sync::Attempt::Interrupted);
+    assert!(!sync::barrier_complete(
+        &peers,
+        &BTreeMap::from([(world.devices[1].id, failed)])
+    ));
+    let retried = world.sync(0, 1, 32, None, None).unwrap();
+    assert_eq!(retried, sync::Attempt::Complete);
+    assert!(sync::barrier_complete(
+        &peers,
+        &BTreeMap::from([(world.devices[1].id, retried)])
+    ));
+    world.converge().unwrap();
+}
+
+#[test]
+fn startup_learns_removal_before_sending_locally_written_data() {
+    let mut world = World::new().unwrap();
+    world.step(&Action::Pair(1)).unwrap();
+    world.step(&Action::Pair(2)).unwrap();
+    world.sync(0, 1, 10, None, None).unwrap();
+    world.step(&Action::Crash(1)).unwrap();
+    world.step(&Action::Remove(2)).unwrap();
+    world.step(&Action::Add(1, 99)).unwrap();
+    assert!(!world.devices[1].ready);
+    // The removed peer answers before the honest peer carrying its removal.
+    let fast = world.sync(1, 2, 11, None, None).unwrap();
+    assert_eq!(fast, sync::Attempt::Complete);
+    world.devices[2]
+        .with(|s| {
+            assert!(s.vault(&world.vault).items().is_empty());
+            Ok(())
+        })
+        .unwrap();
+    let honest = world.sync(1, 0, 12, None, None).unwrap();
+    let peers = world.devices[1].with(|s| Ok(s.peer_set())).unwrap();
+    assert!(!peers.contains(&world.devices[2].id));
+    world.devices[1].ready = sync::barrier_complete(
+        &peers,
+        &BTreeMap::from([(world.devices[0].id, honest), (world.devices[2].id, fast)]),
+    );
+    assert!(world.devices[1].ready);
+    assert_eq!(
+        world.sync(1, 2, 13, None, None).unwrap(),
+        sync::Attempt::Unreachable
+    );
+    world.devices[2]
+        .with(|s| {
+            assert!(s.vault(&world.vault).items().is_empty());
+            Ok(())
+        })
+        .unwrap();
+    world.converge().unwrap();
 }

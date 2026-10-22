@@ -89,9 +89,23 @@ a small, auditable persistence seam. Sync batches publish independently per vaul
 The vault list comes from the encrypted entry log. Legacy `cli/vaults` metadata is
 ignored, so a crash after storing genesis cannot hide the new vault.
 
-The startup barrier opens only after every current known peer completed a
-membership round. Failed attempts retry; new members learned during that round
-must also be contacted. Both inbound data and local item access remain blocked.
-This deliberately fails closed when a known peer is offline; it does not claim
-that a timeout proves a peer has no newer removal. A device with no peers is
-ready immediately.
+Local item reads and writes are available immediately after unlock, including
+imports. Readiness gates sending data to peers, accepting inbound data, and
+invitations. Membership entries flow while the barrier is closed.
+
+A startup round completes when each current member either completed its exchange
+or was unreachable during the dial. Dial errors and dial timeouts are
+unreachable; any error or timeout after connecting is an interrupted round and
+requires a retry. Members learned during a round must also be attempted. Retries
+wait one second and share a total 30-second budget (`2 * SYNC_TIMEOUT`), including
+time spent connecting and exchanging entries. A device with no peers is ready
+immediately.
+
+At the 30-second deadline, the startup round is cancelled, a warning is logged,
+and peer data resumes using the membership learned so far. Regular background
+sync continues retrying. This bounded, best-effort refresh can miss a removal
+held only by an unreachable or persistently failing peer; the timeout is not
+proof that membership is current. Removals learned before the deadline are
+applied and enforced before data resumes. Paused-time unit tests cover dial versus
+exchange failures, retries and the total deadline; simulations cover offline
+writes and a fast removed peer answering before an honest peer's removal.

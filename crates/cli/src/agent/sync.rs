@@ -8,6 +8,7 @@
 //! entries are sent.
 
 use std::collections::{BTreeMap, HashSet};
+use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::Duration;
@@ -25,6 +26,10 @@ use crate::protocol::PeerSync;
 
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(30);
 pub const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
+/// Best-effort startup membership refresh. At the deadline peer data resumes
+/// using the membership learned so far; normal background sync keeps retrying.
+pub const STARTUP_TIMEOUT: Duration = SYNC_TIMEOUT.saturating_mul(2);
+const STARTUP_RETRY: Duration = Duration::from_secs(1);
 
 #[derive(Serialize, Deserialize)]
 struct Hello {
@@ -190,12 +195,78 @@ pub(super) fn receive(
     Ok(added)
 }
 
-pub(super) fn barrier_complete(members: &HashSet<PeerId>, succeeded: &HashSet<PeerId>) -> bool {
-    members.is_subset(succeeded)
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Attempt {
+    Complete,
+    Unreachable,
+    Interrupted,
+}
+
+pub(super) fn barrier_complete(
+    members: &HashSet<PeerId>,
+    attempts: &BTreeMap<PeerId, Attempt>,
+) -> bool {
+    members.iter().all(|peer| {
+        matches!(
+            attempts.get(peer),
+            Some(Attempt::Complete | Attempt::Unreachable)
+        )
+    })
+}
+
+/// The dial and exchange share one deadline. Once connected, every error or
+/// timeout is an interrupted round, even if no entry frame arrived yet.
+async fn attempt<C, T, E: std::fmt::Display>(
+    connect: impl Future<Output = std::result::Result<C, E>>,
+    exchange: impl FnOnce(C) -> T,
+) -> (
+    Attempt,
+    std::result::Result<deadbolt_net::SyncOutcome, String>,
+)
+where
+    T: Future<Output = std::result::Result<deadbolt_net::SyncOutcome, E>>,
+{
+    let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
+    let conn = match tokio::time::timeout_at(deadline, connect).await {
+        Ok(Ok(conn)) => conn,
+        Ok(Err(error)) => return (Attempt::Unreachable, Err(error.to_string())),
+        Err(_) => return (Attempt::Unreachable, Err("dial timed out".into())),
+    };
+    match tokio::time::timeout_at(deadline, exchange(conn)).await {
+        Ok(Ok(outcome)) => (Attempt::Complete, Ok(outcome)),
+        Ok(Err(error)) => (Attempt::Interrupted, Err(error.to_string())),
+        Err(_) => (Attempt::Interrupted, Err("sync timed out".into())),
+    }
+}
+
+/// Returns false only when the total startup budget expires. Round errors and
+/// connected peers that fail mid-exchange are retried within the same budget.
+async fn wait_for_membership<F: Future<Output = Result<bool>>>(
+    mut round: impl FnMut() -> F,
+) -> bool {
+    tokio::time::timeout(STARTUP_TIMEOUT, async {
+        loop {
+            match round().await {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => warn!("startup sync failed: {error:#}"),
+            }
+            tokio::time::sleep(STARTUP_RETRY).await;
+        }
+    })
+    .await
+    .is_ok()
 }
 
 /// Syncs with every member of every vault, or only of `only`, concurrently.
 pub async fn sync_all(agent: &Arc<Agent>, only: Option<VaultId>) -> Result<Vec<PeerSync>> {
+    Ok(sync_round(agent, only).await?.0)
+}
+
+async fn sync_round(
+    agent: &Arc<Agent>,
+    only: Option<VaultId>,
+) -> Result<(Vec<PeerSync>, BTreeMap<PeerId, Attempt>)> {
     let (node, targets) = agent.with(|s| {
         let peers = match only {
             Some(id) => s
@@ -217,12 +288,13 @@ pub async fn sync_all(agent: &Arc<Agent>, only: Option<VaultId>) -> Result<Vec<P
         let node = node.clone();
         tasks.spawn(async move {
             let id = addr.id;
-            let result = match tokio::time::timeout(SYNC_TIMEOUT, node.sync(addr)).await {
-                Ok(Ok(outcome)) => Ok(outcome),
-                Ok(Err(error)) => Err(error.to_string()),
-                Err(_) => Err("timed out".to_string()),
-            };
-            (id, result)
+            let (attempt, result) = attempt(node.connect(addr), |conn| async move {
+                let result = conn.sync().await;
+                conn.close();
+                result
+            })
+            .await;
+            (id, attempt, result)
         });
     }
     let mut results = Vec::new();
@@ -231,9 +303,13 @@ pub async fn sync_all(agent: &Arc<Agent>, only: Option<VaultId>) -> Result<Vec<P
     }
     let connected: HashSet<PeerId> = node.connected_peers().into_iter().collect();
     agent.with(|s| {
+        let attempts = results
+            .iter()
+            .map(|(id, attempt, _)| (*id, *attempt))
+            .collect();
         let mut peers: Vec<PeerSync> = results
             .into_iter()
-            .map(|(id, result)| {
+            .map(|(id, _, result)| {
                 let device = s.device_info(&DeviceId::from_bytes(id), &connected);
                 match result {
                     Ok(outcome) => PeerSync {
@@ -255,39 +331,43 @@ pub async fn sync_all(agent: &Arc<Agent>, only: Option<VaultId>) -> Result<Vec<P
             })
             .collect();
         peers.sort_by(|a, b| (&a.device.name, &a.device.id).cmp(&(&b.device.name, &b.device.id)));
-        Ok(peers)
+        Ok((peers, attempts))
     })
 }
 
 /// The background sync loop, running while unlocked: a membership round with
-/// every known member, then full syncs every [`SYNC_INTERVAL`] and
+/// every reachable member (bounded by [`STARTUP_TIMEOUT`]), then full syncs every [`SYNC_INTERVAL`] and
 /// whenever something changed.
 pub async fn run(agent: Arc<Agent>) {
-    loop {
-        match sync_all(&agent, None).await {
-            Ok(results) if !agent.ready.load(Ordering::SeqCst) => {
-                let succeeded = results
-                    .iter()
-                    .filter(|p| p.error.is_none())
-                    .filter_map(|p| unhex(&p.device.id).ok())
-                    .collect();
-                // Re-read membership after the round: newly learned members must
-                // also complete a round. Failed/time-out attempts never open data.
-                let completed = agent
-                    .with(|s| {
-                        let complete = barrier_complete(&s.peer_set(), &succeeded);
-                        if complete {
-                            agent.ready.store(true, Ordering::SeqCst);
-                        }
-                        Ok(complete)
-                    })
-                    .unwrap_or(false);
-                if completed {
-                    continue;
+    if !agent.ready.load(Ordering::SeqCst) {
+        let completed = wait_for_membership(|| async {
+            let (_, attempts) = sync_round(&agent, None).await?;
+            // Include members learned during this round, not just its original targets.
+            agent.with(|s| {
+                let complete = barrier_complete(&s.peer_set(), &attempts);
+                if complete {
+                    agent.ready.store(true, Ordering::SeqCst);
                 }
+                Ok(complete)
+            })
+        })
+        .await;
+        if !completed {
+            warn!("startup membership deadline reached; continuing with known membership");
+            if agent
+                .with(|_| {
+                    agent.ready.store(true, Ordering::SeqCst);
+                    Ok(())
+                })
+                .is_err()
+            {
+                return;
             }
-            Ok(_) => {}
-            Err(error) => warn!("sync failed: {error:#}"),
+        }
+    }
+    loop {
+        if let Err(error) = sync_all(&agent, None).await {
+            warn!("sync failed: {error:#}");
         }
         tokio::select! {
             _ = tokio::time::sleep(SYNC_INTERVAL) => {}
@@ -303,19 +383,83 @@ mod tests {
     use deadbolt_core::{DeviceSecret, Field, FieldType, Vault};
 
     #[test]
-    fn startup_requires_success_from_current_and_newly_discovered_peers() {
+    fn startup_requires_attempts_for_current_and_newly_discovered_peers() {
         assert!(!barrier_complete(
             &HashSet::from([[1; 32]]),
-            &HashSet::new()
+            &BTreeMap::new()
         ));
         assert!(!barrier_complete(
             &HashSet::from([[1; 32], [2; 32]]),
-            &HashSet::from([[1; 32]])
+            &BTreeMap::from([([1; 32], Attempt::Complete)])
         ));
         assert!(barrier_complete(
             &HashSet::from([[1; 32]]),
-            &HashSet::from([[1; 32]])
+            &BTreeMap::from([([1; 32], Attempt::Complete)])
         ));
+        assert!(barrier_complete(
+            &HashSet::from([[1; 32]]),
+            &BTreeMap::from([([1; 32], Attempt::Unreachable)])
+        ));
+        assert!(!barrier_complete(
+            &HashSet::from([[1; 32]]),
+            &BTreeMap::from([([1; 32], Attempt::Interrupted)])
+        ));
+    }
+
+    fn outcome() -> deadbolt_net::SyncOutcome {
+        deadbolt_net::SyncOutcome {
+            sent: 0,
+            received: 0,
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn dial_failures_and_timeouts_are_unreachable_but_exchange_failures_are_not() {
+        let failed_dial = attempt(async { Err::<(), _>("offline") }, |_| async {
+            Ok(outcome())
+        })
+        .await;
+        assert_eq!(failed_dial.0, Attempt::Unreachable);
+        let dial_timeout = attempt(std::future::pending::<Result<(), &str>>(), |_| async {
+            Ok(outcome())
+        })
+        .await;
+        assert_eq!(dial_timeout.0, Attempt::Unreachable);
+        let failed_exchange = attempt(async { Ok(()) }, |_| async {
+            Err::<deadbolt_net::SyncOutcome, _>("broken stream")
+        })
+        .await;
+        assert_eq!(failed_exchange.0, Attempt::Interrupted);
+        let exchange_timeout =
+            attempt(async { Ok::<_, &str>(()) }, |_| std::future::pending()).await;
+        assert_eq!(exchange_timeout.0, Attempt::Interrupted);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn interrupted_round_retries_before_opening_and_flapping_has_a_total_bound() {
+        let rounds = std::cell::Cell::new(0);
+        assert!(
+            wait_for_membership(|| async {
+                rounds.set(rounds.get() + 1);
+                let result = if rounds.get() == 1 {
+                    Attempt::Interrupted
+                } else {
+                    Attempt::Complete
+                };
+                Ok(barrier_complete(
+                    &HashSet::from([[1; 32]]),
+                    &BTreeMap::from([([1; 32], result)]),
+                ))
+            })
+            .await
+        );
+        assert_eq!(rounds.get(), 2);
+        let start = tokio::time::Instant::now();
+        assert!(!wait_for_membership(|| async { Ok(false) }).await);
+        assert_eq!(start.elapsed(), STARTUP_TIMEOUT);
+        let start = tokio::time::Instant::now();
+        assert!(!wait_for_membership(std::future::pending::<Result<bool>>).await);
+        assert_eq!(start.elapsed(), STARTUP_TIMEOUT);
     }
 
     #[test]
@@ -353,7 +497,18 @@ mod tests {
             )
             .unwrap();
         let peer = loaded.id;
+        let heads = hello(&loaded, &peer, None).unwrap();
         receive(&mut loaded, &peer, vec![entry.encode()], false).unwrap();
         assert!(loaded.vault(&id).items().is_empty());
+        receive(&mut loaded, &peer, vec![entry.encode()], true).unwrap();
+        assert!(
+            missing_for(&mut loaded, &peer, &heads, false)
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(
+            missing_for(&mut loaded, &peer, &heads, true).unwrap(),
+            vec![entry.encode()]
+        );
     }
 }
