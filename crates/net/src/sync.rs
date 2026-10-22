@@ -255,14 +255,18 @@ async fn run_session(
     let local = handler.receive(peer, entries).await;
 
     if initiator {
-        let _ = send.shutdown().await;
+        if let Err(error) = send.shutdown().await {
+            tracing::debug!(%error, "sync send closed; peer result determines success");
+        }
         let remote = frame::read_result(recv, max).await;
         local.map_err(Error::Handler)?;
         remote?;
     } else {
         let report = local.as_ref().map(|_| ()).map_err(|e| e.to_string());
         frame::write_result(send, &report).await?;
-        let _ = send.shutdown().await;
+        if let Err(error) = send.shutdown().await {
+            tracing::debug!(%error, "sync send closed after reporting result");
+        }
         local.map_err(Error::Handler)?;
     }
     Ok(outcome)

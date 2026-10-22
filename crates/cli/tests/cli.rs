@@ -1,6 +1,8 @@
 //! End-to-end tests: each device is a separate set of directories with its
 //! own agent process, networking over localhost only.
 
+#![cfg(test)]
+
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;
 use std::process::{Child, Command, Output, Stdio};
@@ -130,7 +132,9 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        let _ = self.cmd(&["agent", "stop"]).output();
+        if let Err(error) = self.cmd(&["agent", "stop"]).output() {
+            eprintln!("test cleanup could not stop agent: {error}");
+        }
         if std::thread::panicking() {
             eprintln!(
                 "--- agent log {}\n{}",
@@ -156,7 +160,9 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
             return status;
         }
         if Instant::now() > deadline {
-            let _ = child.kill();
+            if let Err(error) = child.kill() {
+                eprintln!("test cleanup could not kill timed-out process: {error}");
+            }
             panic!("process timed out");
         }
         std::thread::sleep(Duration::from_millis(50));

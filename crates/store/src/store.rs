@@ -561,6 +561,10 @@ struct TempFile(PathBuf);
 
 impl Drop for TempFile {
     fn drop(&mut self) {
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "best-effort temporary-file cleanup; successful rename already removed this path"
+        )]
         let _ = fs::remove_file(&self.0);
     }
 }

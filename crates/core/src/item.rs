@@ -100,6 +100,21 @@ impl Drop for Field {
     }
 }
 
+#[test]
+fn field_debug_redacts_values_of_every_kind() {
+    for kind in [
+        FieldType::Secret,
+        FieldType::Otp,
+        FieldType::Note,
+        FieldType::Text,
+    ] {
+        let field = Field::new(kind, "private-marker");
+        let debug = format!("{field:?}");
+        assert!(debug.contains("<redacted>"));
+        assert!(!debug.contains("private-marker"));
+    }
+}
+
 impl Field {
     pub fn new(kind: FieldType, value: impl Into<String>) -> Self {
         Self {

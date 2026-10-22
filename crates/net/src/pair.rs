@@ -424,7 +424,9 @@ impl PairingStream {
         let join = frame::expect(recv, tag::JOIN, max).await?;
         let welcome = inviter.welcome(&ctx, join).await.map_err(Error::Handler)?;
         frame::write_entries(send, &welcome).await?;
-        let _ = send.shutdown().await;
+        if let Err(error) = send.shutdown().await {
+            debug!(%error, "pairing send closed; peer result determines success");
+        }
         frame::read_result(recv, max).await?;
         Ok(PairingOutcome {
             peer: ctx.remote,
@@ -460,7 +462,9 @@ impl ProvenPairing {
         let received = joiner.receive(&ctx, welcome).await;
         let report = received.as_ref().map(|_| ()).map_err(|e| e.to_string());
         frame::write_result(send, &report).await?;
-        let _ = send.shutdown().await;
+        if let Err(error) = send.shutdown().await {
+            debug!(%error, "pairing send closed after reporting result");
+        }
         received.map_err(Error::Handler)?;
         Ok(PairingOutcome {
             peer: ctx.remote,
@@ -528,6 +532,10 @@ impl PairingListener {
         match result {
             Ok(outcome) => {
                 // Let the dialer read RESULT; it closes the connection once it has.
+                #[expect(
+                    clippy::let_underscore_must_use,
+                    reason = "best-effort linger ends on either peer close or its deadline"
+                )]
                 let _ = tokio::time::timeout(LINGER_TIMEOUT, conn.closed()).await;
                 debug!(peer = %crate::fmt_id(&remote), "paired");
                 Ok(outcome)
@@ -582,9 +590,12 @@ impl Node {
     /// Creates a one-time pairing ticket for this (new) device and starts accepting pairing
     /// connections for it. Replaces any previous outstanding ticket.
     pub async fn start_pairing(&self, options: PairingOptions) -> Result<PairingListener> {
-        if self.inner.relays_enabled {
-            let _ =
-                tokio::time::timeout(options.online_timeout, self.inner.endpoint.online()).await;
+        if self.inner.relays_enabled
+            && tokio::time::timeout(options.online_timeout, self.inner.endpoint.online())
+                .await
+                .is_err()
+        {
+            debug!("relay online deadline elapsed; pairing ticket uses available addresses");
         }
         let mut secret = Zeroizing::new([0u8; 32]);
         getrandom::fill(secret.as_mut()).map_err(|e| Error::Io(std::io::Error::other(e)))?;
@@ -709,6 +720,7 @@ fn transcript_bytes(listener: &PeerId, dialer: &PeerId, ekm: &[u8; 32]) -> Vec<u
     t
 }
 
+#[expect(clippy::expect_used, reason = "HMAC accepts keys of every length")]
 fn hmac(secret: &[u8; 32], label: &[u8], transcript: &[u8]) -> Hmac<Sha256> {
     let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(secret).expect("any key length");
     m.update(label);
@@ -730,7 +742,9 @@ fn verify(secret: &[u8; 32], label: &[u8], transcript: &[u8], tag: &[u8]) -> boo
 
 fn confirmation_code(secret: &[u8; 32], transcript: &[u8]) -> ConfirmationCode {
     let out = mac(secret, CODE_LABEL, transcript);
-    let n = u64::from_be_bytes(out[..8].try_into().expect("8 bytes"));
+    let mut prefix = [0; 8];
+    prefix.copy_from_slice(&out[..8]);
+    let n = u64::from_be_bytes(prefix);
     ConfirmationCode((n % 1_000_000) as u32)
 }
 

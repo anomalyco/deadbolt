@@ -250,7 +250,7 @@ impl Entry {
             seq,
             deps,
             payload,
-            signature: Signature(signature.try_into().expect("split at 64")),
+            signature: Signature(Reader::new(signature).array()?),
             hash: Hash(blake3::derive_key(HASH_CONTEXT, body)),
         })
     }
