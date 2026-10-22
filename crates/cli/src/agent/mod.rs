@@ -83,7 +83,11 @@ mod tests {
         let offline = DeviceSecret::from_bytes(&[52; 32]);
         loaded
             .update(id, |v, key| {
-                Ok(v.add(key, offline.device_id(), offline.join_consent(&id))?)
+                Ok(v.add(
+                    key,
+                    offline.device_id(),
+                    offline.join_consent(&id, &key.device_id()),
+                )?)
             })
             .unwrap();
         drop(loaded);
