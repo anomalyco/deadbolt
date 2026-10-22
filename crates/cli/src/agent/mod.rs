@@ -188,6 +188,19 @@ mod tests {
             agent.with_data(|_| Ok(())).is_err(),
             "invitations must still wait"
         );
+        tokio::time::pause();
+        let (waited, ()) = tokio::join!(agent.wait_ready(), async {
+            tokio::time::sleep(Duration::from_secs(1)).await;
+            agent.ready.store(true, Ordering::SeqCst);
+        });
+        waited.unwrap();
+        agent.with_data(|_| Ok(())).unwrap();
+        agent.ready.store(false, Ordering::SeqCst);
+        let start = tokio::time::Instant::now();
+        assert!(agent.wait_ready().await.is_err());
+        assert!(start.elapsed() >= sync::STARTUP_TIMEOUT);
+        // Tokio's timer wheel rounds deadlines to millisecond ticks.
+        assert!(start.elapsed() <= sync::STARTUP_TIMEOUT + Duration::from_millis(1));
         agent.lock().await;
     }
 }
@@ -485,10 +498,7 @@ impl Agent {
             Command::Sync { vault } => {
                 let only =
                     self.with(|s| vault.as_deref().map(|v| s.resolve(Some(v))).transpose())?;
-                let deadline = Instant::now() + sync::STARTUP_TIMEOUT;
-                while !self.ready.load(Ordering::SeqCst) && Instant::now() < deadline {
-                    tokio::time::sleep(Duration::from_millis(50)).await;
-                }
+                self.wait_ready().await?;
                 Ok(Reply::Sync {
                     peers: sync::sync_all(&self, only).await?,
                 })
@@ -541,6 +551,22 @@ impl Agent {
         let item = self.with(f)?;
         self.sync_now.notify_one();
         Ok(Reply::Item { item })
+    }
+
+    /// Waits within the startup budget; the background loop owns the fallback.
+    async fn wait_ready(&self) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + sync::STARTUP_TIMEOUT;
+        while !self.ready.load(Ordering::SeqCst) {
+            self.with(|_| Ok(()))?;
+            if tokio::time::Instant::now() >= deadline {
+                bail!("waiting for membership sync");
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(50)),
+            )
+            .await;
+        }
+        Ok(())
     }
 
     /// Checks readiness before serving vault data to a pairing peer.

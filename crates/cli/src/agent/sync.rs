@@ -214,17 +214,17 @@ pub(super) fn barrier_complete(
     })
 }
 
-/// The dial and exchange share one deadline. Once connected, every error or
-/// timeout is an interrupted round, even if no entry frame arrived yet.
-async fn attempt<C, T, E: std::fmt::Display>(
-    connect: impl Future<Output = std::result::Result<C, E>>,
+/// The dial and exchange share one deadline. A remote membership refusal is a
+/// completed contact; other post-connect errors leave the round interrupted.
+async fn attempt<C, T>(
+    connect: impl Future<Output = deadbolt_net::Result<C>>,
     exchange: impl FnOnce(C) -> T,
 ) -> (
     Attempt,
     std::result::Result<deadbolt_net::SyncOutcome, String>,
 )
 where
-    T: Future<Output = std::result::Result<deadbolt_net::SyncOutcome, E>>,
+    T: Future<Output = deadbolt_net::Result<deadbolt_net::SyncOutcome>>,
 {
     let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
     let conn = match tokio::time::timeout_at(deadline, connect).await {
@@ -234,6 +234,9 @@ where
     };
     match tokio::time::timeout_at(deadline, exchange(conn)).await {
         Ok(Ok(outcome)) => (Attempt::Complete, Ok(outcome)),
+        Ok(Err(error @ deadbolt_net::Error::MembershipRejected(_))) => {
+            (Attempt::Complete, Err(error.to_string()))
+        }
         Ok(Err(error)) => (Attempt::Interrupted, Err(error.to_string())),
         Err(_) => (Attempt::Interrupted, Err("sync timed out".into())),
     }
@@ -415,24 +418,46 @@ mod tests {
 
     #[tokio::test(start_paused = true)]
     async fn dial_failures_and_timeouts_are_unreachable_but_exchange_failures_are_not() {
-        let failed_dial = attempt(async { Err::<(), _>("offline") }, |_| async {
-            Ok(outcome())
-        })
+        let failed_dial = attempt(
+            async { Err::<(), _>(deadbolt_net::Error::Connect("offline".into())) },
+            |_| async { Ok(outcome()) },
+        )
         .await;
         assert_eq!(failed_dial.0, Attempt::Unreachable);
-        let dial_timeout = attempt(std::future::pending::<Result<(), &str>>(), |_| async {
-            Ok(outcome())
-        })
+        let dial_timeout = attempt(
+            std::future::pending::<deadbolt_net::Result<()>>(),
+            |_| async { Ok(outcome()) },
+        )
         .await;
         assert_eq!(dial_timeout.0, Attempt::Unreachable);
         let failed_exchange = attempt(async { Ok(()) }, |_| async {
-            Err::<deadbolt_net::SyncOutcome, _>("broken stream")
+            Err(deadbolt_net::Error::Closed("broken stream".into()))
         })
         .await;
         assert_eq!(failed_exchange.0, Attempt::Interrupted);
-        let exchange_timeout =
-            attempt(async { Ok::<_, &str>(()) }, |_| std::future::pending()).await;
+        let exchange_timeout = attempt(async { Ok(()) }, |_| std::future::pending()).await;
         assert_eq!(exchange_timeout.0, Attempt::Interrupted);
+    }
+
+    #[tokio::test]
+    async fn remote_membership_refusal_completes_startup_contact() {
+        let (result, error) = attempt(async { Ok(()) }, |_| async {
+            Err(deadbolt_net::Error::MembershipRejected(
+                "not a member".into(),
+            ))
+        })
+        .await;
+        assert!(error.is_err());
+        assert_eq!(result, Attempt::Complete);
+        assert!(barrier_complete(
+            &HashSet::from([[1; 32]]),
+            &BTreeMap::from([([1; 32], result)]),
+        ));
+        let (result, _) = attempt(async { Ok(()) }, |_| async {
+            Err(deadbolt_net::Error::Rejected("pairing unavailable".into()))
+        })
+        .await;
+        assert_eq!(result, Attempt::Interrupted);
     }
 
     #[tokio::test(start_paused = true)]

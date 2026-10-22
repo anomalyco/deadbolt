@@ -17,7 +17,9 @@ In Kit's environment, put the command (including `env NAME=value`) after
 
 Two fixed seeds run by default. Each generates 48 actions after pairing three
 devices: item creation, edits, deletion, pairing, removal, lock/unlock, crash and
-reopen, sync, partitions, heals, failed writes, and revocation during sync.
+reopen, startup rounds, sync, partitions, heals, failed writes, and revocation during sync.
+Startup actions use the production barrier against the current membership, and
+handlers read live readiness. Item actions use the production item-command path.
 Removal actions use the creator as author; concurrent removal authority conflicts
 belong to the core membership tests.
 
@@ -53,6 +55,9 @@ Pairing uses the production proof, confirmation and welcome protocol with test
 exporter bytes and signed core join consent. Its test adapter omits CLI display
 and address metadata. Ticket expiry, single-use admission and TLS exporter wiring
 remain covered by the real-iroh tests in `crates/net/tests/pair.rs`.
+Focused regressions also cut pairing during its exchange and check persistence
+across reopening. A cut after admission can leave the inviter with a member that
+never received its welcome; these traces check durability rather than convergence.
 
 Crashes drop and reopen stores between actions. Connection cuts cover protocol
 cancellation during a session. Failed-write actions inject an error at the
@@ -78,13 +83,14 @@ Set `DEADBOLT_SIM_TIMING=1` and add `-- --nocapture` for per-action timings.
 `SyncHandler`. `PairingStream::invite`, `PairingStream::prove`, and
 `ProvenPairing::complete` share the pairing exchange with the iroh adapter. The
 adapter supplies authenticated identities, exporter bytes, ticket lifetime and
-connection cancellation.
+connection cancellation. The stream constructors and membership gate are exported
+only with the net crate's `sim` feature, enabled by the CLI's dev-dependency.
 
 `Loaded` owns transport-independent unlocked state. A `Session` adds its iroh
 node. Vault changes build a private validated staging view, append new entries in
 one durable transaction, then publish the view. A failed append leaves live heads
-unchanged. Staging currently rebuilds the vault from its entries, trading CPU for
-a small, auditable persistence seam. Sync batches publish independently per vault.
+unchanged. Staging clones the validated vault, avoiding signature verification of
+historical entries. Sync batches publish independently per vault.
 
 The vault list comes from the encrypted entry log. Legacy `cli/vaults` metadata is
 ignored, so a crash after storing genesis cannot hide the new vault.
@@ -94,12 +100,14 @@ imports. Readiness gates sending data to peers, accepting inbound data, and
 invitations. Membership entries flow while the barrier is closed.
 
 A startup round completes when each current member either completed its exchange
-or was unreachable during the dial. Dial errors and dial timeouts are
-unreachable; any error or timeout after connecting is an interrupted round and
-requires a retry. Members learned during a round must also be attempted. Retries
+or was unreachable during the dial. A remote membership-gate refusal also completes
+contact. Dial errors and dial timeouts are unreachable; other errors or timeouts
+after connecting interrupt the round and require a retry. Members learned during
+a round must also be attempted. Retries
 wait one second and share a total 30-second budget (`2 * SYNC_TIMEOUT`), including
 time spent connecting and exchanging entries. A device with no peers is ready
 immediately.
+Explicit sync and invitation commands share the same bounded readiness wait.
 
 At the 30-second deadline, the startup round is cancelled, a warning is logged,
 and peer data resumes using the membership learned so far. Regular background

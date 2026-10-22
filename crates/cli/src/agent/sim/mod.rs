@@ -7,8 +7,7 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use deadbolt_core::{
-    DataOp, DeviceId, DeviceSecret, Entry, Field, FieldType, Hash, MembershipOp, Payload,
-    Signature, Vault, VaultId,
+    DeviceId, DeviceSecret, Entry, Hash, MembershipOp, Payload, Signature, Vault, VaultId,
 };
 use deadbolt_net::{
     HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PairingStream, PeerId,
@@ -19,7 +18,10 @@ use network::{Rng, drive, link};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 const PASS: &[u8] = b"simulation-only";
@@ -32,7 +34,7 @@ struct Device {
     state: Arc<Mutex<Option<Loaded>>>,
     gate: MembershipGate,
     id: PeerId,
-    ready: bool,
+    ready: Arc<AtomicBool>,
 }
 
 impl Device {
@@ -72,7 +74,7 @@ impl Device {
             state,
             gate,
             id,
-            ready: true,
+            ready: Arc::new(AtomicBool::new(true)),
         }
     }
 
@@ -84,7 +86,7 @@ impl Device {
     fn reopen(&mut self) -> Result<()> {
         self.state.lock().unwrap().take();
         *self.state.lock().unwrap() = Some(Loaded::open(self.dir.path(), PASS)?);
-        self.ready = false;
+        self.ready.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -95,14 +97,14 @@ impl Device {
     fn handler(&self) -> Handler {
         Handler {
             state: self.state.clone(),
-            ready: self.ready,
+            ready: self.ready.clone(),
         }
     }
 }
 
 struct Handler {
     state: Arc<Mutex<Option<Loaded>>>,
-    ready: bool,
+    ready: Arc<AtomicBool>,
 }
 impl SyncHandler for Handler {
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
@@ -124,7 +126,7 @@ impl SyncHandler for Handler {
             guard.as_mut().ok_or("locked")?,
             &DeviceId::from_bytes(peer),
             &heads,
-            self.ready,
+            self.ready.load(Ordering::SeqCst),
         )
         .map_err(|e| e.to_string().into())
     }
@@ -134,7 +136,7 @@ impl SyncHandler for Handler {
             guard.as_mut().ok_or("locked")?,
             &DeviceId::from_bytes(peer),
             entries,
-            self.ready,
+            self.ready.load(Ordering::SeqCst),
         )
         .map(|_| ())
         .map_err(|e| e.to_string().into())
@@ -204,6 +206,7 @@ enum Action {
     Lock(usize),
     Unlock(usize),
     Crash(usize),
+    Startup(usize),
     WriteFailure(usize),
     RevokeDuringSync(usize, u64, usize),
 }
@@ -251,8 +254,12 @@ impl World {
     }
 
     fn pair(&mut self, to: usize) -> Result<()> {
+        self.pair_with_cut(to, None)
+    }
+
+    fn pair_with_cut(&mut self, to: usize, cut: Option<usize>) -> Result<()> {
         if to == 0
-            || !self.devices[0].ready
+            || !self.devices[0].ready.load(Ordering::SeqCst)
             || !self.devices[to].open()
             || !self.devices[0].open()
             || self.blocked.contains(&(0, to))
@@ -294,15 +301,20 @@ impl World {
                 .complete(&mut bt, &mut br, MAX, &self.devices[to])
                 .await
         };
-        let (result, _) = drive(
+        let (result, wires) = drive(
             dial.invite(&mut at, &mut ar, MAX, &invite),
             join,
             aw,
             bw,
             to as u64,
-            None,
+            cut,
             |_| false,
         );
+        self.digest.update(&wires[0]);
+        self.digest.update(&wires[1]);
+        if result.is_none() && cut.is_some() {
+            return Ok(());
+        }
         let (a, b) = result.ok_or_else(|| anyhow::anyhow!("pair protocol stalled"))?;
         ensure!(a?.code == b?.code, "confirmation code mismatch");
         Ok(())
@@ -410,6 +422,26 @@ impl World {
         })
     }
 
+    fn startup(&mut self, i: usize) -> Result<()> {
+        if !self.devices[i].open() || self.devices[i].ready.load(Ordering::SeqCst) {
+            return Ok(());
+        }
+        let targets = self.devices[i].with(|s| Ok(s.peer_set()))?;
+        let mut attempts = BTreeMap::new();
+        for j in 0..DEVICES {
+            let peer = self.devices[j].id;
+            if targets.contains(&peer) {
+                attempts.insert(peer, self.sync(i, j, (i * DEVICES + j) as u64, None, None)?);
+            }
+        }
+        self.devices[i].with(|s| {
+            if sync::barrier_complete(&s.peer_set(), &attempts) {
+                self.devices[i].ready.store(true, Ordering::SeqCst);
+            }
+            Ok(())
+        })
+    }
+
     fn step(&mut self, action: &Action) -> Result<()> {
         match *action {
             Action::Pair(i) => self.pair(i)?,
@@ -419,7 +451,7 @@ impl World {
             Action::Heal => self.blocked.clear(),
             Action::Lock(i) => {
                 self.devices[i].state.lock().unwrap().take();
-                self.devices[i].ready = false;
+                self.devices[i].ready.store(false, Ordering::SeqCst);
             }
             Action::Unlock(i) if !self.devices[i].open() => self.devices[i].reopen()?,
             Action::Crash(i) if self.devices[i].open() => {
@@ -441,6 +473,7 @@ impl World {
             Action::Sync(a, b, seed, cut) => {
                 self.sync(a, b, seed, cut, None)?;
             }
+            Action::Startup(i) => self.startup(i)?,
             Action::RevokeDuringSync(b, seed, tick) if b != 0 => {
                 self.sync(0, b, seed, None, Some(tick))?;
             }
@@ -467,38 +500,27 @@ impl World {
             Action::Add(i, value) | Action::Edit(i, value) if self.can_write(i) => {
                 let value = format!("{SECRET_MARKER}{value:016x}-never-on-disk");
                 self.devices[i].with(|s| {
-                    s.update(self.vault, |v, key| {
-                        if matches!(action, Action::Edit(..))
-                            && let Some(item) = v.items().first()
-                        {
-                            v.write(
-                                key,
-                                vec![DataOp::set(
-                                    item.id,
-                                    "password",
-                                    Field::new(FieldType::Secret, value),
-                                )],
-                            )?;
-                        } else {
-                            v.create_item(
-                                key,
-                                "login",
-                                None,
-                                [("password".into(), Field::new(FieldType::Secret, value))],
-                            )?;
-                        }
-                        Ok(())
-                    })
+                    let fields = vec![crate::protocol::FieldInput {
+                        name: "password".into(),
+                        kind: None,
+                        value,
+                    }];
+                    if matches!(action, Action::Edit(..))
+                        && let Some(item) = s.vault(&self.vault).items().first()
+                    {
+                        super::items::set(s, None, &[item.id.to_string()], fields, None)?;
+                    } else {
+                        super::items::create(s, None, "login", None, fields)?;
+                    }
+                    Ok(())
                 })?;
             }
             Action::Delete(i) if self.can_write(i) => {
                 self.devices[i].with(|s| {
-                    s.update(self.vault, |v, key| {
-                        if let Some(item) = v.items().first() {
-                            v.write(key, vec![DataOp::delete(item.id)])?;
-                        }
-                        Ok(())
-                    })
+                    if let Some(item) = s.vault(&self.vault).items().first() {
+                        super::items::remove(s, None, &[item.id.to_string()])?;
+                    }
+                    Ok(())
                 })?;
             }
             _ => {}
@@ -618,7 +640,7 @@ impl World {
             for (a, attempts) in attempts.iter().enumerate() {
                 let peers = self.devices[a].with(|s| Ok(s.peer_set()))?;
                 if sync::barrier_complete(&peers, attempts) {
-                    self.devices[a].ready = true;
+                    self.devices[a].ready.store(true, Ordering::SeqCst);
                 }
             }
             self.check()?;
@@ -638,7 +660,7 @@ impl World {
             if !members.contains(&DeviceId::from_bytes(d.id)) {
                 continue;
             }
-            if !d.ready {
+            if !d.ready.load(Ordering::SeqCst) {
                 return Ok(false);
             }
             let same = d.with(|s| {
@@ -663,7 +685,7 @@ fn actions(seed: u64) -> Vec<Action> {
         let i = (rng.next() % DEVICES as u64) as usize;
         let j = (rng.next() % DEVICES as u64) as usize;
         let value = rng.next();
-        actions.push(match rng.next() % 14 {
+        actions.push(match rng.next() % 15 {
             0 => Action::Add(i, value),
             1 => Action::Edit(i, value),
             2 => Action::Delete(i),
@@ -677,6 +699,7 @@ fn actions(seed: u64) -> Vec<Action> {
             10 => Action::Sync(i, j, value, Some((value % 500) as usize)),
             12 => Action::WriteFailure(i),
             13 => Action::RevokeDuringSync(i, value, (value % 400) as usize),
+            14 => Action::Startup(i),
             _ => Action::Sync(i, j, value, None),
         });
     }
@@ -757,6 +780,34 @@ fn exploration() {
 }
 
 #[test]
+fn pairing_cuts_preserve_committed_state() {
+    for cut in [1, 20, 60, 120, 240] {
+        let mut world = World::new().unwrap();
+        world.pair_with_cut(1, Some(cut)).unwrap();
+        world.check().unwrap();
+        world.step(&Action::Crash(0)).unwrap();
+        world.step(&Action::Crash(1)).unwrap();
+    }
+}
+
+#[test]
+fn startup_reopens_pairing_and_existing_handlers_observe_readiness() {
+    let mut world = World::new().unwrap();
+    world.step(&Action::Pair(1)).unwrap();
+    world.step(&Action::Crash(0)).unwrap();
+    let handler = world.devices[0].handler();
+    assert!(!handler.ready.load(Ordering::SeqCst));
+    world.step(&Action::Pair(2)).unwrap();
+    assert!(!world.can_write(2));
+    world.step(&Action::Startup(0)).unwrap();
+    assert!(handler.ready.load(Ordering::SeqCst));
+    world.step(&Action::Pair(2)).unwrap();
+    assert!(world.can_write(2));
+    world.step(&Action::Add(2, 42)).unwrap();
+    world.converge().unwrap();
+}
+
+#[test]
 fn replay_has_identical_wire_schedule() {
     let trace = vec![
         Action::Pair(1),
@@ -812,7 +863,7 @@ fn offline_unlock_keeps_local_items_available_and_failed_dials_finish_startup() 
     world.step(&Action::Add(0, 10)).unwrap();
     world.step(&Action::Lock(1)).unwrap();
     world.step(&Action::Crash(0)).unwrap();
-    assert!(!world.devices[0].ready);
+    assert!(!world.devices[0].ready.load(Ordering::SeqCst));
     assert!(world.can_write(0));
     world.step(&Action::Add(0, 11)).unwrap();
     world.devices[0]
@@ -823,10 +874,8 @@ fn offline_unlock_keeps_local_items_available_and_failed_dials_finish_startup() 
         .unwrap();
     let result = world.sync(0, 1, 10, None, None).unwrap();
     assert_eq!(result, sync::Attempt::Unreachable);
-    let peers = world.devices[0].with(|s| Ok(s.peer_set())).unwrap();
-    world.devices[0].ready =
-        sync::barrier_complete(&peers, &BTreeMap::from([(world.devices[1].id, result)]));
-    assert!(world.devices[0].ready);
+    world.step(&Action::Startup(0)).unwrap();
+    assert!(world.devices[0].ready.load(Ordering::SeqCst));
     world.converge().unwrap();
 }
 
@@ -860,7 +909,7 @@ fn startup_learns_removal_before_sending_locally_written_data() {
     world.step(&Action::Crash(1)).unwrap();
     world.step(&Action::Remove(2)).unwrap();
     world.step(&Action::Add(1, 99)).unwrap();
-    assert!(!world.devices[1].ready);
+    assert!(!world.devices[1].ready.load(Ordering::SeqCst));
     // The removed peer answers before the honest peer carrying its removal.
     let fast = world.sync(1, 2, 11, None, None).unwrap();
     assert_eq!(fast, sync::Attempt::Complete);
@@ -873,11 +922,14 @@ fn startup_learns_removal_before_sending_locally_written_data() {
     let honest = world.sync(1, 0, 12, None, None).unwrap();
     let peers = world.devices[1].with(|s| Ok(s.peer_set())).unwrap();
     assert!(!peers.contains(&world.devices[2].id));
-    world.devices[1].ready = sync::barrier_complete(
-        &peers,
-        &BTreeMap::from([(world.devices[0].id, honest), (world.devices[2].id, fast)]),
+    world.devices[1].ready.store(
+        sync::barrier_complete(
+            &peers,
+            &BTreeMap::from([(world.devices[0].id, honest), (world.devices[2].id, fast)]),
+        ),
+        Ordering::SeqCst,
     );
-    assert!(world.devices[1].ready);
+    assert!(world.devices[1].ready.load(Ordering::SeqCst));
     assert_eq!(
         world.sync(1, 2, 13, None, None).unwrap(),
         sync::Attempt::Unreachable

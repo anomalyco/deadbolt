@@ -519,9 +519,9 @@ pub(super) fn update<T>(
     change: impl FnOnce(&mut Vault) -> Result<T>,
 ) -> Result<T> {
     let heads = vault.heads();
-    // Rebuild a private staging view. Failed validation or I/O cannot advance the
-    // live log; publishing the validated state after the durable write is infallible.
-    let mut staged = Vault::load(vault.entries().into_iter().cloned())?;
+    // Clone the validated state without re-verifying historical signatures.
+    // Failed validation or I/O cannot advance the live log.
+    let mut staged = vault.clone();
     let result = change(&mut staged)?;
     let entries: Vec<_> = staged.missing_for(&heads).into_iter().cloned().collect();
     persist(&entries)?;

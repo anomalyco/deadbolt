@@ -10,7 +10,7 @@ use std::collections::BTreeSet;
 use anyhow::{Result, bail};
 use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
 
-use super::session::Session;
+use super::session::Loaded;
 use crate::items::{format_month, line, with_scheme};
 use crate::protocol::{FieldInfo, FieldInput, ItemInfo, NewItem};
 
@@ -242,23 +242,23 @@ fn fields(
         .collect()
 }
 
-fn write(s: &mut Session, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
+fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
     s.update(vault, |v, secret| Ok(v.write(secret, ops)?))
 }
 
-fn info(s: &Session, vault: VaultId, id: &ItemId) -> ItemInfo {
+fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");
     Listing::new(vault).info(&item, false)
 }
 
-pub fn get(s: &Session, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+pub fn get(s: &Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
     Ok(listing.info(listing.find(query)?, true))
 }
 
 pub fn list(
-    s: &Session,
+    s: &Loaded,
     vault: Option<&str>,
     query: &[String],
     kind: Option<&str>,
@@ -275,7 +275,7 @@ pub fn list(
 }
 
 pub fn create(
-    s: &mut Session,
+    s: &mut Loaded,
     vault: Option<&str>,
     kind: &str,
     name: Option<String>,
@@ -291,7 +291,7 @@ pub fn create(
 }
 
 /// Creates all `items` or none.
-pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Result<()> {
+pub fn import(s: &mut Loaded, vault: Option<&str>, items: Vec<NewItem>) -> Result<()> {
     let vault = s.resolve(vault)?;
     let items = items
         .into_iter()
@@ -309,7 +309,7 @@ pub fn import(s: &mut Session, vault: Option<&str>, items: Vec<NewItem>) -> Resu
 }
 
 pub fn set(
-    s: &mut Session,
+    s: &mut Loaded,
     vault: Option<&str>,
     query: &[String],
     inputs: Vec<FieldInput>,
@@ -332,7 +332,7 @@ pub fn set(
 }
 
 pub fn unset(
-    s: &mut Session,
+    s: &mut Loaded,
     vault: Option<&str>,
     query: &[String],
     field: &str,
@@ -346,7 +346,7 @@ pub fn unset(
     Ok(info(s, vault, &item.id))
 }
 
-pub fn remove(s: &mut Session, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;

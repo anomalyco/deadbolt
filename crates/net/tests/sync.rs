@@ -75,7 +75,10 @@ async fn accept_rejects_non_member() {
         conn.sync().await
     })
     .await;
-    assert!(matches!(result, Err(Error::Rejected(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(Error::MembershipRejected(_))),
+        "{result:?}"
+    );
 
     // A never ran any application logic for B, and B received nothing.
     assert_eq!(a.store.calls(), 0);
@@ -117,7 +120,7 @@ async fn revoke_closes_live_inbound_connection() {
     assert_eq!(a.node.revoke(&b.id()), 1);
 
     let reason = within(conn.closed()).await;
-    assert!(matches!(reason, Error::Rejected(_)), "{reason:?}");
+    assert!(matches!(reason, Error::MembershipRejected(_)), "{reason:?}");
     assert!(conn.is_closed());
     assert!(within(conn.sync()).await.is_err());
     assert!(a.node.connected_peers().is_empty());
@@ -129,7 +132,10 @@ async fn revoke_closes_live_inbound_connection() {
         conn.sync().await
     })
     .await;
-    assert!(matches!(result, Err(Error::Rejected(_))), "{result:?}");
+    assert!(
+        matches!(result, Err(Error::MembershipRejected(_))),
+        "{result:?}"
+    );
     assert_eq!(a.store.calls(), calls);
 }
 

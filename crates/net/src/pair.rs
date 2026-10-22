@@ -353,6 +353,8 @@ pub struct PairingStream {
 
 impl PairingStream {
     /// Both sides supply the same exporter, listener id and dialer id.
+    /// Simulation-only: bypasses the iroh adapter's exporter binding and ticket checks.
+    #[cfg(feature = "sim")]
     pub fn new(
         local: PeerId,
         remote: PeerId,

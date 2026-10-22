@@ -35,6 +35,7 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 zeroize = "1.9"
 
 [dev-dependencies]
+deadbolt-net = { path = "../net", features = ["sim"] }
 tokio = { version = "1.53.3", features = ["test-util"] }
 memchr = "2.8"
 tempfile = "3.27.0"

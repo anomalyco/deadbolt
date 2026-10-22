@@ -213,6 +213,7 @@ pub(crate) async fn serve_sync(
 
 /// Runs the wire protocol on an authenticated, membership-gated byte stream.
 /// The transport adapter supplies the peer identity and closes both halves on failure.
+#[cfg(feature = "sim")]
 pub async fn run_sync_session(
     handler: &impl SyncHandler,
     peer: PeerId,

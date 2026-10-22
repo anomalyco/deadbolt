@@ -282,6 +282,10 @@ pub async fn pair(
     confirm: bool,
 ) -> Result<Reply> {
     let ticket: PairingTicket = ticket.parse()?;
+    tokio::select! {
+        result = agent.wait_ready() => result?,
+        _ = conv.closed() => bail!("cancelled"),
+    }
     let (node, vault) = agent.with_data(|s| {
         if ticket.peer_id() == *s.id.as_bytes() {
             bail!("that ticket is from this device");

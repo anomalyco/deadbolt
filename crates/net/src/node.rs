@@ -673,8 +673,17 @@ mod tests {
         conn.closed().await;
         assert!(matches!(
             crate::error::from_conn(&conn, Error::Timeout),
-            Error::Rejected(r) if r == "not a member"
+            Error::MembershipRejected(r) if r == "not a member"
         ));
         assert!(a.connected_peers().is_empty());
+    }
+
+    #[tokio::test]
+    async fn sync_preserves_remote_membership_refusal() {
+        let a = node(|_: &PeerId| false).await;
+        let b = node(|_: &PeerId| true).await;
+        let conn = b.connect(a.addr()).await.unwrap();
+        let error = conn.sync().await.unwrap_err();
+        assert!(matches!(error, Error::MembershipRejected(_)), "{error:?}");
     }
 }

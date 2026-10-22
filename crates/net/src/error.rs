@@ -14,6 +14,9 @@ pub enum Error {
     Revoked(crate::PeerId),
     #[error("connection rejected by peer: {0}")]
     Rejected(String),
+    /// The remote membership gate refused this device (not a member or revoked).
+    #[error("membership rejected by peer: {0}")]
+    MembershipRejected(String),
     #[error("failed to connect: {0}")]
     Connect(String),
     #[error("connection closed: {0}")]
@@ -77,12 +80,10 @@ pub(crate) fn from_conn(conn: &Connection, fallback: Error) -> Error {
         Some(ConnectionError::ApplicationClosed(ac)) => {
             let reason = String::from_utf8_lossy(&ac.reason).into_owned();
             match ac.error_code {
-                c if c == close::NOT_MEMBER
-                    || c == close::REVOKED
-                    || c == close::PAIRING_UNAVAILABLE =>
-                {
-                    Error::Rejected(reason)
+                c if c == close::NOT_MEMBER || c == close::REVOKED => {
+                    Error::MembershipRejected(reason)
                 }
+                c if c == close::PAIRING_UNAVAILABLE => Error::Rejected(reason),
                 c if c == close::PAIRING_PROOF_FAILED => Error::PairingProofFailed,
                 c if c == close::PAIRING_DECLINED => Error::PairingDeclined,
                 c if c == close::ABORTED => Error::Remote(reason),
