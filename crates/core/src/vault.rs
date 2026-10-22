@@ -109,7 +109,21 @@ pub struct Vault {
     /// Entries no entry depends on.
     tips: BTreeSet<Hash>,
     membership: Membership,
+    /// Memberships of causal pasts behind the current membership heads, keyed by
+    /// the membership heads they contain. Cleared on every membership insert.
+    past_memberships: HashMap<Frontier, Membership>,
     items: BTreeMap<ItemId, ItemState>,
+}
+
+/// The latest membership seq per author in a causal past.
+type Frontier = Vec<(DeviceId, u64)>;
+
+fn frontier(clock: &Clock) -> Frontier {
+    clock
+        .iter()
+        .filter(|(log, _)| log.log == Log::Membership)
+        .map(|(log, seq)| (log.author, *seq))
+        .collect()
 }
 
 impl Vault {
@@ -164,6 +178,7 @@ impl Vault {
             membership_tips: BTreeSet::new(),
             tips: BTreeSet::new(),
             membership: Membership::default(),
+            past_memberships: HashMap::new(),
             items: BTreeMap::new(),
         };
         let clock = Clock::from([(genesis.log_id(), 0)]);
@@ -276,18 +291,7 @@ impl Vault {
             }
             depth = depth.max(dep.depth + 1);
         }
-        clock.insert(log_id, entry.seq());
-        let past = self
-            .membership_order
-            .iter()
-            .map(|hash| &self.nodes[hash])
-            .filter(|node| {
-                clock
-                    .get(&node.entry.log_id())
-                    .is_some_and(|&seq| seq >= node.entry.seq())
-            })
-            .collect();
-        let past = membership::resolve(&self.id, past);
+        let past = self.past_membership(&clock);
         if !past.is_member(&entry.author()) {
             return Err(Error::NotMember);
         }
@@ -296,6 +300,7 @@ impl Vault {
         {
             return Err(Error::RemoveNonMember);
         }
+        clock.insert(log_id, entry.seq());
         self.insert(Node {
             entry,
             depth,
@@ -488,6 +493,38 @@ impl Vault {
         self.logs.get(&log).map_or(0, |hashes| hashes.len() as u64)
     }
 
+    /// Resolves the membership of the causal past `clock` covers, excluding the
+    /// entry being applied.
+    fn past_membership(&mut self, clock: &Clock) -> &Membership {
+        let frontier = frontier(clock);
+        let current = self
+            .logs
+            .iter()
+            .filter(|(log, _)| log.log == Log::Membership)
+            .map(|(log, hashes)| (log.author, hashes.len() as u64 - 1));
+        if frontier.iter().copied().eq(current) {
+            return &self.membership;
+        }
+        let nodes = &self.nodes;
+        let ops = &self.membership_order;
+        let id = &self.id;
+        self.past_memberships
+            .entry(frontier)
+            .or_insert_with_key(|frontier| {
+                let covered: BTreeMap<_, _> = frontier.iter().copied().collect();
+                let past = ops
+                    .iter()
+                    .map(|hash| &nodes[hash])
+                    .filter(|node| {
+                        covered
+                            .get(&node.entry.author())
+                            .is_some_and(|&seq| seq >= node.entry.seq())
+                    })
+                    .collect();
+                membership::resolve(id, past)
+            })
+    }
+
     fn insert(&mut self, node: Node) {
         let entry = &node.entry;
         let hash = entry.hash();
@@ -514,8 +551,13 @@ impl Vault {
                     .iter()
                     .map(|hash| &self.nodes[hash])
                     .collect();
-                self.membership = membership::resolve(&self.id, ops);
-                self.rebuild_items();
+                let membership = membership::resolve(&self.id, ops);
+                self.past_memberships.clear();
+                let rebuild = !membership.counts_like(&self.membership);
+                self.membership = membership;
+                if rebuild {
+                    self.rebuild_items();
+                }
             }
             Log::Data => {
                 let node = &self.nodes[&hash];

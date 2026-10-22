@@ -781,6 +781,60 @@ fn exhaustive_small_histories() {
     );
 }
 
+// Run in release: `cargo test -p deadbolt-core --release -- --ignored large_vault`.
+// On an idle machine the load takes about half a second, nearly all of it
+// signature checks. Those slow down with the machine, so the budget covers the
+// rest; before per-frontier caching that rest took over 30 s.
+#[test]
+#[ignore]
+fn large_vault_loads_quickly() {
+    let keys: Vec<_> = (1..=30).map(key).collect();
+    let mut vault = load(&[genesis(&keys[0])]);
+    let started = std::time::Instant::now();
+    for k in &keys[1..20] {
+        vault
+            .add(&keys[0], k.device_id(), consent(k, &vault, &keys[0]))
+            .unwrap();
+    }
+    let mut writers: Vec<usize> = (0..20).collect();
+    for i in 0..5000 {
+        let author = &keys[writers[i % writers.len()]];
+        vault.commit(author, data()).unwrap();
+        if i % 20 == 0 {
+            vault.rename(author, format!("name-{i}")).unwrap();
+        }
+        if i % 500 == 250 {
+            let gone = writers.remove(writers.len() - 1);
+            vault.remove(&keys[0], keys[gone].device_id()).unwrap();
+            let new = &keys[20 + i / 500];
+            vault
+                .add(&keys[0], new.device_id(), consent(new, &vault, &keys[0]))
+                .unwrap();
+            writers.insert(0, 20 + i / 500);
+        }
+    }
+    let built = started.elapsed();
+    let entries = all(&vault);
+    let membership = entries
+        .iter()
+        .filter(|e| e.log() == Log::Membership)
+        .count();
+    let started = std::time::Instant::now();
+    let loaded = load(&entries);
+    let elapsed = started.elapsed();
+    let started = std::time::Instant::now();
+    entries.iter().for_each(|e| e.verify().unwrap());
+    let signatures = started.elapsed();
+    eprintln!(
+        "{} entries ({membership} membership): built in {built:?}, loaded in {elapsed:?}, \
+         of which checking signatures alone takes {signatures:?}",
+        entries.len()
+    );
+    assert_eq!(loaded.items().len(), vault.items().len());
+    let rest = elapsed.saturating_sub(signatures);
+    assert!(rest < std::time::Duration::from_millis(250), "{rest:?}");
+}
+
 #[test]
 fn sockpuppet_bypass() {
     let (a, b, c) = (key(1), key(2), key(3));

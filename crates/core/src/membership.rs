@@ -37,6 +37,11 @@ impl Membership {
                 .get(author)
                 .is_some_and(|cutoff| cutoff.is_some_and(|c| seq <= c))
     }
+
+    /// Whether [`Membership::counts`] agrees with `other` for every entry.
+    pub(crate) fn counts_like(&self, other: &Membership) -> bool {
+        self.members == other.members && self.removed == other.removed
+    }
 }
 
 /// Resolves a causally closed set of entries; non-membership entries are ignored.
