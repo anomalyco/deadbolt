@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
+use zeroize::Zeroizing;
 
 pub use paths::Paths;
 use protocol::{
@@ -103,12 +104,10 @@ where
         .map_err(Error::Connect)?;
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
-    let mut body = serde_json::to_vec(&Request {
+    let body = encode_line(&Request {
         v: PROTOCOL_VERSION,
         command,
-    })
-    .map_err(Error::Encode)?;
-    body.push(b'\n');
+    })?;
     write.write_all(&body).await?;
     loop {
         let Some(line) = lines.next_line().await? else {
@@ -117,15 +116,34 @@ where
         match serde_json::from_str::<Message>(&line).map_err(Error::InvalidReply)? {
             Message::Event { event } => {
                 if let Some(answer) = on_event(event).map_err(|e| Error::Event(e.into()))? {
-                    let mut body = serde_json::to_vec(&Answer { answer }).map_err(Error::Encode)?;
-                    body.push(b'\n');
-                    write.write_all(&body).await?;
+                    write.write_all(&encode_line(&Answer { answer })?).await?;
                 }
             }
             Message::Ok { reply } => return Ok(reply),
             Message::Error { code, message } => return Err(AgentError { code, message }.into()),
         }
     }
+}
+
+/// `value` as one JSON line. Requests can carry a passphrase, so the buffer
+/// is sized up front (no reallocation leaves a copy behind) and wiped on drop.
+fn encode_line(value: &impl serde::Serialize) -> Result<Zeroizing<Vec<u8>>, Error> {
+    struct Count(usize);
+    impl std::io::Write for Count {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut len = Count(0);
+    serde_json::to_writer(&mut len, value).map_err(Error::Encode)?;
+    let mut body = Zeroizing::new(Vec::with_capacity(len.0 + 1));
+    serde_json::to_writer(&mut *body, value).map_err(Error::Encode)?;
+    body.push(b'\n');
+    Ok(body)
 }
 
 /// Sends a request that expects no events.

@@ -959,7 +959,11 @@ impl Agent {
         Ok(())
     }
 
-    async fn setup(self: &Arc<Self>, passphrase: String, device_name: String) -> Result<()> {
+    async fn setup(
+        self: &Arc<Self>,
+        passphrase: zeroize::Zeroizing<String>,
+        device_name: String,
+    ) -> Result<()> {
         let _transition = self.transition.lock().await;
         if deadbolt_store::is_initialized(&self.paths.data) {
             bail!("this device is already set up");
@@ -971,7 +975,6 @@ impl Agent {
         if passphrase.is_empty() {
             bail!("the passphrase cannot be empty");
         }
-        let passphrase = zeroize::Zeroizing::new(passphrase);
         let dir = self.paths.data.clone();
         let params = self.kdf;
         let loaded = tokio::task::spawn_blocking(move || {
@@ -981,7 +984,11 @@ impl Agent {
         self.start(loaded, None).await
     }
 
-    async fn unlock(self: &Arc<Self>, passphrase: String, timeout_secs: Option<u64>) -> Result<()> {
+    async fn unlock(
+        self: &Arc<Self>,
+        passphrase: zeroize::Zeroizing<String>,
+        timeout_secs: Option<u64>,
+    ) -> Result<()> {
         let _transition = self.transition.lock().await;
         if self
             .session
@@ -997,7 +1004,6 @@ impl Agent {
                 "this device is not set up; run `deadbolt init` or `deadbolt join`",
             ));
         }
-        let passphrase = zeroize::Zeroizing::new(passphrase);
         let dir = self.paths.data.clone();
         let loaded = tokio::task::spawn_blocking(move || Loaded::open(&dir, passphrase.as_bytes()))
             .await??;

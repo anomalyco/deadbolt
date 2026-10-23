@@ -174,18 +174,19 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 .map_err(Failure::from),
         ),
         Job::Status => Done::Status(deadbolt_client::status(paths).await),
-        Job::Unlock(passphrase) => {
-            let command = Command::Unlock {
-                passphrase: passphrase.to_string(),
-                timeout_secs: None,
-            };
-            Done::Unlocked(
-                deadbolt_client::simple(paths, command)
-                    .await
-                    .map(drop)
-                    .map_err(Failure::from),
-            )
-        }
+        // The agent may have stopped while the unlock screen was up.
+        Job::Unlock(passphrase) => Done::Unlocked(
+            async {
+                deadbolt_client::ensure_running(paths, launch).await?;
+                let command = Command::Unlock {
+                    passphrase,
+                    timeout_secs: None,
+                };
+                deadbolt_client::simple(paths, command).await.map(drop)
+            }
+            .await
+            .map_err(Failure::from),
+        ),
         Job::Lock => Done::Locked(
             deadbolt_client::simple(paths, Command::Lock)
                 .await

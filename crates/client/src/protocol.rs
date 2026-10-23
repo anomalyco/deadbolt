@@ -20,6 +20,7 @@
 //! readable by older and newer ones.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroizing;
 
 pub const PROTOCOL_VERSION: u32 = 1;
 
@@ -37,11 +38,11 @@ pub enum Command {
     Stop,
     /// First run: create the device key and store, leaving it unlocked.
     Setup {
-        passphrase: String,
+        passphrase: Zeroizing<String>,
         device_name: String,
     },
     Unlock {
-        passphrase: String,
+        passphrase: Zeroizing<String>,
         /// Idle timeout in seconds; `None` uses the config file, `Some(0)` never locks.
         timeout_secs: Option<u64>,
     },
