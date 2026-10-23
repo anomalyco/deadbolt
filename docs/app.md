@@ -156,7 +156,8 @@ crates/app/scripts/snap.sh              # headless PNGs of every scene into crat
 cargo run -p deadbolt-app -- --scene copied --at 2.4 --snap copied.png   # one scene; --theme light, --reduced-motion
 cargo run -p deadbolt-app -- --panel                                             # start with the quick panel
 cargo run -p deadbolt-app -- --window panel --scene filtering --snap panel.png   # a quick panel scene
-cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-motion.json --frames 240 --trace motion/panel.jsonl   # motion-lint trace: filter, copy, close
+cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-motion.json --frames 240 --trace motion/panel.jsonl   # motion-lint trace: filter, then close
+cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-copy.json --frames 150 --trace motion/panel-copy.jsonl   # copy (the opening selection's values are loaded; a new one's come from the agent), then close
 ```
 
 Scenes (`--scene`): `connecting`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`, and first run: `welcome`, `welcome-set-up`, `create`, `create-typing`, `create-ready`, `create-invalid`, `create-failed`, `creating` (created at 1.2 s, the moment, the vault at 2.7 s), `join`, `ticket`, `code`, `joining` (joined at 0.6 s), `join-declined`, `join-cancelled`, `join-failed`, and the command: `command-offer`, `install-command`, `command-installed`. Quick panel scenes (`--window panel --scene`): `connecting`, `empty`, `filtering`, `no-match`, `empty-vault`, `copied` (closes at 1.1 s), `locked`, `locked-error`, `not-set-up`, `failed`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
