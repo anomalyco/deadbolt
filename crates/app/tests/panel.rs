@@ -485,7 +485,7 @@ fn the_passphrase_stays_in_its_field() {
         for c in ['a', 'c', 'x', 'z'] {
             rt.key(with(Key::Command(c), cmd));
         }
-        rt.key(with(Key::Text("k".into()), ctrl));
+        rt.key(with(Key::Text("j".into()), ctrl));
         rt.frame(FRAME);
         assert_eq!(rt.state.passphrase.text, "hunter22");
         if rt.state.panel.is_none() {
