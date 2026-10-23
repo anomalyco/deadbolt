@@ -357,36 +357,29 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
                 )),
         )
         .on_press(move |s: &mut App| s.select(Some(id.clone())))
-        .child(fade_line(
+        .child(
             text(item.label.clone())
+                .key("label")
                 .font(k.ty.ui_medium.lh(20.0))
-                .color(k.c.text_strong),
-            "label",
-        ));
+                .color(k.c.text_strong)
+                .truncate_fade(),
+        );
     let sub = match &item.detail {
         Some(d) => format!("{d} · {}", item.kind),
         None => item.kind.clone(),
     };
-    r = r.child(fade_line(
-        text(sub).font(k.ty.small.lh(16.0)).color(k.c.text_muted),
-        "sub",
-    ));
+    r = r.child(
+        text(sub)
+            .key("sub")
+            .font(k.ty.small.lh(16.0))
+            .color(k.c.text_muted)
+            .truncate_fade(),
+    );
     if selected {
         r.fill(k.c.surface_raised_hover)
     } else {
         r.hover(k.c.hover)
     }
-}
-
-/// One line of text that fades out at the right edge instead of ending in "…".
-fn fade_line(t: El, key: &str) -> El {
-    row()
-        .key(key)
-        .w_full()
-        .shrink()
-        // Rune gap: `truncate_fade` is 1 em, short of 1.5. Remove when its default lands.
-        .clip_fade(0.0, 0.0, 20.0, 0.0)
-        .child(t)
 }
 
 fn detail(s: &App, k: &Kit) -> El {
@@ -421,12 +414,13 @@ fn detail(s: &App, k: &Kit) -> El {
             .key("head")
             .w_full()
             .gap(4.0)
-            .child(fade_line(
+            .child(
                 text(item.label.clone())
+                    .key("title")
                     .font(TextStyle::new(20.0, 500.0).lh(26.0))
-                    .color(k.c.text_strong),
-                "title",
-            ))
+                    .color(k.c.text_strong)
+                    .truncate_fade(),
+            )
             .child(
                 text(kind)
                     .key("kind")
@@ -522,10 +516,11 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
             .key(if copied { "copied" } else { "copy" })
             .transition(replace()),
     );
+    let value = text(value).key("value").font(style).color(k.c.text_base);
     let value = if field.kind == "note" {
-        text(value).font(style).color(k.c.text_base).wrap().w_full()
+        value.wrap().min_w(0.0)
     } else {
-        text(value).font(style).color(k.c.text_base)
+        value.truncate_fade()
     };
     row()
         .key(format!("field-{}", field.name))
@@ -545,15 +540,7 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
                 .font(k.ty.text_small)
                 .color(k.c.text_muted),
         )
-        .child(
-            row()
-                .key("value")
-                .grow(1.0)
-                .shrink()
-                // Rune gap: `truncate_fade` is 1 em, short of 1.5. Remove when its default lands.
-                .clip_fade(0.0, 0.0, 20.0, 0.0)
-                .child(value),
-        )
+        .child(value.grow(1.0).shrink())
         .child(actions)
 }
 

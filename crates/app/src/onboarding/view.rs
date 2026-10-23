@@ -1131,13 +1131,12 @@ fn command(s: &App, k: &Kit, key: &str, label: &str, line: &'static str, note: O
                     ..Shadow::default()
                 })
                 .child(
-                    row()
+                    text(line)
                         .key("text")
-                        .grow(1.0)
-                        .shrink()
-                        // Rune gap: `truncate_fade` is 1 em, short of 1.5. Remove when its default lands.
-                        .clip_fade(0.0, 0.0, 20.0, 0.0)
-                        .child(text(line).font(k.ty.text_small).color(k.c.text_base)),
+                        .font(k.ty.text_small)
+                        .color(k.c.text_base)
+                        .truncate_fade()
+                        .grow(1.0),
                 )
                 .child(
                     IconButton::new(if copied {
