@@ -564,9 +564,7 @@ fn focus_loss_while_closing_keeps_the_copy() {
     assert_eq!(phase(&rt), Phase::Hidden);
 }
 
-/// What headless runs can check of placement: they ignore `place`, so the
-/// display it lands on and the final frame are untested until Rune's
-/// launcher-wakes branch gives headless runs displays (docs/app.md).
+/// The placement request itself; tests/place.rs checks where it lands.
 #[test]
 fn it_opens_under_the_pointer_near_the_top() {
     use rune::{Align, DisplayTarget, OverlayPlacement, ScreenEdge};

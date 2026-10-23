@@ -114,7 +114,8 @@ pub fn run() {
             })
             .on_focus(|s, focused, tx| s.panel_focus(focused, tx))
             .on_close(|s, tx| s.panel_closed(tx));
-        if live && panel_first {
+        // Headless too, so a `--script` with displays and a pointer shows where it's placed.
+        if panel_first {
             main = windows.start_with_panel(main);
         }
         vec![
