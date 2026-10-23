@@ -60,6 +60,8 @@ Rune's runtime already enforces no first-paint animation, reduced motion (travel
 | Copy notice | user | rises 12 pt with a fade `.3/0`; text swaps by replacement; leaves the way it came, shorter |
 | Countdown | time | the bar's width is a `rune::Live` set every 100 ms and smoothed on `.12/0`, so it empties without rebuilding the view; the text rebuilds once a second. Plex Mono's digits are all one width, so nothing shakes |
 | Unlock error | agent | fades in |
+| Command offer | app | rises 12 pt with a fade, like the copy notice; leaves the same way |
+| Install page ↔ vault, its states | user | whole-state replacement; the page's body swaps by replacement (install → installed); Copy → Copied in place; errors fade in |
 | Hover | pointer | in 0 ms, out on Rune's snap |
 | Onboarding steps | user | whole-state replacement, as above; progress and its result share one panel |
 | Field hints (strength, repeat, problems) | dependent on typing | swap in place with a fade; the strength and repeat lines are always there, so typing never moves the fields below |
@@ -115,7 +117,7 @@ crates/app/scripts/snap.sh              # headless PNGs of every scene into crat
 cargo run -p deadbolt-app -- --scene copied --at 2.4 --snap copied.png   # one scene; --theme light, --reduced-motion
 ```
 
-Scenes (`--scene`): `connecting`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`, and first run: `welcome`, `welcome-set-up`, `create`, `create-typing`, `create-ready`, `create-invalid`, `create-failed`, `creating` (created at 1.2 s, the moment, the vault at 2.7 s), `join`, `ticket`, `code`, `joining` (joined at 0.6 s), `join-declined`, `join-cancelled`, `join-failed`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
+Scenes (`--scene`): `connecting`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`, and first run: `welcome`, `welcome-set-up`, `create`, `create-typing`, `create-ready`, `create-invalid`, `create-failed`, `creating` (created at 1.2 s, the moment, the vault at 2.7 s), `join`, `ticket`, `code`, `joining` (joined at 0.6 s), `join-declined`, `join-cancelled`, `join-failed`, and the command: `command-offer`, `install-command`, `command-installed`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
 
 ## One bundle, one agent
 
@@ -129,11 +131,23 @@ Deadbolt.app/Contents/
 
 The CLI uses Apple's `Helpers` code-signing location: `MacOS/Deadbolt` and `MacOS/deadbolt` would collide on a case-insensitive Mac disk. The helper is signed first, then the outer bundle. Fonts are embedded in the app binary. Rune currently has no bundle builder in its scripts or examples.
 
-**The CLI owns build replacement; the app accepts any compatible agent.** The CLI passes its exact Cargo version plus Git/build stamp to `ensure_running` and replaces an agent of another build, as before. The app passes no build requirement. It reuses an agent with the same protocol, regardless of whether the bundled, Homebrew or Cargo CLI started it. When no agent runs, it starts the bundled helper. An incompatible running protocol produces an error without stopping the agent; update the app or explicitly stop that agent with its CLI. The app's watch reconnection never launches an agent. Thus invoking a separately installed CLI may replace the agent once, but the app won't replace it back. Two distinct CLI builds still use the existing explicit-CLI replacement rule.
+**One rule decides which agent runs**, and the app and the CLI share it (`deadbolt_client::ensure_running`), so two builds never take turns replacing each other's agent:
 
-The first bundled launch offers **Install the deadbolt command**. The same action remains under Settings at the bottom of the window. Install creates a symlink, confirms its location in place and shows the `rm` command to undo it. Done or Not now records `app-command-offered` beside the agent config. Headless scenes (`install-command`, `command-installed`) never read or write these preferences or install a real link.
+| The running agent's protocol | What a client does |
+| --- | --- |
+| the same as its own | reuses it, whatever build started it: the bundled helper, Homebrew or Cargo |
+| older | stops it cleanly, then starts its own binary |
+| newer | fails without stopping it, naming the agent's program, version and pid, and suggests updating this copy or running `deadbolt agent stop` |
 
-The installer prefers writable `~/.local/bin`, `/opt/homebrew/bin`, then `/usr/local/bin` directories on the app's PATH. Otherwise it prefers a writable user directory and supplies a copyable `export PATH=…` command. Finder's PATH may differ from the terminal's; the app doesn't execute shell startup files or change shell profiles. If the chosen directory needs administrator access, it shows an exact, quoted command to copy; it never invokes sudo. Existing commands on that PATH are identified as this app's link, Homebrew (a Cellar link), Cargo (`.cargo/bin`), or another install. No existing file or foreign symlink, including a dangling one, is replaced. Remove the old command through its installer, then Check again. Put the app in its permanent location before linking; moving it later breaks an absolute symlink.
+A bundled app always starts its own helper; if that's missing the app says it's damaged and should be reinstalled, rather than falling back to another install. The app's watch reconnection never starts an agent. `deadbolt agent status` shows which build is running.
+
+In development, a rebuilt agent of the same protocol isn't picked up while the old one runs. `deadbolt agent stop` hands over to whichever build runs next; there's no override that replaces a compatible agent. Tests use `DEADBOLT_TEST_VERSION` for another build and `DEADBOLT_TEST_PROTOCOL` for an older or newer agent (`crates/cli/tests/cli.rs`, and fake agents in `crates/client`).
+
+**The command offer lives in the vault.** Nothing about the command appears before the vault opens: not over onboarding, the locked screen or a failure, and leaving the vault (a lock on sleep, say) closes it. Once the vault shows, a card at the bottom of the detail pane offers **Install…** when no `deadbolt` was found, or **Repair…** when the one found links to a Deadbolt that moved. Not now, or opening the install page, answers it for good: `app-command-offered` is written beside the agent config. The same page stays under **Settings** at the end of the vault's key hints. The page replaces the vault with a Back button and its panel centred, like an onboarding step; Install creates the link, confirms it in place and shows the `rm` that undoes it. While Settings or the page is open it takes every key first (Escape closes it, Tab moves between its buttons); nothing reaches the search field or the list behind it. Copy buttons turn into "Copied" in place, then back. Headless scenes (`command-offer`, `install-command`, `command-installed`) never read or write the preference or install a real link.
+
+The installer prefers writable `~/.local/bin`, `/opt/homebrew/bin`, then `/usr/local/bin` directories on the app's PATH. Otherwise it prefers a writable user directory and supplies a copyable `export PATH=…` command. Finder's PATH may differ from the terminal's; the app doesn't execute shell startup files or change shell profiles. If the chosen directory needs administrator access, it shows an exact, quoted command to copy; it never invokes sudo.
+
+It looks for an existing `deadbolt` in the same places the app looks for an agent binary (`binary::search_dirs`): PATH, then `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and `~/.cargo/bin`, which a Finder launch's PATH lacks. Directories that can't be read count as not having one. The scan and the install run off the UI thread. What it finds is this app's link, a link to a moved Deadbolt, Homebrew (a Cellar link), Cargo (`.cargo/bin`), or another install. A link is ours by its target's shape, `<anything>.app/Contents/Helpers/deadbolt`, whether or not the target still exists; the installer repoints it at this app (a new link renamed over the old one) or gives the `sudo ln -sfh` to do so. No other file or symlink, including a dangling one, is replaced: remove the old command through its installer, then Check again. A copy running from a disk image (`/Volumes`) or under App Translocation refuses to link and says to move Deadbolt to Applications first.
 
 ## Shipping the app
 
