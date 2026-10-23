@@ -7,11 +7,9 @@
 //! stranded rule stand in for them; docs/app.md ("Quick panel stand-ins") says
 //! which API replaces which.
 
-use std::sync::Arc;
-
 use rune::{
     Align, AppHandle, ConfiguredWindowOptions, Cursor, DisplayTarget, El, Key, KeyEvent,
-    OverlayPlacement, ScreenEdge, Tx, Waker, WindowOptions,
+    OverlayPlacement, ScreenEdge, Tx, WindowOptions,
 };
 use rune_kit::Kit;
 
@@ -89,12 +87,6 @@ impl Windows {
     pub fn open_main(&self) {
         self.main.set_dock_icon(true);
         self.main.open();
-    }
-
-    /// An empty update: Rune's launcher doesn't poll on a plain wake until branch launcher-wakes lands.
-    pub fn panel_waker(&self) -> Waker {
-        let panel = self.panel.clone();
-        Arc::new(move || panel.update(|_, _| {}))
     }
 
     /// Nothing but the panel could be on screen, and nothing can summon it

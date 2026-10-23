@@ -33,8 +33,10 @@ pub enum Stage {
 #[derive(Debug)]
 pub enum Progress {
     Stage(Stage),
-    /// This device is set up (it was, or the request just did it).
-    DeviceReady,
+    /// This device is set up; `set_up` says whether this request did it.
+    DeviceReady {
+        set_up: bool,
+    },
     /// This device's pairing ticket.
     Ticket(Zeroizing<String>),
     /// The confirmation code; waits for [`Worker::answer`].
@@ -225,6 +227,7 @@ async fn set_up(
     device: Option<NewDevice>,
     report: &Report,
 ) -> Result<(), Failure> {
+    let set_up = !status.initialized;
     match (status.initialized, device) {
         (true, None) => {}
         (true, Some(_)) => {
@@ -248,7 +251,7 @@ async fn set_up(
             deadbolt_client::simple(paths, command).await?;
         }
     }
-    report(Progress::DeviceReady);
+    report(Progress::DeviceReady { set_up });
     Ok(())
 }
 

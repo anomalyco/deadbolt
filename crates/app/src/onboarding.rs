@@ -587,8 +587,9 @@ impl App {
                     o.stage = Some(stage);
                 }
             }
-            Progress::DeviceReady => {
-                o.set_up_now |= !o.device_ready;
+            // Not inferred from `device_ready`: a status refresh may already have set it.
+            Progress::DeviceReady { set_up } => {
+                o.set_up_now |= set_up;
                 o.device_ready = true;
             }
             // A cancel is on its way; its result will say so.
