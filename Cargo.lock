@@ -3980,7 +3980,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=97bbc4f2a368870b4eea6e99de9e86c237d37ed2#97bbc4f2a368870b4eea6e99de9e86c237d37ed2"
+source = "git+https://github.com/anomalyco/rune?rev=a23bfa5acf58131472d3fde2bf3d40217f89a2ff#a23bfa5acf58131472d3fde2bf3d40217f89a2ff"
 dependencies = [
  "arboard",
  "blake3",
@@ -4006,6 +4006,7 @@ dependencies = [
  "serde_json",
  "swash",
  "taffy",
+ "unicode-segmentation",
  "wayland-backend",
  "wayland-client",
  "wayland-protocols",
@@ -4021,7 +4022,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=97bbc4f2a368870b4eea6e99de9e86c237d37ed2#97bbc4f2a368870b4eea6e99de9e86c237d37ed2"
+source = "git+https://github.com/anomalyco/rune?rev=a23bfa5acf58131472d3fde2bf3d40217f89a2ff#a23bfa5acf58131472d3fde2bf3d40217f89a2ff"
 dependencies = [
  "rune",
  "rune-motion",
@@ -4032,7 +4033,7 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=97bbc4f2a368870b4eea6e99de9e86c237d37ed2#97bbc4f2a368870b4eea6e99de9e86c237d37ed2"
+source = "git+https://github.com/anomalyco/rune?rev=a23bfa5acf58131472d3fde2bf3d40217f89a2ff#a23bfa5acf58131472d3fde2bf3d40217f89a2ff"
 
 [[package]]
 name = "rustc-hash"
