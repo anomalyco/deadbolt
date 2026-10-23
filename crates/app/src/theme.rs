@@ -7,7 +7,7 @@
 use std::sync::OnceLock;
 
 use rune::{Color, Shadow, TextStyle, Theme};
-use rune_kit::{Elevation, Kit, PaletteSeed, Radius, StateColors, Type};
+use rune_kit::{Elevation, Kit, PaletteFocus, PaletteSeed, Radius, StateColors, Type};
 
 pub const THEME: &str = include_str!("../assets/theme.json");
 
@@ -62,15 +62,20 @@ fn theme(dark: bool) -> &'static Theme {
 fn build(dark: bool) -> Kit {
     let t = theme(dark);
     let c = |n: &str| t.color(n);
-    let mut k = Kit::from_palette(PaletteSeed {
-        bg: c("bg"),
-        fg: c("text"),
-        accent: c("accent"),
-    });
+    // Focus is ink, as on the site; red is kept for the countdown and danger.
+    let mut k = Kit::from_palette_focus(
+        PaletteSeed {
+            bg: c("bg"),
+            fg: c("text"),
+            accent: c("accent"),
+        },
+        PaletteFocus::Ink,
+    );
     let p = &mut k.c;
-    // The site's surface ramp. Derived layers step OKLab lightness from the
-    // background, which on pure black barely leaves it (#000000-#070707); on
-    // paper they darken where the site's raised surfaces lighten.
+    // The site's surface ramp. Derived layers rise from the background on both
+    // appearances, so on paper raised surfaces come out darker (#e1ddd5) where
+    // the site's are lighter (#f3f0ea), and the dark steps differ by up to 13
+    // levels (the site's surface sits below its raised layer).
     [p.surface_base, p.surface_weak] = [c("surface"); 2];
     [
         p.layer_01,
@@ -80,19 +85,14 @@ fn build(dark: bool) -> Kit {
     ] = [c("raised"); 4];
     [p.layer_02, p.surface_raised_hover] = [c("layer"); 2];
     [p.layer_03, p.layer_04] = [c("layer-strong"); 2];
-    // Hairlines everywhere: the opaque border steps vanish on black (#060606)
-    // and turn grey on paper.
+    // Hairlines everywhere: the derived opaque border steps are heavier lines
+    // (#393939 on black, #aeaaa3 on paper).
     [p.border_weak, p.std_border, p.border_disabled] = [p.border_base; 3];
     p.border_hover = p.border_strong;
-    // Focus is ink, as on the site; a blue ring would be the only blue in a
-    // black, white and red app. Red is kept for the countdown and danger.
-    [p.border_focus, p.border_active] = [c("focus"); 2];
-    // The site's warm inks on paper (derived: #403f3c and #6f6c68); on black
-    // they match the derived greys.
-    [p.text_muted, p.text_weak, p.icon_muted, p.std_icon] = [c("text-muted"); 4];
+    // The site's faint ink on paper; the derived one is darker (#807c75).
     [p.text_faint, p.icon_faint, p.icon_weaker] = [c("text-faint"); 3];
-    // Derived status tints mix towards black and disappear; these are the
-    // site's.
+    // The site's red and amber: derived status roles take rune-kit's own
+    // (#ff847d and #dfa11a on black), not the seed's.
     p.danger = StateColors {
         bg: c("danger-bg"),
         fg: c("danger"),

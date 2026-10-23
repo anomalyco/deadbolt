@@ -3979,7 +3979,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=f848cb271561611c9f6d997d33ea047970617122#f848cb271561611c9f6d997d33ea047970617122"
+source = "git+https://github.com/anomalyco/rune?rev=43ff4f8a0064e38650d7fe180d698b3c99dfec0c#43ff4f8a0064e38650d7fe180d698b3c99dfec0c"
 dependencies = [
  "arboard",
  "blake3",
@@ -4014,7 +4014,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=f848cb271561611c9f6d997d33ea047970617122#f848cb271561611c9f6d997d33ea047970617122"
+source = "git+https://github.com/anomalyco/rune?rev=43ff4f8a0064e38650d7fe180d698b3c99dfec0c#43ff4f8a0064e38650d7fe180d698b3c99dfec0c"
 dependencies = [
  "rune",
  "rune-motion",
@@ -4024,7 +4024,7 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=f848cb271561611c9f6d997d33ea047970617122#f848cb271561611c9f6d997d33ea047970617122"
+source = "git+https://github.com/anomalyco/rune?rev=43ff4f8a0064e38650d7fe180d698b3c99dfec0c#43ff4f8a0064e38650d7fe180d698b3c99dfec0c"
 
 [[package]]
 name = "rustc-hash"
