@@ -134,6 +134,15 @@ impl App {
         }
         changed |= self.poll_onboarding(now, tx);
         changed |= self.tick_copy(now, tx);
+        if let Some(installer) = &mut self.installer {
+            changed |= installer.poll(now);
+            // The page and Settings belong to the vault; leaving it closes them.
+            if self.screen != Screen::Vault && (installer.open || installer.settings_open) {
+                installer.open = false;
+                installer.settings_open = false;
+                changed = true;
+            }
+        }
         changed
     }
 
@@ -499,6 +508,9 @@ impl App {
 
     /// Keys in the search field, before its editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if let Some(handled) = self.overlay_key(ev) {
+            return handled;
+        }
         match ev.key {
             Key::Up => self.step(-1),
             Key::Down => self.step(1),
@@ -617,22 +629,35 @@ impl App {
         }
     }
 
-    /// App-level keys, before the focused field.
-    pub fn on_key(&mut self, ev: &KeyEvent, _tx: &mut Tx) -> bool {
-        if let Some(installer) = &mut self.installer
-            && installer.settings_open
-            && ev.key == Key::Escape
-        {
-            installer.settings_open = false;
-            return true;
+    /// The install page is showing in place of the vault.
+    pub fn installing(&self) -> bool {
+        self.screen == Screen::Vault && self.installer.as_ref().is_some_and(|i| i.open)
+    }
+
+    /// Keys for the Settings popover or the install page, which sit over the
+    /// vault: Escape closes them, Tab moves between their buttons, and
+    /// nothing else reaches the vault behind. `None` when neither is open.
+    fn overlay_key(&mut self, ev: &KeyEvent) -> Option<bool> {
+        if self.screen != Screen::Vault {
+            return None;
         }
-        if let Some(installer) = &mut self.installer
-            && installer.open
-        {
-            if ev.key == Key::Escape {
-                installer.dismiss();
-            }
-            return true;
+        let installer = self.installer.as_mut()?;
+        if !installer.settings_open && !installer.open {
+            return None;
+        }
+        match ev.key {
+            Key::Escape if installer.settings_open => installer.settings_open = false,
+            Key::Escape => installer.close(),
+            Key::Tab => return Some(false),
+            _ => {}
+        }
+        Some(true)
+    }
+
+    /// App-level keys: before the focused field when there is none, after it otherwise.
+    pub fn on_key(&mut self, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+        if let Some(handled) = self.overlay_key(ev) {
+            return handled;
         }
         match ev.key {
             Key::Command('l') if self.screen == Screen::Vault => {

@@ -81,6 +81,9 @@ pub fn is_live(args: &rune::tooling::Args) -> bool {
 
 fn setup(s: &mut App, waker: Waker) {
     s.onboarding.worker.set_waker(waker.clone());
+    if let Some(installer) = &s.installer {
+        installer.set_waker(waker.clone());
+    }
     s.agent.set_waker(waker);
     s.agent.send(Job::Connect);
 }
@@ -91,12 +94,21 @@ fn setup(s: &mut App, waker: Waker) {
 type Scene = (&'static str, fn(&mut App));
 
 const SCENES: &[Scene] = &[
-    ("install-command", |s| {
+    ("command-offer", |s| {
+        vault(s);
         s.installer = Some(install::Installer::fixture());
     }),
-    ("command-installed", |s| {
+    ("install-command", |s| {
+        vault(s);
         let mut i = install::Installer::fixture();
-        i.installed = true;
+        i.show();
+        s.installer = Some(i);
+    }),
+    ("command-installed", |s| {
+        vault(s);
+        let mut i = install::Installer::fixture();
+        i.show();
+        i.apply();
         s.installer = Some(i);
     }),
     ("connecting", |_| {}),

@@ -20,7 +20,7 @@ use rune_kit::{
 use crate::model::{App, BAR_W, Screen, is_secret, title_case};
 
 const LIST_W: f32 = 300.0;
-const NOTICE_W: f32 = BAR_W + 24.0;
+pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
 
 fn replace() -> Transition {
     Transition::blur_replace()
@@ -29,67 +29,22 @@ fn replace() -> Transition {
 pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     cx.reduced_motion(s.reduced_motion);
     let k = crate::theme::kit(cx.system_dark());
-    let installing = s.installer.as_ref().is_some_and(|i| i.open);
-    let screen = if installing {
-        crate::install::view(s, k)
-    } else {
-        match &s.screen {
-            Screen::Connecting => connecting(k),
-            Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark()),
-            Screen::Locked => unlock(s, k),
-            Screen::Vault => vault(s, k),
-            Screen::Failed(message) => failed(k, message),
-        }
+    let mut layer = Vec::new();
+    let screen = match &s.screen {
+        Screen::Vault if s.installing() => crate::install::page(s, k),
+        Screen::Connecting => connecting(k),
+        Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark()),
+        Screen::Locked => unlock(s, k),
+        Screen::Vault => vault(s, k, &mut layer),
+        Screen::Failed(message) => failed(k, message),
     };
-    let mut window = col()
+    col()
         .key("window")
         .w_full()
         .h_full()
         .fill(k.c.bg_base)
-        .child(screen.grow(1.0).w_full().transition(replace()));
-    if let Some(installer) = &s.installer
-        && !installing
-    {
-        let mut layer = Vec::new();
-        let settings = rune_kit::Popover::new("command-settings")
-            .title("Settings")
-            .open(installer.settings_open)
-            .placement(rune_kit::Placement::TopStart)
-            .trigger(
-                Button::new("Settings")
-                    .size(ButtonSize::Large)
-                    .on_press(|s: &mut App| {
-                        if let Some(i) = &mut s.installer {
-                            i.settings_open = !i.settings_open;
-                        }
-                    })
-                    .build(k)
-                    .min_h(44.0),
-            )
-            .on_close(|s: &mut App| {
-                if let Some(i) = &mut s.installer {
-                    i.settings_open = false;
-                }
-            })
-            .child(
-                Button::new("Install deadbolt command…")
-                    .size(ButtonSize::Large)
-                    .on_press(|s: &mut App| {
-                        if let Some(i) = &mut s.installer {
-                            i.refresh();
-                            i.settings_open = false;
-                            i.open = true;
-                        }
-                    })
-                    .build(k)
-                    .min_h(44.0),
-            )
-            .build(k, &mut layer);
-        window = window
-            .child(row().w_full().padding(8.0).child(settings))
-            .children(layer);
-    }
-    window
+        .child(screen.grow(1.0).w_full().transition(replace()))
+        .children(layer)
 }
 
 /// A centred column for the screens that aren't the vault.
@@ -232,7 +187,7 @@ fn unlock(s: &App, k: &Kit) -> El {
 // -------------------------------------------------------------------------------------------
 // The vault: search, list, detail.
 
-fn vault(s: &App, k: &Kit) -> El {
+fn vault(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     col()
         .key("vault")
         .child(toolbar(s, k))
@@ -248,7 +203,7 @@ fn vault(s: &App, k: &Kit) -> El {
                 .child(detail(s, k)),
         )
         .child(el().key("rule2").h(1.0).w_full().fill(k.c.border_weak))
-        .child(hints(k))
+        .child(hints(s, k, layer))
 }
 
 fn toolbar(s: &App, k: &Kit) -> El {
@@ -409,6 +364,7 @@ fn detail(s: &App, k: &Kit) -> El {
         .px(28.0)
         .py(24.0)
         .gap(20.0);
+    let offer = s.loaded.then(|| crate::install::offer(s, k)).flatten();
     let Some(item) = s.selected_item() else {
         if s.loaded && s.items.is_empty() {
             pane = pane.child(crate::onboarding::view::empty_vault(s, k));
@@ -419,6 +375,9 @@ fn detail(s: &App, k: &Kit) -> El {
                     .font(k.ty.text_small)
                     .color(k.c.text_faint),
             );
+        }
+        if offer.is_some() {
+            pane = pane.child(spacer()).children(offer);
         }
         return pane;
     };
@@ -447,7 +406,7 @@ fn detail(s: &App, k: &Kit) -> El {
             fields = fields.child(field_row(s, &full.id, field, k));
         }
     }
-    pane = pane.child(fields).child(spacer());
+    pane = pane.child(fields).child(spacer()).children(offer);
     if let Some(n) = notice(s, k) {
         pane = pane.child(n);
     }
@@ -633,7 +592,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
     Some(pill)
 }
 
-fn hints(k: &Kit) -> El {
+fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let hint = |key: &str, keys: &[&str], label: &str| {
         row()
             .key(key)
@@ -658,4 +617,5 @@ fn hints(k: &Kit) -> El {
         .child(hint("h-move", &["↑", "↓"], "Select"))
         .child(spacer())
         .child(hint("h-lock", &["⌘", "L"], "Lock"))
+        .children(crate::install::settings(s, k, layer))
 }
