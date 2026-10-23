@@ -31,9 +31,9 @@ pub enum Phase {
     /// Up and taking keys.
     Open,
     /// A copy landed: the confirmation shows until `until`, then it closes.
-    Copied { until: f64 },
+    Copied { until: Option<f64> },
     /// The card is fading; the window hides at `until`.
-    Closing { until: f64 },
+    Closing { until: Option<f64> },
     /// Hidden until the shortcut brings it back.
     Hidden,
 }
@@ -120,32 +120,53 @@ impl App {
         if matches!(panel.phase, Phase::Closing { .. } | Phase::Hidden) {
             return;
         }
-        panel.phase = Phase::Closing {
-            until: self.clock + HIDE_AFTER,
-        };
+        panel.phase = Phase::Closing { until: None };
         self.passphrase.clear();
-        tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
+        tx.wake_after(Duration::ZERO);
     }
 
     /// A copy landed: show the confirmation, then close.
     pub(crate) fn panel_copied(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
         if panel.phase == Phase::Open {
-            panel.phase = Phase::Copied {
-                until: self.clock + CONFIRM,
-            };
-            tx.wake_after(Duration::from_secs_f64(CONFIRM));
+            panel.phase = Phase::Copied { until: None };
+            tx.wake_after(Duration::ZERO);
         }
     }
 
     /// Moves the panel along its phases. True when anything changed.
+    ///
+    /// A phase's deadline is set here, from the frame's clock: an event can
+    /// arrive before the frame moves `self.clock` on from an idle stretch.
     pub(crate) fn poll_panel(&mut self, now: f64, tx: &mut Tx) -> bool {
         let Some(panel) = &mut self.panel else {
             return false;
         };
-        match panel.phase {
-            Phase::Copied { until } if now >= until - 1e-3 => self.dismiss(tx),
-            Phase::Closing { until } if now >= until - 1e-3 => {
+        match &mut panel.phase {
+            Phase::Copied {
+                until: until @ None,
+            } => {
+                *until = Some(now + CONFIRM);
+                tx.wake_after(Duration::from_secs_f64(CONFIRM));
+                return false;
+            }
+            Phase::Closing {
+                until: until @ None,
+            } => {
+                *until = Some(now + HIDE_AFTER);
+                tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
+                return false;
+            }
+            Phase::Copied { until: Some(until) } if now >= *until - 1e-3 => {
+                self.dismiss(tx);
+                if let Some(panel) = &mut self.panel {
+                    panel.phase = Phase::Closing {
+                        until: Some(now + HIDE_AFTER),
+                    };
+                }
+                tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
+            }
+            Phase::Closing { until: Some(until) } if now >= *until - 1e-3 => {
                 self.hide_panel(tx);
                 window::leave_if_stranded(self, tx);
             }

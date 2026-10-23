@@ -318,6 +318,62 @@ fn escape_fades_the_card_then_hides() {
     assert!(gone < 0.01, "faded out by the time it hides ({gone})");
 }
 
+/// A window draws no frames while nothing moves, so the app's clock stands
+/// still until an event's frame; the time passes with no poll.
+fn idle(rt: &mut Runtime<App>) {
+    let poll = rt.poll.take();
+    rt.frame(5.0);
+    rt.poll = poll;
+}
+
+fn fades_then_hides(rt: &mut Runtime<App>, how: &str) {
+    assert!(matches!(phase(rt), Phase::Closing { .. }), "{how} closes");
+    frames(rt, 5);
+    let fade = find(rt, "card").expect("still fading").1;
+    assert!(fade > 0.0 && fade < 1.0, "{how}: the card fades ({fade})");
+    frames(rt, 20);
+    assert_eq!(phase(rt), Phase::Hidden, "{how}");
+    let gone = find(rt, "card").map_or(0.0, |c| c.1);
+    assert!(
+        gone < 0.01,
+        "{how}: faded out by the time it hides ({gone})"
+    );
+}
+
+#[test]
+fn after_a_pause_escape_and_clicking_away_still_fade() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    idle(&mut rt);
+    rt.key(key(Key::Escape));
+    rt.frame(FRAME);
+    fades_then_hides(&mut rt, "Escape");
+
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    idle(&mut rt);
+    rt.update(|s, tx| s.panel_focus(false, tx));
+    rt.frame(FRAME);
+    fades_then_hides(&mut rt, "clicking away");
+}
+
+#[test]
+fn after_a_pause_a_copy_still_confirms() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    idle(&mut rt);
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    frames(&mut rt, 50);
+    assert!(
+        matches!(phase(&rt), Phase::Copied { .. }),
+        "the confirmation shows its full time"
+    );
+    frames(&mut rt, 30);
+    assert!(matches!(phase(&rt), Phase::Closing { .. } | Phase::Hidden));
+}
+
 /// Summoned again while the close still fades: the card comes back at rest,
 /// not fading back in from where its close had got to.
 #[test]
@@ -738,6 +794,7 @@ fn a_replaced_copy_never_clears_the_newer_one() {
     both(&mut quick, &mut main, FRAME);
     assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
 
+    both(&mut quick, &mut main, FRAME);
     both(&mut quick, &mut main, 15.0);
     assert_eq!(phase(&quick), Phase::Hidden);
     main.update(|s, tx| s.copy_field("password", tx));
