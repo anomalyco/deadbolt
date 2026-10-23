@@ -11,7 +11,7 @@ use crate::agent::{Agent, Done, Failure, Job};
 use crate::clipboard::{Clipboard, Copied};
 use crate::secret::SecretEdit;
 
-/// How long a copied secret stays on the clipboard.
+/// How long a copied secret stays on the clipboard, by default.
 pub const CLEAR_AFTER: f64 = 30.0;
 /// How long "Clipboard cleared" stays before the notice leaves.
 const CLEARED_NOTICE: f64 = 1.6;
@@ -40,6 +40,8 @@ pub struct Copy {
     pub item: String,
     pub field: String,
     pub at: f64,
+    /// Seconds until the clear.
+    pub lasts: f64,
     pub copied: Option<Copied>,
     /// When the clipboard was cleared (or the copy failed), for the closing notice.
     pub cleared_at: Option<f64>,
@@ -50,13 +52,15 @@ pub struct Copy {
 
 impl Copy {
     pub fn remaining(&self, now: f64) -> f64 {
-        (CLEAR_AFTER - (now - self.at)).max(0.0)
+        (self.lasts - (now - self.at)).max(0.0)
     }
 }
 
 pub struct App {
     pub agent: Agent,
     pub clipboard: Clipboard,
+    /// How long a copied secret stays on the clipboard.
+    pub clear_after: f64,
     pub screen: Screen,
     pub status: Option<Status>,
     pub passphrase: SecretEdit,
@@ -87,6 +91,7 @@ impl App {
         App {
             agent,
             clipboard,
+            clear_after: CLEAR_AFTER,
             screen: Screen::Connecting,
             status: None,
             passphrase: SecretEdit::default(),
@@ -439,8 +444,9 @@ impl App {
             item,
             field: field.into(),
             at: self.clock,
+            lasts: self.clear_after,
             cleared_at: error.as_ref().map(|_| self.clock),
-            shown: CLEAR_AFTER as u32,
+            shown: self.clear_after.ceil() as u32,
             copied,
             error,
         });
@@ -463,7 +469,7 @@ impl App {
         }
         let remaining = copy.remaining(now);
         self.bar
-            .set([0.0, 0.0, BAR_W * (remaining / CLEAR_AFTER) as f32, 2.0]);
+            .set([0.0, 0.0, BAR_W * (remaining / copy.lasts) as f32, 2.0]);
         if remaining <= 0.0 {
             if let Some(c) = copy.copied.take() {
                 self.clipboard.clear(c);

@@ -18,11 +18,19 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const PASSPHRASE: &str = "correct horse";
 
-/// `DEADBOLT_BIN`, else `deadbolt` built from this repository into the test's
-/// own target dir (a separate one, so it doesn't wait on the outer build's lock).
+/// `DEADBOLT_BIN`, else the `deadbolt` cargo already built next to this test
+/// (`cargo test --workspace` builds it for the CLI's own tests), else one
+/// built here into the test's own target dir, which doesn't wait on the outer
+/// build's lock but compiles the CLI from scratch.
 fn deadbolt() -> PathBuf {
     if let Some(bin) = std::env::var_os("DEADBOLT_BIN") {
         return bin.into();
+    }
+    let sibling = std::env::current_exe()
+        .ok()
+        .and_then(|exe| Some(exe.parent()?.parent()?.join("deadbolt")));
+    if let Some(bin) = sibling.filter(|bin| bin.is_file()) {
+        return bin;
     }
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
     let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli");
@@ -89,6 +97,24 @@ impl Device {
             .status()
             .unwrap();
         assert!(status.success(), "deadbolt {args:?} failed");
+    }
+
+    /// How the app starts this device's agent: a script that runs `deadbolt`
+    /// with the device's environment, as the app's own would have.
+    fn launch(&self) -> Launch {
+        let script = self._dir.path().join("deadbolt");
+        let mut body = String::from("#!/bin/sh\nexec env");
+        for (name, value) in &self.vars {
+            body.push_str(&format!(" {name}='{}'", value.to_string_lossy()));
+        }
+        body.push_str(&format!(" '{}' \"$@\"\n", self.bin.display()));
+        std::fs::write(&script, body).unwrap();
+        std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        Launch {
+            program: script,
+            version: None,
+        }
     }
 
     fn paths(&self) -> Paths {
@@ -159,13 +185,7 @@ fn unlock_search_copy_lock() {
     device.run(&["lock"]);
 
     let (clipboard, board) = Clipboard::memory();
-    let agent = Agent::spawn(
-        device.paths(),
-        Launch {
-            program: device.bin.clone(),
-            version: None,
-        },
-    );
+    let agent = Agent::spawn(device.paths(), device.launch());
     let mut rt = Runtime::new(
         App::new(agent, clipboard),
         deadbolt_app::view::app,
@@ -197,6 +217,12 @@ fn unlock_search_copy_lock() {
     until(&mut rt, "the unlock error", |s| s.unlock_error.is_some());
     assert_eq!(rt.state.screen, Screen::Locked);
 
+    // Typing clears the error; the agent stopping meanwhile is no obstacle.
+    device.run(&["agent", "stop"]);
+    rt.key(key(Key::Text(PASSPHRASE[..1].into())));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.unlock_error, None);
+    rt.key(key(Key::Backspace));
     for c in PASSPHRASE.chars() {
         rt.key(key(Key::Text(c.into())));
     }
@@ -264,6 +290,7 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
         },
     );
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.state.clear_after = 1.0;
     // The "copied" scene's state, by hand: a vault with one item's fields.
     rt.state.screen = Screen::Vault;
     rt.state.detail = Some(deadbolt_client::protocol::ItemInfo {
@@ -282,15 +309,15 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
     rt.update(|s, tx| s.copy_field("password", tx));
     rt.frame(1.0 / 60.0);
     assert_eq!(board.lock().unwrap().as_deref(), Some("pw"));
-    for _ in 0..(31 * 20) {
+    for _ in 0..25 {
         rt.frame(0.05);
     }
-    assert_eq!(*board.lock().unwrap(), None, "cleared after 30 s");
+    assert_eq!(*board.lock().unwrap(), None, "cleared after a second");
 
     rt.update(|s, tx| s.copy_field("password", tx));
     rt.frame(1.0 / 60.0);
     *board.lock().unwrap() = Some("mine".into());
-    for _ in 0..(31 * 20) {
+    for _ in 0..25 {
         rt.frame(0.05);
     }
     assert_eq!(
