@@ -172,7 +172,7 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
 /// `new` runs `deadbolt join`, `inviter` runs `deadbolt pair <ticket>`.
 fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) {
     let mut child = new
-        .cmd(&["join", "--device-name", device_name])
+        .cmd(&["join", "--yes", "--device-name", device_name])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -340,6 +340,37 @@ fn pairing_membership_and_removal() {
     );
     // b still syncs with a.
     let out = b.run(&["sync"]);
+    assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
+
+    // Re-pairing gamma into family (from which it was removed) is refused before
+    // dialing, while pairing that same ticket into a's other vault succeeds.
+    let mut child = c
+        .cmd(&["join", "--yes", "--device-name", "gamma"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let ticket = rx.recv_timeout(Duration::from_secs(30)).expect("no ticket");
+    let err = a.fail(&["pair", &ticket, "--vault", "family"]);
+    assert!(
+        err.contains("that device was removed from family and can't rejoin it"),
+        "{err}"
+    );
+    let out = a.run(&["pair", &ticket, "--vault", "other"]);
+    assert!(out.starts_with("added gamma to other"), "{out}");
+    assert!(wait(&mut child, Duration::from_secs(30)).success());
+    let joined = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(joined, "joined vault other");
+    let out = c.run(&["sync", "--vault", "other"]);
     assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
 
     // Restarting the agent keeps everything (store + meta).

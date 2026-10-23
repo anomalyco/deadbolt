@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
-use deadbolt_core::{DeviceId, Entry, Signature, Vault, VaultId};
+use deadbolt_core::{DeviceId, Entry, Signature, Vault, VaultId, valid_name};
 use deadbolt_net::{HandlerError, Inviter, Joiner, PairingContext, PairingOptions, PairingTicket};
 use serde::{Deserialize, Serialize};
 use tracing::info;
@@ -67,6 +67,9 @@ pub(super) fn join_blob(
     offer: &Offer,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>> {
+    if !valid_name(&offer.vault_name) {
+        bail!("invalid vault name");
+    }
     let vault = VaultId::from_bytes(unhex(&offer.vault)?);
     if s.vaults.contains_key(&vault) {
         bail!("this device already holds vault {}", offer.vault_name);
@@ -91,6 +94,12 @@ pub(super) fn welcome(
     let held = s.vault(&vault);
     if !held.is_member(&s.id) {
         bail!("this device is no longer a member of {}", held.name());
+    }
+    if held.was_removed(&device) {
+        bail!(
+            "that device was removed from {} and can't rejoin it",
+            held.name()
+        );
     }
     if held.is_member(&device) {
         bail!("that device is already a member of {}", held.name());
@@ -126,7 +135,7 @@ pub(super) fn apply_welcome(
         .map(|bytes| Entry::decode(&bytes))
         .collect::<Result<_, _>>()
         .context("decoding welcome")?;
-    let vault = Vault::load(entries.clone()).context("loading the vault")?;
+    let vault = Vault::load(entries).context("loading the vault")?;
     if vault.id().to_string() != offer.vault {
         bail!("the welcome is for another vault");
     }
@@ -135,7 +144,7 @@ pub(super) fn apply_welcome(
     }
     s.learn(&inviter, Some(&offer.name), offer.addr.clone(), meta.peers);
     let id = vault.id();
-    s.add_vault(vault, &entries)?;
+    s.add_vault(vault)?;
     Ok(s.vault_info(&id))
 }
 
@@ -157,18 +166,23 @@ struct NewDevice<'a> {
 }
 
 impl Joiner for NewDevice<'_> {
-    async fn confirm(&self, _ctx: &PairingContext) -> bool {
-        // Reported in `join`, once the vault name is known.
-        true
-    }
-
-    async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
-        let offer: Offer = serde_json::from_slice(&offer)?;
-        let inviter_id = DeviceId::from_bytes(ctx.remote);
-        let join = self
+    async fn confirm(&self, ctx: &PairingContext, offer: &[u8]) -> bool {
+        let Ok(offer) = serde_json::from_slice::<Offer>(offer) else {
+            return false;
+        };
+        if !valid_name(&offer.vault_name) {
+            return false;
+        }
+        let Ok(vault) = unhex(&offer.vault).map(VaultId::from_bytes) else {
+            return false;
+        };
+        if self
             .agent
-            .with(|s| join_blob(s, inviter_id, &offer, Some(s.own_addr())))
-            .map_err(handler_error)?;
+            .with(|s| Ok(s.vaults.contains_key(&vault)))
+            .unwrap_or(true)
+        {
+            return false;
+        }
         let inviter = DeviceInfo {
             id: hex(&ctx.remote),
             name: Some(super::session::clean_name(&offer.name)),
@@ -178,12 +192,19 @@ impl Joiner for NewDevice<'_> {
         };
         let event = Event::Joining {
             code: ctx.code.to_string(),
-            vault: offer.vault_name.clone(),
+            vault: super::session::clean_name(&offer.vault_name),
             inviter,
         };
-        if !report(self.conv, event, self.confirm).await {
-            return Err("declined".into());
-        }
+        report(self.conv, event, self.confirm).await
+    }
+
+    async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+        let offer: Offer = serde_json::from_slice(&offer)?;
+        let inviter_id = DeviceId::from_bytes(ctx.remote);
+        let join = self
+            .agent
+            .with(|s| join_blob(s, inviter_id, &offer, Some(s.own_addr())))
+            .map_err(handler_error)?;
         *self.offer.lock().unwrap_or_else(|e| e.into_inner()) = Some(offer);
         Ok(join)
     }
@@ -213,12 +234,11 @@ impl NewDevice<'_> {
         welcome: Vec<Vec<u8>>,
     ) -> Result<VaultInfo> {
         let inviter = DeviceId::from_bytes(ctx.remote);
-        let (node, removed, info) = self.agent.with(|s| {
+        self.agent.with(|s| {
             let info = apply_welcome(s, inviter, &offer, welcome)?;
-            Ok((s.node.clone(), self.agent.refresh(s), info))
-        })?;
-        self.agent.enforce(&node, &removed);
-        Ok(info)
+            self.agent.refresh(s);
+            Ok(info)
+        })
     }
 }
 
@@ -282,15 +302,15 @@ impl Inviter for ExistingDevice<'_> {
         join: Vec<u8>,
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
         let device = DeviceId::from_bytes(ctx.remote);
-        let (node, removed, blobs, info) = self
+        let (blobs, info) = self
             .agent
             .with_data(|s| {
                 let (blobs, info) =
                     welcome(s, self.vault, device, &join, Some(self.ticket_addr.clone()))?;
-                Ok((s.node.clone(), self.agent.refresh(s), blobs, info))
+                self.agent.refresh(s);
+                Ok((blobs, info))
             })
             .map_err(handler_error)?;
-        self.agent.enforce(&node, &removed);
         *self.added.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
         Ok(blobs)
     }
@@ -314,11 +334,19 @@ pub async fn pair(
             bail!("that ticket is from this device");
         }
         let id = s.resolve(vault.as_deref())?;
-        if !s.vault(&id).is_member(&s.id) {
+        let held = s.vault(&id);
+        if !held.is_member(&s.id) {
+            bail!("this device is no longer a member of {}", held.name());
+        }
+        let peer = DeviceId::from_bytes(ticket.peer_id());
+        if held.was_removed(&peer) {
             bail!(
-                "this device is no longer a member of {}",
-                s.vault(&id).name()
+                "that device was removed from {} and can't rejoin it",
+                held.name()
             );
+        }
+        if held.is_member(&peer) {
+            bail!("that device is already a member of {}", held.name());
         }
         Ok((s.node.clone(), id))
     })?;
@@ -344,4 +372,304 @@ pub async fn pair(
     info!(vault = %vault.name, device = %device.id, "paired");
     agent.sync_now.notify_one();
     Ok(Reply::Device { vault, device })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::protocol::Message;
+    use deadbolt_net::{Error as NetError, Node, NodeConfig, PairingStream, PeerId};
+    use deadbolt_store::KdfParams;
+    use std::sync::RwLock;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixStream;
+    use tokio::sync::{Notify, mpsc, watch};
+
+    async fn test_agent(dir: &std::path::Path, name: &str) -> Arc<Agent> {
+        let kdf = KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let loaded = Loaded::setup(dir, b"test", name, kdf).unwrap();
+        let agent = Arc::new(Agent {
+            paths: Paths {
+                data: dir.into(),
+                config: dir.join("config"),
+                socket: dir.join("socket"),
+                lock: dir.join("lock"),
+                log: dir.join("log"),
+            },
+            local_net: true,
+            kdf,
+            session: Mutex::default(),
+            members: Arc::new(RwLock::default()),
+            ready: watch::channel(true).0,
+            sync_now: Notify::new(),
+            transition: tokio::sync::Mutex::new(()),
+            idle: Mutex::default(),
+            busy: AtomicUsize::new(0),
+            shutdown: Notify::new(),
+        });
+        let node = Node::spawn(
+            NodeConfig::local_only(*loaded.secret.to_bytes()),
+            Arc::new(|_: &PeerId| false),
+            super::super::sync::Handler(agent.clone()),
+        )
+        .await
+        .unwrap();
+        *agent.session.lock().unwrap() = Some(super::super::session::Session::new(loaded, node));
+        agent
+    }
+
+    fn test_conv(answer: bool) -> (Conversation, UnixStream) {
+        let (server, client) = UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(answer).unwrap();
+        let conv = Conversation {
+            write: tokio::sync::Mutex::new(write),
+            answers: tokio::sync::Mutex::new(rx),
+            closed: watch::channel(false).1,
+        };
+        (conv, client)
+    }
+
+    async fn read_event(client: UnixStream) -> Event {
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).await.unwrap();
+        match serde_json::from_str::<Message>(&line).unwrap() {
+            Message::Event { event } => event,
+            other => panic!("expected event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn joiner_confirms_with_offer_and_declining_withholds_consent() {
+        for joiner_accepts in [false, true] {
+            let a_dir = tempfile::tempdir().unwrap();
+            let b_dir = tempfile::tempdir().unwrap();
+            let a = test_agent(a_dir.path(), "alpha").await;
+            let b = test_agent(b_dir.path(), "beta").await;
+            let vault = a.with(|s| s.create_vault("personal")).unwrap();
+            let a_id = a.with(|s| Ok(*s.id.as_bytes())).unwrap();
+            let b_id = b.with(|s| Ok(*s.id.as_bytes())).unwrap();
+
+            let (a_conv, a_client) = test_conv(true);
+            let (b_conv, b_client) = test_conv(joiner_accepts);
+            let inviter = ExistingDevice {
+                agent: &a,
+                conv: &a_conv,
+                confirm: true,
+                vault,
+                ticket_addr: b.with(|s| Ok(s.own_addr())).unwrap(),
+                added: Mutex::default(),
+            };
+            let joiner = NewDevice {
+                agent: &b,
+                conv: &b_conv,
+                confirm: true,
+                offer: Mutex::default(),
+                joined: Mutex::default(),
+            };
+
+            let (left, right) = tokio::io::duplex(64 * 1024);
+            let dial = PairingStream::new(a_id, b_id, [7; 32], [9; 32], false);
+            let listen = PairingStream::new(b_id, a_id, [7; 32], [9; 32], true);
+            let inviter_ref = &inviter;
+            let joiner_ref = &joiner;
+
+            let (invited, joined) = tokio::join!(
+                async move {
+                    let (mut ar, mut at) = tokio::io::split(left);
+                    dial.invite(&mut at, &mut ar, 1 << 20, inviter_ref).await
+                },
+                async move {
+                    let (mut br, mut bt) = tokio::io::split(right);
+                    listen
+                        .prove(&mut br)
+                        .await?
+                        .complete(&mut bt, &mut br, 1 << 20, joiner_ref)
+                        .await
+                }
+            );
+
+            let Event::Pairing {
+                code: a_code,
+                device,
+            } = read_event(a_client).await
+            else {
+                panic!("expected Pairing event");
+            };
+            let Event::Joining {
+                code: b_code,
+                vault: vault_name,
+                inviter: inviter_info,
+            } = read_event(b_client).await
+            else {
+                panic!("expected Joining event");
+            };
+            assert_eq!(a_code, b_code);
+            assert_eq!(device, short(&b_id));
+            assert_eq!(vault_name, "personal");
+            assert_eq!(inviter_info.name.as_deref(), Some("alpha"));
+
+            if joiner_accepts {
+                invited.unwrap();
+                joined.unwrap();
+                assert!(inviter.added.lock().unwrap().is_some());
+                assert!(joiner.joined.lock().unwrap().is_some());
+                assert!(b.with(|s| Ok(s.vaults.contains_key(&vault))).unwrap());
+            } else {
+                assert!(invited.is_err());
+                assert!(matches!(joined, Err(NetError::PairingDeclined)));
+                assert!(joiner.offer.lock().unwrap().is_none());
+                assert!(inviter.added.lock().unwrap().is_none());
+                assert!(!b.with(|s| Ok(s.vaults.contains_key(&vault))).unwrap());
+                assert_eq!(
+                    a.with(|s| Ok(s.vault(&vault).members().count())).unwrap(),
+                    1
+                );
+            }
+
+            a.lock().await;
+            b.lock().await;
+        }
+    }
+
+    #[tokio::test]
+    async fn confirm_declines_invalid_offer_and_welcome_refuses_removed_device() {
+        struct BadInviter(Vec<u8>);
+        impl Inviter for BadInviter {
+            async fn confirm(&self, _: &PairingContext) -> bool {
+                true
+            }
+            async fn offer(&self, _: &PairingContext) -> Result<Vec<u8>, HandlerError> {
+                Ok(self.0.clone())
+            }
+            async fn welcome(
+                &self,
+                _: &PairingContext,
+                _: Vec<u8>,
+            ) -> Result<Vec<Vec<u8>>, HandlerError> {
+                unreachable!("joiner must decline before sending join")
+            }
+        }
+
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let a = test_agent(a_dir.path(), "alpha").await;
+        let b = test_agent(b_dir.path(), "beta").await;
+        let vault = a.with(|s| s.create_vault("personal")).unwrap();
+        let a_id = a.with(|s| Ok(*s.id.as_bytes())).unwrap();
+        let b_id = b.with(|s| Ok(*s.id.as_bytes())).unwrap();
+        let b_dev = DeviceId::from_bytes(b_id);
+
+        // Admit b into personal so b already holds it.
+        let valid_offer = a.with(|s| offer(s, vault, None)).unwrap();
+        let parsed_offer: Offer = serde_json::from_slice(&valid_offer).unwrap();
+        let join = b
+            .with(|s| join_blob(s, DeviceId::from_bytes(a_id), &parsed_offer, None))
+            .unwrap();
+        let (blobs, _) = a.with(|s| welcome(s, vault, b_dev, &join, None)).unwrap();
+        b.with(|s| apply_welcome(s, DeviceId::from_bytes(a_id), &parsed_offer, blobs))
+            .unwrap();
+
+        // Remove b on a; a hostile b trying to re-pair into the same vault is
+        // refused by `welcome` and receives no entries.
+        a.with(|s| s.update(vault, |v, key| Ok(v.remove(key, b_dev)?)))
+            .unwrap();
+        let err = a
+            .with(|s| welcome(s, vault, b_dev, &join, None))
+            .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "that device was removed from personal and can't rejoin it"
+        );
+
+        // Bad offers (malformed JSON, ANSI/invalid vault name, bad vault id, or
+        // an already-held vault) are declined in `NewDevice::confirm` even when
+        // `confirm: false`.
+        let other = a.with(|s| s.create_vault("work")).unwrap();
+        let ansi_offer = serde_json::to_vec(&Offer {
+            v: 1,
+            vault: other.to_string(),
+            vault_name: "work\x1b[31m".into(),
+            name: "alpha".into(),
+            addr: None,
+        })
+        .unwrap();
+        let bad_id_offer = serde_json::to_vec(&Offer {
+            v: 1,
+            vault: "not-a-vault-id".into(),
+            vault_name: "work".into(),
+            name: "alpha".into(),
+            addr: None,
+        })
+        .unwrap();
+        for bad in [b"not-json".to_vec(), ansi_offer, bad_id_offer, valid_offer] {
+            let (b_conv, _b_client) = test_conv(true);
+            let joiner = NewDevice {
+                agent: &b,
+                conv: &b_conv,
+                confirm: false,
+                offer: Mutex::default(),
+                joined: Mutex::default(),
+            };
+            let inviter = BadInviter(bad);
+            let (left, right) = tokio::io::duplex(64 * 1024);
+            let dial = PairingStream::new(a_id, b_id, [7; 32], [9; 32], false);
+            let listen = PairingStream::new(b_id, a_id, [7; 32], [9; 32], true);
+            let (_, joined) = tokio::join!(
+                async move {
+                    let (mut ar, mut at) = tokio::io::split(left);
+                    dial.invite(&mut at, &mut ar, 1 << 20, &inviter).await
+                },
+                async move {
+                    let (mut br, mut bt) = tokio::io::split(right);
+                    listen
+                        .prove(&mut br)
+                        .await?
+                        .complete(&mut bt, &mut br, 1 << 20, &joiner)
+                        .await
+                }
+            );
+            assert!(matches!(joined, Err(NetError::PairingDeclined)));
+        }
+
+        // Locked agent also declines in `NewDevice::confirm`.
+        b.lock().await;
+        let work_offer = a.with(|s| offer(s, other, None)).unwrap();
+        let (b_conv, _b_client) = test_conv(true);
+        let joiner = NewDevice {
+            agent: &b,
+            conv: &b_conv,
+            confirm: false,
+            offer: Mutex::default(),
+            joined: Mutex::default(),
+        };
+        let inviter = BadInviter(work_offer);
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let dial = PairingStream::new(a_id, b_id, [7; 32], [9; 32], false);
+        let listen = PairingStream::new(b_id, a_id, [7; 32], [9; 32], true);
+        let (_, joined) = tokio::join!(
+            async move {
+                let (mut ar, mut at) = tokio::io::split(left);
+                dial.invite(&mut at, &mut ar, 1 << 20, &inviter).await
+            },
+            async move {
+                let (mut br, mut bt) = tokio::io::split(right);
+                listen
+                    .prove(&mut br)
+                    .await?
+                    .complete(&mut bt, &mut br, 1 << 20, &joiner)
+                    .await
+            }
+        );
+        assert!(matches!(joined, Err(NetError::PairingDeclined)));
+
+        a.lock().await;
+    }
 }

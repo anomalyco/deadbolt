@@ -11,9 +11,8 @@
 //! it is dialed (endpoint `before_connect` hook) and again once the TLS handshake has
 //! authenticated the remote key, on both the accepting and the dialing side (endpoint
 //! `after_handshake` hook). A rejected connection is closed before the application reads
-//! or writes a single byte. [`Node::revoke`] closes open connections to a removed device
-//! immediately; [`Node::enforce_membership`] does the same for every peer the membership
-//! no longer accepts.
+//! or writes a single byte. [`Node::enforce_membership`] immediately closes open sync
+//! connections to any peer that [`Membership::is_member`] no longer accepts.
 //!
 //! The caller is responsible for the rest of the membership rules, notably syncing
 //! membership with reachable peers on startup before serving data, and ordering

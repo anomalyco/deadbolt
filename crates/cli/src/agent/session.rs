@@ -177,7 +177,7 @@ impl Loaded {
         };
         let mut grouped: IndexMap<VaultId, Vec<Entry>> = IndexMap::new();
         for item in store.iter_all()? {
-            let (_, bytes) = item?;
+            let bytes = item?;
             let entry = Entry::decode(&bytes).context("decoding a stored entry")?;
             grouped.entry(entry.vault()).or_default().push(entry);
         }
@@ -246,11 +246,6 @@ impl Loaded {
 
     pub fn save_peers(&self) -> Result<()> {
         set_json(&self.store, META_PEERS, &self.meta.peers)
-    }
-
-    /// Persists validated entries before publishing their in-memory state.
-    pub fn persist(&self, entries: &[Entry]) -> Result<()> {
-        persist(&self.store, entries)
     }
 
     /// Every other device that is a member of a vault this device holds.
@@ -381,12 +376,12 @@ impl Loaded {
     }
 
     /// Adds a vault this device just created or joined.
-    pub fn add_vault(&mut self, vault: Vault, entries: &[Entry]) -> Result<()> {
+    pub fn add_vault(&mut self, vault: Vault) -> Result<()> {
         let id = vault.id();
         if self.vaults.contains_key(&id) {
             bail!("this device already holds vault {}", vault.name());
         }
-        self.persist(entries)?;
+        persist(&self.store, vault.entries())?;
         self.vaults.insert(id, vault);
         if self.meta.default_vault.is_none() {
             self.meta.default_vault = Some(id);
@@ -403,9 +398,9 @@ impl Loaded {
         if self.name_taken(name, None) {
             bail!("a vault named {name} already exists");
         }
-        let (vault, genesis) = Vault::create(&self.secret, name)?;
+        let (vault, _) = Vault::create(&self.secret, name)?;
         let id = vault.id();
-        self.add_vault(vault, &[genesis])?;
+        self.add_vault(vault)?;
         Ok(id)
     }
 
@@ -491,13 +486,10 @@ fn resolve_by_name_or_id<'a, T: Copy + std::fmt::Display>(
     if names.is_empty() { prefixes } else { names }
 }
 
-fn persist(store: &Unlocked, entries: &[Entry]) -> Result<()> {
-    if !entries.is_empty() {
-        let encoded: Vec<_> = entries
-            .iter()
-            .map(|e| (*e.hash().as_bytes(), e.encode()))
-            .collect();
-        store.append_batch(encoded.iter().map(|(hash, bytes)| (hash, bytes.as_slice())))?;
+fn persist<'a>(store: &Unlocked, entries: impl IntoIterator<Item = &'a Entry>) -> Result<()> {
+    let encoded: Vec<_> = entries.into_iter().map(Entry::encode).collect();
+    if !encoded.is_empty() {
+        store.append_batch(encoded.iter().map(Vec::as_slice))?;
     }
     Ok(())
 }

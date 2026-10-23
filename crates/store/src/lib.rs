@@ -9,13 +9,13 @@
 //! # fn main() -> deadbolt_store::Result<()> {
 //! # let dir = std::path::Path::new("/tmp/deadbolt");
 //! let store = deadbolt_store::init(dir, b"passphrase", [7; 32])?;
-//! store.append_batch([(&[1; 32], &b"signed entry bytes"[..])])?;
+//! store.append_batch([&b"signed entry bytes"[..]])?;
 //! drop(store);
 //!
 //! let store = deadbolt_store::unlock(dir, b"passphrase")?;
 //! assert_eq!(store.device_secret(), &[7; 32]);
 //! for entry in store.iter_all()? {
-//!     let (hash, bytes) = entry?;
+//!     let bytes = entry?;
 //! }
 //! # Ok(())
 //! # }
@@ -37,8 +37,7 @@
 //! |             | `"kdf"`                | Argon2id params + salt (plaintext)      |
 //! |             | `"keyset"`             | AEAD(unlock key, data key ‖ device secret) |
 //! |             | `"log_len"`            | AEAD(data key, entry count u64 LE)      |
-//! | `log`       | seq u64, from 0        | AEAD(data key, entry hash ‖ bytes)      |
-//! | `log_index` | keyed-hash(entry hash) | seq                                     |
+//! | `log`       | seq u64, from 0        | AEAD(data key, bytes)                   |
 //! | `meta`      | keyed-hash(name)       | AEAD(data key, value)                   |
 //!
 //! Every AEAD value is `nonce (24) ‖ ciphertext ‖ tag (16)`.
@@ -57,11 +56,10 @@
 //!   only re-seal this record.
 //! - **Data**: subkeys are derived from the data key with BLAKE3's KDF mode:
 //!   one XChaCha20-Poly1305 key for all data records, and one BLAKE3 keyed-hash
-//!   key each for the log index and meta names, so entry hashes and meta
-//!   names never appear on disk in the clear. Every record's AAD carries a
-//!   versioned purpose label plus its position (log seq or blinded meta
-//!   name), so records cannot be swapped. The sealed `log_len` lets
-//!   [`Unlocked::iter_all`] detect deleted or truncated entries.
+//!   key for meta names, so meta names never appear on disk in the clear.
+//!   Every record's AAD carries a versioned purpose label plus its position
+//!   (log seq or blinded meta name), so records cannot be swapped. The sealed
+//!   `log_len` lets [`Unlocked::iter_all`] detect deleted or truncated entries.
 //!
 //! Nonces are 192-bit random, so there is no nonce state to keep.
 //!
@@ -89,12 +87,12 @@
 //! and a crash mid-commit leaves the previous committed state intact. We turn
 //! on its two-phase commit, which also makes redb refuse a damaged latest
 //! commit rather than quietly rolling back to the one before. That gives
-//! crash safety, a hash → entry index, and an atomic multi-record update
-//! (entry + index + count) for free. A hand-rolled append-only file would
-//! need its own framing, torn-tail recovery, index rebuild and atomic header
-//! rewrite to match. redb also takes an exclusive file lock, so two processes
-//! cannot open one store ([`Error::InUse`]). Only ciphertext and keyed hashes
-//! reach redb, so its page cache never holds plaintext.
+//! crash safety and an atomic multi-record update (entries + count) for free.
+//! A hand-rolled append-only file would need its own framing, torn-tail
+//! recovery and atomic header rewrite to match. redb also takes an exclusive
+//! file lock, so two processes cannot open one store ([`Error::InUse`]). Only
+//! ciphertext and keyed hashes reach redb, so its page cache never holds
+//! plaintext.
 //!
 //! # Memory
 //!
@@ -118,7 +116,6 @@ mod tests;
 pub use error::{Error, Result};
 pub use kdf::KdfParams;
 pub use store::{
-    DB_FILE, EntryHash, FORMAT_VERSION, LogIter, Unlocked, init, init_with_params, is_initialized,
-    unlock,
+    DB_FILE, FORMAT_VERSION, LogIter, Unlocked, init, init_with_params, is_initialized, unlock,
 };
 pub use zeroize::Zeroizing;

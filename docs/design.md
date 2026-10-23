@@ -22,7 +22,7 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 ## Membership
 - Signed log of `Add(device)` / `Remove(device)` ops, each referencing the ops it saw (causal).
 - `Add` carries the new device's signature too: it consents to joining *this* vault through *this* inviter (vault id, inviter, new device), so the consent can't back anyone else's `Add`.
-- `Remove(B)` records the last entry of B's log the remover had seen; anything B wrote beyond that is ignored. Removed keys can never be re-added. Only a current member can be removed.
+- `Remove(B)` records the last entry of B's log the remover had seen; anything B wrote beyond that is ignored. Removed keys can never be re-added (`Vault::add` and `Vault::apply` reject an `Add` of a removed key, and any concurrent `Add` that did not see the removal is ignored once resolved). Only a current member can be removed.
 - A removal cuts every op by B it didn't see, including devices B added that the remover hadn't seen. A device with several `Add`s stays a member while any of them survives, so an extra `Add` never takes membership away.
 - Seniority is the DAG depth of a device's first `Add` (ties broken by entry hash). An `Add` must see its inviter's admission, so an invited device always sits deeper than its inviter.
 - Conflicting removals (mutual, cycles, or a removal of someone's inviter): removals are considered in their authors' seniority order, and each is kept only if it leaves itself and every earlier kept removal authorized. So in a mutual removal the device added earlier wins. The full rule and its reference model are in `crates/core/src/membership_tests.rs`.
@@ -73,8 +73,8 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 
 ## Pairing
 - New device shows a QR: its device public key + a one-time secret (+ relay hint).
-- Existing device (unlocked) scans, dials it, both prove the secret, new device signs "join vault V, invited by this device", existing device signs `Add`, sends the membership log + data over the same connection.
-- No camera: existing device dials via a short code, and both screens show a 6-digit code derived from the connection + both keys; the user confirms they match.
+- Existing device (unlocked) scans, dials it, both prove the secret, existing device sends the offer (vault id and name, inviter device name and addresses), both confirm the 6-digit code derived from the connection + both keys (`--yes` skips on a TTY), new device signs "join vault V, invited by this device", existing device signs `Add`, and sends the membership log + data over the same connection.
+- Because the offer precedes code confirmation so the joining screen can name the vault and inviter in its prompt, a party that observed the one-time ticket can learn the offer metadata (vault id/name, inviter name/addresses) before the inviter rejects the mismatched code; neither join consent nor vault entries are sent before confirmation.
 
 ## Removing a device
 Sign `Remove(B)`; it spreads to the other members as they sync. B is refused at connection time (and any open connection is closed) and can't get anything new; it keeps what it already had (inherent; prompt the user to rotate passwords it saw).

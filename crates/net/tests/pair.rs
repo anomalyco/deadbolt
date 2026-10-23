@@ -14,13 +14,15 @@ use deadbolt_net::{
 struct NewDevice {
     confirm: Option<bool>,
     code: Mutex<Option<ConfirmationCode>>,
+    confirmed_offer: Mutex<Option<Vec<u8>>>,
     offer: Mutex<Option<Vec<u8>>>,
     welcome: Mutex<Option<Vec<Vec<u8>>>>,
 }
 
 impl Joiner for NewDevice {
-    async fn confirm(&self, ctx: &PairingContext) -> bool {
+    async fn confirm(&self, ctx: &PairingContext, offer: &[u8]) -> bool {
         *self.code.lock().unwrap() = Some(ctx.code);
+        *self.confirmed_offer.lock().unwrap() = Some(offer.to_vec());
         self.confirm.unwrap_or(true)
     }
 
@@ -283,6 +285,13 @@ async fn declined_code_aborts_both_sides() {
             matches!(invited, Err(Error::PairingDeclined)),
             "{invited:?}"
         );
+        if !new_ok {
+            assert_eq!(
+                joiner.confirmed_offer.lock().unwrap().as_deref(),
+                Some(&b"vault-1"[..])
+            );
+        }
+        assert!(joiner.offer.lock().unwrap().is_none());
         assert!(joiner.welcome.lock().unwrap().is_none());
         assert!(inviter.join.lock().unwrap().is_none());
     }
@@ -335,4 +344,33 @@ async fn pairing_does_not_bypass_sync_gate() {
         "{result:?}"
     );
     assert_eq!(new.store.calls(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removed_peer_can_still_pair_into_another_vault() {
+    let (a, b) = pair_of_members(&["a1"], &["b1"]).await;
+    let conn = within(b.node.connect(a.node.addr())).await.unwrap();
+    within(conn.sync()).await.unwrap();
+
+    // A removes B from their only shared vault, closing the active sync connection.
+    a.members.remove(&b.id());
+    assert_eq!(a.node.enforce_membership(), 1);
+    within(conn.closed()).await;
+    assert!(matches!(
+        within(a.node.connect(b.node.addr())).await,
+        Err(Error::NotAMember(_))
+    ));
+
+    // Later, A pairs B into a different vault without restarting A's node.
+    let listener = within(b.node.start_pairing(PairingOptions::default()))
+        .await
+        .unwrap();
+    let ticket = listener.ticket().clone();
+    let joiner = NewDevice::default();
+    let inviter = ExistingDevice::default();
+    let (joined, invited) =
+        within(async { tokio::join!(listener.complete(&joiner), a.node.pair(&ticket, &inviter)) })
+            .await;
+    assert_eq!(joined.unwrap().peer, a.id());
+    assert_eq!(invited.unwrap().peer, b.id());
 }

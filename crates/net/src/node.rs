@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fmt,
     net::SocketAddr,
     sync::{Arc, Mutex, MutexGuard},
@@ -268,7 +268,7 @@ impl Node {
                 .is_ok()
     }
 
-    /// Opens a sync connection to a member. Refuses to dial non-members and revoked peers.
+    /// Opens a sync connection to a member. Refuses to dial non-members.
     pub async fn connect(&self, peer: impl Into<PeerAddr>) -> Result<SyncConnection> {
         let peer = peer.into();
         self.inner.gate.check_dial(&peer.id)?;
@@ -297,16 +297,9 @@ impl Node {
         outcome
     }
 
-    /// Permanently refuses `peer` on this node (for its lifetime) and immediately closes
-    /// every open connection to it, on any ALPN. Call this as soon as a `Remove` for the
-    /// peer is applied. Returns the number of connections closed.
-    pub fn revoke(&self, peer: &PeerId) -> usize {
-        self.inner.gate.revoke(peer)
-    }
-
     /// Closes every open sync connection to a peer that [`Membership::is_member`] no longer
-    /// accepts. Call this after applying membership changes received from a peer. Returns
-    /// the number of connections closed.
+    /// accepts. Call this after updating membership. Returns the number of connections
+    /// closed.
     pub fn enforce_membership(&self) -> usize {
         self.inner.gate.enforce_membership()
     }
@@ -391,7 +384,6 @@ impl PairingSlot {
 #[derive(Default)]
 struct GateState {
     conns: HashMap<PeerId, Vec<Tracked>>,
-    revoked: HashSet<PeerId>,
     pairing: Option<PairingSlot>,
     next_slot: u64,
 }
@@ -421,12 +413,8 @@ impl Gate {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// Checks current membership and explicit revocations before opening a stream.
+    /// Checks current membership before opening a sync stream.
     pub fn check_dial(&self, peer: &PeerId) -> Result<()> {
-        let st = self.lock();
-        if st.revoked.contains(peer) {
-            return Err(Error::Revoked(*peer));
-        }
         if !self.membership.is_member(peer) {
             return Err(Error::NotAMember(*peer));
         }
@@ -436,24 +424,23 @@ impl Gate {
     fn allow_dial(&self, peer: &PeerId, alpn: &[u8]) -> bool {
         match alpn {
             SYNC_ALPN => self.check_dial(peer).is_ok(),
-            PAIR_ALPN => !self.lock().revoked.contains(peer),
+            PAIR_ALPN => true,
             _ => false,
         }
     }
 
     /// Decides whether a connection whose TLS handshake just completed may proceed, and
     /// registers it for revocation. The membership check and the registration happen
-    /// under one lock, and [`Gate::revoke`] takes the same lock, so a connection admitted
-    /// concurrently with a revocation is always either rejected here or closed there.
+    /// under one lock, and [`Gate::enforce_membership`] takes the same lock after the
+    /// caller updates [`Membership`], so a connection admitted concurrently with a
+    /// removal is always either rejected here or closed there. No sticky revocation set is
+    /// needed, so a device removed from one vault can still pair into another vault later.
     fn admit(
         &self,
         conn: &Connection,
     ) -> std::result::Result<(), (iroh::endpoint::VarInt, &'static [u8])> {
         let peer = *conn.remote_id().as_bytes();
         let mut st = self.lock();
-        if st.revoked.contains(&peer) {
-            return Err((close::REVOKED, b"revoked"));
-        }
         let kind = match conn.alpn() {
             SYNC_ALPN => {
                 if !self.membership.is_member(&peer) {
@@ -480,24 +467,9 @@ impl Gate {
         Ok(())
     }
 
-    /// Permanently refuses this peer and closes its tracked iroh connections.
-    /// Other transport adapters must cancel their streams when this gate refuses them.
-    pub fn revoke(&self, peer: &PeerId) -> usize {
-        let mut st = self.lock();
-        st.revoked.insert(*peer);
-        let closed = st
-            .conns
-            .remove(peer)
-            .unwrap_or_default()
-            .iter()
-            .filter_map(Tracked::live)
-            .map(|conn| conn.close(close::REVOKED, b"revoked"))
-            .count();
-        debug!(peer = %fmt_id(peer), closed, "revoked");
-        closed
-    }
-
-    fn enforce_membership(&self) -> usize {
+    /// Closes every tracked sync connection to a peer that [`Membership::is_member`] no
+    /// longer accepts.
+    pub fn enforce_membership(&self) -> usize {
         let mut st = self.lock();
         let mut closed = 0;
         for (peer, list) in st.conns.iter_mut() {

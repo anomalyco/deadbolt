@@ -30,12 +30,13 @@
 //! removals coexist.
 //!
 //! Acceptance is causal, never arrival-dependent. An entry is rejected unless
-//! its author is a member of its causal past, and a removal also unless its
-//! target is. Join consent covers the vault, the inviter (the `Add`'s author)
-//! and the new device, so it cannot back another device's `Add`. An attacker can
-//! hide knowledge using old parents: that is indistinguishable from an offline
-//! write and may be stored, but its effects beyond the removal's cutoff are
-//! ignored. Delivery order must not affect membership, names, or visible data.
+//! its author is a member of its causal past, a removal unless its target is,
+//! and an addition if its target was removed there. Join consent covers the
+//! vault, the inviter (the `Add`'s author) and the new device, so it cannot
+//! back another device's `Add`. An attacker can hide knowledge using old
+//! parents: that is indistinguishable from an offline write and may be stored,
+//! but its effects beyond the removal's cutoff are ignored. Delivery order must
+//! not affect membership, names, or visible data.
 //!
 //! Known limitations (design.md, Membership):
 //! - A causal removal is final only if the remover is senior to its target. A
@@ -300,6 +301,11 @@ impl<'a> Graph<'a> {
             return Err(Error::NotMember);
         }
         match entry.payload() {
+            Payload::Membership(MembershipOp::Add { device, .. })
+                if state.cutoffs.contains_key(device) =>
+            {
+                Err(Error::AddRemovedDevice)
+            }
             Payload::Membership(MembershipOp::Remove { device, .. })
                 if !state.members.contains(device) =>
             {
@@ -744,6 +750,11 @@ fn exhaustive_small_histories() {
                         // A data entry's previous write can reveal its
                         // author's removal; such entries are not explored.
                         _ if !state.members.contains(&author) => return None,
+                        Payload::Membership(MembershipOp::Add { device, .. })
+                            if state.cutoffs.contains_key(device) =>
+                        {
+                            Err(Error::AddRemovedDevice)
+                        }
                         Payload::Membership(MembershipOp::Remove { device, .. })
                             if !state.members.contains(device) =>
                         {
@@ -1141,6 +1152,11 @@ fn removing_a_non_member_is_rejected() {
         vault.remove(&a, b.device_id()),
         Err(Error::RemoveNonMember),
         "already removed"
+    );
+    assert_eq!(
+        vault.add(&a, b.device_id(), consent(&b, &vault, &a)),
+        Err(Error::AddRemovedDevice),
+        "re-adding removed device"
     );
     assert_eq!(vault.heads(), heads);
 }

@@ -117,7 +117,7 @@ async fn revoke_closes_live_inbound_connection() {
 
     // A applies Remove(B).
     a.members.remove(&b.id());
-    assert_eq!(a.node.revoke(&b.id()), 1);
+    assert_eq!(a.node.enforce_membership(), 1);
 
     let reason = within(conn.closed()).await;
     assert!(matches!(reason, Error::MembershipRejected(_)), "{reason:?}");
@@ -146,14 +146,14 @@ async fn revoke_closes_live_outbound_connection_and_blocks_redial() {
     let conn = within(a.node.connect(b.node.addr())).await.unwrap();
     within(conn.sync()).await.unwrap();
 
-    // Revocation is sticky even if membership has not caught up yet.
-    assert_eq!(a.node.revoke(&b.id()), 1);
+    a.members.remove(&b.id());
+    assert_eq!(a.node.enforce_membership(), 1);
     within(conn.closed()).await;
     assert!(within(conn.sync()).await.is_err());
 
     let result = within(a.node.connect(b.node.addr())).await;
     assert!(
-        matches!(result, Err(Error::Revoked(id)) if id == b.id()),
+        matches!(result, Err(Error::NotAMember(id)) if id == b.id()),
         "{result:?}"
     );
     within(async {
@@ -183,7 +183,7 @@ async fn revoke_interrupts_in_flight_session() {
     // A is in the middle of the session (computing what B is missing).
     within(entered.notified()).await;
     a.members.remove(&b.id());
-    assert_eq!(a.node.revoke(&b.id()), 1);
+    assert_eq!(a.node.enforce_membership(), 1);
 
     let result = within(session).await.unwrap();
     assert!(result.is_err(), "{result:?}");

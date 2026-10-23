@@ -424,22 +424,25 @@ fn is_member_removed_device_cannot_be_re_added() {
     sync(&a, &mut b);
     a.remove(b.id());
     sync(&a, &mut c);
+    assert!(a.vault.was_removed(&b.id()));
+    assert!(c.vault.was_removed(&b.id()));
 
-    a.vault
-        .add(
+    assert_eq!(
+        a.vault.add(
             &a.secret,
             b.id(),
             b.secret.join_consent(&a.vault.id(), &a.id()),
-        )
-        .unwrap();
-    c.vault
-        .add(
+        ),
+        Err(Error::AddRemovedDevice)
+    );
+    assert_eq!(
+        c.vault.add(
             &c.secret,
             b.id(),
             b.secret.join_consent(&c.vault.id(), &c.id()),
-        )
-        .unwrap();
-    sync_both(&mut a, &mut c);
+        ),
+        Err(Error::AddRemovedDevice)
+    );
     assert!(!a.vault.is_member(&b.id()));
     assert!(!c.vault.is_member(&b.id()));
 
@@ -459,6 +462,8 @@ fn is_member_removed_device_cannot_be_re_added() {
     sync_both(&mut d, &mut f);
     assert!(!d.vault.is_member(&e.id()));
     assert!(!f.vault.is_member(&e.id()));
+    assert!(d.vault.was_removed(&e.id()));
+    assert!(f.vault.was_removed(&e.id()));
 }
 
 #[test]

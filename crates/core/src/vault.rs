@@ -215,6 +215,11 @@ impl Vault {
         self.membership.is_member(device)
     }
 
+    /// Whether `device` was removed from this vault. Removed keys can never rejoin.
+    pub fn was_removed(&self, device: &DeviceId) -> bool {
+        self.membership.was_removed(device)
+    }
+
     /// Current members.
     pub fn members(&self) -> impl Iterator<Item = DeviceId> + '_ {
         self.membership.members().copied()
@@ -294,10 +299,14 @@ impl Vault {
         if !past.is_member(&entry.author()) {
             return Err(Error::NotMember);
         }
-        if let Payload::Membership(MembershipOp::Remove { device, .. }) = entry.payload()
-            && !past.is_member(device)
-        {
-            return Err(Error::RemoveNonMember);
+        match entry.payload() {
+            Payload::Membership(MembershipOp::Add { device, .. }) if past.was_removed(device) => {
+                return Err(Error::AddRemovedDevice);
+            }
+            Payload::Membership(MembershipOp::Remove { device, .. }) if !past.is_member(device) => {
+                return Err(Error::RemoveNonMember);
+            }
+            _ => {}
         }
         clock.insert(log_id, entry.seq());
         self.insert(Node {
@@ -343,6 +352,9 @@ impl Vault {
         device: DeviceId,
         consent: Signature,
     ) -> Result<Entry, Error> {
+        if self.was_removed(&device) {
+            return Err(Error::AddRemovedDevice);
+        }
         self.commit(
             secret,
             Payload::Membership(MembershipOp::Add { device, consent }),

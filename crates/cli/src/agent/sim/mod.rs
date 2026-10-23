@@ -171,7 +171,7 @@ impl Inviter for Invitation<'_> {
     }
 }
 impl Joiner for Device {
-    async fn confirm(&self, _: &PairingContext) -> bool {
+    async fn confirm(&self, _: &PairingContext, _: &[u8]) -> bool {
         true
     }
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
@@ -242,7 +242,7 @@ impl World {
                     name: "sim".into(),
                 }),
             );
-            s.add_vault(Vault::from_genesis(genesis.clone())?, &[genesis])?;
+            s.add_vault(Vault::from_genesis(genesis)?)?;
             Ok(id)
         })?;
         Ok(Self {
@@ -376,7 +376,7 @@ impl World {
                     }) {
                         Ok(Some(entry)) => {
                             removal = Some(entry.hash());
-                            self.devices[a].gate.revoke(&self.devices[b].id);
+                            self.devices[a].gate.enforce_membership();
                         }
                         Ok(None) => {}
                         Err(error) => failure = Some(error),
@@ -592,12 +592,16 @@ impl World {
                         .values()
                         .flat_map(|v| v.entries().into_iter().map(Entry::hash))
                         .collect();
-                    let persisted = s
+                    let persisted: Vec<_> = s
                         .store
                         .iter_all()?
-                        .map(|row| row.map(|(hash, _)| Hash::from_bytes(hash)))
-                        .collect::<Result<BTreeSet<_>, _>>()?;
-                    ensure!(accepted == persisted, "accepted/persisted mismatch on {i}");
+                        .map(|row| Ok(Entry::decode(&row?)?.hash()))
+                        .collect::<Result<Vec<_>>>()?;
+                    let persisted_set: BTreeSet<_> = persisted.iter().copied().collect();
+                    ensure!(
+                        accepted == persisted_set && accepted.len() == persisted.len(),
+                        "accepted/persisted mismatch on {i}"
+                    );
                     for e in self.forbidden.get(&i).into_iter().flatten() {
                         ensure!(
                             !accepted.contains(&e.hash()),

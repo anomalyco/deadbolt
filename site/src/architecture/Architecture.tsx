@@ -93,7 +93,7 @@ const chapters: Chapter[] = [
     </>,
     scene: <RemoveStory />,
     why: <p>the trade-off: without a shared vault key there's nothing to re-key, so removal has no ciphertext backstop. if the membership check had a bug, there'd be nothing behind it. the design accepts that and asks for dedicated tests of the gate.</p>,
-    code: [["crates/net/src/node.rs", "the gate: before_connect and after_handshake hooks, revoke"], ["crates/core/src/membership.rs", "add, remove, and concurrent removals"]],
+    code: [["crates/net/src/node.rs", "the gate: before_connect and after_handshake hooks, enforce_membership"], ["crates/core/src/membership.rs", "add, remove, and concurrent removals"]],
   },
 ]
 
