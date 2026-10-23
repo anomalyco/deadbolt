@@ -7,6 +7,7 @@ pub mod clipboard;
 pub mod install;
 pub mod model;
 pub mod onboarding;
+pub mod panel;
 pub mod secret;
 pub mod theme;
 pub mod view;
@@ -41,37 +42,81 @@ pub fn spec() -> AppSpec<App> {
 /// for Rune's tooling (`--snap`, `--tree`, `--script`, `--scene`, …): those
 /// runs get no agent and an in-memory clipboard, so a snapshot or tree dump
 /// can never hold real vault data.
+///
+/// Two windows: the main one (`--window main` for tooling) and the quick
+/// panel (`--window panel`), which ⇧⌘Space or the main window's hint brings
+/// up. `--panel` starts with the panel instead of the main window.
 pub fn run() {
     let live = is_live(&rune::tooling::Args::parse());
-    rune::App::new(spec())
-        .init(move || {
-            let mut app = if live {
-                let mut app = App::new(
-                    Agent::spawn(Paths::get(), agent::launch()),
-                    Clipboard::system(),
-                );
-                app.onboarding.worker = Worker::new(Paths::get(), agent::launch());
-                if let Some(source) = std::env::current_exe()
-                    .ok()
-                    .as_deref()
-                    .and_then(binary::bundled)
-                    && let Some(home) = std::env::var_os("HOME")
-                {
-                    app.installer = Some(install::Installer::live(
-                        source,
-                        home.into(),
-                        Paths::get().config.with_file_name("app-command-offered"),
-                    ));
-                }
+    let extra = rune::extra_args();
+    let reduced_motion = extra.iter().any(|a| a == "--reduced-motion");
+    let panel_first = extra.iter().any(|a| a == panel::window::FLAG);
+    // One clipboard for both windows, so only the latest copy is ever cleared.
+    let clipboard = if live {
+        Clipboard::system()
+    } else {
+        Clipboard::memory().0
+    };
+    rune::run_windows(move |displays| {
+        let mut main = rune::App::new(spec());
+        let quick = rune::App::new(panel::spec()).windowless();
+        let windows = panel::window::Windows::new(main.handle(), quick.handle(), displays);
+        let main_windows = windows.clone();
+        let main_clipboard = clipboard.clone();
+        main = main
+            .init(move || {
+                let mut app = if live {
+                    let mut app =
+                        App::new(Agent::spawn(Paths::get(), agent::launch()), main_clipboard);
+                    app.onboarding.worker = Worker::new(Paths::get(), agent::launch());
+                    if let Some(source) = std::env::current_exe()
+                        .ok()
+                        .as_deref()
+                        .and_then(binary::bundled)
+                        && let Some(home) = std::env::var_os("HOME")
+                    {
+                        app.installer = Some(install::Installer::live(
+                            source,
+                            home.into(),
+                            Paths::get().config.with_file_name("app-command-offered"),
+                        ));
+                    }
+                    app.windows = Some(main_windows);
+                    app
+                } else {
+                    App::new(Agent::offline(), main_clipboard)
+                };
+                app.reduced_motion = reduced_motion;
                 app
-            } else {
-                App::new(Agent::offline(), Clipboard::memory().0)
-            };
-            app.reduced_motion = rune::extra_args().iter().any(|a| a == "--reduced-motion");
-            app
-        })
-        .on_close(|s, tx| s.close(tx))
-        .run();
+            })
+            .on_close(|s, tx| s.quit(tx));
+        let panel_windows = windows.clone();
+        let panel_clipboard = clipboard.clone();
+        let quick = quick
+            .init(move || {
+                let mut app = if live {
+                    let mut app =
+                        App::panel(Agent::spawn(Paths::get(), agent::launch()), panel_clipboard);
+                    app.windows = Some(panel_windows);
+                    if let Some(panel) = &mut app.panel {
+                        panel.phase = panel::Phase::Hidden;
+                    }
+                    app
+                } else {
+                    App::panel(Agent::offline(), panel_clipboard)
+                };
+                app.reduced_motion = reduced_motion;
+                app
+            })
+            .on_close(|s, tx| s.panel_closed(tx));
+        if live && panel_first {
+            main = windows.start_with_panel(main);
+        }
+        vec![
+            rune::WindowSpec::from_app("main", main),
+            rune::WindowSpec::from_app("panel", quick).options(panel::window::options(displays)),
+        ]
+    });
 }
 
 /// True for a plain windowed run: no headless output, no scene, no script.
@@ -243,6 +288,65 @@ const SCENES: &[Scene] = &[
         s.detail = None;
     }),
 ];
+
+/// The quick panel's states (`--window panel --scene NAME`).
+pub(crate) const PANEL_SCENES: &[Scene] = &[
+    ("connecting", |_| {}),
+    // Just opened: empty search, every item, the first selected.
+    ("empty", panel_vault),
+    ("filtering", |s| {
+        panel_vault(s);
+        s.search = rune::TextEdit::new("git");
+        s.search.focused = true;
+        s.keep_selection_visible();
+        detail_for_selection(s);
+    }),
+    ("no-match", |s| {
+        panel_vault(s);
+        s.search = rune::TextEdit::new("bitbucket");
+        s.search.focused = true;
+        s.keep_selection_visible();
+    }),
+    // ⏎ just copied github.com's password: the confirmation, then it closes at 1.1 s.
+    ("copied", |s| {
+        panel_vault(s);
+        s.copy_selected("password", &mut Tx::default());
+    }),
+    ("locked", locked),
+    ("locked-error", |s| {
+        locked(s);
+        s.unlock_error = Some("That passphrase didn't unlock this device.".into());
+    }),
+    ("not-set-up", |s| {
+        s.status = Some(Status {
+            initialized: false,
+            device: None,
+            vaults: Vec::new(),
+            ..status(false)
+        });
+        s.screen = Screen::Onboarding;
+    }),
+    ("empty-vault", |s| {
+        panel_vault(s);
+        s.items.clear();
+        s.select(None);
+    }),
+    ("failed", |s| {
+        s.screen =
+            Screen::Failed("connecting to the agent: Connection refused (os error 61)".into());
+    }),
+];
+
+/// The vault as the panel opens on it: no item's values until one is selected.
+fn panel_vault(s: &mut App) {
+    vault(s);
+    s.search = rune::TextEdit::new("");
+    s.search.focused = true;
+    s.selected = None;
+    s.detail = None;
+    s.keep_selection_visible();
+    detail_for_selection(s);
+}
 
 fn welcome(s: &mut App) {
     s.screen = Screen::Onboarding;

@@ -78,6 +78,10 @@ pub struct App {
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub reduced_motion: bool,
+    /// Set in the quick panel's `App` only.
+    pub panel: Option<crate::panel::Panel>,
+    /// Handles to both windows, when the app runs both (not headless or in tests).
+    pub windows: Option<crate::panel::window::Windows>,
     /// Seconds on Rune's clock (virtual when headless).
     pub clock: f64,
     /// The countdown bar's presented rect, set on each tick without rebuilding the view.
@@ -113,6 +117,8 @@ impl App {
             copy: None,
             notice: None,
             reduced_motion: false,
+            panel: None,
+            windows: None,
             clock: 0.0,
             bar: rune::Live::new([0.0, 0.0, BAR_W, 2.0]),
             generation: 0,
@@ -143,6 +149,7 @@ impl App {
                 changed = true;
             }
         }
+        changed |= self.poll_panel(now, tx);
         changed
     }
 
@@ -175,20 +182,23 @@ impl App {
                 if generation != self.generation || self.screen != Screen::Vault {
                     return;
                 }
+                // The panel's list lands just after it opens; it opens at rest.
+                if self.panel.is_some() && !self.loaded {
+                    tx.instant();
+                }
                 match result {
                     Ok(items) => self.on_items(items),
                     Err(failure) => self.on_failure(failure, tx),
                 }
             }
+            // Dropping a stale item wipes its values (`agent::Values`).
             Done::Item { seq, result } => {
                 if seq != self.seq || self.screen != Screen::Vault {
-                    if let Ok(mut item) = result {
-                        forget(&mut item);
-                    }
                     return;
                 }
                 match result {
                     Ok(item) => {
+                        let item = item.take();
                         // A new selection's fields land in place, not animated: the
                         // selection moved under the user's own hand. A refresh of the
                         // shown item animates what changed.
@@ -370,9 +380,15 @@ impl App {
     }
 
     fn forget_vault(&mut self, _tx: &mut Tx) {
+        self.clear_clipboard();
+        self.forget_items();
+    }
+
+    /// Forgets what was read from the store and the search, and drops any
+    /// reply still on its way. A copy keeps counting down.
+    pub(crate) fn forget_items(&mut self) {
         self.generation += 1;
         self.seq += 1;
-        self.clear_clipboard();
         self.set_detail(None);
         self.items.clear();
         self.loaded = false;
@@ -409,6 +425,7 @@ impl App {
     /// A key in the passphrase field. Any change to the passphrase clears
     /// the last unlock error.
     pub fn passphrase_key(&mut self, ev: &KeyEvent) -> bool {
+        self.panel_active();
         let edits = self.passphrase.edits();
         let handled = self.passphrase.key(ev);
         if self.passphrase.edits() != edits {
@@ -511,9 +528,16 @@ impl App {
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
         }
+        if self.panel_shortcut(ev, tx) {
+            return true;
+        }
         match ev.key {
-            Key::Up => self.step(-1),
-            Key::Down => self.step(1),
+            Key::Up | Key::Down => {
+                self.step(if ev.key == Key::Up { -1 } else { 1 });
+                if let Some(id) = &self.selected {
+                    tx.scroll_into_view(format!("item-{id}"));
+                }
+            }
             Key::Enter => {
                 let field = if ev.mods.shift {
                     "username"
@@ -565,6 +589,7 @@ impl App {
             Err(error) => (None, Some(format!("Couldn't copy: {error}"))),
         };
         let item = item.id.clone();
+        let copied_ok = error.is_none();
         self.copy = Some(Copy {
             what: title_case(field),
             item,
@@ -577,7 +602,24 @@ impl App {
             error,
         });
         self.bar.set([0.0, 0.0, BAR_W, 2.0]);
-        tx.wake_after(TICK);
+        if copied_ok {
+            self.panel_copied(tx);
+        }
+        tx.wake_after(self.next_tick(self.clear_after));
+    }
+
+    /// When the countdown next needs a look: every `TICK` while it shows, else
+    /// at its end (the quick panel's copy, once the panel has moved on).
+    fn next_tick(&self, remaining: f64) -> Duration {
+        let shows = self
+            .panel
+            .as_ref()
+            .is_none_or(|p| matches!(p.phase, crate::panel::Phase::Copied { .. }));
+        if shows {
+            TICK
+        } else {
+            Duration::from_secs_f64(remaining)
+        }
     }
 
     /// Advances the countdown; clears the clipboard when it runs out. True
@@ -593,6 +635,12 @@ impl App {
             }
             return false;
         }
+        // The other window copied since (or a lock cleared it): this countdown
+        // ends quietly; the clipboard is no longer this one's to clear.
+        if copy.copied.is_some_and(|c| !self.clipboard.holds(c)) {
+            self.copy = None;
+            return true;
+        }
         let remaining = copy.remaining(now);
         self.bar
             .set([0.0, 0.0, BAR_W * (remaining / copy.lasts) as f32, 2.0]);
@@ -604,20 +652,22 @@ impl App {
             tx.wake_after(Duration::from_secs_f64(CLEARED_NOTICE));
             return true;
         }
-        tx.wake_after(TICK);
         let shown = remaining.ceil() as u32;
         let changed = shown != copy.shown;
         copy.shown = shown;
+        tx.wake_after(self.next_tick(remaining));
         changed
     }
 
-    /// Clears our copy off the clipboard now (lock, quit).
+    /// Whether a copy is still counting down to its clear.
+    pub fn copy_pending(&self) -> bool {
+        self.copy.as_ref().is_some_and(|c| c.copied.is_some())
+    }
+
+    /// Clears the clipboard now, whichever window copied (lock, quit).
     pub fn clear_clipboard(&mut self) {
-        if let Some(copy) = self.copy.take()
-            && let Some(c) = copy.copied
-        {
-            self.clipboard.clear(c);
-        }
+        self.copy = None;
+        self.clipboard.clear_latest();
     }
 
     pub fn toggle_reveal(&mut self, field: &str) {
@@ -638,7 +688,8 @@ impl App {
     /// vault: Escape closes them, Tab moves between their buttons, and
     /// nothing else reaches the vault behind. `None` when neither is open.
     fn overlay_key(&mut self, ev: &KeyEvent) -> Option<bool> {
-        if self.screen != Screen::Vault {
+        // The quick panel has no Settings or install offer; its keys are its own.
+        if self.screen != Screen::Vault || self.panel.is_some() {
             return None;
         }
         let installer = self.installer.as_mut()?;
@@ -655,16 +706,19 @@ impl App {
     }
 
     /// App-level keys: before the focused field when there is none, after it otherwise.
-    pub fn on_key(&mut self, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
+        }
+        if self.panel_shortcut(ev, tx) {
+            return true;
         }
         match ev.key {
             Key::Command('l') if self.screen == Screen::Vault => {
                 self.lock();
                 true
             }
-            _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev),
+            _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev, tx),
             _ => false,
         }
     }
@@ -707,7 +761,7 @@ mod tests {
     use rune::{Env, Runtime};
 
     use super::{App, Screen};
-    use crate::agent::Done;
+    use crate::agent::{Done, Values};
 
     fn vault() -> Runtime<App> {
         let app = rune::tooling::initial_state(&crate::spec(), Some("vault"));
@@ -720,6 +774,22 @@ mod tests {
                 scale: 1.0,
             },
         )
+    }
+
+    fn panel(scene: &str) -> Runtime<App> {
+        let app = rune::tooling::initial_state(&crate::panel::spec(), Some(scene));
+        let mut rt = Runtime::new(
+            app,
+            crate::panel::view::panel,
+            crate::panel::SIZE,
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        rt.poll = Some(|s, now, tx| s.poll(now, tx));
+        rt.frame(0.0);
+        rt
     }
 
     fn forgotten(app: &App) -> bool {
@@ -748,7 +818,7 @@ mod tests {
                     s.apply(
                         Done::Item {
                             seq,
-                            result: Ok(item),
+                            result: Ok(Values::new(item)),
                         },
                         tx,
                     );
@@ -773,5 +843,43 @@ mod tests {
             late(&mut rt);
             assert!(forgotten(&rt.state), "repopulated after unlocking");
         }
+    }
+
+    /// Rune doesn't poll a hidden window, so the panel forgets everything as
+    /// it hides; a lock and the replies to what it asked before, landing
+    /// while it's hidden, bring nothing back.
+    #[test]
+    fn a_hidden_panel_keeps_nothing() {
+        let mut rt = panel("filtering");
+        let item = rt.state.detail.clone().expect("the scene shows an item");
+        let items = rt.state.items.clone();
+        let (generation, seq) = (rt.state.generation, rt.state.seq);
+        rt.update(|s, tx| s.dismiss(tx));
+        for _ in 0..30 {
+            rt.frame(1.0 / 60.0);
+        }
+        assert_eq!(rt.state.panel_phase(), Some(crate::panel::Phase::Hidden));
+        assert!(forgotten(&rt.state));
+        assert_eq!(rt.state.search.text, "", "the query too");
+
+        rt.update(|s, tx| {
+            s.apply(Done::Changed(Change::Locked), tx);
+            s.apply(
+                Done::Item {
+                    seq,
+                    result: Ok(Values::new(item)),
+                },
+                tx,
+            );
+            s.apply(
+                Done::Items {
+                    generation,
+                    result: Ok(items),
+                },
+                tx,
+            );
+        });
+        assert_eq!(rt.state.screen, Screen::Locked);
+        assert!(forgotten(&rt.state));
     }
 }

@@ -46,7 +46,8 @@ impl SecretEdit {
     }
 
     /// Handles a key before the editor does; true when it was handled here.
-    /// Copy, cut and undo do nothing, so the passphrase can't leave the field.
+    /// Copy, cut and undo do nothing, so the passphrase can't leave the field,
+    /// and text typed with ⌘ or ⌃ held does nothing either.
     pub fn key(&mut self, ev: &KeyEvent) -> bool {
         let (start, end) = self.selection();
         let word = ev.mods.alt || ev.mods.cmd;
@@ -78,6 +79,8 @@ impl SecretEdit {
                 true
             }
             Key::Command('c' | 'x' | 'z' | 'y') => true,
+            // A chord the app didn't take (⇧⌘Space, say) types nothing.
+            Key::Text(_) => true,
             _ => false,
         }
     }
@@ -211,6 +214,32 @@ mod tests {
             }));
         }
         assert_eq!(field.secret(), "secret");
+    }
+
+    #[test]
+    fn chords_type_nothing() {
+        let mut field = typed("secret");
+        let edits = field.edits();
+        for mods in [
+            Mods {
+                cmd: true,
+                shift: true,
+                ..Mods::default()
+            },
+            Mods {
+                ctrl: true,
+                ..Mods::default()
+            },
+        ] {
+            let ev = KeyEvent {
+                key: Key::Text(" ".into()),
+                mods,
+            };
+            assert!(field.key(&ev), "the chord is taken, not left to the editor");
+        }
+        assert_eq!(field.secret(), "secret");
+        assert_eq!(field.mask.text, "••••••");
+        assert_eq!(field.edits(), edits);
     }
 
     #[test]

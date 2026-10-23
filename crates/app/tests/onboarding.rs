@@ -168,6 +168,36 @@ fn the_create_form_confirms_in_place() {
     assert!(rt.state.onboarding.passphrase.is_empty());
 }
 
+/// ⇧⌘Space in a field opens the quick panel; it never types a space, not
+/// into a plain field and not, unseen, into a passphrase.
+#[test]
+fn the_panel_shortcut_types_nothing() {
+    let shortcut = KeyEvent {
+        key: Key::Text(" ".into()),
+        mods: Mods {
+            cmd: true,
+            shift: true,
+            ..Mods::default()
+        },
+    };
+    let mut rt = runtime("create", true);
+    settle(&mut rt, 0.1);
+    type_text(&mut rt, "hunter22");
+    rt.key(shortcut.clone());
+    rt.frame(FRAME);
+    assert_eq!(rt.state.onboarding.passphrase.secret(), "hunter22");
+
+    rt.update(|s, _| {
+        s.onboarding.passphrase.mask.focused = false;
+        s.onboarding.vault.focused = true;
+    });
+    rt.frame(FRAME);
+    let before = rt.state.onboarding.vault.text.clone();
+    rt.key(shortcut);
+    rt.frame(FRAME);
+    assert_eq!(rt.state.onboarding.vault.text, before);
+}
+
 #[test]
 fn the_moment_throws_the_bolt_lights_the_strike_and_lets_it_cool() {
     // "creating" reports the vault created at 1.2 s.

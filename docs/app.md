@@ -43,6 +43,7 @@ Search first. The search field always has focus while unlocked.
 | ⇧↵ | copy the username |
 | esc | clear the search |
 | ⌘L | lock |
+| ⇧⌘Space | open the quick panel (in Deadbolt only, for now); in any field it never types a space, and a passphrase field drops any text typed with ⌘ or ⌃ held |
 | ↵ on Unlock | unlock |
 
 **Open:** ⌘C to copy the password when the search has no selection, as 1Password does? ⌘1–9 for the first rows?
@@ -68,6 +69,44 @@ Rune's runtime already enforces no first-paint animation, reduced motion (travel
 | Progress stages | agent | the stage's glyph replaces in place (pending dot → breathing dot → check); the breath stops under reduced motion |
 | Vault created or joined | agent | the one flourish: the bolt throws from the body into the strike on `.3/.3` (overshoots about 1 pt). On contact (`.11` s) the strike flashes hot and its glow lights (50 ms attack), then cools: hot → red on `.3/0`, red → rest on `.9/0`, the glow decays over 1.1 s, fast then slow. The title replaces; the vault opens at 1.5 s |
 
+## Quick panel
+
+A Spotlight-style panel for the everyday task: press ⇧⌘Space, type, ⏎ copies the password (⇧⏎ the username, a card's ⏎ its number) and the panel goes away.
+
+- **Shortcut: ⇧⌘Space.** ⌘Space is Spotlight and ⌥⌘Space is the Finder search window on a stock Mac; ⇧⌘Space is free there and is 1Password Quick Access's default, so it's where people already reach. Configurable later. Rune has no global shortcuts on our pin yet, so for now it works only while Deadbolt is in front (see Stand-ins).
+- **Window:** a second Rune window (`rune::run_windows`, key `panel`) with its own `App`: its own agent connection, `App::panel` set, started hidden. Borderless and transparent, 680×440 with the card inset 20 pt, centred near the top of the primary display.
+- **What it reuses:** the vault view's search field (`view::search_input`), rows (`view::rows`, `list_row`), the passphrase field and unlock error, and the model's filtering, selection and copy-with-countdown. The panel adds only its phases (`Open`, `Copied`, `Closing`, `Hidden`) and its card. It has no install offer or Settings: it never gets an installer, and `App::overlay_key` ignores them in the panel, so its keys stay its own.
+- **States:** connecting; the vault (empty search over every item, the first selected); filtering; no matches; an empty vault; locked, with the passphrase field in place and its error; not set up, which points to the main window (⏎ or Open Deadbolt opens it); can't reach the agent, with Try again.
+- **Dismissing:** Escape (in the search or the passphrase field too), ⇧⌘Space again, or a copy: the footer shows "Password copied clears in 0:30" for 1.1 s, then the card fades and the window hides. Rune doesn't poll a hidden window when the agent replies, so hiding forgets everything the panel read or was typed (the list, the query, an item's values, a part-typed passphrase) and moves to a new generation: replies still on their way are dropped, and an item's values are wiped when its reply is dropped, read or not (`agent::Values`). Each summon fetches the list again and starts from an empty search and the first item. The copy keeps counting down while hidden (one wake at its end, not every 100 ms) and is cleared on time, on lock, or when the app quits.
+- **One clipboard:** both windows share the process's `Clipboard`. Each copy gets the next id, and a countdown clears only the latest copy, and only if the clipboard still holds it. A copy the other window has since replaced ends quietly: its notice leaves without "Clipboard cleared". Lock and quit clear the latest copy, whichever window made it.
+- **Footer:** what ⏎ does ("Copy password", "Copy number", "Unlock", …), replaced by the copy's line or by a notice (an item "has no username", an agent error). ⇧⏎ Username shows only for a login with a username.
+
+### Stand-ins
+
+Rune 43ff4f8 can't yet do five things the panel wants, and a sixth (rolling the copy line) waits for a Rune bump. `crates/app/src/panel/window.rs` holds each stand-in (the ways in, opening, closing, placing, the shortcut, leaving), so moving to Rune's APIs is a change there plus the lines noted. The first five are assigned on Rune's side but not on `dev` yet; the copy line lives in `view.rs` and `RollingText` is already on `dev`.
+
+| Now | Replaced by | Then |
+|---|---|---|
+| **The shortcut:** ⇧⌘Space only inside Deadbolt (`window::is_shortcut`, checked in `App::on_key`, the search field and the passphrase field) | `App::global_shortcut` / `AppHandle::register_shortcut` → `Result<ShortcutId, ShortcutError>` (Carbon, `RegisterHotKey`, `XGrabKey`, the Wayland portal); headless `{"shortcut": …}` steps | Register ⇧⌘Space in `run()`, say why on stderr on `ShortcutError` (a conflict); drop the in-app checks (the global key arrives first) |
+| **The menu entry:** the main window's clickable "Quick panel ⇧⌘Space" hint (`window::entry`), and `deadbolt-app --panel` (`window::FLAG`, `Windows::start_with_panel`). No native menu or Dock menu: Rune has no menu API and the workspace forbids `unsafe` | Rune menus (queued after the shortcut recorder, sharing its accelerator type): app-menu and Dock-menu items with `fn(&mut S, &mut Tx)` actions, key equivalents and runtime enabled/checked state; headless `{"menu": "Open Quick Panel"}` steps. macOS first; Windows and Linux return `Unsupported` | An "Open Quick Panel" item in the app menu and the Dock menu, key equivalent ⇧⌘Space, calling `App::open_panel`; it replaces the hint and `--panel` as the way in. Where menus are `Unsupported` (Windows, Linux), keep both. A test with `{"menu": "Open Quick Panel"}` |
+| **Leaving:** without the shortcut, a hidden panel can't come back while the main window is closed (`--panel`, the main window never opened), so the process would idle forever. It exits instead (`window::leave_if_stranded`, from `poll_panel` and the panel's `on_close`): once the panel's copy has been cleared on time, so copy then paste still works, or at once without one | Global shortcuts and launcher panels: `App::global_shortcut` / `AppHandle::register_shortcut` brings the panel back from anywhere, and a non-activating launcher panel (`MacWindowOptions::nonactivating_panel(true)`) lives without the main window | Drop `leave_if_stranded` and `Windows::stranded`; the process stays for the shortcut. Closing the panel's window still runs the main window's cleanup (`App::panel_closed`) |
+| **Focus loss:** the window isn't always on top, so clicking another app at least sends it behind; it closes itself after 30 s without a key (`window::IDLE`, `App::panel_active`) | per-window `on_focus(fn(&mut S, bool, &mut Tx))`; headless `{"focus": false}` steps | `on_focus(false)` calls `dismiss`; always on top again; drop `IDLE` and `panel_active`; a test with `{"focus": false}` |
+| **Activation:** `AppHandle::open` activates Deadbolt, so the main window can come forward with it and hiding doesn't hand focus back to the previous app; the panel stays on the Space it was made on | `MacWindowOptions::nonactivating_panel(true)` (takes keys without activating the app; focus returns to the previous app on hide) and `MacWindowOptions::collection_behavior` (MoveToActiveSpace, IgnoresCycle, FullScreenAuxiliary; already at Rune `86a04ef`) | Set both in `window::options` |
+| **Placement:** `window::position` from the displays at launch: the primary display, 18% down | `AppHandle::place(DisplayTarget, OverlayPlacement)`, resolved when called (the active screen) | `Windows::summon_panel` calls `place` instead of `set_position`; drop `position` and the stored displays |
+| **The copy line:** `view::copy_line`, shared by the vault's copy notice and the panel footer; each line (what ⏎ does, copied with its countdown, cleared, failed) swaps by replacement in a fixed cell | `rune_kit::RollingText` (Rune `dev` `bc8bd76`: diffs grapheme clusters, proportional fonts, reduced motion crossfades) | A separate PR after this one bumps Rune to its latest `dev` and switches `copy_line` to `RollingText`, together with the secure field, expiring clipboard, linear countdown and font families from `2b2ee8d` |
+
+| Change | Motion |
+|---|---|
+| Summon | none: the card appears at rest (`Tx::settle`, and a fresh card key per summon so a reopen never revives the last close) |
+| Escape, after a copy | the card fades on `.25/0`; the window hides at 0.3 s |
+| Typing filters | as the vault: rows that stay slide, rows that arrive or leave fade in place |
+| ⏎ copies | the footer's line swaps by replacement to the copy's line (`view::copy_line`, the vault notice's), then counts down; `RollingText` replaces this (Stand-ins) |
+| What ⏎ does changes (Copy password ↔ Copy number, lock, unlock) | the line is keyed by what it says, so it swaps by replacement too; a notice does the same |
+| ⇧⏎ Username comes or goes | fades in place |
+| The list lands after an open | at rest, like the open (`Tx::instant` for the panel's first list) |
+| Screens inside the card | whole-state replacement, as in the main window |
+| Reduced motion | Rune keeps only the fades: the footer's line crossfades in place |
+
 ## Breadboard
 
 The main flows, as states (see the PR for the chat version):
@@ -85,7 +124,7 @@ The main flows, as states (see the PR for the chat version):
 1. **Clipboard timeout:** 30 s now. 1Password uses 90 s, KeePassXC 10 s. Configurable?
 2. **Where unlock lives:** decided: the agent owns locking (`unlock_timeout`, `lock_on_sleep` in its config); the app has no timer.
 4. **Bundling:** decided: ship `deadbolt` inside `Deadbolt.app`, with an optional command link on first run.
-5. **Window model:** a normal window now. A menu-bar / quick-access panel (global shortcut, search, ↵ copies, dismiss) may fit "open it every day" better.
+5. **Window model:** decided: the main window plus the quick panel (see Quick panel). A menu-bar item is still open.
 6. **Live updates:** done: the app follows the agent's `watch` stream.
 7. **Weak passphrases:** the form refuses under 8 characters and only warns about weak ones (a rough estimate that flatters dictionary words). Refuse weak ones too?
 
@@ -99,11 +138,18 @@ Resolved at `43ff4f8`: `Kit::from_palette` floors near-black surfaces (pure blac
 - **Linear tracks.** `Live` plus `wake_after` drives the countdown bar without rebuilding, but the app still sets it 10 times a second. A linear tween run by the render thread ("go from 272 to 0 over 30 s") would need no app ticks.
 - **Nested `clip_fade` washes out text.** A descendant takes the max fade width per side from its ancestors but applies it to its own, smaller clip rect (`runtime.rs` ~2361). A row label with a right-edge fade inside a list with 12/16 pt top/bottom fades gets those fades over its own 20 pt line, so the whole label goes faint and soft. The list has no soft edges for now.
 - **`Kit::from_palette` and Deadbolt's palette.** Still overridden at `43ff4f8`, by how far the derived value is off: the surface ramp (on paper, derived raised surfaces are darker than the background, `#e1ddd5`, where the site's are lighter, `#f3f0ea`; on black `layer_01` and `layer_04` match but `layer_02`/`layer_03` and the surface tokens are 3–13 levels off, as the site's surface sits below its raised layer), the status colours (derived roles are rune-kit's own, `#ff847d` and `#dfa11a` on black, since `PaletteSeed` has no danger or warning seed), and the faint ink on paper (derived `#807c75`, 5 levels darker than the site's `#857f74`). The opaque border tokens point at the hairline by choice: the derived steps are heavier lines. Muted ink, hover, pressed, the hairlines, focus and `blend_over` are derived.
-- **Rolling labels.** No roll primitive for "Copy" → "Copied" or changing digits (`@kitlangton/rolling-number`); the app swaps icons by replacement.
+- **Rolling labels.** No roll primitive on our pin for "Copy" → "Copied" or changing digits (`@kitlangton/rolling-number`), so the copy line (`view::copy_line`, the vault notice and the panel footer) swaps whole lines in a fixed cell. Landed: `rune_kit::RollingText` on Rune `dev` `bc8bd76`; a follow-up PR switches `copy_line` to it (Quick panel, Stand-ins).
 - **Ellipsis by default.** `truncate()` ends in "…"; the app wraps lines in `clip_fade` rows to get the fade the UI guide prefers.
 - **`rune_kit::TextInput` can't animate dependent layout** (`animate_edit_layout`), so the search field is built from `text_input` directly.
 - **System reduced motion.** `Env` has no reduced-motion flag from the OS; the app takes `--reduced-motion`.
-- **Window focus events** (to refresh status and the list when the window comes forward) aren't exposed to the app.
+- **Waking a hidden window.** A `Waker` (the agent's replies, the watch stream) wakes a hidden window's event loop but doesn't poll its app; only its `wake_after` deadlines do. So a hidden quick panel would sit on a lock or a late item until it opens again. The panel forgets everything as it hides instead (Quick panel). Wanted: a `Waker` that polls the app while its window is hidden.
+- **Window focus events** (to refresh status and the list when the window comes forward, and to dismiss the quick panel when it loses focus) aren't exposed to the app. Assigned: per-window `on_focus`.
+- **Global shortcuts.** No API to register a system-wide key, so the quick panel's ⇧⌘Space works only inside Deadbolt. Assigned: `App::global_shortcut` / `AppHandle::register_shortcut`.
+- **Non-activating key panels.** An ordinary window can't be a non-activating panel that still takes keys, so `AppHandle::open` activates the app (and the main window can come forward) when the quick panel opens. Assigned: `MacWindowOptions::nonactivating_panel`.
+- **Placing a window on the active screen.** Overlays can (`DisplayTarget`); ordinary windows only take a position, so the panel opens on the primary display. Assigned: `AppHandle::place`.
+- **Native menus.** No app menu or Dock menu items, so the quick panel has no "Open Quick Panel" menu entry; the main window's key hint and `--panel` stand in (`window::entry`, `window::FLAG`). Queued with the global-shortcuts work: app-menu and Dock-menu items with actions, key equivalents, enabled/checked state and a headless `{"menu": …}` step, macOS first (Quick panel, Stand-ins).
+- **Reviving an exiting key ignores `Mount::Initial`.** Re-adding a key that's still fading out revives it from where it is even under `Tx::settle`, so a reopened card would fade back in from its close. The panel keys its card per summon (`card-{n}`, `panel/view.rs`). Fixed on Rune `dev` in `5f321c4`: under `Mount::Initial`/settle a revived node lands present at full opacity at once (an animated revive still reverses). The per-summon key is removable once Rune is at `3333f37` or later; the Rune upgrade PR after this one removes it.
+- **A scroll doesn't clip.** `El::scroll` sets overflow but draws children past its box; both lists add a zero-width `clip_fade` (`list` in `view.rs` and in `panel/view.rs`). Zero widths, since a soft fade would wash the rows out (nested `clip_fade`, below). Fixed on Rune `dev` in `3333f37`: `scroll()` clips with a hard edge by default (an explicit `clip_soft`/`clip_fade` still wins), and presses outside the box don't reach clipped children. Both `clip_fade`s are removable once Rune is at `3333f37` or later; the Rune upgrade PR after this one removes them.
 - **Two font families.** `TextStyle` names `Sans` or `Mono` only, so a display face (Anton for the wordmark) has to take the mono slot and no other style can use `.mono()`. Wanted: named families, or a third `Display` slot.
 - **Timed sequences on an element.** `rune-motion` has keyframes and `Choreography`, but `El` can't take them: the bolt's flash, cool and fade are four app phases, each a `wake_after` and a view rebuild with new targets and springs. Wanted: keyframed opacity and fill on an element ("hot for 50 ms, then red on .3, then rest on .9").
 - **Focus set from state lands a frame late.** A handler that moves focus (`edit.focused = true`) takes effect at the next frame, so keys already queued in the same frame still go to the old field. Rare by hand; tests must run a frame between Enter and typing.
@@ -115,9 +161,12 @@ cargo run --release -p deadbolt-app     # against your agent (starts it if neede
 cargo test -p deadbolt-cli -p deadbolt-app   # the real-agent test uses the deadbolt cargo built (or DEADBOLT_BIN)
 crates/app/scripts/snap.sh              # headless PNGs of every scene into crates/app/snaps/
 cargo run -p deadbolt-app -- --scene copied --at 2.4 --snap copied.png   # one scene; --theme light, --reduced-motion
+cargo run -p deadbolt-app -- --panel                                             # start with the quick panel
+cargo run -p deadbolt-app -- --window panel --scene filtering --snap panel.png   # a quick panel scene
+cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-motion.json --frames 240 --trace motion/panel.jsonl   # motion-lint trace: filter, copy, close
 ```
 
-Scenes (`--scene`): `connecting`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`, and first run: `welcome`, `welcome-set-up`, `create`, `create-typing`, `create-ready`, `create-invalid`, `create-failed`, `creating` (created at 1.2 s, the moment, the vault at 2.7 s), `join`, `ticket`, `code`, `joining` (joined at 0.6 s), `join-declined`, `join-cancelled`, `join-failed`, and the command: `command-offer`, `install-command`, `command-installed`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
+Scenes (`--scene`): `connecting`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`, and first run: `welcome`, `welcome-set-up`, `create`, `create-typing`, `create-ready`, `create-invalid`, `create-failed`, `creating` (created at 1.2 s, the moment, the vault at 2.7 s), `join`, `ticket`, `code`, `joining` (joined at 0.6 s), `join-declined`, `join-cancelled`, `join-failed`, and the command: `command-offer`, `install-command`, `command-installed`. Quick panel scenes (`--window panel --scene`): `connecting`, `empty`, `filtering`, `no-match`, `empty-vault`, `copied` (closes at 1.1 s), `locked`, `locked-error`, `not-set-up`, `failed`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
 
 ## One bundle, one agent
 

@@ -102,6 +102,25 @@ fn the_offer_and_settings_live_in_the_vault_only() {
 }
 
 #[test]
+fn the_hint_bar_keeps_settings_at_the_narrowest_window() {
+    let mut rt = runtime("command-offer");
+    rt.set_viewport((640.0, 540.0), 1.0);
+    settle(&mut rt, 0.5);
+    let elements = rt.elements();
+    for label in ["Quick panel", "Lock", "Settings"] {
+        let e = elements
+            .iter()
+            .rfind(|e| e.text.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("no {label:?}"));
+        assert!(
+            e.rect[0] + e.rect[2] <= 640.0,
+            "{label:?} runs past the window: {:?}",
+            e.rect
+        );
+    }
+}
+
+#[test]
 fn the_offer_opens_the_page_or_goes_away_for_good() {
     let mut rt = runtime("command-offer");
     settle(&mut rt, 0.6);
