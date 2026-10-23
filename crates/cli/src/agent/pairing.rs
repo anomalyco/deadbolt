@@ -377,15 +377,12 @@ pub async fn pair(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::paths::Paths;
     use crate::protocol::Message;
     use deadbolt_net::{Error as NetError, Node, NodeConfig, PairingStream, PeerId};
     use deadbolt_store::KdfParams;
-    use std::sync::RwLock;
-    use std::sync::atomic::AtomicUsize;
     use tokio::io::{AsyncBufReadExt, BufReader};
     use tokio::net::UnixStream;
-    use tokio::sync::{Notify, mpsc, watch};
+    use tokio::sync::{mpsc, watch};
 
     async fn test_agent(dir: &std::path::Path, name: &str) -> Arc<Agent> {
         let kdf = KdfParams {
@@ -394,25 +391,8 @@ mod tests {
             p_cost: 1,
         };
         let loaded = Loaded::setup(dir, b"test", name, kdf).unwrap();
-        let agent = Arc::new(Agent {
-            paths: Paths {
-                data: dir.into(),
-                config: dir.join("config"),
-                socket: dir.join("socket"),
-                lock: dir.join("lock"),
-                log: dir.join("log"),
-            },
-            local_net: true,
-            kdf,
-            session: Mutex::default(),
-            members: Arc::new(RwLock::default()),
-            ready: watch::channel(true).0,
-            sync_now: Notify::new(),
-            transition: tokio::sync::Mutex::new(()),
-            idle: Mutex::default(),
-            busy: AtomicUsize::new(0),
-            shutdown: Notify::new(),
-        });
+        let agent = Agent::new(super::super::tests::test_paths(dir), true, kdf);
+        agent.ready.send_replace(true);
         let node = Node::spawn(
             NodeConfig::local_only(*loaded.secret.to_bytes()),
             Arc::new(|_: &PeerId| false),

@@ -74,3 +74,50 @@ fn the_agent_notice_fades_in_and_out() {
     }
     assert_eq!(at(&rt, "agent-notice"), None);
 }
+
+#[test]
+fn an_item_synced_in_fades_into_the_list_and_the_selection_stays() {
+    use deadbolt_app::agent::Done;
+    let mut rt = runtime("vault");
+    let selected = rt.state.selected.clone();
+    let mut items = rt.state.items.clone();
+    let mut synced = items[0].clone();
+    synced.id = "b7d1e2".repeat(10) + "0000";
+    synced.label = "Bitwarden".into();
+    items.push(synced.clone());
+    items.sort_by_key(|i| i.label.to_lowercase());
+    let generation = rt.state.generation();
+    rt.update(|s, tx| {
+        let result = Ok(items);
+        s.apply(Done::Items { generation, result }, tx)
+    });
+    rt.frame(FRAME);
+    let key = format!("item-{}", synced.id);
+    let (_, fade) = at(&rt, &key).expect("the synced row is in the list");
+    assert!(fade < 0.5, "the synced row fades in (opacity {fade})");
+    for _ in 0..60 {
+        rt.frame(FRAME);
+    }
+    assert_eq!(at(&rt, &key).unwrap().1, 1.0);
+    assert_eq!(rt.state.selected, selected, "the selection stays");
+}
+
+#[test]
+fn the_agent_locking_swaps_to_the_lock_screen_softly() {
+    use deadbolt_app::agent::Done;
+    use deadbolt_client::protocol::Change;
+    let mut rt = runtime("vault");
+    rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
+    rt.frame(FRAME);
+    let (_, leaving) = at(&rt, "vault").expect("the vault is still leaving");
+    assert!(
+        leaving > 0.0 && leaving < 1.0,
+        "the vault fades out ({leaving})"
+    );
+    assert!(rt.state.items.is_empty() && rt.state.detail.is_none());
+    for _ in 0..60 {
+        rt.frame(FRAME);
+    }
+    assert_eq!(at(&rt, "vault"), None);
+    assert_eq!(at(&rt, "passphrase").map(|(_, o)| o), Some(1.0));
+}

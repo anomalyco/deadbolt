@@ -1,16 +1,24 @@
 //! The connection to the agent: requests run in order on one worker thread
 //! (each is one socket connection, like the CLI's) and their results land in
-//! an inbox the UI drains each frame. The worker wakes the window when a
-//! result arrives; nothing polls.
+//! an inbox the UI drains each frame. A second thread holds a `watch` stream
+//! open, reconnecting with backoff, and posts each change to the same inbox.
+//! Both wake the window when something lands; nothing polls.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use deadbolt_client::protocol::{Command, ErrorCode, ItemInfo, Reply, Status};
+use deadbolt_client::protocol::{Change, Command, ErrorCode, ItemInfo, Reply, Status};
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
+
+/// The first wait before watching again after the agent went away.
+const RECONNECT_FIRST: Duration = Duration::from_millis(100);
+/// The longest wait between attempts while no agent is running.
+const RECONNECT_MAX: Duration = Duration::from_secs(2);
 
 pub enum Job {
     /// Start the agent if needed and read its status.
@@ -18,7 +26,10 @@ pub enum Job {
     Status,
     Unlock(Zeroizing<String>),
     Lock,
-    List,
+    /// The list; `generation` tells a reply from before a lock from a current one.
+    List {
+        generation: u64,
+    },
     /// One item with its values; `seq` tells a stale reply from the current one.
     Get {
         id: String,
@@ -32,11 +43,18 @@ pub enum Done {
     /// The status right after unlocking.
     Unlocked(Result<Status, Failure>),
     Locked(Result<(), Failure>),
-    Items(Result<Vec<ItemInfo>, Failure>),
+    Items {
+        generation: u64,
+        result: Result<Vec<ItemInfo>, Failure>,
+    },
     Item {
         seq: u64,
         result: Result<ItemInfo, Failure>,
     },
+    /// From the watch stream.
+    Changed(Change),
+    /// The watch stream broke without the agent saying it was stopping.
+    WatchLost,
 }
 
 /// A request that failed: the agent's code if it refused, and a message for people.
@@ -83,6 +101,8 @@ pub struct Agent {
     jobs: Option<Sender<Job>>,
     inbox: Receiver<Done>,
     waker: Arc<Mutex<Option<Waker>>>,
+    /// Dropping it ends the watch thread.
+    _watching: Option<oneshot::Sender<()>>,
 }
 
 impl Agent {
@@ -95,6 +115,16 @@ impl Agent {
         let (jobs, requests) = channel::<Job>();
         let (results, inbox) = channel();
         let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
+        let (watching, stop) = oneshot::channel();
+        let post = Post {
+            results: results.clone(),
+            waker: waker.clone(),
+        };
+        let watch_paths = paths.clone();
+        std::thread::Builder::new()
+            .name("deadbolt-watch".into())
+            .spawn(move || watch(watch_paths, post, stop))
+            .expect("spawning the watch thread");
         let wake = waker.clone();
         std::thread::Builder::new()
             .name("deadbolt-agent".into())
@@ -104,6 +134,7 @@ impl Agent {
             jobs: Some(jobs),
             inbox,
             waker,
+            _watching: Some(watching),
         }
     }
 
@@ -114,6 +145,7 @@ impl Agent {
             jobs: None,
             inbox,
             waker: Arc::default(),
+            _watching: None,
         }
     }
 
@@ -131,6 +163,75 @@ impl Agent {
 
     pub fn drain(&self) -> Vec<Done> {
         self.inbox.try_iter().collect()
+    }
+}
+
+/// Posts to the UI's inbox and wakes the window.
+struct Post {
+    results: Sender<Done>,
+    waker: Arc<Mutex<Option<Waker>>>,
+}
+
+impl Post {
+    /// False once the app is gone.
+    fn send(&self, done: Done) -> bool {
+        if self.results.send(done).is_err() {
+            return false;
+        }
+        let wake = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(wake) = wake {
+            wake();
+        }
+        true
+    }
+}
+
+/// Keeps a watch stream open until `stop` fires or the app is gone. It never
+/// starts the agent: that's the worker's `Connect` and `Unlock`.
+fn watch(paths: Paths, post: Post, mut stop: oneshot::Receiver<()>) {
+    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    else {
+        return;
+    };
+    runtime.block_on(async {
+        let mut delay = RECONNECT_FIRST;
+        loop {
+            tokio::select! {
+                gone = follow(&paths, &post, &mut delay) => if gone { return },
+                _ = &mut stop => return,
+            }
+            tokio::select! {
+                () = tokio::time::sleep(delay) => {}
+                _ = &mut stop => return,
+            }
+            delay = (delay * 2).min(RECONNECT_MAX);
+        }
+    });
+}
+
+/// Follows one watch stream to its end. True once the app is gone.
+async fn follow(paths: &Paths, post: &Post, delay: &mut Duration) -> bool {
+    let Ok(mut stream) = deadbolt_client::watch(paths).await else {
+        return false;
+    };
+    loop {
+        match stream.next().await {
+            Ok(Some(change)) => {
+                // Only an agent that accepted the watch resets the backoff; one
+                // that refuses it (an older protocol) keeps it growing.
+                if change == Change::Watching {
+                    *delay = RECONNECT_FIRST;
+                }
+                if !post.send(Done::Changed(change)) {
+                    return true;
+                }
+            }
+            // The agent said `stopping` before ending the stream.
+            Ok(None) => return false,
+            Err(_) => return !post.send(Done::WatchLost),
+        }
     }
 }
 
@@ -201,17 +302,18 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 .map(drop)
                 .map_err(Failure::from),
         ),
-        Job::List => {
+        Job::List { generation } => {
             let command = Command::ItemList {
                 vault: None,
                 query: Vec::new(),
                 kind: None,
             };
-            Done::Items(match deadbolt_client::simple(paths, command).await {
+            let result = match deadbolt_client::simple(paths, command).await {
                 Ok(Reply::Items { items }) => Ok(items),
                 Ok(_) => Err(unexpected()),
                 Err(error) => Err(error.into()),
-            })
+            };
+            Done::Items { generation, result }
         }
         Job::Get { id, seq } => {
             let command = Command::ItemGet {

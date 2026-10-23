@@ -12,13 +12,14 @@ use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixStream;
+use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use zeroize::Zeroizing;
 
 pub use paths::Paths;
 use protocol::{
-    Answer, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request, Status,
+    Answer, Change, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request, Status,
 };
 
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
@@ -57,6 +58,8 @@ pub enum Error {
     Event(Box<dyn std::error::Error + Send + Sync>),
     #[error("unexpected event {0:?}")]
     UnexpectedEvent(Event),
+    #[error("unexpected change {0:?}")]
+    UnexpectedChange(Change),
     #[error("creating {}", .0.display())]
     CreateDir(PathBuf, #[source] std::io::Error),
     #[error("opening {}", .0.display())]
@@ -153,6 +156,7 @@ where
                     write.write_all(&encode_line(&Answer { answer })?).await?;
                 }
             }
+            Message::Change { change } => return Err(Error::UnexpectedChange(change)),
             Message::Ok { reply } => return Ok(reply),
             Message::Error { code, message } => return Err(AgentError { code, message }.into()),
         }
@@ -192,6 +196,47 @@ fn encode_line(value: &impl serde::Serialize) -> Result<Zeroizing<Vec<u8>>, Erro
 /// Sends a request that expects no events.
 pub async fn simple(paths: &Paths, command: Command) -> Result<Reply, Error> {
     call(paths, command, |event| Err(Error::UnexpectedEvent(event))).await
+}
+
+/// A live `watch` stream. Dropping it hangs up.
+pub struct Watch {
+    lines: Lines<BufReader<OwnedReadHalf>>,
+    /// Held open: the agent ends the stream when the client stops writing.
+    _write: OwnedWriteHalf,
+}
+
+impl Watch {
+    /// The next change, or `None` once the agent ended the stream (after
+    /// [`Change::Stopping`]). Cancel-safe.
+    pub async fn next(&mut self) -> Result<Option<Change>, Error> {
+        let Some(line) = self.lines.next_line().await? else {
+            return Err(Error::Closed);
+        };
+        match serde_json::from_str::<Message>(&line).map_err(Error::InvalidReply)? {
+            Message::Change { change } => Ok(Some(change)),
+            Message::Ok { .. } => Ok(None),
+            Message::Error { code, message } => Err(AgentError { code, message }.into()),
+            Message::Event { event } => Err(Error::UnexpectedEvent(event)),
+        }
+    }
+}
+
+/// Subscribes to the running agent's changes. The first is
+/// [`Change::Watching`]; fetch state after it so nothing is missed.
+pub async fn watch(paths: &Paths) -> Result<Watch, Error> {
+    let stream = UnixStream::connect(&paths.socket)
+        .await
+        .map_err(Error::Connect)?;
+    let (read, mut write) = stream.into_split();
+    let body = encode_line(&Request {
+        v: PROTOCOL_VERSION,
+        command: Command::Watch,
+    })?;
+    write.write_all(&body).await?;
+    Ok(Watch {
+        lines: BufReader::new(read).lines(),
+        _write: write,
+    })
 }
 
 /// The running agent's status, or `None` when none is running.

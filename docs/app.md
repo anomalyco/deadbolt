@@ -8,7 +8,8 @@
 - **`crates/client` (`deadbolt-client`)** holds what both clients need: the protocol types, where the files live (`Paths`) and the client (`call`, `status`, `ensure_running`, `stop`). The CLI wraps it in `crates/cli/src/client.rs` and behaves as before. `Launch { program, version }` says which binary runs the agent: the CLI passes itself and its build (so an agent of another build is replaced), the app passes `deadbolt` and no version (any agent speaking the protocol will do).
 - **`crates/app` (`deadbolt-app`)** is a workspace member. Rune and rune-kit are git dependencies pinned to one rev (`43ff4f8`, on Rune's `dev` branch), bumped deliberately by changing both `rev`s in `crates/app/Cargo.toml`. `deny.toml` allows that one git source and BSL-1.0 (arboard's Windows backend). Linux needs no Wayland dev package: winit loads libwayland at run time.
 - **Finding the agent binary:** `DEADBOLT_BIN`, else `deadbolt` next to the app's executable (the bundle will ship it there), else `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, else `PATH`. Apps opened from the Finder get a minimal `PATH`, hence the fixed places.
-- **Threads:** one worker thread runs agent requests in order on a current-thread Tokio runtime and wakes the window when a reply lands. The UI drains replies in Rune's `poll`; nothing polls the socket. A status request every 10 s while unlocked notices a lock from the CLI or the idle timeout (`status` doesn't reset the idle timer).
+- **Threads:** one worker thread runs agent requests in order on a current-thread Tokio runtime and wakes the window when a reply lands. A second thread holds the agent's `watch` stream open and posts each change to the same inbox, reconnecting with backoff (100 ms doubling to 2 s) when the agent restarts; it never starts the agent itself. The UI drains both in Rune's `poll`; nothing polls the socket.
+- **Live state:** the agent owns locking (idle timeout, `deadbolt lock`, sleep and screen lock) and the app mirrors it. `locked` or the agent stopping goes to the lock screen and forgets every value; `unlocked` from elsewhere enters the vault; `items` for the shown vault refetches the list, keeping the selection, search and scroll, then the selected item's values in place; `watching` (after each reconnect) and `resync` refetch everything.
 - **Secrets in the app:** the passphrase field edits a mask of dots; the passphrase lives in a `Zeroizing<String>` all the way to the socket (the protocol's passphrase fields and the request buffer are wiped too) and copy, cut and undo do nothing. Item values are fetched one item at a time (`item-get`) and wiped when the selection changes, the store locks or the window closes. Copies are written with clipboard history exclusion (`org.nspasteboard.ConcealedType` on macOS) through one clipboard handle kept open for the app's life (on X11 the process serves the selection), and cleared after 30 s, or on lock and quit, only if the clipboard still holds them.
 - **Keys:** the search field and the passphrase field handle their own keys (`on_input_key`) and get focus by rendering with `focused: true`; the window's `on_key` handles only ⌘L. This keeps working when Rune sends keys to the focused element before the window.
 - **Look:** Deadbolt's own theme (`crates/app/assets/theme.json`): the site's black, white and red, paper `#e8e4dc` for light, IBM Plex Mono for everything but the wordmark, small radii, flat surfaces with hairline rings. `src/theme.rs` maps it onto rune-kit's tokens. The wordmark is Anton (OFL, the site's subset as TTF), on the lock and onboarding screens only; it takes Rune's mono slot, so no other style uses `.mono()`.
@@ -27,7 +28,7 @@
 | Generate | — (CLI generates when `password=` is omitted) | Length and symbols, regenerate, used by Add |
 | Devices | — (CLI: `devices`, `pair`, `devices remove`) | List with presence; Add device (paste the new device's ticket, confirm the code); remove with confirm in place |
 | Import | — (CLI: `import bitwarden`) | Pick a Bitwarden export, show counts, import |
-| Lock | ⌘L or the lock button; clears our clipboard copy and forgets every value | Lock on sleep or screen lock |
+| Lock | ⌘L or the lock button, or the agent locking (idle timeout, sleep, screen lock, CLI); clears our clipboard copy and forgets every value | |
 | Errors, empty | Can't reach the agent (with the reason and Try again); an empty vault shows how to add a login or import from Bitwarden with the CLI, with copy buttons; no matches; agent errors inline | Agent version mismatch help |
 
 ## Keyboard
@@ -80,10 +81,10 @@ The main flows, as states (see the PR for the chat version):
 ## Open decisions
 
 1. **Clipboard timeout:** 30 s now. 1Password uses 90 s, KeePassXC 10 s. Configurable?
-2. **Where unlock lives:** the agent's idle timeout locks for both clients. Should the app offer its own timeout or lock on sleep, or should that be agent config only?
+2. **Where unlock lives:** decided: the agent owns locking (`unlock_timeout`, `lock_on_sleep` in its config); the app has no timer.
 4. **Bundling:** ship `deadbolt` inside `Deadbolt.app` (and start the agent from there), or require the CLI install?
 5. **Window model:** a normal window now. A menu-bar / quick-access panel (global shortcut, search, ↵ copies, dismiss) may fit "open it every day" better.
-6. **Live updates:** items synced from another device appear on the next list load. Add a `watch` command to the protocol that streams lock and item changes?
+6. **Live updates:** done: the app follows the agent's `watch` stream.
 7. **Weak passphrases:** the form refuses under 8 characters and only warns about weak ones (a rough estimate that flatters dictionary words). Refuse weak ones too?
 
 ## Rune gaps (for the Rune team)

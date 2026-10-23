@@ -3,11 +3,13 @@ mod network;
 
 use super::{
     pairing,
-    session::{Loaded, Meta},
+    session::{Changes, Loaded, Meta},
     sync,
 };
 use anyhow::{Context, Result, ensure};
-use deadbolt_core::{DeviceId, DeviceSecret, Entry, Hash, MembershipOp, Payload, Vault, VaultId};
+use deadbolt_core::{
+    DeviceId, DeviceSecret, Entry, Hash, Log, MembershipOp, Payload, Vault, VaultId,
+};
 use deadbolt_net::{
     HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PairingStream, PeerId,
     SyncHandler, run_sync_session,
@@ -35,6 +37,8 @@ struct Device {
     id: PeerId,
     ready: Arc<AtomicBool>,
     offer: Mutex<Option<pairing::Offer>>,
+    /// Accepted sync batches whose changes went unreported to watchers.
+    unreported: Arc<Mutex<Vec<String>>>,
 }
 
 impl Device {
@@ -60,6 +64,7 @@ impl Device {
             id: DeviceId::from_bytes(id),
             meta: Meta::default(),
             vaults: Default::default(),
+            changes: Default::default(),
         })));
         let member_state = state.clone();
         let gate = MembershipGate::new(Arc::new(move |peer: &PeerId| {
@@ -76,6 +81,7 @@ impl Device {
             id,
             ready: Arc::new(AtomicBool::new(true)),
             offer: Mutex::default(),
+            unreported: Arc::default(),
         }
     }
 
@@ -99,6 +105,7 @@ impl Device {
         Handler {
             state: self.state.clone(),
             ready: self.ready.clone(),
+            unreported: self.unreported.clone(),
         }
     }
 }
@@ -106,6 +113,46 @@ impl Device {
 struct Handler {
     state: Arc<Mutex<Option<Loaded>>>,
     ready: Arc<AtomicBool>,
+    unreported: Arc<Mutex<Vec<String>>>,
+}
+
+/// Accepted (data, membership) entries per vault.
+fn accepted(s: &Loaded) -> BTreeMap<VaultId, (usize, usize)> {
+    s.vaults
+        .iter()
+        .map(|(id, v)| {
+            let entries = v.entries();
+            let data = entries.iter().filter(|e| e.log() == Log::Data).count();
+            (*id, (data, entries.len() - data))
+        })
+        .collect()
+}
+
+/// What watchers must hear about a batch: every vault whose items or
+/// membership grew, and nothing else.
+fn report_problem(
+    before: &BTreeMap<VaultId, (usize, usize)>,
+    after: &BTreeMap<VaultId, (usize, usize)>,
+    reported: &Changes,
+) -> Option<String> {
+    for (id, (data, membership)) in after {
+        let (data_before, membership_before) = before.get(id).copied().unwrap_or_default();
+        let items = *data > data_before;
+        let members = *membership > membership_before;
+        let problem = if items && !reported.items.contains(id) {
+            "items grew unreported"
+        } else if members && !reported.vaults {
+            "membership grew unreported"
+        } else if !items && !members && reported.items.contains(id) {
+            "unchanged items reported"
+        } else if !members && reported.devices.contains(id) {
+            "unchanged devices reported"
+        } else {
+            continue;
+        };
+        return Some(format!("{id}: {problem}"));
+    }
+    None
 }
 impl SyncHandler for Handler {
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
@@ -133,14 +180,21 @@ impl SyncHandler for Handler {
     }
     async fn receive(&self, peer: PeerId, entries: Vec<Vec<u8>>) -> Result<(), HandlerError> {
         let mut guard = self.state.lock().unwrap();
-        sync::receive(
-            guard.as_mut().ok_or("locked")?,
+        let s = guard.as_mut().ok_or("locked")?;
+        // Local writes and pairing record changes too; judge only this batch.
+        s.changes = Changes::default();
+        let before = accepted(s);
+        let result = sync::receive(
+            s,
             &DeviceId::from_bytes(peer),
             entries,
             self.ready.load(Ordering::SeqCst),
-        )
-        .map(|_| ())
-        .map_err(|e| e.to_string().into())
+        );
+        let reported = std::mem::take(&mut s.changes);
+        if let Some(problem) = report_problem(&before, &accepted(s), &reported) {
+            self.unreported.lock().unwrap().push(problem);
+        }
+        result.map(|_| ()).map_err(|e| e.to_string().into())
     }
 }
 
@@ -611,6 +665,13 @@ impl World {
                     Ok(())
                 })?;
             }
+            let unreported = d.unreported.lock().unwrap();
+            ensure!(
+                unreported.is_empty(),
+                "device {i} accepted a batch watchers didn't hear about: {}",
+                unreported.join("; ")
+            );
+            drop(unreported);
             for file in std::fs::read_dir(d.dir.path())? {
                 let file = file?;
                 if !file.file_type()?.is_file() {

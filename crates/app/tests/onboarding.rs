@@ -248,6 +248,38 @@ fn joining_lands_in_the_vault() {
     assert_eq!(rt.state.screen, Screen::Vault);
 }
 
+/// The agent locking (sleep, screen lock, CLI) mid-create or mid-join
+/// leaves the flow where it is: it finishes or fails on its own.
+#[test]
+fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
+    use deadbolt_client::protocol::{Change, Status};
+    let locked = Status {
+        pid: 1,
+        version: "fixture".into(),
+        protocol: deadbolt_client::protocol::PROTOCOL_VERSION,
+        home: String::new(),
+        initialized: true,
+        unlocked: false,
+        locks_in_secs: None,
+        device: None,
+        vaults: Vec::new(),
+        peers_online: 0,
+        peers: 0,
+    };
+    for scene in ["creating", "ticket", "code", "joining"] {
+        let mut rt = runtime(scene, false);
+        rt.frame(FRAME);
+        let step = rt.state.onboarding.step.clone();
+        rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
+        rt.update(|s, tx| s.apply(Done::Status(Some(locked.clone())), tx));
+        rt.update(|s, tx| s.apply(Done::Changed(Change::Stopping), tx));
+        rt.update(|s, tx| s.apply(Done::WatchLost, tx));
+        rt.frame(FRAME);
+        assert_eq!(rt.state.screen, Screen::Onboarding, "{scene}");
+        assert_eq!(rt.state.onboarding.step, step, "{scene}");
+    }
+}
+
 #[test]
 fn notices_say_how_serious_they_are() {
     for (scene, severity) in [
