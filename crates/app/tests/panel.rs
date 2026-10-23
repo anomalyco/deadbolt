@@ -473,9 +473,14 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
     let items = rt.state.items.clone();
     frames(&mut rt, 10);
     assert_eq!(footer(&rt), "Copy password");
+    let hints =
+        |rt: &Runtime<App>| ["h-user", "h-close"].map(|key| find(rt, key).map(|(rect, _)| rect));
+    let resting = hints(&rt);
+    assert!(resting[1].is_some(), "esc Close shows");
     rt.key(key(Key::Enter));
     rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    assert_eq!(hints(&rt), resting, "the hints hold still");
     assert!(rt.state.copy.as_ref().is_some_and(|c| c.error.is_none()));
     let line = find(&rt, "footer-line").expect("the same line");
     assert!(line.1 >= 0.99, "the line stays; its label rolls");
@@ -484,7 +489,10 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
         "Cop",
         "only \"Cop\" stays put"
     );
-    frames(&mut rt, 36);
+    for _ in 0..36 {
+        rt.frame(FRAME);
+        assert_eq!(hints(&rt), resting, "the hints hold still");
+    }
     assert_eq!(footer(&rt), COPIED);
     frames(&mut rt, 40);
     assert!(
