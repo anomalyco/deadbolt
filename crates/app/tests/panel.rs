@@ -1146,3 +1146,41 @@ fn a_selected_row_stops_clear_of_the_lists_fade() {
         );
     }
 }
+
+/// At rest the footer's rolling label sets like the same words as one text:
+/// its glyphs span the plain text's width to within half a device pixel.
+#[test]
+fn the_rolled_label_is_as_wide_as_plain_text() {
+    fn plain(_: &(), _: &mut rune::Cx<()>) -> rune::El {
+        rune::row().child(rune::text("Copy password").font(deadbolt_app::theme::kit(true).ty.small))
+    }
+    let env = Env {
+        system_dark: true,
+        scale: 2.0,
+    };
+    let mut words = Runtime::new((), plain, (400.0, 100.0), env);
+    words.frame(0.0);
+    let width = words
+        .elements()
+        .iter()
+        .find_map(|e| e.text.as_ref().map(|_| e.rect[2]));
+    let width = width.expect("the plain text");
+
+    let app = rune::tooling::initial_state(&panel::spec(), Some("empty"));
+    let mut rt = Runtime::new(app, panel::view::panel, panel::SIZE, env);
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.frame(0.0);
+    frames(&mut rt, 30);
+    assert_eq!(steady(&rt, "footer-line-label"), "Copy password");
+    let glyphs = glyphs(&rt, "footer-line-label");
+    let left = glyphs.iter().map(|g| g.1[0]).fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|g| g.1[0] + g.1[2])
+        .fold(f32::MIN, f32::max);
+    assert!(
+        (right - left - width).abs() <= 0.25,
+        "rolled {} vs plain {width}",
+        right - left
+    );
+}
