@@ -7,9 +7,11 @@
 //! stranded rule stand in for them; docs/app.md ("Quick panel stand-ins") says
 //! which API replaces which.
 
+use std::sync::Arc;
+
 use rune::{
     Align, AppHandle, ConfiguredWindowOptions, Cursor, DisplayTarget, El, Key, KeyEvent,
-    OverlayPlacement, ScreenEdge, Tx, WindowOptions,
+    OverlayPlacement, ScreenEdge, Tx, Waker, WindowOptions,
 };
 use rune_kit::Kit;
 
@@ -85,6 +87,15 @@ impl Windows {
 
     pub fn open_main(&self) {
         self.main.open();
+    }
+
+    /// Wakes the panel through an empty update. A launcher redraws, and so
+    /// polls, only for updates: a plain wake would leave the agent's answers
+    /// (a lock, the list) waiting until the next key. Drop this for the
+    /// runtime's waker once Rune redraws a launcher on wake (docs/app.md, Rune gaps).
+    pub fn panel_waker(&self) -> Waker {
+        let panel = self.panel.clone();
+        Arc::new(move || panel.update(|_, _| {}))
     }
 
     /// Nothing but the panel could be on screen, and nothing can summon it

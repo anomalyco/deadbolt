@@ -64,6 +64,10 @@ pub fn spec() -> AppSpec<App> {
 /// The panel follows the agent through its watch stream and only asks it to
 /// start when summoned, so it never races the main window to start one.
 fn setup(s: &mut App, waker: Waker) {
+    let waker = s
+        .windows
+        .as_ref()
+        .map_or(waker, window::Windows::panel_waker);
     s.agent.set_waker(waker);
 }
 
