@@ -337,25 +337,14 @@ fn unexpected() -> Failure {
     }
 }
 
-/// The `deadbolt` binary that runs the agent: `DEADBOLT_BIN`, else one next to
-/// this app, else the usual install locations, else `deadbolt` on `PATH`.
-/// Apps opened from the Finder get a minimal `PATH`, hence the fixed places.
+/// Bundles always launch their own helper. Development runs allow an override.
 pub fn launch() -> Launch {
-    let mut candidates = std::env::var_os("DEADBOLT_BIN")
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| Some(exe.parent()?.join("deadbolt"))),
-        )
-        .chain(["/opt/homebrew/bin/deadbolt", "/usr/local/bin/deadbolt"].map(PathBuf::from))
-        .chain(
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin/deadbolt")),
-        );
-    let program = candidates
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| "deadbolt".into());
+    let program = crate::binary::discover(
+        std::env::current_exe().ok().as_deref(),
+        std::env::var_os("DEADBOLT_BIN").as_deref(),
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    );
     Launch {
         program,
         version: None,

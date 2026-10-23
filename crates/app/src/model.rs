@@ -57,6 +57,7 @@ impl Copy {
 }
 
 pub struct App {
+    pub installer: Option<crate::install::Installer>,
     pub agent: Agent,
     pub clipboard: Clipboard,
     /// How long a copied secret stays on the clipboard.
@@ -93,6 +94,7 @@ pub struct App {
 impl App {
     pub fn new(agent: Agent, clipboard: Clipboard) -> App {
         App {
+            installer: None,
             agent,
             clipboard,
             clear_after: CLEAR_AFTER,
@@ -617,6 +619,21 @@ impl App {
 
     /// App-level keys, before the focused field.
     pub fn on_key(&mut self, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+        if let Some(installer) = &mut self.installer
+            && installer.settings_open
+            && ev.key == Key::Escape
+        {
+            installer.settings_open = false;
+            return true;
+        }
+        if let Some(installer) = &mut self.installer
+            && installer.open
+        {
+            if ev.key == Key::Escape {
+                installer.dismiss();
+            }
+            return true;
+        }
         match ev.key {
             Key::Command('l') if self.screen == Screen::Vault => {
                 self.lock();

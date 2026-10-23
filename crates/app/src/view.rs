@@ -29,19 +29,67 @@ fn replace() -> Transition {
 pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     cx.reduced_motion(s.reduced_motion);
     let k = crate::theme::kit(cx.system_dark());
-    let screen = match &s.screen {
-        Screen::Connecting => connecting(k),
-        Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark()),
-        Screen::Locked => unlock(s, k),
-        Screen::Vault => vault(s, k),
-        Screen::Failed(message) => failed(k, message),
+    let installing = s.installer.as_ref().is_some_and(|i| i.open);
+    let screen = if installing {
+        crate::install::view(s, k)
+    } else {
+        match &s.screen {
+            Screen::Connecting => connecting(k),
+            Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark()),
+            Screen::Locked => unlock(s, k),
+            Screen::Vault => vault(s, k),
+            Screen::Failed(message) => failed(k, message),
+        }
     };
-    col()
+    let mut window = col()
         .key("window")
         .w_full()
         .h_full()
         .fill(k.c.bg_base)
-        .child(screen.grow(1.0).w_full().transition(replace()))
+        .child(screen.grow(1.0).w_full().transition(replace()));
+    if let Some(installer) = &s.installer
+        && !installing
+    {
+        let mut layer = Vec::new();
+        let settings = rune_kit::Popover::new("command-settings")
+            .title("Settings")
+            .open(installer.settings_open)
+            .placement(rune_kit::Placement::TopStart)
+            .trigger(
+                Button::new("Settings")
+                    .size(ButtonSize::Large)
+                    .on_press(|s: &mut App| {
+                        if let Some(i) = &mut s.installer {
+                            i.settings_open = !i.settings_open;
+                        }
+                    })
+                    .build(k)
+                    .min_h(44.0),
+            )
+            .on_close(|s: &mut App| {
+                if let Some(i) = &mut s.installer {
+                    i.settings_open = false;
+                }
+            })
+            .child(
+                Button::new("Install deadbolt command…")
+                    .size(ButtonSize::Large)
+                    .on_press(|s: &mut App| {
+                        if let Some(i) = &mut s.installer {
+                            i.refresh();
+                            i.settings_open = false;
+                            i.open = true;
+                        }
+                    })
+                    .build(k)
+                    .min_h(44.0),
+            )
+            .build(k, &mut layer);
+        window = window
+            .child(row().w_full().padding(8.0).child(settings))
+            .children(layer);
+    }
+    window
 }
 
 /// A centred column for the screens that aren't the vault.

@@ -70,6 +70,10 @@ pub enum Error {
     NotStarted(PathBuf),
     #[error("the agent did not stop")]
     NotStopped,
+    #[error(
+        "the running agent uses protocol {running}, but this app needs {expected}; update Deadbolt or stop the agent with its CLI before trying again"
+    )]
+    IncompatibleProtocol { running: u32, expected: u32 },
 }
 
 impl Error {
@@ -88,7 +92,8 @@ pub struct Launch {
     /// A `deadbolt` binary; the agent runs as `<program> agent`.
     pub program: PathBuf,
     /// The build the client expects. A running agent of another build is
-    /// replaced. `None` accepts any agent that speaks [`PROTOCOL_VERSION`].
+    /// replaced. `None` accepts any agent that speaks [`PROTOCOL_VERSION`]
+    /// and refuses incompatible agents without replacing them.
     pub version: Option<String>,
 }
 
@@ -255,6 +260,12 @@ pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Er
         if same_build && status.protocol == PROTOCOL_VERSION {
             return Ok(status);
         }
+        if launch.version.is_none() {
+            return Err(Error::IncompatibleProtocol {
+                running: status.protocol,
+                expected: PROTOCOL_VERSION,
+            });
+        }
         stop(paths).await?;
     }
     if let Some(dir) = paths.log.parent() {
@@ -373,6 +384,57 @@ mod tests {
             .build()
             .unwrap()
             .block_on(test);
+    }
+
+    #[test]
+    fn app_accepts_other_builds_but_never_replaces_an_incompatible_agent() {
+        run(async {
+            for protocol in [PROTOCOL_VERSION, PROTOCOL_VERSION + 1] {
+                let dir = tempfile::tempdir().unwrap();
+                let paths = paths(dir.path());
+                let listener = UnixListener::bind(&paths.socket).unwrap();
+                let server = async {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    let request: Request =
+                        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                    assert!(matches!(request.command, Command::Status));
+                    let status = Status {
+                        pid: 1,
+                        version: "a-separately-installed-build".into(),
+                        protocol,
+                        home: String::new(),
+                        initialized: true,
+                        unlocked: false,
+                        locks_in_secs: None,
+                        device: None,
+                        vaults: vec![],
+                        peers_online: 0,
+                        peers: 0,
+                    };
+                    write
+                        .write_all(
+                            &encode_line(&Message::Ok {
+                                reply: Reply::Status(Box::new(status)),
+                            })
+                            .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                };
+                let launch = Launch {
+                    program: "/must-not-be-launched".into(),
+                    version: None,
+                };
+                let (result, ()) = tokio::join!(ensure_running(&paths, &launch), server);
+                if protocol == PROTOCOL_VERSION {
+                    assert_eq!(result.unwrap().version, "a-separately-installed-build");
+                } else {
+                    assert!(matches!(result, Err(Error::IncompatibleProtocol { .. })));
+                }
+            }
+        });
     }
 
     #[test]

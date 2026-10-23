@@ -2,7 +2,9 @@
 //! the same socket protocol as the CLI. See docs/app.md.
 
 pub mod agent;
+pub mod binary;
 pub mod clipboard;
+pub mod install;
 pub mod model;
 pub mod onboarding;
 pub mod secret;
@@ -49,6 +51,18 @@ pub fn run() {
                     Clipboard::system(),
                 );
                 app.onboarding.worker = Worker::new(Paths::get(), agent::launch());
+                if let Some(source) = std::env::current_exe()
+                    .ok()
+                    .as_deref()
+                    .and_then(binary::bundled)
+                    && let Some(home) = std::env::var_os("HOME")
+                {
+                    app.installer = Some(install::Installer::live(
+                        source,
+                        home.into(),
+                        Paths::get().config.with_file_name("app-command-offered"),
+                    ));
+                }
                 app
             } else {
                 App::new(Agent::offline(), Clipboard::memory().0)
@@ -77,6 +91,14 @@ fn setup(s: &mut App, waker: Waker) {
 type Scene = (&'static str, fn(&mut App));
 
 const SCENES: &[Scene] = &[
+    ("install-command", |s| {
+        s.installer = Some(install::Installer::fixture());
+    }),
+    ("command-installed", |s| {
+        let mut i = install::Installer::fixture();
+        i.installed = true;
+        s.installer = Some(i);
+    }),
     ("connecting", |_| {}),
     ("welcome", welcome),
     ("welcome-set-up", |s| {
