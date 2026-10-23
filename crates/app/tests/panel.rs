@@ -602,6 +602,27 @@ fn a_superseded_copy_leaves_quietly() {
     assert_eq!(board(&clip), None, "the panel cleared its copy on time");
 }
 
+/// Scenario C: the panel copies and hides, then the main window locks. The
+/// lock clears the panel's copy, and the panel's countdown ends quietly.
+#[test]
+fn a_lock_in_the_other_window_clears_the_copy() {
+    let mut quick = runtime("empty", true);
+    let mut main = main_window();
+    let clip = share_clipboard([&mut quick, &mut main]);
+    quick.key(key(Key::Enter));
+    both(&mut quick, &mut main, FRAME);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    both(&mut quick, &mut main, 5.0);
+
+    main.update(|s, tx| s.apply(Done::Locked(Ok(())), tx));
+    assert_eq!(board(&clip), None, "the lock clears it at once");
+    for _ in 0..30 {
+        both(&mut quick, &mut main, 1.0);
+        assert!(!shows(&quick, "Clipboard cleared"));
+    }
+    assert!(quick.state.copy.is_none(), "its countdown ended quietly");
+}
+
 #[test]
 fn alone_it_leaves_once_hidden() {
     let mut rt = runtime("empty", true);
