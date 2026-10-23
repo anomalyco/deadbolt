@@ -17,9 +17,17 @@ use tokio::task::JoinSet;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SystemEvent {
     /// The computer is about to sleep.
+    #[cfg_attr(
+        not(any(target_os = "macos", test)),
+        expect(dead_code, reason = "only the macOS observer reports it")
+    )]
     Sleep,
     /// The computer slept, seen on wake.
     Slept,
+    #[cfg_attr(
+        not(any(target_os = "macos", test)),
+        expect(dead_code, reason = "only the macOS observer reports it")
+    )]
     ScreenLocked,
 }
 
