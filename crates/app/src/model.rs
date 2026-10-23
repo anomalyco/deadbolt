@@ -431,7 +431,6 @@ impl App {
 
     /// A key in the passphrase field, before the editor sees it.
     pub fn passphrase_key(&mut self, ev: &KeyEvent) -> bool {
-        self.panel_active();
         secret::chord(ev)
     }
 

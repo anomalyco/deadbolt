@@ -43,8 +43,6 @@ pub struct Panel {
     pub phase: Phase,
     /// Counts summons.
     pub opens: u32,
-    /// When the panel last opened or took a key; it closes `window::IDLE` later.
-    pub active: f64,
 }
 
 pub fn spec() -> AppSpec<App> {
@@ -76,7 +74,6 @@ impl App {
         app.panel = Some(Panel {
             phase: Phase::Open,
             opens: 0,
-            active: 0.0,
         });
         app
     }
@@ -91,11 +88,9 @@ impl App {
         let Some(panel) = &mut self.panel else { return };
         panel.phase = Phase::Open;
         panel.opens += 1;
-        panel.active = self.clock;
         // The card's own transition has no entrance, but its contents and a card
         // revived mid-close would still animate in.
         tx.settle();
-        tx.wake_after(Duration::from_secs_f64(window::IDLE));
         // A failed copy shows until the next open; a good one keeps counting down.
         if self.copy.as_ref().is_some_and(|c| c.error.is_some()) {
             self.copy = None;
@@ -113,8 +108,8 @@ impl App {
         }
     }
 
-    /// Escape, the confirmation ending, or handing over to the main window:
-    /// the card fades, then the window hides. A part-typed passphrase goes as
+    /// Escape, clicking away, the confirmation ending, or handing over to the
+    /// main window: the card fades, then the window hides. A part-typed passphrase goes as
     /// the card starts leaving.
     pub fn dismiss(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
@@ -145,12 +140,6 @@ impl App {
             return false;
         };
         match panel.phase {
-            Phase::Open if now >= panel.active + window::IDLE - 1e-3 => self.dismiss(tx),
-            Phase::Open => {
-                let left = panel.active + window::IDLE - now;
-                tx.wake_after(Duration::from_secs_f64(left));
-                return false;
-            }
             Phase::Copied { until } if now >= until - 1e-3 => self.dismiss(tx),
             Phase::Closing { until } if now >= until - 1e-3 => {
                 self.hide_panel(tx);
@@ -160,13 +149,6 @@ impl App {
             _ => return false,
         }
         true
-    }
-
-    /// A key reached the panel: it stays up another `window::IDLE`.
-    pub(crate) fn panel_active(&mut self) {
-        if let Some(panel) = &mut self.panel {
-            panel.active = self.clock;
-        }
     }
 
     /// From the main window: bring the panel up.
@@ -207,6 +189,14 @@ impl App {
         }
     }
 
+    /// The panel's window lost focus (another app or window was clicked):
+    /// it goes as Escape sends it.
+    pub fn panel_focus(&mut self, focused: bool, tx: &mut Tx) {
+        if !focused {
+            self.dismiss(tx);
+        }
+    }
+
     /// The panel's window was closed (by the system; it has no close button):
     /// the main window's cleanup, and the process leaves if nothing else can
     /// bring the panel back.
@@ -229,7 +219,6 @@ impl App {
     /// Keys in the panel's search field: Escape closes; while the
     /// confirmation shows, nothing else does anything.
     pub fn panel_search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        self.panel_active();
         if self.panel_shortcut(ev, tx) || self.panel_escape(ev, tx) {
             return true;
         }
@@ -251,7 +240,6 @@ impl App {
 
     /// Keys no field took.
     pub fn panel_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        self.panel_active();
         if self.panel_shortcut(ev, tx) {
             return true;
         }

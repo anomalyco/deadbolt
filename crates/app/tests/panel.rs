@@ -82,7 +82,7 @@ fn both(a: &mut Runtime<App>, b: &mut Runtime<App>, seconds: f64) {
 fn alone(rt: &mut Runtime<App>) {
     let main = rune::App::new(deadbolt_app::spec());
     let quick = rune::App::new(panel::spec());
-    rt.state.windows = Some(Windows::new(main.handle(), quick.handle(), &[]));
+    rt.state.windows = Some(Windows::new(main.handle(), quick.handle()));
     rt.state.panel.as_mut().unwrap().opens = 1;
 }
 
@@ -458,17 +458,72 @@ fn the_username_hint_shows_only_for_logins_with_one() {
     assert_eq!(footer(&rt), "Visa •••• 4242 has no username");
 }
 
+/// Clicking away goes as Escape does: the card fades, the window hides, and
+/// what was read and typed is forgotten.
 #[test]
-fn it_closes_itself_when_left_alone() {
-    let idle = panel::window::IDLE;
+fn clicking_away_closes_it_and_forgets() {
+    for scene in ["filtering", "locked"] {
+        let mut rt = runtime(scene, true);
+        rt.key(key(Key::Down));
+        rt.key(key(Key::Text("h".into())));
+        frames(&mut rt, 2);
+        rt.update(|s, tx| s.panel_focus(true, tx));
+        rt.frame(FRAME);
+        assert_eq!(
+            phase(&rt),
+            Phase::Open,
+            "{scene}: gaining focus does nothing"
+        );
+
+        rt.update(|s, tx| s.panel_focus(false, tx));
+        rt.frame(FRAME);
+        assert!(matches!(phase(&rt), Phase::Closing { .. }), "{scene}");
+        assert!(rt.state.passphrase.text.is_empty(), "{scene}");
+        frames(&mut rt, 30);
+        assert_eq!(phase(&rt), Phase::Hidden, "{scene}");
+        assert!(
+            rt.state.items.is_empty() && rt.state.selected.is_none(),
+            "{scene}"
+        );
+        assert!(rt.state.detail.is_none(), "{scene}");
+        let gone = find(&rt, "card").map_or(0.0, |c| c.1);
+        assert!(gone < 0.01, "{scene}: faded out ({gone})");
+    }
+}
+
+/// Losing focus to its own copy's close, or once hidden, changes nothing.
+#[test]
+fn focus_loss_while_closing_keeps_the_copy() {
     let mut rt = runtime("empty", true);
-    rt.frame(idle - 10.0);
-    rt.key(key(Key::Down));
+    frames(&mut rt, 2);
+    rt.key(key(Key::Enter));
     rt.frame(FRAME);
-    rt.frame(idle - 5.0);
-    assert_eq!(phase(&rt), Phase::Open, "a key keeps it up");
-    rt.frame(5.1);
+    rt.update(|s, tx| s.panel_focus(false, tx));
+    rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Closing { .. }));
+    assert!(rt.state.copy_pending(), "the copy still counts down");
+    frames(&mut rt, 30);
+    rt.update(|s, tx| s.panel_focus(false, tx));
+    rt.frame(FRAME);
+    assert_eq!(phase(&rt), Phase::Hidden);
+}
+
+#[test]
+fn it_opens_under_the_pointer_near_the_top() {
+    use rune::{Align, DisplayTarget, OverlayPlacement, ScreenEdge};
+    let (display, placement) = panel::window::PLACE;
+    assert_eq!(display, DisplayTarget::UnderPointer);
+    let OverlayPlacement::Edge {
+        edge,
+        align,
+        margin,
+        ..
+    } = placement
+    else {
+        panic!("placed against an edge: {placement:?}");
+    };
+    assert_eq!((edge, align), (ScreenEdge::Top, Align::Center));
+    assert!(margin > 0.0 && margin < 300.0);
 }
 
 #[test]
@@ -624,6 +679,45 @@ fn a_hidden_panel_wakes_once_for_its_countdown() {
         next > 25.0,
         "nothing wakes it until about the clear ({next} s)"
     );
+}
+
+/// Hidden, the panel still clears its copy on time.
+#[test]
+fn a_hidden_panel_clears_its_copy_on_time() {
+    let mut rt = runtime("empty", true);
+    let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
+    frames(&mut rt, 2);
+    rt.key(key(Key::Enter));
+    frames(&mut rt, 120);
+    assert_eq!(phase(&rt), Phase::Hidden);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    let clears = rt.state.copy.as_ref().unwrap().remaining(rt.state.clock);
+    rt.frame(clears - 0.1);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD), "not early");
+    rt.frame(0.2);
+    assert_eq!(board(&clip), None, "cleared on time");
+}
+
+/// A lock that reaches the hidden panel clears its copy and leaves nothing
+/// to show when it next opens.
+#[test]
+fn a_lock_while_hidden_leaves_nothing_behind() {
+    let mut rt = runtime("empty", true);
+    let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
+    frames(&mut rt, 2);
+    rt.key(key(Key::Enter));
+    frames(&mut rt, 120);
+    assert_eq!(phase(&rt), Phase::Hidden);
+
+    rt.update(|s, tx| s.apply(Done::Locked(Ok(())), tx));
+    rt.frame(FRAME);
+    assert_eq!(board(&clip), None, "the lock clears the copy");
+    assert!(rt.state.copy.is_none());
+    assert!(rt.state.items.is_empty() && rt.state.detail.is_none());
+    rt.update(|s, tx| s.summon(tx));
+    frames(&mut rt, 2);
+    assert!(shows(&rt, "Unlock Deadbolt"), "it opens locked");
+    assert!(!shows(&rt, "github.com"));
 }
 
 /// Scenario A: the panel copies, hides with its countdown running, and the
