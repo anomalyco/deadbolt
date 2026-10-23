@@ -14,6 +14,7 @@ pub fn field() -> TextEdit {
 
 /// Runs before the editor: true when `ev` is a chord that would type text,
 /// so it types nothing.
+// Rune gap: a TextEdit inserts ⌘/⌃ text chords. Remove when Rune lands `secure-input`.
 pub fn chord(ev: &KeyEvent) -> bool {
     matches!(ev.key, Key::Text(_)) && (ev.mods.cmd || ev.mods.ctrl)
 }
@@ -21,6 +22,7 @@ pub fn chord(ev: &KeyEvent) -> bool {
 /// Runs after an edit: drops control characters, keeping the caret where it
 /// was among the rest. The buffer is sized up front, so no partial copy is
 /// left behind by a reallocation, and the old text is wiped by the swap.
+// Rune gap: typing, ⇧⏎ and paste insert control characters. Remove when Rune lands `secure-input`.
 pub fn tidy(field: &mut TextEdit) {
     if !field.text.contains(char::is_control) {
         return;
