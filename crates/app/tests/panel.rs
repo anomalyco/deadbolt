@@ -1022,3 +1022,33 @@ fn a_hidden_panel_fetches_and_holds_nothing() {
     frames(&mut rt, 2);
     assert_eq!(rt.state.screen, Screen::Locked, "a lock still reaches it");
 }
+
+/// ⌘L locks from the open panel (when no field took it), but not once it's
+/// confirming a copy or closing.
+#[test]
+fn command_l_locks_only_while_open() {
+    let command_l = KeyEvent {
+        key: Key::Command('l'),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    };
+    let mut rt = runtime("empty", true);
+    let (agent, jobs, _replies) = Agent::scripted();
+    rt.state.agent = agent;
+    frames(&mut rt, 2);
+    for phase in [
+        Phase::Copied { until: None },
+        Phase::Closing { until: None },
+        Phase::Open,
+    ] {
+        let ev = command_l.clone();
+        rt.update(move |s, tx| {
+            s.panel.as_mut().unwrap().phase = phase;
+            s.panel_key(&ev, tx);
+        });
+        let locked = jobs.try_iter().any(|job| matches!(job, Job::Lock));
+        assert_eq!(locked, phase == Phase::Open, "{phase:?}");
+    }
+}

@@ -281,7 +281,11 @@ impl App {
             Key::Escape => self.dismiss(tx),
             Key::Enter if self.screen == Screen::Onboarding => self.open_main(tx),
             Key::Enter if matches!(self.screen, Screen::Failed(_)) => self.retry(),
-            Key::Command('l') if self.screen == Screen::Vault => self.lock(),
+            Key::Command('l')
+                if self.screen == Screen::Vault && self.panel_phase() == Some(Phase::Open) =>
+            {
+                self.lock()
+            }
             _ => return false,
         }
         true
