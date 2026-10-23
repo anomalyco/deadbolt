@@ -162,6 +162,7 @@ fn unlock(s: &App, k: &Kit) -> El {
 }
 
 /// The passphrase field: dots, Enter unlocks, typing clears the last error.
+/// In the quick panel, Escape closes the panel rather than blurring the field.
 pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
     TextInput::new(&s.passphrase.mask)
         .placeholder("Passphrase")
@@ -170,7 +171,9 @@ pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
         .invalid(s.unlock_error.is_some())
         .disabled(s.unlocking)
         .on_edit(|s: &mut App| &mut s.passphrase.mask)
-        .on_key(|s: &mut App, ev, _| s.passphrase_key(ev))
+        .on_key(|s: &mut App, ev, tx| {
+            s.panel_shortcut(ev, tx) || s.panel_escape(ev, tx) || s.passphrase_key(ev)
+        })
         .on_change(|s: &mut App, _| {
             s.passphrase.reconcile();
             s.unlock_error = None;
@@ -644,10 +647,21 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .px(16.0)
         .gap(16.0)
         .center_y()
-        .child(hint("h-copy", &["⏎"], "Copy password"))
-        .child(hint("h-user", &["⇧", "⏎"], "Copy username"))
-        .child(hint("h-move", &["↑", "↓"], "Select"))
+        // At the narrowest window the key hints give way, never Lock or Settings.
+        .child(
+            row()
+                .key("h-keys")
+                .shrink()
+                .pr(16.0)
+                .gap(16.0)
+                .center_y()
+                .clip_fade(0.0, 0.0, 16.0, 0.0)
+                .child(hint("h-copy", &["⏎"], "Copy password"))
+                .child(hint("h-user", &["⇧", "⏎"], "Copy username"))
+                .child(hint("h-move", &["↑", "↓"], "Select")),
+        )
         .child(spacer())
+        .child(crate::panel::window::entry(k))
         .child(hint("h-lock", &["⌘", "L"], "Lock"))
         .children(crate::install::settings(s, k, layer))
 }

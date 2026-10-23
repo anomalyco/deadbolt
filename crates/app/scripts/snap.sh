@@ -21,3 +21,12 @@ done
 "$bin" --scene copied --at 2.4 --snap "$out/copied.png" "$@"
 "$bin" --scene copied --at 2.4 --theme light --snap "$out/copied-light.png" "$@"
 "$bin" --scene locked --theme light --snap "$out/locked-light.png" "$@"
+# The quick panel, dark and light: just opened, filtering, nothing found, an
+# empty vault, locked, a wrong passphrase, not set up, failed, and 0.6 s after
+# a copy (the footer shows the countdown).
+for theme in dark light; do
+  for scene in empty filtering no-match empty-vault locked locked-error not-set-up failed; do
+    "$bin" --window panel --scene "$scene" --theme "$theme" --snap "$out/panel-$scene-$theme.png" "$@"
+  done
+  "$bin" --window panel --scene copied --at 0.6 --theme "$theme" --snap "$out/panel-copied-$theme.png" "$@"
+done

@@ -1,0 +1,7 @@
+{
+  "events": [
+    { "t": 0.5, "type": "type", "text": "git", "every": 0.12 },
+    { "t": 1.4, "type": "key", "name": "Down" },
+    { "t": 1.9, "type": "key", "name": "Enter" }
+  ]
+}

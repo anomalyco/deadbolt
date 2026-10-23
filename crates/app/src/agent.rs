@@ -49,12 +49,37 @@ pub enum Done {
     },
     Item {
         seq: u64,
-        result: Result<ItemInfo, Failure>,
+        result: Result<Values, Failure>,
     },
     /// From the watch stream.
     Changed(Change),
     /// The watch stream broke without the agent saying it was stopping.
     WatchLost,
+}
+
+/// An item with its values, wiped when dropped, so a reply nobody takes (a
+/// stale one, or one left in a hidden window's inbox) doesn't keep them.
+pub struct Values(ItemInfo);
+
+impl Values {
+    pub fn new(item: ItemInfo) -> Values {
+        Values(item)
+    }
+
+    /// The item, for the taker to wipe (`model::forget`).
+    pub fn take(mut self) -> ItemInfo {
+        let fields = std::mem::take(&mut self.0.fields);
+        ItemInfo {
+            fields,
+            ..self.0.clone()
+        }
+    }
+}
+
+impl Drop for Values {
+    fn drop(&mut self) {
+        crate::model::forget(&mut self.0);
+    }
 }
 
 /// A request that failed: the agent's code if it refused, and a message for people.
@@ -326,7 +351,7 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 query: vec![id],
             };
             let result = match deadbolt_client::simple(paths, command).await {
-                Ok(Reply::Item { item }) => Ok(item),
+                Ok(Reply::Item { item }) => Ok(Values::new(item)),
                 Ok(_) => Err(unexpected()),
                 Err(error) => Err(error.into()),
             };

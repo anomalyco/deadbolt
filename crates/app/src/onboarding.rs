@@ -763,9 +763,13 @@ fn short(id: &str) -> &str {
     &id[..id.len().min(8)]
 }
 
-/// Keys while onboarding, before the focused field: Escape goes back or
-/// cancels. True when handled.
-pub fn key(s: &mut App, ev: &KeyEvent) -> bool {
+/// Keys while onboarding, before the focused field: ⇧⌘Space opens the quick
+/// panel rather than typing a space, and Escape goes back or cancels. True
+/// when handled.
+pub fn key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    if s.panel_shortcut(ev, tx) {
+        return true;
+    }
     if ev.key != Key::Escape {
         return false;
     }

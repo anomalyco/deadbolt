@@ -397,7 +397,7 @@ fn device_field(s: &App, k: &Kit) -> El {
         .width(None)
         .invalid(problem.is_some())
         .on_edit(|s: &mut App| &mut s.onboarding.device)
-        .on_key(|s: &mut App, ev, _| super::key(s, ev))
+        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx))
         .on_submit(|s: &mut App, _| s.onboarding.passphrase.mask.focused = true)
         .build(k)
         .key("device-input");
@@ -420,7 +420,7 @@ fn vault_field(s: &App, k: &Kit) -> El {
         .width(None)
         .invalid(problem.is_some())
         .on_edit(|s: &mut App| &mut s.onboarding.vault)
-        .on_key(|s: &mut App, ev, _| super::key(s, ev))
+        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx))
         .on_submit(submit)
         .build(k)
         .key("vault-input");
@@ -438,7 +438,7 @@ fn passphrase_field(s: &App, k: &Kit, flow: Flow) -> El {
         .width(None)
         .invalid(o.attempted && short)
         .on_edit(|s: &mut App| &mut s.onboarding.passphrase.mask)
-        .on_key(|s: &mut App, ev, _| super::key(s, ev) || s.onboarding.passphrase.key(ev))
+        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || s.onboarding.passphrase.key(ev))
         .on_change(|s: &mut App, _| s.onboarding.passphrase.reconcile())
         .on_submit(move |s: &mut App, tx| {
             if s.onboarding.repeat_matches() == Some(true) {
@@ -520,7 +520,7 @@ fn repeat_field(s: &App, k: &Kit, flow: Flow) -> El {
         .width(None)
         .invalid(matches == Some(false))
         .on_edit(|s: &mut App| &mut s.onboarding.repeat.mask)
-        .on_key(|s: &mut App, ev, _| super::key(s, ev) || s.onboarding.repeat.key(ev))
+        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || s.onboarding.repeat.key(ev))
         .on_change(|s: &mut App, _| s.onboarding.repeat.reconcile())
         .on_submit(move |s: &mut App, tx| submit_for(flow)(s, tx))
         .build(k)
