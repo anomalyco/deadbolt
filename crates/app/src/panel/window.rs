@@ -85,7 +85,9 @@ impl Windows {
         self.panel.hide();
     }
 
+    /// Opens the main window, with the Dock icon a `--panel` start went without.
     pub fn open_main(&self) {
+        self.main.set_dock_icon(true);
         self.main.open();
     }
 
