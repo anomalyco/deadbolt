@@ -363,9 +363,13 @@ fn escape_on_the_locked_panel_closes_it_and_forgets_the_passphrase() {
         matches!(phase(&rt), Phase::Closing { .. }),
         "Escape closes, not just blurs the field"
     );
+    assert!(
+        rt.state.passphrase.text.is_empty(),
+        "forgotten as the card starts leaving"
+    );
+    assert!(rt.state.passphrase.is_secure());
     frames(&mut rt, 30);
     assert_eq!(phase(&rt), Phase::Hidden);
-    assert!(rt.state.passphrase.text.is_empty(), "hiding forgets it");
 }
 
 /// Both unlock fields: ⌘V pastes (on one line), but nothing copies, cuts or

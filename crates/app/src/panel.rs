@@ -112,7 +112,8 @@ impl App {
     }
 
     /// Escape, the confirmation ending, or handing over to the main window:
-    /// the card fades, then the window hides.
+    /// the card fades, then the window hides. A part-typed passphrase goes as
+    /// the card starts leaving.
     pub fn dismiss(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
         if matches!(panel.phase, Phase::Closing { .. } | Phase::Hidden) {
@@ -121,6 +122,7 @@ impl App {
         panel.phase = Phase::Closing {
             until: self.clock + HIDE_AFTER,
         };
+        self.passphrase.clear();
         tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
     }
 
@@ -199,7 +201,6 @@ impl App {
         }
         self.forget_items();
         if !self.unlocking {
-            self.passphrase.clear();
             self.unlock_error = None;
         }
     }
