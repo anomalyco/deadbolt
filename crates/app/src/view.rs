@@ -10,14 +10,14 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
-    Cursor, Cx, El, Icon, ScrollSpec, Spring, TextStyle, Transition, col, el, icon, row, spacer,
-    text, text_input,
+    Cursor, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, TextStyle, Transition, Tx, col, el, icon,
+    row, spacer, text, text_input,
 };
 use rune_kit::{
     Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, TextInput,
 };
 
-use crate::model::{App, BAR_W, Screen, is_secret, title_case};
+use crate::model::{App, BAR_W, Copy, Screen, is_secret, title_case};
 
 const LIST_W: f32 = 300.0;
 pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
@@ -126,37 +126,14 @@ fn unlock(s: &App, k: &Kit) -> El {
         ),
         (None, _) => "Locked. Enter your passphrase to unlock this device.".into(),
     };
-    let field = TextInput::new(&s.passphrase.mask)
-        .placeholder("Passphrase")
-        .large()
-        .width(None)
-        .invalid(s.unlock_error.is_some())
-        .disabled(s.unlocking)
-        .on_edit(|s: &mut App| &mut s.passphrase.mask)
-        .on_key(|s: &mut App, ev, _| s.passphrase_key(ev))
-        .on_change(|s: &mut App, _| {
-            s.passphrase.reconcile();
-            s.unlock_error = None;
-        })
-        .on_submit(|s: &mut App, _| s.submit_unlock())
-        .build(k)
-        .key("passphrase");
     let mut body = col()
         .key("body")
         .w_full()
         .gap(12.0)
         .child(muted(k, "about", about))
-        .child(field);
-    if let Some(e) = &s.unlock_error {
-        body = body.child(
-            text(e.clone())
-                .key("error")
-                .font(k.ty.text_small)
-                .color(k.c.danger.fg)
-                .wrap()
-                .w_full()
-                .transition(Transition::opacity()),
-        );
+        .child(passphrase_field(s, k));
+    if let Some(e) = unlock_error(s, k) {
+        body = body.child(e);
     }
     let label = if s.unlocking {
         "Unlocking…"
@@ -184,6 +161,38 @@ fn unlock(s: &App, k: &Kit) -> El {
     )
 }
 
+/// The passphrase field: dots, Enter unlocks, typing clears the last error.
+pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
+    TextInput::new(&s.passphrase.mask)
+        .placeholder("Passphrase")
+        .large()
+        .width(None)
+        .invalid(s.unlock_error.is_some())
+        .disabled(s.unlocking)
+        .on_edit(|s: &mut App| &mut s.passphrase.mask)
+        .on_key(|s: &mut App, ev, _| s.passphrase_key(ev))
+        .on_change(|s: &mut App, _| {
+            s.passphrase.reconcile();
+            s.unlock_error = None;
+        })
+        .on_submit(|s: &mut App, _| s.submit_unlock())
+        .build(k)
+        .key("passphrase")
+}
+
+pub(crate) fn unlock_error(s: &App, k: &Kit) -> Option<El> {
+    let e = s.unlock_error.as_ref()?;
+    Some(
+        text(e.clone())
+            .key("error")
+            .font(k.ty.text_small)
+            .color(k.c.danger.fg)
+            .wrap()
+            .w_full()
+            .transition(Transition::opacity()),
+    )
+}
+
 // -------------------------------------------------------------------------------------------
 // The vault: search, list, detail.
 
@@ -206,12 +215,16 @@ fn vault(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .child(hints(s, k, layer))
 }
 
-fn toolbar(s: &App, k: &Kit) -> El {
+/// Keys the search field handles before its editor; true when handled.
+pub(crate) type SearchKeys = fn(&mut App, &KeyEvent, &mut Tx) -> bool;
+
+/// The search field: typing filters the list live; `keys` takes ↑↓, Enter and Escape.
+pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys) -> El {
     let count = match s.items.len() {
         1 => "Search 1 item".to_owned(),
         n => format!("Search {n} items"),
     };
-    let field = text_input(&s.search, TextStyle::new(15.0, 400.0).lh(20.0))
+    text_input(&s.search, style)
         .key("search-input")
         .grow(1.0)
         .shrink()
@@ -220,8 +233,14 @@ fn toolbar(s: &App, k: &Kit) -> El {
         .caret(k.c.text_strong, k.alpha(k.c.text_accent, 0.3))
         .animate_edit_layout()
         .on_edit(|s: &mut App| &mut s.search)
-        .on_input_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
-        .on_input_change(|s: &mut App, _| s.keep_selection_visible());
+        .on_input_key(keys)
+        .on_input_change(|s: &mut App, _| s.keep_selection_visible())
+}
+
+fn toolbar(s: &App, k: &Kit) -> El {
+    let field = search_input(s, k, TextStyle::new(15.0, 400.0).lh(20.0), |s, ev, tx| {
+        s.search_key(ev, tx)
+    });
     row()
         .key("toolbar")
         .w_full()
@@ -246,6 +265,20 @@ fn toolbar(s: &App, k: &Kit) -> El {
 }
 
 fn list(s: &App, k: &Kit) -> El {
+    col()
+        .key("list")
+        .w(LIST_W)
+        .h_full()
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        // Rune gap: a scroll doesn't clip its children (docs/app.md); hard edges.
+        .clip_fade(0.0, 0.0, 0.0, 0.0)
+        .child(rows(s, k))
+}
+
+/// The visible items as rows, or why there are none. Shared by the vault and the quick panel.
+pub(crate) fn rows(s: &App, k: &Kit) -> El {
     let visible = s.visible();
     let mut rows = col().key("rows").w_full().gap(2.0).px(8.0).py(8.0);
     if !s.loaded {
@@ -268,16 +301,7 @@ fn list(s: &App, k: &Kit) -> El {
     for i in 0..visible.len() {
         rows = rows.child(list_row(s, k, &visible, i));
     }
-    col()
-        .key("list")
-        .w(LIST_W)
-        .h_full()
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        // No soft top/bottom edge: nested clip_fades apply the outer fade
-        // widths to each row's own line (Rune bug), which washes the rows out.
-        .child(rows)
+    rows
 }
 
 fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
@@ -525,54 +549,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
     for shadow in k.shadow_layers(&k.elevation.floating) {
         pill = pill.box_shadow(shadow);
     }
-    let line = if let Some(error) = &copy.error {
-        row().key("failed").w_full().child(
-            text(error.clone())
-                .font(k.ty.text_small)
-                .color(k.c.danger.fg)
-                .wrap()
-                .w_full(),
-        )
-    } else if copy.cleared_at.is_some() {
-        row()
-            .key("cleared")
-            .w_full()
-            .gap(8.0)
-            .center_y()
-            .transition(replace())
-            .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_muted))
-            .child(
-                text("Clipboard cleared")
-                    .font(k.ty.text_small)
-                    .color(k.c.text_muted),
-            )
-    } else {
-        let left = copy.shown;
-        row()
-            .key("copied")
-            .w_full()
-            .gap(8.0)
-            .center_y()
-            .transition(replace())
-            .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_base))
-            .child(
-                text(format!("{} copied", copy.what))
-                    .font(k.ty.ui_medium)
-                    .color(k.c.text_strong),
-            )
-            .child(spacer())
-            .child(
-                text("clears in")
-                    .font(k.ty.text_small)
-                    .color(k.c.text_muted),
-            )
-            .child(
-                text(format!("{}:{:02}", left / 60, left % 60))
-                    .font(k.ty.text_small)
-                    .color(k.c.text_base),
-            )
-    };
-    pill = pill.child(line);
+    pill = pill.child(copy_line(k, copy, true));
     // The bar's width follows a `Live` value the countdown sets, so ticking doesn't rebuild the view.
     pill = pill.child(
         el().key("track")
@@ -592,19 +569,74 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
     Some(pill)
 }
 
-fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    let hint = |key: &str, keys: &[&str], label: &str| {
-        row()
-            .key(key)
-            .gap(6.0)
-            .center_y()
-            .child(Keybind::new(keys).build(k))
-            .child(
-                text(label.to_owned())
-                    .font(k.ty.small)
-                    .color(k.c.text_muted),
-            )
+/// A key and what it does, for the hint bars.
+pub(crate) fn hint(k: &Kit, key: &str, keys: &[&str], label: &str) -> El {
+    row()
+        .key(key)
+        .gap(6.0)
+        .center_y()
+        .child(Keybind::new(keys).build(k))
+        .child(
+            text(label.to_owned())
+                .font(k.ty.small)
+                .color(k.c.text_muted),
+        )
+}
+
+/// What a copy says: "Password copied", then "clears in 0:30" counting down,
+/// then "Clipboard cleared", or why it failed. Each line swaps by replacement,
+/// and the countdown's digits are all one width. Shared by the vault's copy
+/// notice and the quick panel's footer; `spread` puts the countdown at the far
+/// edge and lets an error wrap (the notice).
+pub(crate) fn copy_line(k: &Kit, copy: &Copy, spread: bool) -> El {
+    let line = |key: &str| {
+        let line = row().key(key).gap(8.0).center_y().transition(replace());
+        if spread { line.w_full() } else { line }
     };
+    if let Some(error) = &copy.error {
+        let message = text(error.clone())
+            .font(k.ty.text_small)
+            .color(k.c.danger.fg);
+        return if spread {
+            row().key("failed").w_full().child(message.wrap().w_full())
+        } else {
+            line("failed").shrink().child(message.truncate())
+        };
+    }
+    if copy.cleared_at.is_some() {
+        return line("cleared")
+            .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_muted))
+            .child(
+                text("Clipboard cleared")
+                    .font(k.ty.text_small)
+                    .color(k.c.text_muted),
+            );
+    }
+    let left = copy.shown;
+    let mut out = line("copied")
+        .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_base))
+        .child(
+            text(format!("{} copied", copy.what))
+                .font(k.ty.ui_medium)
+                .color(k.c.text_strong),
+        );
+    if spread {
+        out = out.child(spacer());
+    }
+    out.child(
+        text("clears in")
+            .font(k.ty.text_small)
+            .color(k.c.text_muted),
+    )
+    .child(
+        text(format!("{}:{:02}", left / 60, left % 60))
+            .font(k.ty.text_small)
+            .color(k.c.text_base),
+    )
+}
+
+fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    let hint = |key: &str, keys: &[&str], label: &str| hint(k, key, keys, label);
     row()
         .key("hints")
         .w_full()
