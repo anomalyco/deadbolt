@@ -167,7 +167,9 @@ impl Loaded {
     pub fn open(dir: &Path, passphrase: &[u8]) -> Result<Self> {
         let store = deadbolt_store::unlock(dir, passphrase)?;
         let secret = DeviceSecret::from_bytes(store.device_secret());
-        let default: Option<String> = get_json(&store, META_DEFAULT_VAULT)?;
+        // Setup stores `null` until the first vault exists.
+        let default: Option<String> =
+            get_json::<Option<String>>(&store, META_DEFAULT_VAULT)?.flatten();
         let meta = Meta {
             device_name: get_json(&store, META_DEVICE_NAME)?.unwrap_or_default(),
             default_vault: default
@@ -556,6 +558,20 @@ mod tests {
             vec![second]
         );
         assert!(resolve_by_name_or_id([(first, None)].into_iter(), "ABA").is_empty());
+    }
+
+    #[test]
+    fn a_device_reopens_before_its_first_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let kdf = KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        drop(Loaded::setup(dir.path(), b"test", "device", kdf).unwrap());
+        let loaded = Loaded::open(dir.path(), b"test").unwrap();
+        assert_eq!(loaded.meta.default_vault, None);
+        assert_eq!(loaded.meta.device_name, "device");
     }
 
     #[test]
