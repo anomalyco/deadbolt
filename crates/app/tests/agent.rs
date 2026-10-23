@@ -16,9 +16,14 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const PASSPHRASE: &str = "correct horse";
 
-/// Builds `deadbolt` and returns its path.
+/// `DEADBOLT_BIN`, else `deadbolt` built from this repository into the test's
+/// own target dir (a separate one, so it doesn't wait on the outer build's lock).
 fn deadbolt() -> PathBuf {
-    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../Cargo.toml");
+    if let Some(bin) = std::env::var_os("DEADBOLT_BIN") {
+        return bin.into();
+    }
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    let target = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cli");
     let out = Command::new(env!("CARGO"))
         .args([
             "build",
@@ -26,9 +31,11 @@ fn deadbolt() -> PathBuf {
             "-p",
             "deadbolt-cli",
             "--message-format=json",
-            "--manifest-path",
         ])
+        .arg("--manifest-path")
         .arg(&manifest)
+        .arg("--target-dir")
+        .arg(&target)
         .stderr(Stdio::inherit())
         .output()
         .expect("running cargo");

@@ -5,6 +5,7 @@ pub mod agent;
 pub mod clipboard;
 pub mod model;
 pub mod secret;
+pub mod theme;
 pub mod view;
 
 use deadbolt_client::Paths;
@@ -33,8 +34,8 @@ pub fn spec() -> AppSpec<App> {
         init: || App::new(Agent::offline(), Clipboard::memory().0),
         view: view::app,
         scenes: SCENES,
-        fonts: rune_theme_opencode::FONTS,
-        families: rune_theme_opencode::FAMILIES,
+        fonts: theme::FONTS,
+        families: theme::FAMILIES,
         setup: Some(setup),
         poll: Some(|s, now, tx| s.poll(now, tx)),
         on_key: Some(|s: &mut App, ev: &KeyEvent, tx: &mut Tx| s.on_key(ev, tx)),

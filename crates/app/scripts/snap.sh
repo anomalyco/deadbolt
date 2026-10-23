@@ -1,13 +1,12 @@
 #!/bin/sh
 # Renders the app's scenes headless (offscreen, no window) to PNGs.
-# Usage: app/scripts/snap.sh [OUT] [extra Rune flags...]   (default OUT: app/snaps)
+# Usage: crates/app/scripts/snap.sh [OUT] [extra Rune flags...]   (default OUT: crates/app/snaps)
 set -eu
 cd "$(dirname "$0")/.."
 out=${1:-snaps}
 [ $# -gt 0 ] && shift
 mkdir -p "$out"
-cargo build --quiet
-bin=$(cargo build --quiet --message-format=json | sed -n 's/.*"executable":"\([^"]*deadbolt-app\)".*/\1/p' | tail -1)
+bin=$(cargo build --release --quiet -p deadbolt-app --message-format=json | sed -n 's/.*"executable":"\([^"]*deadbolt-app\)".*/\1/p' | tail -1)
 for scene in locked locked-error vault search revealed empty setup failed; do
   "$bin" --scene "$scene" --snap "$out/$scene.png" "$@"
 done

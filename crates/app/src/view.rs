@@ -10,20 +10,15 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
-    Align, Cursor, Cx, El, Icon, ScrollSpec, Spring, TextStyle, Transition, col, el, icon, row,
-    spacer, text, text_input,
+    Cursor, Cx, El, Icon, ScrollSpec, Spring, TextStyle, Transition, col, el, icon, row, spacer,
+    text, text_input,
 };
-use rune_kit::{
-    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, KeybindVariant, Kit,
-    TextInput,
-};
+use rune_kit::{Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Kit, TextInput};
 
-use crate::model::{App, CLEAR_AFTER, Screen, is_secret, title_case};
+use crate::model::{App, BAR_W, Screen, is_secret, title_case};
 
 const LIST_W: f32 = 300.0;
-const NOTICE_W: f32 = 280.0;
-/// Width of one digit cell: tabular figures by layout (Rune has no `tnum`).
-const DIGIT_W: f32 = 7.5;
+const NOTICE_W: f32 = BAR_W + 24.0;
 
 pub static LOCK: Icon = Icon {
     name: "deadbolt-lock",
@@ -34,6 +29,22 @@ pub static EYE: Icon = Icon {
     name: "deadbolt-eye",
     view: 16.0,
     body: r#"<path d="M1.75 8C3.1 5.4 5.4 4 8 4s4.9 1.4 6.25 4C12.9 10.6 10.6 12 8 12S3.1 10.6 1.75 8Z" stroke="currentColor"/><circle cx="8" cy="8" r="1.75" stroke="currentColor"/>"#,
+};
+// Key symbols Plex Mono lacks (Rune only falls back to other fonts for CJK).
+pub static CMD: Icon = Icon {
+    name: "deadbolt-cmd",
+    view: 16.0,
+    body: r#"<path d="M6 6h4v4H6zM6 6V4.5A1.5 1.5 0 1 0 4.5 6H6M10 6V4.5A1.5 1.5 0 1 1 11.5 6H10M10 10v1.5a1.5 1.5 0 1 0 1.5-1.5H10M6 10v1.5A1.5 1.5 0 1 1 4.5 10H6" stroke="currentColor" stroke-width="1.25"/>"#,
+};
+pub static SHIFT: Icon = Icon {
+    name: "deadbolt-shift",
+    view: 16.0,
+    body: r#"<path d="M8 2.5l5.5 6h-3V13h-5V8.5h-3z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>"#,
+};
+pub static ENTER: Icon = Icon {
+    name: "deadbolt-enter",
+    view: 16.0,
+    body: r#"<path d="M13 3v5.5A1.5 1.5 0 0 1 11.5 10H3.5M6.5 7l-3 3 3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 pub static EYE_OFF: Icon = Icon {
     name: "deadbolt-eye-off",
@@ -47,7 +58,7 @@ fn replace() -> Transition {
 
 pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     cx.reduced_motion(s.reduced_motion);
-    let k = rune_theme_opencode::kit(cx.system_dark());
+    let k = crate::theme::kit(cx.system_dark());
     let screen = match &s.screen {
         Screen::Connecting => connecting(k),
         Screen::NotSetUp => not_set_up(k),
@@ -76,14 +87,14 @@ fn centred(key: &str, k: &Kit, glyph: &'static Icon, title: &str, body: El) -> E
                     .key("mark")
                     .size(36.0, 36.0)
                     .center()
-                    .radius(10.0)
+                    .radius(k.radius.lg)
                     .fill(k.c.layer_02)
                     .child(icon(glyph, 20.0).color(k.c.icon_base)),
             )
             .child(
                 text(title)
                     .key("title")
-                    .font(TextStyle::new(17.0, 600.0).lh(22.0))
+                    .font(TextStyle::new(17.0, 500.0).lh(22.0))
                     .color(k.c.text_strong),
             )
             .child(body),
@@ -289,12 +300,8 @@ fn list(s: &App, k: &Kit) -> El {
             &format!("Nothing matches “{}”.", s.search.text.trim()),
         ));
     }
-    for item in visible {
-        rows = rows.child(list_row(
-            item,
-            s.selected.as_deref() == Some(item.id.as_str()),
-            k,
-        ));
+    for i in 0..visible.len() {
+        rows = rows.child(list_row(s, k, &visible, i));
     }
     col()
         .key("list")
@@ -303,7 +310,8 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        .clip_fade(0.0, 12.0, 0.0, 16.0)
+        // No soft top/bottom edge: nested clip_fades apply the outer fade
+        // widths to each row's own line (Rune bug), which washes the rows out.
         .child(rows)
 }
 
@@ -325,7 +333,10 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
         )
 }
 
-fn list_row(item: &ItemInfo, selected: bool, k: &Kit) -> El {
+/// Row `i` of the visible items. Rows are built only here, by index, ready for a lazy list.
+fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
+    let item = visible[i];
+    let selected = s.selected.as_deref() == Some(item.id.as_str());
     let id = item.id.clone();
     let mut r = col()
         .key(format!("item-{}", item.id))
@@ -407,7 +418,7 @@ fn detail(s: &App, k: &Kit) -> El {
             .gap(4.0)
             .child(fade_line(
                 text(item.label.clone())
-                    .font(TextStyle::new(20.0, 600.0).lh(26.0))
+                    .font(TextStyle::new(20.0, 500.0).lh(26.0))
                     .color(k.c.text_strong),
                 "title",
             ))
@@ -530,7 +541,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
         .self_center()
         .padding(12.0)
         .gap(10.0)
-        .radius(10.0)
+        .radius(k.radius.lg)
         .fill(k.c.layer_01)
         .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
     pill = rune_kit_shadows(pill, &k.elevation.floating);
@@ -556,7 +567,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
                     .color(k.c.text_muted),
             )
     } else {
-        let left = copy.remaining(s.clock).ceil() as u32;
+        let left = copy.shown;
         row()
             .key("copied")
             .w_full()
@@ -575,55 +586,30 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
                     .font(k.ty.text_small)
                     .color(k.c.text_muted),
             )
-            .child(digits(
-                &format!("{}:{:02}", left / 60, left % 60),
-                k.ty.text_small,
-                k,
-            ))
+            .child(
+                text(format!("{}:{:02}", left / 60, left % 60))
+                    .font(k.ty.text_small)
+                    .color(k.c.text_base),
+            )
     };
     pill = pill.child(line);
-    let frac = if copy.cleared_at.is_some() {
-        0.0
-    } else {
-        (copy.remaining(s.clock) / CLEAR_AFTER) as f32
-    };
-    let track = NOTICE_W - 24.0;
+    // The bar's width follows a `Live` value the countdown sets, so ticking doesn't rebuild the view.
     pill = pill.child(
         el().key("track")
-            .w(track)
+            .w(BAR_W)
             .h(2.0)
             .radius(1.0)
             .fill(k.c.layer_03)
             .child(
                 el().key("bar")
-                    .w(track * frac)
+                    .w(BAR_W)
                     .h(2.0)
                     .radius(1.0)
-                    .fill(k.c.icon_base)
-                    .motion(Spring::new(0.1, 0.0)),
+                    .fill(k.c.text_accent)
+                    .live_rect(s.bar.smooth(Spring::new(0.12, 0.0))),
             ),
     );
     Some(pill)
-}
-
-/// Text whose digits each take the same width, so a ticking number doesn't
-/// shake what's beside it.
-fn digits(s: &str, style: TextStyle, k: &Kit) -> El {
-    row()
-        .key("digits")
-        .children(s.chars().enumerate().map(|(i, c)| {
-            let w = if c.is_ascii_digit() {
-                DIGIT_W
-            } else {
-                DIGIT_W * 0.5
-            };
-            text(c.to_string())
-                .key(format!("d{i}"))
-                .w(w)
-                .align(Align::Center)
-                .font(style)
-                .color(k.c.text_base)
-        }))
 }
 
 fn rune_kit_shadows(mut e: El, list: &[rune::Shadow]) -> El {
@@ -633,13 +619,47 @@ fn rune_kit_shadows(mut e: El, list: &[rune::Shadow]) -> El {
     e
 }
 
+/// Keycaps like rune-kit's `Keybind`, with ⌘ ⇧ ↵ drawn as icons.
+fn keycaps(keys: &[&str], k: &Kit) -> El {
+    let font = TextStyle {
+        line_height: 11.0,
+        ..k.ty.small_medium
+    };
+    let ink = k.c.text_muted;
+    row()
+        .role("group")
+        .label(keys.join(" "))
+        .gap(2.0)
+        .center_y()
+        .children(keys.iter().enumerate().map(|(i, key)| {
+            let glyph = match *key {
+                "⌘" => Some(&CMD),
+                "⇧" => Some(&SHIFT),
+                "↵" => Some(&ENTER),
+                _ => None,
+            };
+            let cap = row()
+                .key(format!("key{i}"))
+                .min_w(14.0)
+                .h(14.0)
+                .px(if glyph.is_some() { 2.0 } else { 4.0 })
+                .center()
+                .radius(2.0)
+                .fill(k.c.layer_03);
+            match glyph {
+                Some(g) => cap.child(icon(g, 10.0).color(ink)),
+                None => cap.child(text(key.to_string()).font(font).color(ink)),
+            }
+        }))
+}
+
 fn hints(k: &Kit) -> El {
     let hint = |key: &str, keys: &[&str], label: &str| {
         row()
             .key(key)
             .gap(6.0)
             .center_y()
-            .child(Keybind::new(keys).variant(KeybindVariant::Neutral).build(k))
+            .child(keycaps(keys, k))
             .child(
                 text(label.to_owned())
                     .font(k.ty.small)

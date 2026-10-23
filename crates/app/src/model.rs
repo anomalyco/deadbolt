@@ -15,8 +15,10 @@ use crate::secret::SecretEdit;
 pub const CLEAR_AFTER: f64 = 30.0;
 /// How long "Clipboard cleared" stays before the notice leaves.
 const CLEARED_NOTICE: f64 = 1.6;
-/// Countdown bar updates while a copy is on the clipboard.
-const TICK: Duration = Duration::from_millis(50);
+/// Countdown bar updates while a copy is on the clipboard (the bar smooths between them).
+const TICK: Duration = Duration::from_millis(100);
+/// The countdown bar's full width, in points.
+pub const BAR_W: f32 = 272.0;
 /// How often to notice a lock from elsewhere (the CLI, the idle timeout).
 const STATUS_EVERY: Duration = Duration::from_secs(10);
 
@@ -41,6 +43,8 @@ pub struct Copy {
     pub copied: Option<Copied>,
     /// When the clipboard was cleared (or the copy failed), for the closing notice.
     pub cleared_at: Option<f64>,
+    /// The whole seconds the notice shows.
+    pub shown: u32,
     pub error: Option<String>,
 }
 
@@ -70,6 +74,8 @@ pub struct App {
     pub reduced_motion: bool,
     /// Seconds on Rune's clock (virtual when headless).
     pub clock: f64,
+    /// The countdown bar's presented rect, set on each tick without rebuilding the view.
+    pub bar: rune::Live<[f32; 4]>,
     seq: u64,
     /// A copy waiting for its item's values: (seq, field).
     pending_copy: Option<(u64, String)>,
@@ -96,6 +102,7 @@ impl App {
             notice: None,
             reduced_motion: false,
             clock: 0.0,
+            bar: rune::Live::new([0.0, 0.0, BAR_W, 2.0]),
             seq: 0,
             pending_copy: None,
             next_status: STATUS_EVERY.as_secs_f64(),
@@ -416,35 +423,43 @@ impl App {
             field: field.into(),
             at: self.clock,
             cleared_at: error.as_ref().map(|_| self.clock),
+            shown: CLEAR_AFTER as u32,
             copied,
             error,
         });
+        self.bar.set([0.0, 0.0, BAR_W, 2.0]);
         tx.wake_after(TICK);
     }
 
-    /// Advances the countdown; clears the clipboard when it runs out.
+    /// Advances the countdown; clears the clipboard when it runs out. True
+    /// when the notice's text changes; the bar moves through `bar` alone.
     fn tick_copy(&mut self, now: f64, tx: &mut Tx) -> bool {
         let Some(copy) = &mut self.copy else {
             return false;
         };
         if let Some(cleared) = copy.cleared_at {
-            if now - cleared >= CLEARED_NOTICE {
+            if now - cleared >= CLEARED_NOTICE - 1e-3 {
                 self.copy = None;
-            } else {
-                tx.wake_after(Duration::from_secs_f64(CLEARED_NOTICE - (now - cleared)));
+                return true;
             }
-            return true;
+            return false;
         }
-        if copy.remaining(now) <= 0.0 {
+        let remaining = copy.remaining(now);
+        self.bar
+            .set([0.0, 0.0, BAR_W * (remaining / CLEAR_AFTER) as f32, 2.0]);
+        if remaining <= 0.0 {
             if let Some(c) = copy.copied.take() {
                 self.clipboard.clear(c);
             }
             copy.cleared_at = Some(now);
             tx.wake_after(Duration::from_secs_f64(CLEARED_NOTICE));
-        } else {
-            tx.wake_after(TICK);
+            return true;
         }
-        true
+        tx.wake_after(TICK);
+        let shown = remaining.ceil() as u32;
+        let changed = shown != copy.shown;
+        copy.shown = shown;
+        changed
     }
 
     /// Clears our copy off the clipboard now (lock, quit).
