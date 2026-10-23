@@ -1,6 +1,7 @@
-//! The app against a real agent in a temporary home: unlock, search, copy,
-//! lock. Drives Rune's runtime headless (no window, no GPU) and an in-memory
-//! clipboard. Builds the CLI from this repository for the agent.
+//! The app against a real agent in a temporary home: first run (create, and
+//! join between two agents), unlock, search, copy, lock. Drives Rune's
+//! runtime headless (no window, no GPU) and an in-memory clipboard. Builds
+//! the CLI from this repository for the agent.
 
 #![cfg(test)]
 
@@ -10,9 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use deadbolt_app::agent::Agent;
+use deadbolt_app::agent::{Agent, Job};
 use deadbolt_app::clipboard::Clipboard;
 use deadbolt_app::model::{App, Screen};
+use deadbolt_app::onboarding::worker::Worker;
+use deadbolt_app::onboarding::{Flow, Severity, Step};
 use deadbolt_client::{Launch, Paths};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -97,6 +100,31 @@ impl Device {
             .status()
             .unwrap();
         assert!(status.success(), "deadbolt {args:?} failed");
+    }
+
+    fn output(&self, args: &[&str]) -> String {
+        let out = Command::new(&self.bin)
+            .args(args)
+            .envs(&self.vars)
+            .env("DEADBOLT_PASSPHRASE", PASSPHRASE)
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "deadbolt {args:?} failed");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    fn spawn(&self, args: &[&str]) -> std::process::Child {
+        Command::new(&self.bin)
+            .args(args)
+            .envs(&self.vars)
+            .env_remove("RUST_LOG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap()
     }
 
     /// How the app starts this device's agent: a script that runs `deadbolt`
@@ -336,4 +364,165 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
         Some("mine"),
         "a later copy of the user's own survives"
     );
+}
+
+/// The app for `device`, as `run` builds it, before it connects.
+fn app(device: &Device) -> Runtime<App> {
+    let mut app = App::new(
+        Agent::spawn(device.paths(), device.launch()),
+        Clipboard::memory().0,
+    );
+    app.onboarding.worker = Worker::new(device.paths(), device.launch());
+    let mut rt = Runtime::new(
+        app,
+        deadbolt_app::view::app,
+        (820.0, 540.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+    rt.state.agent.send(Job::Connect);
+    rt
+}
+
+fn type_text(rt: &mut Runtime<App>, text: &str) {
+    for c in text.chars() {
+        rt.key(key(Key::Text(c.into())));
+    }
+    rt.frame(1.0 / 60.0);
+}
+
+/// Picks `flow` on the welcome screen and fills the form for a new device.
+fn fill_form(rt: &mut Runtime<App>, flow: Flow, name: &str) {
+    until(rt, "the welcome screen", |s| s.screen == Screen::Onboarding);
+    assert!(shows(rt, "DEADBOLT"));
+    rt.update(|s, _| s.choose(flow));
+    rt.update(|s, _| s.onboarding.device = rune::TextEdit::new(name));
+    rt.frame(1.0 / 60.0);
+    type_text(rt, PASSPHRASE);
+    rt.key(key(Key::Enter));
+    rt.frame(1.0 / 60.0);
+    type_text(rt, PASSPHRASE);
+    assert!(
+        !rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref().is_some_and(|t| t.contains(PASSPHRASE))),
+        "the passphrase never shows"
+    );
+    rt.key(key(Key::Enter));
+}
+
+#[test]
+fn create_a_vault_in_the_app() {
+    let device = Device::new();
+    let mut rt = app(&device);
+    fill_form(&mut rt, Flow::Create, "alpha");
+    until(&mut rt, "creating", |s| {
+        matches!(s.onboarding.step, Step::Working(_) | Step::Done { .. })
+    });
+    until(&mut rt, "the moment", |s| {
+        matches!(s.onboarding.step, Step::Done { .. })
+    });
+    assert!(shows(&rt, "Vault created"));
+    until(&mut rt, "the empty vault", |s| {
+        s.screen == Screen::Vault && s.loaded
+    });
+    assert!(rt.state.items.is_empty());
+    assert!(rt.state.onboarding.passphrase.is_empty(), "wiped");
+    until(&mut rt, "the vault's name", |s| {
+        s.status.as_ref().is_some_and(|st| !st.vaults.is_empty())
+    });
+    assert!(shows(&rt, "personal is empty"));
+    // The CLI sees the device and vault the app made.
+    assert!(device.output(&["vault", "ls"]).contains("personal"));
+    assert!(device.output(&["status"]).contains("alpha"));
+}
+
+/// Shows a ticket on `device`'s app and pairs it from `inviter`; returns the
+/// inviter's `deadbolt pair` once the code is up.
+fn pair_to_code(rt: &mut Runtime<App>, inviter: &Device, form: bool) -> std::process::Child {
+    if form {
+        fill_form(rt, Flow::Join, "beta");
+    } else {
+        rt.update(|s, _| s.submit_join());
+    }
+    until(rt, "the ticket", |s| s.onboarding.ticket.is_some());
+    assert!(shows(rt, "Pair from your other device"));
+    let ticket = rt.state.onboarding.ticket.as_ref().unwrap().text.clone();
+    let pair = inviter.spawn(&["pair", &ticket, "--yes"]);
+    until(rt, "the code", |s| {
+        matches!(s.onboarding.step, Step::Confirm { .. })
+    });
+    let Step::Confirm { code, vault, .. } = &rt.state.onboarding.step else {
+        unreachable!()
+    };
+    assert!(code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()));
+    assert_eq!(vault, "personal");
+    pair
+}
+
+#[test]
+fn join_from_another_device_in_the_app() {
+    let inviter = Device::new();
+    inviter.run(&["init"]);
+    inviter.run(&[
+        "new",
+        "login",
+        "username=dax",
+        "url=github.com",
+        "password=hunter22",
+    ]);
+    let device = Device::new();
+    let mut rt = app(&device);
+    let mut pair = pair_to_code(&mut rt, &inviter, true);
+    rt.update(|s, _| s.answer_code(true));
+    until(&mut rt, "joined", |s| {
+        matches!(s.onboarding.step, Step::Done { .. })
+    });
+    assert!(shows(&rt, "Joined personal"));
+    until(&mut rt, "the synced vault", |s| {
+        s.screen == Screen::Vault && s.items.len() == 1
+    });
+    assert_eq!(rt.state.items[0].label, "github.com");
+    assert!(
+        pair.wait().unwrap().success(),
+        "the inviter added this device"
+    );
+}
+
+#[test]
+fn declining_or_cancelling_a_join_keeps_the_device_set_up() {
+    let inviter = Device::new();
+    inviter.run(&["init"]);
+    let device = Device::new();
+    let mut rt = app(&device);
+
+    // The codes "don't match": nothing is shared and both sides stop.
+    let mut pair = pair_to_code(&mut rt, &inviter, true);
+    rt.update(|s, _| s.answer_code(false));
+    until(&mut rt, "the caution notice", |s| {
+        s.onboarding.step == Step::Join && s.onboarding.notice.is_some()
+    });
+    let notice = rt.state.onboarding.notice.clone().unwrap();
+    assert_eq!(notice.severity, Severity::Caution, "{notice:?}");
+    assert!(!pair.wait().unwrap().success(), "the inviter stopped too");
+    until(&mut rt, "the device set up", |s| s.onboarding.device_ready);
+
+    // A second try needs no passphrase; cancelling it hangs up.
+    rt.update(|s, _| s.submit_join());
+    until(&mut rt, "the ticket", |s| s.onboarding.ticket.is_some());
+    rt.key(key(Key::Escape));
+    until(&mut rt, "the neutral notice", |s| {
+        s.onboarding.step == Step::Join
+            && s.onboarding
+                .notice
+                .as_ref()
+                .is_some_and(|n| n.severity == Severity::Neutral)
+    });
+    assert!(shows(&rt, "Join cancelled"));
+    assert!(rt.state.onboarding.ticket.is_none());
+    assert!(device.output(&["vault", "ls"]).trim().is_empty());
 }
