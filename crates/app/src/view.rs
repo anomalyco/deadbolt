@@ -227,6 +227,7 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
     };
     text_input(&s.search, style)
         .key("search-input")
+        .label("Search items")
         .grow(1.0)
         .shrink()
         .color(k.c.text_strong)
@@ -279,7 +280,14 @@ fn list(s: &App, k: &Kit) -> El {
 /// The visible items as rows, or why there are none. Shared by the vault and the quick panel.
 pub(crate) fn rows(s: &App, k: &Kit) -> El {
     let visible = s.visible();
-    let mut rows = col().key("rows").w_full().gap(2.0).px(8.0).py(8.0);
+    let mut rows = col()
+        .key("rows")
+        .role("listbox")
+        .label("Items")
+        .w_full()
+        .gap(2.0)
+        .px(8.0)
+        .py(8.0);
     if !s.loaded {
         // The list arrives within a frame or two of unlocking; show nothing rather than a flash.
     } else if s.items.is_empty() {
@@ -464,6 +472,12 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         .as_ref()
         .is_some_and(|c| c.item == item && c.field == field.name && c.cleared_at.is_none());
     let name = field.name.clone();
+    let named = title_case(&name);
+    let noun = if named == name.to_uppercase() {
+        named.clone()
+    } else {
+        name.clone()
+    };
     let mut actions = row().key("actions").gap(2.0).center_y();
     if secret {
         let n = name.clone();
@@ -475,7 +489,11 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         actions = actions.child(
             IconButton::new(glyph)
                 .variant(IconButtonVariant::GhostMuted)
-                .label(if revealed { "Hide" } else { "Show" })
+                .label(if revealed {
+                    format!("Hide {noun}")
+                } else {
+                    format!("Show {noun}")
+                })
                 .on_press(move |s: &mut App| s.toggle_reveal(&n))
                 .build(k)
                 .key("reveal"),
@@ -491,7 +509,11 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     actions = actions.child(
         IconButton::new(glyph)
             .variant(IconButtonVariant::GhostMuted)
-            .label(if copied { "Copied" } else { "Copy" })
+            .label(if copied {
+                format!("{named} copied")
+            } else {
+                format!("Copy {noun}")
+            })
             .on_press_tx(move |s: &mut App, tx| s.copy_field(&n, tx))
             .build(k)
             .key(if copied { "copied" } else { "copy" })
@@ -667,7 +689,7 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(hint("h-move", &["↑", "↓"], "Select")),
         )
         .child(spacer())
-        .child(crate::panel::window::entry(k))
+        .child(crate::panel::window::entry(k).label("Open quick panel"))
         .child(hint("h-lock", &["⌘", "L"], "Lock"))
         .children(crate::install::settings(s, k, layer))
 }
