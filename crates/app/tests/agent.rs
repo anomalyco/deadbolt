@@ -320,6 +320,95 @@ fn unlock_search_copy_lock() {
     assert!(rt.state.items.is_empty() && rt.state.detail.is_none());
 }
 
+/// The quick panel on its own agent connection: summoned locked, it unlocks
+/// in place, filters, copies with ⏎ and closes itself.
+#[test]
+fn quick_panel_unlock_filter_copy() {
+    use deadbolt_app::panel::Phase;
+    let device = Device::new();
+    device.run(&["init"]);
+    device.run(&[
+        "new",
+        "login",
+        "username=dax",
+        "url=github.com",
+        "password=hunter22",
+    ]);
+    device.run(&[
+        "new",
+        "login",
+        "username=ops",
+        "url=fly.io",
+        "password=flyfly",
+    ]);
+    device.run(&["lock"]);
+
+    let (clipboard, board) = Clipboard::memory();
+    let agent = Agent::spawn(device.paths(), device.launch());
+    let mut rt = Runtime::new(
+        App::panel(agent, clipboard),
+        deadbolt_app::panel::view::panel,
+        deadbolt_app::panel::SIZE,
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.on_key = Some(|s, ev, tx| s.panel_key(ev, tx));
+    rt.update(|s, tx| s.summon(tx));
+
+    until(&mut rt, "the locked panel", |s| s.screen == Screen::Locked);
+    assert!(shows(&rt, "Unlock Deadbolt"));
+    type_text(&mut rt, PASSPHRASE);
+    rt.key(key(Key::Enter));
+    until(&mut rt, "the vault in the panel", |s| {
+        s.screen == Screen::Vault && s.loaded && s.detail.is_some()
+    });
+    assert!(rt.state.search.focused, "the search takes the keys");
+
+    type_text(&mut rt, "fly");
+    until(&mut rt, "fly.io's fields", |s| {
+        s.detail.as_ref().is_some_and(|d| d.label == "fly.io")
+    });
+    let visible: Vec<&str> = rt
+        .state
+        .visible()
+        .iter()
+        .map(|i| i.label.as_str())
+        .collect();
+    assert_eq!(visible, ["fly.io"]);
+    assert!(shows(&rt, "fly.io"));
+
+    rt.key(key(Key::Enter));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(board.lock().unwrap().as_deref(), Some("flyfly"));
+    assert!(matches!(rt.state.panel_phase(), Some(Phase::Copied { .. })));
+    until(&mut rt, "the panel to close", |s| {
+        s.panel_phase() == Some(Phase::Hidden)
+    });
+    assert_eq!(
+        board.lock().unwrap().as_deref(),
+        Some("flyfly"),
+        "closing keeps the copy until it clears"
+    );
+
+    // Opened again: an empty search over both items, ready for ⇧⏎.
+    rt.update(|s, tx| s.summon(tx));
+    until(&mut rt, "the first item's fields", |s| s.detail.is_some());
+    assert_eq!(rt.state.search.text, "");
+    assert_eq!(rt.state.visible().len(), 2);
+    rt.key(KeyEvent {
+        key: Key::Enter,
+        mods: Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(1.0 / 60.0);
+    assert_eq!(board.lock().unwrap().as_deref(), Some("ops"));
+}
+
 #[test]
 fn the_clipboard_clears_itself_unless_something_else_was_copied() {
     let (clipboard, board) = Clipboard::memory();
