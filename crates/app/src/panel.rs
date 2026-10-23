@@ -86,6 +86,15 @@ impl App {
         self.panel.as_ref().map(|p| p.phase)
     }
 
+    /// Closing or hidden: the panel reads nothing from the vault until it's
+    /// summoned, and drops what arrives.
+    pub(crate) fn panel_away(&self) -> bool {
+        matches!(
+            self.panel_phase(),
+            Some(Phase::Closing { .. } | Phase::Hidden)
+        )
+    }
+
     /// Summoned: open fresh and at rest, with no animation: check on the
     /// agent and fetch the list again (empty search, the first item selected).
     pub fn summon(&mut self, tx: &mut Tx) {

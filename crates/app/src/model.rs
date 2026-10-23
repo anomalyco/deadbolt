@@ -173,9 +173,13 @@ impl App {
                 Err(failure) => self.notice = Some(failure.message),
             },
             // A reply from before a lock (or stop) can land after it: drop
-            // anything from an older generation or for a screen that's gone.
+            // anything from an older generation, for a screen that's gone, or
+            // for a panel that's going.
             Done::Items { generation, result } => {
-                if generation != self.generation || self.screen != Screen::Vault {
+                if generation != self.generation
+                    || self.screen != Screen::Vault
+                    || self.panel_away()
+                {
                     return;
                 }
                 // The panel's list lands just after it opens; it opens at rest.
@@ -189,7 +193,7 @@ impl App {
             }
             // Dropping a stale item wipes its values (`agent::Values`).
             Done::Item { seq, result } => {
-                if seq != self.seq || self.screen != Screen::Vault {
+                if seq != self.seq || self.screen != Screen::Vault || self.panel_away() {
                     return;
                 }
                 match result {
@@ -218,6 +222,10 @@ impl App {
 
     /// A change the agent streamed. It says what changed; this refetches.
     fn on_change(&mut self, change: Change, tx: &mut Tx) {
+        // A panel that's going only follows the vault closing; its summon fetches the rest.
+        if self.panel_away() && !matches!(change, Change::Locked | Change::Stopping) {
+            return;
+        }
         match change {
             // The stream is (again) live, or it dropped changes: fetch it all.
             Change::Watching | Change::Resync => {
@@ -257,6 +265,9 @@ impl App {
 
     /// Fetches the list for the current generation.
     pub(crate) fn list(&self) {
+        if self.panel_away() {
+            return;
+        }
         self.agent.send(Job::List {
             generation: self.generation,
         });
@@ -265,6 +276,11 @@ impl App {
     /// The current generation, for tagging a list reply in tests and scenes.
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+
+    /// The current item request, for tagging an item reply in tests.
+    pub fn seq(&self) -> u64 {
+        self.seq
     }
 
     /// A list arrived. The selection and the search stay; if the selected

@@ -8,12 +8,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use deadbolt_app::agent::Done;
+use deadbolt_app::agent::{Agent, Done, Job, Values};
 use deadbolt_app::clipboard::Clipboard;
-use deadbolt_app::model::App;
+use deadbolt_app::model::{App, Screen};
 use deadbolt_app::panel::window::Windows;
 use deadbolt_app::panel::{self, Phase};
-use deadbolt_client::protocol::ItemInfo;
+use deadbolt_client::protocol::{Change, ItemInfo};
 use rune::{Env, Key, KeyEvent, Mods, Runtime, Shell};
 
 const FRAME: f64 = 1.0 / 60.0;
@@ -967,4 +967,58 @@ fn closing_its_window_cleans_up_like_the_main_one() {
     assert!(rt.state.detail.is_none() && rt.state.items.is_empty());
     assert_eq!(board(&clip), None);
     assert_eq!(rt.shell_request, Some(Shell::Quit), "alone, it leaves");
+}
+
+/// Hidden, the panel follows a lock but reads nothing: changes that would
+/// refetch the list, and replies that arrive anyway, leave it holding nothing.
+#[test]
+fn a_hidden_panel_fetches_and_holds_nothing() {
+    let mut rt = runtime("empty", true);
+    let (agent, jobs, replies) = Agent::scripted();
+    rt.state.agent = agent;
+    let items = rt.state.items.clone();
+    let item = rt.state.detail.clone().expect("an item's values show");
+    let status = rt.state.status.clone().expect("a status");
+    frames(&mut rt, 2);
+    rt.key(key(Key::Escape));
+    frames(&mut rt, 30);
+    assert_eq!(phase(&rt), Phase::Hidden);
+    assert_eq!(jobs.try_iter().count(), 0);
+
+    let vault = status.vaults[0].id.clone();
+    let (generation, seq) = (rt.state.generation(), rt.state.seq());
+    for done in [
+        Done::Changed(Change::Watching),
+        Done::Changed(Change::Resync),
+        Done::Changed(Change::Unlocked),
+        Done::Changed(Change::Items { vault }),
+        Done::Changed(Change::Vaults),
+        Done::Status(Some(status.clone())),
+        Done::Items {
+            generation,
+            result: Ok(items),
+        },
+        Done::Item {
+            seq,
+            result: Ok(Values::new(item)),
+        },
+    ] {
+        replies.send(done).unwrap();
+    }
+    frames(&mut rt, 2);
+    let sent: Vec<_> = jobs.try_iter().collect();
+    assert!(
+        !sent
+            .iter()
+            .any(|job| matches!(job, Job::List { .. } | Job::Get { .. })),
+        "nothing fetched"
+    );
+    assert!(
+        rt.state.items.is_empty() && rt.state.detail.is_none(),
+        "nothing held"
+    );
+
+    replies.send(Done::Changed(Change::Locked)).unwrap();
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.screen, Screen::Locked, "a lock still reaches it");
 }
