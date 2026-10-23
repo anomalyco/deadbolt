@@ -7,8 +7,8 @@
 //! ```text
 //! dialer -> listener  PROOF(HMAC(secret, "dialer"   || transcript))
 //! listener -> dialer  PROOF(HMAC(secret, "listener" || transcript))   (ticket consumed)
-//! both                CONFIRM([1]) once the local user confirmed the code
 //! dialer -> listener  OFFER(blob)
+//! both                CONFIRM([1]) once the local user confirmed the code
 //! listener -> dialer  JOIN(blob)
 //! dialer -> listener  ENTRY(blob)* DONE
 //! listener -> dialer  RESULT
@@ -255,10 +255,9 @@ pub struct PairingOutcome {
 
 /// New-device side of pairing.
 pub trait Joiner: Send + Sync {
-    /// Called once both sides proved the ticket secret. Show `ctx.code` and return whether
-    /// the user confirmed it matches the other screen. Return `true` without asking when
-    /// the ticket was scanned from a QR code shown by this device.
-    fn confirm(&self, ctx: &PairingContext) -> impl Future<Output = bool> + Send;
+    /// Called once both sides proved the ticket secret and the inviter sent `offer`. Show
+    /// `ctx.code` and return whether the user confirmed it matches the other screen.
+    fn confirm(&self, ctx: &PairingContext, offer: &[u8]) -> impl Future<Output = bool> + Send;
 
     /// Produce the join blob (e.g. the new device's signed consent to join the vault named
     /// in `offer`).
@@ -418,9 +417,9 @@ impl PairingStream {
             return Err(Error::PairingProofFailed);
         }
         let ctx = self.context();
-        confirm_exchange(send, recv, inviter.confirm(&ctx)).await?;
         let offer = inviter.offer(&ctx).await.map_err(Error::Handler)?;
         frame::write(send, tag::OFFER, &offer).await?;
+        confirm_exchange(send, recv, inviter.confirm(&ctx)).await?;
         let join = frame::expect(recv, tag::JOIN, max).await?;
         let welcome = inviter.welcome(&ctx, join).await.map_err(Error::Handler)?;
         frame::write_entries(send, &welcome).await?;
@@ -454,8 +453,8 @@ impl ProvenPairing {
             &mac(&self.0.secret, LISTENER_LABEL, &self.0.transcript),
         )
         .await?;
-        confirm_exchange(send, recv, joiner.confirm(&ctx)).await?;
         let offer = frame::expect(recv, tag::OFFER, max).await?;
+        confirm_exchange(send, recv, joiner.confirm(&ctx, &offer)).await?;
         let join = joiner.join(&ctx, offer).await.map_err(Error::Handler)?;
         frame::write(send, tag::JOIN, &join).await?;
         let welcome = frame::read_entries(recv, max).await?;

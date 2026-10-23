@@ -157,18 +157,20 @@ struct NewDevice<'a> {
 }
 
 impl Joiner for NewDevice<'_> {
-    async fn confirm(&self, _ctx: &PairingContext) -> bool {
-        // Reported in `join`, once the vault name is known.
-        true
-    }
-
-    async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
-        let offer: Offer = serde_json::from_slice(&offer)?;
-        let inviter_id = DeviceId::from_bytes(ctx.remote);
-        let join = self
+    async fn confirm(&self, ctx: &PairingContext, offer: &[u8]) -> bool {
+        let Ok(offer) = serde_json::from_slice::<Offer>(offer) else {
+            return true;
+        };
+        let Ok(vault) = unhex(&offer.vault).map(VaultId::from_bytes) else {
+            return true;
+        };
+        if self
             .agent
-            .with(|s| join_blob(s, inviter_id, &offer, Some(s.own_addr())))
-            .map_err(handler_error)?;
+            .with(|s| Ok(s.vaults.contains_key(&vault)))
+            .unwrap_or(true)
+        {
+            return true;
+        }
         let inviter = DeviceInfo {
             id: hex(&ctx.remote),
             name: Some(super::session::clean_name(&offer.name)),
@@ -178,12 +180,19 @@ impl Joiner for NewDevice<'_> {
         };
         let event = Event::Joining {
             code: ctx.code.to_string(),
-            vault: offer.vault_name.clone(),
+            vault: offer.vault_name,
             inviter,
         };
-        if !report(self.conv, event, self.confirm).await {
-            return Err("declined".into());
-        }
+        report(self.conv, event, self.confirm).await
+    }
+
+    async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+        let offer: Offer = serde_json::from_slice(&offer)?;
+        let inviter_id = DeviceId::from_bytes(ctx.remote);
+        let join = self
+            .agent
+            .with(|s| join_blob(s, inviter_id, &offer, Some(s.own_addr())))
+            .map_err(handler_error)?;
         *self.offer.lock().unwrap_or_else(|e| e.into_inner()) = Some(offer);
         Ok(join)
     }
@@ -343,4 +352,170 @@ pub async fn pair(
     info!(vault = %vault.name, device = %device.id, "paired");
     agent.sync_now.notify_one();
     Ok(Reply::Device { vault, device })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::paths::Paths;
+    use crate::protocol::Message;
+    use deadbolt_net::{Error as NetError, Node, NodeConfig, PairingStream, PeerId};
+    use deadbolt_store::KdfParams;
+    use std::sync::RwLock;
+    use std::sync::atomic::AtomicUsize;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::net::UnixStream;
+    use tokio::sync::{Notify, mpsc, watch};
+
+    async fn test_agent(dir: &std::path::Path, name: &str) -> Arc<Agent> {
+        let kdf = KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let loaded = Loaded::setup(dir, b"test", name, kdf).unwrap();
+        let agent = Arc::new(Agent {
+            paths: Paths {
+                data: dir.into(),
+                config: dir.join("config"),
+                socket: dir.join("socket"),
+                lock: dir.join("lock"),
+                log: dir.join("log"),
+            },
+            local_net: true,
+            kdf,
+            session: Mutex::default(),
+            members: Arc::new(RwLock::default()),
+            ready: watch::channel(true).0,
+            sync_now: Notify::new(),
+            transition: tokio::sync::Mutex::new(()),
+            idle: Mutex::default(),
+            busy: AtomicUsize::new(0),
+            shutdown: Notify::new(),
+        });
+        let node = Node::spawn(
+            NodeConfig::local_only(*loaded.secret.to_bytes()),
+            Arc::new(|_: &PeerId| false),
+            super::super::sync::Handler(agent.clone()),
+        )
+        .await
+        .unwrap();
+        *agent.session.lock().unwrap() = Some(super::super::session::Session::new(loaded, node));
+        agent
+    }
+
+    fn test_conv(answer: bool) -> (Conversation, UnixStream) {
+        let (server, client) = UnixStream::pair().unwrap();
+        let (_, write) = server.into_split();
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(answer).unwrap();
+        let conv = Conversation {
+            write: tokio::sync::Mutex::new(write),
+            answers: tokio::sync::Mutex::new(rx),
+            closed: watch::channel(false).1,
+        };
+        (conv, client)
+    }
+
+    async fn read_event(client: UnixStream) -> Event {
+        let mut line = String::new();
+        BufReader::new(client).read_line(&mut line).await.unwrap();
+        match serde_json::from_str::<Message>(&line).unwrap() {
+            Message::Event { event } => event,
+            other => panic!("expected event, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn joiner_confirms_with_offer_and_declining_withholds_consent() {
+        for joiner_accepts in [false, true] {
+            let a_dir = tempfile::tempdir().unwrap();
+            let b_dir = tempfile::tempdir().unwrap();
+            let a = test_agent(a_dir.path(), "alpha").await;
+            let b = test_agent(b_dir.path(), "beta").await;
+            let vault = a.with(|s| s.create_vault("personal")).unwrap();
+            let a_id = a.with(|s| Ok(*s.id.as_bytes())).unwrap();
+            let b_id = b.with(|s| Ok(*s.id.as_bytes())).unwrap();
+
+            let (a_conv, a_client) = test_conv(true);
+            let (b_conv, b_client) = test_conv(joiner_accepts);
+            let inviter = ExistingDevice {
+                agent: &a,
+                conv: &a_conv,
+                confirm: true,
+                vault,
+                ticket_addr: b.with(|s| Ok(s.own_addr())).unwrap(),
+                added: Mutex::default(),
+            };
+            let joiner = NewDevice {
+                agent: &b,
+                conv: &b_conv,
+                confirm: true,
+                offer: Mutex::default(),
+                joined: Mutex::default(),
+            };
+
+            let (left, right) = tokio::io::duplex(64 * 1024);
+            let dial = PairingStream::new(a_id, b_id, [7; 32], [9; 32], false);
+            let listen = PairingStream::new(b_id, a_id, [7; 32], [9; 32], true);
+            let inviter_ref = &inviter;
+            let joiner_ref = &joiner;
+
+            let (invited, joined) = tokio::join!(
+                async move {
+                    let (mut ar, mut at) = tokio::io::split(left);
+                    dial.invite(&mut at, &mut ar, 1 << 20, inviter_ref).await
+                },
+                async move {
+                    let (mut br, mut bt) = tokio::io::split(right);
+                    listen
+                        .prove(&mut br)
+                        .await?
+                        .complete(&mut bt, &mut br, 1 << 20, joiner_ref)
+                        .await
+                }
+            );
+
+            let Event::Pairing {
+                code: a_code,
+                device,
+            } = read_event(a_client).await
+            else {
+                panic!("expected Pairing event");
+            };
+            let Event::Joining {
+                code: b_code,
+                vault: vault_name,
+                inviter: inviter_info,
+            } = read_event(b_client).await
+            else {
+                panic!("expected Joining event");
+            };
+            assert_eq!(a_code, b_code);
+            assert_eq!(device, short(&b_id));
+            assert_eq!(vault_name, "personal");
+            assert_eq!(inviter_info.name.as_deref(), Some("alpha"));
+
+            if joiner_accepts {
+                invited.unwrap();
+                joined.unwrap();
+                assert!(inviter.added.lock().unwrap().is_some());
+                assert!(joiner.joined.lock().unwrap().is_some());
+                assert!(b.with(|s| Ok(s.vaults.contains_key(&vault))).unwrap());
+            } else {
+                assert!(invited.is_err());
+                assert!(matches!(joined, Err(NetError::PairingDeclined)));
+                assert!(joiner.offer.lock().unwrap().is_none());
+                assert!(inviter.added.lock().unwrap().is_none());
+                assert!(!b.with(|s| Ok(s.vaults.contains_key(&vault))).unwrap());
+                assert_eq!(
+                    a.with(|s| Ok(s.vault(&vault).members().count())).unwrap(),
+                    1
+                );
+            }
+
+            a.lock().await;
+            b.lock().await;
+        }
+    }
 }

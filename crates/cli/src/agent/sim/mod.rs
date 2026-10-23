@@ -171,7 +171,7 @@ impl Inviter for Invitation<'_> {
     }
 }
 impl Joiner for Device {
-    async fn confirm(&self, _: &PairingContext) -> bool {
+    async fn confirm(&self, _: &PairingContext, _: &[u8]) -> bool {
         true
     }
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {

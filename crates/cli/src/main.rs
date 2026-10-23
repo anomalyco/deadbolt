@@ -66,6 +66,9 @@ enum Commands {
         /// This device's name, shown to your other devices (default: hostname).
         #[arg(long)]
         device_name: Option<String>,
+        /// Accept the confirmation code without asking, even on a terminal.
+        #[arg(short, long)]
+        yes: bool,
     },
     /// Admit a new device into a vault, using the ticket `deadbolt join` shows.
     Pair {
@@ -226,12 +229,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let default = if vault.default { " (default)" } else { "" };
             println!("created vault {}{default}", vault.name);
         }
-        Commands::Join { device_name } => {
+        Commands::Join { device_name, yes } => {
             let status = client::ensure_running(&paths).await?;
             if !status.initialized {
                 setup(&paths, device_name, from_stdin).await?;
             }
-            let reply = pairing(&paths, Command::Join { confirm: false }, from_stdin).await?;
+            let confirm = !yes && prompt::interactive();
+            let reply = pairing(&paths, Command::Join { confirm }, from_stdin).await?;
             let Reply::Vault { vault } = reply else {
                 bail!("unexpected reply");
             };

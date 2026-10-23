@@ -172,7 +172,7 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
 /// `new` runs `deadbolt join`, `inviter` runs `deadbolt pair <ticket>`.
 fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) {
     let mut child = new
-        .cmd(&["join", "--device-name", device_name])
+        .cmd(&["join", "--yes", "--device-name", device_name])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

@@ -14,13 +14,15 @@ use deadbolt_net::{
 struct NewDevice {
     confirm: Option<bool>,
     code: Mutex<Option<ConfirmationCode>>,
+    confirmed_offer: Mutex<Option<Vec<u8>>>,
     offer: Mutex<Option<Vec<u8>>>,
     welcome: Mutex<Option<Vec<Vec<u8>>>>,
 }
 
 impl Joiner for NewDevice {
-    async fn confirm(&self, ctx: &PairingContext) -> bool {
+    async fn confirm(&self, ctx: &PairingContext, offer: &[u8]) -> bool {
         *self.code.lock().unwrap() = Some(ctx.code);
+        *self.confirmed_offer.lock().unwrap() = Some(offer.to_vec());
         self.confirm.unwrap_or(true)
     }
 
@@ -283,6 +285,13 @@ async fn declined_code_aborts_both_sides() {
             matches!(invited, Err(Error::PairingDeclined)),
             "{invited:?}"
         );
+        if !new_ok {
+            assert_eq!(
+                joiner.confirmed_offer.lock().unwrap().as_deref(),
+                Some(&b"vault-1"[..])
+            );
+        }
+        assert!(joiner.offer.lock().unwrap().is_none());
         assert!(joiner.welcome.lock().unwrap().is_none());
         assert!(inviter.join.lock().unwrap().is_none());
     }
