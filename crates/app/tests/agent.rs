@@ -264,6 +264,17 @@ fn unlock_search_copy_lock() {
     rt.frame(1.0 / 60.0);
     assert_eq!(board.lock().unwrap().as_deref(), Some("ops"));
 
+    // Escape, in the focused search field, clears the search; ↓ then moves
+    // the selection to the next item.
+    rt.key(key(Key::Escape));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.search.text, "");
+    assert_eq!(rt.state.visible().len(), 2);
+    let first = rt.state.selected.clone();
+    rt.key(key(Key::Down));
+    rt.frame(1.0 / 60.0);
+    assert_ne!(rt.state.selected, first, "↓ moves the selection");
+
     // Locking clears our copy off the clipboard and forgets the vault.
     rt.key(KeyEvent {
         key: Key::Command('l'),
