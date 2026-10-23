@@ -273,8 +273,6 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        // Rune gap: a scroll doesn't clip its children (docs/app.md); hard edges.
-        .clip_fade(0.0, 0.0, 0.0, 0.0)
         .child(rows(s, k))
 }
 

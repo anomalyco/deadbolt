@@ -41,8 +41,7 @@ pub enum Phase {
 /// The panel's part of its `App`; `App::panel` is `None` in the main window.
 pub struct Panel {
     pub phase: Phase,
-    /// Counts summons. The card is keyed by it, so each open mounts a new
-    /// card at rest rather than reviving the last one's close fade.
+    /// Counts summons.
     pub opens: u32,
     /// When the panel last opened or took a key; it closes `window::IDLE` later.
     pub active: f64,

@@ -77,10 +77,8 @@ fn card(s: &App, k: &Kit) -> El {
             message(k, "connecting", "Starting Deadbolt…", None),
         ),
     };
-    let opens = s.panel.as_ref().map_or(0, |p| p.opens);
     let mut card = col()
-        // Rune gap: reviving an exiting key ignores settle (docs/app.md); a new key per open.
-        .key(format!("card-{opens}"))
+        .key("card")
         .w_full()
         .h_full()
         .radius(k.radius.lg)
@@ -155,8 +153,6 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        // Rune gap: a scroll doesn't clip its children (docs/app.md).
-        .clip_fade(0.0, 0.0, 0.0, 0.0)
         .child(rows(s, k))
 }
 

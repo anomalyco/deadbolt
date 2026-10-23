@@ -133,11 +133,6 @@ fn find(rt: &Runtime<App>, key: &str) -> Option<([f32; 4], f32)> {
         .map(|e| (e.rect, e.opacity))
 }
 
-/// The card's key: it changes with each summon.
-fn card(rt: &Runtime<App>) -> String {
-    format!("card-{}", rt.state.panel.as_ref().unwrap().opens)
-}
-
 fn shows(rt: &Runtime<App>, s: &str) -> bool {
     rt.elements()
         .iter()
@@ -222,7 +217,7 @@ fn every_state_renders_inside_the_card() {
             };
             assert_eq!(footer(&rt), enter, "{scene}: what ⏎ does");
             let elements = rt.elements();
-            let rect = find(&rt, &card(&rt)).expect("the card").0;
+            let rect = find(&rt, "card").expect("the card").0;
             let rule = find(&rt, "rule-bottom").expect("the footer rule").0;
             assert!(
                 (rect[1] + rect[3] - (panel::SIZE.1 - panel::MARGIN)).abs() < 0.5,
@@ -275,7 +270,7 @@ fn it_opens_fresh_and_at_rest() {
     let first = rt.state.visible().first().map(|i| i.id.clone());
     assert_eq!(rt.state.selected, first, "the first item is selected");
     let elements = rt.elements();
-    assert_eq!(find(&rt, &card(&rt)).unwrap().1, 1.0, "no fade in");
+    assert_eq!(find(&rt, "card").unwrap().1, 1.0, "no fade in");
     let moving: Vec<_> = elements
         .iter()
         .filter(|e| e.moving || (e.opacity > 0.0 && e.opacity < 1.0 && e.text.is_some()))
@@ -315,12 +310,32 @@ fn escape_fades_the_card_then_hides() {
     rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Closing { .. }));
     frames(&mut rt, 5);
-    let fade = find(&rt, &card(&rt)).expect("still fading").1;
+    let fade = find(&rt, "card").expect("still fading").1;
     assert!(fade > 0.0 && fade < 1.0, "the card fades ({fade})");
     frames(&mut rt, 20);
     assert_eq!(phase(&rt), Phase::Hidden);
-    let gone = find(&rt, &card(&rt)).map_or(0.0, |c| c.1);
+    let gone = find(&rt, "card").map_or(0.0, |c| c.1);
     assert!(gone < 0.01, "faded out by the time it hides ({gone})");
+}
+
+/// Summoned again while the close still fades: the card comes back at rest,
+/// not fading back in from where its close had got to.
+#[test]
+fn a_summon_during_the_close_lands_at_rest() {
+    let mut rt = runtime("empty", true);
+    let items = rt.state.items.clone();
+    frames(&mut rt, 10);
+    rt.key(key(Key::Escape));
+    frames(&mut rt, 6);
+    let fade = find(&rt, "card").expect("still fading").1;
+    assert!(fade > 0.0 && fade < 1.0, "mid-close ({fade})");
+
+    rt.update(|s, tx| s.summon(tx));
+    rt.frame(FRAME);
+    answer_list(&mut rt, &items);
+    rt.frame(FRAME);
+    assert_eq!(phase(&rt), Phase::Open);
+    assert_eq!(find(&rt, "card").unwrap().1, 1.0, "no fade back in");
 }
 
 #[test]
