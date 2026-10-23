@@ -336,3 +336,32 @@ async fn pairing_does_not_bypass_sync_gate() {
     );
     assert_eq!(new.store.calls(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn removed_peer_can_still_pair_into_another_vault() {
+    let (a, b) = pair_of_members(&["a1"], &["b1"]).await;
+    let conn = within(b.node.connect(a.node.addr())).await.unwrap();
+    within(conn.sync()).await.unwrap();
+
+    // A removes B from their only shared vault, closing the active sync connection.
+    a.members.remove(&b.id());
+    assert_eq!(a.node.enforce_membership(), 1);
+    within(conn.closed()).await;
+    assert!(matches!(
+        within(a.node.connect(b.node.addr())).await,
+        Err(Error::NotAMember(_))
+    ));
+
+    // Later, A pairs B into a different vault without restarting A's node.
+    let listener = within(b.node.start_pairing(PairingOptions::default()))
+        .await
+        .unwrap();
+    let ticket = listener.ticket().clone();
+    let joiner = NewDevice::default();
+    let inviter = ExistingDevice::default();
+    let (joined, invited) =
+        within(async { tokio::join!(listener.complete(&joiner), a.node.pair(&ticket, &inviter)) })
+            .await;
+    assert_eq!(joined.unwrap().peer, a.id());
+    assert_eq!(invited.unwrap().peer, b.id());
+}

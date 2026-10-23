@@ -342,6 +342,12 @@ fn pairing_membership_and_removal() {
     let out = b.run(&["sync"]);
     assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
 
+    // Even after being removed from family (and having no shared vaults with a),
+    // gamma can be paired into a's other vault without restarting the agent.
+    pair(&a, &c, "gamma", Some("other"));
+    let out = c.run(&["sync", "--vault", "other"]);
+    assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
+
     // Restarting the agent keeps everything (store + meta).
     a.run(&["agent", "stop"]);
     a.run(&["unlock"]);

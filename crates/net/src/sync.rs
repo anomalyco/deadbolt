@@ -121,7 +121,7 @@ pub struct SyncOutcome {
 /// An open sync connection to a member, created by [`crate::Node::connect`].
 ///
 /// The connection stays open until dropped, [`SyncConnection::close`]d, or closed by the
-/// gate (e.g. [`crate::Node::revoke`]).
+/// gate ([`crate::Node::enforce_membership`]).
 pub struct SyncConnection {
     conn: Connection,
     handler: Arc<dyn DynSyncHandler>,

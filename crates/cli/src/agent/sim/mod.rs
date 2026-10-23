@@ -376,7 +376,7 @@ impl World {
                     }) {
                         Ok(Some(entry)) => {
                             removal = Some(entry.hash());
-                            self.devices[a].gate.revoke(&self.devices[b].id);
+                            self.devices[a].gate.enforce_membership();
                         }
                         Ok(None) => {}
                         Err(error) => failure = Some(error),

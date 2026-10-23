@@ -69,16 +69,16 @@ impl SyncHandler for Handler {
 
     async fn receive(&self, peer: PeerId, entries: Vec<Vec<u8>>) -> Result<(), HandlerError> {
         let agent = &self.0;
-        let (node, removed, received) = agent
+        let received = agent
             .with(|s| {
                 let ready = *agent.ready.borrow();
                 let received = receive(s, &DeviceId::from_bytes(peer), entries, ready);
                 // Earlier vault transactions may have committed even if a later
                 // vault or address-book write failed. Always enforce those removals.
-                Ok((s.node.clone(), agent.refresh(s), received))
+                agent.refresh(s);
+                Ok(received)
             })
             .map_err(handler_error)?;
-        agent.enforce(&node, &removed);
         let added = received.map_err(handler_error)?;
         if added > 0 {
             // Pass news on to the other members.

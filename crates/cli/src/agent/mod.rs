@@ -761,7 +761,7 @@ impl Agent {
                 Ok(Reply::Devices { devices })
             }
             Command::DeviceRemove { vault, device } => {
-                let (node, removed, vault, device) = self.with(|s| {
+                let (vault, device) = self.with(|s| {
                     let id = s.resolve(vault.as_deref())?;
                     let target = s.resolve_device(&id, &device)?;
                     if target == s.id {
@@ -771,9 +771,9 @@ impl Agent {
                     s.update(id, |v, secret| {
                         v.remove(secret, target).context("removing device")
                     })?;
-                    Ok((s.node.clone(), self.refresh(s), s.vault_info(&id), info))
+                    self.refresh(s);
+                    Ok((s.vault_info(&id), info))
                 })?;
-                self.enforce(&node, &removed);
                 self.sync_now.notify_one();
                 Ok(Reply::Device { vault, device })
             }
@@ -883,23 +883,14 @@ impl Agent {
         f(session)
     }
 
-    /// Updates the membership gate; returns devices that are no longer
-    /// members of any vault.
-    pub fn refresh(&self, session: &Session) -> Vec<PeerId> {
-        let next = session.peer_set();
-        let mut members = self.members.write().unwrap_or_else(|e| e.into_inner());
-        let removed = members.difference(&next).copied().collect();
-        *members = next;
-        removed
-    }
-
-    /// Closes connections to devices that are no longer members.
-    pub fn enforce(&self, node: &Node, removed: &[PeerId]) {
-        for peer in removed {
-            let closed = node.revoke(peer);
-            info!(peer = %session::short(peer), closed, "revoked device");
+    /// Updates the membership gate and closes open sync connections to devices
+    /// that are no longer members of any vault.
+    pub fn refresh(&self, session: &Session) {
+        *self.members.write().unwrap_or_else(|e| e.into_inner()) = session.peer_set();
+        let closed = session.node.enforce_membership();
+        if closed > 0 {
+            info!(closed, "closed sync connections to removed devices");
         }
-        node.enforce_membership();
     }
 
     fn status(&self) -> Status {

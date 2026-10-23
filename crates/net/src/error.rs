@@ -10,11 +10,9 @@ pub enum Error {
     Bind(String),
     #[error("peer {} is not a member", crate::fmt_id(.0))]
     NotAMember(crate::PeerId),
-    #[error("peer {} has been revoked", crate::fmt_id(.0))]
-    Revoked(crate::PeerId),
     #[error("connection rejected by peer: {0}")]
     Rejected(String),
-    /// The remote membership gate refused this device (not a member or revoked).
+    /// The remote membership gate refused this device.
     #[error("membership rejected by peer: {0}")]
     MembershipRejected(String),
     #[error("failed to connect: {0}")]
@@ -55,7 +53,6 @@ pub(crate) mod close {
 
     pub const DONE: VarInt = VarInt::from_u32(0);
     pub const NOT_MEMBER: VarInt = VarInt::from_u32(1);
-    pub const REVOKED: VarInt = VarInt::from_u32(2);
     pub const PAIRING_UNAVAILABLE: VarInt = VarInt::from_u32(3);
     pub const PAIRING_PROOF_FAILED: VarInt = VarInt::from_u32(4);
     pub const PAIRING_DECLINED: VarInt = VarInt::from_u32(5);
@@ -84,9 +81,7 @@ pub(crate) fn from_conn(conn: &Connection, fallback: Error) -> Error {
         Some(ConnectionError::ApplicationClosed(ac)) => {
             let reason = String::from_utf8_lossy(&ac.reason).into_owned();
             match ac.error_code {
-                c if c == close::NOT_MEMBER || c == close::REVOKED => {
-                    Error::MembershipRejected(reason)
-                }
+                c if c == close::NOT_MEMBER => Error::MembershipRejected(reason),
                 c if c == close::PAIRING_UNAVAILABLE => Error::Rejected(reason),
                 c if c == close::PAIRING_PROOF_FAILED => Error::PairingProofFailed,
                 c if c == close::PAIRING_DECLINED => Error::PairingDeclined,

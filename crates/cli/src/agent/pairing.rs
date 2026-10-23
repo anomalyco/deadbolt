@@ -213,12 +213,11 @@ impl NewDevice<'_> {
         welcome: Vec<Vec<u8>>,
     ) -> Result<VaultInfo> {
         let inviter = DeviceId::from_bytes(ctx.remote);
-        let (node, removed, info) = self.agent.with(|s| {
+        self.agent.with(|s| {
             let info = apply_welcome(s, inviter, &offer, welcome)?;
-            Ok((s.node.clone(), self.agent.refresh(s), info))
-        })?;
-        self.agent.enforce(&node, &removed);
-        Ok(info)
+            self.agent.refresh(s);
+            Ok(info)
+        })
     }
 }
 
@@ -282,15 +281,15 @@ impl Inviter for ExistingDevice<'_> {
         join: Vec<u8>,
     ) -> Result<Vec<Vec<u8>>, HandlerError> {
         let device = DeviceId::from_bytes(ctx.remote);
-        let (node, removed, blobs, info) = self
+        let (blobs, info) = self
             .agent
             .with_data(|s| {
                 let (blobs, info) =
                     welcome(s, self.vault, device, &join, Some(self.ticket_addr.clone()))?;
-                Ok((s.node.clone(), self.agent.refresh(s), blobs, info))
+                self.agent.refresh(s);
+                Ok((blobs, info))
             })
             .map_err(handler_error)?;
-        self.agent.enforce(&node, &removed);
         *self.added.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
         Ok(blobs)
     }
