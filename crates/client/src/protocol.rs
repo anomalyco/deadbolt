@@ -14,6 +14,20 @@
 //! otherwise the code is accepted automatically. A client hanging up cancels
 //! a pending `join`/`pair`.
 //!
+//! `watch` keeps the connection open and streams what changed:
+//!
+//! ```text
+//! client -> agent   Request   {"v":2,"cmd":"watch"}
+//! agent  -> client  Message*  {"type":"change","change":"watching"}   first
+//!                             {"type":"change","change":"items","vault":"…"}
+//! agent  -> client  Message   {"type":"ok","reply":"done"}   after "stopping"
+//! ```
+//!
+//! Changes name what changed, never values: clients refetch. They are
+//! coalesced, so a burst (a sync batch, an import) arrives as one change per
+//! vault. A watcher that can't keep up gets `resync`, or is dropped if it
+//! stops reading. The stream ends when the client hangs up or the agent stops.
+//!
 //! `status` and `stop` are answered whatever `v` says, so a client can always
 //! find and replace an agent of another version. They are the only messages
 //! exchanged between different builds, so `Request` and `Status` must stay
@@ -22,7 +36,7 @@
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -47,6 +61,8 @@ pub enum Command {
         timeout_secs: Option<u64>,
     },
     Lock,
+    /// Streams [`Change`]s until the client hangs up or the agent stops.
+    Watch,
     VaultCreate {
         name: String,
     },
@@ -139,9 +155,46 @@ pub struct FieldInput {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "kebab-case")]
 pub enum Message {
-    Event { event: Event },
-    Ok { reply: Reply },
-    Error { code: ErrorCode, message: String },
+    Event {
+        event: Event,
+    },
+    /// Streamed by `watch`.
+    Change {
+        #[serde(flatten)]
+        change: Change,
+    },
+    Ok {
+        reply: Reply,
+    },
+    Error {
+        code: ErrorCode,
+        message: String,
+    },
+}
+
+/// What changed in the agent. Vaults are named by id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "change", rename_all = "kebab-case")]
+pub enum Change {
+    /// The first change: the stream is live. Fetch what you show now.
+    Watching,
+    Locked,
+    Unlocked,
+    /// The vault list changed: a vault was created, joined or renamed, its
+    /// members changed, or the default moved.
+    Vaults,
+    /// Items in `vault` changed, written here or received by sync.
+    Items {
+        vault: String,
+    },
+    /// Devices were added to or removed from `vault`.
+    Devices {
+        vault: String,
+    },
+    /// Changes were dropped because the watcher fell behind. Fetch everything.
+    Resync,
+    /// The agent is stopping, which locks the store. The stream ends.
+    Stopping,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -270,4 +323,50 @@ pub struct PeerSync {
     pub sent: usize,
     pub received: usize,
     pub error: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watch_round_trips_as_flat_json_lines() {
+        let request = serde_json::to_string(&Request {
+            v: PROTOCOL_VERSION,
+            command: Command::Watch,
+        })
+        .unwrap();
+        assert_eq!(request, r#"{"v":2,"cmd":"watch"}"#);
+        assert!(matches!(
+            serde_json::from_str::<Request>(&request).unwrap().command,
+            Command::Watch
+        ));
+        let changes = [
+            (Change::Watching, r#"{"type":"change","change":"watching"}"#),
+            (Change::Locked, r#"{"type":"change","change":"locked"}"#),
+            (Change::Unlocked, r#"{"type":"change","change":"unlocked"}"#),
+            (Change::Vaults, r#"{"type":"change","change":"vaults"}"#),
+            (
+                Change::Items { vault: "ab".into() },
+                r#"{"type":"change","change":"items","vault":"ab"}"#,
+            ),
+            (
+                Change::Devices { vault: "ab".into() },
+                r#"{"type":"change","change":"devices","vault":"ab"}"#,
+            ),
+            (Change::Resync, r#"{"type":"change","change":"resync"}"#),
+            (Change::Stopping, r#"{"type":"change","change":"stopping"}"#),
+        ];
+        for (change, json) in changes {
+            let line = serde_json::to_string(&Message::Change {
+                change: change.clone(),
+            })
+            .unwrap();
+            assert_eq!(line, json);
+            match serde_json::from_str::<Message>(&line).unwrap() {
+                Message::Change { change: back } => assert_eq!(back, change),
+                other => panic!("expected a change, got {other:?}"),
+            }
+        }
+    }
 }
