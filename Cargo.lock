@@ -3980,12 +3980,15 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=43ff4f8a0064e38650d7fe180d698b3c99dfec0c#43ff4f8a0064e38650d7fe180d698b3c99dfec0c"
+source = "git+https://github.com/anomalyco/rune?rev=97bbc4f2a368870b4eea6e99de9e86c237d37ed2#97bbc4f2a368870b4eea6e99de9e86c237d37ed2"
 dependencies = [
  "arboard",
  "blake3",
+ "block2 0.5.1",
  "bytemuck",
+ "half",
  "image",
+ "libloading",
  "objc2 0.5.3",
  "objc2 0.6.5",
  "objc2-app-kit 0.2.2",
@@ -4010,22 +4013,26 @@ dependencies = [
  "wgpu",
  "windows-sys 0.59.0",
  "winit",
+ "x11rb",
+ "xkbcommon",
+ "zeroize",
 ]
 
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=43ff4f8a0064e38650d7fe180d698b3c99dfec0c#43ff4f8a0064e38650d7fe180d698b3c99dfec0c"
+source = "git+https://github.com/anomalyco/rune?rev=97bbc4f2a368870b4eea6e99de9e86c237d37ed2#97bbc4f2a368870b4eea6e99de9e86c237d37ed2"
 dependencies = [
  "rune",
  "rune-motion",
  "serde_json",
+ "unicode-segmentation",
 ]
 
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=43ff4f8a0064e38650d7fe180d698b3c99dfec0c#43ff4f8a0064e38650d7fe180d698b3c99dfec0c"
+source = "git+https://github.com/anomalyco/rune?rev=97bbc4f2a368870b4eea6e99de9e86c237d37ed2#97bbc4f2a368870b4eea6e99de9e86c237d37ed2"
 
 [[package]]
 name = "rustc-hash"
@@ -6057,6 +6064,17 @@ name = "xcursor"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "163b33ed8786455e2fa5d72f554057ce3f3182425434f756cd39c99839d88e23"
+
+[[package]]
+name = "xkbcommon"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7a974f48060a14e95705c01f24ad9c3345022f4d97441b8a36beb7ed5c4a02d"
+dependencies = [
+ "libc",
+ "memmap2",
+ "xkeysym",
+]
 
 [[package]]
 name = "xkbcommon-dl"
