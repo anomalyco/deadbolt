@@ -29,7 +29,7 @@
 //! stops reading. The stream ends when the client hangs up or the agent stops.
 //!
 //! `status` and `stop` are answered whatever `v` says, so a client can always
-//! find and replace an agent of another version. They are the only messages
+//! find and replace an agent of an older protocol. They are the only messages
 //! exchanged between different builds, so `Request` and `Status` must stay
 //! readable by older and newer ones.
 
@@ -285,6 +285,9 @@ pub struct Status {
     pub pid: u32,
     pub version: String,
     pub protocol: u32,
+    /// The agent's executable, so a client that can't use it can say which one runs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub program: Option<String>,
     /// The store directory this agent serves.
     pub home: String,
     pub initialized: bool,

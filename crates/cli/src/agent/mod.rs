@@ -31,12 +31,10 @@ use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-use crate::client::{AgentError, version};
+use crate::client::{AgentError, protocol, version};
 use crate::config::Config;
 use crate::paths::Paths;
-use crate::protocol::{
-    Answer, Change, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request, Status,
-};
+use crate::protocol::{Answer, Change, Command, ErrorCode, Event, Message, Reply, Request, Status};
 use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
 use watchers::Watchers;
@@ -96,6 +94,7 @@ impl Agent {
 mod tests {
     use super::*;
     use crate::protocol::FieldInput;
+    use crate::protocol::PROTOCOL_VERSION;
     use deadbolt_core::DeviceSecret;
 
     fn locked_agent(dir: &std::path::Path) -> Arc<Agent> {
@@ -628,19 +627,18 @@ impl Agent {
         };
         let mut stop = false;
         let result = match request {
-            Ok(request)
-                if matches!(request.command, Command::Watch) && request.v == PROTOCOL_VERSION =>
-            {
+            Ok(request) if matches!(request.command, Command::Watch) && request.v == protocol() => {
                 return self.watch(&conversation).await;
             }
             Ok(request) => {
                 stop = matches!(request.command, Command::Stop);
                 let always = matches!(request.command, Command::Status | Command::Stop);
-                if request.v != PROTOCOL_VERSION && !always {
+                if request.v != protocol() && !always {
                     Err(fail(
                         ErrorCode::Version,
                         format!(
-                            "the agent speaks protocol {PROTOCOL_VERSION}, not {}; run `deadbolt agent stop`",
+                            "the agent speaks protocol {}, not {}; run `deadbolt agent stop`",
+                            protocol(),
                             request.v
                         ),
                     ))
@@ -960,7 +958,10 @@ impl Agent {
         Status {
             pid: std::process::id(),
             version: version(),
-            protocol: PROTOCOL_VERSION,
+            protocol: protocol(),
+            program: std::env::current_exe()
+                .ok()
+                .map(|p| p.display().to_string()),
             home: self.paths.data.display().to_string(),
             initialized: deadbolt_store::is_initialized(&self.paths.data),
             unlocked: session.is_some(),

@@ -1,5 +1,5 @@
 //! Talking to the agent: its control protocol, where its files live,
-//! starting it on demand, replacing an agent of another version, and sending
+//! starting it on demand, replacing an agent of an older protocol, and sending
 //! requests. The CLI and the desktop app are both clients of this crate.
 
 pub mod paths;
@@ -64,16 +64,21 @@ pub enum Error {
     CreateDir(PathBuf, #[source] std::io::Error),
     #[error("opening {}", .0.display())]
     OpenLog(PathBuf, #[source] std::io::Error),
-    #[error("starting the agent")]
-    Spawn(#[source] std::io::Error),
+    #[error("starting the agent from {}", .0.display())]
+    Spawn(PathBuf, #[source] std::io::Error),
     #[error("the agent did not start; see {}", .0.display())]
     NotStarted(PathBuf),
     #[error("the agent did not stop")]
     NotStopped,
     #[error(
-        "the running agent uses protocol {running}, but this app needs {expected}; update Deadbolt or stop the agent with its CLI before trying again"
+        "a newer Deadbolt agent is running ({}, version {}, pid {}): it speaks protocol {}, and this copy speaks {}. Update this copy of Deadbolt, or stop that agent with `deadbolt agent stop` and try again",
+        .0.program.as_deref().unwrap_or("unknown program"),
+        .0.version,
+        .0.pid,
+        .0.protocol,
+        PROTOCOL_VERSION
     )]
-    IncompatibleProtocol { running: u32, expected: u32 },
+    NewerAgent(Box<Status>),
 }
 
 impl Error {
@@ -91,10 +96,6 @@ impl Error {
 pub struct Launch {
     /// A `deadbolt` binary; the agent runs as `<program> agent`.
     pub program: PathBuf,
-    /// The build the client expects. A running agent of another build is
-    /// replaced. `None` accepts any agent that speaks [`PROTOCOL_VERSION`]
-    /// and refuses incompatible agents without replacing them.
-    pub version: Option<String>,
 }
 
 /// Sends one request. `on_event` handles interactive events and returns the
@@ -252,21 +253,26 @@ pub async fn status(paths: &Paths) -> Option<Status> {
     }
 }
 
-/// Starts the agent unless a suitable one is running (see [`Launch::version`]),
-/// replacing one of another version.
+/// Starts the agent unless one that speaks [`PROTOCOL_VERSION`] is running.
+///
+/// The app and the CLI share this rule, so two builds never take turns
+/// replacing each other's agent:
+///
+/// - same protocol: reuse it, whatever its build
+/// - older protocol: stop it, then start `launch.program`
+/// - newer protocol: [`Error::NewerAgent`], leaving it running
+///
+/// A rebuilt agent of the same protocol is only picked up once the running
+/// one stops (`deadbolt agent stop`).
 pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Error> {
     if let Some(status) = status(paths).await {
-        let same_build = launch.version.as_ref().is_none_or(|v| *v == status.version);
-        if same_build && status.protocol == PROTOCOL_VERSION {
-            return Ok(status);
+        match status.protocol.cmp(&PROTOCOL_VERSION) {
+            std::cmp::Ordering::Equal => return Ok(status),
+            std::cmp::Ordering::Greater => return Err(Error::NewerAgent(Box::new(status))),
+            std::cmp::Ordering::Less => {
+                stop(paths).await?;
+            }
         }
-        if launch.version.is_none() {
-            return Err(Error::IncompatibleProtocol {
-                running: status.protocol,
-                expected: PROTOCOL_VERSION,
-            });
-        }
-        stop(paths).await?;
     }
     if let Some(dir) = paths.log.parent() {
         fs::create_dir_all(dir).map_err(|e| Error::CreateDir(dir.into(), e))?;
@@ -283,7 +289,7 @@ pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Er
         .stderr(log)
         .process_group(0)
         .spawn()
-        .map_err(Error::Spawn)?;
+        .map_err(|e| Error::Spawn(launch.program.clone(), e))?;
     for _ in 0..250 {
         tokio::time::sleep(Duration::from_millis(20)).await;
         if let Some(status) = status(paths).await {
@@ -330,6 +336,7 @@ pub async fn stop(paths: &Paths) -> Result<bool, Error> {
 mod tests {
     use super::*;
     use protocol::DeviceInfo;
+    use std::sync::{Arc, Mutex};
     use tokio::net::UnixListener;
 
     fn paths(dir: &std::path::Path) -> Paths {
@@ -386,24 +393,26 @@ mod tests {
             .block_on(test);
     }
 
-    #[test]
-    fn app_accepts_other_builds_but_never_replaces_an_incompatible_agent() {
-        run(async {
-            for protocol in [PROTOCOL_VERSION, PROTOCOL_VERSION + 1] {
-                let dir = tempfile::tempdir().unwrap();
-                let paths = paths(dir.path());
-                let listener = UnixListener::bind(&paths.socket).unwrap();
-                let server = async {
-                    let (stream, _) = listener.accept().await.unwrap();
-                    let (read, mut write) = stream.into_split();
-                    let mut lines = BufReader::new(read).lines();
-                    let request: Request =
-                        serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
-                    assert!(matches!(request.command, Command::Status));
-                    let status = Status {
-                        pid: 1,
-                        version: "a-separately-installed-build".into(),
+    /// A running agent of `protocol` that answers `status` and `stop`, and
+    /// records what it was asked. It goes away on `stop`, like a real one.
+    fn fake_agent(paths: &Paths, protocol: u32) -> Arc<Mutex<Vec<&'static str>>> {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let listener = UnixListener::bind(&paths.socket).unwrap();
+        let socket = paths.socket.clone();
+        let log = asked.clone();
+        tokio::spawn(async move {
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let (read, mut write) = stream.into_split();
+                let mut lines = BufReader::new(read).lines();
+                let request: Request =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                let reply = match request.command {
+                    Command::Status => Reply::Status(Box::new(Status {
+                        pid: 41,
+                        version: "another-build".into(),
                         protocol,
+                        program: Some("/opt/homebrew/bin/deadbolt".into()),
                         home: String::new(),
                         initialized: true,
                         unlocked: false,
@@ -412,28 +421,78 @@ mod tests {
                         vaults: vec![],
                         peers_online: 0,
                         peers: 0,
-                    };
-                    write
-                        .write_all(
-                            &encode_line(&Message::Ok {
-                                reply: Reply::Status(Box::new(status)),
-                            })
-                            .unwrap(),
-                        )
-                        .await
-                        .unwrap();
+                    })),
+                    Command::Stop => Reply::Done,
+                    other => panic!("an agent of another build was sent {other:?}"),
                 };
-                let launch = Launch {
-                    program: "/must-not-be-launched".into(),
-                    version: None,
-                };
-                let (result, ()) = tokio::join!(ensure_running(&paths, &launch), server);
-                if protocol == PROTOCOL_VERSION {
-                    assert_eq!(result.unwrap().version, "a-separately-installed-build");
-                } else {
-                    assert!(matches!(result, Err(Error::IncompatibleProtocol { .. })));
+                let stopping = matches!(reply, Reply::Done);
+                log.lock()
+                    .unwrap()
+                    .push(if stopping { "stop" } else { "status" });
+                let reply = encode_line(&Message::Ok { reply }).unwrap();
+                write.write_all(&reply).await.unwrap();
+                if stopping {
+                    fs::remove_file(&socket).unwrap();
+                    return;
                 }
             }
+        });
+        asked
+    }
+
+    fn launch(dir: &std::path::Path) -> Launch {
+        Launch {
+            program: dir.join("our-deadbolt"),
+        }
+    }
+
+    #[test]
+    fn an_agent_of_the_same_protocol_is_reused_whatever_its_build() {
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(dir.path());
+            let asked = fake_agent(&paths, PROTOCOL_VERSION);
+            let status = ensure_running(&paths, &launch(dir.path())).await.unwrap();
+            assert_eq!((status.pid, status.version.as_str()), (41, "another-build"));
+            // A second client of yet another build reuses it too: nobody replaces anybody.
+            ensure_running(&paths, &launch(dir.path())).await.unwrap();
+            assert_eq!(*asked.lock().unwrap(), ["status", "status"]);
+        });
+    }
+
+    #[test]
+    fn an_older_agent_is_stopped_before_ours_starts() {
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(dir.path());
+            let asked = fake_agent(&paths, PROTOCOL_VERSION - 1);
+            let result = ensure_running(&paths, &launch(dir.path())).await;
+            assert_eq!(*asked.lock().unwrap(), ["status", "status", "stop"]);
+            // Then it starts our binary, which this test doesn't have.
+            assert!(matches!(result, Err(Error::Spawn(..))), "{result:?}");
+        });
+    }
+
+    #[test]
+    fn a_newer_agent_is_left_running_and_named() {
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(dir.path());
+            let asked = fake_agent(&paths, PROTOCOL_VERSION + 1);
+            let error = ensure_running(&paths, &launch(dir.path()))
+                .await
+                .unwrap_err();
+            assert!(matches!(error, Error::NewerAgent(_)), "{error:?}");
+            let message = error.to_string();
+            for part in [
+                "/opt/homebrew/bin/deadbolt",
+                "another-build",
+                "pid 41",
+                "deadbolt agent stop",
+            ] {
+                assert!(message.contains(part), "{message}");
+            }
+            assert_eq!(*asked.lock().unwrap(), ["status"]);
         });
     }
 

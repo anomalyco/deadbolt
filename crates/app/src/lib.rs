@@ -308,6 +308,7 @@ fn status(unlocked: bool) -> Status {
         pid: 1,
         version: "fixture".into(),
         protocol: deadbolt_client::protocol::PROTOCOL_VERSION,
+        program: None,
         home: String::new(),
         initialized: true,
         unlocked,

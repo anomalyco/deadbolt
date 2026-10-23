@@ -38,6 +38,7 @@ impl Device {
             .env("DEADBOLT_KDF", "fast")
             .env("DEADBOLT_PASSPHRASE", PASSPHRASE)
             .env_remove("DEADBOLT_TEST_VERSION")
+            .env_remove("DEADBOLT_TEST_PROTOCOL")
             .env_remove("RUST_LOG")
             .stdin(Stdio::null());
         cmd
@@ -413,26 +414,62 @@ fn agent_is_single_instance() {
 }
 
 #[test]
-fn replaces_agent_of_another_version() {
+fn shares_an_agent_of_another_build() {
     let a = Device::new();
     let old = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_VERSION", "0.0.0-old"));
     assert!(old.status.success());
-    let out = a.output(
-        a.cmd(&["agent", "status"])
-            .env("DEADBOLT_TEST_VERSION", "0.0.0-old"),
-    );
-    let out = String::from_utf8(out.stdout).unwrap();
+    let pid = a.agent_pid().unwrap();
+    // Two builds of one protocol, in turns: neither replaces the other's agent.
+    for _ in 0..2 {
+        let status = a.run(&["status"]);
+        assert!(status.contains("state\tnot set up"), "{status}");
+        let out = a.output(
+            a.cmd(&["status"])
+                .env("DEADBOLT_TEST_VERSION", "0.0.0-other"),
+        );
+        assert!(out.status.success());
+    }
+    assert_eq!(a.agent_pid().unwrap(), pid);
+    let out = a.run(&["agent", "status"]);
     assert!(out.ends_with("version 0.0.0-old\n"), "{out}");
+}
+
+#[test]
+fn replaces_an_agent_of_an_older_protocol() {
+    let a = Device::new();
+    let old = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "1"));
+    assert!(old.status.success());
     let old_pid = a.agent_pid().unwrap();
 
     let status = a.run(&["status"]);
     assert!(status.contains("state\tnot set up"), "{status}");
-    let out = a.run(&["agent", "status"]);
-    assert!(
-        out.contains(&format!("version {}+", env!("CARGO_PKG_VERSION"))),
-        "{out}"
-    );
-    assert_ne!(a.agent_pid().unwrap(), old_pid);
+    let pid = a.agent_pid().unwrap();
+    assert_ne!(pid, old_pid);
+    a.run(&["status"]);
+    assert_eq!(a.agent_pid().unwrap(), pid);
+}
+
+#[test]
+fn leaves_an_agent_of_a_newer_protocol_running() {
+    let a = Device::new();
+    let newer = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "3"));
+    assert!(newer.status.success());
+    let pid = a.agent_pid().unwrap();
+
+    let error = a.fail(&["status"]);
+    for part in [
+        "a newer Deadbolt agent is running",
+        BIN,
+        &format!("pid {pid}"),
+        "deadbolt agent stop",
+    ] {
+        assert!(error.contains(part), "{error}");
+    }
+    assert_eq!(a.agent_pid().unwrap(), pid);
+    // The way out it names works.
+    assert_eq!(a.run(&["agent", "stop"]), "stopped\n");
+    a.run(&["status"]);
+    assert_ne!(a.agent_pid().unwrap(), pid);
 }
 
 #[test]

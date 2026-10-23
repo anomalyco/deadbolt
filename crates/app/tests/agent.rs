@@ -146,10 +146,7 @@ impl Device {
         std::fs::write(&script, body).unwrap();
         std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755))
             .unwrap();
-        Launch {
-            program: script,
-            version: None,
-        }
+        Launch { program: script }
     }
 
     fn paths(&self) -> Paths {

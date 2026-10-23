@@ -14,6 +14,52 @@ pub fn bundled(exe: &Path) -> Option<PathBuf> {
         .then(|| contents.join("Helpers/deadbolt"))
 }
 
+/// Whether `path` has the shape of a bundle's helper,
+/// `<Something>.app/Contents/Helpers/deadbolt`, whether or not it exists.
+pub fn is_helper(path: &Path) -> bool {
+    let mut up = path.ancestors().skip(1);
+    path.file_name().is_some_and(|n| n == "deadbolt")
+        && up
+            .next()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "Helpers")
+        && up
+            .next()
+            .and_then(Path::file_name)
+            .is_some_and(|n| n == "Contents")
+        && up
+            .next()
+            .and_then(Path::extension)
+            .is_some_and(|e| e == "app")
+}
+
+/// Where commands live even when the app's PATH doesn't say so: Finder,
+/// the Dock and Spotlight start apps with only `/usr/bin:/bin:/usr/sbin:/sbin`.
+pub fn well_known_dirs(home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Some(home) = home {
+        dirs.push(home.join(".local/bin"));
+    }
+    dirs.extend(["/opt/homebrew/bin", "/usr/local/bin"].map(PathBuf::from));
+    if let Some(home) = home {
+        dirs.push(home.join(".cargo/bin"));
+    }
+    dirs
+}
+
+/// PATH's absolute directories, then the well-known ones it lacks, in order.
+pub fn search_dirs(path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = std::env::split_paths(path)
+        .filter(|p| p.is_absolute())
+        .collect();
+    for dir in well_known_dirs(home) {
+        if !dirs.contains(&dir) {
+            dirs.push(dir);
+        }
+    }
+    dirs
+}
+
 pub fn discover(
     exe: Option<&Path>,
     override_bin: Option<&OsStr>,
@@ -30,12 +76,10 @@ pub fn discover(
     sibling
         .into_iter()
         .chain(
-            std::env::split_paths(path)
-                .filter(|p| p.is_absolute())
+            search_dirs(path, home)
+                .into_iter()
                 .map(|p| p.join("deadbolt")),
         )
-        .chain(home.map(|p| p.join(".local/bin/deadbolt")))
-        .chain(["/opt/homebrew/bin/deadbolt", "/usr/local/bin/deadbolt"].map(PathBuf::from))
         .find(|p| executable(p))
         .unwrap_or_else(|| "deadbolt".into())
 }
@@ -63,6 +107,48 @@ mod tests {
             Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt")
         );
         assert!(bundled(Path::new("/tmp/MacOS/Deadbolt")).is_none());
+    }
+
+    #[test]
+    fn helpers_are_recognised_by_shape_alone() {
+        for helper in [
+            "/Applications/Deadbolt.app/Contents/Helpers/deadbolt",
+            "/Volumes/Deadbolt/Deadbolt.app/Contents/Helpers/deadbolt",
+            "/gone/Deadbolt 2.app/Contents/Helpers/deadbolt",
+        ] {
+            assert!(is_helper(Path::new(helper)), "{helper}");
+        }
+        for other in [
+            "/opt/homebrew/Cellar/deadbolt/1/bin/deadbolt",
+            "/Applications/Deadbolt.app/Contents/MacOS/Deadbolt",
+            "/Applications/Deadbolt/Contents/Helpers/deadbolt",
+            "Contents/Helpers/deadbolt",
+        ] {
+            assert!(!is_helper(Path::new(other)), "{other}");
+        }
+    }
+
+    #[test]
+    fn a_finder_launch_still_searches_the_usual_places() {
+        let home = Path::new("/Users/dax");
+        let dirs = search_dirs(OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin"), Some(home));
+        for dir in [
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/Users/dax/.cargo/bin",
+            "/Users/dax/.local/bin",
+        ] {
+            assert!(dirs.contains(&PathBuf::from(dir)), "{dir}");
+        }
+        assert_eq!(dirs[0], Path::new("/usr/bin"));
+        let once = search_dirs(OsStr::new("/opt/homebrew/bin:relative"), Some(home));
+        assert_eq!(
+            once.iter()
+                .filter(|d| *d == Path::new("/opt/homebrew/bin"))
+                .count(),
+            1
+        );
+        assert!(!once.contains(&PathBuf::from("relative")));
     }
 
     #[test]

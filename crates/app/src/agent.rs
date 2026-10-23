@@ -73,9 +73,14 @@ impl Failure {
 impl From<Error> for Failure {
     fn from(error: Error) -> Self {
         let message = match &error {
-            Error::Spawn(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                "Couldn't find the deadbolt command. Install it, or set DEADBOLT_BIN to its path."
-                    .into()
+            Error::Spawn(program, e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if crate::binary::is_helper(program) {
+                    "Deadbolt is damaged: its deadbolt helper is missing. Reinstall Deadbolt."
+                        .into()
+                } else {
+                    "Couldn't find the deadbolt command. Install it, or set DEADBOLT_BIN to its path."
+                        .into()
+                }
             }
             _ => error_chain(&error),
         };
@@ -345,8 +350,24 @@ pub fn launch() -> Launch {
         &std::env::var_os("PATH").unwrap_or_default(),
         std::env::var_os("HOME").map(PathBuf::from).as_deref(),
     );
-    Launch {
-        program,
-        version: None,
+    Launch { program }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_helper_means_a_damaged_app_not_a_missing_command() {
+        let missing = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        let helper = "/Applications/Deadbolt.app/Contents/Helpers/deadbolt";
+        let failure = Failure::from(Error::Spawn(helper.into(), missing()));
+        assert!(
+            failure.message.contains("Reinstall Deadbolt"),
+            "{failure:?}"
+        );
+        assert!(!failure.message.contains("DEADBOLT_BIN"));
+        let failure = Failure::from(Error::Spawn("deadbolt".into(), missing()));
+        assert!(failure.message.contains("DEADBOLT_BIN"), "{failure:?}");
     }
 }
