@@ -144,7 +144,7 @@ fn unlock(s: &App, k: &Kit) -> El {
         Button::new(label)
             .variant(ButtonVariant::Contrast)
             .size(ButtonSize::Large)
-            .disabled(s.unlocking || s.passphrase.is_empty())
+            .disabled(s.unlocking || s.passphrase.text.is_empty())
             .on_press(|s: &mut App| s.submit_unlock())
             .build(k)
             .key("unlock")
@@ -164,20 +164,17 @@ fn unlock(s: &App, k: &Kit) -> El {
 /// The passphrase field: dots, Enter unlocks, typing clears the last error.
 /// In the quick panel, Escape closes the panel rather than blurring the field.
 pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
-    TextInput::new(&s.passphrase.mask)
+    TextInput::new(&s.passphrase)
         .placeholder("Passphrase")
         .large()
         .width(None)
         .invalid(s.unlock_error.is_some())
         .disabled(s.unlocking)
-        .on_edit(|s: &mut App| &mut s.passphrase.mask)
+        .on_edit(|s: &mut App| &mut s.passphrase)
         .on_key(|s: &mut App, ev, tx| {
             s.panel_shortcut(ev, tx) || s.panel_escape(ev, tx) || s.passphrase_key(ev)
         })
-        .on_change(|s: &mut App, _| {
-            s.passphrase.reconcile();
-            s.unlock_error = None;
-        })
+        .on_change(|s: &mut App, _| s.passphrase_changed())
         .on_submit(|s: &mut App, _| s.submit_unlock())
         .build(k)
         .key("passphrase")

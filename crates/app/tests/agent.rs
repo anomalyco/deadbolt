@@ -239,7 +239,7 @@ fn unlock_search_copy_lock() {
         rt.key(key(Key::Text(c.into())));
     }
     rt.frame(1.0 / 60.0);
-    assert!(shows(&rt, "••••"), "the field shows dots");
+    assert!(rt.has_secure_focus(), "a secure field takes it");
     assert!(
         !rt.elements()
             .iter()
@@ -524,7 +524,7 @@ fn create_a_vault_in_the_app() {
         s.screen == Screen::Vault && s.loaded
     });
     assert!(rt.state.items.is_empty());
-    assert!(rt.state.onboarding.passphrase.is_empty(), "wiped");
+    assert!(rt.state.onboarding.passphrase.text.is_empty(), "wiped");
     until(&mut rt, "the vault's name", |s| {
         s.status.as_ref().is_some_and(|st| !st.vaults.is_empty())
     });

@@ -105,7 +105,7 @@ impl App {
             self.passphrase.clear();
             self.unlock_error = None;
         }
-        self.passphrase.mask.focused = self.screen == Screen::Locked;
+        self.passphrase.focused = self.screen == Screen::Locked;
         self.agent.send(Job::Connect);
         if self.screen == Screen::Vault {
             self.list();

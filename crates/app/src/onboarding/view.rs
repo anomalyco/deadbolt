@@ -9,8 +9,8 @@
 //! drops the travel and keeps the fades (Rune's runtime).
 
 use rune::{
-    Color, Cursor, Curve, Cycle, Easing, El, Icon, Shadow, Spring, TextStyle, Transition, canvas,
-    col, el, icon, row, text,
+    Color, Cursor, Curve, Cycle, Easing, El, Icon, Shadow, Spring, TextEdit, TextStyle, Transition,
+    canvas, col, el, icon, row, text,
 };
 use rune_kit::{
     Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Kit, StateColors, TextInput,
@@ -19,6 +19,7 @@ use rune_kit::{
 use super::worker::Stage;
 use super::{Flow, Notice, Severity, Step, Strength};
 use crate::model::App;
+use crate::secret;
 use crate::theme;
 
 pub(crate) const PANEL_W: f32 = 400.0;
@@ -398,7 +399,7 @@ fn device_field(s: &App, k: &Kit) -> El {
         .invalid(problem.is_some())
         .on_edit(|s: &mut App| &mut s.onboarding.device)
         .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx))
-        .on_submit(|s: &mut App, _| s.onboarding.passphrase.mask.focused = true)
+        .on_submit(|s: &mut App, _| s.onboarding.passphrase.focused = true)
         .build(k)
         .key("device-input");
     let hint = problem.map(|p| hint(k, "device-problem", k.c.danger.fg, p));
@@ -412,7 +413,7 @@ fn vault_field(s: &App, k: &Kit) -> El {
     let submit = if o.device_ready {
         submit_for(Flow::Create)
     } else {
-        |s: &mut App, _: &mut rune::Tx| s.onboarding.passphrase.mask.focused = true
+        |s: &mut App, _: &mut rune::Tx| s.onboarding.passphrase.focused = true
     };
     let input = TextInput::new(&o.vault)
         .placeholder("personal")
@@ -432,20 +433,20 @@ fn passphrase_field(s: &App, k: &Kit, flow: Flow) -> El {
     let o = &s.onboarding;
     let strength = o.strength();
     let short = strength == Strength::TooShort;
-    let input = TextInput::new(&o.passphrase.mask)
+    let input = TextInput::new(&o.passphrase)
         .placeholder("Passphrase")
         .large()
         .width(None)
         .invalid(o.attempted && short)
-        .on_edit(|s: &mut App| &mut s.onboarding.passphrase.mask)
-        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || s.onboarding.passphrase.key(ev))
-        .on_change(|s: &mut App, _| s.onboarding.passphrase.reconcile())
+        .on_edit(|s: &mut App| &mut s.onboarding.passphrase)
+        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || secret::chord(ev))
+        .on_change(|s: &mut App, _| secret::tidy(&mut s.onboarding.passphrase))
         .on_submit(move |s: &mut App, tx| {
             if s.onboarding.repeat_matches() == Some(true) {
                 submit_for(flow)(s, tx);
             } else {
-                s.onboarding.passphrase.mask.focused = false;
-                s.onboarding.repeat.mask.focused = true;
+                s.onboarding.passphrase.focused = false;
+                s.onboarding.repeat.focused = true;
             }
         })
         .build(k)
@@ -461,14 +462,9 @@ fn passphrase_field(s: &App, k: &Kit, flow: Flow) -> El {
 
 /// A three-step meter and a word. The line is always there, so typing never
 /// moves the fields below it.
-fn strength_hint(
-    k: &Kit,
-    passphrase: &crate::secret::SecretEdit,
-    strength: Strength,
-    attempted: bool,
-) -> El {
+fn strength_hint(k: &Kit, passphrase: &TextEdit, strength: Strength, attempted: bool) -> El {
     let (filled, ink, words) = match strength {
-        Strength::TooShort if passphrase.is_empty() && !attempted => {
+        Strength::TooShort if passphrase.text.is_empty() && !attempted => {
             (0, k.c.text_faint, "At least 8 characters.")
         }
         Strength::TooShort if attempted => (0, k.c.danger.fg, "Too short: at least 8 characters."),
@@ -514,14 +510,14 @@ fn strength_hint(
 fn repeat_field(s: &App, k: &Kit, flow: Flow) -> El {
     let o = &s.onboarding;
     let matches = o.repeat_matches();
-    let input = TextInput::new(&o.repeat.mask)
+    let input = TextInput::new(&o.repeat)
         .placeholder("Passphrase again")
         .large()
         .width(None)
         .invalid(matches == Some(false))
-        .on_edit(|s: &mut App| &mut s.onboarding.repeat.mask)
-        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || s.onboarding.repeat.key(ev))
-        .on_change(|s: &mut App, _| s.onboarding.repeat.reconcile())
+        .on_edit(|s: &mut App| &mut s.onboarding.repeat)
+        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || secret::chord(ev))
+        .on_change(|s: &mut App, _| secret::tidy(&mut s.onboarding.repeat))
         .on_submit(move |s: &mut App, tx| submit_for(flow)(s, tx))
         .build(k)
         .key("repeat-input");

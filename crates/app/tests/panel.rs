@@ -324,7 +324,7 @@ fn escape_on_the_locked_panel_closes_it_and_forgets_the_passphrase() {
         rt.key(key(Key::Text(c.into())));
     }
     rt.frame(FRAME);
-    assert_eq!(rt.state.passphrase.secret(), "hunt");
+    assert_eq!(rt.state.passphrase.text, "hunt");
     rt.key(key(Key::Escape));
     rt.frame(FRAME);
     assert!(
@@ -333,7 +333,63 @@ fn escape_on_the_locked_panel_closes_it_and_forgets_the_passphrase() {
     );
     frames(&mut rt, 30);
     assert_eq!(phase(&rt), Phase::Hidden);
-    assert!(rt.state.passphrase.is_empty(), "hiding forgets it");
+    assert!(rt.state.passphrase.text.is_empty(), "hiding forgets it");
+}
+
+/// Both unlock fields: ⌘V pastes (on one line), but nothing copies, cuts or
+/// undoes the passphrase out, a ⌃ chord types nothing, and closing leaves an
+/// empty secure field.
+#[test]
+fn the_passphrase_stays_in_its_field() {
+    let main = || {
+        let app = rune::tooling::initial_state(&deadbolt_app::spec(), Some("locked"));
+        let mut rt = Runtime::new(
+            app,
+            deadbolt_app::view::app,
+            (820.0, 540.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+        rt
+    };
+    let with = |key, mods| KeyEvent { key, mods };
+    let cmd = Mods {
+        cmd: true,
+        ..Mods::default()
+    };
+    let ctrl = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    for mut rt in [runtime("locked", true), main()] {
+        frames(&mut rt, 2);
+        assert!(rt.has_secure_focus());
+        for c in "hunter".chars() {
+            rt.key(key(Key::Text(c.into())));
+        }
+        rt.paste("2\t2\r\n");
+        rt.frame(FRAME);
+        assert_eq!(rt.state.passphrase.text, "hunter22");
+        for c in ['a', 'c', 'x', 'z'] {
+            rt.key(with(Key::Command(c), cmd));
+        }
+        rt.key(with(Key::Text("k".into()), ctrl));
+        rt.frame(FRAME);
+        assert_eq!(rt.state.passphrase.text, "hunter22");
+        assert!(rt.copy_request.is_none(), "nothing reaches the clipboard");
+        assert!(
+            !rt.elements()
+                .iter()
+                .any(|e| e.text.as_deref().is_some_and(|t| t.contains("hunter"))),
+            "the passphrase never shows"
+        );
+        rt.update(|s, tx| s.close(tx));
+        assert!(rt.state.passphrase.text.is_empty());
+        assert!(rt.state.passphrase.is_secure());
+    }
 }
 
 #[test]
@@ -590,15 +646,10 @@ fn with_the_main_window_around_it_stays() {
 fn closing_its_window_cleans_up_like_the_main_one() {
     let mut rt = runtime("locked", true);
     let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
-    rt.update(|s, _| {
-        s.passphrase.key(&KeyEvent {
-            key: Key::Text("x".into()),
-            mods: Mods::default(),
-        });
-    });
+    rt.update(|s, _| s.passphrase.insert("x"));
     rt.state.clipboard.copy(PASSWORD).unwrap();
     rt.update(|s, tx| s.panel_closed(tx));
-    assert!(rt.state.passphrase.is_empty());
+    assert!(rt.state.passphrase.text.is_empty());
     assert_eq!(board(&clip), None, "the clipboard is cleared");
     assert_eq!(rt.shell_request, None, "the main window is still around");
 

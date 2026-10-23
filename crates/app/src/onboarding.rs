@@ -19,7 +19,7 @@ use zeroize::Zeroizing;
 use crate::agent::{Failure, Job};
 use crate::clipboard::Copied;
 use crate::model::{App, Screen};
-use crate::secret::SecretEdit;
+use crate::secret;
 use worker::{NewDevice, Progress, Stage, Worker};
 
 /// Shortest passphrase the form accepts.
@@ -119,8 +119,8 @@ pub struct Onboarding {
     pub stage: Option<Stage>,
     pub device: TextEdit,
     pub vault: TextEdit,
-    pub passphrase: SecretEdit,
-    pub repeat: SecretEdit,
+    pub passphrase: TextEdit,
+    pub repeat: TextEdit,
     /// This device already has a key and passphrase.
     pub device_ready: bool,
     /// Submit was pressed with something missing: every problem shows.
@@ -153,8 +153,8 @@ impl Onboarding {
             stage: None,
             device: TextEdit::new(""),
             vault: TextEdit::new("personal"),
-            passphrase: SecretEdit::default(),
-            repeat: SecretEdit::default(),
+            passphrase: secret::field(),
+            repeat: secret::field(),
             device_ready: false,
             attempted: false,
             notice: None,
@@ -198,7 +198,7 @@ impl Onboarding {
     }
 
     pub fn strength(&self) -> Strength {
-        strength(self.passphrase.secret())
+        strength(&self.passphrase.text)
     }
 
     pub fn device_name(&self) -> &str {
@@ -234,7 +234,7 @@ impl Onboarding {
     /// `Some(true)` when the repeat matches, `Some(false)` when it can't
     /// (or, after submit, doesn't yet), `None` while it's still a prefix.
     pub fn repeat_matches(&self) -> Option<bool> {
-        let (first, second) = (self.passphrase.secret(), self.repeat.secret());
+        let (first, second) = (self.passphrase.text.as_str(), self.repeat.text.as_str());
         if second.is_empty() && !self.attempted {
             None
         } else if first == second {
@@ -256,7 +256,7 @@ impl Onboarding {
             || (self.device_problem().is_none()
                 && self.passphrase_problem().is_none()
                 && self.repeat_matches() == Some(true)
-                && !self.passphrase.is_empty())
+                && !self.passphrase.text.is_empty())
     }
 
     pub fn can_create(&self) -> bool {
@@ -270,7 +270,7 @@ impl Onboarding {
     fn new_device(&mut self) -> Option<NewDevice> {
         self.needs_device().then(|| NewDevice {
             name: self.device_name().to_owned(),
-            passphrase: self.passphrase.take(),
+            passphrase: secret::take(&mut self.passphrase),
         })
     }
 
@@ -284,10 +284,11 @@ impl Onboarding {
             self.vault.focused = true;
         } else if device && self.device_problem().is_some() {
             self.device.focused = true;
-        } else if device && (self.passphrase_problem().is_some() || self.passphrase.is_empty()) {
-            self.passphrase.mask.focused = true;
+        } else if device && (self.passphrase_problem().is_some() || self.passphrase.text.is_empty())
+        {
+            self.passphrase.focused = true;
         } else if device && self.repeat_matches() != Some(true) {
-            self.repeat.mask.focused = true;
+            self.repeat.focused = true;
         } else if flow == Flow::Create {
             self.vault.focused = true;
         }
@@ -296,8 +297,8 @@ impl Onboarding {
     fn blur(&mut self) {
         self.device.focused = false;
         self.vault.focused = false;
-        self.passphrase.mask.focused = false;
-        self.repeat.mask.focused = false;
+        self.passphrase.focused = false;
+        self.repeat.focused = false;
     }
 
     /// Wipes both passphrase fields.
@@ -403,7 +404,7 @@ impl App {
         };
         o.blur();
         if o.needs_device() {
-            o.passphrase.mask.focused = true;
+            o.passphrase.focused = true;
         } else if flow == Flow::Create {
             o.vault.focused = true;
         }

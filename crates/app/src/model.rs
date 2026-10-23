@@ -11,7 +11,7 @@ use crate::agent::{Agent, Done, Failure, Job};
 use crate::clipboard::{Clipboard, Copied};
 use crate::onboarding::Onboarding;
 use crate::onboarding::worker::Worker;
-use crate::secret::SecretEdit;
+use crate::secret;
 
 /// How long a copied secret stays on the clipboard, by default.
 pub const CLEAR_AFTER: f64 = 30.0;
@@ -64,7 +64,7 @@ pub struct App {
     pub clear_after: f64,
     pub screen: Screen,
     pub status: Option<Status>,
-    pub passphrase: SecretEdit,
+    pub passphrase: TextEdit,
     pub onboarding: Onboarding,
     pub unlocking: bool,
     pub unlock_error: Option<String>,
@@ -104,7 +104,7 @@ impl App {
             clear_after: CLEAR_AFTER,
             screen: Screen::Connecting,
             status: None,
-            passphrase: SecretEdit::default(),
+            passphrase: secret::field(),
             onboarding: Onboarding::new(Worker::offline()),
             unlocking: false,
             unlock_error: None,
@@ -168,7 +168,7 @@ impl App {
                     }
                     Err(failure) => {
                         self.unlock_error = Some(unlock_message(&failure));
-                        self.passphrase.mask.focused = true;
+                        self.passphrase.focused = true;
                     }
                 }
             }
@@ -333,7 +333,7 @@ impl App {
             (_, Screen::Locked) => {
                 self.forget_onboarding();
                 self.screen = Screen::Locked;
-                self.passphrase.mask.focused = true;
+                self.passphrase.focused = true;
             }
             _ => self.screen = screen,
         }
@@ -367,7 +367,7 @@ impl App {
         }
         self.screen = Screen::Locked;
         self.passphrase.clear();
-        self.passphrase.mask.focused = true;
+        self.passphrase.focused = true;
     }
 
     /// The window is closing: clear our clipboard copies, wipe what we read
@@ -414,24 +414,25 @@ impl App {
     // Unlock
 
     pub fn submit_unlock(&mut self) {
-        if self.unlocking || self.passphrase.is_empty() {
+        if self.unlocking || self.passphrase.text.is_empty() {
             return;
         }
         self.unlocking = true;
         self.unlock_error = None;
-        self.agent.send(Job::Unlock(self.passphrase.take()));
+        self.agent
+            .send(Job::Unlock(secret::take(&mut self.passphrase)));
     }
 
-    /// A key in the passphrase field. Any change to the passphrase clears
-    /// the last unlock error.
+    /// A key in the passphrase field, before the editor sees it.
     pub fn passphrase_key(&mut self, ev: &KeyEvent) -> bool {
         self.panel_active();
-        let edits = self.passphrase.edits();
-        let handled = self.passphrase.key(ev);
-        if self.passphrase.edits() != edits {
-            self.unlock_error = None;
-        }
-        handled
+        secret::chord(ev)
+    }
+
+    /// The passphrase changed: tidy it and clear the last unlock error.
+    pub fn passphrase_changed(&mut self) {
+        secret::tidy(&mut self.passphrase);
+        self.unlock_error = None;
     }
 
     pub fn lock(&mut self) {
