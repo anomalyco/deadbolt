@@ -242,7 +242,7 @@ impl World {
                     name: "sim".into(),
                 }),
             );
-            s.add_vault(Vault::from_genesis(genesis.clone())?, &[genesis])?;
+            s.add_vault(Vault::from_genesis(genesis)?)?;
             Ok(id)
         })?;
         Ok(Self {
@@ -595,8 +595,8 @@ impl World {
                     let persisted = s
                         .store
                         .iter_all()?
-                        .map(|row| row.map(|(hash, _)| Hash::from_bytes(hash)))
-                        .collect::<Result<BTreeSet<_>, _>>()?;
+                        .map(|row| Ok(Entry::decode(&row?)?.hash()))
+                        .collect::<Result<BTreeSet<_>>>()?;
                     ensure!(accepted == persisted, "accepted/persisted mismatch on {i}");
                     for e in self.forbidden.get(&i).into_iter().flatten() {
                         ensure!(

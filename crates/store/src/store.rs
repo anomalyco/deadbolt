@@ -17,16 +17,11 @@ pub const DB_FILE: &str = "store.redb";
 /// On-disk format version. Bound into every AEAD label below.
 pub const FORMAT_VERSION: u32 = 1;
 
-/// Hash of a log entry; the store treats it as an opaque 32-byte key.
-pub type EntryHash = [u8; 32];
-
 // Plaintext header: format version, KDF header, wrapped key set, and the
 // sealed log length.
 pub(crate) const HEADER: TableDefinition<&str, &[u8]> = TableDefinition::new("header");
-// seq (append order, contiguous from 0) -> seal(entry_hash || bytes)
+// seq (append order, contiguous from 0) -> seal(bytes)
 pub(crate) const LOG: TableDefinition<u64, &[u8]> = TableDefinition::new("log");
-// blind(entry_hash) -> seq
-pub(crate) const LOG_INDEX: TableDefinition<&[u8; 32], u64> = TableDefinition::new("log_index");
 // blind(name) -> seal(value)
 pub(crate) const META: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new("meta");
 
@@ -41,7 +36,6 @@ const AAD_LOG_LEN: &[u8] = b"deadbolt-store/v1/log-len";
 const AAD_META: &[u8] = b"deadbolt-store/v1/meta";
 
 const CTX_DATA: &str = "deadbolt-store v1 2026-10-15 data encryption";
-const CTX_LOG_INDEX: &str = "deadbolt-store v1 2026-10-15 log index blinding";
 const CTX_META_INDEX: &str = "deadbolt-store v1 2026-10-15 meta key blinding";
 
 const CACHE_BYTES: usize = 16 * 1024 * 1024;
@@ -101,7 +95,6 @@ pub fn init_with_params(
             header.insert(H_KEYSET, wrapped.as_slice())?;
             write_log_len(&keys, &mut header, 0)?;
             txn.open_table(LOG)?;
-            txn.open_table(LOG_INDEX)?;
             txn.open_table(META)?;
         }
         txn.commit()?;
@@ -175,32 +168,26 @@ impl Unlocked {
         &self.keys.keyset.device_secret
     }
 
-    /// Appends several entries in one durable transaction, skipping hashes that
-    /// are already stored (the bytes are not compared). Returns how many were
-    /// added. Either all new entries are written or none are.
-    pub fn append_batch<'a>(
-        &self,
-        entries: impl IntoIterator<Item = (&'a EntryHash, &'a [u8])>,
-    ) -> Result<usize> {
+    /// Appends several entries in one durable transaction. Returns how many
+    /// were added. Either all entries are written or none are.
+    ///
+    /// Deduplication and hash verification happen in `deadbolt-core::Vault`
+    /// before entries are staged for persistence, so the store keeps only the
+    /// sealed entry bytes in append order.
+    pub fn append_batch<'a>(&self, entries: impl IntoIterator<Item = &'a [u8]>) -> Result<usize> {
         let txn = begin_write(&self.db)?;
         let added = {
             let mut header = txn.open_table(HEADER)?;
             let mut log = txn.open_table(LOG)?;
-            let mut index = txn.open_table(LOG_INDEX)?;
             let start = read_log_len(&self.keys, &header)?;
             let last = log.last()?.map(|(k, _)| k.value());
             if last.map_or(0, |k| k + 1) != start {
                 return Err(Error::corrupt("log length does not match stored entries"));
             }
             let mut len = start;
-            for (hash, bytes) in entries {
-                let blinded = self.keys.log_blind(hash);
-                if index.get(&blinded)?.is_some() {
-                    continue;
-                }
-                let row = crypto::seal(&self.keys.data, &log_aad(len), &[hash, bytes])?;
+            for bytes in entries {
+                let row = crypto::seal(&self.keys.data, &log_aad(len), &[bytes])?;
                 log.insert(len, row.as_slice())?;
-                index.insert(&blinded, len)?;
                 len += 1;
             }
             if len != start {
@@ -310,7 +297,7 @@ pub struct LogIter<'a> {
 }
 
 impl Iterator for LogIter<'_> {
-    type Item = Result<(EntryHash, Zeroizing<Vec<u8>>)>;
+    type Item = Result<Zeroizing<Vec<u8>>>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.done {
@@ -383,7 +370,6 @@ impl KeySet {
 pub(crate) struct Keys {
     keyset: KeySet,
     data: XChaCha20Poly1305,
-    log_index: SecretKey,
     meta_index: SecretKey,
 }
 
@@ -392,30 +378,18 @@ impl Keys {
         let data = crypto::subkey(CTX_DATA, &keyset.data_key);
         Self {
             data: crypto::cipher(&data),
-            log_index: crypto::subkey(CTX_LOG_INDEX, &keyset.data_key),
             meta_index: crypto::subkey(CTX_META_INDEX, &keyset.data_key),
             keyset,
         }
-    }
-
-    fn log_blind(&self, hash: &EntryHash) -> [u8; 32] {
-        crypto::blind(&self.log_index, &[hash])
     }
 
     pub(crate) fn meta_blind(&self, name: &str) -> [u8; 32] {
         crypto::blind(&self.meta_index, &[name.as_bytes()])
     }
 
-    fn open_log_row(&self, seq: u64, row: &[u8]) -> Result<(EntryHash, Zeroizing<Vec<u8>>)> {
-        let mut plain = crypto::open(&self.data, &log_aad(seq), row)
-            .ok_or_else(|| Error::corrupt(format!("log entry {seq} failed authentication")))?;
-        if plain.len() < 32 {
-            return Err(Error::corrupt(format!("log entry {seq} is truncated")));
-        }
-        let mut hash = [0u8; 32];
-        hash.copy_from_slice(&plain[..32]);
-        plain.drain(..32);
-        Ok((hash, plain))
+    fn open_log_row(&self, seq: u64, row: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+        crypto::open(&self.data, &log_aad(seq), row)
+            .ok_or_else(|| Error::corrupt(format!("log entry {seq} failed authentication")))
     }
 }
 

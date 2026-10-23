@@ -126,7 +126,7 @@ pub(super) fn apply_welcome(
         .map(|bytes| Entry::decode(&bytes))
         .collect::<Result<_, _>>()
         .context("decoding welcome")?;
-    let vault = Vault::load(entries.clone()).context("loading the vault")?;
+    let vault = Vault::load(entries).context("loading the vault")?;
     if vault.id().to_string() != offer.vault {
         bail!("the welcome is for another vault");
     }
@@ -135,7 +135,7 @@ pub(super) fn apply_welcome(
     }
     s.learn(&inviter, Some(&offer.name), offer.addr.clone(), meta.peers);
     let id = vault.id();
-    s.add_vault(vault, &entries)?;
+    s.add_vault(vault)?;
     Ok(s.vault_info(&id))
 }
 
