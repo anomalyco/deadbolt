@@ -153,6 +153,7 @@ cargo run -p deadbolt-app -- --window panel --scene filtering --snap panel.png  
 cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-motion.json --frames 240 --trace motion/panel.jsonl   # motion-lint trace: filter, then close
 cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-copy.json --frames 150 --trace motion/panel-copy.jsonl   # copy (the opening selection's values are loaded; a new one's come from the agent), then close
 cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-clickaway.json --frames 150 --trace motion/panel-clickaway.jsonl   # filter, then the window loses focus and the card fades
+cargo run -p deadbolt-app -- --window panel --scene empty --script crates/app/scripts/panel-scroll.json --frames 240 --trace motion/panel-scroll.jsonl   # ↓ past the list's bottom edge, then ↑ back
 cargo run -p deadbolt-app -- --window panel --panel --frames 2 --script desktop.json --tree tree.json   # where it's placed: a script with "displays" and "pointer"; prints rune-placed, "placed" in the tree
 ```
 
