@@ -11,13 +11,14 @@
 - **Threads:** one worker thread runs agent requests in order on a current-thread Tokio runtime and wakes the window when a reply lands. The UI drains replies in Rune's `poll`; nothing polls the socket. A status request every 10 s while unlocked notices a lock from the CLI or the idle timeout (`status` doesn't reset the idle timer).
 - **Secrets in the app:** the passphrase field edits a mask of dots; the passphrase lives in a `Zeroizing<String>` all the way to the socket (the protocol's passphrase fields and the request buffer are wiped too) and copy, cut and undo do nothing. Item values are fetched one item at a time (`item-get`) and wiped when the selection changes, the store locks or the window closes. Copies are written with clipboard history exclusion (`org.nspasteboard.ConcealedType` on macOS) through one clipboard handle kept open for the app's life (on X11 the process serves the selection), and cleared after 30 s, or on lock and quit, only if the clipboard still holds them.
 - **Keys:** the search field and the passphrase field handle their own keys (`on_input_key`) and get focus by rendering with `focused: true`; the window's `on_key` handles only ⌘L. This keeps working when Rune sends keys to the focused element before the window.
-- **Look:** Deadbolt's own theme (`crates/app/assets/theme.json`): the site's black, white and red, paper `#e8e4dc` for light, IBM Plex Mono for everything, small radii, flat surfaces with hairline rings. `src/theme.rs` maps it onto rune-kit's tokens.
+- **Look:** Deadbolt's own theme (`crates/app/assets/theme.json`): the site's black, white and red, paper `#e8e4dc` for light, IBM Plex Mono for everything but the wordmark, small radii, flat surfaces with hairline rings. `src/theme.rs` maps it onto rune-kit's tokens. The wordmark is Anton (OFL, the site's subset as TTF), on the lock and onboarding screens only; it takes Rune's mono slot, so no other style uses `.mono()`.
+- **First run** (`src/onboarding.rs`, `onboarding/{worker,view,qr}.rs`): creating and joining run on their own thread and connection (`onboarding/worker.rs`), beside the request worker, because a join holds its connection for minutes and waits on the person at the screen. The worker reports each stage as it starts, so progress shows only what really happened. It answers the join's code through `deadbolt_client::converse`, whose handler can wait while the socket is still read, so the other device declining ends the wait at once. A device that is set up but holds no vault (a cancelled join) goes back to onboarding without the passphrase step.
 
 ## Screens
 
 | Screen | v1 | Later |
 |---|---|---|
-| First run | "Set up this device" pointing at `deadbolt init` / `join`, with Check again | Create a vault (device name, passphrase twice, strength) and Join (shows QR + ticket, then the 6-digit code to confirm) in the app |
+| First run | Welcome (wordmark, Create or Join). Create: device name (prefilled from the computer's name), vault name, passphrase with a strength meter and a repeat that confirms in place, then honest progress (Argon2, creating), then the moment and the empty vault. Join: device name and passphrase, then the ticket as a QR code and the `deadbolt pair` command to copy, then the six-digit code to compare, then the moment and the synced vault. Cancelling, declining the code, the other device declining, an expired ticket and agent failures each return to the form with a notice coloured by how serious it is (neutral, caution, danger) and what to do next | Scan the QR from a phone app |
 | Unlock | Passphrase, Enter or Unlock; wrong passphrase says so in place and keeps focus | Touch ID once the agent stores the unlock key in the keychain (design.md) |
 | List | Search-first: the field is focused, typing filters live, ↑↓ select, rows show label and username or expiry | Vault switcher, favourites, sort by recently used, agent-side search over URL host and cardholder |
 | Item detail | Fields in schema order, secrets masked with Show, Copy per field, notes wrap | TOTP codes with their own countdown, open URL, password age |
@@ -27,7 +28,7 @@
 | Devices | — (CLI: `devices`, `pair`, `devices remove`) | List with presence; Add device (paste the new device's ticket, confirm the code); remove with confirm in place |
 | Import | — (CLI: `import bitwarden`) | Pick a Bitwarden export, show counts, import |
 | Lock | ⌘L or the lock button; clears our clipboard copy and forgets every value | Lock on sleep or screen lock |
-| Errors, empty | Can't reach the agent (with the reason and Try again); no items; no matches; agent errors inline | Agent version mismatch help |
+| Errors, empty | Can't reach the agent (with the reason and Try again); an empty vault shows how to add a login or import from Bitwarden with the CLI, with copy buttons; no matches; agent errors inline | Agent version mismatch help |
 
 ## Keyboard
 
@@ -59,12 +60,18 @@ Rune's runtime already enforces no first-paint animation, reduced motion (travel
 | Countdown | time | the bar's width is a `rune::Live` set every 100 ms and smoothed on `.12/0`, so it empties without rebuilding the view; the text rebuilds once a second. Plex Mono's digits are all one width, so nothing shakes |
 | Unlock error | agent | fades in |
 | Hover | pointer | in 0 ms, out on Rune's snap |
+| Onboarding steps | user | whole-state replacement, as above; progress and its result share one panel |
+| Field hints (strength, repeat, problems) | dependent on typing | swap in place with a fade; the strength and repeat lines are always there, so typing never moves the fields below |
+| Progress stages | agent | the stage's glyph replaces in place (pending dot → breathing dot → check); the breath stops under reduced motion |
+| Vault created or joined | agent | the one flourish: the bolt throws from the body into the strike on `.3/.3` (overshoots about 1 pt). On contact (`.11` s) the strike flashes hot and its glow lights (50 ms attack), then cools: hot → red on `.3/0`, red → rest on `.9/0`, the glow decays over 1.1 s, fast then slow. The title replaces; the vault opens at 1.5 s |
 
 ## Breadboard
 
 The main flows, as states (see the PR for the chat version):
 
 1. Launch → agent starting ("Starting Deadbolt…") → locked or first-run.
+   - First run → Create → device, vault, passphrase twice → Protecting your passphrase → Creating personal → the bolt throws → empty vault with the CLI guide.
+   - First run → Join → device, passphrase twice → Making a pairing ticket → QR + `deadbolt pair …` (Copy command) → other device pairs → 482 913, They match → Receiving personal → the bolt throws → synced vault. They don't match, Cancel or Escape, or the other device declining → the join form with a notice; the device stays set up.
 2. Locked: type the passphrase → ↵ → vault, or the error in place.
 3. Vault: type "git" → list narrows → ↵ → "Password copied · clears in 0:30" → 30 s → "Clipboard cleared" → notice leaves.
 4. ⌘L → locked; the clipboard copy is gone.
@@ -74,11 +81,10 @@ The main flows, as states (see the PR for the chat version):
 
 1. **Clipboard timeout:** 30 s now. 1Password uses 90 s, KeePassXC 10 s. Configurable?
 2. **Where unlock lives:** the agent's idle timeout locks for both clients. Should the app offer its own timeout or lock on sleep, or should that be agent config only?
-3. **First run in the app or the CLI:** v1 sends people to `deadbolt init`. Creating a vault and joining in the app is the onboarding and gets the most care; when?
 4. **Bundling:** ship `deadbolt` inside `Deadbolt.app` (and start the agent from there), or require the CLI install?
 5. **Window model:** a normal window now. A menu-bar / quick-access panel (global shortcut, search, ↵ copies, dismiss) may fit "open it every day" better.
 6. **Live updates:** items synced from another device appear on the next list load. Add a `watch` command to the protocol that streams lock and item changes?
-7. **Look:** the site's palette and Plex Mono now. Anton for the wordmark on the lock screen?
+7. **Weak passphrases:** the form refuses under 8 characters and only warns about weak ones (a rough estimate that flatters dictionary words). Refuse weak ones too?
 
 ## Rune gaps (for the Rune team)
 
@@ -97,6 +103,10 @@ Resolved at `3294968`: symbol fallback for keyboard symbols, `Kit::from_palette`
 - **`rune_kit::TextInput` can't animate dependent layout** (`animate_edit_layout`), so the search field is built from `text_input` directly.
 - **System reduced motion.** `Env` has no reduced-motion flag from the OS; the app takes `--reduced-motion`.
 - **Window focus events** (to refresh status and the list when the window comes forward) aren't exposed to the app.
+- **Two font families.** `TextStyle` names `Sans` or `Mono` only, so a display face (Anton for the wordmark) has to take the mono slot and no other style can use `.mono()`. Wanted: named families, or a third `Display` slot.
+- **Timed sequences on an element.** `rune-motion` has keyframes and `Choreography`, but `El` can't take them: the bolt's flash, cool and fade are four app phases, each a `wake_after` and a view rebuild with new targets and springs. Wanted: keyframed opacity and fill on an element ("hot for 50 ms, then red on .3, then rest on .9").
+- **Focus set from state lands a frame late.** A handler that moves focus (`edit.focused = true`) takes effect at the next frame, so keys already queued in the same frame still go to the old field. Rare by hand; tests must run a frame between Enter and typing.
+- **Invalid `TextInput` paints its placeholder red,** so an empty repeat field reads as an error before anything is typed in it.
 
 ## Run, test, snapshot
 
@@ -107,4 +117,4 @@ crates/app/scripts/snap.sh              # headless PNGs of every scene into crat
 cargo run -p deadbolt-app -- --scene copied --at 2.4 --snap copied.png   # one scene; --theme light, --reduced-motion
 ```
 
-Scenes (`--scene`): `connecting`, `setup`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
+Scenes (`--scene`): `connecting`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`, and first run: `welcome`, `welcome-set-up`, `create`, `create-typing`, `create-ready`, `create-invalid`, `create-failed`, `creating` (created at 1.2 s, the moment, the vault at 2.7 s), `join`, `ticket`, `code`, `joining` (joined at 0.6 s), `join-declined`, `join-cancelled`, `join-failed`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
