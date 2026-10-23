@@ -152,7 +152,7 @@ impl App {
     pub fn apply(&mut self, done: Done, tx: &mut Tx) {
         match done {
             Done::Connected(Ok(status)) | Done::Status(Some(status)) => self.on_status(status, tx),
-            Done::Connected(Err(failure)) => self.screen = Screen::Failed(failure.message),
+            Done::Connected(Err(failure)) => self.show(Screen::Failed(failure.message)),
             Done::Status(None) => self.fail("The agent stopped.".into(), tx),
             Done::Unlocked(result) => {
                 self.unlocking = false;
@@ -328,16 +328,26 @@ impl App {
             (Screen::Vault, Screen::Locked) => self.on_locked(tx),
             (_, Screen::Locked) => {
                 self.forget_onboarding();
-                self.screen = Screen::Locked;
+                self.show(Screen::Locked);
                 self.passphrase.focused = true;
             }
-            _ => self.screen = screen,
+            _ => self.show(screen),
         }
+    }
+
+    /// Every screen change after start-up comes through here. Leaving Locked
+    /// wipes a part-typed passphrase, however it was left: an unlock from the
+    /// other window or the CLI, the agent stopping, onboarding.
+    pub(crate) fn show(&mut self, screen: Screen) {
+        if screen != Screen::Locked {
+            self.passphrase.clear();
+        }
+        self.screen = screen;
     }
 
     pub(crate) fn enter_vault(&mut self, _tx: &mut Tx) {
         self.forget_onboarding();
-        self.screen = Screen::Vault;
+        self.show(Screen::Vault);
         self.search.focused = true;
     }
 
@@ -352,7 +362,7 @@ impl App {
     fn fail(&mut self, message: String, tx: &mut Tx) {
         self.forget_vault(tx);
         self.forget_onboarding();
-        self.screen = Screen::Failed(message);
+        self.show(Screen::Failed(message));
     }
 
     /// The store is locked: drop everything read from it.
@@ -361,7 +371,7 @@ impl App {
         if let Some(status) = &mut self.status {
             status.unlocked = false;
         }
-        self.screen = Screen::Locked;
+        self.show(Screen::Locked);
         self.passphrase.clear();
         self.passphrase.focused = true;
     }
@@ -436,7 +446,7 @@ impl App {
     }
 
     pub fn retry(&mut self) {
-        self.screen = Screen::Connecting;
+        self.show(Screen::Connecting);
         self.agent.send(Job::Connect);
     }
 
@@ -764,7 +774,11 @@ mod tests {
     use crate::agent::{Done, Values};
 
     fn vault() -> Runtime<App> {
-        let app = rune::tooling::initial_state(&crate::spec(), Some("vault"));
+        main("vault")
+    }
+
+    fn main(scene: &str) -> Runtime<App> {
+        let app = rune::tooling::initial_state(&crate::spec(), Some(scene));
         Runtime::new(
             app,
             crate::view::app,
@@ -880,5 +894,42 @@ mod tests {
         });
         assert_eq!(rt.state.screen, Screen::Locked);
         assert!(forgotten(&rt.state));
+    }
+
+    /// A part-typed passphrase goes as soon as either window leaves Locked
+    /// without it: unlocked elsewhere (the other window, the CLI), the agent
+    /// gone, or the device reset to onboarding.
+    #[test]
+    fn leaving_locked_wipes_a_part_typed_passphrase() {
+        let windows: [fn() -> Runtime<App>; 2] = [|| main("locked"), || panel("locked")];
+        let exits: [fn(&App) -> Done; 3] = [
+            |s| {
+                let mut status = s.status.clone().expect("the scene has a status");
+                status.unlocked = true;
+                Done::Status(Some(status))
+            },
+            |_| Done::Status(None),
+            |s| {
+                let mut status = s.status.clone().expect("the scene has a status");
+                status.initialized = false;
+                Done::Status(Some(status))
+            },
+        ];
+        for window in windows {
+            for exit in exits {
+                let mut rt = window();
+                assert_eq!(rt.state.screen, Screen::Locked);
+                rt.update(|s, _| {
+                    s.passphrase.paste("hunt");
+                    s.passphrase_changed();
+                });
+                rt.update(|s, tx| {
+                    let done = exit(s);
+                    s.apply(done, tx);
+                });
+                assert_ne!(rt.state.screen, Screen::Locked);
+                assert_eq!(rt.state.passphrase.text, "", "left {:?}", rt.state.screen);
+            }
+        }
     }
 }

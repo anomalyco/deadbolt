@@ -369,7 +369,7 @@ pub fn default_device_name() -> String {
 impl App {
     /// Shows the welcome screen. Leaves a running request alone.
     pub(crate) fn begin_onboarding(&mut self, device_ready: bool) {
-        self.screen = Screen::Onboarding;
+        self.show(Screen::Onboarding);
         if self.onboarding.busy() {
             self.onboarding.device_ready |= device_ready;
             return;
