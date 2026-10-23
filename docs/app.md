@@ -50,7 +50,7 @@ Search first. The search field always has focus while unlocked.
 
 ## Motion
 
-Rune's runtime already enforces no first-paint animation, reduced motion (travel off, short fade kept) and retargeting mid-flight.
+Rune's runtime already enforces no first-paint animation, reduced motion (travel off, short fade kept; from the system's setting, or `--reduced-motion`) and retargeting mid-flight.
 
 | Change | Who causes it | Motion |
 |---|---|---|
@@ -138,7 +138,6 @@ Resolved at `43ff4f8`: `Kit::from_palette` floors near-black surfaces (pure blac
 - **`Kit::from_palette` and Deadbolt's palette.** Still overridden at `43ff4f8`, by how far the derived value is off: the surface ramp (on paper, derived raised surfaces are darker than the background, `#e1ddd5`, where the site's are lighter, `#f3f0ea`; on black `layer_01` and `layer_04` match but `layer_02`/`layer_03` and the surface tokens are 3–13 levels off, as the site's surface sits below its raised layer), the status colours (derived roles are rune-kit's own, `#ff847d` and `#dfa11a` on black, since `PaletteSeed` has no danger or warning seed), and the faint ink on paper (derived `#807c75`, 5 levels darker than the site's `#857f74`). The opaque border tokens point at the hairline by choice: the derived steps are heavier lines. Muted ink, hover, pressed, the hairlines, focus and `blend_over` are derived.
 - **Ellipsis by default.** `truncate()` ends in "…"; the app wraps lines in `clip_fade` rows (20 pt) to get the fade the UI guide prefers. Rune's `truncate_fade` fades only on overflow but over a fixed 1 em, short of the guide's 1.5 em. Wanted: a width for `truncate_fade`.
 - **`rune_kit::TextInput` can't animate dependent layout** (`animate_edit_layout`), so the search field is built from `text_input` directly.
-- **System reduced motion.** `Env` has no reduced-motion flag from the OS; the app takes `--reduced-motion`.
 - **Waking a hidden window.** A `Waker` (the agent's replies, the watch stream) wakes a hidden window's event loop but doesn't poll its app; only its `wake_after` deadlines do. So a hidden quick panel would sit on a lock or a late item until it opens again. The panel forgets everything as it hides instead (Quick panel). Wanted: a `Waker` that polls the app while its window is hidden.
 - **Window focus events** (to refresh status and the list when the window comes forward, and to dismiss the quick panel when it loses focus) aren't exposed to the app. Assigned: per-window `on_focus`.
 - **Global shortcuts.** No API to register a system-wide key, so the quick panel's ⇧⌘Space works only inside Deadbolt. Assigned: `App::global_shortcut` / `AppHandle::register_shortcut`.

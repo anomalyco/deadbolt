@@ -532,16 +532,27 @@ fn rows_that_stay_slide_when_filtering() {
     assert!(!shows(&rt, "fly.io"));
 }
 
+/// From `--reduced-motion` or the system's setting.
 #[test]
 fn reduced_motion_fades_the_label_in_place() {
-    let mut rt = runtime("empty", true);
-    rt.update(|s, _| s.reduced_motion = true);
-    frames(&mut rt, 10);
-    let line = find(&rt, "footer-line").unwrap().0;
+    for system in [false, true] {
+        let mut rt = runtime("empty", true);
+        if system {
+            rt.set_system_reduced_motion(true);
+        } else {
+            rt.update(|s, _| s.reduced_motion = true);
+        }
+        label_fades_in_place(&mut rt);
+    }
+}
+
+fn label_fades_in_place(rt: &mut Runtime<App>) {
+    frames(rt, 10);
+    let line = find(rt, "footer-line").unwrap().0;
     let middle = line[1] + line[3] / 2.0;
     rt.key(key(Key::Enter));
     rt.frame(FRAME);
-    let rolling = glyphs(&rt, "footer-line-label");
+    let rolling = glyphs(rt, "footer-line-label");
     assert!(
         rolling.iter().any(|g| g.2 > 0.0 && g.2 < 1.0),
         "the label crossfades"
@@ -552,8 +563,8 @@ fn reduced_motion_fades_the_label_in_place() {
             "{glyph:?} stays on the line ({rect:?} vs {line:?})"
         );
     }
-    frames(&mut rt, 30);
-    assert_eq!(footer(&rt), COPIED);
+    frames(rt, 30);
+    assert_eq!(footer(rt), COPIED);
 }
 
 /// The vault's countdown: the bar empties on the render clock, and the app

@@ -75,6 +75,7 @@ pub struct App {
     pub revealed: Vec<String>,
     pub copy: Option<Copy>,
     pub notice: Option<String>,
+    /// `--reduced-motion`; otherwise Rune follows the system's setting.
     pub reduced_motion: bool,
     /// Set in the quick panel's `App` only.
     pub panel: Option<crate::panel::Panel>,

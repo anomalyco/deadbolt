@@ -24,7 +24,9 @@ const HEADER_H: f32 = 56.0;
 const FOOTER_H: f32 = 40.0;
 
 pub fn panel(s: &App, cx: &mut Cx<App>) -> El {
-    cx.reduced_motion(s.reduced_motion);
+    if s.reduced_motion {
+        cx.reduced_motion(true);
+    }
     let k = crate::theme::kit(cx.system_dark());
     let mut window = col().key("panel").w_full().h_full().padding(MARGIN);
     let showing = matches!(

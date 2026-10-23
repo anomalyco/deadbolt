@@ -28,7 +28,9 @@ fn replace() -> Transition {
 }
 
 pub fn app(s: &App, cx: &mut Cx<App>) -> El {
-    cx.reduced_motion(s.reduced_motion);
+    if s.reduced_motion {
+        cx.reduced_motion(true);
+    }
     let k = crate::theme::kit(cx.system_dark());
     let mut layer = Vec::new();
     let screen = match &s.screen {
