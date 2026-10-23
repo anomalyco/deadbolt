@@ -15,6 +15,9 @@ use crate::onboarding::worker::Worker;
 pub const CLEAR_AFTER: f64 = 30.0;
 /// How long "Clipboard cleared" stays before the notice leaves.
 const CLEARED_NOTICE: f64 = 1.6;
+/// A copy Rune clears this close to the countdown's end expired on time,
+/// rather than being cleared early by a lock elsewhere.
+const EXPIRY_SLACK: f64 = 0.5;
 /// The countdown bar's full width, in points.
 pub const BAR_W: f32 = 272.0;
 
@@ -646,7 +649,7 @@ impl App {
             }
             return false;
         }
-        let remaining = copy.remaining(now);
+        let mut remaining = copy.remaining(now);
         match copy.copied.as_ref().map(SecretCopy::state) {
             Some(SecretState::Failed(error)) => {
                 copy.copied = None;
@@ -663,10 +666,12 @@ impl App {
                 self.copy = None;
                 return true;
             }
-            Some(SecretState::Cleared) if remaining > 0.0 => {
+            Some(SecretState::Cleared) if remaining > EXPIRY_SLACK => {
                 self.copy = None;
                 return true;
             }
+            // Rune's own timer, on the wall clock, beat this one to the clear.
+            Some(SecretState::Cleared) => remaining = 0.0,
             _ => {}
         }
         if remaining <= 0.0 {

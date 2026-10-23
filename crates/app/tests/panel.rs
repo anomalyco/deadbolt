@@ -908,6 +908,34 @@ fn a_lock_in_the_other_window_clears_the_copy() {
     assert!(quick.state.copy.is_none(), "its countdown ended quietly");
 }
 
+/// Rune's own timer runs on the wall clock and can clear a moment before the
+/// countdown ends: that's still the clear on time, and the notice says so.
+#[test]
+fn runes_clear_just_before_the_end_still_says_cleared() {
+    let mut main = main_window();
+    let clip = share_clipboard([&mut runtime("empty", true), &mut main]);
+    main.update(|s, tx| s.copy_field("password", tx));
+    main.frame(FRAME);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    main.frame(29.8);
+    main.state
+        .copy
+        .as_ref()
+        .unwrap()
+        .copied
+        .as_ref()
+        .unwrap()
+        .clear_now();
+    main.frame(FRAME);
+    let copy = main.state.copy.as_ref().expect("the notice stays");
+    assert!(
+        copy.cleared_at.is_some(),
+        "it says the clipboard was cleared"
+    );
+    frames(&mut main, 30);
+    assert!(shows(&main, "Clipboard cleared"));
+}
+
 #[test]
 fn alone_it_leaves_once_hidden() {
     let mut rt = runtime("empty", true);
