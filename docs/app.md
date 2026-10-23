@@ -9,7 +9,7 @@
 - **`crates/app` (`deadbolt-app`)** is a workspace member. Rune and rune-kit are git dependencies pinned to one rev (`3e5a158`), bumped deliberately by changing both `rev`s in `crates/app/Cargo.toml`. `deny.toml` allows that one git source, BSL-1.0 (arboard's Windows backend) and the unmaintained ttf-parser under winit; CI installs `libwayland-dev` on Linux.
 - **Finding the agent binary:** `DEADBOLT_BIN`, else `deadbolt` next to the app's executable (the bundle will ship it there), else `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, else `PATH`. Apps opened from the Finder get a minimal `PATH`, hence the fixed places.
 - **Threads:** one worker thread runs agent requests in order on a current-thread Tokio runtime and wakes the window when a reply lands. The UI drains replies in Rune's `poll`; nothing polls the socket. A status request every 10 s while unlocked notices a lock from the CLI or the idle timeout (`status` doesn't reset the idle timer).
-- **Secrets in the app:** the passphrase field edits a mask of dots; the passphrase lives in a `Zeroizing<String>` and copy, cut and undo do nothing. Item values are fetched one item at a time (`item-get`) and wiped when the selection changes or the store locks. Copies are written with clipboard history exclusion (`org.nspasteboard.ConcealedType` on macOS) and cleared after 30 s, or on lock and quit, only if the clipboard still holds them.
+- **Secrets in the app:** the passphrase field edits a mask of dots; the passphrase lives in a `Zeroizing<String>` all the way to the socket (the protocol's passphrase fields and the request buffer are wiped too) and copy, cut and undo do nothing. Item values are fetched one item at a time (`item-get`) and wiped when the selection changes, the store locks or the window closes. Copies are written with clipboard history exclusion (`org.nspasteboard.ConcealedType` on macOS) through one clipboard handle kept open for the app's life (on X11 the process serves the selection), and cleared after 30 s, or on lock and quit, only if the clipboard still holds them.
 - **Keys:** the search field and the passphrase field handle their own keys (`on_input_key`) and get focus by rendering with `focused: true`; the window's `on_key` handles only ⌘L. This keeps working when Rune sends keys to the focused element before the window.
 - **Look:** Deadbolt's own theme (`crates/app/assets/theme.json`): the site's black, white and red, paper `#e8e4dc` for light, IBM Plex Mono for everything, small radii, flat surfaces with hairline rings. `src/theme.rs` maps it onto rune-kit's tokens.
 
@@ -100,9 +100,9 @@ The main flows, as states (see the PR for the chat version):
 
 ```sh
 cargo run --release -p deadbolt-app     # against your agent (starts it if needed)
-cargo test -p deadbolt-app              # unit tests and the real-agent test (builds the CLI, or set DEADBOLT_BIN)
+cargo test -p deadbolt-cli -p deadbolt-app   # the real-agent test uses the deadbolt cargo built (or DEADBOLT_BIN)
 crates/app/scripts/snap.sh              # headless PNGs of every scene into crates/app/snaps/
 cargo run -p deadbolt-app -- --scene copied --at 2.4 --snap copied.png   # one scene; --theme light, --reduced-motion
 ```
 
-Scenes (`--scene`): `connecting`, `setup`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`. They use synthetic data and an in-memory clipboard; they never touch the agent.
+Scenes (`--scene`): `connecting`, `setup`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
