@@ -427,7 +427,7 @@ fn cancelling_while_the_device_is_set_up_waits_for_it() {
 
     // The setup finishes, then the join stops; the form knows the device is set up.
     rt.state.onboarding.worker = Worker::scripted(vec![
-        (0.0, Progress::DeviceReady),
+        (0.0, Progress::DeviceReady { set_up: true }),
         (0.0, Progress::Joined(Err(failure("cancelled")))),
     ]);
     settle(&mut rt, 0.4);
