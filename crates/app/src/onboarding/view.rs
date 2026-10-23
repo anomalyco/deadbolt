@@ -19,7 +19,6 @@ use rune_kit::{
 use super::worker::Stage;
 use super::{Flow, Notice, Severity, Step, Strength};
 use crate::model::App;
-use crate::secret;
 use crate::theme;
 
 pub(crate) const PANEL_W: f32 = 400.0;
@@ -439,8 +438,7 @@ fn passphrase_field(s: &App, k: &Kit, flow: Flow) -> El {
         .width(None)
         .invalid(o.attempted && short)
         .on_edit(|s: &mut App| &mut s.onboarding.passphrase)
-        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || secret::chord(ev))
-        .on_change(|s: &mut App, _| secret::tidy(&mut s.onboarding.passphrase))
+        .on_key(super::key)
         .on_submit(move |s: &mut App, tx| {
             if s.onboarding.repeat_matches() == Some(true) {
                 submit_for(flow)(s, tx);
@@ -516,8 +514,7 @@ fn repeat_field(s: &App, k: &Kit, flow: Flow) -> El {
         .width(None)
         .invalid(matches == Some(false))
         .on_edit(|s: &mut App| &mut s.onboarding.repeat)
-        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || secret::chord(ev))
-        .on_change(|s: &mut App, _| secret::tidy(&mut s.onboarding.repeat))
+        .on_key(super::key)
         .on_submit(move |s: &mut App, tx| submit_for(flow)(s, tx))
         .build(k)
         .key("repeat-input");
@@ -903,7 +900,7 @@ fn ticket(s: &App, k: &Kit) -> El {
                 .child(canvas(qr.shape(module, Color::BLACK)).size(side, side)),
         );
     }
-    let how = col()
+    let mut how = col()
         .key("how")
         .w(320.0)
         .shrink()
@@ -951,23 +948,27 @@ fn ticket(s: &App, k: &Kit) -> El {
                 } else {
                     k.glyph.copy
                 })
-                .on_press(|s: &mut App| s.copy_ticket())
+                .on_press_tx(|s: &mut App, tx| s.copy_ticket(tx))
                 .build(k)
                 .key("copy"),
-        )
-        .child(
-            row()
-                .key("waiting")
-                .gap(10.0)
-                .center_y()
-                .mt(4.0)
-                .child(waiting(k))
-                .child(
-                    text("Waiting for your other device")
-                        .font(k.ty.text_small)
-                        .color(k.c.text_muted),
-                ),
         );
+    // A failed copy.
+    if let Some(n) = &o.notice {
+        how = how.child(banner(k, n));
+    }
+    how = how.child(
+        row()
+            .key("waiting")
+            .gap(10.0)
+            .center_y()
+            .mt(4.0)
+            .child(waiting(k))
+            .child(
+                text("Waiting for your other device")
+                    .font(k.ty.text_small)
+                    .color(k.c.text_muted),
+            ),
+    );
     page(
         "ticket",
         Some(bar(k, "Cancel", k.glyph.close, |s| s.cancel_join())),

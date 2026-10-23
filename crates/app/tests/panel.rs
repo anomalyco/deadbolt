@@ -6,14 +6,12 @@
 
 #![cfg(test)]
 
-use std::sync::{Arc, Mutex};
-
 use deadbolt_app::agent::{Agent, Done, Job, Values};
-use deadbolt_app::clipboard::Clipboard;
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::panel::window::Windows;
 use deadbolt_app::panel::{self, Phase};
 use deadbolt_client::protocol::{Change, ItemInfo};
+use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime, Shell};
 
 const FRAME: f64 = 1.0 / 60.0;
@@ -57,19 +55,17 @@ fn main_window() -> Runtime<App> {
     rt
 }
 
-type Board = Arc<Mutex<Option<String>>>;
-
-/// One clipboard for both windows, as `run` gives them.
-fn share_clipboard(windows: [&mut Runtime<App>; 2]) -> Board {
-    let (clipboard, board) = Clipboard::memory();
+/// One clipboard for both windows, as Rune gives every window in a process.
+fn share_clipboard(windows: [&mut Runtime<App>; 2]) -> MemoryClipboard {
+    let clipboard = rune::clipboard::memory();
     for rt in windows {
-        rt.state.clipboard = clipboard.clone();
+        rt.use_clipboard(&clipboard);
     }
-    board
+    clipboard
 }
 
-fn board(board: &Board) -> Option<String> {
-    board.lock().unwrap().clone()
+fn board(clipboard: &MemoryClipboard) -> Option<String> {
+    clipboard.text().map(|t| t.as_str().to_owned())
 }
 
 /// Both windows on the same clock, `seconds` on.
@@ -171,12 +167,14 @@ fn glyphs(rt: &Runtime<App>, label: &str) -> Vec<(String, [f32; 4], f32)> {
         .collect()
 }
 
-/// The glyphs of a rolling label that are at rest, in order.
+/// The glyphs of a rolling label that are at rest, in order: opaque, and
+/// centred on its line (the label's rect also holds the roll's fade).
 fn steady(rt: &Runtime<App>, label: &str) -> String {
-    let y = find(rt, label).expect("the label").0[1];
+    let rect = find(rt, label).expect("the label").0;
+    let middle = rect[1] + rect[3] / 2.0;
     glyphs(rt, label)
         .iter()
-        .filter(|g| g.2 >= 0.99 && (g.1[1] - y).abs() < 0.01)
+        .filter(|g| g.2 >= 0.99 && (g.1[1] + g.1[3] / 2.0 - middle).abs() < 0.01)
         .map(|g| g.0.as_str())
         .collect()
 }
@@ -428,9 +426,26 @@ fn escape_on_the_locked_panel_closes_it_and_forgets_the_passphrase() {
     assert_eq!(phase(&rt), Phase::Hidden);
 }
 
-/// Both unlock fields: ⌘V pastes (on one line), but nothing copies, cuts or
-/// undoes the passphrase out, a ⌃ chord types nothing, and closing leaves an
-/// empty secure field.
+/// The locked panel's passphrase field hands ⇧⌘Space to the panel, which
+/// closes and forgets what was typed.
+#[test]
+fn the_shortcut_closes_the_locked_panel_from_its_field() {
+    let mut rt = runtime("locked", true);
+    frames(&mut rt, 2);
+    assert!(rt.has_secure_focus());
+    for c in "hunt".chars() {
+        rt.key(key(Key::Text(c.into())));
+    }
+    rt.key(shortcut());
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Closing { .. }));
+    assert!(rt.state.passphrase.text.is_empty());
+    assert!(rt.state.passphrase.is_secure());
+}
+
+/// Both unlock fields: a paste (what ⌘V does) lands on one line, but nothing
+/// copies, cuts or undoes the passphrase out, ⌃ and ⇧⌘ chords type nothing,
+/// and closing leaves an empty secure field.
 #[test]
 fn the_passphrase_stays_in_its_field() {
     let main = || {
@@ -470,6 +485,11 @@ fn the_passphrase_stays_in_its_field() {
         }
         rt.key(with(Key::Text("k".into()), ctrl));
         rt.frame(FRAME);
+        assert_eq!(rt.state.passphrase.text, "hunter22");
+        if rt.state.panel.is_none() {
+            rt.key(shortcut());
+            rt.frame(FRAME);
+        }
         assert_eq!(rt.state.passphrase.text, "hunter22");
         assert!(rt.copy_request.is_none(), "nothing reaches the clipboard");
         assert!(
@@ -628,6 +648,23 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
     answer_list(&mut rt, &items);
     rt.frame(FRAME);
     assert_eq!(footer(&rt), "Copy password");
+}
+
+/// A copy whose write fails says why in the footer, and the panel stays
+/// open rather than closing on a confirmation.
+#[test]
+fn a_failed_copy_stays_open_and_says_why() {
+    let mut rt = runtime("empty", true);
+    let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
+    clip.fail_writes(Some("no pasteboard"));
+    frames(&mut rt, 10);
+    rt.key(key(Key::Enter));
+    frames(&mut rt, 30);
+    assert!(shows(&rt, "Couldn't copy: no pasteboard"));
+    assert!(!rt.state.copy_pending());
+    assert_eq!(board(&clip), None);
+    frames(&mut rt, 90);
+    assert_eq!(phase(&rt), Phase::Open, "no confirmation to close on");
 }
 
 #[test]
@@ -871,6 +908,34 @@ fn a_lock_in_the_other_window_clears_the_copy() {
     assert!(quick.state.copy.is_none(), "its countdown ended quietly");
 }
 
+/// Rune's own timer runs on the wall clock and can clear a moment before the
+/// countdown ends: that's still the clear on time, and the notice says so.
+#[test]
+fn runes_clear_just_before_the_end_still_says_cleared() {
+    let mut main = main_window();
+    let clip = share_clipboard([&mut runtime("empty", true), &mut main]);
+    main.update(|s, tx| s.copy_field("password", tx));
+    main.frame(FRAME);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    main.frame(29.8);
+    main.state
+        .copy
+        .as_ref()
+        .unwrap()
+        .copied
+        .as_ref()
+        .unwrap()
+        .clear_now();
+    main.frame(FRAME);
+    let copy = main.state.copy.as_ref().expect("the notice stays");
+    assert!(
+        copy.cleared_at.is_some(),
+        "it says the clipboard was cleared"
+    );
+    frames(&mut main, 30);
+    assert!(shows(&main, "Clipboard cleared"));
+}
+
 #[test]
 fn alone_it_leaves_once_hidden() {
     let mut rt = runtime("empty", true);
@@ -951,7 +1016,10 @@ fn closing_its_window_cleans_up_like_the_main_one() {
     let mut rt = runtime("locked", true);
     let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
     rt.update(|s, _| s.passphrase.insert("x"));
-    rt.state.clipboard.copy(PASSWORD).unwrap();
+    rt.update(|_, tx| {
+        tx.copy_secret(PASSWORD, std::time::Duration::from_secs(30));
+    });
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
     rt.update(|s, tx| s.panel_closed(tx));
     assert!(rt.state.passphrase.text.is_empty());
     assert_eq!(board(&clip), None, "the clipboard is cleared");
@@ -1049,4 +1117,98 @@ fn command_l_locks_only_while_open() {
         let locked = jobs.try_iter().any(|job| matches!(job, Job::Lock));
         assert_eq!(locked, phase == Phase::Open, "{phase:?}");
     }
+}
+
+/// Rows that ↑ and ↓ bring into view stop clear of the list's faded edges, in
+/// both windows, while the list's own ends still sit flush.
+#[test]
+fn a_selected_row_stops_clear_of_the_lists_fade() {
+    const EDGE: f32 = 24.0;
+    let items: Vec<ItemInfo> = (0..40)
+        .map(|i| ItemInfo {
+            id: format!("{i:064x}"),
+            short: format!("{i:04x}"),
+            kind: "login".into(),
+            label: format!("site-{i:02}.com"),
+            detail: Some("dax".into()),
+            fields: Vec::new(),
+        })
+        .collect();
+    for (name, mut rt) in [("panel", runtime("empty", true)), ("main", main_window())] {
+        answer_list(&mut rt, &items);
+        rt.update(|s, _| s.selected = s.visible().first().map(|i| i.id.clone()));
+        frames(&mut rt, 10);
+        let list = find(&rt, "list").expect("the list").0;
+        let row = |rt: &Runtime<App>| {
+            let id = rt.state.selected.clone().unwrap();
+            find(rt, &format!("item-{id}")).expect("the selected row").0
+        };
+        let first = row(&rt);
+        assert!(
+            first[1] - list[1] < EDGE,
+            "{name}: the top row sits flush, not pushed down"
+        );
+
+        for _ in 0..25 {
+            rt.key(key(Key::Down));
+            rt.frame(FRAME);
+        }
+        frames(&mut rt, 60);
+        let r = row(&rt);
+        let gap = list[1] + list[3] - (r[1] + r[3]);
+        assert!(
+            (gap - EDGE).abs() < 0.5,
+            "{name}: ↓ stops {gap} above the bottom"
+        );
+
+        for _ in 0..10 {
+            rt.key(key(Key::Up));
+            rt.frame(FRAME);
+        }
+        frames(&mut rt, 60);
+        let r = row(&rt);
+        let gap = r[1] - list[1];
+        assert!(
+            (gap - EDGE).abs() < 0.5,
+            "{name}: ↑ stops {gap} below the top"
+        );
+    }
+}
+
+/// At rest the footer's rolling label sets like the same words as one text:
+/// its glyphs span the plain text's width to within half a device pixel.
+#[test]
+fn the_rolled_label_is_as_wide_as_plain_text() {
+    fn plain(_: &(), _: &mut rune::Cx<()>) -> rune::El {
+        rune::row().child(rune::text("Copy password").font(deadbolt_app::theme::kit(true).ty.small))
+    }
+    let env = Env {
+        system_dark: true,
+        scale: 2.0,
+    };
+    let mut words = Runtime::new((), plain, (400.0, 100.0), env);
+    words.frame(0.0);
+    let width = words
+        .elements()
+        .iter()
+        .find_map(|e| e.text.as_ref().map(|_| e.rect[2]));
+    let width = width.expect("the plain text");
+
+    let app = rune::tooling::initial_state(&panel::spec(), Some("empty"));
+    let mut rt = Runtime::new(app, panel::view::panel, panel::SIZE, env);
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.frame(0.0);
+    frames(&mut rt, 30);
+    assert_eq!(steady(&rt, "footer-line-label"), "Copy password");
+    let glyphs = glyphs(&rt, "footer-line-label");
+    let left = glyphs.iter().map(|g| g.1[0]).fold(f32::MAX, f32::min);
+    let right = glyphs
+        .iter()
+        .map(|g| g.1[0] + g.1[2])
+        .fold(f32::MIN, f32::max);
+    assert!(
+        (right - left - width).abs() <= 0.25,
+        "rolled {} vs plain {width}",
+        right - left
+    );
 }

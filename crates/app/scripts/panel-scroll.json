@@ -1,0 +1,16 @@
+{
+  "events": [
+    { "t": 0.4, "type": "key", "name": "Down" },
+    { "t": 0.6, "type": "key", "name": "Down" },
+    { "t": 0.8, "type": "key", "name": "Down" },
+    { "t": 1.0, "type": "key", "name": "Down" },
+    { "t": 1.2, "type": "key", "name": "Down" },
+    { "t": 1.4, "type": "key", "name": "Down" },
+    { "t": 2.0, "type": "key", "name": "Up" },
+    { "t": 2.2, "type": "key", "name": "Up" },
+    { "t": 2.4, "type": "key", "name": "Up" },
+    { "t": 2.6, "type": "key", "name": "Up" },
+    { "t": 2.8, "type": "key", "name": "Up" },
+    { "t": 3.0, "type": "key", "name": "Up" }
+  ]
+}

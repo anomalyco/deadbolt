@@ -12,7 +12,6 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use deadbolt_app::agent::{Agent, Job};
-use deadbolt_app::clipboard::Clipboard;
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::worker::{ALREADY_SET_UP, NewDevice, Progress, Stage, Worker};
 use deadbolt_app::onboarding::{Flow, Severity, Step};
@@ -218,10 +217,10 @@ fn unlock_search_copy_lock() {
     ]);
     device.run(&["lock"]);
 
-    let (clipboard, board) = Clipboard::memory();
+    let board = rune::clipboard::memory();
     let agent = Agent::spawn(device.paths(), device.launch());
     let mut rt = Runtime::new(
-        App::new(agent, clipboard),
+        App::new(agent),
         deadbolt_app::view::app,
         (820.0, 540.0),
         Env {
@@ -229,6 +228,7 @@ fn unlock_search_copy_lock() {
             scale: 1.0,
         },
     );
+    rt.use_clipboard(&board);
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
     rt.state.agent.send(deadbolt_app::agent::Job::Connect);
@@ -284,7 +284,7 @@ fn unlock_search_copy_lock() {
     // Enter copies the password and starts the countdown.
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
-    assert_eq!(board.lock().unwrap().as_deref(), Some("flyfly"));
+    assert_eq!(text(&board).as_deref(), Some("flyfly"));
     assert!(shows(&rt, "Copied, clears in 0:30"));
 
     // Shift+Enter copies the username in its place.
@@ -296,7 +296,7 @@ fn unlock_search_copy_lock() {
         },
     });
     rt.frame(1.0 / 60.0);
-    assert_eq!(board.lock().unwrap().as_deref(), Some("ops"));
+    assert_eq!(text(&board).as_deref(), Some("ops"));
 
     // Escape, in the focused search field, clears the search; ↓ then moves
     // the selection to the next item.
@@ -318,7 +318,7 @@ fn unlock_search_copy_lock() {
         },
     });
     until(&mut rt, "the lock", |s| s.screen == Screen::Locked);
-    assert_eq!(*board.lock().unwrap(), None);
+    assert_eq!(text(&board), None);
     assert!(rt.state.items.is_empty() && rt.state.detail.is_none());
 }
 
@@ -345,10 +345,10 @@ fn quick_panel_unlock_filter_copy() {
     ]);
     device.run(&["lock"]);
 
-    let (clipboard, board) = Clipboard::memory();
+    let board = rune::clipboard::memory();
     let agent = Agent::spawn(device.paths(), device.launch());
     let mut rt = Runtime::new(
-        App::panel(agent, clipboard),
+        App::panel(agent),
         deadbolt_app::panel::view::panel,
         deadbolt_app::panel::SIZE,
         Env {
@@ -356,6 +356,7 @@ fn quick_panel_unlock_filter_copy() {
             scale: 1.0,
         },
     );
+    rt.use_clipboard(&board);
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.on_key = Some(|s, ev, tx| s.panel_key(ev, tx));
     rt.update(|s, tx| s.summon(tx));
@@ -384,13 +385,13 @@ fn quick_panel_unlock_filter_copy() {
 
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
-    assert_eq!(board.lock().unwrap().as_deref(), Some("flyfly"));
+    assert_eq!(text(&board).as_deref(), Some("flyfly"));
     assert!(matches!(rt.state.panel_phase(), Some(Phase::Copied { .. })));
     until(&mut rt, "the panel to close", |s| {
         s.panel_phase() == Some(Phase::Hidden)
     });
     assert_eq!(
-        board.lock().unwrap().as_deref(),
+        text(&board).as_deref(),
         Some("flyfly"),
         "closing keeps the copy until it clears"
     );
@@ -408,14 +409,14 @@ fn quick_panel_unlock_filter_copy() {
         },
     });
     rt.frame(1.0 / 60.0);
-    assert_eq!(board.lock().unwrap().as_deref(), Some("ops"));
+    assert_eq!(text(&board).as_deref(), Some("ops"));
 }
 
 #[test]
 fn the_clipboard_clears_itself_unless_something_else_was_copied() {
-    let (clipboard, board) = Clipboard::memory();
+    let board = rune::clipboard::memory();
     let mut rt = Runtime::new(
-        App::new(Agent::offline(), clipboard),
+        App::new(Agent::offline()),
         deadbolt_app::view::app,
         (820.0, 540.0),
         Env {
@@ -423,6 +424,7 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
             scale: 1.0,
         },
     );
+    rt.use_clipboard(&board);
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.state.clear_after = 1.0;
     // The "copied" scene's state, by hand: a vault with one item's fields.
@@ -442,20 +444,20 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
     rt.frame(0.0);
     rt.update(|s, tx| s.copy_field("password", tx));
     rt.frame(1.0 / 60.0);
-    assert_eq!(board.lock().unwrap().as_deref(), Some("pw"));
+    assert_eq!(text(&board).as_deref(), Some("pw"));
     for _ in 0..25 {
         rt.frame(0.05);
     }
-    assert_eq!(*board.lock().unwrap(), None, "cleared after a second");
+    assert_eq!(text(&board), None, "cleared after a second");
 
     rt.update(|s, tx| s.copy_field("password", tx));
     rt.frame(1.0 / 60.0);
-    *board.lock().unwrap() = Some("mine".into());
+    board.set_text("mine");
     for _ in 0..25 {
         rt.frame(0.05);
     }
     assert_eq!(
-        board.lock().unwrap().as_deref(),
+        text(&board).as_deref(),
         Some("mine"),
         "a later copy of the user's own survives"
     );
@@ -463,10 +465,7 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
 
 /// The app for `device`, as `run` builds it, before it connects.
 fn app(device: &Device) -> Runtime<App> {
-    let mut app = App::new(
-        Agent::spawn(device.paths(), device.launch()),
-        Clipboard::memory().0,
-    );
+    let mut app = App::new(Agent::spawn(device.paths(), device.launch()));
     app.onboarding.worker = Worker::new(device.paths(), device.launch());
     let mut rt = Runtime::new(
         app,
@@ -481,6 +480,10 @@ fn app(device: &Device) -> Runtime<App> {
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
     rt.state.agent.send(Job::Connect);
     rt
+}
+
+fn text(board: &rune::clipboard::MemoryClipboard) -> Option<String> {
+    board.text().map(|t| t.as_str().to_owned())
 }
 
 fn type_text(rt: &mut Runtime<App>, text: &str) {

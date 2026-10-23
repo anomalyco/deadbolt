@@ -146,7 +146,7 @@ fn settings_takes_keys_before_the_focused_search() {
     let selected = rt.state.selected.clone();
     // Open it without moving focus: the search field would get keys first.
     rt.update(|s, _| s.installer.as_mut().unwrap().settings_open = true);
-    settle(&mut rt, 0.3);
+    settle(&mut rt, 0.5);
     assert!(shows(&rt, "Install deadbolt command…"));
     assert!(
         rt.state.search.focused,

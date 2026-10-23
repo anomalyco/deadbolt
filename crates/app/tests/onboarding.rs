@@ -4,13 +4,11 @@
 
 #![cfg(test)]
 
-use std::sync::{Arc, Mutex};
-
 use deadbolt_app::agent::{Done, Failure};
-use deadbolt_app::clipboard::Clipboard;
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::worker::{Progress, Stage, Worker};
 use deadbolt_app::onboarding::{Flow, Severity, Step, moment};
+use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const FRAME: f64 = 1.0 / 60.0;
@@ -115,7 +113,7 @@ fn the_ticket_is_a_qr_code_and_the_copy_is_the_whole_command() {
     settle(&mut rt, 0.1);
     let qr = find(&rt, "qr").expect("a QR tile");
     assert!(qr.rect[2] >= 220.0, "big enough to scan across a desk");
-    rt.update(|s, _| s.copy_ticket());
+    rt.update(|s, tx| s.copy_ticket(tx));
     rt.frame(FRAME);
     assert!(shows(&rt, "Copied"));
 }
@@ -336,25 +334,23 @@ fn nothing_animates_on_first_paint() {
     }
 }
 
-type Board = Arc<Mutex<Option<String>>>;
+fn board(clipboard: &MemoryClipboard) -> Option<String> {
+    clipboard.text().map(|t| t.as_str().to_owned())
+}
 
 /// The ticket scene after "Copy command", with a clipboard the test can read.
-fn ticket_copied() -> (Runtime<App>, Board) {
+fn ticket_copied() -> (Runtime<App>, MemoryClipboard) {
     let mut rt = runtime("ticket", true);
-    let (clipboard, board) = Clipboard::memory();
-    rt.state.clipboard = clipboard;
+    let clipboard = rune::clipboard::memory();
+    rt.use_clipboard(&clipboard);
     rt.frame(FRAME);
-    rt.update(|s, _| s.copy_ticket());
+    rt.update(|s, tx| s.copy_ticket(tx));
     rt.frame(FRAME);
     assert!(
-        board
-            .lock()
-            .unwrap()
-            .as_deref()
-            .is_some_and(|t| t.starts_with("deadbolt pair DBPAIR")),
+        board(&clipboard).is_some_and(|t| t.starts_with("deadbolt pair DBPAIR")),
         "the whole command is on the clipboard"
     );
-    (rt, board)
+    (rt, clipboard)
 }
 
 fn failure(message: &str) -> Failure {
@@ -367,36 +363,49 @@ fn failure(message: &str) -> Failure {
 #[test]
 fn a_copied_ticket_leaves_the_clipboard_with_the_screen() {
     // Closing the window.
-    let (mut rt, board) = ticket_copied();
+    let (mut rt, clip) = ticket_copied();
     rt.update(|s, tx| s.close(tx));
-    assert_eq!(*board.lock().unwrap(), None, "close clears it");
+    assert_eq!(board(&clip), None, "close clears it");
     assert!(rt.state.onboarding.ticket.is_none());
 
     // The agent stopping, which leaves onboarding for the failed screen.
-    let (mut rt, board) = ticket_copied();
+    let (mut rt, clip) = ticket_copied();
     rt.update(|s, tx| s.apply(Done::Status(None), tx));
     assert!(matches!(rt.state.screen, Screen::Failed(_)));
-    assert_eq!(*board.lock().unwrap(), None, "leaving clears it");
+    assert_eq!(board(&clip), None, "leaving clears it");
 
     // The ticket expiring, which ends the join.
-    let (mut rt, board) = ticket_copied();
+    let (mut rt, clip) = ticket_copied();
     rt.state.onboarding.worker = Worker::scripted(vec![(
         0.0,
         Progress::Joined(Err(failure("the ticket expired"))),
     )]);
     rt.frame(FRAME);
     assert_eq!(rt.state.onboarding.step, Step::Join);
-    assert_eq!(
-        *board.lock().unwrap(),
-        None,
-        "the end of the join clears it"
-    );
+    assert_eq!(board(&clip), None, "the end of the join clears it");
 
-    // Something the person copied since stays.
-    let (mut rt, board) = ticket_copied();
-    *board.lock().unwrap() = Some("mine".into());
+    // Something the person copied since stays, and the button stops saying
+    // the ticket is copied.
+    let (mut rt, clip) = ticket_copied();
+    clip.set_text("mine");
+    rt.frame(FRAME);
+    assert!(rt.state.onboarding.copied.is_none());
     rt.update(|s, tx| s.close(tx));
-    assert_eq!(board.lock().unwrap().as_deref(), Some("mine"));
+    assert_eq!(board(&clip).as_deref(), Some("mine"));
+}
+
+#[test]
+fn a_ticket_that_fails_to_copy_says_so() {
+    let mut rt = runtime("ticket", true);
+    let clip = rune::clipboard::memory();
+    clip.fail_writes(Some("no pasteboard"));
+    rt.use_clipboard(&clip);
+    rt.frame(FRAME);
+    rt.update(|s, tx| s.copy_ticket(tx));
+    settle(&mut rt, 0.4);
+    assert!(rt.state.onboarding.copied.is_none());
+    assert!(shows(&rt, "Couldn't copy") && shows(&rt, "no pasteboard"));
+    assert!(!shows(&rt, "Copied"));
 }
 
 #[test]

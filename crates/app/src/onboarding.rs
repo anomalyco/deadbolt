@@ -13,19 +13,19 @@ pub mod worker;
 use std::time::Duration;
 
 use deadbolt_client::protocol::VaultInfo;
-use rune::{Key, KeyEvent, TextEdit, Tx};
+use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::Zeroizing;
 
 use crate::agent::{Failure, Job};
-use crate::clipboard::Copied;
 use crate::model::{App, Screen};
-use crate::secret;
 use worker::{NewDevice, Progress, Stage, Worker};
 
 /// Shortest passphrase the form accepts.
 pub const MIN_PASSPHRASE: usize = 8;
 /// How long a copied command's button shows a check, in seconds.
 pub const COPIED_FOR: f64 = 1.6;
+/// How long a copied ticket stays on the clipboard: as long as it works.
+const TICKET_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
 /// The moment a vault is created or joined, from the bolt throwing to the vault
 /// opening. See `view::bolt` for what happens when.
@@ -127,7 +127,8 @@ pub struct Onboarding {
     pub attempted: bool,
     pub notice: Option<Notice>,
     pub ticket: Option<Ticket>,
-    pub copied: Option<Copied>,
+    /// The copied ticket, while it's still on the clipboard.
+    pub copied: Option<SecretCopy>,
     /// A command copied from the empty vault's guide, and when.
     pub copied_command: Option<(&'static str, f64)>,
     /// The vault being joined and the device inviting this one, once the code shows.
@@ -153,8 +154,8 @@ impl Onboarding {
             stage: None,
             device: TextEdit::new(""),
             vault: TextEdit::new("personal"),
-            passphrase: secret::field(),
-            repeat: secret::field(),
+            passphrase: TextEdit::new("").secure(),
+            repeat: TextEdit::new("").secure(),
             device_ready: false,
             attempted: false,
             notice: None,
@@ -270,7 +271,7 @@ impl Onboarding {
     fn new_device(&mut self) -> Option<NewDevice> {
         self.needs_device().then(|| NewDevice {
             name: self.device_name().to_owned(),
-            passphrase: secret::take(&mut self.passphrase),
+            passphrase: crate::model::take_secret(&mut self.passphrase),
         })
     }
 
@@ -505,47 +506,54 @@ impl App {
     }
 
     /// Copies `deadbolt pair <ticket>`, the command to run on the other device.
-    pub fn copy_ticket(&mut self) {
+    pub fn copy_ticket(&mut self, tx: &mut Tx) {
         let Some(ticket) = &self.onboarding.ticket else {
             return;
         };
-        let command = Zeroizing::new(format!("deadbolt pair {}", ticket.text.as_str()));
-        match self.clipboard.copy(&command) {
-            Ok(copied) => self.onboarding.copied = Some(copied),
-            Err(error) => {
-                self.onboarding.notice = Some(Notice {
-                    severity: Severity::Danger,
-                    title: "Couldn't copy".into(),
-                    body: error,
-                });
-            }
-        }
+        let command = format!("deadbolt pair {}", ticket.text.as_str());
+        self.onboarding.notice = None;
+        self.onboarding.copied = Some(tx.copy_secret(command, TICKET_LIFETIME));
     }
 
     /// Copies a command from the empty vault's guide.
     pub fn copy_command(&mut self, command: &'static str, tx: &mut Tx) {
-        match self.clipboard.copy(command) {
-            Ok(_) => {
-                self.onboarding.copied_command = Some((command, self.clock));
-                tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
-            }
-            Err(error) => self.notice = Some(format!("Couldn't copy: {error}")),
-        }
+        tx.copy(command);
+        self.onboarding.copied_command = Some((command, self.clock));
+        tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
     }
 
     /// Takes the copied ticket off the clipboard if it's still there, and
     /// wipes the ticket.
     fn forget_ticket(&mut self) {
         if let Some(copied) = self.onboarding.copied.take() {
-            self.clipboard.clear(copied);
+            copied.clear_now();
         }
         self.onboarding.ticket = None;
+    }
+
+    /// The copied ticket's write failed, or something else took its place
+    /// on the clipboard: the button stops saying it's copied. True when so.
+    fn check_ticket_copy(&mut self) -> bool {
+        let o = &mut self.onboarding;
+        match o.copied.as_ref().map(SecretCopy::state) {
+            Some(SecretState::Failed(error)) => {
+                o.notice = Some(Notice {
+                    severity: Severity::Danger,
+                    title: "Couldn't copy".into(),
+                    body: error,
+                });
+            }
+            Some(SecretState::Replaced | SecretState::Cleared) => {}
+            _ => return false,
+        }
+        o.copied = None;
+        true
     }
 
     /// Applies the requests' progress and runs the moment. True when anything changed.
     pub fn poll_onboarding(&mut self, now: f64, tx: &mut Tx) -> bool {
         let (progress, next) = self.onboarding.worker.drain(now);
-        let mut changed = !progress.is_empty();
+        let mut changed = self.check_ticket_copy() || !progress.is_empty();
         if self
             .onboarding
             .copied_command
