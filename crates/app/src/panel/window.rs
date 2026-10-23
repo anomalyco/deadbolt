@@ -1,26 +1,17 @@
-//! How the quick panel is reached (`--panel`, the main window's hint,
-//! ⇧⌘Space), how its window opens, closes and is placed, and when a process
-//! with only the panel leaves.
+//! How the quick panel is reached (its global shortcut, the menus' "Open
+//! Quick Panel", `--panel`, the main window's hint off macOS) and how its
+//! window opens, closes and is placed.
 //! The window is Rune's launcher panel: it takes keys without activating
-//! Deadbolt, opens under the pointer, and clicking away dismisses it. Global
-//! shortcuts and menus aren't in Rune yet, so the shortcut, the hint and the
-//! stranded rule stand in for them; docs/app.md ("Quick panel stand-ins") says
-//! which API replaces which.
+//! Deadbolt, opens under the pointer, and clicking away dismisses it. The
+//! shortcut itself is `crate::shortcut`.
 
 use rune::{
-    Align, AppHandle, ConfiguredWindowOptions, Cursor, DisplayTarget, El, Key, KeyEvent,
-    OverlayPlacement, ScreenEdge, Tx, WindowOptions,
+    Align, AppHandle, ConfiguredWindowOptions, Cursor, DisplayTarget, El, Key, KeyEvent, MenuError,
+    MenuItem, OverlayPlacement, ScreenEdge, Shortcut, WindowOptions,
 };
 use rune_kit::Kit;
 
-use super::Phase;
 use crate::model::App;
-
-/// ⇧⌘Space. macOS already uses ⌘Space (Spotlight) and ⌥⌘Space (the Finder
-/// search window); ⇧⌘Space is free there, and it's 1Password's Quick Access
-/// default, so people switching keep the habit. Only inside Deadbolt for
-/// now: Rune has no global shortcuts yet.
-pub const SHORTCUT: [&str; 3] = ["⇧", "⌘", "Space"];
 
 /// Where the panel opens: centred near the top of the display under the
 /// pointer, the window's top this many points down. Rune falls back to the
@@ -38,7 +29,8 @@ pub const PLACE: (DisplayTarget, OverlayPlacement) = (
 /// `deadbolt-app --panel` starts with the panel instead of the main window.
 pub const FLAG: &str = "--panel";
 
-/// ⇧⌘Space (Ctrl+Shift+Space off macOS).
+/// The default shortcut pressed inside Deadbolt: ⇧⌘Space (Ctrl+Shift+Space
+/// off macOS). Only while it isn't registered globally (`App::shortcut_fallback`).
 pub fn is_shortcut(ev: &KeyEvent) -> bool {
     ev.key == Key::Text(" ".into()) && ev.mods.cmd && ev.mods.shift && !ev.mods.alt
 }
@@ -49,10 +41,11 @@ pub fn options() -> ConfiguredWindowOptions {
     WindowOptions::launcher_panel()
 }
 
-/// Both windows, so each can reach the other (`App::windows`, None headless
-/// and in tests): the main window summons the panel, the panel hides itself
-/// and opens the main window for onboarding, and closing the main window
-/// quits through the panel so its copy is cleared too.
+/// Both windows, so each can reach the other (`App::windows`; in the main
+/// window None headless and in tests): the main window summons the panel and
+/// changes its shortcut, the panel places and hides itself and opens the main
+/// window for onboarding, and closing the main window quits through the panel
+/// so its copy is cleared too.
 #[derive(Clone)]
 pub struct Windows {
     main: AppHandle<App>,
@@ -67,6 +60,11 @@ impl Windows {
     /// Brings the panel up fresh (see `App::summon`), placed under the pointer and in front.
     pub fn summon_panel(&self) {
         self.panel.update(|s, tx| s.summon(tx));
+        self.present_panel();
+    }
+
+    /// Places the panel under the pointer and puts it in front.
+    pub fn present_panel(&self) {
         let (display, placement) = PLACE;
         self.panel.place(display, placement);
         self.panel.open();
@@ -89,11 +87,17 @@ impl Windows {
         self.main.open();
     }
 
-    /// Nothing but the panel could be on screen, and nothing can summon it
-    /// back: the main window isn't open (`--panel`) and there's no global
-    /// shortcut yet.
-    fn stranded(&self) -> bool {
-        !self.main.is_visible()
+    /// Tells the panel whether ⇧⌘Space inside it still closes it.
+    pub fn shortcut_fallback(&self, on: bool) {
+        self.panel.update(move |s, _| s.shortcut_fallback = on);
+    }
+
+    /// Shows `shortcut` beside the menus' "Open Quick Panel".
+    pub fn set_menu(&self, shortcut: Option<&Shortcut>) {
+        match self.panel.set_menu(menu(shortcut)) {
+            Ok(()) | Err(MenuError::Unsupported | MenuError::NotRunning) => {}
+            Err(e) => eprintln!("Couldn't update the menu: {e}"),
+        }
     }
 
     /// Quits from the main window through the panel, so the panel clears its copy first.
@@ -105,27 +109,39 @@ impl Windows {
     }
 }
 
-/// A hidden panel with the main window closed can't be brought back (no
-/// global shortcut yet), so rather than idle forever the process leaves: once
-/// the panel's copy has been cleared on time, so copy then paste still works,
-/// or at once without one. True when it quits. Global shortcuts replace this
-/// (docs/app.md, Stand-ins).
-pub(crate) fn leave_if_stranded(s: &mut App, tx: &mut Tx) -> bool {
-    // Before its first open the panel is only waiting (the main window may not be up yet).
-    let opened = s.panel.as_ref().is_some_and(|p| p.opens > 0);
-    let stranded = opened && s.windows.as_ref().is_some_and(Windows::stranded);
-    if !stranded || s.panel_phase() != Some(Phase::Hidden) || s.copy_pending() {
-        return false;
+/// The menus' item, in the app menu and the Dock menu.
+pub const OPEN: &str = "Open Quick Panel";
+
+/// The panel's `App` owns the menus, so headless `--window panel` scripts
+/// reach them (`{"menu": "Open Quick Panel"}`). Native menus are macOS's;
+/// elsewhere the hint bar's `entry` is the way in.
+pub fn menu(shortcut: Option<&Shortcut>) -> Vec<MenuItem<App>> {
+    let mut item = MenuItem::new(OPEN, |s: &mut App, tx| s.show_panel(tx));
+    if let Some(shortcut) = shortcut {
+        item = item.key_equivalent(shortcut.clone());
     }
-    s.close(tx);
-    tx.quit();
-    true
+    let dock = MenuItem::new(OPEN, |s: &mut App, tx| s.show_panel(tx))
+        .id("dock-quick")
+        .dock();
+    vec![item, dock]
 }
 
-/// The main window's way in, in its hint bar: the shortcut, and a click opens
-/// the panel. Stands in for an "Open Quick Panel" menu item.
-pub fn entry(k: &Kit) -> El {
-    crate::view::hint(k, "h-panel", &SHORTCUT, "Quick panel")
+/// The main window's way in off macOS, where there are no native menus: the
+/// hint bar shows the shortcut, and a click opens the panel.
+pub fn entry(s: &App, k: &Kit) -> Option<El> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
+    let keys = s
+        .hotkey
+        .shortcut
+        .as_ref()
+        .map(rune::Shortcut::keycaps)
+        .unwrap_or_default();
+    let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
+    let hint = crate::view::hint(k, "h-panel", &keys, "Quick panel")
         .cursor(Cursor::Pointer)
-        .on_press(|s: &mut App| s.open_panel())
+        .label("Open quick panel")
+        .on_press(|s: &mut App| s.open_panel());
+    Some(hint)
 }

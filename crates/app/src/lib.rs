@@ -7,6 +7,7 @@ pub mod install;
 pub mod model;
 pub mod onboarding;
 pub mod panel;
+pub mod shortcut;
 pub mod theme;
 pub mod view;
 
@@ -41,10 +42,15 @@ pub fn spec() -> AppSpec<App> {
 /// snapshot or tree dump can never hold real vault data.
 ///
 /// Two windows: the main one (`--window main` for tooling) and the quick
-/// panel (`--window panel`), which ⇧⌘Space or the main window's hint brings
-/// up. `--panel` starts with the panel instead of the main window.
+/// panel (`--window panel`), which the global shortcut (⇧⌘Space unless
+/// changed in Settings) or "Open Quick Panel" in the app and Dock menus
+/// brings up (off macOS, the main window's hint). `--panel` starts with the
+/// panel instead of the main window. Headless runs register the default
+/// shortcut on the panel virtually, so a script's `{"shortcut": …}` and
+/// `{"menu": …}` steps reach it without touching the desktop.
 pub fn run() {
-    let live = is_live(&rune::tooling::Args::parse());
+    let args = rune::tooling::Args::parse();
+    let (live, headless) = (is_live(&args), args.headless());
     let extra = rune::extra_args();
     let reduced_motion = extra.iter().any(|a| a == "--reduced-motion");
     let panel_first = extra.iter().any(|a| a == panel::window::FLAG);
@@ -52,11 +58,22 @@ pub fn run() {
     // doesn't activate it and the app you were in keeps focus; opening the
     // main window brings the icon back (`Windows::open_main`).
     let accessory = live && panel_first;
+    let shortcut_file = live.then(|| Paths::get().config.with_file_name("app-shortcut"));
+    let chosen = shortcut_file
+        .as_deref()
+        .map_or_else(|| Some(shortcut::default()), shortcut::load);
     rune::run_windows_with(rune::RunOptions { accessory }, move |_| {
         let mut main = rune::App::new(spec());
-        let quick = rune::App::new(panel::spec()).windowless();
+        let mut quick = rune::App::new(panel::spec()).windowless();
+        // Native menus are macOS's; headless scripts reach them everywhere.
+        if cfg!(target_os = "macos") || headless {
+            for item in panel::window::menu(chosen.as_ref()) {
+                quick = quick.menu_item(item);
+            }
+        }
         let windows = panel::window::Windows::new(main.handle(), quick.handle());
         let main_windows = windows.clone();
+        let quick_handle = quick.handle();
         main = main
             .init(move || {
                 let mut app = if live {
@@ -74,6 +91,9 @@ pub fn run() {
                             Paths::get().config.with_file_name("app-command-offered"),
                         ));
                     }
+                    if let Some(file) = shortcut_file {
+                        app.hotkey = shortcut::Hotkey::live(quick_handle, file, chosen);
+                    }
                     app.windows = Some(main_windows);
                     app
                 } else {
@@ -83,8 +103,21 @@ pub fn run() {
                 app
             })
             .on_close(|s, tx| s.quit(tx));
+        // Registering and setting the menu need the panel's App running.
+        // Rune gap (registering before a host attaches): windows start in
+        // order, and the main window's queued updates run before the panel's
+        // can take shortcuts (`NotRunning`), so the start waits for the
+        // panel's queue, then runs on the main window's. Waits on Rune
+        // attaching every host before any queue drains; then queue
+        // `start_shortcut` on `main.handle()` directly.
+        if live {
+            let main_handle = main.handle();
+            quick.handle().update(move |_, _| {
+                main_handle.update(move |s, _| s.start_shortcut(panel_first));
+            });
+        }
         let panel_windows = windows.clone();
-        let quick = quick
+        let mut quick = quick
             .init(move || {
                 let mut app = if live {
                     let mut app = App::panel(Agent::spawn(Paths::get(), agent::launch()));
@@ -101,6 +134,9 @@ pub fn run() {
             })
             .on_focus(|s, focused, tx| s.panel_focus(focused, tx))
             .on_close(|s, tx| s.panel_closed(tx));
+        if headless {
+            quick = quick.global_shortcut(shortcut::DEFAULT, |s, tx| s.toggle_panel(tx));
+        }
         // Headless too, so a `--script` with displays and a pointer shows where it's placed.
         if panel_first {
             main = windows.start_with_panel(main);
@@ -293,7 +329,43 @@ const SCENES: &[Scene] = &[
         s.selected = None;
         s.detail = None;
     }),
+    // Another app holds ⌥⌘Space: recording it shows the conflict in place
+    // (scripts/settings-shortcut.json).
+    ("settings", |s| {
+        vault(s);
+        let mut i = install::Installer::fixture();
+        i.offered = true;
+        s.installer = Some(i);
+        s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), vec![other_shortcut()]);
+        s.start_shortcut(false);
+        s.settings_open = true;
+    }),
+    // Changed to ⌥⌘Space: Settings offers the default back.
+    ("settings-changed", |s| {
+        vault(s);
+        s.hotkey = shortcut::Hotkey::new(Some(other_shortcut()), Vec::new());
+        s.start_shortcut(false);
+        s.settings_open = true;
+    }),
+    ("shortcut-conflict", |s| {
+        vault(s);
+        s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), vec![shortcut::default()]);
+        s.start_shortcut(false);
+    }),
+    // ⇧⌘Space was taken at launch: Settings says so and offers to try again.
+    ("settings-unavailable", |s| {
+        vault(s);
+        s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), vec![shortcut::default()]);
+        s.start_shortcut(false);
+        s.settings_open = true;
+    }),
 ];
+
+/// ⌥⌘Space, the scenes' other shortcut.
+#[expect(clippy::expect_used, reason = "a constant")]
+fn other_shortcut() -> rune::Shortcut {
+    "alt+super+space".parse().expect("parses")
+}
 
 /// The quick panel's states (`--window panel --scene NAME`).
 pub(crate) const PANEL_SCENES: &[Scene] = &[

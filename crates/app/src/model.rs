@@ -58,6 +58,13 @@ impl Copy {
 
 pub struct App {
     pub installer: Option<crate::install::Installer>,
+    /// The vault footer's Settings popover is open.
+    pub settings_open: bool,
+    /// The quick panel's global shortcut (the main window's).
+    pub hotkey: crate::shortcut::Hotkey,
+    /// The default shortcut isn't registered globally, so ⇧⌘Space inside
+    /// Deadbolt opens and closes the panel (`panel::window::is_shortcut`).
+    pub shortcut_fallback: bool,
     pub agent: Agent,
     /// How long a copied secret stays on the clipboard.
     pub clear_after: f64,
@@ -97,6 +104,9 @@ impl App {
     pub fn new(agent: Agent) -> App {
         App {
             installer: None,
+            settings_open: false,
+            hotkey: crate::shortcut::Hotkey::default(),
+            shortcut_fallback: true,
             agent,
             clear_after: CLEAR_AFTER,
             screen: Screen::Connecting,
@@ -138,12 +148,14 @@ impl App {
         changed |= self.tick_copy(now, tx);
         if let Some(installer) = &mut self.installer {
             changed |= installer.poll(now);
-            // The page and Settings belong to the vault; leaving it closes them.
-            if self.screen != Screen::Vault && (installer.open || installer.settings_open) {
+        }
+        // The install page and Settings belong to the vault; leaving it closes them.
+        if self.screen != Screen::Vault && (self.installing() || self.settings_open) {
+            if let Some(installer) = &mut self.installer {
                 installer.open = false;
-                installer.settings_open = false;
-                changed = true;
             }
+            self.close_settings();
+            changed = true;
         }
         changed |= self.poll_panel(now, tx);
         changed
@@ -541,9 +553,6 @@ impl App {
 
     /// Keys in the search field, before its editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if self.quit_key(ev, tx) {
-            return true;
-        }
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
         }
@@ -722,24 +731,33 @@ impl App {
         if self.screen != Screen::Vault || self.panel.is_some() {
             return None;
         }
-        let installer = self.installer.as_mut()?;
-        if !installer.settings_open && !installer.open {
+        let installing = self.installing();
+        if !self.settings_open && !installing {
             return None;
         }
         match ev.key {
-            Key::Escape if installer.settings_open => installer.settings_open = false,
-            Key::Escape => installer.close(),
+            Key::Escape if self.settings_open => self.close_settings(),
+            Key::Escape => {
+                if let Some(installer) = &mut self.installer {
+                    installer.close();
+                }
+            }
             Key::Tab => return Some(false),
             _ => {}
         }
         Some(true)
     }
 
+    /// Closes the Settings popover; a recording in it is cancelled.
+    pub fn close_settings(&mut self) {
+        self.settings_open = false;
+        self.hotkey.recorder.cancel();
+        self.hotkey.reset_error = None;
+        self.hotkey.refused = None;
+    }
+
     /// App-level keys: before the focused field when there is none, after it otherwise.
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if self.quit_key(ev, tx) {
-            return true;
-        }
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
         }

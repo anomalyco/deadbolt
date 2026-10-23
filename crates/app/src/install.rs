@@ -249,7 +249,6 @@ struct Live {
 pub struct Installer {
     /// The install page is showing, in place of the vault.
     pub open: bool,
-    pub settings_open: bool,
     /// The vault's one-time offer was answered; remembered across launches.
     pub offered: bool,
     pub source: PathBuf,
@@ -271,7 +270,6 @@ impl Installer {
         let search = binary::search_dirs(&path, Some(&home));
         let mut state = Self {
             open: false,
-            settings_open: false,
             offered: marker.exists(),
             source,
             scan: None,
@@ -296,7 +294,6 @@ impl Installer {
     pub fn fixture() -> Self {
         Self {
             open: false,
-            settings_open: false,
             offered: false,
             source: "/Applications/Deadbolt.app/Contents/Helpers/deadbolt".into(),
             scan: Some(Scan {
@@ -431,7 +428,6 @@ impl Installer {
 
     /// Opens the install page with a fresh scan.
     pub fn show(&mut self) {
-        self.settings_open = false;
         self.open = true;
         self.refresh();
     }
@@ -806,8 +802,8 @@ mod view {
         )
     }
 
-    /// Settings in the vault's footer; its popover goes in `layer`.
-    pub fn settings(s: &App, k: &Kit, layer: &mut Vec<El>) -> Option<El> {
+    /// Settings' way to the install page, when the app has a command to install.
+    pub fn setting(s: &App, k: &Kit) -> Option<El> {
         let i = s.installer.as_ref()?;
         let label = if i.installed() {
             "deadbolt command…"
@@ -815,43 +811,21 @@ mod view {
             "Install deadbolt command…"
         };
         Some(
-            rune_kit::Popover::new("settings")
-                .title("Settings")
-                .open(i.settings_open)
-                .placement(rune_kit::Placement::TopEnd)
-                .trigger(
-                    Button::new("Settings")
-                        .variant(ButtonVariant::GhostMuted)
-                        .size(ButtonSize::Small)
-                        .on_press(|s: &mut App| {
-                            if let Some(i) = installer(s) {
-                                i.settings_open = !i.settings_open;
-                            }
-                        })
-                        .build(k),
-                )
-                .on_close(|s: &mut App| {
+            Button::new(label)
+                .variant(ButtonVariant::Ghost)
+                .on_press(|s: &mut App| {
+                    s.close_settings();
                     if let Some(i) = installer(s) {
-                        i.settings_open = false;
+                        i.show();
                     }
                 })
-                .child(
-                    Button::new(label)
-                        .variant(ButtonVariant::Ghost)
-                        .on_press(|s: &mut App| {
-                            if let Some(i) = installer(s) {
-                                i.show();
-                            }
-                        })
-                        .build(k)
-                        .key("install"),
-                )
-                .build(k, layer),
+                .build(k)
+                .key("install"),
         )
     }
 }
 
-pub use view::{offer, page, settings};
+pub use view::{offer, page, setting};
 
 #[cfg(test)]
 mod tests {

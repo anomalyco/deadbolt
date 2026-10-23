@@ -6,9 +6,6 @@ version = 2
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only reachable through iroh; no replacement available" },
-    { id = "RUSTSEC-2026-0370", reason = "zvariant: Linux-only, through Rune's zbus 5; drop when Rune moves to zbus 6" },
-    { id = "RUSTSEC-2026-0371", reason = "zbus_names: Linux-only, through Rune's zbus 5; drop when Rune moves to zbus 6" },
-    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive: Linux-only, through Rune's zbus 5; drop when Rune moves to zbus 6" },
 ]
 
 [licenses]

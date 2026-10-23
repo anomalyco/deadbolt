@@ -45,7 +45,6 @@ fn the_vault_names_its_controls() {
         ("button", "Copy username"),
         ("button", "Copy URL"),
         ("button", "Lock"),
-        ("button", "Open quick panel"),
     ] {
         assert!(
             has(&rt, role, label),
@@ -53,6 +52,11 @@ fn the_vault_names_its_controls() {
             labels(&rt)
         );
     }
+    // macOS has "Open Quick Panel" in its menus instead.
+    assert_eq!(
+        has(&rt, "button", "Open quick panel"),
+        !cfg!(target_os = "macos")
+    );
 }
 
 #[test]

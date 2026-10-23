@@ -2,7 +2,7 @@
 //! into `model.rs`.
 //!
 //! Motion (docs/app.md has the full table): screens swap with Kit's
-//! whole-state replacement (blur 4, scale .96, fade; exits shorter). Filter
+//! whole-state replacement (blur σ 1.5, scale .96, fade; exits shorter). Filter
 //! results reflow on `REFLOW` while rows that stay never blur; rows that leave
 //! or arrive fade in place. Keyboard selection and the selected item's fields
 //! land at once. Nothing animates on first paint, and reduced motion keeps
@@ -14,8 +14,8 @@ use rune::{
     row, spacer, text, text_input,
 };
 use rune_kit::{
-    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, RollingText,
-    TextInput,
+    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, Placement,
+    Popover, RollingText, TextInput,
 };
 
 use crate::model::{App, BAR_W, Copy, Screen, is_secret, title_case};
@@ -396,6 +396,7 @@ fn detail(s: &App, k: &Kit) -> El {
         .py(24.0)
         .gap(20.0);
     let offer = s.loaded.then(|| crate::install::offer(s, k)).flatten();
+    let shortcut = crate::shortcut::notice(s, k);
     let Some(item) = s.selected_item() else {
         if s.loaded && s.items.is_empty() {
             pane = pane.child(crate::onboarding::view::empty_vault(s, k));
@@ -407,8 +408,8 @@ fn detail(s: &App, k: &Kit) -> El {
                     .color(k.c.text_faint),
             );
         }
-        if offer.is_some() {
-            pane = pane.child(spacer()).children(offer);
+        if offer.is_some() || shortcut.is_some() {
+            pane = pane.child(spacer()).children(shortcut).children(offer);
         }
         return pane;
     };
@@ -438,7 +439,11 @@ fn detail(s: &App, k: &Kit) -> El {
             fields = fields.child(field_row(s, &full.id, field, k));
         }
     }
-    pane = pane.child(fields).child(spacer()).children(offer);
+    pane = pane
+        .child(fields)
+        .child(spacer())
+        .children(shortcut)
+        .children(offer);
     if let Some(n) = notice(s, k) {
         pane = pane.child(n);
     }
@@ -684,7 +689,38 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(hint("h-move", &["↑", "↓"], "Select")),
         )
         .child(spacer())
-        .child(crate::panel::window::entry(k).label("Open quick panel"))
+        .children(crate::panel::window::entry(s, k))
         .child(hint("h-lock", &["⌘", "L"], "Lock"))
-        .children(crate::install::settings(s, k, layer))
+        .child(settings(s, k, layer))
+}
+
+/// Settings in the vault's footer: the quick panel's shortcut and the
+/// install page. Its popover goes in `layer`.
+fn settings(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
+    Popover::new("settings")
+        .title("Settings")
+        .open(s.settings_open)
+        .placement(Placement::TopEnd)
+        .trigger(
+            Button::new("Settings")
+                .variant(ButtonVariant::GhostMuted)
+                .size(ButtonSize::Small)
+                .on_press(|s: &mut App| {
+                    if s.settings_open {
+                        s.close_settings();
+                    } else {
+                        s.settings_open = true;
+                    }
+                })
+                .build(k),
+        )
+        .on_close(|s: &mut App| s.close_settings())
+        .child(
+            col()
+                .key("settings-body")
+                .gap(12.0)
+                .child(crate::shortcut::setting(s, k))
+                .children(crate::install::setting(s, k)),
+        )
+        .build(k, layer)
 }

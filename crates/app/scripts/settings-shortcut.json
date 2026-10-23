@@ -1,0 +1,6 @@
+{
+  "events": [
+    { "t": 0.6, "key": "recorder" },
+    { "t": 1.4, "physical": "alt+super+space" }
+  ]
+}
