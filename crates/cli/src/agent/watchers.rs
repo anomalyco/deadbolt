@@ -49,6 +49,12 @@ struct Pending {
 }
 
 impl Pending {
+    fn is_empty(&self) -> bool {
+        !(self.locked || self.unlocked || self.vaults || self.resync || self.stopping)
+            && self.items.is_empty()
+            && self.devices.is_empty()
+    }
+
     fn changed(&mut self, changes: &Changes) {
         self.vaults |= changes.vaults;
         self.items.extend(&changes.items);
@@ -164,21 +170,28 @@ pub struct Subscription<'a> {
 
 impl Subscription<'_> {
     /// Waits for changes, gathers them for [`COALESCE`] and returns them.
-    /// Cancel-safe: anything pending stays pending.
+    /// Cancel-safe: the pending set, not the wake-up, says whether to send,
+    /// and it is only taken at the end.
     pub async fn next(&self) -> Vec<Change> {
         loop {
-            self.watcher.wake.notified().await;
+            let idle = self.pending().is_empty();
+            if idle {
+                self.watcher.wake.notified().await;
+                continue;
+            }
             tokio::time::sleep(COALESCE).await;
-            let changes = self
-                .watcher
-                .pending
-                .lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .take();
+            let changes = self.pending().take();
             if !changes.is_empty() {
                 return changes;
             }
         }
+    }
+
+    fn pending(&self) -> std::sync::MutexGuard<'_, Pending> {
+        self.watcher
+            .pending
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 }
 
@@ -252,6 +265,29 @@ mod tests {
         assert_eq!(
             late.watcher.pending.lock().unwrap().take(),
             [Change::Stopping]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancelling_next_keeps_the_wake_up() {
+        let watchers = Watchers::default();
+        let sub = watchers.subscribe();
+        watchers.changed(&items([1]));
+        // Cancelled mid-coalesce, after it took the wake-up.
+        let cancelled = tokio::time::timeout(COALESCE / 2, sub.next()).await;
+        assert!(cancelled.is_err());
+        let changes = tokio::time::timeout(COALESCE * 2, sub.next()).await;
+        assert_eq!(
+            changes.ok(),
+            Some(vec![Change::Items {
+                vault: vault(1).to_string()
+            }])
+        );
+        // Nothing pending: it waits.
+        assert!(
+            tokio::time::timeout(COALESCE * 4, sub.next())
+                .await
+                .is_err()
         );
     }
 
