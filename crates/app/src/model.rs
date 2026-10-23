@@ -531,6 +531,9 @@ impl App {
 
     /// Keys in the search field, before its editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if self.quit_key(ev, tx) {
+            return true;
+        }
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
         }
@@ -716,6 +719,9 @@ impl App {
 
     /// App-level keys: before the focused field when there is none, after it otherwise.
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if self.quit_key(ev, tx) {
+            return true;
+        }
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
         }

@@ -259,6 +259,17 @@ impl App {
 }
 
 impl App {
+    /// ⌘Q in the main window, ahead of any popover or field.
+    // Rune gap: a `--panel` start has no app menu until set_dock_icon(true) installs one.
+    pub(crate) fn quit_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let plain = !(ev.mods.shift || ev.mods.alt || ev.mods.ctrl);
+        if self.panel.is_some() || ev.key != Key::Command('q') || !plain {
+            return false;
+        }
+        self.quit(tx);
+        true
+    }
+
     /// The main window closed: wipe it and quit, through the panel when
     /// there is one, so the panel clears its own copy first.
     pub fn quit(&mut self, tx: &mut Tx) {

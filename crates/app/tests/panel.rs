@@ -856,6 +856,41 @@ fn with_the_main_window_around_it_stays() {
     assert_eq!(rt.shell_request, None);
 }
 
+/// A `--panel` start has no app menu, so the main window it opens quits on
+/// ⌘Q itself, even from the search field under Settings. The panel doesn't.
+#[test]
+fn command_q_quits_from_the_main_window() {
+    let cmd_q = KeyEvent {
+        key: Key::Command('q'),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    };
+    let mut main = main_window();
+    let clip = share_clipboard([&mut main, &mut runtime("empty", true)]);
+    let mut installer = deadbolt_app::install::Installer::fixture();
+    installer.show();
+    installer.settings_open = true;
+    main.update(|s, tx| {
+        s.installer = Some(installer);
+        s.copy_field("password", tx);
+    });
+    main.frame(FRAME);
+    assert!(main.state.search.focused);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    main.key(cmd_q.clone());
+    main.frame(FRAME);
+    assert_eq!(main.shell_request, Some(Shell::Quit));
+    assert_eq!(board(&clip), None, "quitting clears the copy");
+
+    let mut quick = runtime("empty", true);
+    quick.key(cmd_q);
+    quick.frame(FRAME);
+    assert_eq!(quick.shell_request, None);
+    assert_eq!(phase(&quick), Phase::Open);
+}
+
 #[test]
 fn closing_its_window_cleans_up_like_the_main_one() {
     let mut rt = runtime("locked", true);
