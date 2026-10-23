@@ -1,11 +1,12 @@
 //! Deadbolt's look as Rune theme data: the site's black, white and red, IBM
 //! Plex Mono for everything, small radii and flat surfaces. `assets/theme.json`
-//! holds the colours; this maps them onto rune-kit's semantic tokens.
+//! holds the colours; rune-kit derives the semantic tokens from three of them
+//! and this overrides the few where Deadbolt's look differs.
 
 use std::sync::OnceLock;
 
 use rune::{Shadow, TextStyle, Theme};
-use rune_kit::{Elevation, Kit, Radius, StateColors, Type};
+use rune_kit::{Elevation, Kit, PaletteSeed, Radius, StateColors, Type};
 
 pub const THEME: &str = include_str!("../assets/theme.json");
 
@@ -32,75 +33,45 @@ pub fn kit(dark: bool) -> &'static Kit {
 fn build(dark: bool) -> Kit {
     let t = Theme::from_json(THEME, dark).unwrap_or_else(|e| panic!("{e}"));
     let c = |n: &str| t.color(n);
-    let mut k = Kit::neutral(dark);
+    let mut k = Kit::from_palette(PaletteSeed {
+        bg: c("bg"),
+        fg: c("text"),
+        accent: c("accent"),
+    });
     let p = &mut k.c;
-    p.page = c("bg");
-    p.bg_base = c("bg");
-    p.bg_deep = c("bg");
-    p.layer_01 = c("raised");
-    p.layer_02 = c("layer");
-    p.layer_03 = c("layer-strong");
-    p.layer_04 = c("layer-strong");
-    p.bg_button_neutral = c("raised");
-    p.bg_contrast = c("contrast-bg");
-    p.bg_inverse = c("contrast-bg");
-    p.bg_icon_button_contrast = c("contrast-bg");
-    p.text_contrast = c("contrast-text");
-    p.text_inverse = c("contrast-text");
-    p.icon_contrast = c("contrast-text");
-    p.icon_inverse = c("contrast-text");
-    p.submit_fg = c("contrast-text");
-    p.submit_icon = c("contrast-text");
-    p.bg_accent = c("accent");
-    p.text_accent = c("accent");
-    p.icon_accent = c("accent");
-    for text in [
-        &mut p.text_base,
-        &mut p.text_strong,
-        &mut p.std_text,
-        &mut p.icon_base,
-        &mut p.std_icon_strong,
-    ] {
-        *text = c("text");
-    }
-    for muted in [
-        &mut p.text_muted,
-        &mut p.text_weak,
-        &mut p.icon_muted,
-        &mut p.std_icon,
-        &mut p.icon_weaker,
-    ] {
-        *muted = c("text-muted");
-    }
-    p.text_faint = c("text-faint");
-    p.icon_faint = c("text-faint");
-    for border in [
-        &mut p.border_muted,
-        &mut p.border_base,
-        &mut p.border_weak,
-        &mut p.std_border,
-        &mut p.border_disabled,
-    ] {
-        *border = c("border");
-    }
-    p.border_strong = c("border-strong");
-    p.border_hover = c("border-strong");
-    p.border_focus = c("focus");
-    p.border_active = c("focus");
-    p.hover = c("hover");
-    p.surface_hover = c("hover");
+    // The site's surface ramp: derived layers mix in linear light and read far
+    // lighter on black.
+    [p.surface_base, p.surface_weak] = [c("surface"); 2];
+    [
+        p.layer_01,
+        p.bg_button_neutral,
+        p.surface_raised,
+        p.surface_raised_base,
+    ] = [c("raised"); 4];
+    [p.layer_02, p.surface_raised_hover] = [c("layer"); 2];
+    [p.layer_03, p.layer_04] = [c("layer-strong"); 2];
+    // Hairlines, not opaque grey.
+    [
+        p.border_muted,
+        p.border_weak,
+        p.border_base,
+        p.std_border,
+        p.border_disabled,
+    ] = [c("border"); 5];
+    [p.border_strong, p.border_hover] = [c("border-strong"); 2];
+    // Focus is ink; red is kept for the countdown and danger.
+    [p.border_focus, p.border_active] = [c("focus"); 2];
+    [p.text_muted, p.text_weak, p.icon_muted, p.std_icon] = [c("text-muted"); 4];
+    [p.text_faint, p.icon_faint, p.icon_weaker] = [c("text-faint"); 3];
+    [p.hover, p.surface_hover] = [c("hover"); 2];
     p.pressed = c("pressed");
-    p.surface_base = c("surface");
-    p.surface_weak = c("surface");
-    p.surface_raised = c("raised");
-    p.surface_raised_base = c("raised");
-    p.surface_raised_hover = c("layer");
     p.danger = StateColors {
         bg: c("danger-bg"),
         fg: c("danger"),
         border: c("danger-border"),
         icon: c("danger"),
     };
+    // Flat surfaces: a hairline ring, and a drop only where something floats.
     let ring = Shadow {
         spread: 0.5,
         color: c("border"),

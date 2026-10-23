@@ -20,22 +20,19 @@ use crate::model::{App, BAR_W, Screen, is_secret, title_case};
 const LIST_W: f32 = 300.0;
 const NOTICE_W: f32 = BAR_W + 24.0;
 
-pub static LOCK: Icon = Icon {
-    name: "deadbolt-lock",
-    view: 16.0,
-    body: r#"<rect x="3.5" y="7" width="9" height="6.5" rx="1.5" stroke="currentColor"/><path d="M5.5 7V5.25a2.5 2.5 0 0 1 5 0V7" stroke="currentColor"/>"#,
-};
+// rune-kit's EYE and EYE_OFF draw malformed at this rev, so the app keeps its own.
 pub static EYE: Icon = Icon {
     name: "deadbolt-eye",
     view: 16.0,
     body: r#"<path d="M1.75 8C3.1 5.4 5.4 4 8 4s4.9 1.4 6.25 4C12.9 10.6 10.6 12 8 12S3.1 10.6 1.75 8Z" stroke="currentColor"/><circle cx="8" cy="8" r="1.75" stroke="currentColor"/>"#,
 };
-// Key symbols Plex Mono lacks (Rune only falls back to other fonts for CJK).
-pub static CMD: Icon = Icon {
-    name: "deadbolt-cmd",
+pub static EYE_OFF: Icon = Icon {
+    name: "deadbolt-eye-off",
     view: 16.0,
-    body: r#"<path d="M6 6h4v4H6zM6 6V4.5A1.5 1.5 0 1 0 4.5 6H6M10 6V4.5A1.5 1.5 0 1 1 11.5 6H10M10 10v1.5a1.5 1.5 0 1 0 1.5-1.5H10M6 10v1.5A1.5 1.5 0 1 1 4.5 10H6" stroke="currentColor" stroke-width="1.25"/>"#,
+    body: r#"<path d="M1.75 8C3.1 5.4 5.4 4 8 4s4.9 1.4 6.25 4C12.9 10.6 10.6 12 8 12S3.1 10.6 1.75 8Z" stroke="currentColor"/><path d="M3 13L13 3" stroke="currentColor"/>"#,
 };
+
+// The fallback symbol font's ⇧ and ↵ sit small and low beside Plex Mono.
 pub static SHIFT: Icon = Icon {
     name: "deadbolt-shift",
     view: 16.0,
@@ -46,12 +43,6 @@ pub static ENTER: Icon = Icon {
     view: 16.0,
     body: r#"<path d="M13 3v5.5A1.5 1.5 0 0 1 11.5 10H3.5M6.5 7l-3 3 3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
-pub static EYE_OFF: Icon = Icon {
-    name: "deadbolt-eye-off",
-    view: 16.0,
-    body: r#"<path d="M1.75 8C3.1 5.4 5.4 4 8 4s4.9 1.4 6.25 4C12.9 10.6 10.6 12 8 12S3.1 10.6 1.75 8Z" stroke="currentColor"/><path d="M3 13L13 3" stroke="currentColor"/>"#,
-};
-
 fn replace() -> Transition {
     Transition::blur_replace()
 }
@@ -122,7 +113,7 @@ fn not_set_up(k: &Kit) -> El {
     centred(
         "setup",
         k,
-        &LOCK,
+        k.glyph.lock,
         "Set up this device",
         col()
             .key("body")
@@ -141,7 +132,7 @@ fn failed(k: &Kit, message: &str) -> El {
     centred(
         "failed",
         k,
-        &LOCK,
+        k.glyph.lock,
         "Can't reach Deadbolt",
         col()
             .key("body")
@@ -216,7 +207,7 @@ fn unlock(s: &App, k: &Kit) -> El {
             .key("unlock")
             .mt(4.0),
     );
-    centred("unlock", k, &LOCK, "Deadbolt is locked", body)
+    centred("unlock", k, k.glyph.lock, "Deadbolt is locked", body)
 }
 
 // -------------------------------------------------------------------------------------------
@@ -271,7 +262,7 @@ fn toolbar(s: &App, k: &Kit) -> El {
         )
         .child(field)
         .child(
-            IconButton::new(&LOCK)
+            IconButton::new(k.glyph.lock)
                 .variant(IconButtonVariant::Ghost)
                 .label("Lock")
                 .on_press(|s: &mut App| s.lock())
@@ -619,7 +610,7 @@ fn rune_kit_shadows(mut e: El, list: &[rune::Shadow]) -> El {
     e
 }
 
-/// Keycaps like rune-kit's `Keybind`, with ⌘ ⇧ ↵ drawn as icons.
+/// Keycaps like rune-kit's `Keybind`, with ⇧ and ↵ drawn as icons.
 fn keycaps(keys: &[&str], k: &Kit) -> El {
     let font = TextStyle {
         line_height: 11.0,
@@ -633,7 +624,6 @@ fn keycaps(keys: &[&str], k: &Kit) -> El {
         .center_y()
         .children(keys.iter().enumerate().map(|(i, key)| {
             let glyph = match *key {
-                "⌘" => Some(&CMD),
                 "⇧" => Some(&SHIFT),
                 "↵" => Some(&ENTER),
                 _ => None,
