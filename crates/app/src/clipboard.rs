@@ -14,6 +14,7 @@
 use std::hash::{BuildHasher, RandomState};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+// Rune gap: `copy_secret` returns no handle. Replace with its `SecretCopy` when Rune lands it.
 #[derive(Clone)]
 pub struct Clipboard(Arc<Mutex<Owner>>);
 
