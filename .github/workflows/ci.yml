@@ -29,6 +29,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
       # Same steps as `bun run check`; cargo-deny stays in its dedicated job below.
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
@@ -57,4 +59,5 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
       - run: cargo test --workspace --release --locked

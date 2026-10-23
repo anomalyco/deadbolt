@@ -144,10 +144,7 @@ fn the_create_form_confirms_in_place() {
     assert!(shows(&rt, "Doesn't match"));
     rt.key(key(Key::Backspace));
     type_text(&mut rt, "22 correct horse");
-    assert_eq!(
-        rt.state.onboarding.repeat.secret(),
-        "hunter22 correct horse"
-    );
+    assert_eq!(rt.state.onboarding.repeat.text, "hunter22 correct horse");
     assert!(shows(&rt, "Matches"));
 
     // A bad vault name stops the submit and says why, in place.
@@ -165,7 +162,7 @@ fn the_create_form_confirms_in_place() {
     rt.key(key(Key::Escape));
     rt.frame(FRAME);
     assert_eq!(rt.state.onboarding.step, Step::Welcome);
-    assert!(rt.state.onboarding.passphrase.is_empty());
+    assert!(rt.state.onboarding.passphrase.text.is_empty());
 }
 
 /// ⇧⌘Space in a field opens the quick panel; it never types a space, not
@@ -185,10 +182,10 @@ fn the_panel_shortcut_types_nothing() {
     type_text(&mut rt, "hunter22");
     rt.key(shortcut.clone());
     rt.frame(FRAME);
-    assert_eq!(rt.state.onboarding.passphrase.secret(), "hunter22");
+    assert_eq!(rt.state.onboarding.passphrase.text, "hunter22");
 
     rt.update(|s, _| {
-        s.onboarding.passphrase.mask.focused = false;
+        s.onboarding.passphrase.focused = false;
         s.onboarding.vault.focused = true;
     });
     rt.frame(FRAME);

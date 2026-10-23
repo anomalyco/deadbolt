@@ -41,8 +41,7 @@ pub enum Phase {
 /// The panel's part of its `App`; `App::panel` is `None` in the main window.
 pub struct Panel {
     pub phase: Phase,
-    /// Counts summons. The card is keyed by it, so each open mounts a new
-    /// card at rest rather than reviving the last one's close fade.
+    /// Counts summons.
     pub opens: u32,
     /// When the panel last opened or took a key; it closes `window::IDLE` later.
     pub active: f64,
@@ -93,6 +92,8 @@ impl App {
         panel.phase = Phase::Open;
         panel.opens += 1;
         panel.active = self.clock;
+        // The card's own transition has no entrance, but its contents and a card
+        // revived mid-close would still animate in.
         tx.settle();
         tx.wake_after(Duration::from_secs_f64(window::IDLE));
         // A failed copy shows until the next open; a good one keeps counting down.
@@ -105,7 +106,7 @@ impl App {
             self.passphrase.clear();
             self.unlock_error = None;
         }
-        self.passphrase.mask.focused = self.screen == Screen::Locked;
+        self.passphrase.focused = self.screen == Screen::Locked;
         self.agent.send(Job::Connect);
         if self.screen == Screen::Vault {
             self.list();
@@ -113,7 +114,8 @@ impl App {
     }
 
     /// Escape, the confirmation ending, or handing over to the main window:
-    /// the card fades, then the window hides.
+    /// the card fades, then the window hides. A part-typed passphrase goes as
+    /// the card starts leaving.
     pub fn dismiss(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
         if matches!(panel.phase, Phase::Closing { .. } | Phase::Hidden) {
@@ -122,6 +124,7 @@ impl App {
         panel.phase = Phase::Closing {
             until: self.clock + HIDE_AFTER,
         };
+        self.passphrase.clear();
         tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
     }
 
@@ -186,9 +189,8 @@ impl App {
     }
 
     /// The card has faded: hide the window and forget everything read and
-    /// typed. Rune doesn't poll a hidden window when the agent replies, so
-    /// nothing is kept for later: what's waiting is applied now, and anything
-    /// later is from an older generation and dropped. A copy keeps counting
+    /// typed, so nothing outlives the card: what's waiting is applied now, and
+    /// anything later is from an older generation and dropped. A copy keeps counting
     /// down and is cleared on time.
     fn hide_panel(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
@@ -201,7 +203,6 @@ impl App {
         }
         self.forget_items();
         if !self.unlocking {
-            self.passphrase.clear();
             self.unlock_error = None;
         }
     }

@@ -18,7 +18,7 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime, Shell};
 
 const FRAME: f64 = 1.0 / 60.0;
 /// The footer once github.com's password is copied, as the vault's notice says it.
-const COPIED: &str = "Password copied clears in 0:30";
+const COPIED: &str = "Copied, clears in 0:30";
 /// Every login's password in the scenes.
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -133,40 +133,52 @@ fn find(rt: &Runtime<App>, key: &str) -> Option<([f32; 4], f32)> {
         .map(|e| (e.rect, e.opacity))
 }
 
-/// The card's key: it changes with each summon.
-fn card(rt: &Runtime<App>) -> String {
-    format!("card-{}", rt.state.panel.as_ref().unwrap().opens)
-}
-
 fn shows(rt: &Runtime<App>, s: &str) -> bool {
     rt.elements()
         .iter()
-        .any(|e| e.text.as_deref() == Some(s) && e.opacity > 0.0)
+        .any(|e| (e.text.as_deref() == Some(s) || e.label.as_deref() == Some(s)) && e.opacity > 0.0)
 }
 
-/// The footer's line as drawn, once it's fully in: what ⏎ does, or the copy.
+/// The footer's line once it's fully in: what ⏎ does or the copy (the
+/// rolling label's text), a failed copy, or a notice.
 fn footer(rt: &Runtime<App>) -> String {
     let elements = rt.elements();
     let Some(line) = elements.iter().rposition(|e| {
-        e.key.as_deref().is_some_and(|k| {
-            matches!(k, "copied" | "failed" | "cleared")
-                || k.starts_with("enter:")
-                || k.starts_with("notice:")
-        }) && e.opacity >= 0.99
+        e.key
+            .as_deref()
+            .is_some_and(|k| matches!(k, "footer-line" | "failed") || k.starts_with("notice:"))
+            && e.opacity >= 0.99
     }) else {
         return String::new();
     };
-    let mut words: Vec<_> = elements
+    elements
         .iter()
         .filter(|e| e.parent == Some(line))
-        .filter_map(|e| Some((e.rect[0], e.text.clone()?)))
-        .collect();
-    words.sort_by(|a, b| a.0.total_cmp(&b.0));
-    words
+        .find_map(|e| match e.key.as_deref() {
+            Some("footer-line-label") => e.label.clone(),
+            _ => e.text.clone(),
+        })
+        .unwrap_or_default()
+}
+
+/// A rolling label's glyphs: (text, rect, opacity).
+fn glyphs(rt: &Runtime<App>, label: &str) -> Vec<(String, [f32; 4], f32)> {
+    let prefix = format!("{label}.");
+    rt.elements()
         .into_iter()
-        .map(|(_, w)| w)
-        .collect::<Vec<_>>()
-        .join(" ")
+        .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with(&prefix)))
+        .filter_map(|e| Some((e.text?, e.rect, e.opacity)))
+        .collect()
+}
+
+/// The glyphs of a rolling label that are at rest, in order.
+fn steady(rt: &Runtime<App>, label: &str) -> String {
+    let y = find(rt, label).expect("the label").0[1];
+    glyphs(rt, label)
+        .iter()
+        .filter(|g| g.2 >= 0.99 && (g.1[1] - y).abs() < 0.01)
+        .map(|g| g.0.as_str())
+        .collect()
 }
 
 fn phase(rt: &Runtime<App>) -> Phase {
@@ -205,7 +217,7 @@ fn every_state_renders_inside_the_card() {
             };
             assert_eq!(footer(&rt), enter, "{scene}: what ⏎ does");
             let elements = rt.elements();
-            let rect = find(&rt, &card(&rt)).expect("the card").0;
+            let rect = find(&rt, "card").expect("the card").0;
             let rule = find(&rt, "rule-bottom").expect("the footer rule").0;
             assert!(
                 (rect[1] + rect[3] - (panel::SIZE.1 - panel::MARGIN)).abs() < 0.5,
@@ -258,7 +270,7 @@ fn it_opens_fresh_and_at_rest() {
     let first = rt.state.visible().first().map(|i| i.id.clone());
     assert_eq!(rt.state.selected, first, "the first item is selected");
     let elements = rt.elements();
-    assert_eq!(find(&rt, &card(&rt)).unwrap().1, 1.0, "no fade in");
+    assert_eq!(find(&rt, "card").unwrap().1, 1.0, "no fade in");
     let moving: Vec<_> = elements
         .iter()
         .filter(|e| e.moving || (e.opacity > 0.0 && e.opacity < 1.0 && e.text.is_some()))
@@ -298,12 +310,32 @@ fn escape_fades_the_card_then_hides() {
     rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Closing { .. }));
     frames(&mut rt, 5);
-    let fade = find(&rt, &card(&rt)).expect("still fading").1;
+    let fade = find(&rt, "card").expect("still fading").1;
     assert!(fade > 0.0 && fade < 1.0, "the card fades ({fade})");
     frames(&mut rt, 20);
     assert_eq!(phase(&rt), Phase::Hidden);
-    let gone = find(&rt, &card(&rt)).map_or(0.0, |c| c.1);
+    let gone = find(&rt, "card").map_or(0.0, |c| c.1);
     assert!(gone < 0.01, "faded out by the time it hides ({gone})");
+}
+
+/// Summoned again while the close still fades: the card comes back at rest,
+/// not fading back in from where its close had got to.
+#[test]
+fn a_summon_during_the_close_lands_at_rest() {
+    let mut rt = runtime("empty", true);
+    let items = rt.state.items.clone();
+    frames(&mut rt, 10);
+    rt.key(key(Key::Escape));
+    frames(&mut rt, 6);
+    let fade = find(&rt, "card").expect("still fading").1;
+    assert!(fade > 0.0 && fade < 1.0, "mid-close ({fade})");
+
+    rt.update(|s, tx| s.summon(tx));
+    rt.frame(FRAME);
+    answer_list(&mut rt, &items);
+    rt.frame(FRAME);
+    assert_eq!(phase(&rt), Phase::Open);
+    assert_eq!(find(&rt, "card").unwrap().1, 1.0, "no fade back in");
 }
 
 #[test]
@@ -324,16 +356,76 @@ fn escape_on_the_locked_panel_closes_it_and_forgets_the_passphrase() {
         rt.key(key(Key::Text(c.into())));
     }
     rt.frame(FRAME);
-    assert_eq!(rt.state.passphrase.secret(), "hunt");
+    assert_eq!(rt.state.passphrase.text, "hunt");
     rt.key(key(Key::Escape));
     rt.frame(FRAME);
     assert!(
         matches!(phase(&rt), Phase::Closing { .. }),
         "Escape closes, not just blurs the field"
     );
+    assert!(
+        rt.state.passphrase.text.is_empty(),
+        "forgotten as the card starts leaving"
+    );
+    assert!(rt.state.passphrase.is_secure());
     frames(&mut rt, 30);
     assert_eq!(phase(&rt), Phase::Hidden);
-    assert!(rt.state.passphrase.is_empty(), "hiding forgets it");
+}
+
+/// Both unlock fields: ⌘V pastes (on one line), but nothing copies, cuts or
+/// undoes the passphrase out, a ⌃ chord types nothing, and closing leaves an
+/// empty secure field.
+#[test]
+fn the_passphrase_stays_in_its_field() {
+    let main = || {
+        let app = rune::tooling::initial_state(&deadbolt_app::spec(), Some("locked"));
+        let mut rt = Runtime::new(
+            app,
+            deadbolt_app::view::app,
+            (820.0, 540.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        );
+        rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+        rt
+    };
+    let with = |key, mods| KeyEvent { key, mods };
+    let cmd = Mods {
+        cmd: true,
+        ..Mods::default()
+    };
+    let ctrl = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    for mut rt in [runtime("locked", true), main()] {
+        frames(&mut rt, 2);
+        assert!(rt.has_secure_focus());
+        for c in "hunter".chars() {
+            rt.key(key(Key::Text(c.into())));
+        }
+        rt.paste("2\t2\r\n");
+        rt.frame(FRAME);
+        assert_eq!(rt.state.passphrase.text, "hunter22");
+        for c in ['a', 'c', 'x', 'z'] {
+            rt.key(with(Key::Command(c), cmd));
+        }
+        rt.key(with(Key::Text("k".into()), ctrl));
+        rt.frame(FRAME);
+        assert_eq!(rt.state.passphrase.text, "hunter22");
+        assert!(rt.copy_request.is_none(), "nothing reaches the clipboard");
+        assert!(
+            !rt.elements()
+                .iter()
+                .any(|e| e.text.as_deref().is_some_and(|t| t.contains("hunter"))),
+            "the passphrase never shows"
+        );
+        rt.update(|s, tx| s.close(tx));
+        assert!(rt.state.passphrase.text.is_empty());
+        assert!(rt.state.passphrase.is_secure());
+    }
 }
 
 #[test]
@@ -385,16 +477,26 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
     let items = rt.state.items.clone();
     frames(&mut rt, 10);
     assert_eq!(footer(&rt), "Copy password");
+    let hints =
+        |rt: &Runtime<App>| ["h-user", "h-close"].map(|key| find(rt, key).map(|(rect, _)| rect));
+    let resting = hints(&rt);
+    assert!(resting[1].is_some(), "esc Close shows");
     rt.key(key(Key::Enter));
     rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    assert_eq!(hints(&rt), resting, "the hints hold still");
     assert!(rt.state.copy.as_ref().is_some_and(|c| c.error.is_none()));
-    let fading = |key: &str| find(&rt, key).is_some_and(|(_, o)| o > 0.0 && o < 1.0);
-    assert!(
-        fading("copied") && fading("enter:Copy password"),
-        "the copy replaces what ⏎ does, as in the vault's notice"
+    let line = find(&rt, "footer-line").expect("the same line");
+    assert!(line.1 >= 0.99, "the line stays; its label rolls");
+    assert_eq!(
+        steady(&rt, "footer-line-label"),
+        "Cop",
+        "only \"Cop\" stays put"
     );
-    frames(&mut rt, 36);
+    for _ in 0..36 {
+        rt.frame(FRAME);
+        assert_eq!(hints(&rt), resting, "the hints hold still");
+    }
     assert_eq!(footer(&rt), COPIED);
     frames(&mut rt, 40);
     assert!(
@@ -442,26 +544,72 @@ fn rows_that_stay_slide_when_filtering() {
     assert!(!shows(&rt, "fly.io"));
 }
 
+/// From `--reduced-motion` or the system's setting.
 #[test]
 fn reduced_motion_fades_the_label_in_place() {
-    let mut rt = runtime("empty", true);
-    rt.update(|s, _| s.reduced_motion = true);
-    frames(&mut rt, 10);
-    let line = find(&rt, "enter:Copy password").unwrap().0;
-    rt.key(key(Key::Enter));
-    rt.frame(FRAME);
-    let (rect, opacity) = find(&rt, "copied").expect("the copy's line");
-    assert!(opacity < 1.0, "it fades in ({opacity})");
-    assert!(
-        (rect[0] - line[0]).abs() < 0.5
-            && (rect[1] + rect[3] / 2.0 - (line[1] + line[3] / 2.0)).abs() < 0.5,
-        "it stays on the line ({rect:?} vs {line:?})"
-    );
-    frames(&mut rt, 30);
-    assert_eq!(footer(&rt), COPIED);
+    for system in [false, true] {
+        let mut rt = runtime("empty", true);
+        if system {
+            rt.set_system_reduced_motion(true);
+        } else {
+            rt.update(|s, _| s.reduced_motion = true);
+        }
+        label_fades_in_place(&mut rt);
+    }
 }
 
-/// While hidden, the panel's countdown wakes once, at its end, not every 100 ms.
+fn label_fades_in_place(rt: &mut Runtime<App>) {
+    frames(rt, 10);
+    let line = find(rt, "footer-line").unwrap().0;
+    let middle = line[1] + line[3] / 2.0;
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    let rolling = glyphs(rt, "footer-line-label");
+    assert!(
+        rolling.iter().any(|g| g.2 > 0.0 && g.2 < 1.0),
+        "the label crossfades"
+    );
+    for (glyph, rect, ..) in &rolling {
+        assert!(
+            (rect[1] + rect[3] / 2.0 - middle).abs() < 0.5,
+            "{glyph:?} stays on the line ({rect:?} vs {line:?})"
+        );
+    }
+    frames(rt, 30);
+    assert_eq!(footer(rt), COPIED);
+}
+
+/// The vault's countdown: the bar empties on the render clock, and the app
+/// wakes once a second for the label, which rolls only the digits that change.
+#[test]
+fn the_countdown_wakes_once_a_second_and_rolls_its_digits() {
+    let mut rt = main_window();
+    rt.update(|s, tx| s.copy_field("password", tx));
+    rt.frame(FRAME);
+    let bar = |rt: &Runtime<App>| find(rt, "bar").expect("the bar").0[2];
+    let full = bar(&rt);
+    let next = rt.wake_deadline().unwrap() - rt.state.clock;
+    assert!(
+        next > 0.9 && next < 1.01,
+        "the next look is at 0:29 ({next} s)"
+    );
+    rt.frame(0.5);
+    assert!(bar(&rt) < full - 2.0, "the bar empties between wakes");
+    assert!(shows(&rt, COPIED));
+
+    while !shows(&rt, "Copied, clears in 0:29") {
+        assert!(rt.state.clock < 1.1, "0:29 by a second in");
+        rt.frame(FRAME);
+    }
+    assert_eq!(
+        steady(&rt, "notice-line-label"),
+        "Copied, clears in 0:",
+        "only the digits roll"
+    );
+}
+
+/// Once hidden, the panel's countdown wakes only at its end, not each second
+/// (past the one look that was already due when it hid).
 #[test]
 fn a_hidden_panel_wakes_once_for_its_countdown() {
     let mut rt = runtime("empty", true);
@@ -470,6 +618,7 @@ fn a_hidden_panel_wakes_once_for_its_countdown() {
     frames(&mut rt, 120);
     assert_eq!(phase(&rt), Phase::Hidden);
     assert!(rt.state.copy_pending());
+    rt.frame(1.0);
     let next = rt.wake_deadline().unwrap() - rt.state.clock;
     assert!(
         next > 25.0,
@@ -546,6 +695,27 @@ fn a_superseded_copy_leaves_quietly() {
     assert_eq!(board(&clip), None, "the panel cleared its copy on time");
 }
 
+/// Scenario C: the panel copies and hides, then the main window locks. The
+/// lock clears the panel's copy, and the panel's countdown ends quietly.
+#[test]
+fn a_lock_in_the_other_window_clears_the_copy() {
+    let mut quick = runtime("empty", true);
+    let mut main = main_window();
+    let clip = share_clipboard([&mut quick, &mut main]);
+    quick.key(key(Key::Enter));
+    both(&mut quick, &mut main, FRAME);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    both(&mut quick, &mut main, 5.0);
+
+    main.update(|s, tx| s.apply(Done::Locked(Ok(())), tx));
+    assert_eq!(board(&clip), None, "the lock clears it at once");
+    for _ in 0..30 {
+        both(&mut quick, &mut main, 1.0);
+        assert!(!shows(&quick, "Clipboard cleared"));
+    }
+    assert!(quick.state.copy.is_none(), "its countdown ended quietly");
+}
+
 #[test]
 fn alone_it_leaves_once_hidden() {
     let mut rt = runtime("empty", true);
@@ -590,15 +760,10 @@ fn with_the_main_window_around_it_stays() {
 fn closing_its_window_cleans_up_like_the_main_one() {
     let mut rt = runtime("locked", true);
     let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
-    rt.update(|s, _| {
-        s.passphrase.key(&KeyEvent {
-            key: Key::Text("x".into()),
-            mods: Mods::default(),
-        });
-    });
+    rt.update(|s, _| s.passphrase.insert("x"));
     rt.state.clipboard.copy(PASSWORD).unwrap();
     rt.update(|s, tx| s.panel_closed(tx));
-    assert!(rt.state.passphrase.is_empty());
+    assert!(rt.state.passphrase.text.is_empty());
     assert_eq!(board(&clip), None, "the clipboard is cleared");
     assert_eq!(rt.shell_request, None, "the main window is still around");
 

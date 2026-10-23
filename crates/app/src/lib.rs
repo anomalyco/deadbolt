@@ -165,22 +165,26 @@ const SCENES: &[Scene] = &[
     ("create", |s| form(s, Flow::Create)),
     ("create-typing", |s| {
         form(s, Flow::Create);
-        type_secret(&mut s.onboarding.passphrase, "correct horse");
-        type_secret(&mut s.onboarding.repeat, "correct hose");
-        s.onboarding.passphrase.mask.focused = false;
-        s.onboarding.repeat.mask.focused = true;
+        s.onboarding.passphrase.replace_text("correct horse");
+        s.onboarding.repeat.replace_text("correct hose");
+        s.onboarding.passphrase.focused = false;
+        s.onboarding.repeat.focused = true;
     }),
     ("create-ready", |s| {
         form(s, Flow::Create);
-        type_secret(&mut s.onboarding.passphrase, "correct horse battery staple");
-        type_secret(&mut s.onboarding.repeat, "correct horse battery staple");
-        s.onboarding.passphrase.mask.focused = false;
-        s.onboarding.repeat.mask.focused = true;
+        s.onboarding
+            .passphrase
+            .replace_text("correct horse battery staple");
+        s.onboarding
+            .repeat
+            .replace_text("correct horse battery staple");
+        s.onboarding.passphrase.focused = false;
+        s.onboarding.repeat.focused = true;
     }),
     ("create-invalid", |s| {
         form(s, Flow::Create);
         s.onboarding.vault = rune::TextEdit::new("My Vault");
-        type_secret(&mut s.onboarding.passphrase, "hunter2");
+        s.onboarding.passphrase.replace_text("hunter2");
         s.submit_create();
     }),
     ("create-failed", |s| {
@@ -377,15 +381,6 @@ fn join_notice(s: &mut App, severity: Severity, title: &str, body: &str) {
     });
 }
 
-fn type_secret(field: &mut secret::SecretEdit, text: &str) {
-    for c in text.chars() {
-        field.key(&rune::KeyEvent {
-            key: rune::Key::Text(c.to_string()),
-            mods: rune::Mods::default(),
-        });
-    }
-}
-
 fn pairing() -> Pairing {
     Pairing {
         vault: "personal".into(),
@@ -451,7 +446,7 @@ fn status(unlocked: bool) -> Status {
 fn locked(s: &mut App) {
     s.status = Some(status(false));
     s.screen = Screen::Locked;
-    s.passphrase.mask.focused = true;
+    s.passphrase.focused = true;
 }
 
 const FIXTURE: &[(&str, &str, &str, Option<&str>)] = &[

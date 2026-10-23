@@ -193,7 +193,9 @@ fn until(rt: &mut Runtime<App>, what: &str, done: impl Fn(&App) -> bool) {
 }
 
 fn shows(rt: &Runtime<App>, s: &str) -> bool {
-    rt.elements().iter().any(|e| e.text.as_deref() == Some(s))
+    rt.elements()
+        .iter()
+        .any(|e| e.text.as_deref() == Some(s) || e.label.as_deref() == Some(s))
 }
 
 #[test]
@@ -239,7 +241,7 @@ fn unlock_search_copy_lock() {
         rt.key(key(Key::Text(c.into())));
     }
     rt.frame(1.0 / 60.0);
-    assert!(shows(&rt, "••••"), "the field shows dots");
+    assert!(rt.has_secure_focus(), "a secure field takes it");
     assert!(
         !rt.elements()
             .iter()
@@ -283,7 +285,7 @@ fn unlock_search_copy_lock() {
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
     assert_eq!(board.lock().unwrap().as_deref(), Some("flyfly"));
-    assert!(shows(&rt, "Password copied"));
+    assert!(shows(&rt, "Copied, clears in 0:30"));
 
     // Shift+Enter copies the username in its place.
     rt.key(KeyEvent {
@@ -524,7 +526,7 @@ fn create_a_vault_in_the_app() {
         s.screen == Screen::Vault && s.loaded
     });
     assert!(rt.state.items.is_empty());
-    assert!(rt.state.onboarding.passphrase.is_empty(), "wiped");
+    assert!(rt.state.onboarding.passphrase.text.is_empty(), "wiped");
     until(&mut rt, "the vault's name", |s| {
         s.status.as_ref().is_some_and(|st| !st.vaults.is_empty())
     });

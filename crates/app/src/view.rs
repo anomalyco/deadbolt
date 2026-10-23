@@ -10,11 +10,12 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
-    Cursor, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, TextStyle, Transition, Tx, col, el, icon,
+    Cursor, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
     row, spacer, text, text_input,
 };
 use rune_kit::{
-    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, TextInput,
+    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, RollingText,
+    TextInput,
 };
 
 use crate::model::{App, BAR_W, Copy, Screen, is_secret, title_case};
@@ -27,7 +28,9 @@ fn replace() -> Transition {
 }
 
 pub fn app(s: &App, cx: &mut Cx<App>) -> El {
-    cx.reduced_motion(s.reduced_motion);
+    if s.reduced_motion {
+        cx.reduced_motion(true);
+    }
     let k = crate::theme::kit(cx.system_dark());
     let mut layer = Vec::new();
     let screen = match &s.screen {
@@ -144,7 +147,7 @@ fn unlock(s: &App, k: &Kit) -> El {
         Button::new(label)
             .variant(ButtonVariant::Contrast)
             .size(ButtonSize::Large)
-            .disabled(s.unlocking || s.passphrase.is_empty())
+            .disabled(s.unlocking || s.passphrase.text.is_empty())
             .on_press(|s: &mut App| s.submit_unlock())
             .build(k)
             .key("unlock")
@@ -164,20 +167,17 @@ fn unlock(s: &App, k: &Kit) -> El {
 /// The passphrase field: dots, Enter unlocks, typing clears the last error.
 /// In the quick panel, Escape closes the panel rather than blurring the field.
 pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
-    TextInput::new(&s.passphrase.mask)
+    TextInput::new(&s.passphrase)
         .placeholder("Passphrase")
         .large()
         .width(None)
         .invalid(s.unlock_error.is_some())
         .disabled(s.unlocking)
-        .on_edit(|s: &mut App| &mut s.passphrase.mask)
+        .on_edit(|s: &mut App| &mut s.passphrase)
         .on_key(|s: &mut App, ev, tx| {
             s.panel_shortcut(ev, tx) || s.panel_escape(ev, tx) || s.passphrase_key(ev)
         })
-        .on_change(|s: &mut App, _| {
-            s.passphrase.reconcile();
-            s.unlock_error = None;
-        })
+        .on_change(|s: &mut App, _| s.passphrase_changed())
         .on_submit(|s: &mut App, _| s.submit_unlock())
         .build(k)
         .key("passphrase")
@@ -229,6 +229,7 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
     };
     text_input(&s.search, style)
         .key("search-input")
+        .label("Search items")
         .grow(1.0)
         .shrink()
         .color(k.c.text_strong)
@@ -275,15 +276,20 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
-        // Rune gap: a scroll doesn't clip its children (docs/app.md); hard edges.
-        .clip_fade(0.0, 0.0, 0.0, 0.0)
         .child(rows(s, k))
 }
 
 /// The visible items as rows, or why there are none. Shared by the vault and the quick panel.
 pub(crate) fn rows(s: &App, k: &Kit) -> El {
     let visible = s.visible();
-    let mut rows = col().key("rows").w_full().gap(2.0).px(8.0).py(8.0);
+    let mut rows = col()
+        .key("rows")
+        .role("listbox")
+        .label("Items")
+        .w_full()
+        .gap(2.0)
+        .px(8.0)
+        .py(8.0);
     if !s.loaded {
         // The list arrives within a frame or two of unlocking; show nothing rather than a flash.
     } else if s.items.is_empty() {
@@ -351,35 +357,29 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
                 )),
         )
         .on_press(move |s: &mut App| s.select(Some(id.clone())))
-        .child(fade_line(
+        .child(
             text(item.label.clone())
+                .key("label")
                 .font(k.ty.ui_medium.lh(20.0))
-                .color(k.c.text_strong),
-            "label",
-        ));
+                .color(k.c.text_strong)
+                .truncate_fade(),
+        );
     let sub = match &item.detail {
         Some(d) => format!("{d} · {}", item.kind),
         None => item.kind.clone(),
     };
-    r = r.child(fade_line(
-        text(sub).font(k.ty.small.lh(16.0)).color(k.c.text_muted),
-        "sub",
-    ));
+    r = r.child(
+        text(sub)
+            .key("sub")
+            .font(k.ty.small.lh(16.0))
+            .color(k.c.text_muted)
+            .truncate_fade(),
+    );
     if selected {
         r.fill(k.c.surface_raised_hover)
     } else {
         r.hover(k.c.hover)
     }
-}
-
-/// One line of text that fades out at the right edge instead of ending in "…".
-fn fade_line(t: El, key: &str) -> El {
-    row()
-        .key(key)
-        .w_full()
-        .shrink()
-        .clip_fade(0.0, 0.0, 20.0, 0.0)
-        .child(t)
 }
 
 fn detail(s: &App, k: &Kit) -> El {
@@ -414,12 +414,13 @@ fn detail(s: &App, k: &Kit) -> El {
             .key("head")
             .w_full()
             .gap(4.0)
-            .child(fade_line(
+            .child(
                 text(item.label.clone())
+                    .key("title")
                     .font(TextStyle::new(20.0, 500.0).lh(26.0))
-                    .color(k.c.text_strong),
-                "title",
-            ))
+                    .color(k.c.text_strong)
+                    .truncate_fade(),
+            )
             .child(
                 text(kind)
                     .key("kind")
@@ -468,6 +469,12 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         .as_ref()
         .is_some_and(|c| c.item == item && c.field == field.name && c.cleared_at.is_none());
     let name = field.name.clone();
+    let named = title_case(&name);
+    let noun = if named == name.to_uppercase() {
+        named.clone()
+    } else {
+        name.clone()
+    };
     let mut actions = row().key("actions").gap(2.0).center_y();
     if secret {
         let n = name.clone();
@@ -479,7 +486,11 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         actions = actions.child(
             IconButton::new(glyph)
                 .variant(IconButtonVariant::GhostMuted)
-                .label(if revealed { "Hide" } else { "Show" })
+                .label(if revealed {
+                    format!("Hide {noun}")
+                } else {
+                    format!("Show {noun}")
+                })
                 .on_press(move |s: &mut App| s.toggle_reveal(&n))
                 .build(k)
                 .key("reveal"),
@@ -495,16 +506,21 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     actions = actions.child(
         IconButton::new(glyph)
             .variant(IconButtonVariant::GhostMuted)
-            .label(if copied { "Copied" } else { "Copy" })
+            .label(if copied {
+                format!("{named} copied")
+            } else {
+                format!("Copy {noun}")
+            })
             .on_press_tx(move |s: &mut App, tx| s.copy_field(&n, tx))
             .build(k)
             .key(if copied { "copied" } else { "copy" })
             .transition(replace()),
     );
+    let value = text(value).key("value").font(style).color(k.c.text_base);
     let value = if field.kind == "note" {
-        text(value).font(style).color(k.c.text_base).wrap().w_full()
+        value.wrap().min_w(0.0)
     } else {
-        text(value).font(style).color(k.c.text_base)
+        value.truncate_fade()
     };
     row()
         .key(format!("field-{}", field.name))
@@ -524,19 +540,12 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
                 .font(k.ty.text_small)
                 .color(k.c.text_muted),
         )
-        .child(
-            row()
-                .key("value")
-                .grow(1.0)
-                .shrink()
-                .clip_fade(0.0, 0.0, 20.0, 0.0)
-                .child(value),
-        )
+        .child(value.grow(1.0).shrink())
         .child(actions)
 }
 
-/// "Password copied · clears in 0:28", with a bar that empties; then
-/// "Clipboard cleared" for a moment before it leaves.
+/// "Copied, clears in 0:28", with a bar that empties; then "Clipboard
+/// cleared" for a moment before it leaves.
 fn notice(s: &App, k: &Kit) -> Option<El> {
     let copy = s.copy.as_ref()?;
     let mut pill = col()
@@ -552,8 +561,8 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
     for shadow in k.shadow_layers(&k.elevation.floating) {
         pill = pill.box_shadow(shadow);
     }
-    pill = pill.child(copy_line(k, copy, true));
-    // The bar's width follows a `Live` value the countdown sets, so ticking doesn't rebuild the view.
+    pill = pill.child(copy_line(k, "notice-line", Some(copy), "", true));
+    // The bar empties on a linear `Tween`, so the countdown never rebuilds the view for it.
     pill = pill.child(
         el().key("track")
             .w(BAR_W)
@@ -566,7 +575,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
                     .h(2.0)
                     .radius(1.0)
                     .fill(k.c.text_accent)
-                    .live_rect(s.bar.smooth(Spring::new(0.12, 0.0))),
+                    .live_rect(&copy.bar),
             ),
     );
     Some(pill)
@@ -586,56 +595,66 @@ pub(crate) fn hint(k: &Kit, key: &str, keys: &[&str], label: &str) -> El {
         )
 }
 
-/// What a copy says: "Password copied", then "clears in 0:30" counting down,
-/// then "Clipboard cleared", or why it failed. Each line swaps by replacement,
-/// and the countdown's digits are all one width. Shared by the vault's copy
-/// notice and the quick panel's footer; `spread` puts the countdown at the far
-/// edge and lets an error wrap (the notice).
-pub(crate) fn copy_line(k: &Kit, copy: &Copy, spread: bool) -> El {
-    let line = |key: &str| {
-        let line = row().key(key).gap(8.0).center_y().transition(replace());
-        if spread { line.w_full() } else { line }
-    };
-    if let Some(error) = &copy.error {
+/// What a copy says, in one label that rolls only the characters that
+/// change: what ⏎ does ("Copy password", the panel's footer), then "Copied,
+/// clears in 0:30" counting down, then "Clipboard cleared". A failed copy
+/// says why on its own line, swapped by replacement; `wrap` lets it wrap (the
+/// vault's notice). Shared by that notice and the quick panel's footer; `key`
+/// names the line, so each keeps its own roll.
+pub(crate) fn copy_line(k: &Kit, key: &str, copy: Option<&Copy>, does: &str, wrap: bool) -> El {
+    if let Some(error) = copy.and_then(|c| c.error.as_ref()) {
         let message = text(error.clone())
             .font(k.ty.text_small)
             .color(k.c.danger.fg);
-        return if spread {
-            row().key("failed").w_full().child(message.wrap().w_full())
+        let line = row().key("failed").transition(replace());
+        return if wrap {
+            line.w_full().child(message.wrap().w_full())
         } else {
-            line("failed").shrink().child(message.truncate())
+            line.shrink().child(message.truncate())
         };
     }
-    if copy.cleared_at.is_some() {
-        return line("cleared")
-            .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_muted))
-            .child(
-                text("Clipboard cleared")
-                    .font(k.ty.text_small)
-                    .color(k.c.text_muted),
-            );
-    }
-    let left = copy.shown;
-    let mut out = line("copied")
-        .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_base))
+    let check = |ink| {
+        icon(k.glyph.check_small, 16.0)
+            .key("check")
+            .color(ink)
+            .transition(replace())
+    };
+    let (lead, label, ink) = match copy {
+        None => (
+            Keybind::new(&["⏎"])
+                .build(k)
+                .key("enter")
+                .transition(replace()),
+            does.to_owned(),
+            k.c.text_base,
+        ),
+        Some(copy) if copy.cleared_at.is_some() => (
+            check(k.c.icon_muted),
+            "Clipboard cleared".to_owned(),
+            k.c.text_muted,
+        ),
+        Some(copy) => {
+            let left = copy.shown;
+            (
+                check(k.c.icon_base),
+                format!("Copied, clears in {}:{:02}", left / 60, left % 60),
+                k.c.text_base,
+            )
+        }
+    };
+    row()
+        .key(key)
+        .gap(8.0)
+        .center_y()
+        .transition(replace())
+        .child(lead)
         .child(
-            text(format!("{} copied", copy.what))
-                .font(k.ty.ui_medium)
-                .color(k.c.text_strong),
-        );
-    if spread {
-        out = out.child(spacer());
-    }
-    out.child(
-        text("clears in")
-            .font(k.ty.text_small)
-            .color(k.c.text_muted),
-    )
-    .child(
-        text(format!("{}:{:02}", left / 60, left % 60))
-            .font(k.ty.text_small)
-            .color(k.c.text_base),
-    )
+            RollingText::new(format!("{key}-label"), label)
+                .font(k.ty.small)
+                .color(ink)
+                .from(Edge::Top)
+                .build(k),
+        )
 }
 
 fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
@@ -661,7 +680,7 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .child(hint("h-move", &["↑", "↓"], "Select")),
         )
         .child(spacer())
-        .child(crate::panel::window::entry(k))
+        .child(crate::panel::window::entry(k).label("Open quick panel"))
         .child(hint("h-lock", &["⌘", "L"], "Lock"))
         .children(crate::install::settings(s, k, layer))
 }

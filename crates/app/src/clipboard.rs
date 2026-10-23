@@ -7,10 +7,14 @@
 //! it). Each copy gets the next id, and only the latest copy can be cleared on
 //! its timer: a window whose copy another window has since replaced lets its
 //! countdown go quietly.
+//!
+//! Not Rune's `Tx::copy_secret`: it can't clear early (lock), say whether a
+//! copy is still the latest, or report a failed write (docs/app.md).
 
 use std::hash::{BuildHasher, RandomState};
 use std::sync::{Arc, Mutex, MutexGuard};
 
+// Rune gap: `copy_secret` returns no handle. Replace with its `SecretCopy` when Rune lands it.
 #[derive(Clone)]
 pub struct Clipboard(Arc<Mutex<Owner>>);
 
@@ -161,6 +165,17 @@ mod tests {
         assert_eq!(cell.lock().unwrap().as_deref(), Some("hunter2"));
         assert!(other.clear(second));
         assert_eq!(*cell.lock().unwrap(), None);
+    }
+
+    #[test]
+    fn a_lock_clears_the_latest_copy_from_any_handle() {
+        let (clipboard, cell) = Clipboard::memory();
+        let other = clipboard.clone();
+        let copied = other.copy("hunter2").unwrap();
+        assert!(clipboard.clear_latest());
+        assert_eq!(*cell.lock().unwrap(), None);
+        assert!(!other.holds(copied), "its countdown ends quietly");
+        assert!(!other.clear(copied) && !clipboard.clear_latest());
     }
 
     #[test]
