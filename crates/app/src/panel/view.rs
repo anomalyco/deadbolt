@@ -85,11 +85,14 @@ fn card(s: &App, k: &Kit) -> El {
         .h_full()
         .radius(k.radius.lg)
         .fill(k.c.bg_base)
-        // Opens at rest (`summon` settles); only the close fades.
-        .transition(Transition::opacity().springs(SpringPair::new(
-            Spring::new(CLOSE as f32, 0.0),
-            Spring::new(CLOSE as f32, 0.0),
-        )));
+        // Only the close fades (`summon` settles what's inside).
+        .transition(Transition::asymmetric(
+            Transition::identity(),
+            Transition::opacity().springs(SpringPair::new(
+                Spring::new(CLOSE as f32, 0.0),
+                Spring::new(CLOSE as f32, 0.0),
+            )),
+        ));
     for shadow in k.shadow_layers(&k.elevation.floating) {
         card = card.box_shadow(shadow);
     }

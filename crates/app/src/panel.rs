@@ -92,6 +92,8 @@ impl App {
         panel.phase = Phase::Open;
         panel.opens += 1;
         panel.active = self.clock;
+        // The card's own transition has no entrance, but its contents and a card
+        // revived mid-close would still animate in.
         tx.settle();
         tx.wake_after(Duration::from_secs_f64(window::IDLE));
         // A failed copy shows until the next open; a good one keeps counting down.
