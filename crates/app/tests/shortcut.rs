@@ -275,6 +275,11 @@ fn a_shortcut_taken_at_launch_can_be_tried_again() {
     settle(&mut rt, 0.5);
     let in_use = format!("{} is in use by another app.", shortcut::name(&default));
     assert!(shows(&rt, &in_use), "Settings says why");
+    assert_eq!(
+        rt.state.hotkey.recorder.shortcut(),
+        Some(&default),
+        "the recorder still shows it"
+    );
     assert!(rt.find("reset").is_none(), "it's already the default");
 
     press(&mut rt, "retry");

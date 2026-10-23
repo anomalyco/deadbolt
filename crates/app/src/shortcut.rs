@@ -80,8 +80,8 @@ pub struct Hotkey {
     pub error: Option<ShortcutError>,
     /// The notice was put off until the next launch.
     pub dismissed: bool,
-    /// Holds the registered shortcut, so recording a chord that failed to
-    /// register proposes it again (`start` leaves it empty on a failure).
+    /// Holds the chosen shortcut; after a failed registration `start` marks
+    /// it unregistered, so recording it again proposes it again.
     pub recorder: ShortcutRecorderState,
     /// Why "Reset" couldn't take the default back.
     pub reset_error: Option<ShortcutError>,
@@ -198,12 +198,9 @@ impl Hotkey {
             }
             Err(error) => {
                 self.error = Some(error);
-                // Rune gap (retrying an unchanged chord): the recorder ignores
-                // a chord equal to its own, so it holds nothing while ours is
-                // unregistered, and recording that chord again tries again.
-                // Waits on the recorder's opt-in to propose an unchanged chord;
-                // then keep it on `shortcut`.
-                self.recorder = ShortcutRecorderState::new(None);
+                // Recording the same chord again then tries again.
+                self.recorder = ShortcutRecorderState::new(Some(shortcut));
+                self.recorder.mark_unregistered();
             }
         }
     }
