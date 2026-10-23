@@ -5,9 +5,9 @@
 ## Architecture
 
 - **A thin client of the agent.** The app speaks the agent's socket protocol, as the CLI does, and starts the agent if none runs. It holds no keys and reads no store files: unlock, items, devices and pairing are all agent requests. Quitting the app leaves the agent (and its unlock) running.
-- **`crates/client` (`deadbolt-client`)** holds what both clients need: the protocol types, where the files live (`Paths`) and the client (`call`, `status`, `ensure_running`, `stop`). The CLI wraps it in `crates/cli/src/client.rs` and behaves as before. `Launch { program, version }` says which binary runs the agent: the CLI passes itself and its build (so an agent of another build is replaced), the app passes `deadbolt` and no version (any agent speaking the protocol will do).
+- **`crates/client` (`deadbolt-client`)** holds what both clients need: the protocol types, where the files live (`Paths`) and the client (`call`, `status`, `ensure_running`, `stop`). The CLI wraps it in `crates/cli/src/client.rs`. `Launch { program, version }` says which binary runs the agent; the replacement rule below lets a bundled app coexist with a separately installed CLI.
 - **`crates/app` (`deadbolt-app`)** is a workspace member. Rune and rune-kit are git dependencies pinned to one rev (`43ff4f8`, on Rune's `dev` branch), bumped deliberately by changing both `rev`s in `crates/app/Cargo.toml`. `deny.toml` allows that one git source and BSL-1.0 (arboard's Windows backend). Linux needs no Wayland dev package: winit loads libwayland at run time.
-- **Finding the agent binary:** `DEADBOLT_BIN`, else `deadbolt` next to the app's executable (the bundle will ship it there), else `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, else `PATH`. Apps opened from the Finder get a minimal `PATH`, hence the fixed places.
+- **Finding the agent binary:** in an `.app/Contents/MacOS` directory, always `../Helpers/deadbolt`, even when `DEADBOLT_BIN` or PATH points elsewhere. A missing helper is an error, not a fallback. Outside a bundle: `DEADBOLT_BIN`, an executable sibling (Cargo development), PATH, `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin`. Finder launches have a minimal PATH, hence the fallback locations.
 - **Threads:** one worker thread runs agent requests in order on a current-thread Tokio runtime and wakes the window when a reply lands. A second thread holds the agent's `watch` stream open and posts each change to the same inbox, reconnecting with backoff (100 ms doubling to 2 s) when the agent restarts; it never starts the agent itself. The UI drains both in Rune's `poll`; nothing polls the socket.
 - **Live state:** the agent owns locking (idle timeout, `deadbolt lock`, sleep and screen lock) and the app mirrors it. `locked` or the agent stopping goes to the lock screen and forgets every value; `unlocked` from elsewhere enters the vault; `items` for the shown vault refetches the list, keeping the selection, search and scroll, then the selected item's values in place; `watching` (after each reconnect) and `resync` refetch everything.
 - **Secrets in the app:** the passphrase field edits a mask of dots; the passphrase lives in a `Zeroizing<String>` all the way to the socket (the protocol's passphrase fields and the request buffer are wiped too) and copy, cut and undo do nothing. Item values are fetched one item at a time (`item-get`) and wiped when the selection changes, the store locks or the window closes. Copies are written with clipboard history exclusion (`org.nspasteboard.ConcealedType` on macOS) through one clipboard handle kept open for the app's life (on X11 the process serves the selection), and cleared after 30 s, or on lock and quit, only if the clipboard still holds them.
@@ -82,7 +82,7 @@ The main flows, as states (see the PR for the chat version):
 
 1. **Clipboard timeout:** 30 s now. 1Password uses 90 s, KeePassXC 10 s. Configurable?
 2. **Where unlock lives:** decided: the agent owns locking (`unlock_timeout`, `lock_on_sleep` in its config); the app has no timer.
-4. **Bundling:** ship `deadbolt` inside `Deadbolt.app` (and start the agent from there), or require the CLI install?
+4. **Bundling:** decided: ship `deadbolt` inside `Deadbolt.app`, with an optional command link on first run.
 5. **Window model:** a normal window now. A menu-bar / quick-access panel (global shortcut, search, ↵ copies, dismiss) may fit "open it every day" better.
 6. **Live updates:** done: the app follows the agent's `watch` stream.
 7. **Weak passphrases:** the form refuses under 8 characters and only warns about weak ones (a rough estimate that flatters dictionary words). Refuse weak ones too?
@@ -116,3 +116,45 @@ cargo run -p deadbolt-app -- --scene copied --at 2.4 --snap copied.png   # one s
 ```
 
 Scenes (`--scene`): `connecting`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`, and first run: `welcome`, `welcome-set-up`, `create`, `create-typing`, `create-ready`, `create-invalid`, `create-failed`, `creating` (created at 1.2 s, the moment, the vault at 2.7 s), `join`, `ticket`, `code`, `joining` (joined at 0.6 s), `join-declined`, `join-cancelled`, `join-failed`. They use synthetic data. Any tooling run (`--snap`, `--tree`, `--trace`, `--frames`, `--script`, `--scene`, …) gets no agent and an in-memory clipboard, so its output can't hold real items.
+
+## One bundle, one agent
+
+```text
+Deadbolt.app/Contents/
+  Info.plist                 pw.deadbolt.app; version from Cargo
+  MacOS/Deadbolt             Rune desktop client
+  Helpers/deadbolt           CLI and background agent
+  Resources/Deadbolt.icns    red keyhole, generated headlessly
+```
+
+The CLI uses Apple's `Helpers` code-signing location: `MacOS/Deadbolt` and `MacOS/deadbolt` would collide on a case-insensitive Mac disk. The helper is signed first, then the outer bundle. Fonts are embedded in the app binary. Rune currently has no bundle builder in its scripts or examples.
+
+**The CLI owns build replacement; the app accepts any compatible agent.** The CLI passes its exact Cargo version plus Git/build stamp to `ensure_running` and replaces an agent of another build, as before. The app passes no build requirement. It reuses an agent with the same protocol, regardless of whether the bundled, Homebrew or Cargo CLI started it. When no agent runs, it starts the bundled helper. An incompatible running protocol produces an error without stopping the agent; update the app or explicitly stop that agent with its CLI. The app's watch reconnection never launches an agent. Thus invoking a separately installed CLI may replace the agent once, but the app won't replace it back. Two distinct CLI builds still use the existing explicit-CLI replacement rule.
+
+The first bundled launch offers **Install the deadbolt command**. The same action remains under Settings at the bottom of the window. Install creates a symlink, confirms its location in place and shows the `rm` command to undo it. Done or Not now records `app-command-offered` beside the agent config. Headless scenes (`install-command`, `command-installed`) never read or write these preferences or install a real link.
+
+The installer prefers writable `~/.local/bin`, `/opt/homebrew/bin`, then `/usr/local/bin` directories on the app's PATH. Otherwise it prefers a writable user directory and supplies a copyable `export PATH=…` command. Finder's PATH may differ from the terminal's; the app doesn't execute shell startup files or change shell profiles. If the chosen directory needs administrator access, it shows an exact, quoted command to copy; it never invokes sudo. Existing commands on that PATH are identified as this app's link, Homebrew (a Cellar link), Cargo (`.cargo/bin`), or another install. No existing file or foreign symlink, including a dangling one, is replaced. Remove the old command through its installer, then Check again. Put the app in its permanent location before linking; moving it later breaks an absolute symlink.
+
+## Shipping the app
+
+Build an ad-hoc-signed development bundle on a Mac worker:
+
+```sh
+hivemind run --kind cargo --fetch .lab-output -- bash crates/app/scripts/bundle.sh
+# Universal, after installing aarch64-apple-darwin and x86_64-apple-darwin:
+hivemind run --kind cargo --fetch .lab-output -- bash crates/app/scripts/bundle.sh --universal
+```
+
+The script builds both release binaries with `--locked`, assembles into a temporary directory, generates the icon, signs ad hoc and checks the plist, signature, bundled CLI's `--version` and app's headless `--list-scenes` before moving the bundle into `.lab-output/Deadbolt.app`. An optional final argument selects a fresh output path; an existing output is refused. Native is the default to reuse the build cache; universal builds both Rust targets and combines each executable with `lipo`. These bundles aren't distribution releases.
+
+Dax's `publish.yml` currently builds four CLI targets, then `packages/cli/script/release.ts` publishes tarballs, checksums and a Homebrew **formula**. `site/public/install` consumes those CLI tarballs. To add the app, introduce a macOS bundle job in the same publish mode, call this script, sign and notarize, then pass its app archive/DMG to the publish job. Keep the CLI artifacts and installer contract. The release script must upload the app even when the `v<version>` release already exists; its current existence check skips all uploads on reruns.
+
+Remaining release work, with Anomaly's identities and Dax's pipeline:
+
+- Developer ID signing with hardened runtime on `fleet role releaseHost`, replacing the development signatures inside-out; verify the signing identity and entitlements there.
+- Notarize and staple every app and DMG, then assess both with Gatekeeper before publishing.
+- Add a Sparkle-style signed update feed and updater integration. Upload and verify artifacts before publishing the feed.
+- Add the Homebrew **cask** (`brew install --cask anomalyco/tap/deadbolt`, or `brew install --cask deadbolt` after tapping), alongside the existing CLI formula.
+- Add a Mac download button to deadbolt.pw. Site publishing needs Dax's approval.
+
+Signing identities, notarization, updater integration and publishing are deliberately left to that release work.
