@@ -99,6 +99,28 @@ fn a_conflict_at_launch_shows_a_notice_that_leads_to_settings() {
     assert!(rt.find("shortcut-notice").is_none(), "Not now puts it away");
 }
 
+/// When the desktop says who holds a chord (macOS's own shortcuts, another
+/// Rune app), the notice, Settings and the recorder name it.
+#[test]
+fn a_known_holder_is_named() {
+    let default = shortcut::default();
+    let taken = parse("ctrl+alt+j");
+    let hotkey = Hotkey::new(Some(default.clone()), vec![default.clone(), taken.clone()]);
+    let mut rt = main_window(hotkey.taken_by("Spotlight"));
+    assert!(shows(
+        &rt,
+        "Spotlight is using it, so the quick panel can't open from anywhere."
+    ));
+    rt.update(|s, _| s.settings_open = true);
+    settle(&mut rt, 0.5);
+    let in_use = |chord| format!("{} is in use by Spotlight.", shortcut::name(chord));
+    assert!(shows(&rt, &in_use(&default)), "Settings says who");
+
+    press(&mut rt, "recorder");
+    chord(&mut rt, &taken);
+    assert!(shows(&rt, &in_use(&taken)), "and so does the recorder");
+}
+
 #[test]
 fn a_registered_shortcut_shows_no_notice_and_turns_the_fallback_off() {
     let rt = main_window(Hotkey::new(Some(shortcut::default()), Vec::new()));
@@ -127,6 +149,11 @@ fn the_recorder_changes_saves_and_resets_the_shortcut() {
     let refusal = format!("{} is in use by another app.", shortcut::name(&taken));
     assert!(shows(&rt, &refusal), "it names the chord");
     assert!(!shows(&rt, &ShortcutError::Conflict.to_string()));
+    assert_eq!(
+        rt.state.hotkey.recorder.refused(),
+        Some(&taken),
+        "and keeps it on the keycaps"
+    );
     assert_eq!(rt.state.hotkey.shortcut, Some(shortcut::default()));
     assert!(
         rt.state.hotkey.recorder.is_recording(),
