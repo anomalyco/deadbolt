@@ -2,6 +2,8 @@
 //! lock. Drives Rune's runtime headless (no window, no GPU) and an in-memory
 //! clipboard. Builds the CLI from this repository for the agent.
 
+#![cfg(test)]
+
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};

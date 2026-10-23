@@ -6,6 +6,7 @@ version = 2
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only reachable through iroh; no replacement available" },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained but only reachable through winit's Wayland decorations (sctk-adwaita) in the desktop app; no upgrade yet" },
 ]
 
 [licenses]
@@ -14,6 +15,7 @@ allow = [
     "Apache-2.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
+    "BSL-1.0",
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",

@@ -86,6 +86,10 @@ pub struct Agent {
 
 impl Agent {
     /// Starts the worker. Nothing is sent until the first job.
+    #[expect(
+        clippy::expect_used,
+        reason = "the app can't run without its agent thread"
+    )]
     pub fn spawn(paths: Paths, launch: Launch) -> Agent {
         let (jobs, requests) = channel::<Job>();
         let (results, inbox) = channel();
