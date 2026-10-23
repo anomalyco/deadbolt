@@ -18,7 +18,7 @@ use rune::{Env, Key, KeyEvent, Mods, Runtime, Shell};
 
 const FRAME: f64 = 1.0 / 60.0;
 /// The footer once github.com's password is copied, as the vault's notice says it.
-const COPIED: &str = "Password copied clears in 0:30";
+const COPIED: &str = "Copied, clears in 0:30";
 /// Every login's password in the scenes.
 const PASSWORD: &str = "correct-horse-battery-staple";
 
@@ -141,32 +141,49 @@ fn card(rt: &Runtime<App>) -> String {
 fn shows(rt: &Runtime<App>, s: &str) -> bool {
     rt.elements()
         .iter()
-        .any(|e| e.text.as_deref() == Some(s) && e.opacity > 0.0)
+        .any(|e| (e.text.as_deref() == Some(s) || e.label.as_deref() == Some(s)) && e.opacity > 0.0)
 }
 
-/// The footer's line as drawn, once it's fully in: what ⏎ does, or the copy.
+/// The footer's line once it's fully in: what ⏎ does or the copy (the
+/// rolling label's text), a failed copy, or a notice.
 fn footer(rt: &Runtime<App>) -> String {
     let elements = rt.elements();
     let Some(line) = elements.iter().rposition(|e| {
-        e.key.as_deref().is_some_and(|k| {
-            matches!(k, "copied" | "failed" | "cleared")
-                || k.starts_with("enter:")
-                || k.starts_with("notice:")
-        }) && e.opacity >= 0.99
+        e.key
+            .as_deref()
+            .is_some_and(|k| matches!(k, "footer-line" | "failed") || k.starts_with("notice:"))
+            && e.opacity >= 0.99
     }) else {
         return String::new();
     };
-    let mut words: Vec<_> = elements
+    elements
         .iter()
         .filter(|e| e.parent == Some(line))
-        .filter_map(|e| Some((e.rect[0], e.text.clone()?)))
-        .collect();
-    words.sort_by(|a, b| a.0.total_cmp(&b.0));
-    words
+        .find_map(|e| match e.key.as_deref() {
+            Some("footer-line-label") => e.label.clone(),
+            _ => e.text.clone(),
+        })
+        .unwrap_or_default()
+}
+
+/// A rolling label's glyphs: (text, rect, opacity).
+fn glyphs(rt: &Runtime<App>, label: &str) -> Vec<(String, [f32; 4], f32)> {
+    let prefix = format!("{label}.");
+    rt.elements()
         .into_iter()
-        .map(|(_, w)| w)
-        .collect::<Vec<_>>()
-        .join(" ")
+        .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with(&prefix)))
+        .filter_map(|e| Some((e.text?, e.rect, e.opacity)))
+        .collect()
+}
+
+/// The glyphs of a rolling label that are at rest, in order.
+fn steady(rt: &Runtime<App>, label: &str) -> String {
+    let y = find(rt, label).expect("the label").0[1];
+    glyphs(rt, label)
+        .iter()
+        .filter(|g| g.2 >= 0.99 && (g.1[1] - y).abs() < 0.01)
+        .map(|g| g.0.as_str())
+        .collect()
 }
 
 fn phase(rt: &Runtime<App>) -> Phase {
@@ -445,10 +462,12 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
     rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Copied { .. }));
     assert!(rt.state.copy.as_ref().is_some_and(|c| c.error.is_none()));
-    let fading = |key: &str| find(&rt, key).is_some_and(|(_, o)| o > 0.0 && o < 1.0);
-    assert!(
-        fading("copied") && fading("enter:Copy password"),
-        "the copy replaces what ⏎ does, as in the vault's notice"
+    let line = find(&rt, "footer-line").expect("the same line");
+    assert!(line.1 >= 0.99, "the line stays; its label rolls");
+    assert_eq!(
+        steady(&rt, "footer-line-label"),
+        "Cop",
+        "only \"Cop\" stays put"
     );
     frames(&mut rt, 36);
     assert_eq!(footer(&rt), COPIED);
@@ -503,24 +522,29 @@ fn reduced_motion_fades_the_label_in_place() {
     let mut rt = runtime("empty", true);
     rt.update(|s, _| s.reduced_motion = true);
     frames(&mut rt, 10);
-    let line = find(&rt, "enter:Copy password").unwrap().0;
+    let line = find(&rt, "footer-line").unwrap().0;
+    let middle = line[1] + line[3] / 2.0;
     rt.key(key(Key::Enter));
     rt.frame(FRAME);
-    let (rect, opacity) = find(&rt, "copied").expect("the copy's line");
-    assert!(opacity < 1.0, "it fades in ({opacity})");
+    let rolling = glyphs(&rt, "footer-line-label");
     assert!(
-        (rect[0] - line[0]).abs() < 0.5
-            && (rect[1] + rect[3] / 2.0 - (line[1] + line[3] / 2.0)).abs() < 0.5,
-        "it stays on the line ({rect:?} vs {line:?})"
+        rolling.iter().any(|g| g.2 > 0.0 && g.2 < 1.0),
+        "the label crossfades"
     );
+    for (glyph, rect, ..) in &rolling {
+        assert!(
+            (rect[1] + rect[3] / 2.0 - middle).abs() < 0.5,
+            "{glyph:?} stays on the line ({rect:?} vs {line:?})"
+        );
+    }
     frames(&mut rt, 30);
     assert_eq!(footer(&rt), COPIED);
 }
 
 /// The vault's countdown: the bar empties on the render clock, and the app
-/// wakes once a second, for the label.
+/// wakes once a second for the label, which rolls only the digits that change.
 #[test]
-fn the_countdown_wakes_once_a_second() {
+fn the_countdown_wakes_once_a_second_and_rolls_its_digits() {
     let mut rt = main_window();
     rt.update(|s, tx| s.copy_field("password", tx));
     rt.frame(FRAME);
@@ -533,6 +557,17 @@ fn the_countdown_wakes_once_a_second() {
     );
     rt.frame(0.5);
     assert!(bar(&rt) < full - 2.0, "the bar empties between wakes");
+    assert!(shows(&rt, COPIED));
+
+    while !shows(&rt, "Copied, clears in 0:29") {
+        assert!(rt.state.clock < 1.1, "0:29 by a second in");
+        rt.frame(FRAME);
+    }
+    assert_eq!(
+        steady(&rt, "notice-line-label"),
+        "Copied, clears in 0:",
+        "only the digits roll"
+    );
 }
 
 /// Once hidden, the panel's countdown wakes only at its end, not each second

@@ -10,11 +10,12 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
-    Cursor, Cx, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon, row,
-    spacer, text, text_input,
+    Cursor, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
+    row, spacer, text, text_input,
 };
 use rune_kit::{
-    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, TextInput,
+    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, RollingText,
+    TextInput,
 };
 
 use crate::model::{App, BAR_W, Copy, Screen, is_secret, title_case};
@@ -532,8 +533,8 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         .child(actions)
 }
 
-/// "Password copied · clears in 0:28", with a bar that empties; then
-/// "Clipboard cleared" for a moment before it leaves.
+/// "Copied, clears in 0:28", with a bar that empties; then "Clipboard
+/// cleared" for a moment before it leaves.
 fn notice(s: &App, k: &Kit) -> Option<El> {
     let copy = s.copy.as_ref()?;
     let mut pill = col()
@@ -549,7 +550,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
     for shadow in k.shadow_layers(&k.elevation.floating) {
         pill = pill.box_shadow(shadow);
     }
-    pill = pill.child(copy_line(k, copy, true));
+    pill = pill.child(copy_line(k, "notice-line", Some(copy), "", true));
     // The bar empties on a linear `Tween`, so the countdown never rebuilds the view for it.
     pill = pill.child(
         el().key("track")
@@ -583,56 +584,66 @@ pub(crate) fn hint(k: &Kit, key: &str, keys: &[&str], label: &str) -> El {
         )
 }
 
-/// What a copy says: "Password copied", then "clears in 0:30" counting down,
-/// then "Clipboard cleared", or why it failed. Each line swaps by replacement,
-/// and the countdown's digits are all one width. Shared by the vault's copy
-/// notice and the quick panel's footer; `spread` puts the countdown at the far
-/// edge and lets an error wrap (the notice).
-pub(crate) fn copy_line(k: &Kit, copy: &Copy, spread: bool) -> El {
-    let line = |key: &str| {
-        let line = row().key(key).gap(8.0).center_y().transition(replace());
-        if spread { line.w_full() } else { line }
-    };
-    if let Some(error) = &copy.error {
+/// What a copy says, in one label that rolls only the characters that
+/// change: what ⏎ does ("Copy password", the panel's footer), then "Copied,
+/// clears in 0:30" counting down, then "Clipboard cleared". A failed copy
+/// says why on its own line, swapped by replacement; `wrap` lets it wrap (the
+/// vault's notice). Shared by that notice and the quick panel's footer; `key`
+/// names the line, so each keeps its own roll.
+pub(crate) fn copy_line(k: &Kit, key: &str, copy: Option<&Copy>, does: &str, wrap: bool) -> El {
+    if let Some(error) = copy.and_then(|c| c.error.as_ref()) {
         let message = text(error.clone())
             .font(k.ty.text_small)
             .color(k.c.danger.fg);
-        return if spread {
-            row().key("failed").w_full().child(message.wrap().w_full())
+        let line = row().key("failed").transition(replace());
+        return if wrap {
+            line.w_full().child(message.wrap().w_full())
         } else {
-            line("failed").shrink().child(message.truncate())
+            line.shrink().child(message.truncate())
         };
     }
-    if copy.cleared_at.is_some() {
-        return line("cleared")
-            .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_muted))
-            .child(
-                text("Clipboard cleared")
-                    .font(k.ty.text_small)
-                    .color(k.c.text_muted),
-            );
-    }
-    let left = copy.shown;
-    let mut out = line("copied")
-        .child(icon(k.glyph.check_small, 16.0).color(k.c.icon_base))
+    let check = |ink| {
+        icon(k.glyph.check_small, 16.0)
+            .key("check")
+            .color(ink)
+            .transition(replace())
+    };
+    let (lead, label, ink) = match copy {
+        None => (
+            Keybind::new(&["⏎"])
+                .build(k)
+                .key("enter")
+                .transition(replace()),
+            does.to_owned(),
+            k.c.text_base,
+        ),
+        Some(copy) if copy.cleared_at.is_some() => (
+            check(k.c.icon_muted),
+            "Clipboard cleared".to_owned(),
+            k.c.text_muted,
+        ),
+        Some(copy) => {
+            let left = copy.shown;
+            (
+                check(k.c.icon_base),
+                format!("Copied, clears in {}:{:02}", left / 60, left % 60),
+                k.c.text_base,
+            )
+        }
+    };
+    row()
+        .key(key)
+        .gap(8.0)
+        .center_y()
+        .transition(replace())
+        .child(lead)
         .child(
-            text(format!("{} copied", copy.what))
-                .font(k.ty.ui_medium)
-                .color(k.c.text_strong),
-        );
-    if spread {
-        out = out.child(spacer());
-    }
-    out.child(
-        text("clears in")
-            .font(k.ty.text_small)
-            .color(k.c.text_muted),
-    )
-    .child(
-        text(format!("{}:{:02}", left / 60, left % 60))
-            .font(k.ty.text_small)
-            .color(k.c.text_base),
-    )
+            RollingText::new(format!("{key}-label"), label)
+                .font(k.ty.small)
+                .color(ink)
+                .from(Edge::Top)
+                .build(k),
+        )
 }
 
 fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {

@@ -32,8 +32,6 @@ pub enum Screen {
 
 /// A secret on the clipboard and its countdown.
 pub struct Copy {
-    /// "Password", "Username", …
-    pub what: String,
     /// The field it came from, for the copy button's checkmark.
     pub item: String,
     pub field: String,
@@ -589,7 +587,6 @@ impl App {
         let item = item.id.clone();
         let copied_ok = error.is_none();
         self.copy = Some(Copy {
-            what: title_case(field),
             item,
             field: field.into(),
             at: self.clock,

@@ -23,7 +23,7 @@
 | Unlock | Passphrase, Enter or Unlock; wrong passphrase says so in place and keeps focus | Touch ID once the agent stores the unlock key in the keychain (design.md) |
 | List | Search-first: the field is focused, typing filters live, ↑↓ select, rows show label and username or expiry | Vault switcher, favourites, sort by recently used, agent-side search over URL host and cardholder |
 | Item detail | Fields in schema order, secrets masked with Show, Copy per field, notes wrap | TOTP codes with their own countdown, open URL, password age |
-| Copy | "Password copied · clears in 0:28" with a bar that empties, then "Clipboard cleared" | Configurable timeout, "copy and paste into the previous app" |
+| Copy | "Copied, clears in 0:28" with a bar that empties, then "Clipboard cleared" | Configurable timeout, "copy and paste into the previous app" |
 | Add / edit | — (CLI: `deadbolt new`, `set`) | Add login or card from the schema, edit in place, delete with confirm in place and a dim red surface |
 | Generate | — (CLI generates when `password=` is omitted) | Length and symbols, regenerate, used by Add |
 | Devices | — (CLI: `devices`, `pair`, `devices remove`) | List with presence; Add device (paste the new device's ticket, confirm the code); remove with confirm in place |
@@ -58,7 +58,7 @@ Rune's runtime already enforces no first-paint animation, reduced motion (travel
 | Typing filters the list | dependent on typing | rows that stay slide on `.4/0` and never blur; rows that leave or arrive fade in place (blur 3, scale .96, `.3/0` in, `.25/0` out) |
 | ↑↓ selection, the selected item's fields | user's hand | instant |
 | Copy icon → check | user | in-place replacement `.3/0` |
-| Copy notice | user | rises 12 pt with a fade `.3/0`; text swaps by replacement; leaves the way it came, shorter |
+| Copy notice | user | rises 12 pt with a fade `.3/0`; its label (`view::copy_line`, a `rune_kit::RollingText`) rolls only the characters that change, entering from the top; a failed copy's message swaps by replacement; leaves the way it came, shorter |
 | Countdown | time | the bar empties on a linear `rune::Tween` run by the render thread, so it needs no app wakes; the app wakes once a second for the text, and only at the clear while the quick panel is hidden. Plex Mono's digits are all one width, so nothing shakes |
 | Unlock error | agent | fades in |
 | Command offer | app | rises 12 pt with a fade, like the copy notice; leaves the same way |
@@ -77,13 +77,13 @@ A Spotlight-style panel for the everyday task: press ⇧⌘Space, type, ⏎ copi
 - **Window:** a second Rune window (`rune::run_windows`, key `panel`) with its own `App`: its own agent connection, `App::panel` set, started hidden. Borderless and transparent, 680×440 with the card inset 20 pt, centred near the top of the primary display.
 - **What it reuses:** the vault view's search field (`view::search_input`), rows (`view::rows`, `list_row`), the passphrase field and unlock error, and the model's filtering, selection and copy-with-countdown. The panel adds only its phases (`Open`, `Copied`, `Closing`, `Hidden`) and its card. It has no install offer or Settings: it never gets an installer, and `App::overlay_key` ignores them in the panel, so its keys stay its own.
 - **States:** connecting; the vault (empty search over every item, the first selected); filtering; no matches; an empty vault; locked, with the passphrase field in place and its error; not set up, which points to the main window (⏎ or Open Deadbolt opens it); can't reach the agent, with Try again.
-- **Dismissing:** Escape (in the search or the passphrase field too), ⇧⌘Space again, or a copy: the footer shows "Password copied clears in 0:30" for 1.1 s, then the card fades and the window hides. Rune doesn't poll a hidden window when the agent replies, so hiding forgets everything the panel read or was typed (the list, the query, an item's values, a part-typed passphrase) and moves to a new generation: replies still on their way are dropped, and an item's values are wiped when its reply is dropped, read or not (`agent::Values`). Each summon fetches the list again and starts from an empty search and the first item. The copy keeps counting down while hidden (one wake at its end, not every second) and is cleared on time, on lock, or when the app quits.
+- **Dismissing:** Escape (in the search or the passphrase field too), ⇧⌘Space again, or a copy: the footer's "Copy password" rolls into "Copied, clears in 0:30" for 1.1 s, then the card fades and the window hides. Rune doesn't poll a hidden window when the agent replies, so hiding forgets everything the panel read or was typed (the list, the query, an item's values, a part-typed passphrase) and moves to a new generation: replies still on their way are dropped, and an item's values are wiped when its reply is dropped, read or not (`agent::Values`). Each summon fetches the list again and starts from an empty search and the first item. The copy keeps counting down while hidden (one wake at its end, not every second) and is cleared on time, on lock, or when the app quits.
 - **One clipboard:** both windows share the process's `Clipboard`. Each copy gets the next id, and a countdown clears only the latest copy, and only if the clipboard still holds it. A copy the other window has since replaced ends quietly: its notice leaves without "Clipboard cleared". Lock and quit clear the latest copy, whichever window made it.
-- **Footer:** what ⏎ does ("Copy password", "Copy number", "Unlock", …), replaced by the copy's line or by a notice (an item "has no username", an agent error). ⇧⏎ Username shows only for a login with a username.
+- **Footer:** what ⏎ does ("Copy password", "Copy number", "Unlock", …), rolling into the copy's line, or replaced by a notice (an item "has no username", an agent error). ⇧⏎ Username shows only for a login with a username.
 
 ### Stand-ins
 
-Rune 43ff4f8 can't yet do five things the panel wants, and a sixth (rolling the copy line) waits for a Rune bump. `crates/app/src/panel/window.rs` holds each stand-in (the ways in, opening, closing, placing, the shortcut, leaving), so moving to Rune's APIs is a change there plus the lines noted. The first five are assigned on Rune's side but not on `dev` yet; the copy line lives in `view.rs` and `RollingText` is already on `dev`.
+Rune 43ff4f8 can't yet do five things the panel wants. `crates/app/src/panel/window.rs` holds each stand-in (the ways in, opening, closing, placing, the shortcut, leaving), so moving to Rune's APIs is a change there plus the lines noted. The first five are assigned on Rune's side but not on `dev` yet.
 
 | Now | Replaced by | Then |
 |---|---|---|
@@ -93,19 +93,18 @@ Rune 43ff4f8 can't yet do five things the panel wants, and a sixth (rolling the 
 | **Focus loss:** the window isn't always on top, so clicking another app at least sends it behind; it closes itself after 30 s without a key (`window::IDLE`, `App::panel_active`) | per-window `on_focus(fn(&mut S, bool, &mut Tx))`; headless `{"focus": false}` steps | `on_focus(false)` calls `dismiss`; always on top again; drop `IDLE` and `panel_active`; a test with `{"focus": false}` |
 | **Activation:** `AppHandle::open` activates Deadbolt, so the main window can come forward with it and hiding doesn't hand focus back to the previous app; the panel stays on the Space it was made on | `MacWindowOptions::nonactivating_panel(true)` (takes keys without activating the app; focus returns to the previous app on hide) and `MacWindowOptions::collection_behavior` (MoveToActiveSpace, IgnoresCycle, FullScreenAuxiliary; already at Rune `86a04ef`) | Set both in `window::options` |
 | **Placement:** `window::position` from the displays at launch: the primary display, 18% down | `AppHandle::place(DisplayTarget, OverlayPlacement)`, resolved when called (the active screen) | `Windows::summon_panel` calls `place` instead of `set_position`; drop `position` and the stored displays |
-| **The copy line:** `view::copy_line`, shared by the vault's copy notice and the panel footer; each line (what ⏎ does, copied with its countdown, cleared, failed) swaps by replacement in a fixed cell | `rune_kit::RollingText` (Rune `dev` `bc8bd76`: diffs grapheme clusters, proportional fonts, reduced motion crossfades) | A separate PR after this one bumps Rune to its latest `dev` and switches `copy_line` to `RollingText`, together with the secure field, expiring clipboard, linear countdown and font families from `2b2ee8d` |
 
 | Change | Motion |
 |---|---|
 | Summon | none: the card appears at rest (`Tx::settle`, and a fresh card key per summon so a reopen never revives the last close) |
 | Escape, after a copy | the card fades on `.25/0`; the window hides at 0.3 s |
 | Typing filters | as the vault: rows that stay slide, rows that arrive or leave fade in place |
-| ⏎ copies | the footer's line swaps by replacement to the copy's line (`view::copy_line`, the vault notice's), then counts down; `RollingText` replaces this (Stand-ins) |
-| What ⏎ does changes (Copy password ↔ Copy number, lock, unlock) | the line is keyed by what it says, so it swaps by replacement too; a notice does the same |
+| ⏎ copies | the footer's label rolls into the copy's (`view::copy_line`, the vault notice's): "Cop" stays, the rest rolls; then only the changing digits roll each second |
+| What ⏎ does changes (Copy password ↔ Copy number, lock, unlock) | the label rolls what changes; a notice swaps in by replacement |
 | ⇧⏎ Username comes or goes | fades in place |
 | The list lands after an open | at rest, like the open (`Tx::instant` for the panel's first list) |
 | Screens inside the card | whole-state replacement, as in the main window |
-| Reduced motion | Rune keeps only the fades: the footer's line crossfades in place |
+| Reduced motion | Rune keeps only the fades: the label's changing characters crossfade in place |
 
 ## Breadboard
 
@@ -115,7 +114,7 @@ The main flows, as states (see the PR for the chat version):
    - First run → Create → device, vault, passphrase twice → Protecting your passphrase → Creating personal → the bolt throws → empty vault with the CLI guide.
    - First run → Join → device, passphrase twice → Making a pairing ticket → QR + `deadbolt pair …` (Copy command) → other device pairs → 482 913, They match → Receiving personal → the bolt throws → synced vault. They don't match, Cancel or Escape, or the other device declining → the join form with a notice; the device stays set up.
 2. Locked: type the passphrase → ↵ → vault, or the error in place.
-3. Vault: type "git" → list narrows → ↵ → "Password copied · clears in 0:30" → 30 s → "Clipboard cleared" → notice leaves.
+3. Vault: type "git" → list narrows → ↵ → "Copied, clears in 0:30" → 30 s → "Clipboard cleared" → notice leaves.
 4. ⌘L → locked; the clipboard copy is gone.
 5. Later: Devices → Add device → paste ticket → both screens show 482 913 → Confirm → device appears in the list.
 
@@ -137,7 +136,6 @@ Resolved at `43ff4f8`: `Kit::from_palette` floors near-black surfaces (pure blac
 - **Tabular figures.** `TextStyle` has no font features (`tnum`). Not a problem with Plex Mono, but any proportional font needs digit cells laid out by hand.
 - **Nested `clip_fade` washes out text.** A descendant takes the max fade width per side from its ancestors but applies it to its own, smaller clip rect (`runtime.rs` ~2361). A row label with a right-edge fade inside a list with 12/16 pt top/bottom fades gets those fades over its own 20 pt line, so the whole label goes faint and soft. The list has no soft edges for now.
 - **`Kit::from_palette` and Deadbolt's palette.** Still overridden at `43ff4f8`, by how far the derived value is off: the surface ramp (on paper, derived raised surfaces are darker than the background, `#e1ddd5`, where the site's are lighter, `#f3f0ea`; on black `layer_01` and `layer_04` match but `layer_02`/`layer_03` and the surface tokens are 3–13 levels off, as the site's surface sits below its raised layer), the status colours (derived roles are rune-kit's own, `#ff847d` and `#dfa11a` on black, since `PaletteSeed` has no danger or warning seed), and the faint ink on paper (derived `#807c75`, 5 levels darker than the site's `#857f74`). The opaque border tokens point at the hairline by choice: the derived steps are heavier lines. Muted ink, hover, pressed, the hairlines, focus and `blend_over` are derived.
-- **Rolling labels.** No roll primitive on our pin for "Copy" → "Copied" or changing digits (`@kitlangton/rolling-number`), so the copy line (`view::copy_line`, the vault notice and the panel footer) swaps whole lines in a fixed cell. Landed: `rune_kit::RollingText` on Rune `dev` `bc8bd76`; a follow-up PR switches `copy_line` to it (Quick panel, Stand-ins).
 - **Ellipsis by default.** `truncate()` ends in "…"; the app wraps lines in `clip_fade` rows to get the fade the UI guide prefers.
 - **`rune_kit::TextInput` can't animate dependent layout** (`animate_edit_layout`), so the search field is built from `text_input` directly.
 - **System reduced motion.** `Env` has no reduced-motion flag from the OS; the app takes `--reduced-motion`.

@@ -3,15 +3,16 @@
 //!
 //! Motion: it opens at rest on the next frame, like a menu, and only its
 //! close fades (`.25/0`). Rows filter as in the vault (rows that stay slide,
-//! rows that arrive or leave fade in place). The footer's line swaps by
-//! replacement, like the vault's copy notice. Screens inside the card (locked, vault, …) swap with the
-//! whole-state replacement. Reduced motion keeps only fades (Rune).
+//! rows that arrive or leave fade in place). The footer's label rolls what
+//! changes, like the vault's copy notice. Screens inside the card (locked,
+//! vault, …) swap with the whole-state replacement. Reduced motion keeps only
+//! fades (Rune).
 
 use rune::{
     Cx, El, Icon, ScrollSpec, Spring, SpringPair, TextStyle, Transition, col, el, icon, row,
     spacer, text,
 };
-use rune_kit::{Button, ButtonVariant, Keybind, Kit};
+use rune_kit::{Button, ButtonVariant, Kit};
 
 use deadbolt_client::protocol::ItemInfo;
 
@@ -212,9 +213,9 @@ fn message(k: &Kit, key: &str, body: &str, action: Option<El>) -> El {
     out
 }
 
-/// What ⏎ does, replaced by the copy's line (as in the vault's copy notice)
-/// once it lands or if it failed, or by a notice; the other keys on the right.
-/// Each line is keyed by what it says, so a change swaps by replacement.
+/// What ⏎ does, rolling into the copy's line (as in the vault's copy notice)
+/// once it lands or if it failed; a notice replaces it. The other keys sit on
+/// the right.
 fn footer(s: &App, k: &Kit) -> El {
     let copied = matches!(s.panel_phase(), Some(Phase::Copied { .. }));
     let copy = s
@@ -229,9 +230,7 @@ fn footer(s: &App, k: &Kit) -> El {
         .gap(8.0)
         .center_y();
     let enter = enter_does(s);
-    if let Some(copy) = copy {
-        bar = bar.child(copy_line(k, copy, false));
-    } else if let Some(notice) = &s.notice {
+    if let (None, Some(notice)) = (copy, &s.notice) {
         bar = bar.child(
             row()
                 .key(format!("notice:{notice}"))
@@ -245,21 +244,8 @@ fn footer(s: &App, k: &Kit) -> El {
                         .truncate(),
                 ),
         );
-    } else if !enter.is_empty() {
-        bar = bar.child(
-            row()
-                .key(format!("enter:{enter}"))
-                .gap(8.0)
-                .center_y()
-                .transition(Transition::blur_replace())
-                .child(Keybind::new(&["⏎"]).build(k))
-                .child(
-                    text(enter)
-                        .key("does")
-                        .font(k.ty.small)
-                        .color(k.c.text_base),
-                ),
-        );
+    } else if copy.is_some() || !enter.is_empty() {
+        bar = bar.child(copy_line(k, "footer-line", copy, enter, false));
     }
     bar = bar.child(spacer());
     if s.selected_item().is_some_and(has_username) {

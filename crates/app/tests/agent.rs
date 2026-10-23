@@ -193,7 +193,9 @@ fn until(rt: &mut Runtime<App>, what: &str, done: impl Fn(&App) -> bool) {
 }
 
 fn shows(rt: &Runtime<App>, s: &str) -> bool {
-    rt.elements().iter().any(|e| e.text.as_deref() == Some(s))
+    rt.elements()
+        .iter()
+        .any(|e| e.text.as_deref() == Some(s) || e.label.as_deref() == Some(s))
 }
 
 #[test]
@@ -283,7 +285,7 @@ fn unlock_search_copy_lock() {
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
     assert_eq!(board.lock().unwrap().as_deref(), Some("flyfly"));
-    assert!(shows(&rt, "Password copied"));
+    assert!(shows(&rt, "Copied, clears in 0:30"));
 
     // Shift+Enter copies the username in its place.
     rt.key(KeyEvent {
