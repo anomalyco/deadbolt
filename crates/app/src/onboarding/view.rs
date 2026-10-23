@@ -210,8 +210,8 @@ fn choice(k: &Kit, key: &str, glyph: &'static Icon, label: &str, sub: &str, flow
                 ),
         )
         .child(icon(&CHEVRON_RIGHT, 16.0).key("go").color(k.c.icon_muted));
-    for s in &k.elevation.raised {
-        card = card.box_shadow(*s);
+    for s in k.shadow_layers(&k.elevation.raised) {
+        card = card.box_shadow(s);
     }
     card
 }

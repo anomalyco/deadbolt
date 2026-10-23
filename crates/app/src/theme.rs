@@ -68,8 +68,9 @@ fn build(dark: bool) -> Kit {
         accent: c("accent"),
     });
     let p = &mut k.c;
-    // The site's surface ramp: derived layers mix in linear light and read far
-    // lighter on black.
+    // The site's surface ramp. Derived layers step OKLab lightness from the
+    // background, which on pure black barely leaves it (#000000-#070707); on
+    // paper they darken where the site's raised surfaces lighten.
     [p.surface_base, p.surface_weak] = [c("surface"); 2];
     [
         p.layer_01,
@@ -79,21 +80,19 @@ fn build(dark: bool) -> Kit {
     ] = [c("raised"); 4];
     [p.layer_02, p.surface_raised_hover] = [c("layer"); 2];
     [p.layer_03, p.layer_04] = [c("layer-strong"); 2];
-    // Hairlines, not opaque grey.
-    [
-        p.border_muted,
-        p.border_weak,
-        p.border_base,
-        p.std_border,
-        p.border_disabled,
-    ] = [c("border"); 5];
-    [p.border_strong, p.border_hover] = [c("border-strong"); 2];
-    // Focus is ink; red is kept for the countdown and danger.
+    // Hairlines everywhere: the opaque border steps vanish on black (#060606)
+    // and turn grey on paper.
+    [p.border_weak, p.std_border, p.border_disabled] = [p.border_base; 3];
+    p.border_hover = p.border_strong;
+    // Focus is ink, as on the site; a blue ring would be the only blue in a
+    // black, white and red app. Red is kept for the countdown and danger.
     [p.border_focus, p.border_active] = [c("focus"); 2];
+    // The site's warm inks on paper (derived: #403f3c and #6f6c68); on black
+    // they match the derived greys.
     [p.text_muted, p.text_weak, p.icon_muted, p.std_icon] = [c("text-muted"); 4];
     [p.text_faint, p.icon_faint, p.icon_weaker] = [c("text-faint"); 3];
-    [p.hover, p.surface_hover] = [c("hover"); 2];
-    p.pressed = c("pressed");
+    // Derived status tints mix towards black and disappear; these are the
+    // site's.
     p.danger = StateColors {
         bg: c("danger-bg"),
         fg: c("danger"),
@@ -109,7 +108,7 @@ fn build(dark: bool) -> Kit {
     // Flat surfaces: a hairline ring, and a drop only where something floats.
     let ring = Shadow {
         spread: 0.5,
-        color: c("border"),
+        color: k.c.border_base,
         ..Shadow::default()
     };
     let drop = |y: f32, blur: f32| Shadow {
@@ -154,6 +153,5 @@ fn build(dark: bool) -> Kit {
         lg: r("radius-lg"),
         xl: r("radius-lg"),
     };
-    k.blend_over = Some(c("bg"));
     k
 }
