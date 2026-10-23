@@ -6,7 +6,7 @@
 
 use std::sync::OnceLock;
 
-use rune::{Color, Shadow, TextStyle, Theme};
+use rune::{Color, Family, Shadow, TextStyle, Theme};
 use rune_kit::{Elevation, Kit, PaletteFocus, PaletteSeed, Radius, StateColors, Type};
 
 pub const THEME: &str = include_str!("../assets/theme.json");
@@ -19,15 +19,14 @@ pub const FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/Anton-Regular.ttf"),
 ];
 
-/// `AppSpec::families`. Rune styles name one of two families, so Plex Mono is
-/// the sans (everything) and Anton takes the mono slot for the wordmark. No
-/// style here uses `.mono()` except [`wordmark`].
-pub const FAMILIES: (&str, &str) = ("IBM Plex Mono", "Anton");
+/// `AppSpec::families`: Plex Mono in both slots. Anton is registered through
+/// [`FONTS`] and named by [`wordmark`].
+pub const FAMILIES: (&str, &str) = ("IBM Plex Mono", "IBM Plex Mono");
 
 /// The wordmark, in Anton, for the lock and onboarding screens only.
 pub fn wordmark(size: f32) -> TextStyle {
     TextStyle::new(size, 400.0)
-        .mono()
+        .family(Family::Named("Anton"))
         .lh(size)
         .tracking(size * 0.01)
 }
@@ -142,8 +141,7 @@ fn build(dark: bool) -> Kit {
         text_small_medium: mono(12.0, 500.0, 18.0),
         text_xsmall: mono(11.0, 400.0, 16.0),
         text_xsmall_medium: mono(11.0, 500.0, 16.0),
-        // Plex Mono through the sans slot: the mono slot is Anton's.
-        mono: mono(12.0, 400.0, 18.0),
+        mono: mono(12.0, 400.0, 18.0).mono(),
     };
     let r = |n: &str| t.num(n);
     k.radius = Radius {
