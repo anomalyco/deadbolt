@@ -1,8 +1,8 @@
 //! The quick panel, headless and offline: each state renders inside the card,
 //! it opens fresh and at rest, Escape and a copy both close it, its motion
 //! (rows filtering, the footer's copy line, the close fading) never pops, it
-//! shares one clipboard with the main window, and a process with only the
-//! panel leaves once nothing can bring it back.
+//! shares one clipboard with the main window, and its global shortcut brings
+//! it up from anywhere.
 
 #![cfg(test)]
 
@@ -282,8 +282,10 @@ fn it_has_no_settings_or_install_offer_and_keeps_its_keys() {
     let mut rt = runtime("empty", true);
     let mut installer = deadbolt_app::install::Installer::fixture();
     installer.show();
-    installer.settings_open = true;
-    rt.update(|s, _| s.installer = Some(installer));
+    rt.update(|s, _| {
+        s.installer = Some(installer);
+        s.settings_open = true;
+    });
     frames(&mut rt, 10);
     for text in ["Settings", "Install the deadbolt command", "Install…"] {
         assert!(!shows(&rt, text), "the panel shows {text:?}");
@@ -297,7 +299,7 @@ fn it_has_no_settings_or_install_offer_and_keeps_its_keys() {
     rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Closing { .. }), "Escape closes");
     let i = rt.state.installer.as_ref().unwrap();
-    assert!(i.open && i.settings_open, "no popover took the keys");
+    assert!(i.open && rt.state.settings_open, "no popover took the keys");
 }
 
 #[test]
@@ -936,19 +938,10 @@ fn runes_clear_just_before_the_end_still_says_cleared() {
     assert!(shows(&main, "Clipboard cleared"));
 }
 
+/// Started with `--panel` and the main window never opened, the hidden panel
+/// waits for its global shortcut: it clears its copy on time and keeps running.
 #[test]
-fn alone_it_leaves_once_hidden() {
-    let mut rt = runtime("empty", true);
-    alone(&mut rt);
-    frames(&mut rt, 2);
-    rt.key(key(Key::Escape));
-    frames(&mut rt, 30);
-    assert_eq!(phase(&rt), Phase::Hidden);
-    assert_eq!(rt.shell_request, Some(Shell::Quit));
-}
-
-#[test]
-fn alone_it_leaves_after_clearing_its_copy() {
+fn alone_it_waits_for_the_shortcut() {
     let mut rt = runtime("empty", true);
     let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
     alone(&mut rt);
@@ -956,24 +949,21 @@ fn alone_it_leaves_after_clearing_its_copy() {
     rt.key(key(Key::Enter));
     frames(&mut rt, 120);
     assert_eq!(phase(&rt), Phase::Hidden);
-    assert_eq!(rt.shell_request, None, "copy, then paste: it waits");
     assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
-    rt.frame(26.0);
-    assert_eq!(rt.shell_request, None);
-    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
-    rt.frame(2.5);
+    rt.frame(28.5);
     assert_eq!(board(&clip), None, "cleared on time");
-    assert_eq!(rt.shell_request, Some(Shell::Quit), "then it leaves");
-}
+    rt.frame(60.0);
+    assert_eq!(rt.shell_request, None, "it stays for the shortcut");
 
-#[test]
-fn with_the_main_window_around_it_stays() {
-    let mut rt = runtime("empty", true);
-    frames(&mut rt, 2);
-    rt.key(key(Key::Escape));
-    frames(&mut rt, 30);
-    assert_eq!(phase(&rt), Phase::Hidden);
-    assert_eq!(rt.shell_request, None);
+    rt.update(|s, tx| s.toggle_panel(tx));
+    rt.frame(FRAME);
+    assert_eq!(phase(&rt), Phase::Open, "the shortcut brings it back");
+    rt.update(|s, tx| s.toggle_panel(tx));
+    rt.frame(FRAME);
+    assert!(
+        matches!(phase(&rt), Phase::Closing { .. }),
+        "and sends it away"
+    );
 }
 
 /// A `--panel` start has no app menu, so the main window it opens quits on
@@ -991,9 +981,9 @@ fn command_q_quits_from_the_main_window() {
     let clip = share_clipboard([&mut main, &mut runtime("empty", true)]);
     let mut installer = deadbolt_app::install::Installer::fixture();
     installer.show();
-    installer.settings_open = true;
     main.update(|s, tx| {
         s.installer = Some(installer);
+        s.settings_open = true;
         s.copy_field("password", tx);
     });
     main.frame(FRAME);
@@ -1032,7 +1022,7 @@ fn closing_its_window_cleans_up_like_the_main_one() {
     rt.update(|s, tx| s.panel_closed(tx));
     assert!(rt.state.detail.is_none() && rt.state.items.is_empty());
     assert_eq!(board(&clip), None);
-    assert_eq!(rt.shell_request, Some(Shell::Quit), "alone, it leaves");
+    assert_eq!(rt.shell_request, None, "alone, the shortcut brings it back");
 }
 
 /// Hidden, the panel follows a lock but reads nothing: changes that would

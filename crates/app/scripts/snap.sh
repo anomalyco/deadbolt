@@ -21,6 +21,18 @@ done
 "$bin" --scene copied --at 2.4 --snap "$out/copied.png" "$@"
 "$bin" --scene copied --at 2.4 --theme light --snap "$out/copied-light.png" "$@"
 "$bin" --scene locked --theme light --snap "$out/locked-light.png" "$@"
+# The quick panel's shortcut, dark and light: Settings at rest, recording, a
+# conflict shown in place (another app holds ⌥⌘Space), changed (with a way
+# back to the default), and when it couldn't be registered: the vault's notice
+# and Settings with Try again.
+for theme in dark light; do
+  "$bin" --scene settings --theme "$theme" --snap "$out/settings-$theme.png" "$@"
+  "$bin" --scene settings --script scripts/settings-shortcut.json --at 1.2 --theme "$theme" --snap "$out/settings-recording-$theme.png" "$@"
+  "$bin" --scene settings --script scripts/settings-shortcut.json --theme "$theme" --snap "$out/settings-conflict-$theme.png" "$@"
+  "$bin" --scene settings-changed --theme "$theme" --snap "$out/settings-changed-$theme.png" "$@"
+  "$bin" --scene shortcut-conflict --theme "$theme" --snap "$out/shortcut-conflict-$theme.png" "$@"
+  "$bin" --scene settings-unavailable --theme "$theme" --snap "$out/settings-unavailable-$theme.png" "$@"
+done
 # The quick panel, dark and light: just opened, filtering, nothing found, an
 # empty vault, locked, a wrong passphrase, not set up, failed, and 0.6 s after
 # a copy (the footer shows the countdown).

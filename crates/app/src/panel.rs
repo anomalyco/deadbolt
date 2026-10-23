@@ -180,11 +180,7 @@ impl App {
                 }
                 tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
             }
-            Phase::Closing { until: Some(until) } if now >= *until - 1e-3 => {
-                self.hide_panel(tx);
-                window::leave_if_stranded(self, tx);
-            }
-            Phase::Hidden => return window::leave_if_stranded(self, tx),
+            Phase::Closing { until: Some(until) } if now >= *until - 1e-3 => self.hide_panel(tx),
             _ => return false,
         }
         true
@@ -197,9 +193,29 @@ impl App {
         }
     }
 
-    /// ⇧⌘Space: the main window brings the panel up; the panel closes.
+    /// Summoned (`App::summon`), then placed under the pointer and in front.
+    pub fn show_panel(&mut self, tx: &mut Tx) {
+        self.summon(tx);
+        if let Some(windows) = &self.windows {
+            windows.present_panel();
+        }
+    }
+
+    /// The global shortcut, registered on the panel's `App`: up if it's away,
+    /// away if it's up.
+    pub fn toggle_panel(&mut self, tx: &mut Tx) {
+        match self.panel_phase() {
+            Some(Phase::Open | Phase::Copied { .. }) => self.dismiss(tx),
+            Some(_) => self.show_panel(tx),
+            None => self.open_panel(),
+        }
+    }
+
+    /// ⇧⌘Space inside Deadbolt while it isn't registered globally
+    /// (`App::shortcut_fallback`): the main window brings the panel up; the
+    /// panel closes.
     pub(crate) fn panel_shortcut(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if !window::is_shortcut(ev) {
+        if !self.shortcut_fallback || !window::is_shortcut(ev) {
             return false;
         }
         match self.panel {
@@ -237,14 +253,12 @@ impl App {
     }
 
     /// The panel's window was closed (by the system; it has no close button):
-    /// the main window's cleanup, and the process leaves if nothing else can
-    /// bring the panel back.
+    /// the main window's cleanup. The shortcut brings it back.
     pub fn panel_closed(&mut self, tx: &mut Tx) {
         self.close(tx);
         if let Some(panel) = &mut self.panel {
             panel.phase = Phase::Hidden;
         }
-        window::leave_if_stranded(self, tx);
     }
 
     /// The device isn't set up: onboarding lives in the main window.
