@@ -2,12 +2,15 @@
 # Run on macOS. Local builds: hivemind run --kind cargo --fetch .lab-output -- bash crates/app/scripts/bundle.sh
 # CI can invoke this script directly. --universal requires both Rust Darwin targets.
 set -euo pipefail
-cd "$(dirname "$0")/../../.."
 [[ $(uname -s) == Darwin ]] || { echo 'Bundling requires macOS.' >&2; exit 1; }
 universal=false
 if [[ ${1:-} == --universal ]]; then universal=true; shift; fi
-out=${1:-.lab-output/Deadbolt.app}
-[[ ! -e "$out" ]] || { echo "Refusing to replace $out; choose a fresh output path." >&2; exit 1; }
+root=$(cd "$(dirname "$0")/../../.." && pwd)
+# A relative output path is relative to where the script was run from.
+out=${1:-$root/.lab-output/Deadbolt.app}
+[[ $out == /* ]] || out="$PWD/$out"
+[[ ! -e "$out" && ! -L "$out" ]] || { echo "Refusing to replace $out; choose a fresh output path." >&2; exit 1; }
+cd "$root"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 export MACOSX_DEPLOYMENT_TARGET=12.0
