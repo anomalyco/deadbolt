@@ -5,7 +5,7 @@
 //! is folded in afterwards and the mask's history is dropped.
 
 use rune::{Key, KeyEvent, TextEdit};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const DOT: char = '•';
 
@@ -14,11 +14,18 @@ pub struct SecretEdit {
     /// What the field shows and edits: one dot per character.
     pub mask: TextEdit,
     secret: Zeroizing<String>,
+    /// Counts changes to the passphrase.
+    edits: u64,
 }
 
 impl SecretEdit {
     pub fn secret(&self) -> &str {
         &self.secret
+    }
+
+    /// Goes up whenever the passphrase changes.
+    pub fn edits(&self) -> u64 {
+        self.edits
     }
 
     pub fn is_empty(&self) -> bool {
@@ -27,7 +34,7 @@ impl SecretEdit {
 
     /// Empties the field, keeping its focus.
     pub fn clear(&mut self) {
-        *self.secret = String::new();
+        self.secret.zeroize();
         self.set_mask(0);
     }
 
@@ -45,7 +52,7 @@ impl SecretEdit {
         let word = ev.mods.alt || ev.mods.cmd;
         match &ev.key {
             Key::Text(s) if !ev.mods.cmd && !ev.mods.ctrl => {
-                let s: String = s.chars().filter(|c| !c.is_control()).collect();
+                let s = printable(s.chars());
                 if !s.is_empty() {
                     self.splice(start, end, &s);
                 }
@@ -76,26 +83,26 @@ impl SecretEdit {
     }
 
     /// Folds in an edit the editor made itself: the characters that aren't
-    /// dots were just inserted and end at the caret.
+    /// dots were just inserted and end at the caret. Control characters (a
+    /// pasted line's trailing newline) are dropped, as when typing.
     pub fn reconcile(&mut self) {
-        let chars: Vec<char> = self.mask.text.chars().collect();
+        let chars: Zeroizing<Vec<char>> = Zeroizing::new(self.mask.text.chars().collect());
         let caret = char_index(&self.mask.text, self.mask.focus);
-        let inserted: String = {
-            let run = chars[..caret]
-                .iter()
-                .rev()
-                .take_while(|c| **c != DOT)
-                .count();
-            chars[caret - run..caret].iter().collect()
-        };
+        let run = chars[..caret]
+            .iter()
+            .rev()
+            .take_while(|c| **c != DOT)
+            .count();
+        let inserted = &chars[caret - run..caret];
         let old = self.secret.chars().count();
-        let kept = chars.len() - inserted.chars().count();
-        if inserted.is_empty() && kept == old {
+        let kept = chars.len() - run;
+        if run == 0 && kept == old {
             return;
         }
-        let start = caret - inserted.chars().count();
+        let start = caret - run;
         let removed = old.saturating_sub(kept);
-        self.splice(start, (start + removed).min(old), &inserted);
+        let with = printable(inserted.iter().copied());
+        self.splice(start, (start + removed).min(old), &with);
     }
 
     /// The selection in characters, ordered.
@@ -119,6 +126,7 @@ impl SecretEdit {
         next.push_str(with);
         next.push_str(&self.secret[to..]);
         self.secret = next;
+        self.edits += 1;
         self.set_mask(start + with.chars().count());
     }
 
@@ -130,6 +138,15 @@ impl SecretEdit {
         self.mask.anchor = caret * DOT.len_utf8();
         self.mask.focus = self.mask.anchor;
     }
+}
+
+/// `chars` without control characters, in a buffer sized up front so no
+/// partial copy is left behind by a reallocation.
+fn printable(chars: impl Iterator<Item = char> + Clone) -> Zeroizing<String> {
+    let len = chars.clone().map(char::len_utf8).sum();
+    let mut out = Zeroizing::new(String::with_capacity(len));
+    out.extend(chars.filter(|c| !c.is_control()));
+    out
 }
 
 /// The character index of byte offset `byte` in `text`.
@@ -206,6 +223,25 @@ mod tests {
         assert_eq!(field.secret(), "abcd");
         assert_eq!(field.mask.text, "••••");
         assert_eq!(field.mask.focus, 3 * DOT.len_utf8());
+    }
+
+    #[test]
+    fn pasted_line_breaks_and_controls_are_dropped() {
+        let mut field = typed("a");
+        field.mask.paste("b\tc\r\n");
+        field.reconcile();
+        assert_eq!(field.secret(), "abc");
+        assert_eq!(field.mask.text, "•••");
+    }
+
+    #[test]
+    fn edits_count_changes_only() {
+        let mut field = typed("ab");
+        let edits = field.edits();
+        field.key(&key(Key::Command('c')));
+        assert_eq!(field.edits(), edits);
+        field.key(&key(Key::Backspace));
+        assert!(field.edits() > edits);
     }
 
     #[test]

@@ -272,6 +272,17 @@ impl App {
         self.agent.send(Job::Unlock(self.passphrase.take()));
     }
 
+    /// A key in the passphrase field. Any change to the passphrase clears
+    /// the last unlock error.
+    pub fn passphrase_key(&mut self, ev: &KeyEvent) -> bool {
+        let edits = self.passphrase.edits();
+        let handled = self.passphrase.key(ev);
+        if self.passphrase.edits() != edits {
+            self.unlock_error = None;
+        }
+        handled
+    }
+
     pub fn lock(&mut self) {
         self.agent.send(Job::Lock);
     }

@@ -176,7 +176,7 @@ fn unlock(s: &App, k: &Kit) -> El {
         .invalid(s.unlock_error.is_some())
         .disabled(s.unlocking)
         .on_edit(|s: &mut App| &mut s.passphrase.mask)
-        .on_key(|s: &mut App, ev, _| s.passphrase.key(ev))
+        .on_key(|s: &mut App, ev, _| s.passphrase_key(ev))
         .on_change(|s: &mut App, _| {
             s.passphrase.reconcile();
             s.unlock_error = None;
