@@ -171,12 +171,14 @@ fn glyphs(rt: &Runtime<App>, label: &str) -> Vec<(String, [f32; 4], f32)> {
         .collect()
 }
 
-/// The glyphs of a rolling label that are at rest, in order.
+/// The glyphs of a rolling label that are at rest, in order: opaque, and
+/// centred on its line (the label's rect also holds the roll's fade).
 fn steady(rt: &Runtime<App>, label: &str) -> String {
-    let y = find(rt, label).expect("the label").0[1];
+    let rect = find(rt, label).expect("the label").0;
+    let middle = rect[1] + rect[3] / 2.0;
     glyphs(rt, label)
         .iter()
-        .filter(|g| g.2 >= 0.99 && (g.1[1] - y).abs() < 0.01)
+        .filter(|g| g.2 >= 0.99 && (g.1[1] + g.1[3] / 2.0 - middle).abs() < 0.01)
         .map(|g| g.0.as_str())
         .collect()
 }
