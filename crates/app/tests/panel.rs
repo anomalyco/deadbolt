@@ -430,9 +430,26 @@ fn escape_on_the_locked_panel_closes_it_and_forgets_the_passphrase() {
     assert_eq!(phase(&rt), Phase::Hidden);
 }
 
-/// Both unlock fields: ⌘V pastes (on one line), but nothing copies, cuts or
-/// undoes the passphrase out, a ⌃ chord types nothing, and closing leaves an
-/// empty secure field.
+/// The locked panel's passphrase field hands ⇧⌘Space to the panel, which
+/// closes and forgets what was typed.
+#[test]
+fn the_shortcut_closes_the_locked_panel_from_its_field() {
+    let mut rt = runtime("locked", true);
+    frames(&mut rt, 2);
+    assert!(rt.has_secure_focus());
+    for c in "hunt".chars() {
+        rt.key(key(Key::Text(c.into())));
+    }
+    rt.key(shortcut());
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Closing { .. }));
+    assert!(rt.state.passphrase.text.is_empty());
+    assert!(rt.state.passphrase.is_secure());
+}
+
+/// Both unlock fields: a paste (what ⌘V does) lands on one line, but nothing
+/// copies, cuts or undoes the passphrase out, ⌃ and ⇧⌘ chords type nothing,
+/// and closing leaves an empty secure field.
 #[test]
 fn the_passphrase_stays_in_its_field() {
     let main = || {
@@ -472,6 +489,11 @@ fn the_passphrase_stays_in_its_field() {
         }
         rt.key(with(Key::Text("k".into()), ctrl));
         rt.frame(FRAME);
+        assert_eq!(rt.state.passphrase.text, "hunter22");
+        if rt.state.panel.is_none() {
+            rt.key(shortcut());
+            rt.frame(FRAME);
+        }
         assert_eq!(rt.state.passphrase.text, "hunter22");
         assert!(rt.copy_request.is_none(), "nothing reaches the clipboard");
         assert!(

@@ -5,13 +5,12 @@ use std::time::Duration;
 
 use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status};
 use rune::{Key, KeyEvent, TextEdit, Tx};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::agent::{Agent, Done, Failure, Job};
 use crate::clipboard::{Clipboard, Copied};
 use crate::onboarding::Onboarding;
 use crate::onboarding::worker::Worker;
-use crate::secret;
 
 /// How long a copied secret stays on the clipboard, by default.
 pub const CLEAR_AFTER: f64 = 30.0;
@@ -101,7 +100,7 @@ impl App {
             clear_after: CLEAR_AFTER,
             screen: Screen::Connecting,
             status: None,
-            passphrase: secret::field(),
+            passphrase: TextEdit::new("").secure(),
             onboarding: Onboarding::new(Worker::offline()),
             unlocking: false,
             unlock_error: None,
@@ -442,17 +441,11 @@ impl App {
         self.unlocking = true;
         self.unlock_error = None;
         self.agent
-            .send(Job::Unlock(secret::take(&mut self.passphrase)));
+            .send(Job::Unlock(take_secret(&mut self.passphrase)));
     }
 
-    /// A key in the passphrase field, before the editor sees it.
-    pub fn passphrase_key(&mut self, ev: &KeyEvent) -> bool {
-        secret::chord(ev)
-    }
-
-    /// The passphrase changed: tidy it and clear the last unlock error.
+    /// The passphrase changed: clear the last unlock error.
     pub fn passphrase_changed(&mut self) {
-        secret::tidy(&mut self.passphrase);
         self.unlock_error = None;
     }
 
@@ -781,6 +774,14 @@ pub fn title_case(name: &str) -> String {
     }
 }
 
+/// Takes a passphrase out of its secure field, leaving the field empty and
+/// still focused. The text moves into the `Zeroizing`, never copied.
+pub fn take_secret(field: &mut TextEdit) -> Zeroizing<String> {
+    let secret = Zeroizing::new(std::mem::take(&mut field.text));
+    field.clear();
+    secret
+}
+
 /// Is this field type secret (masked until revealed)?
 pub fn is_secret(kind: &str) -> bool {
     matches!(kind, "secret" | "otp")
@@ -791,8 +792,18 @@ mod tests {
     use deadbolt_client::protocol::Change;
     use rune::{Env, Runtime};
 
-    use super::{App, Screen};
+    use super::{App, Screen, take_secret};
     use crate::agent::{Done, Values};
+
+    #[test]
+    fn take_secret_empties_the_field() {
+        let mut f = rune::TextEdit::new("").secure();
+        f.paste("hunter22");
+        f.focused = true;
+        assert_eq!(take_secret(&mut f).as_str(), "hunter22");
+        assert_eq!((f.text.as_str(), f.focus, f.anchor), ("", 0, 0));
+        assert!(f.focused && f.is_secure());
+    }
 
     fn vault() -> Runtime<App> {
         main("vault")

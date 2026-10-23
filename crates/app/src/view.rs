@@ -174,9 +174,7 @@ pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
         .invalid(s.unlock_error.is_some())
         .disabled(s.unlocking)
         .on_edit(|s: &mut App| &mut s.passphrase)
-        .on_key(|s: &mut App, ev, tx| {
-            s.panel_shortcut(ev, tx) || s.panel_escape(ev, tx) || s.passphrase_key(ev)
-        })
+        .on_key(|s: &mut App, ev, tx| s.panel_shortcut(ev, tx) || s.panel_escape(ev, tx))
         .on_change(|s: &mut App, _| s.passphrase_changed())
         .on_submit(|s: &mut App, _| s.submit_unlock())
         .build(k)

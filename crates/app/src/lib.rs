@@ -8,7 +8,6 @@ pub mod install;
 pub mod model;
 pub mod onboarding;
 pub mod panel;
-pub mod secret;
 pub mod theme;
 pub mod view;
 

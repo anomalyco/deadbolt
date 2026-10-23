@@ -19,7 +19,6 @@ use zeroize::Zeroizing;
 use crate::agent::{Failure, Job};
 use crate::clipboard::Copied;
 use crate::model::{App, Screen};
-use crate::secret;
 use worker::{NewDevice, Progress, Stage, Worker};
 
 /// Shortest passphrase the form accepts.
@@ -153,8 +152,8 @@ impl Onboarding {
             stage: None,
             device: TextEdit::new(""),
             vault: TextEdit::new("personal"),
-            passphrase: secret::field(),
-            repeat: secret::field(),
+            passphrase: TextEdit::new("").secure(),
+            repeat: TextEdit::new("").secure(),
             device_ready: false,
             attempted: false,
             notice: None,
@@ -270,7 +269,7 @@ impl Onboarding {
     fn new_device(&mut self) -> Option<NewDevice> {
         self.needs_device().then(|| NewDevice {
             name: self.device_name().to_owned(),
-            passphrase: secret::take(&mut self.passphrase),
+            passphrase: crate::model::take_secret(&mut self.passphrase),
         })
     }
 

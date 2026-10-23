@@ -19,7 +19,6 @@ use rune_kit::{
 use super::worker::Stage;
 use super::{Flow, Notice, Severity, Step, Strength};
 use crate::model::App;
-use crate::secret;
 use crate::theme;
 
 pub(crate) const PANEL_W: f32 = 400.0;
@@ -439,8 +438,7 @@ fn passphrase_field(s: &App, k: &Kit, flow: Flow) -> El {
         .width(None)
         .invalid(o.attempted && short)
         .on_edit(|s: &mut App| &mut s.onboarding.passphrase)
-        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || secret::chord(ev))
-        .on_change(|s: &mut App, _| secret::tidy(&mut s.onboarding.passphrase))
+        .on_key(super::key)
         .on_submit(move |s: &mut App, tx| {
             if s.onboarding.repeat_matches() == Some(true) {
                 submit_for(flow)(s, tx);
@@ -516,8 +514,7 @@ fn repeat_field(s: &App, k: &Kit, flow: Flow) -> El {
         .width(None)
         .invalid(matches == Some(false))
         .on_edit(|s: &mut App| &mut s.onboarding.repeat)
-        .on_key(|s: &mut App, ev, tx| super::key(s, ev, tx) || secret::chord(ev))
-        .on_change(|s: &mut App, _| secret::tidy(&mut s.onboarding.repeat))
+        .on_key(super::key)
         .on_submit(move |s: &mut App, tx| submit_for(flow)(s, tx))
         .build(k)
         .key("repeat-input");
