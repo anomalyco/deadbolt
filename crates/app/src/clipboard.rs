@@ -13,7 +13,9 @@ pub struct Clipboard {
 }
 
 enum Backend {
-    System,
+    /// Opened on first use and kept open: on X11 the process serves the
+    /// selection, and closing the last handle takes the copy with it.
+    System(Option<arboard::Clipboard>),
     Memory(Arc<Mutex<Option<String>>>),
 }
 
@@ -26,7 +28,7 @@ impl Clipboard {
     pub fn system() -> Clipboard {
         Clipboard {
             keys: RandomState::new(),
-            backend: Backend::System,
+            backend: Backend::System(None),
         }
     }
 
@@ -42,10 +44,10 @@ impl Clipboard {
         )
     }
 
-    pub fn copy(&self, text: &str) -> Result<Copied, String> {
-        match &self.backend {
-            Backend::System => {
-                let mut clipboard = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+    pub fn copy(&mut self, text: &str) -> Result<Copied, String> {
+        match &mut self.backend {
+            Backend::System(open) => {
+                let clipboard = system(open)?;
                 let set = clipboard.set();
                 #[cfg(target_os = "macos")]
                 let set = arboard::SetExtApple::exclude_from_history(set);
@@ -63,11 +65,12 @@ impl Clipboard {
     }
 
     /// Clears the clipboard if it still holds `copied`. True when it did.
-    pub fn clear(&self, copied: Copied) -> bool {
-        let ours = |text: &str| Copied(self.keys.hash_one(text)) == copied;
-        match &self.backend {
-            Backend::System => {
-                let Ok(mut clipboard) = arboard::Clipboard::new() else {
+    pub fn clear(&mut self, copied: Copied) -> bool {
+        let keys = &self.keys;
+        let ours = |text: &str| Copied(keys.hash_one(text)) == copied;
+        match &mut self.backend {
+            Backend::System(open) => {
+                let Ok(clipboard) = system(open) else {
                     return false;
                 };
                 clipboard.get_text().is_ok_and(|text| ours(&text)) && clipboard.clear().is_ok()
@@ -82,4 +85,11 @@ impl Clipboard {
             }
         }
     }
+}
+
+fn system(open: &mut Option<arboard::Clipboard>) -> Result<&mut arboard::Clipboard, String> {
+    if open.is_none() {
+        *open = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
+    }
+    open.as_mut().ok_or_else(|| "no clipboard".to_owned())
 }
