@@ -517,7 +517,26 @@ fn reduced_motion_fades_the_label_in_place() {
     assert_eq!(footer(&rt), COPIED);
 }
 
-/// While hidden, the panel's countdown wakes once, at its end, not every 100 ms.
+/// The vault's countdown: the bar empties on the render clock, and the app
+/// wakes once a second, for the label.
+#[test]
+fn the_countdown_wakes_once_a_second() {
+    let mut rt = main_window();
+    rt.update(|s, tx| s.copy_field("password", tx));
+    rt.frame(FRAME);
+    let bar = |rt: &Runtime<App>| find(rt, "bar").expect("the bar").0[2];
+    let full = bar(&rt);
+    let next = rt.wake_deadline().unwrap() - rt.state.clock;
+    assert!(
+        next > 0.9 && next < 1.01,
+        "the next look is at 0:29 ({next} s)"
+    );
+    rt.frame(0.5);
+    assert!(bar(&rt) < full - 2.0, "the bar empties between wakes");
+}
+
+/// Once hidden, the panel's countdown wakes only at its end, not each second
+/// (past the one look that was already due when it hid).
 #[test]
 fn a_hidden_panel_wakes_once_for_its_countdown() {
     let mut rt = runtime("empty", true);
@@ -526,6 +545,7 @@ fn a_hidden_panel_wakes_once_for_its_countdown() {
     frames(&mut rt, 120);
     assert_eq!(phase(&rt), Phase::Hidden);
     assert!(rt.state.copy_pending());
+    rt.frame(1.0);
     let next = rt.wake_deadline().unwrap() - rt.state.clock;
     assert!(
         next > 25.0,

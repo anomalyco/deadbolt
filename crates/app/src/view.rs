@@ -10,8 +10,8 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
-    Cursor, Cx, El, Icon, KeyEvent, ScrollSpec, Spring, TextStyle, Transition, Tx, col, el, icon,
-    row, spacer, text, text_input,
+    Cursor, Cx, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon, row,
+    spacer, text, text_input,
 };
 use rune_kit::{
     Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, TextInput,
@@ -550,7 +550,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
         pill = pill.box_shadow(shadow);
     }
     pill = pill.child(copy_line(k, copy, true));
-    // The bar's width follows a `Live` value the countdown sets, so ticking doesn't rebuild the view.
+    // The bar empties on a linear `Tween`, so the countdown never rebuilds the view for it.
     pill = pill.child(
         el().key("track")
             .w(BAR_W)
@@ -563,7 +563,7 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
                     .h(2.0)
                     .radius(1.0)
                     .fill(k.c.text_accent)
-                    .live_rect(s.bar.smooth(Spring::new(0.12, 0.0))),
+                    .live_rect(&copy.bar),
             ),
     );
     Some(pill)

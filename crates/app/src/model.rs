@@ -17,8 +17,6 @@ use crate::secret;
 pub const CLEAR_AFTER: f64 = 30.0;
 /// How long "Clipboard cleared" stays before the notice leaves.
 const CLEARED_NOTICE: f64 = 1.6;
-/// Countdown bar updates while a copy is on the clipboard (the bar smooths between them).
-const TICK: Duration = Duration::from_millis(100);
 /// The countdown bar's full width, in points.
 pub const BAR_W: f32 = 272.0;
 
@@ -47,6 +45,8 @@ pub struct Copy {
     pub cleared_at: Option<f64>,
     /// The whole seconds the notice shows.
     pub shown: u32,
+    /// The countdown bar's rect, emptying linearly on the render clock.
+    pub bar: rune::Tween<[f32; 4]>,
     pub error: Option<String>,
 }
 
@@ -84,8 +84,6 @@ pub struct App {
     pub windows: Option<crate::panel::window::Windows>,
     /// Seconds on Rune's clock (virtual when headless).
     pub clock: f64,
-    /// The countdown bar's presented rect, set on each tick without rebuilding the view.
-    pub bar: rune::Live<[f32; 4]>,
     /// Bumped whenever what was read from the store is forgotten: a list
     /// fetched in an older generation is dropped.
     generation: u64,
@@ -120,7 +118,6 @@ impl App {
             panel: None,
             windows: None,
             clock: 0.0,
-            bar: rune::Live::new([0.0, 0.0, BAR_W, 2.0]),
             generation: 0,
             seq: 0,
             pending_copy: None,
@@ -599,32 +596,38 @@ impl App {
             lasts: self.clear_after,
             cleared_at: error.as_ref().map(|_| self.clock),
             shown: self.clear_after.ceil() as u32,
+            bar: rune::Tween::linear(
+                [0.0, 0.0, BAR_W, 2.0],
+                [0.0, 0.0, 0.0, 2.0],
+                Duration::from_secs_f64(self.clear_after),
+            ),
             copied,
             error,
         });
-        self.bar.set([0.0, 0.0, BAR_W, 2.0]);
         if copied_ok {
             self.panel_copied(tx);
         }
         tx.wake_after(self.next_tick(self.clear_after));
     }
 
-    /// When the countdown next needs a look: every `TICK` while it shows, else
-    /// at its end (the quick panel's copy, once the panel has moved on).
+    /// When the countdown next needs a look: as its whole seconds change while
+    /// it shows, else at its end (the quick panel's copy, once the panel has
+    /// moved on). The bar needs no wakes.
     fn next_tick(&self, remaining: f64) -> Duration {
         let shows = self
             .panel
             .as_ref()
             .is_none_or(|p| matches!(p.phase, crate::panel::Phase::Copied { .. }));
-        if shows {
-            TICK
+        let next_second = remaining - (remaining.ceil() - 1.0) + 1e-3;
+        Duration::from_secs_f64(if shows {
+            next_second.min(remaining)
         } else {
-            Duration::from_secs_f64(remaining)
-        }
+            remaining
+        })
     }
 
     /// Advances the countdown; clears the clipboard when it runs out. True
-    /// when the notice's text changes; the bar moves through `bar` alone.
+    /// when the notice's text changes; the bar moves on its own.
     fn tick_copy(&mut self, now: f64, tx: &mut Tx) -> bool {
         let Some(copy) = &mut self.copy else {
             return false;
@@ -643,8 +646,6 @@ impl App {
             return true;
         }
         let remaining = copy.remaining(now);
-        self.bar
-            .set([0.0, 0.0, BAR_W * (remaining / copy.lasts) as f32, 2.0]);
         if remaining <= 0.0 {
             if let Some(c) = copy.copied.take() {
                 self.clipboard.clear(c);
