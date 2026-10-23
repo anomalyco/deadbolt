@@ -6,11 +6,12 @@
 
 - **A thin client of the agent.** The app speaks the agent's socket protocol, as the CLI does, and starts the agent if none runs. It holds no keys and reads no store files: unlock, items, devices and pairing are all agent requests. Quitting the app leaves the agent (and its unlock) running.
 - **`crates/client` (`deadbolt-client`)** holds what both clients need: the protocol types, where the files live (`Paths`) and the client (`call`, `status`, `ensure_running`, `stop`). The CLI wraps it in `crates/cli/src/client.rs` and behaves as before. `Launch { program, version }` says which binary runs the agent: the CLI passes itself and its build (so an agent of another build is replaced), the app passes `deadbolt` and no version (any agent speaking the protocol will do).
-- **`app/` (`deadbolt-app`)** is its own Cargo workspace, outside `crates/*`. Rune is a git dependency pinned to a rev; keeping it out of the main workspace means the CLI's `--locked` release builds, `cargo test --workspace` and cargo-deny (which denies git sources) never see it. To bump Rune, change the `rev` in `app/Cargo.toml`.
+- **`crates/app` (`deadbolt-app`)** is a workspace member. Rune and rune-kit are git dependencies pinned to one rev (`3e5a158`), bumped deliberately by changing both `rev`s in `crates/app/Cargo.toml`. `deny.toml` allows that one git source, BSL-1.0 (arboard's Windows backend) and the unmaintained ttf-parser under winit; CI installs `libwayland-dev` on Linux.
 - **Finding the agent binary:** `DEADBOLT_BIN`, else `deadbolt` next to the app's executable (the bundle will ship it there), else `/opt/homebrew/bin`, `/usr/local/bin`, `~/.local/bin`, else `PATH`. Apps opened from the Finder get a minimal `PATH`, hence the fixed places.
 - **Threads:** one worker thread runs agent requests in order on a current-thread Tokio runtime and wakes the window when a reply lands. The UI drains replies in Rune's `poll`; nothing polls the socket. A status request every 10 s while unlocked notices a lock from the CLI or the idle timeout (`status` doesn't reset the idle timer).
 - **Secrets in the app:** the passphrase field edits a mask of dots; the passphrase lives in a `Zeroizing<String>` and copy, cut and undo do nothing. Item values are fetched one item at a time (`item-get`) and wiped when the selection changes or the store locks. Copies are written with clipboard history exclusion (`org.nspasteboard.ConcealedType` on macOS) and cleared after 30 s, or on lock and quit, only if the clipboard still holds them.
-- **CI later:** add a job that runs `cd app && cargo fmt --check && cargo clippy --all-targets --locked -- -D warnings && cargo test --locked` on macOS and Linux (Linux needs Rune's Wayland/X11 dev packages). Its test builds the CLI and drives the app against a real agent in a temp home.
+- **Keys:** the search field and the passphrase field handle their own keys (`on_input_key`) and get focus by rendering with `focused: true`; the window's `on_key` handles only ⌘L. This keeps working when Rune sends keys to the focused element before the window.
+- **Look:** Deadbolt's own theme (`crates/app/assets/theme.json`): the site's black, white and red, paper `#e8e4dc` for light, IBM Plex Mono for everything, small radii, flat surfaces with hairline rings. `src/theme.rs` maps it onto rune-kit's tokens.
 
 ## Screens
 
@@ -55,7 +56,7 @@ Rune's runtime already enforces no first-paint animation, reduced motion (travel
 | ↑↓ selection, the selected item's fields | user's hand | instant |
 | Copy icon → check | user | in-place replacement `.3/0` |
 | Copy notice | user | rises 12 pt with a fade `.3/0`; text swaps by replacement; leaves the way it came, shorter |
-| Countdown | time | digits in fixed-width cells; the bar steps every 50 ms on `.1/0` (see Rune gaps) |
+| Countdown | time | the bar's width is a `rune::Live` set every 100 ms and smoothed on `.12/0`, so it empties without rebuilding the view; the text rebuilds once a second. Plex Mono's digits are all one width, so nothing shakes |
 | Unlock error | agent | fades in |
 | Hover | pointer | in 0 ms, out on Rune's snap |
 
@@ -77,14 +78,18 @@ The main flows, as states (see the PR for the chat version):
 4. **Bundling:** ship `deadbolt` inside `Deadbolt.app` (and start the agent from there), or require the CLI install?
 5. **Window model:** a normal window now. A menu-bar / quick-access panel (global shortcut, search, ↵ copies, dismiss) may fit "open it every day" better.
 6. **Live updates:** items synced from another device appear on the next list load. Add a `watch` command to the protocol that streams lock and item changes?
-7. **Look:** the OpenCode theme for now. Deadbolt's own palette (the site's) later?
+7. **Look:** the site's palette and Plex Mono now. Anton for the wordmark on the lock screen?
 
 ## Rune gaps (for the Rune team)
 
-- **Secure text entry.** `TextEdit`/`text_input` have no password mode: the text is shown and kept in an undo history (`edit.rs` `History`), Cmd+C/X copy it, and IME preedit shows composed text in clear. Wanted: `text_input(..).secure()` that draws dots, keeps no history, refuses copy/cut, disables IME (macOS `EnableSecureEventInput` while focused) and zeroizes on drop. The app works around it in `app/src/secret.rs`.
+- **Secure text entry.** `TextEdit`/`text_input` have no password mode: the text is shown and kept in an undo history (`edit.rs` `History`), Cmd+C/X copy it, and IME preedit shows composed text in clear. Wanted: `text_input(..).secure()` that draws dots, keeps no history, refuses copy/cut, disables IME (macOS `EnableSecureEventInput` while focused) and zeroizes on drop. The app works around it in `crates/app/src/secret.rs`.
 - **Secret clipboard writes.** `Tx::copy` can't mark a copy concealed or clear it later. Wanted: `Tx::copy_secret(text, clear_after)` that excludes it from clipboard history and clears it only if unchanged. The app uses `arboard` directly.
-- **Tabular figures.** `TextStyle` has no font features (`tnum`). The countdown lays digits out in fixed-width cells instead.
-- **Linear tracks.** Every layout property animates on a spring, so a bar that empties linearly over 30 s needs the app to step it (20 commits a second). Wanted: a tween/linear track for a property, run by the render thread.
+- **Tabular figures.** `TextStyle` has no font features (`tnum`). Not a problem with Plex Mono, but any proportional font needs digit cells laid out by hand.
+- **Linear tracks.** `Live` plus `wake_after` drives the countdown bar without rebuilding, but the app still sets it 10 times a second. A linear tween run by the render thread ("go from 272 to 0 over 30 s") would need no app ticks.
+- **Nested `clip_fade` washes out text.** A descendant takes the max fade width per side from its ancestors but applies it to its own, smaller clip rect (`runtime.rs` ~2361). A row label with a right-edge fade inside a list with 12/16 pt top/bottom fades gets those fades over its own 20 pt line, so the whole label goes faint and soft. The list has no soft edges for now.
+- **Symbol fallback.** Fallback fonts are registered only for CJK scripts, so ⌘ ⇧ ↵ in a font without them (Plex Mono) draw as tofu, including in `rune_kit::Keybind`. The app draws its own keycaps with SVG icons.
+- **Theme to kit.** No helper builds a `rune_kit::Kit` from theme data; the app mutates `Kit::neutral` field by field (about 60 tokens). The glyph set also has no lock or eye; the app hand-writes those SVGs.
+- **`AppSpec::default()`** doesn't exist at this rev, so `spec()` lists every field; it moves to `..AppSpec::default()` when that lands.
 - **Rolling labels.** No roll primitive for "Copy" → "Copied" or changing digits (`@kitlangton/rolling-number`); the app swaps icons by replacement.
 - **Ellipsis by default.** `truncate()` ends in "…"; the app wraps lines in `clip_fade` rows to get the fade the UI guide prefers.
 - **`rune_kit::TextInput` can't animate dependent layout** (`animate_edit_layout`), so the search field is built from `text_input` directly.
@@ -94,11 +99,10 @@ The main flows, as states (see the PR for the chat version):
 ## Run, test, snapshot
 
 ```sh
-cd app
-cargo run --release                     # against your agent (starts it if needed)
-cargo test                              # unit tests and the real-agent test (builds the CLI)
-scripts/snap.sh                         # headless PNGs of every scene into app/snaps/
-cargo run -- --scene copied --at 2.4 --snap copied.png   # one scene; --theme light, --reduced-motion
+cargo run --release -p deadbolt-app     # against your agent (starts it if needed)
+cargo test -p deadbolt-app              # unit tests and the real-agent test (builds the CLI, or set DEADBOLT_BIN)
+crates/app/scripts/snap.sh              # headless PNGs of every scene into crates/app/snaps/
+cargo run -p deadbolt-app -- --scene copied --at 2.4 --snap copied.png   # one scene; --theme light, --reduced-motion
 ```
 
 Scenes (`--scene`): `connecting`, `setup`, `failed`, `locked`, `locked-error`, `vault`, `search`, `copied`, `revealed`, `empty`. They use synthetic data and an in-memory clipboard; they never touch the agent.
