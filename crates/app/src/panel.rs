@@ -313,7 +313,10 @@ impl App {
 
 impl App {
     /// The main window closed: wipe it and quit, through the panel when
-    /// there is one, so the panel clears its own copy first.
+    /// there is one, so the panel clears its own copy first. macOS Quit (the
+    /// menu, ⌘Q, the Dock, logout) runs this too, as the app is already
+    /// ending: the panel's queued quit never runs, and its own `on_close`
+    /// wipes it instead.
     pub fn quit(&mut self, tx: &mut Tx) {
         self.close(tx);
         match &self.windows {

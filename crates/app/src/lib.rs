@@ -329,14 +329,15 @@ const SCENES: &[Scene] = &[
         s.selected = None;
         s.detail = None;
     }),
-    // Another app holds ⌥⌘Space: recording it shows the conflict in place
-    // (scripts/settings-shortcut.json).
+    // macOS's Finder search holds ⌥⌘Space: recording it shows the conflict
+    // in place (scripts/settings-shortcut.json).
     ("settings", |s| {
         vault(s);
         let mut i = install::Installer::fixture();
         i.offered = true;
         s.installer = Some(i);
-        s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), vec![other_shortcut()]);
+        s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), vec![other_shortcut()])
+            .taken_by("Finder search");
         s.start_shortcut(false);
         s.settings_open = true;
     }),

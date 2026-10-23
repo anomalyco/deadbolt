@@ -59,9 +59,12 @@ pub fn register(
 enum Target {
     /// The panel's `App`, when the app runs both windows.
     Panel(AppHandle<App>),
-    /// Tests and tooling runs: every chord registers except these, as if
-    /// another app held them.
-    Virtual(Vec<Shortcut>),
+    /// Tests and tooling runs: every chord registers except `taken`, as if
+    /// another app held them, named `owner` when the desktop would say.
+    Virtual {
+        taken: Vec<Shortcut>,
+        owner: Option<String>,
+    },
 }
 
 /// The main window's part: the chosen shortcut and whether it's registered.
@@ -78,10 +81,9 @@ pub struct Hotkey {
     pub recorder: ShortcutRecorderState,
     /// Why "Reset" couldn't take the default back.
     pub reset_error: Option<ShortcutError>,
-    /// The chord the recorder last proposed that couldn't be registered.
-    // Rune gap (recorder wording): waits on `ShortcutRecorder::error_message`,
-    // which keeps the refused chord itself; then delete.
-    pub refused: Option<Shortcut>,
+    /// Who holds the chords that were taken when they tried to register, when
+    /// the desktop says (Spotlight, another Rune app, "macOS").
+    holders: Vec<(Shortcut, String)>,
     target: Target,
     file: Option<PathBuf>,
 }
@@ -103,8 +105,8 @@ impl Hotkey {
             error: None,
             dismissed: false,
             reset_error: None,
-            refused: None,
-            target: Target::Virtual(taken),
+            holders: Vec::new(),
+            target: Target::Virtual { taken, owner: None },
             file: None,
         }
     }
@@ -126,10 +128,19 @@ impl Hotkey {
         }
     }
 
+    /// For tests and tooling runs: the taken chords are `owner`'s, as when
+    /// macOS names a system shortcut.
+    pub fn taken_by(mut self, name: &str) -> Hotkey {
+        if let Target::Virtual { owner, .. } = &mut self.target {
+            *owner = Some(name.to_owned());
+        }
+        self
+    }
+
     /// Tests: what other apps hold now, as when one lets go.
-    pub fn set_taken(&mut self, taken: Vec<Shortcut>) {
-        if let Target::Virtual(held) = &mut self.target {
-            *held = taken;
+    pub fn set_taken(&mut self, now: Vec<Shortcut>) {
+        if let Target::Virtual { taken, .. } = &mut self.target {
+            *taken = now;
         }
     }
 
@@ -137,11 +148,33 @@ impl Hotkey {
         self.registration.is_some()
     }
 
-    fn register(&self, shortcut: &Shortcut) -> Result<Registration, ShortcutError> {
-        match &self.target {
+    /// Who holds `shortcut`, if it was taken when it last tried to register
+    /// and the desktop said.
+    pub fn holder(&self, shortcut: &Shortcut) -> Option<&str> {
+        holder(&self.holders, Some(shortcut))
+    }
+
+    fn register(&mut self, shortcut: &Shortcut) -> Result<Registration, ShortcutError> {
+        let result = match &self.target {
             Target::Panel(panel) => register(panel, shortcut),
-            Target::Virtual(taken) if taken.contains(shortcut) => Err(ShortcutError::Conflict),
-            Target::Virtual(_) => Ok(Registration(None)),
+            Target::Virtual { taken, .. } if taken.contains(shortcut) => {
+                Err(ShortcutError::Conflict)
+            }
+            Target::Virtual { .. } => Ok(Registration(None)),
+        };
+        self.holders.retain(|(held, _)| held != shortcut);
+        if let Err(ShortcutError::Conflict) = result
+            && let Some(owner) = self.owner(shortcut)
+        {
+            self.holders.push((shortcut.clone(), owner));
+        }
+        result
+    }
+
+    fn owner(&self, shortcut: &Shortcut) -> Option<String> {
+        match &self.target {
+            Target::Panel(panel) => panel.shortcut_owner(shortcut),
+            Target::Virtual { owner, .. } => owner.clone(),
         }
     }
 
@@ -179,13 +212,11 @@ impl Hotkey {
                 false => Err(ShortcutError::InvalidAccelerator(next.to_string())),
                 true => self.register(next),
             })
-            .transpose()
-            .inspect_err(|_| self.refused = next.cloned())?;
+            .transpose()?;
         self.registration = registration;
         self.shortcut = next.cloned();
         self.error = None;
         self.reset_error = None;
-        self.refused = None;
         self.save();
         Ok(())
     }
@@ -292,14 +323,24 @@ pub fn load(file: &Path) -> Option<Shortcut> {
     }
 }
 
-/// Why the recorder's chord wasn't taken, under the recorder.
-// Rune gap (recorder wording): waits on `ShortcutRecorder::error_message`; then
-// this becomes that closure.
-fn refusal(error: &ShortcutError, chord: Option<&Shortcut>) -> String {
+fn holder<'a>(holders: &'a [(Shortcut, String)], chord: Option<&Shortcut>) -> Option<&'a str> {
+    holders
+        .iter()
+        .find(|(held, _)| Some(held) == chord)
+        .map(|(_, owner)| owner.as_str())
+}
+
+/// Why a chord wasn't taken, under the recorder: `holders` name who has it.
+fn refusal(
+    error: &ShortcutError,
+    chord: Option<&Shortcut>,
+    holders: &[(Shortcut, String)],
+) -> String {
     match (error, chord) {
-        (ShortcutError::Conflict, Some(chord)) => {
-            format!("{} is in use by another app.", name(chord))
-        }
+        (ShortcutError::Conflict, Some(chord)) => match holder(holders, Some(chord)) {
+            Some(owner) => format!("{} is in use by {owner}.", name(chord)),
+            None => format!("{} is in use by another app.", name(chord)),
+        },
         (ShortcutError::Conflict, None) => "That shortcut is in use by another app.".to_owned(),
         (ShortcutError::InvalidAccelerator(_), Some(chord)) if !allowed(chord) => {
             if cfg!(target_os = "macos") {
@@ -383,11 +424,10 @@ pub fn notice(s: &App, k: &Kit) -> Option<El> {
         .filter(|_| !h.dismissed && s.screen == Screen::Vault)?;
     let shortcut = h.shortcut.as_ref()?;
     let why = match error {
-        // Rune gap (conflict owner): waits on `AppHandle::shortcut_owner`; then
-        // name the app here.
-        ShortcutError::Conflict => {
-            "Another app is using it, so the quick panel can't open from anywhere.".to_owned()
-        }
+        ShortcutError::Conflict => format!(
+            "{} is using it, so the quick panel can't open from anywhere.",
+            h.holder(shortcut).unwrap_or("Another app")
+        ),
         ShortcutError::Unsupported => "This desktop doesn't support global shortcuts.".to_owned(),
         ShortcutError::PermissionDenied => "Permission to use it was declined.".to_owned(),
         other => format!("It couldn't be registered: {other}."),
@@ -449,22 +489,14 @@ pub fn notice(s: &App, k: &Kit) -> Option<El> {
     )
 }
 
-/// Settings' shortcut: the recorder, which shows a conflict under itself and
-/// keeps the old shortcut, a way to try an unregistered one again, and a way
+/// Settings' shortcut: the recorder, which keeps showing a refused chord with
+/// why under it (`refusal`) and keeps the old shortcut, a way to try an unregistered one again, and a way
 /// back to the default.
 pub fn setting(s: &App, k: &Kit) -> El {
     let h = &s.hotkey;
     let default = default();
     let recording = h.recorder.is_recording();
-    // Rune gap (recorder wording): the recorder words its own error and drops
-    // the refused chord, so it's drawn without the error (and its red outline)
-    // and ours goes under it. Waits on `ShortcutRecorder::error_message`; then
-    // pass `refusal` to it and drop `shown` and the line below.
-    let error = h.recorder.error().cloned();
-    let mut shown = h.recorder.clone();
-    if error.is_some() {
-        shown.begin();
-    }
+    let holders = h.holders.clone();
     let mut section = col()
         .key("shortcut")
         .w_full()
@@ -476,8 +508,9 @@ pub fn setting(s: &App, k: &Kit) -> El {
                 .color(k.c.text_muted),
         )
         .child(
-            ShortcutRecorder::new("recorder", &shown, |s: &mut App| s.hotkey.recorder())
+            ShortcutRecorder::new("recorder", &h.recorder, |s: &mut App| s.hotkey.recorder())
                 .on_change(|s: &mut App, next, _: &mut Tx| s.change_shortcut(next))
+                .error_message(move |error, chord| refusal(error, chord, &holders))
                 .width(240.0)
                 .build(k),
         );
@@ -489,13 +522,13 @@ pub fn setting(s: &App, k: &Kit) -> El {
             .wrap()
             .w_full()
     };
-    if let Some(error) = &error {
-        section = section.child(line(refusal(error, h.refused.as_ref()), "recorder-error"));
-    } else if let Some(error) = h.error.as_ref().filter(|_| !recording && !h.registered()) {
-        section = section.child(line(refusal(error, h.shortcut.as_ref()), "shortcut-error"));
+    if let Some(error) = h.error.as_ref().filter(|_| !recording && !h.registered()) {
+        let message = refusal(error, h.shortcut.as_ref(), &h.holders);
+        section = section.child(line(message, "shortcut-error"));
     }
     if let Some(error) = h.reset_error.as_ref().filter(|_| !recording) {
-        section = section.child(line(refusal(error, Some(&default)), "reset-error"));
+        let message = refusal(error, Some(&default), &h.holders);
+        section = section.child(line(message, "reset-error"));
     }
     let action = |label: String, key: &str, press: fn(&mut App)| {
         Button::new(label)

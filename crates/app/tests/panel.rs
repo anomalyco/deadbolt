@@ -485,7 +485,7 @@ fn the_passphrase_stays_in_its_field() {
         for c in ['a', 'c', 'x', 'z'] {
             rt.key(with(Key::Command(c), cmd));
         }
-        rt.key(with(Key::Text("k".into()), ctrl));
+        rt.key(with(Key::Text("j".into()), ctrl));
         rt.frame(FRAME);
         assert_eq!(rt.state.passphrase.text, "hunter22");
         if rt.state.panel.is_none() {
@@ -998,22 +998,29 @@ fn closing_the_main_window_quits_and_clears_the_copy() {
     assert_eq!(phase(&quick), Phase::Open);
 }
 
-/// The menu's Quit and ⌘Q exit without `on_close`. The copy is Rune's
-/// `SecretCopy`, which Rune's exit clears while it still holds (headless runs
-/// have no exit to drive, so this clears it the way that exit does).
+/// The menu's Quit, ⌘Q, the Dock and logout run each shown window's
+/// `on_close` once and then exit, without draining queued updates (headless
+/// runs have no OS quit, so this runs the hooks in Rune's order). The main
+/// window's clears the copy; the panel's quit, queued behind it, never runs,
+/// and the panel's own hook finds nothing of ours left to clear.
 #[test]
-fn quitting_from_the_menu_clears_the_copy() {
+fn quitting_from_the_menu_clears_the_copy_once() {
     let mut main = main_window();
-    let clip = share_clipboard([&mut main, &mut runtime("empty", true)]);
+    let mut quick = runtime("empty", true);
+    let clip = share_clipboard([&mut main, &mut quick]);
     main.update(|s, tx| s.copy_field("password", tx));
     main.frame(FRAME);
     assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
-    let copied = main.state.copy.as_ref().and_then(|c| c.copied.clone());
-    let copied = copied.expect("a Rune secret copy");
-    assert!(copied.holds());
-    drop(main);
-    copied.clear_now();
-    assert_eq!(board(&clip), None, "cleared at exit");
+    main.update(|s, tx| s.quit(tx));
+    assert_eq!(board(&clip), None, "the main window's hook clears it");
+    clip.set_text("copied elsewhere");
+    quick.update(|s, tx| s.panel_closed(tx));
+    assert_eq!(
+        board(&clip).as_deref(),
+        Some("copied elsewhere"),
+        "the panel's doesn't clear again"
+    );
+    assert_eq!(quick.shell_request, None, "nor quit again");
 }
 
 #[test]

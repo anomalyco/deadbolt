@@ -753,7 +753,6 @@ impl App {
         self.settings_open = false;
         self.hotkey.recorder.cancel();
         self.hotkey.reset_error = None;
-        self.hotkey.refused = None;
     }
 
     /// App-level keys: before the focused field when there is none, after it otherwise.
