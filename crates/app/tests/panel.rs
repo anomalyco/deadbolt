@@ -508,6 +508,9 @@ fn focus_loss_while_closing_keeps_the_copy() {
     assert_eq!(phase(&rt), Phase::Hidden);
 }
 
+/// What headless runs can check of placement: they ignore `place`, so the
+/// display it lands on and the final frame are untested until Rune's
+/// launcher-wakes branch gives headless runs displays (docs/app.md).
 #[test]
 fn it_opens_under_the_pointer_near_the_top() {
     use rune::{Align, DisplayTarget, OverlayPlacement, ScreenEdge};
@@ -517,13 +520,16 @@ fn it_opens_under_the_pointer_near_the_top() {
         edge,
         align,
         margin,
-        ..
+        inset,
     } = placement
     else {
         panic!("placed against an edge: {placement:?}");
     };
     assert_eq!((edge, align), (ScreenEdge::Top, Align::Center));
     assert!(margin > 0.0 && margin < 300.0);
+    assert_eq!(inset, 0.0, "centred, not nudged");
+    // The shortest screen it should fit whole: a 13-inch laptop's default, 900 pt tall.
+    assert!(margin + panel::SIZE.1 <= 900.0);
 }
 
 #[test]

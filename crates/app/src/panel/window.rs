@@ -91,10 +91,7 @@ impl Windows {
         self.main.open();
     }
 
-    /// Wakes the panel through an empty update. A launcher redraws, and so
-    /// polls, only for updates: a plain wake would leave the agent's answers
-    /// (a lock, the list) waiting until the next key. Drop this for the
-    /// runtime's waker once Rune redraws a launcher on wake (docs/app.md, Rune gaps).
+    /// An empty update: Rune's launcher doesn't poll on a plain wake until branch launcher-wakes lands.
     pub fn panel_waker(&self) -> Waker {
         let panel = self.panel.clone();
         Arc::new(move || panel.update(|_, _| {}))
