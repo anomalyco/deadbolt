@@ -13,6 +13,13 @@
 //! dialer -> listener  ENTRY(blob)* DONE
 //! listener -> dialer  RESULT
 //! ```
+//!
+//! `OFFER` precedes `CONFIRM` so the new device can display what it is being asked to
+//! join alongside the confirmation code before signing `JOIN`. Because `OFFER` is sent
+//! once the ticket secret is proven, a party that observed the ticket can learn the
+//! offer payload (in the CLI: the vault id and name, and the inviter's device name and
+//! network addresses) before the inviter compares the six-digit code; join consent and
+//! vault entries only flow after both sides confirm.
 
 use std::{
     fmt,

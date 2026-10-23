@@ -55,15 +55,22 @@ If the paper recovery key is created **as the genesis device** (`MembershipOp::C
 - **How it works:**
   - The recovery key is the sole device at `first.depth == 0`.
   - Every interactive device (the creator laptop at `depth = 1`, phone at `depth = 2`, etc.) has `first.depth >= 1`.
-  - The recovery key is never online and never runs `deadbolt agent`, so it cannot be stolen from an unlocked running session.
-  - If *any* online device—including the first laptop (`depth = 1`)—is stolen, the user imports the paper recovery key on any surviving device (or a fresh device) to sign `MembershipOp::Remove { device: stolen, last_seen_seq }`.
-  - Because the recovery key has `first.depth = 0`, its removal of the stolen laptop (`first.depth = 1`) is strictly senior to anything the stolen laptop can ever sign.
+  - The recovery key stays offline and never runs `deadbolt agent`, so it cannot be stolen from an unlocked running session.
+  - Because `RecoveryRemove` must undo what the thief already delivered, **signing via `Vault::remove` / `Vault::commit` is not sufficient**:
+    1. `Vault::commit` uses `self.membership_tips` as `deps`. In `authorize` (`crates/core/src/membership.rs`), a removal only cuts operations by its target that the removal *did not see* (`!removal.saw(node)`). A removal whose `deps` are `self.membership_tips` sees—and therefore keeps—every `Remove` of honest devices and every sybil `Add` the thief already delivered.
+    2. Any honest device that already applied a thief's `Remove(recovery)` considers `!vault.is_member(&recovery)`, so `Vault::commit` fails with `Error::NotMember`.
+    3. `Vault::remove` sets `last_seen_seq` to the target's current data tip, which would keep the thief's post-theft data edits.
+  - Instead, recovery requires a dedicated core API on `Vault` (for example, `Vault::recover_remove(&mut self, secret: &DeviceSecret, device: DeviceId, deps: Vec<Hash>, last_seen_seq: Option<u64>)`) that signs `MembershipOp::Remove { device, last_seen_seq }` with **chosen pre-theft membership parents** `deps` (such as the stolen device's admission and the recovery key's own previous membership entry) and a pre-theft `last_seen_seq`:
+    - `Vault::apply` evaluates `past = self.past_membership(&clock)` at `deps`—where the recovery key is still an active member—so `apply` accepts the entry even on honest devices that had applied the thief's `Remove(recovery)`.
+    - Because the recovery removal does not see the thief's post-theft operations (`!recovery_remove.saw(thief_op)`), `choose_removals` orders `recovery_remove` at `first.depth = 0` and cuts every post-theft removal and sybil `Add` by the stolen device, while `last_seen_seq` discards post-theft data writes.
 - **Interaction with `choose_removals`:**
-  - **Zero changes** to `crates/core/src/membership.rs`, `Entry`, wire encoding, or `choose_removals`.
-  - Candidate order remains fixed by `structural`, and hereditary validity is unchanged because the recovery key is just the genesis `DeviceSecret`.
-- **Tradeoffs:**
-  - *Pros:* Solves both total device loss and senior-device compromise with one mechanism; zero protocol or resolver complexity in `deadbolt-core`.
-  - *Cons:* Requires the user to keep a paper/offline recovery key if they want to recover the *same* vault ID after losing their `depth = 1` creator device. Between two online sibling devices at `depth = 1` and `depth = 2`, a normal removal without the paper key still favors `depth = 1` unless the user invokes the recovery key.
+  - **Zero changes** to `choose_removals`, `authorize`, `Entry`, or wire encoding; only a new `Vault` signing helper that accepts explicit pre-theft `deps` and `last_seen_seq`.
+  - Candidate order remains fixed by `structural`, and hereditary validity is unchanged because the recovery key is the genesis `DeviceSecret`.
+- **Operational constraints and tradeoffs:**
+  - *Vaults created before a recovery kit exists:* Because `VaultId::derive(&device, &nonce)` binds the vault ID to the `depth = 0` genesis key, a vault created without a recovery kit already has an online device at `depth = 0` and cannot retroactively receive a `depth = 0` recovery kit; upgrading requires moving items to a new vault.
+  - *One-time offline property:* Importing the paper recovery kit onto an online device to sign a recovery removal exposes its `DeviceSecret` to that online host, ending its offline guarantee. After using the kit (especially if it only removes a compromised `depth >= 1` device), the kit is no longer strictly offline and the user should either provision a fresh vault or treat the kit as an online-exposed key.
+  - *Pros:* Solves both total device loss and senior-device compromise with one mechanism; preserves `choose_removals` and its greedy correctness proof intact.
+  - *Cons:* Requires saving a paper/offline recovery key at vault creation and choosing a pre-theft frontier (`deps` and `last_seen_seq`) when recovering.
 
 ### Option B: Quorum / Co-Signed Removals ($k$-of-$n$)
 
@@ -102,13 +109,13 @@ Keep `crates/core/src/membership.rs` as-is and provide a CLI/UI workflow (`deadb
 | **Works for a 2-device vault (laptop + phone)?** | Yes | No ($1 \text{ vs. } 1$ tie) | Yes |
 | **Resistant to sybil `Add`s by stolen senior?** | Yes (`depth = 0` is unique) | No (without complex relative-past rules) | Yes (new vault has fresh genesis) |
 | **Preserves `choose_removals` greedy proof?** | Yes (unchanged) | No (rank depends on surviving cuts) | Yes (unchanged) |
-| **Wire / `deadbolt-core` changes** | None | New op format + non-greedy resolver | None |
-| **Extra user ceremony at `deadbolt init`** | Save/print recovery key (optional) | None | None |
+| **Wire / `deadbolt-core` changes** | New `Vault` helper signing `Remove` with pre-theft `deps` + `last_seen_seq` (no resolver/wire change) | New op format + non-greedy resolver | None |
+| **Extra user ceremony** | Save recovery kit at `init`; pre-kit vaults must move to a new vault; importing kit ends its offline property | None | Re-vault if senior wins race |
 
 ---
 
 ## 5. Recommendation
 
 1. **Do not add quorum rules (Option B) or modify `membership::resolve`.** Quorum resolution fails in the 2-device case, invites sybil-admission gaming by the stolen device, and breaks the cut-independent candidate ordering that makes `choose_removals` simple, fast, and exhaustively verifiable against `Graph` in `crates/core/src/membership_tests.rs`.
-2. **For v1 now (Option C):** Accept the limitation in `deadbolt-core`. In device-to-device sync, once all honest peers have received `Remove(senior)`, `Gate` (`crates/net/src/node.rs`) refuses connections from the removed senior device at the QUIC handshake layer, preventing it from injecting a backdated counter-removal.
-3. **When the Recovery Kit (`docs/design.md`, "Later") is built (Option A):** Implement the paper recovery kit by generating the recovery `DeviceSecret` as the `depth = 0` genesis creator (`MembershipOp::Create`) and immediately admitting the first interactive device at `depth = 1`. That gives the offline recovery key strict seniority over every online device with **zero changes** to `crates/core/src/membership.rs`.
+2. **For v1 now (Option C):** Keep `membership::resolve` unchanged. In device-to-device sync, once all honest peers have received `Remove(senior)`, `Gate` (`crates/net/src/node.rs`) refuses connections from the removed senior device at the QUIC handshake layer, preventing it from injecting a backdated counter-removal.
+3. **When the Recovery Kit (`docs/design.md`, "Later") is built (Option A):** Generate the paper recovery kit as the `depth = 0` genesis creator (`MembershipOp::Create`), immediately admit the first interactive device at `depth = 1`, and add a `Vault` API that signs `MembershipOp::Remove` with chosen pre-theft `deps` and `last_seen_seq` (rather than `Vault::commit`'s current tips) so the recovery removal cuts everything the thief delivered after the theft. Vaults created before recovery kits exist will need to migrate to a newly created vault to gain a `depth = 0` kit, and importing the kit onto an online machine should be treated as consuming its offline guarantee.

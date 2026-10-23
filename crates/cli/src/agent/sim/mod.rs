@@ -592,12 +592,16 @@ impl World {
                         .values()
                         .flat_map(|v| v.entries().into_iter().map(Entry::hash))
                         .collect();
-                    let persisted = s
+                    let persisted: Vec<_> = s
                         .store
                         .iter_all()?
                         .map(|row| Ok(Entry::decode(&row?)?.hash()))
-                        .collect::<Result<BTreeSet<_>>>()?;
-                    ensure!(accepted == persisted, "accepted/persisted mismatch on {i}");
+                        .collect::<Result<Vec<_>>>()?;
+                    let persisted_set: BTreeSet<_> = persisted.iter().copied().collect();
+                    ensure!(
+                        accepted == persisted_set && accepted.len() == persisted.len(),
+                        "accepted/persisted mismatch on {i}"
+                    );
                     for e in self.forbidden.get(&i).into_iter().flatten() {
                         ensure!(
                             !accepted.contains(&e.hash()),

@@ -15,7 +15,7 @@ use crate::kdf::{KdfHeader, KdfParams};
 pub const DB_FILE: &str = "store.redb";
 
 /// On-disk format version. Bound into every AEAD label below.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 // Plaintext header: format version, KDF header, wrapped key set, and the
 // sealed log length.
