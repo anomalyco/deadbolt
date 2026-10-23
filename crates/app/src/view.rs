@@ -474,6 +474,8 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     };
     row()
         .key(format!("field-{}", field.name))
+        // A field a background refresh adds or removes fades; a new selection lands at once.
+        .transition(Transition::opacity())
         .w_full()
         .min_h(40.0)
         .px(10.0)

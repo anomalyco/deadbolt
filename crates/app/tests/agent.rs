@@ -614,3 +614,56 @@ fn a_device_set_up_meanwhile_refuses_the_new_passphrase() {
     device.run(&["lock"]);
     device.run(&["unlock"]);
 }
+
+/// The app follows the agent with no input of its own: items written
+/// elsewhere appear, locks and unlocks from the CLI carry over, and a
+/// restarted agent is found again.
+#[test]
+fn the_app_follows_the_agent() {
+    let device = Device::new();
+    device.run(&["init"]);
+    device.run(&[
+        "new",
+        "login",
+        "username=dax",
+        "url=github.com",
+        "password=hunter22",
+    ]);
+    let mut rt = app(&device);
+    until(&mut rt, "the vault", |s| {
+        s.screen == Screen::Vault && s.loaded && s.detail.is_some()
+    });
+    let selected = rt.state.selected.clone();
+
+    device.run(&[
+        "new",
+        "login",
+        "username=ops",
+        "url=fly.io",
+        "password=flyfly",
+    ]);
+    until(&mut rt, "the new item", |s| s.items.len() == 2);
+    assert!(shows(&rt, "fly.io"));
+    assert_eq!(rt.state.selected, selected, "the selection stays");
+    assert!(rt.state.detail.is_some(), "the selected item stays shown");
+
+    device.run(&["lock"]);
+    until(&mut rt, "the lock", |s| s.screen == Screen::Locked);
+    assert!(rt.state.items.is_empty() && rt.state.detail.is_none());
+
+    device.run(&["unlock"]);
+    until(&mut rt, "the vault again", |s| {
+        s.screen == Screen::Vault && s.items.len() == 2
+    });
+
+    device.run(&["agent", "stop"]);
+    until(&mut rt, "the lock when the agent stops", |s| {
+        s.screen == Screen::Locked
+    });
+
+    // A new agent, unlocked from the CLI: the app finds it on its own.
+    device.run(&["unlock"]);
+    until(&mut rt, "the vault from the new agent", |s| {
+        s.screen == Screen::Vault && s.items.len() == 2
+    });
+}
