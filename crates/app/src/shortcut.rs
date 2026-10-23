@@ -356,13 +356,15 @@ impl App {
     }
 
     /// While the default shortcut couldn't be registered, it still works
-    /// inside Deadbolt (`panel::window::is_shortcut`).
+    /// inside Deadbolt (`panel::window::is_shortcut`). The menus show the
+    /// chosen one.
     fn shortcut_changed(&mut self) {
         let h = &self.hotkey;
         let fallback = !h.registered() && h.shortcut.as_ref() == Some(&default());
         self.shortcut_fallback = fallback;
         if let Some(windows) = &self.windows {
             windows.shortcut_fallback(fallback);
+            windows.set_menu(h.shortcut.as_ref());
         }
     }
 

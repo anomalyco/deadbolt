@@ -43,10 +43,11 @@ pub fn spec() -> AppSpec<App> {
 ///
 /// Two windows: the main one (`--window main` for tooling) and the quick
 /// panel (`--window panel`), which the global shortcut (⇧⌘Space unless
-/// changed in Settings) or the main window's hint brings up. `--panel`
-/// starts with the panel instead of the main window. Headless runs register
-/// the default shortcut on the panel virtually, so a script's
-/// `{"shortcut": …}` steps reach it without touching the desktop.
+/// changed in Settings) or "Open Quick Panel" in the app and Dock menus
+/// brings up (off macOS, the main window's hint). `--panel` starts with the
+/// panel instead of the main window. Headless runs register the default
+/// shortcut on the panel virtually, so a script's `{"shortcut": …}` and
+/// `{"menu": …}` steps reach it without touching the desktop.
 pub fn run() {
     let args = rune::tooling::Args::parse();
     let (live, headless) = (is_live(&args), args.headless());
@@ -63,7 +64,13 @@ pub fn run() {
         .map_or_else(|| Some(shortcut::default()), shortcut::load);
     rune::run_windows_with(rune::RunOptions { accessory }, move |_| {
         let mut main = rune::App::new(spec());
-        let quick = rune::App::new(panel::spec()).windowless();
+        let mut quick = rune::App::new(panel::spec()).windowless();
+        // Native menus are macOS's; headless scripts reach them everywhere.
+        if cfg!(target_os = "macos") || headless {
+            for item in panel::window::menu(chosen.as_ref()) {
+                quick = quick.menu_item(item);
+            }
+        }
         let windows = panel::window::Windows::new(main.handle(), quick.handle());
         let main_windows = windows.clone();
         let quick_handle = quick.handle();

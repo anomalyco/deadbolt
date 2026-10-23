@@ -1,12 +1,13 @@
-//! How the quick panel is reached (its global shortcut, `--panel`, the main
-//! window's hint) and how its window opens, closes and is placed.
+//! How the quick panel is reached (its global shortcut, the menus' "Open
+//! Quick Panel", `--panel`, the main window's hint off macOS) and how its
+//! window opens, closes and is placed.
 //! The window is Rune's launcher panel: it takes keys without activating
 //! Deadbolt, opens under the pointer, and clicking away dismisses it. The
 //! shortcut itself is `crate::shortcut`.
 
 use rune::{
-    Align, AppHandle, ConfiguredWindowOptions, Cursor, DisplayTarget, El, Key, KeyEvent,
-    OverlayPlacement, ScreenEdge, WindowOptions,
+    Align, AppHandle, ConfiguredWindowOptions, Cursor, DisplayTarget, El, Key, KeyEvent, MenuError,
+    MenuItem, OverlayPlacement, ScreenEdge, Shortcut, WindowOptions,
 };
 use rune_kit::Kit;
 
@@ -91,6 +92,14 @@ impl Windows {
         self.panel.update(move |s, _| s.shortcut_fallback = on);
     }
 
+    /// Shows `shortcut` beside the menus' "Open Quick Panel".
+    pub fn set_menu(&self, shortcut: Option<&Shortcut>) {
+        match self.panel.set_menu(menu(shortcut)) {
+            Ok(()) | Err(MenuError::Unsupported | MenuError::NotRunning) => {}
+            Err(e) => eprintln!("Couldn't update the menu: {e}"),
+        }
+    }
+
     /// Quits from the main window through the panel, so the panel clears its copy first.
     pub fn quit(&self) {
         self.panel.update(|panel, tx| {
@@ -100,9 +109,29 @@ impl Windows {
     }
 }
 
-/// The main window's way in, in its hint bar: the shortcut, and a click
-/// opens the panel. Stands in for an "Open Quick Panel" menu item.
+/// The menus' item, in the app menu and the Dock menu.
+pub const OPEN: &str = "Open Quick Panel";
+
+/// The panel's `App` owns the menus, so headless `--window panel` scripts
+/// reach them (`{"menu": "Open Quick Panel"}`). Native menus are macOS's;
+/// elsewhere the hint bar's `entry` is the way in.
+pub fn menu(shortcut: Option<&Shortcut>) -> Vec<MenuItem<App>> {
+    let mut item = MenuItem::new(OPEN, |s: &mut App, tx| s.show_panel(tx));
+    if let Some(shortcut) = shortcut {
+        item = item.key_equivalent(shortcut.clone());
+    }
+    let dock = MenuItem::new(OPEN, |s: &mut App, tx| s.show_panel(tx))
+        .id("dock-quick")
+        .dock();
+    vec![item, dock]
+}
+
+/// The main window's way in off macOS, where there are no native menus: the
+/// hint bar shows the shortcut, and a click opens the panel.
 pub fn entry(s: &App, k: &Kit) -> Option<El> {
+    if cfg!(target_os = "macos") {
+        return None;
+    }
     let keys = s
         .hotkey
         .shortcut

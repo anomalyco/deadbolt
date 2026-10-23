@@ -966,10 +966,11 @@ fn alone_it_waits_for_the_shortcut() {
     );
 }
 
-/// A `--panel` start has no app menu, so the main window it opens quits on
-/// ⌘Q itself, even from the search field under Settings. The panel doesn't.
+/// ⌘Q is the app menu's (on macOS; off it, closing the window quits), so
+/// neither window takes it as a key. Closing the main window quits and
+/// clears the copy.
 #[test]
-fn command_q_quits_from_the_main_window() {
+fn closing_the_main_window_quits_and_clears_the_copy() {
     let cmd_q = KeyEvent {
         key: Key::Command('q'),
         mods: Mods {
@@ -979,17 +980,13 @@ fn command_q_quits_from_the_main_window() {
     };
     let mut main = main_window();
     let clip = share_clipboard([&mut main, &mut runtime("empty", true)]);
-    let mut installer = deadbolt_app::install::Installer::fixture();
-    installer.show();
-    main.update(|s, tx| {
-        s.installer = Some(installer);
-        s.settings_open = true;
-        s.copy_field("password", tx);
-    });
+    main.update(|s, tx| s.copy_field("password", tx));
     main.frame(FRAME);
-    assert!(main.state.search.focused);
-    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
     main.key(cmd_q.clone());
+    main.frame(FRAME);
+    assert_eq!(main.shell_request, None, "⌘Q is the menu's");
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    main.update(|s, tx| s.quit(tx));
     main.frame(FRAME);
     assert_eq!(main.shell_request, Some(Shell::Quit));
     assert_eq!(board(&clip), None, "quitting clears the copy");
@@ -999,6 +996,24 @@ fn command_q_quits_from_the_main_window() {
     quick.frame(FRAME);
     assert_eq!(quick.shell_request, None);
     assert_eq!(phase(&quick), Phase::Open);
+}
+
+/// The menu's Quit and ⌘Q exit without `on_close`. The copy is Rune's
+/// `SecretCopy`, which Rune's exit clears while it still holds (headless runs
+/// have no exit to drive, so this clears it the way that exit does).
+#[test]
+fn quitting_from_the_menu_clears_the_copy() {
+    let mut main = main_window();
+    let clip = share_clipboard([&mut main, &mut runtime("empty", true)]);
+    main.update(|s, tx| s.copy_field("password", tx));
+    main.frame(FRAME);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    let copied = main.state.copy.as_ref().and_then(|c| c.copied.clone());
+    let copied = copied.expect("a Rune secret copy");
+    assert!(copied.holds());
+    drop(main);
+    copied.clear_now();
+    assert_eq!(board(&clip), None, "cleared at exit");
 }
 
 #[test]

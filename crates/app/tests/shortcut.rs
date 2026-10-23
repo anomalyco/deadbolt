@@ -1,7 +1,7 @@
 //! The quick panel's global shortcut, headless and offline: a conflict at
 //! launch shows a calm notice and keeps ⇧⌘Space working inside Deadbolt,
 //! Settings' recorder changes, saves and resets it, and headless scripts reach
-//! the panel through it.
+//! the panel through it and through the menus' "Open Quick Panel".
 
 #![cfg(test)]
 
@@ -9,7 +9,7 @@ use std::path::Path;
 use std::process::Command;
 
 use deadbolt_app::model::App;
-use deadbolt_app::panel::window::FLAG;
+use deadbolt_app::panel::window::{FLAG, OPEN};
 use deadbolt_app::shortcut::{self, Hotkey};
 use rune::{Env, Mods, PhysicalInput, PhysicalKeyCode, Runtime, Shortcut, ShortcutError};
 use serde_json::{Value, json};
@@ -393,6 +393,22 @@ fn a_headless_shortcut_step_toggles_the_panel() {
     assert!(away < 0.01, "the first press sends it away ({away})");
     let back = card_after(&[], json!([press(0.1), press(1.0)])).unwrap();
     assert_eq!(back, 1.0, "the second brings it back");
+}
+
+/// "Open Quick Panel" brings the panel back from the app menu (by title) and
+/// the Dock menu (by id), and leaves an open one up.
+#[test]
+fn the_menus_open_the_panel() {
+    let away = json!({"t": 0.1, "shortcut": shortcut::DEFAULT});
+    for item in [OPEN, "dock-quick"] {
+        let open = json!({"t": 1.0, "menu": item});
+        let Some(card) = card_after(&[], json!([away.clone(), open])) else {
+            return;
+        };
+        assert_eq!(card, 1.0, "{item} brings it back");
+    }
+    let open = json!({"t": 0.1, "menu": OPEN});
+    assert_eq!(card_after(&[], json!([open])).unwrap(), 1.0);
 }
 
 /// `--panel` starts with the panel up; the shortcut is what brings it back

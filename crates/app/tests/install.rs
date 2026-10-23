@@ -109,7 +109,9 @@ fn the_hint_bar_keeps_settings_at_the_narrowest_window() {
     rt.set_viewport((640.0, 540.0), 1.0);
     settle(&mut rt, 0.5);
     let elements = rt.elements();
-    for label in ["Quick panel", "Lock", "Settings"] {
+    // Off macOS the hint bar also opens the quick panel (macOS has its menus).
+    let panel = (!cfg!(target_os = "macos")).then_some("Quick panel");
+    for label in panel.into_iter().chain(["Lock", "Settings"]) {
         let e = elements
             .iter()
             .rfind(|e| e.text.as_deref() == Some(label))
