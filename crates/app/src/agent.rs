@@ -210,10 +210,14 @@ async fn follow(paths: &Paths, post: &Post, delay: &mut Duration) -> bool {
     let Ok(mut stream) = deadbolt_client::watch(paths).await else {
         return false;
     };
-    *delay = RECONNECT_FIRST;
     loop {
         match stream.next().await {
             Ok(Some(change)) => {
+                // Only an agent that accepted the watch resets the backoff; one
+                // that refuses it (an older protocol) keeps it growing.
+                if change == Change::Watching {
+                    *delay = RECONNECT_FIRST;
+                }
                 if !post.send(Done::Changed(change)) {
                     return true;
                 }
