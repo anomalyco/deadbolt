@@ -1,0 +1,28 @@
+[package]
+name = "deadbolt-app"
+description = "Deadbolt's desktop app: a Rune client of the running agent."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "deadbolt-app"
+path = "src/main.rs"
+
+[dependencies]
+arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
+deadbolt-client = { path = "../client" }
+# Rune is pinned to a rev and bumped deliberately.
+rune = { git = "https://github.com/anomalyco/rune", rev = "329496831aecfa7291edae24c3d806a2beb218f2" }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "329496831aecfa7291edae24c3d806a2beb218f2" }
+serde_json = "1.0.151"
+tokio = { version = "1.53.3", features = ["rt", "net", "io-util", "time"] }
+zeroize = "1.9"
+
+[dev-dependencies]
+tempfile = "3.27.0"

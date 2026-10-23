@@ -10,15 +10,14 @@ mod client;
 mod config;
 mod import;
 mod items;
-mod paths;
 mod prompt;
-mod protocol;
 
 use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
+use deadbolt_client::{paths, protocol};
 use deadbolt_net::{PairingTicket, QrStyle};
 
 use crate::paths::Paths;
@@ -376,7 +375,7 @@ async fn setup(paths: &Paths, device_name: Option<String>, from_stdin: bool) -> 
     client::simple(
         paths,
         Command::Setup {
-            passphrase: passphrase.to_string(),
+            passphrase,
             device_name,
         },
     )
@@ -389,7 +388,7 @@ async fn unlock(paths: &Paths, timeout_secs: Option<u64>, from_stdin: bool) -> R
     client::simple(
         paths,
         Command::Unlock {
-            passphrase: passphrase.to_string(),
+            passphrase,
             timeout_secs,
         },
     )

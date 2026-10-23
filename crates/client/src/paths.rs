@@ -16,33 +16,8 @@
 //! `DEADBOLT_HOME` is set, so every store gets its own agent.
 
 use std::env;
+use std::ffi::OsString;
 use std::path::PathBuf;
-
-fn home() -> PathBuf {
-    env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(env::temp_dir)
-}
-
-fn var(name: &str) -> Option<PathBuf> {
-    env::var_os(name)
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-}
-
-fn xdg(variable: &str, fallback: &[&str]) -> PathBuf {
-    var(variable).unwrap_or_else(|| fallback.iter().fold(home(), |path, part| path.join(part)))
-}
-
-fn suffix() -> String {
-    match var("DEADBOLT_HOME") {
-        Some(home) => {
-            let hash = blake3::hash(home.as_os_str().as_encoded_bytes());
-            format!("-{}", &hash.to_hex()[..8])
-        }
-        None => String::new(),
-    }
-}
 
 pub struct Paths {
     pub data: PathBuf,
@@ -54,7 +29,30 @@ pub struct Paths {
 
 impl Paths {
     pub fn get() -> Self {
-        let suffix = suffix();
+        Self::from_vars(|name| env::var_os(name))
+    }
+
+    /// The paths for an environment given by `vars` instead of the process's
+    /// own (`$TMPDIR` aside), e.g. for a test that starts its own agent.
+    pub fn from_vars(vars: impl Fn(&str) -> Option<OsString>) -> Self {
+        let var = |name: &str| vars(name).filter(|v| !v.is_empty()).map(PathBuf::from);
+        let home = vars("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(env::temp_dir);
+        let xdg = |variable: &str, fallback: &[&str]| {
+            var(variable).unwrap_or_else(|| {
+                fallback
+                    .iter()
+                    .fold(home.clone(), |path, part| path.join(part))
+            })
+        };
+        let suffix = match var("DEADBOLT_HOME") {
+            Some(home) => {
+                let hash = blake3::hash(home.as_os_str().as_encoded_bytes());
+                format!("-{}", &hash.to_hex()[..8])
+            }
+            None => String::new(),
+        };
         let data = var("DEADBOLT_HOME")
             .unwrap_or_else(|| xdg("XDG_DATA_HOME", &[".local", "share"]).join("deadbolt"));
         let uid = user_id();
