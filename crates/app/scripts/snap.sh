@@ -22,7 +22,7 @@ done
 "$bin" --scene copied --at 2.4 --theme light --snap "$out/copied-light.png" "$@"
 "$bin" --scene locked --theme light --snap "$out/locked-light.png" "$@"
 # The quick panel's shortcut, dark and light: Settings at rest, recording, a
-# conflict shown in place (another app holds ⌥⌘Space), changed (with a way
+# conflict shown in place (Finder search holds ⌥⌘Space), changed (with a way
 # back to the default), and when it couldn't be registered: the vault's notice
 # and Settings with Try again.
 for theme in dark light; do
