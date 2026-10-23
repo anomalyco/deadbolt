@@ -22,6 +22,10 @@ impl Membership {
         self.members.contains(device)
     }
 
+    pub(crate) fn was_removed(&self, device: &DeviceId) -> bool {
+        self.removed.contains_key(device)
+    }
+
     pub(crate) fn name(&self) -> &str {
         &self.name
     }
