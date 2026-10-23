@@ -1,9 +1,11 @@
 //! How the quick panel is reached (`--panel`, the main window's hint,
 //! ⇧⌘Space), how its window opens, closes and is placed, and when a process
 //! with only the panel leaves.
-//! Each piece stands in for a Rune API that isn't on our pin yet; docs/app.md
-//! ("Quick panel stand-ins") says which API replaces which, so switching
-//! over changes this file and little else.
+//! Each piece stands in for a Rune API. Focus loss, non-activating panels and
+//! placement are on our pin but not adopted yet; the next PR switches to them.
+//! Global shortcuts and menus aren't in Rune yet. docs/app.md ("Quick panel
+//! stand-ins") says which API replaces which, so switching over changes this
+//! file and little else.
 
 use rune::{AppHandle, Cursor, Display, El, Key, KeyEvent, Tx, WindowOptions};
 use rune_kit::Kit;
@@ -17,8 +19,9 @@ use crate::model::App;
 /// now: Rune has no global shortcuts yet.
 pub const SHORTCUT: [&str; 3] = ["⇧", "⌘", "Space"];
 
-/// Seconds without a key before the panel closes itself. Rune doesn't report
-/// focus loss yet, so a panel left behind after clicking away goes this way.
+/// Seconds without a key before the panel closes itself. Focus loss isn't
+/// adopted yet (the next PR switches to `El::on_window_focus`), so a panel
+/// left behind after clicking away goes this way.
 pub const IDLE: f64 = 30.0;
 
 /// How far down the screen the window's top sits, as a fraction of its height.
@@ -110,8 +113,9 @@ pub(crate) fn leave_if_stranded(s: &mut App, tx: &mut Tx) -> bool {
 }
 
 /// Borderless and transparent, near the top of the primary display. Not
-/// always on top: until Rune reports focus loss, clicking another app at
-/// least sends the panel behind it.
+/// always on top: until focus loss is adopted (the next PR switches to
+/// `El::on_window_focus` and `launcher_panel`), clicking another app at least
+/// sends the panel behind it.
 pub fn options(displays: &[Display]) -> WindowOptions {
     WindowOptions {
         transparent: true,
@@ -125,7 +129,8 @@ pub fn options(displays: &[Display]) -> WindowOptions {
 }
 
 /// Centred on the primary display, near its top, in physical pixels. Not the
-/// display under the pointer: Rune can't place ordinary windows there yet.
+/// display under the pointer: not adopted yet; the next PR switches to
+/// `AppHandle::place`.
 pub fn position(displays: &[Display]) -> Option<(i32, i32)> {
     let d = displays
         .iter()
