@@ -6,14 +6,12 @@
 
 #![cfg(test)]
 
-use std::sync::{Arc, Mutex};
-
 use deadbolt_app::agent::{Agent, Done, Job, Values};
-use deadbolt_app::clipboard::Clipboard;
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::panel::window::Windows;
 use deadbolt_app::panel::{self, Phase};
 use deadbolt_client::protocol::{Change, ItemInfo};
+use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime, Shell};
 
 const FRAME: f64 = 1.0 / 60.0;
@@ -57,19 +55,17 @@ fn main_window() -> Runtime<App> {
     rt
 }
 
-type Board = Arc<Mutex<Option<String>>>;
-
-/// One clipboard for both windows, as `run` gives them.
-fn share_clipboard(windows: [&mut Runtime<App>; 2]) -> Board {
-    let (clipboard, board) = Clipboard::memory();
+/// One clipboard for both windows, as Rune gives every window in a process.
+fn share_clipboard(windows: [&mut Runtime<App>; 2]) -> MemoryClipboard {
+    let clipboard = rune::clipboard::memory();
     for rt in windows {
-        rt.state.clipboard = clipboard.clone();
+        rt.use_clipboard(&clipboard);
     }
-    board
+    clipboard
 }
 
-fn board(board: &Board) -> Option<String> {
-    board.lock().unwrap().clone()
+fn board(clipboard: &MemoryClipboard) -> Option<String> {
+    clipboard.text().map(|t| t.as_str().to_owned())
 }
 
 /// Both windows on the same clock, `seconds` on.
@@ -654,6 +650,23 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
     assert_eq!(footer(&rt), "Copy password");
 }
 
+/// A copy whose write fails says why in the footer, and the panel stays
+/// open rather than closing on a confirmation.
+#[test]
+fn a_failed_copy_stays_open_and_says_why() {
+    let mut rt = runtime("empty", true);
+    let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
+    clip.fail_writes(Some("no pasteboard"));
+    frames(&mut rt, 10);
+    rt.key(key(Key::Enter));
+    frames(&mut rt, 30);
+    assert!(shows(&rt, "Couldn't copy: no pasteboard"));
+    assert!(!rt.state.copy_pending());
+    assert_eq!(board(&clip), None);
+    frames(&mut rt, 90);
+    assert_eq!(phase(&rt), Phase::Open, "no confirmation to close on");
+}
+
 #[test]
 fn rows_that_stay_slide_when_filtering() {
     let mut rt = runtime("empty", true);
@@ -975,7 +988,10 @@ fn closing_its_window_cleans_up_like_the_main_one() {
     let mut rt = runtime("locked", true);
     let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
     rt.update(|s, _| s.passphrase.insert("x"));
-    rt.state.clipboard.copy(PASSWORD).unwrap();
+    rt.update(|_, tx| {
+        tx.copy_secret(PASSWORD, std::time::Duration::from_secs(30));
+    });
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
     rt.update(|s, tx| s.panel_closed(tx));
     assert!(rt.state.passphrase.text.is_empty());
     assert_eq!(board(&clip), None, "the clipboard is cleared");

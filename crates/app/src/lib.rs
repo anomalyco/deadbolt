@@ -3,7 +3,6 @@
 
 pub mod agent;
 pub mod binary;
-pub mod clipboard;
 pub mod install;
 pub mod model;
 pub mod onboarding;
@@ -13,10 +12,9 @@ pub mod view;
 
 use deadbolt_client::Paths;
 use deadbolt_client::protocol::{DeviceInfo, FieldInfo, ItemInfo, Status, VaultInfo};
-use rune::{AppSpec, KeyEvent, Tx, Waker};
+use rune::{AppSpec, KeyEvent, SecretCopy, Tx, Waker};
 
 use agent::{Agent, Job};
-use clipboard::Clipboard;
 use model::{App, Screen};
 use onboarding::worker::{Progress, Stage, Worker};
 use onboarding::{Flow, Notice, Pairing, Severity, Step};
@@ -26,7 +24,7 @@ pub fn spec() -> AppSpec<App> {
         title: "Deadbolt",
         size: (820.0, 540.0),
         min_size: Some((640.0, 420.0)),
-        init: || App::new(Agent::offline(), Clipboard::memory().0),
+        init: || App::new(Agent::offline()),
         view: view::app,
         scenes: SCENES,
         fonts: theme::FONTS,
@@ -39,8 +37,8 @@ pub fn spec() -> AppSpec<App> {
 
 /// Runs the app against this user's agent and clipboard, unless `argv` asks
 /// for Rune's tooling (`--snap`, `--tree`, `--script`, `--scene`, …): those
-/// runs get no agent and an in-memory clipboard, so a snapshot or tree dump
-/// can never hold real vault data.
+/// runs get no agent (and Rune keeps headless runs off the clipboard), so a
+/// snapshot or tree dump can never hold real vault data.
 ///
 /// Two windows: the main one (`--window main` for tooling) and the quick
 /// panel (`--window panel`), which ⇧⌘Space or the main window's hint brings
@@ -50,12 +48,6 @@ pub fn run() {
     let extra = rune::extra_args();
     let reduced_motion = extra.iter().any(|a| a == "--reduced-motion");
     let panel_first = extra.iter().any(|a| a == panel::window::FLAG);
-    // One clipboard for both windows, so only the latest copy is ever cleared.
-    let clipboard = if live {
-        Clipboard::system()
-    } else {
-        Clipboard::memory().0
-    };
     // Started for the panel, Deadbolt runs without a Dock icon so launching
     // doesn't activate it and the app you were in keeps focus; opening the
     // main window brings the icon back (`Windows::open_main`).
@@ -65,12 +57,10 @@ pub fn run() {
         let quick = rune::App::new(panel::spec()).windowless();
         let windows = panel::window::Windows::new(main.handle(), quick.handle());
         let main_windows = windows.clone();
-        let main_clipboard = clipboard.clone();
         main = main
             .init(move || {
                 let mut app = if live {
-                    let mut app =
-                        App::new(Agent::spawn(Paths::get(), agent::launch()), main_clipboard);
+                    let mut app = App::new(Agent::spawn(Paths::get(), agent::launch()));
                     app.onboarding.worker = Worker::new(Paths::get(), agent::launch());
                     if let Some(source) = std::env::current_exe()
                         .ok()
@@ -87,26 +77,24 @@ pub fn run() {
                     app.windows = Some(main_windows);
                     app
                 } else {
-                    App::new(Agent::offline(), main_clipboard)
+                    App::new(Agent::offline())
                 };
                 app.reduced_motion = reduced_motion;
                 app
             })
             .on_close(|s, tx| s.quit(tx));
         let panel_windows = windows.clone();
-        let panel_clipboard = clipboard.clone();
         let quick = quick
             .init(move || {
                 let mut app = if live {
-                    let mut app =
-                        App::panel(Agent::spawn(Paths::get(), agent::launch()), panel_clipboard);
+                    let mut app = App::panel(Agent::spawn(Paths::get(), agent::launch()));
                     app.windows = Some(panel_windows);
                     if let Some(panel) = &mut app.panel {
                         panel.phase = panel::Phase::Hidden;
                     }
                     app
                 } else {
-                    App::panel(Agent::offline(), panel_clipboard)
+                    App::panel(Agent::offline())
                 };
                 app.reduced_motion = reduced_motion;
                 app
@@ -140,6 +128,15 @@ fn setup(s: &mut App, waker: Waker) {
 
 // -------------------------------------------------------------------------------------------
 // Scenes: synthetic data for snapshots and review.
+
+/// Puts a copy in flight in a scene: the handler's write is never made, and
+/// Rune's pending copy stands in for it, so the countdown runs and clears nothing.
+fn staged(s: &mut App, copy: fn(&mut App, &mut Tx)) {
+    copy(s, &mut Tx::default());
+    if let Some(c) = &mut s.copy {
+        c.copied = Some(SecretCopy::pending());
+    }
+}
 
 type Scene = (&'static str, fn(&mut App));
 
@@ -284,7 +281,7 @@ const SCENES: &[Scene] = &[
     }),
     ("copied", |s| {
         vault(s);
-        s.copy_field("password", &mut Tx::default());
+        staged(s, |s, tx| s.copy_field("password", tx));
     }),
     ("revealed", |s| {
         vault(s);
@@ -319,7 +316,7 @@ pub(crate) const PANEL_SCENES: &[Scene] = &[
     // ⏎ just copied github.com's password: the confirmation, then it closes at 1.1 s.
     ("copied", |s| {
         panel_vault(s);
-        s.copy_selected("password", &mut Tx::default());
+        staged(s, |s, tx| s.copy_selected("password", tx));
     }),
     ("locked", locked),
     ("locked-error", |s| {

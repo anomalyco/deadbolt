@@ -13,7 +13,6 @@ use std::time::Duration;
 use rune::{AppSpec, Key, KeyEvent, Tx, Waker};
 
 use crate::agent::{Agent, Job};
-use crate::clipboard::Clipboard;
 use crate::model::{App, Screen};
 
 /// The window: the card plus room for its shadow.
@@ -50,7 +49,7 @@ pub fn spec() -> AppSpec<App> {
         title: "Deadbolt",
         size: SIZE,
         min_size: Some((0.0, 0.0)),
-        init: || App::panel(Agent::offline(), Clipboard::memory().0),
+        init: || App::panel(Agent::offline()),
         view: view::panel,
         scenes: crate::PANEL_SCENES,
         fonts: crate::theme::FONTS,
@@ -69,8 +68,8 @@ fn setup(s: &mut App, waker: Waker) {
 
 impl App {
     /// An `App` for the panel window.
-    pub fn panel(agent: Agent, clipboard: Clipboard) -> App {
-        let mut app = App::new(agent, clipboard);
+    pub fn panel(agent: Agent) -> App {
+        let mut app = App::new(agent);
         app.panel = Some(Panel {
             phase: Phase::Open,
             opens: 0,
@@ -136,6 +135,16 @@ impl App {
         if panel.phase == Phase::Open {
             panel.phase = Phase::Copied { until: None };
             tx.wake_after(Duration::ZERO);
+        }
+    }
+
+    /// The copy's write failed after all: stay open and show why, rather
+    /// than close on the confirmation.
+    pub(crate) fn panel_copy_failed(&mut self) {
+        if let Some(panel) = &mut self.panel
+            && matches!(panel.phase, Phase::Copied { .. })
+        {
+            panel.phase = Phase::Open;
         }
     }
 

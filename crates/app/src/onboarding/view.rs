@@ -900,7 +900,7 @@ fn ticket(s: &App, k: &Kit) -> El {
                 .child(canvas(qr.shape(module, Color::BLACK)).size(side, side)),
         );
     }
-    let how = col()
+    let mut how = col()
         .key("how")
         .w(320.0)
         .shrink()
@@ -948,23 +948,27 @@ fn ticket(s: &App, k: &Kit) -> El {
                 } else {
                     k.glyph.copy
                 })
-                .on_press(|s: &mut App| s.copy_ticket())
+                .on_press_tx(|s: &mut App, tx| s.copy_ticket(tx))
                 .build(k)
                 .key("copy"),
-        )
-        .child(
-            row()
-                .key("waiting")
-                .gap(10.0)
-                .center_y()
-                .mt(4.0)
-                .child(waiting(k))
-                .child(
-                    text("Waiting for your other device")
-                        .font(k.ty.text_small)
-                        .color(k.c.text_muted),
-                ),
         );
+    // A failed copy.
+    if let Some(n) = &o.notice {
+        how = how.child(banner(k, n));
+    }
+    how = how.child(
+        row()
+            .key("waiting")
+            .gap(10.0)
+            .center_y()
+            .mt(4.0)
+            .child(waiting(k))
+            .child(
+                text("Waiting for your other device")
+                    .font(k.ty.text_small)
+                    .color(k.c.text_muted),
+            ),
+    );
     page(
         "ticket",
         Some(bar(k, "Cancel", k.glyph.close, |s| s.cancel_join())),

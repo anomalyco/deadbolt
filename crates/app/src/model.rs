@@ -4,11 +4,10 @@
 use std::time::Duration;
 
 use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status};
-use rune::{Key, KeyEvent, TextEdit, Tx};
+use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::agent::{Agent, Done, Failure, Job};
-use crate::clipboard::{Clipboard, Copied};
 use crate::onboarding::Onboarding;
 use crate::onboarding::worker::Worker;
 
@@ -37,7 +36,8 @@ pub struct Copy {
     pub at: f64,
     /// Seconds until the clear.
     pub lasts: f64,
-    pub copied: Option<Copied>,
+    /// Rune's handle to the copy, until this countdown clears it or ends.
+    pub copied: Option<SecretCopy>,
     /// When the clipboard was cleared (or the copy failed), for the closing notice.
     pub cleared_at: Option<f64>,
     /// The whole seconds the notice shows.
@@ -56,7 +56,6 @@ impl Copy {
 pub struct App {
     pub installer: Option<crate::install::Installer>,
     pub agent: Agent,
-    pub clipboard: Clipboard,
     /// How long a copied secret stays on the clipboard.
     pub clear_after: f64,
     pub screen: Screen,
@@ -92,11 +91,10 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(agent: Agent, clipboard: Clipboard) -> App {
+    pub fn new(agent: Agent) -> App {
         App {
             installer: None,
             agent,
-            clipboard,
             clear_after: CLEAR_AFTER,
             screen: Screen::Connecting,
             status: None,
@@ -400,8 +398,8 @@ impl App {
         self.onboarding.worker.stop();
     }
 
-    fn forget_vault(&mut self, _tx: &mut Tx) {
-        self.clear_clipboard();
+    fn forget_vault(&mut self, tx: &mut Tx) {
+        self.clear_clipboard(tx);
         self.forget_items();
     }
 
@@ -602,30 +600,20 @@ impl App {
             self.notice = Some(format!("{} has no {field}", item.label));
             return;
         };
-        let (copied, error) = match self.clipboard.copy(&info.value) {
-            Ok(copied) => (Some(copied), None),
-            Err(error) => (None, Some(format!("Couldn't copy: {error}"))),
-        };
-        let item = item.id.clone();
-        let copied_ok = error.is_none();
+        let lasts = Duration::from_secs_f64(self.clear_after);
+        let copied = tx.copy_secret(info.value.clone(), lasts);
         self.copy = Some(Copy {
-            item,
+            item: item.id.clone(),
             field: field.into(),
             at: self.clock,
             lasts: self.clear_after,
-            cleared_at: error.as_ref().map(|_| self.clock),
+            cleared_at: None,
             shown: self.clear_after.ceil() as u32,
-            bar: rune::Tween::linear(
-                [0.0, 0.0, BAR_W, 2.0],
-                [0.0, 0.0, 0.0, 2.0],
-                Duration::from_secs_f64(self.clear_after),
-            ),
-            copied,
-            error,
+            bar: rune::Tween::linear([0.0, 0.0, BAR_W, 2.0], [0.0, 0.0, 0.0, 2.0], lasts),
+            copied: Some(copied),
+            error: None,
         });
-        if copied_ok {
-            self.panel_copied(tx);
-        }
+        self.panel_copied(tx);
         tx.wake_after(self.next_tick(self.clear_after));
     }
 
@@ -658,16 +646,32 @@ impl App {
             }
             return false;
         }
-        // The other window copied since (or a lock cleared it): this countdown
-        // ends quietly; the clipboard is no longer this one's to clear.
-        if copy.copied.is_some_and(|c| !self.clipboard.holds(c)) {
-            self.copy = None;
-            return true;
-        }
         let remaining = copy.remaining(now);
+        match copy.copied.as_ref().map(SecretCopy::state) {
+            Some(SecretState::Failed(error)) => {
+                copy.copied = None;
+                copy.error = Some(format!("Couldn't copy: {error}"));
+                copy.cleared_at = Some(now);
+                tx.wake_after(Duration::from_secs_f64(CLEARED_NOTICE));
+                self.panel_copy_failed();
+                return true;
+            }
+            // Something else was copied since (in either window or another app),
+            // or a lock cleared it early: this countdown ends quietly; the
+            // clipboard is no longer this one's to clear.
+            Some(SecretState::Replaced) => {
+                self.copy = None;
+                return true;
+            }
+            Some(SecretState::Cleared) if remaining > 0.0 => {
+                self.copy = None;
+                return true;
+            }
+            _ => {}
+        }
         if remaining <= 0.0 {
             if let Some(c) = copy.copied.take() {
-                self.clipboard.clear(c);
+                c.clear_now();
             }
             copy.cleared_at = Some(now);
             tx.wake_after(Duration::from_secs_f64(CLEARED_NOTICE));
@@ -686,9 +690,9 @@ impl App {
     }
 
     /// Clears the clipboard now, whichever window copied (lock, quit).
-    pub fn clear_clipboard(&mut self) {
+    pub fn clear_clipboard(&mut self, tx: &mut Tx) {
         self.copy = None;
-        self.clipboard.clear_latest();
+        tx.clear_secret_clipboard();
     }
 
     pub fn toggle_reveal(&mut self, field: &str) {

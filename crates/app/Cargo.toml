@@ -15,7 +15,6 @@ name = "deadbolt-app"
 path = "src/main.rs"
 
 [dependencies]
-arboard = { version = "3.6", default-features = false, features = ["wayland-data-control"] }
 deadbolt-client = { path = "../client" }
 qrcode = { version = "0.14.1", default-features = false }
 # Rune is pinned to a rev and bumped deliberately.

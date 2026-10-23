@@ -944,7 +944,6 @@ dependencies = [
 name = "deadbolt-app"
 version = "0.0.0"
 dependencies = [
- "arboard",
  "deadbolt-client",
  "qrcode",
  "rune",
