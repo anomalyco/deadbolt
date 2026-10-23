@@ -242,6 +242,12 @@ impl App {
         self.passphrase.mask.focused = true;
     }
 
+    /// The window is closing: clear our clipboard copy and wipe what we read.
+    pub fn close(&mut self, tx: &mut Tx) {
+        self.forget_vault(tx);
+        self.passphrase.clear();
+    }
+
     fn forget_vault(&mut self, _tx: &mut Tx) {
         self.clear_clipboard();
         self.set_detail(None);

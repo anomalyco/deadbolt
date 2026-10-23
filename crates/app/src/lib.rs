@@ -16,16 +16,6 @@ use agent::{Agent, Job};
 use clipboard::Clipboard;
 use model::{App, Screen};
 
-const HEADLESS_FLAGS: [&str; 7] = [
-    "--snap",
-    "--tree",
-    "--trace",
-    "--frames",
-    "--strip",
-    "--list-scenes",
-    "--first-pixels",
-];
-
 pub fn spec() -> AppSpec<App> {
     AppSpec {
         title: "Deadbolt",
@@ -42,31 +32,32 @@ pub fn spec() -> AppSpec<App> {
     }
 }
 
-/// Runs the app against this user's agent. Headless runs (Rune's `--snap`,
-/// `--script`, …) use an in-memory clipboard, and with `--scene` a fixture
-/// instead of the agent.
+/// Runs the app against this user's agent and clipboard, unless `argv` asks
+/// for Rune's tooling (`--snap`, `--tree`, `--script`, `--scene`, …): those
+/// runs get no agent and an in-memory clipboard, so a snapshot or tree dump
+/// can never hold real vault data.
 pub fn run() {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    let headless = args.iter().any(|a| HEADLESS_FLAGS.contains(&a.as_str()));
-    let scene = args.iter().any(|a| a == "--scene");
+    let live = is_live(&rune::tooling::Args::parse());
     rune::App::new(spec())
         .init(move || {
-            let agent = if scene {
-                Agent::offline()
+            let mut app = if live {
+                App::new(
+                    Agent::spawn(Paths::get(), agent::launch()),
+                    Clipboard::system(),
+                )
             } else {
-                Agent::spawn(Paths::get(), agent::launch())
+                App::new(Agent::offline(), Clipboard::memory().0)
             };
-            let clipboard = if headless {
-                Clipboard::memory().0
-            } else {
-                Clipboard::system()
-            };
-            let mut app = App::new(agent, clipboard);
             app.reduced_motion = rune::extra_args().iter().any(|a| a == "--reduced-motion");
             app
         })
-        .on_close(|s, _| s.clear_clipboard())
+        .on_close(|s, tx| s.close(tx))
         .run();
+}
+
+/// True for a plain windowed run: no headless output, no scene, no script.
+pub fn is_live(args: &rune::tooling::Args) -> bool {
+    !args.headless() && args.scene.is_none() && args.script.is_none()
 }
 
 fn setup(s: &mut App, waker: Waker) {
@@ -212,4 +203,38 @@ fn detail_for_selection(s: &mut App) {
         ],
     };
     s.detail = Some(ItemInfo { fields, ..item });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_live;
+    use rune::tooling::Args;
+
+    fn live(argv: &[&str]) -> bool {
+        is_live(&Args::parse_from(
+            argv.iter().map(|a| a.to_string()).collect(),
+        ))
+    }
+
+    #[test]
+    fn tooling_runs_never_reach_the_agent() {
+        for argv in [
+            &["--snap", "out.png"][..],
+            &["--tree", "tree.json"],
+            &["--trace", "run.jsonl"],
+            &["--frames", "30", "--out", "frames"],
+            &["--strip", "strip.png"],
+            &["--script", "s.json"],
+            &["--list-scenes"],
+            &["--list-windows"],
+            &["--first-pixels"],
+            &["--scene", "vault"],
+            &["--theme", "light", "--snap", "out.png"],
+        ] {
+            assert!(!live(argv), "{argv:?} would connect to the agent");
+        }
+        assert!(live(&[]));
+        assert!(live(&["--reduced-motion"]));
+        assert!(live(&["--theme", "light"]));
+    }
 }
