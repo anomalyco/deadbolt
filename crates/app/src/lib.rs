@@ -103,18 +103,11 @@ pub fn run() {
                 app
             })
             .on_close(|s, tx| s.quit(tx));
-        // Registering and setting the menu need the panel's App running.
-        // Rune gap (registering before a host attaches): windows start in
-        // order, and the main window's queued updates run before the panel's
-        // can take shortcuts (`NotRunning`), so the start waits for the
-        // panel's queue, then runs on the main window's. Waits on Rune
-        // attaching every host before any queue drains; then queue
-        // `start_shortcut` on `main.handle()` directly.
+        // Registers on the panel's App and sets its menu: Rune attaches every
+        // window before any queued update runs.
         if live {
-            let main_handle = main.handle();
-            quick.handle().update(move |_, _| {
-                main_handle.update(move |s, _| s.start_shortcut(panel_first));
-            });
+            main.handle()
+                .update(move |s, _| s.start_shortcut(panel_first));
         }
         let panel_windows = windows.clone();
         let mut quick = quick
