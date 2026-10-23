@@ -384,6 +384,7 @@ fn fade_line(t: El, key: &str) -> El {
         .key(key)
         .w_full()
         .shrink()
+        // Rune gap: `truncate_fade` is 1 em, short of 1.5. Remove when its default lands.
         .clip_fade(0.0, 0.0, 20.0, 0.0)
         .child(t)
 }
@@ -549,6 +550,7 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
                 .key("value")
                 .grow(1.0)
                 .shrink()
+                // Rune gap: `truncate_fade` is 1 em, short of 1.5. Remove when its default lands.
                 .clip_fade(0.0, 0.0, 20.0, 0.0)
                 .child(value),
         )
