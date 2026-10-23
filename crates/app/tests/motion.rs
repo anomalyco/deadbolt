@@ -86,7 +86,11 @@ fn an_item_synced_in_fades_into_the_list_and_the_selection_stays() {
     synced.label = "Bitwarden".into();
     items.push(synced.clone());
     items.sort_by_key(|i| i.label.to_lowercase());
-    rt.update(|s, tx| s.apply(Done::Items(Ok(items)), tx));
+    let generation = rt.state.generation();
+    rt.update(|s, tx| {
+        let result = Ok(items);
+        s.apply(Done::Items { generation, result }, tx)
+    });
     rt.frame(FRAME);
     let key = format!("item-{}", synced.id);
     let (_, fade) = at(&rt, &key).expect("the synced row is in the list");

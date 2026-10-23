@@ -26,7 +26,10 @@ pub enum Job {
     Status,
     Unlock(Zeroizing<String>),
     Lock,
-    List,
+    /// The list; `generation` tells a reply from before a lock from a current one.
+    List {
+        generation: u64,
+    },
     /// One item with its values; `seq` tells a stale reply from the current one.
     Get {
         id: String,
@@ -40,7 +43,10 @@ pub enum Done {
     /// The status right after unlocking.
     Unlocked(Result<Status, Failure>),
     Locked(Result<(), Failure>),
-    Items(Result<Vec<ItemInfo>, Failure>),
+    Items {
+        generation: u64,
+        result: Result<Vec<ItemInfo>, Failure>,
+    },
     Item {
         seq: u64,
         result: Result<ItemInfo, Failure>,
@@ -296,17 +302,18 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 .map(drop)
                 .map_err(Failure::from),
         ),
-        Job::List => {
+        Job::List { generation } => {
             let command = Command::ItemList {
                 vault: None,
                 query: Vec::new(),
                 kind: None,
             };
-            Done::Items(match deadbolt_client::simple(paths, command).await {
+            let result = match deadbolt_client::simple(paths, command).await {
                 Ok(Reply::Items { items }) => Ok(items),
                 Ok(_) => Err(unexpected()),
                 Err(error) => Err(error.into()),
-            })
+            };
+            Done::Items { generation, result }
         }
         Job::Get { id, seq } => {
             let command = Command::ItemGet {

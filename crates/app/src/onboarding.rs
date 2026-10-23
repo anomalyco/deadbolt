@@ -650,7 +650,7 @@ impl App {
     fn open_vault(&mut self, tx: &mut Tx) {
         self.reset_onboarding(true);
         self.agent.send(Job::Status);
-        self.agent.send(Job::List);
+        self.list();
         self.enter_vault(tx);
     }
 

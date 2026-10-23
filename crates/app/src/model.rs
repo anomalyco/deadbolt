@@ -81,6 +81,10 @@ pub struct App {
     pub clock: f64,
     /// The countdown bar's presented rect, set on each tick without rebuilding the view.
     pub bar: rune::Live<[f32; 4]>,
+    /// Bumped whenever what was read from the store is forgotten: a list
+    /// fetched in an older generation is dropped.
+    generation: u64,
+    /// Tells the current `Job::Get` from older ones; also bumped on forgetting.
     seq: u64,
     /// A copy waiting for its item's values: (seq, field).
     pending_copy: Option<(u64, String)>,
@@ -109,6 +113,7 @@ impl App {
             reduced_motion: false,
             clock: 0.0,
             bar: rune::Live::new([0.0, 0.0, BAR_W, 2.0]),
+            generation: 0,
             seq: 0,
             pending_copy: None,
         }
@@ -153,12 +158,19 @@ impl App {
                 Ok(()) => self.on_locked(tx),
                 Err(failure) => self.notice = Some(failure.message),
             },
-            Done::Items(result) => match result {
-                Ok(items) => self.on_items(items),
-                Err(failure) => self.on_failure(failure, tx),
-            },
+            // A reply from before a lock (or stop) can land after it: drop
+            // anything from an older generation or for a screen that's gone.
+            Done::Items { generation, result } => {
+                if generation != self.generation || self.screen != Screen::Vault {
+                    return;
+                }
+                match result {
+                    Ok(items) => self.on_items(items),
+                    Err(failure) => self.on_failure(failure, tx),
+                }
+            }
             Done::Item { seq, result } => {
-                if seq != self.seq {
+                if seq != self.seq || self.screen != Screen::Vault {
                     if let Ok(mut item) = result {
                         forget(&mut item);
                     }
@@ -222,8 +234,20 @@ impl App {
     /// Refetches the list, and with it the selected item.
     fn refresh(&mut self) {
         if self.screen == Screen::Vault {
-            self.agent.send(Job::List);
+            self.list();
         }
+    }
+
+    /// Fetches the list for the current generation.
+    pub(crate) fn list(&self) {
+        self.agent.send(Job::List {
+            generation: self.generation,
+        });
+    }
+
+    /// The current generation, for tagging a list reply in tests and scenes.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     /// A list arrived. The selection and the search stay; if the selected
@@ -281,7 +305,7 @@ impl App {
             }
             (Screen::Vault, Screen::Vault) => {}
             (_, Screen::Vault) => {
-                self.agent.send(Job::List);
+                self.list();
                 self.enter_vault(tx);
             }
             (Screen::Vault, Screen::Locked) => self.on_locked(tx),
@@ -335,6 +359,8 @@ impl App {
     }
 
     fn forget_vault(&mut self, _tx: &mut Tx) {
+        self.generation += 1;
+        self.seq += 1;
         self.clear_clipboard();
         self.set_detail(None);
         self.items.clear();
@@ -631,4 +657,79 @@ pub fn title_case(name: &str) -> String {
 /// Is this field type secret (masked until revealed)?
 pub fn is_secret(kind: &str) -> bool {
     matches!(kind, "secret" | "otp")
+}
+
+#[cfg(test)]
+mod tests {
+    use deadbolt_client::protocol::Change;
+    use rune::{Env, Runtime};
+
+    use super::{App, Screen};
+    use crate::agent::Done;
+
+    fn vault() -> Runtime<App> {
+        let app = rune::tooling::initial_state(&crate::spec(), Some("vault"));
+        Runtime::new(
+            app,
+            crate::view::app,
+            (820.0, 540.0),
+            Env {
+                system_dark: true,
+                scale: 1.0,
+            },
+        )
+    }
+
+    fn forgotten(app: &App) -> bool {
+        app.items.is_empty() && app.detail.is_none() && app.selected.is_none() && !app.loaded
+    }
+
+    /// A list or an item fetched before a lock, a stop or a lost watch can land
+    /// after it. It must not bring the values back, not even once the vault is
+    /// open again.
+    #[test]
+    fn replies_from_before_a_lock_are_dropped() {
+        let ends: [fn() -> Done; 3] = [
+            || Done::Changed(Change::Locked),
+            || Done::Changed(Change::Stopping),
+            || Done::WatchLost,
+        ];
+        for end in ends {
+            let mut rt = vault();
+            let unlocked = rt.state.status.clone();
+            let (generation, seq) = (rt.state.generation, rt.state.seq);
+            let item = rt.state.detail.clone().expect("the scene shows an item");
+            let items = rt.state.items.clone();
+            let late = |rt: &mut Runtime<App>| {
+                let (item, items) = (item.clone(), items.clone());
+                rt.update(|s, tx| {
+                    s.apply(
+                        Done::Item {
+                            seq,
+                            result: Ok(item),
+                        },
+                        tx,
+                    );
+                    s.apply(
+                        Done::Items {
+                            generation,
+                            result: Ok(items),
+                        },
+                        tx,
+                    );
+                });
+            };
+
+            rt.update(|s, tx| s.apply(end(), tx));
+            assert_eq!(rt.state.screen, Screen::Locked);
+            late(&mut rt);
+            assert!(forgotten(&rt.state), "repopulated while locked");
+
+            // Unlocked again (the new list is in flight): the old replies still don't count.
+            rt.update(|s, tx| s.apply(Done::Status(unlocked.clone()), tx));
+            assert_eq!(rt.state.screen, Screen::Vault);
+            late(&mut rt);
+            assert!(forgotten(&rt.state), "repopulated after unlocking");
+        }
+    }
 }
