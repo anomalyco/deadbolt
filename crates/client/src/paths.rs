@@ -19,6 +19,7 @@ use std::env;
 use std::ffi::OsString;
 use std::path::PathBuf;
 
+#[derive(Debug, Clone)]
 pub struct Paths {
     pub data: PathBuf,
     pub config: PathBuf,

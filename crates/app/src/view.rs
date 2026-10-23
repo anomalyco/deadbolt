@@ -13,36 +13,15 @@ use rune::{
     Cursor, Cx, El, Icon, ScrollSpec, Spring, TextStyle, Transition, col, el, icon, row, spacer,
     text, text_input,
 };
-use rune_kit::{Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Kit, TextInput};
+use rune_kit::{
+    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, TextInput,
+};
 
 use crate::model::{App, BAR_W, Screen, is_secret, title_case};
 
 const LIST_W: f32 = 300.0;
 const NOTICE_W: f32 = BAR_W + 24.0;
 
-// rune-kit's EYE and EYE_OFF draw malformed at this rev, so the app keeps its own.
-pub static EYE: Icon = Icon {
-    name: "deadbolt-eye",
-    view: 16.0,
-    body: r#"<path d="M1.75 8C3.1 5.4 5.4 4 8 4s4.9 1.4 6.25 4C12.9 10.6 10.6 12 8 12S3.1 10.6 1.75 8Z" stroke="currentColor"/><circle cx="8" cy="8" r="1.75" stroke="currentColor"/>"#,
-};
-pub static EYE_OFF: Icon = Icon {
-    name: "deadbolt-eye-off",
-    view: 16.0,
-    body: r#"<path d="M1.75 8C3.1 5.4 5.4 4 8 4s4.9 1.4 6.25 4C12.9 10.6 10.6 12 8 12S3.1 10.6 1.75 8Z" stroke="currentColor"/><path d="M3 13L13 3" stroke="currentColor"/>"#,
-};
-
-// The fallback symbol font's ⇧ and ↵ sit small and low beside Plex Mono.
-pub static SHIFT: Icon = Icon {
-    name: "deadbolt-shift",
-    view: 16.0,
-    body: r#"<path d="M8 2.5l5.5 6h-3V13h-5V8.5h-3z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/>"#,
-};
-pub static ENTER: Icon = Icon {
-    name: "deadbolt-enter",
-    view: 16.0,
-    body: r#"<path d="M13 3v5.5A1.5 1.5 0 0 1 11.5 10H3.5M6.5 7l-3 3 3 3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
-};
 fn replace() -> Transition {
     Transition::blur_replace()
 }
@@ -52,7 +31,7 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     let k = crate::theme::kit(cx.system_dark());
     let screen = match &s.screen {
         Screen::Connecting => connecting(k),
-        Screen::NotSetUp => not_set_up(k),
+        Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark()),
         Screen::Locked => unlock(s, k),
         Screen::Vault => vault(s, k),
         Screen::Failed(message) => failed(k, message),
@@ -109,25 +88,6 @@ fn connecting(k: &Kit) -> El {
     )
 }
 
-fn not_set_up(k: &Kit) -> El {
-    centred(
-        "setup",
-        k,
-        k.glyph.lock,
-        "Set up this device",
-        col()
-            .key("body")
-            .w_full()
-            .gap(16.0)
-            .child(muted(
-                k,
-                "how",
-                "Run deadbolt init in a terminal to create a vault, or deadbolt join to join one from your other device.",
-            ))
-            .child(Button::new("Check again").variant(ButtonVariant::Neutral).on_press(|s: &mut App| s.retry()).build(k)),
-    )
-}
-
 fn failed(k: &Kit, message: &str) -> El {
     centred(
         "failed",
@@ -156,9 +116,12 @@ fn unlock(s: &App, k: &Kit) -> El {
         .and_then(|d| d.name.clone());
     let vaults = s.status.as_ref().map_or(0, |st| st.vaults.len());
     let about = match (device, vaults) {
-        (Some(name), 0) => name,
-        (Some(name), n) => format!("{name} · {n} vault{}", if n == 1 { "" } else { "s" }),
-        (None, _) => "Enter your passphrase to unlock this device.".into(),
+        (Some(name), 0) => format!("Locked · {name}"),
+        (Some(name), n) => format!(
+            "Locked · {name} · {n} vault{}",
+            if n == 1 { "" } else { "s" }
+        ),
+        (None, _) => "Locked. Enter your passphrase to unlock this device.".into(),
     };
     let field = TextInput::new(&s.passphrase.mask)
         .placeholder("Passphrase")
@@ -207,7 +170,15 @@ fn unlock(s: &App, k: &Kit) -> El {
             .key("unlock")
             .mt(4.0),
     );
-    centred("unlock", k, k.glyph.lock, "Deadbolt is locked", body)
+    col().key("unlock").center().child(
+        col()
+            .key("panel")
+            .w(320.0)
+            .gap(20.0)
+            .items_start()
+            .child(crate::onboarding::view::wordmark(k, 44.0))
+            .child(body),
+    )
 }
 
 // -------------------------------------------------------------------------------------------
@@ -281,7 +252,7 @@ fn list(s: &App, k: &Kit) -> El {
             k,
             "empty",
             "No items yet",
-            "Add one with deadbolt new login.",
+            "What you add shows up here and on your other devices.",
         ));
     } else if visible.is_empty() {
         rows = rows.child(empty(
@@ -391,7 +362,9 @@ fn detail(s: &App, k: &Kit) -> El {
         .py(24.0)
         .gap(20.0);
     let Some(item) = s.selected_item() else {
-        if s.loaded && !s.items.is_empty() {
+        if s.loaded && s.items.is_empty() {
+            pane = pane.child(crate::onboarding::view::empty_vault(s, k));
+        } else if s.loaded {
             pane = pane.child(
                 text("Select an item")
                     .key("none")
@@ -464,8 +437,13 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     let mut actions = row().key("actions").gap(2.0).center_y();
     if secret {
         let n = name.clone();
+        let glyph = if revealed {
+            k.glyph.eye_off
+        } else {
+            k.glyph.eye
+        };
         actions = actions.child(
-            IconButton::new(if revealed { &EYE_OFF } else { &EYE })
+            IconButton::new(glyph)
                 .variant(IconButtonVariant::GhostMuted)
                 .label(if revealed { "Hide" } else { "Show" })
                 .on_press(move |s: &mut App| s.toggle_reveal(&n))
@@ -535,7 +513,9 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
         .radius(k.radius.lg)
         .fill(k.c.layer_01)
         .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
-    pill = rune_kit_shadows(pill, &k.elevation.floating);
+    for shadow in k.shadow_layers(&k.elevation.floating) {
+        pill = pill.box_shadow(shadow);
+    }
     let line = if let Some(error) = &copy.error {
         row().key("failed").w_full().child(
             text(error.clone())
@@ -603,53 +583,13 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
     Some(pill)
 }
 
-fn rune_kit_shadows(mut e: El, list: &[rune::Shadow]) -> El {
-    for s in list {
-        e = e.box_shadow(*s);
-    }
-    e
-}
-
-/// Keycaps like rune-kit's `Keybind`, with ⇧ and ↵ drawn as icons.
-fn keycaps(keys: &[&str], k: &Kit) -> El {
-    let font = TextStyle {
-        line_height: 11.0,
-        ..k.ty.small_medium
-    };
-    let ink = k.c.text_muted;
-    row()
-        .role("group")
-        .label(keys.join(" "))
-        .gap(2.0)
-        .center_y()
-        .children(keys.iter().enumerate().map(|(i, key)| {
-            let glyph = match *key {
-                "⇧" => Some(&SHIFT),
-                "↵" => Some(&ENTER),
-                _ => None,
-            };
-            let cap = row()
-                .key(format!("key{i}"))
-                .min_w(14.0)
-                .h(14.0)
-                .px(if glyph.is_some() { 2.0 } else { 4.0 })
-                .center()
-                .radius(2.0)
-                .fill(k.c.layer_03);
-            match glyph {
-                Some(g) => cap.child(icon(g, 10.0).color(ink)),
-                None => cap.child(text(key.to_string()).font(font).color(ink)),
-            }
-        }))
-}
-
 fn hints(k: &Kit) -> El {
     let hint = |key: &str, keys: &[&str], label: &str| {
         row()
             .key(key)
             .gap(6.0)
             .center_y()
-            .child(keycaps(keys, k))
+            .child(Keybind::new(keys).build(k))
             .child(
                 text(label.to_owned())
                     .font(k.ty.small)
@@ -663,8 +603,8 @@ fn hints(k: &Kit) -> El {
         .px(16.0)
         .gap(16.0)
         .center_y()
-        .child(hint("h-copy", &["↵"], "Copy password"))
-        .child(hint("h-user", &["⇧", "↵"], "Copy username"))
+        .child(hint("h-copy", &["⏎"], "Copy password"))
+        .child(hint("h-user", &["⇧", "⏎"], "Copy username"))
         .child(hint("h-move", &["↑", "↓"], "Select"))
         .child(spacer())
         .child(hint("h-lock", &["⌘", "L"], "Lock"))

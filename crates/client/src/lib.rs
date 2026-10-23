@@ -99,6 +99,22 @@ pub async fn call<E>(
 where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
+    converse(paths, command, |event| std::future::ready(on_event(event))).await
+}
+
+/// [`call`] with an event handler that may take its time, such as one waiting
+/// for a person to compare a confirmation code. If the agent finishes while
+/// an answer is pending (the other device declined, the ticket expired), its
+/// final message ends the call at once and the pending answer is dropped.
+pub async fn converse<E, F>(
+    paths: &Paths,
+    command: Command,
+    mut on_event: impl FnMut(Event) -> F,
+) -> Result<Reply, Error>
+where
+    E: Into<Box<dyn std::error::Error + Send + Sync>>,
+    F: Future<Output = Result<Option<bool>, E>>,
+{
     let stream = UnixStream::connect(&paths.socket)
         .await
         .map_err(Error::Connect)?;
@@ -109,13 +125,31 @@ where
         command,
     })?;
     write.write_all(&body).await?;
+    let mut queued = std::collections::VecDeque::new();
     loop {
-        let Some(line) = lines.next_line().await? else {
-            return Err(Error::Closed);
+        let message = match queued.pop_front() {
+            Some(message) => message,
+            None => read_message(&mut lines).await?,
         };
-        match serde_json::from_str::<Message>(&line).map_err(Error::InvalidReply)? {
+        match message {
             Message::Event { event } => {
-                if let Some(answer) = on_event(event).map_err(|e| Error::Event(e.into()))? {
+                let answer = on_event(event);
+                tokio::pin!(answer);
+                // Events that arrive while one is being answered wait their turn.
+                let answer = loop {
+                    tokio::select! {
+                        biased;
+                        answer = &mut answer => break answer,
+                        message = read_message(&mut lines) => match message? {
+                            Message::Ok { reply } => return Ok(reply),
+                            Message::Error { code, message } => {
+                                return Err(AgentError { code, message }.into());
+                            }
+                            event => queued.push_back(event),
+                        },
+                    }
+                };
+                if let Some(answer) = answer.map_err(|e| Error::Event(e.into()))? {
                     write.write_all(&encode_line(&Answer { answer })?).await?;
                 }
             }
@@ -123,6 +157,15 @@ where
             Message::Error { code, message } => return Err(AgentError { code, message }.into()),
         }
     }
+}
+
+async fn read_message(
+    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+) -> Result<Message, Error> {
+    let Some(line) = lines.next_line().await? else {
+        return Err(Error::Closed);
+    };
+    serde_json::from_str::<Message>(&line).map_err(Error::InvalidReply)
 }
 
 /// `value` as one JSON line. Requests can carry a passphrase, so the buffer
@@ -225,4 +268,112 @@ pub async fn stop(paths: &Paths) -> Result<bool, Error> {
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     Err(Error::NotStopped)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use protocol::DeviceInfo;
+    use tokio::net::UnixListener;
+
+    fn paths(dir: &std::path::Path) -> Paths {
+        Paths {
+            data: dir.join("data"),
+            config: dir.join("config.toml"),
+            socket: dir.join("agent.sock"),
+            lock: dir.join("agent.lock"),
+            log: dir.join("agent.log"),
+        }
+    }
+
+    fn joining() -> Message {
+        Message::Event {
+            event: Event::Joining {
+                code: "482913".into(),
+                vault: "personal".into(),
+                inviter: DeviceInfo {
+                    id: "d1".into(),
+                    name: Some("studio".into()),
+                    this: false,
+                    connected: true,
+                    last_seen: None,
+                },
+            },
+        }
+    }
+
+    /// A one-request agent: reads the request, sends `joining`, then runs `rest`.
+    async fn agent<F, Fut>(listener: UnixListener, rest: F)
+    where
+        F: FnOnce(
+            tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
+            tokio::net::unix::OwnedWriteHalf,
+        ) -> Fut,
+        Fut: Future<Output = ()>,
+    {
+        let (stream, _) = listener.accept().await.unwrap();
+        let (read, mut write) = stream.into_split();
+        let mut lines = BufReader::new(read).lines();
+        lines.next_line().await.unwrap().unwrap();
+        write
+            .write_all(&encode_line(&joining()).unwrap())
+            .await
+            .unwrap();
+        rest(lines, write).await;
+    }
+
+    fn run(test: impl Future<Output = ()>) {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(test);
+    }
+
+    #[test]
+    fn an_answer_goes_back_and_the_reply_ends_the_call() {
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(dir.path());
+            let listener = UnixListener::bind(&paths.socket).unwrap();
+            let server = agent(listener, |mut lines, mut write| async move {
+                let answer = lines.next_line().await.unwrap().unwrap();
+                assert_eq!(answer, r#"{"answer":true}"#);
+                let done = Message::Ok { reply: Reply::Done };
+                write.write_all(&encode_line(&done).unwrap()).await.unwrap();
+            });
+            let client = converse(&paths, Command::Join { confirm: true }, |_| async {
+                Ok::<_, std::convert::Infallible>(Some(true))
+            });
+            let (reply, ()) = tokio::join!(client, server);
+            assert!(matches!(reply, Ok(Reply::Done)));
+        });
+    }
+
+    #[test]
+    fn the_agent_finishing_drops_a_pending_answer() {
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(dir.path());
+            let listener = UnixListener::bind(&paths.socket).unwrap();
+            // The other device declines while this one is still looking at the code.
+            let server = agent(listener, |_lines, mut write| async move {
+                let declined = Message::Error {
+                    code: ErrorCode::Failed,
+                    message: "pairing confirmation code was not confirmed".into(),
+                };
+                write
+                    .write_all(&encode_line(&declined).unwrap())
+                    .await
+                    .unwrap();
+            });
+            let client = converse(&paths, Command::Join { confirm: true }, |_| {
+                std::future::pending::<Result<Option<bool>, std::convert::Infallible>>()
+            });
+            let (reply, ()) = tokio::join!(client, server);
+            let error = reply.unwrap_err();
+            assert_eq!(error.code(), Some(ErrorCode::Failed));
+            assert!(error.to_string().contains("not confirmed"));
+        });
+    }
 }
