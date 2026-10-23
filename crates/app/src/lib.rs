@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod clipboard;
 pub mod model;
+pub mod onboarding;
 pub mod secret;
 pub mod theme;
 pub mod view;
@@ -15,6 +16,8 @@ use rune::{AppSpec, KeyEvent, Tx, Waker};
 use agent::{Agent, Job};
 use clipboard::Clipboard;
 use model::{App, Screen};
+use onboarding::worker::{Progress, Stage, Worker};
+use onboarding::{Flow, Notice, Pairing, Severity, Step};
 
 pub fn spec() -> AppSpec<App> {
     AppSpec {
@@ -41,10 +44,12 @@ pub fn run() {
     rune::App::new(spec())
         .init(move || {
             let mut app = if live {
-                App::new(
+                let mut app = App::new(
                     Agent::spawn(Paths::get(), agent::launch()),
                     Clipboard::system(),
-                )
+                );
+                app.onboarding.worker = Worker::new(Paths::get(), agent::launch());
+                app
             } else {
                 App::new(Agent::offline(), Clipboard::memory().0)
             };
@@ -61,6 +66,7 @@ pub fn is_live(args: &rune::tooling::Args) -> bool {
 }
 
 fn setup(s: &mut App, waker: Waker) {
+    s.onboarding.worker.set_waker(waker.clone());
     s.agent.set_waker(waker);
     s.agent.send(Job::Connect);
 }
@@ -72,7 +78,105 @@ type Scene = (&'static str, fn(&mut App));
 
 const SCENES: &[Scene] = &[
     ("connecting", |_| {}),
-    ("setup", |s| s.screen = Screen::NotSetUp),
+    ("welcome", welcome),
+    ("welcome-set-up", |s| {
+        welcome(s);
+        s.onboarding.device_ready = true;
+    }),
+    ("create", |s| form(s, Flow::Create)),
+    ("create-typing", |s| {
+        form(s, Flow::Create);
+        type_secret(&mut s.onboarding.passphrase, "correct horse");
+        type_secret(&mut s.onboarding.repeat, "correct hose");
+        s.onboarding.passphrase.mask.focused = false;
+        s.onboarding.repeat.mask.focused = true;
+    }),
+    ("create-ready", |s| {
+        form(s, Flow::Create);
+        type_secret(&mut s.onboarding.passphrase, "correct horse battery staple");
+        type_secret(&mut s.onboarding.repeat, "correct horse battery staple");
+        s.onboarding.passphrase.mask.focused = false;
+        s.onboarding.repeat.mask.focused = true;
+    }),
+    ("create-invalid", |s| {
+        form(s, Flow::Create);
+        s.onboarding.vault = rune::TextEdit::new("My Vault");
+        type_secret(&mut s.onboarding.passphrase, "hunter2");
+        s.submit_create();
+    }),
+    ("create-failed", |s| {
+        form(s, Flow::Create);
+        s.onboarding.notice = Some(Notice {
+            severity: Severity::Danger,
+            title: "Couldn't create the vault".into(),
+            body: "Connecting to the agent: connection refused. Try again.".into(),
+        });
+    }),
+    // Creating, then created at 1.2 s: the moment, then the empty vault at 2.7 s.
+    ("creating", |s| {
+        working(
+            s,
+            Flow::Create,
+            vec![Stage::Protecting, Stage::CreatingVault],
+        );
+        s.onboarding.worker = Worker::scripted(vec![
+            (0.8, Progress::Stage(Stage::CreatingVault)),
+            (1.2, Progress::Created(Ok(vault_info("personal")))),
+        ]);
+    }),
+    ("join", |s| form(s, Flow::Join)),
+    ("ticket", |s| {
+        welcome(s);
+        s.onboarding.device_ready = true;
+        s.onboarding.step = Step::Ticket;
+        let text = fixture_ticket();
+        s.onboarding.ticket = Some(onboarding::Ticket {
+            qr: onboarding::qr::Matrix::new(&text),
+            text,
+        });
+    }),
+    ("code", |s| {
+        welcome(s);
+        s.onboarding.device_ready = true;
+        s.onboarding.pairing = Some(pairing());
+        s.onboarding.step = Step::Confirm {
+            code: "482913".into(),
+            vault: "personal".into(),
+            inviter: "studio".into(),
+        };
+    }),
+    // Codes confirmed, then joined at 0.6 s.
+    ("joining", |s| {
+        working(s, Flow::Join, vec![Stage::Joining]);
+        s.onboarding.device_ready = true;
+        s.onboarding.pairing = Some(pairing());
+        s.onboarding.worker =
+            Worker::scripted(vec![(0.6, Progress::Joined(Ok(vault_info("personal"))))]);
+    }),
+    ("join-declined", |s| {
+        join_notice(
+            s,
+            Severity::Caution,
+            "Stopped: the codes didn't match",
+            "Nothing was shared and the ticket no longer works. Make a new one and compare again. If you didn't start pairing on your other device, someone else may have seen the ticket.",
+        );
+    }),
+    ("join-cancelled", |s| {
+        join_notice(
+            s,
+            Severity::Neutral,
+            "Join cancelled",
+            "Nothing was shared. Make a new ticket when you're ready.",
+        );
+    }),
+    ("join-failed", |s| {
+        join_notice(
+            s,
+            Severity::Danger,
+            "Couldn't join",
+            "The agent stopped. Try again.",
+        );
+    }),
     ("failed", |s| {
         s.screen =
             Screen::Failed("connecting to the agent: Connection refused (os error 61)".into());
@@ -105,6 +209,77 @@ const SCENES: &[Scene] = &[
         s.detail = None;
     }),
 ];
+
+fn welcome(s: &mut App) {
+    s.screen = Screen::Onboarding;
+    s.onboarding.device = rune::TextEdit::new("Dax's MacBook Pro");
+}
+
+fn form(s: &mut App, flow: Flow) {
+    welcome(s);
+    s.choose(flow);
+}
+
+fn working(s: &mut App, flow: Flow, plan: Vec<Stage>) {
+    welcome(s);
+    s.status = Some(status(true));
+    s.onboarding.stage = plan.first().copied();
+    s.onboarding.plan = plan;
+    s.onboarding.step = Step::Working(flow);
+}
+
+fn join_notice(s: &mut App, severity: Severity, title: &str, body: &str) {
+    welcome(s);
+    s.onboarding.device_ready = true;
+    s.choose(Flow::Join);
+    s.onboarding.notice = Some(Notice {
+        severity,
+        title: title.into(),
+        body: body.into(),
+    });
+}
+
+fn type_secret(field: &mut secret::SecretEdit, text: &str) {
+    for c in text.chars() {
+        field.key(&rune::KeyEvent {
+            key: rune::Key::Text(c.to_string()),
+            mods: rune::Mods::default(),
+        });
+    }
+}
+
+fn pairing() -> Pairing {
+    Pairing {
+        vault: "personal".into(),
+        inviter: "studio".into(),
+    }
+}
+
+fn vault_info(name: &str) -> VaultInfo {
+    VaultInfo {
+        id: "v1".into(),
+        name: name.into(),
+        default: true,
+        members: 1,
+        member: true,
+    }
+}
+
+/// A ticket-shaped string: `DBPAIR` and 274 base32 characters, the length of
+/// a real ticket with a relay and a few direct addresses.
+fn fixture_ticket() -> String {
+    const BASE32: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+    let mut x: u32 = 0x2545_f491;
+    let body: String = (0..274)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            BASE32[(x % 32) as usize] as char
+        })
+        .collect();
+    format!("DBPAIR{body}")
+}
 
 fn status(unlocked: bool) -> Status {
     Status {

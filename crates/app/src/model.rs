@@ -9,6 +9,8 @@ use zeroize::Zeroize;
 
 use crate::agent::{Agent, Done, Failure, Job};
 use crate::clipboard::{Clipboard, Copied};
+use crate::onboarding::Onboarding;
+use crate::onboarding::worker::Worker;
 use crate::secret::SecretEdit;
 
 /// How long a copied secret stays on the clipboard, by default.
@@ -25,8 +27,8 @@ const STATUS_EVERY: Duration = Duration::from_secs(10);
 #[derive(Clone, Debug, PartialEq)]
 pub enum Screen {
     Connecting,
-    /// No device set up yet; the CLI does that for now.
-    NotSetUp,
+    /// No device set up yet, or one with no vault: create or join one.
+    Onboarding,
     Locked,
     Vault,
     Failed(String),
@@ -64,6 +66,7 @@ pub struct App {
     pub screen: Screen,
     pub status: Option<Status>,
     pub passphrase: SecretEdit,
+    pub onboarding: Onboarding,
     pub unlocking: bool,
     pub unlock_error: Option<String>,
     pub search: TextEdit,
@@ -95,6 +98,7 @@ impl App {
             screen: Screen::Connecting,
             status: None,
             passphrase: SecretEdit::default(),
+            onboarding: Onboarding::new(Worker::offline()),
             unlocking: false,
             unlock_error: None,
             search: TextEdit::new(""),
@@ -125,6 +129,7 @@ impl App {
             self.apply(done, tx);
             changed = true;
         }
+        changed |= self.poll_onboarding(now, tx);
         changed |= self.tick_copy(now, tx);
         if self.screen == Screen::Vault && now >= self.next_status {
             self.next_status = now + STATUS_EVERY.as_secs_f64();
@@ -192,16 +197,29 @@ impl App {
     }
 
     fn on_status(&mut self, status: Status, tx: &mut Tx) {
+        let ready = status.initialized;
         let screen = if !status.initialized {
-            Screen::NotSetUp
+            Screen::Onboarding
         } else if !status.unlocked {
             Screen::Locked
+        } else if status.vaults.is_empty() {
+            Screen::Onboarding
         } else {
             Screen::Vault
         };
         let was = self.screen.clone();
         self.status = Some(status);
+        if was == Screen::Onboarding && self.onboarding.busy() {
+            // A create or join is running or its moment is showing; it moves on by itself.
+            self.onboarding.device_ready |= ready;
+            return;
+        }
         match (&was, &screen) {
+            (Screen::Onboarding, Screen::Onboarding) => self.onboarding.device_ready = ready,
+            (_, Screen::Onboarding) => {
+                self.forget_vault(tx);
+                self.begin_onboarding(ready);
+            }
             (Screen::Vault, Screen::Vault) => {}
             (_, Screen::Vault) => {
                 self.agent.send(Job::List);
@@ -216,7 +234,8 @@ impl App {
         }
     }
 
-    fn enter_vault(&mut self, tx: &mut Tx) {
+    pub(crate) fn enter_vault(&mut self, tx: &mut Tx) {
+        self.onboarding.forget();
         self.screen = Screen::Vault;
         self.search.focused = true;
         self.next_status = self.clock + STATUS_EVERY.as_secs_f64();
@@ -251,6 +270,7 @@ impl App {
     pub fn close(&mut self, tx: &mut Tx) {
         self.forget_vault(tx);
         self.passphrase.clear();
+        self.onboarding.forget();
     }
 
     fn forget_vault(&mut self, _tx: &mut Tx) {
@@ -510,6 +530,7 @@ impl App {
                 self.lock();
                 true
             }
+            _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev),
             _ => false,
         }
     }

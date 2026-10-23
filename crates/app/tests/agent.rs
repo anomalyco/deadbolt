@@ -200,7 +200,7 @@ fn unlock_search_copy_lock() {
     rt.state.agent.send(deadbolt_app::agent::Job::Connect);
 
     until(&mut rt, "the locked screen", |s| s.screen == Screen::Locked);
-    assert!(shows(&rt, "Deadbolt is locked"));
+    assert!(shows(&rt, "DEADBOLT"));
 
     // A wrong passphrase stays on the unlock screen and says so.
     for c in "nope".chars() {

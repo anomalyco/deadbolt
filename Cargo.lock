@@ -912,8 +912,10 @@ version = "0.0.0"
 dependencies = [
  "arboard",
  "deadbolt-client",
+ "qrcode",
  "rune",
  "rune-kit",
+ "rustix 1.1.5",
  "serde_json",
  "tempfile",
  "tokio",

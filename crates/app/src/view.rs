@@ -52,7 +52,7 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     let k = crate::theme::kit(cx.system_dark());
     let screen = match &s.screen {
         Screen::Connecting => connecting(k),
-        Screen::NotSetUp => not_set_up(k),
+        Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark()),
         Screen::Locked => unlock(s, k),
         Screen::Vault => vault(s, k),
         Screen::Failed(message) => failed(k, message),
@@ -109,25 +109,6 @@ fn connecting(k: &Kit) -> El {
     )
 }
 
-fn not_set_up(k: &Kit) -> El {
-    centred(
-        "setup",
-        k,
-        k.glyph.lock,
-        "Set up this device",
-        col()
-            .key("body")
-            .w_full()
-            .gap(16.0)
-            .child(muted(
-                k,
-                "how",
-                "Run deadbolt init in a terminal to create a vault, or deadbolt join to join one from your other device.",
-            ))
-            .child(Button::new("Check again").variant(ButtonVariant::Neutral).on_press(|s: &mut App| s.retry()).build(k)),
-    )
-}
-
 fn failed(k: &Kit, message: &str) -> El {
     centred(
         "failed",
@@ -156,9 +137,12 @@ fn unlock(s: &App, k: &Kit) -> El {
         .and_then(|d| d.name.clone());
     let vaults = s.status.as_ref().map_or(0, |st| st.vaults.len());
     let about = match (device, vaults) {
-        (Some(name), 0) => name,
-        (Some(name), n) => format!("{name} · {n} vault{}", if n == 1 { "" } else { "s" }),
-        (None, _) => "Enter your passphrase to unlock this device.".into(),
+        (Some(name), 0) => format!("Locked · {name}"),
+        (Some(name), n) => format!(
+            "Locked · {name} · {n} vault{}",
+            if n == 1 { "" } else { "s" }
+        ),
+        (None, _) => "Locked. Enter your passphrase to unlock this device.".into(),
     };
     let field = TextInput::new(&s.passphrase.mask)
         .placeholder("Passphrase")
@@ -207,7 +191,15 @@ fn unlock(s: &App, k: &Kit) -> El {
             .key("unlock")
             .mt(4.0),
     );
-    centred("unlock", k, k.glyph.lock, "Deadbolt is locked", body)
+    col().key("unlock").center().child(
+        col()
+            .key("panel")
+            .w(320.0)
+            .gap(20.0)
+            .items_start()
+            .child(crate::onboarding::view::wordmark(k, 44.0))
+            .child(body),
+    )
 }
 
 // -------------------------------------------------------------------------------------------
@@ -281,7 +273,7 @@ fn list(s: &App, k: &Kit) -> El {
             k,
             "empty",
             "No items yet",
-            "Add one with deadbolt new login.",
+            "What you add shows up here and on your other devices.",
         ));
     } else if visible.is_empty() {
         rows = rows.child(empty(
@@ -391,7 +383,9 @@ fn detail(s: &App, k: &Kit) -> El {
         .py(24.0)
         .gap(20.0);
     let Some(item) = s.selected_item() else {
-        if s.loaded && !s.items.is_empty() {
+        if s.loaded && s.items.is_empty() {
+            pane = pane.child(crate::onboarding::view::empty_vault(s, k));
+        } else if s.loaded {
             pane = pane.child(
                 text("Select an item")
                     .key("none")
