@@ -8,12 +8,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use deadbolt_app::agent::Done;
+use deadbolt_app::agent::{Agent, Done, Job, Values};
 use deadbolt_app::clipboard::Clipboard;
-use deadbolt_app::model::App;
+use deadbolt_app::model::{App, Screen};
 use deadbolt_app::panel::window::Windows;
 use deadbolt_app::panel::{self, Phase};
-use deadbolt_client::protocol::ItemInfo;
+use deadbolt_client::protocol::{Change, ItemInfo};
 use rune::{Env, Key, KeyEvent, Mods, Runtime, Shell};
 
 const FRAME: f64 = 1.0 / 60.0;
@@ -82,7 +82,7 @@ fn both(a: &mut Runtime<App>, b: &mut Runtime<App>, seconds: f64) {
 fn alone(rt: &mut Runtime<App>) {
     let main = rune::App::new(deadbolt_app::spec());
     let quick = rune::App::new(panel::spec());
-    rt.state.windows = Some(Windows::new(main.handle(), quick.handle(), &[]));
+    rt.state.windows = Some(Windows::new(main.handle(), quick.handle()));
     rt.state.panel.as_mut().unwrap().opens = 1;
 }
 
@@ -318,6 +318,62 @@ fn escape_fades_the_card_then_hides() {
     assert!(gone < 0.01, "faded out by the time it hides ({gone})");
 }
 
+/// A window draws no frames while nothing moves, so the app's clock stands
+/// still until an event's frame; the time passes with no poll.
+fn idle(rt: &mut Runtime<App>) {
+    let poll = rt.poll.take();
+    rt.frame(5.0);
+    rt.poll = poll;
+}
+
+fn fades_then_hides(rt: &mut Runtime<App>, how: &str) {
+    assert!(matches!(phase(rt), Phase::Closing { .. }), "{how} closes");
+    frames(rt, 5);
+    let fade = find(rt, "card").expect("still fading").1;
+    assert!(fade > 0.0 && fade < 1.0, "{how}: the card fades ({fade})");
+    frames(rt, 20);
+    assert_eq!(phase(rt), Phase::Hidden, "{how}");
+    let gone = find(rt, "card").map_or(0.0, |c| c.1);
+    assert!(
+        gone < 0.01,
+        "{how}: faded out by the time it hides ({gone})"
+    );
+}
+
+#[test]
+fn after_a_pause_escape_and_clicking_away_still_fade() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    idle(&mut rt);
+    rt.key(key(Key::Escape));
+    rt.frame(FRAME);
+    fades_then_hides(&mut rt, "Escape");
+
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    idle(&mut rt);
+    rt.update(|s, tx| s.panel_focus(false, tx));
+    rt.frame(FRAME);
+    fades_then_hides(&mut rt, "clicking away");
+}
+
+#[test]
+fn after_a_pause_a_copy_still_confirms() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    idle(&mut rt);
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    frames(&mut rt, 50);
+    assert!(
+        matches!(phase(&rt), Phase::Copied { .. }),
+        "the confirmation shows its full time"
+    );
+    frames(&mut rt, 30);
+    assert!(matches!(phase(&rt), Phase::Closing { .. } | Phase::Hidden));
+}
+
 /// Summoned again while the close still fades: the card comes back at rest,
 /// not fading back in from where its close had got to.
 #[test]
@@ -458,17 +514,78 @@ fn the_username_hint_shows_only_for_logins_with_one() {
     assert_eq!(footer(&rt), "Visa •••• 4242 has no username");
 }
 
+/// Clicking away goes as Escape does: the card fades, the window hides, and
+/// what was read and typed is forgotten.
 #[test]
-fn it_closes_itself_when_left_alone() {
-    let idle = panel::window::IDLE;
+fn clicking_away_closes_it_and_forgets() {
+    for scene in ["filtering", "locked"] {
+        let mut rt = runtime(scene, true);
+        rt.key(key(Key::Down));
+        rt.key(key(Key::Text("h".into())));
+        frames(&mut rt, 2);
+        rt.update(|s, tx| s.panel_focus(true, tx));
+        rt.frame(FRAME);
+        assert_eq!(
+            phase(&rt),
+            Phase::Open,
+            "{scene}: gaining focus does nothing"
+        );
+
+        rt.update(|s, tx| s.panel_focus(false, tx));
+        rt.frame(FRAME);
+        assert!(matches!(phase(&rt), Phase::Closing { .. }), "{scene}");
+        assert!(rt.state.passphrase.text.is_empty(), "{scene}");
+        frames(&mut rt, 30);
+        assert_eq!(phase(&rt), Phase::Hidden, "{scene}");
+        assert!(
+            rt.state.items.is_empty() && rt.state.selected.is_none(),
+            "{scene}"
+        );
+        assert!(rt.state.detail.is_none(), "{scene}");
+        let gone = find(&rt, "card").map_or(0.0, |c| c.1);
+        assert!(gone < 0.01, "{scene}: faded out ({gone})");
+    }
+}
+
+/// Losing focus to its own copy's close, or once hidden, changes nothing.
+#[test]
+fn focus_loss_while_closing_keeps_the_copy() {
     let mut rt = runtime("empty", true);
-    rt.frame(idle - 10.0);
-    rt.key(key(Key::Down));
+    frames(&mut rt, 2);
+    rt.key(key(Key::Enter));
     rt.frame(FRAME);
-    rt.frame(idle - 5.0);
-    assert_eq!(phase(&rt), Phase::Open, "a key keeps it up");
-    rt.frame(5.1);
+    rt.update(|s, tx| s.panel_focus(false, tx));
+    rt.frame(FRAME);
     assert!(matches!(phase(&rt), Phase::Closing { .. }));
+    assert!(rt.state.copy_pending(), "the copy still counts down");
+    frames(&mut rt, 30);
+    rt.update(|s, tx| s.panel_focus(false, tx));
+    rt.frame(FRAME);
+    assert_eq!(phase(&rt), Phase::Hidden);
+}
+
+/// What headless runs can check of placement: they ignore `place`, so the
+/// display it lands on and the final frame are untested until Rune's
+/// launcher-wakes branch gives headless runs displays (docs/app.md).
+#[test]
+fn it_opens_under_the_pointer_near_the_top() {
+    use rune::{Align, DisplayTarget, OverlayPlacement, ScreenEdge};
+    let (display, placement) = panel::window::PLACE;
+    assert_eq!(display, DisplayTarget::UnderPointer);
+    let OverlayPlacement::Edge {
+        edge,
+        align,
+        margin,
+        inset,
+    } = placement
+    else {
+        panic!("placed against an edge: {placement:?}");
+    };
+    assert_eq!((edge, align), (ScreenEdge::Top, Align::Center));
+    assert!(margin > 0.0 && margin < 300.0);
+    assert_eq!(inset, 0.0, "centred, not nudged");
+    // The shortest screen it should fit whole: a 13-inch laptop's default, 900 pt tall.
+    assert!(margin + panel::SIZE.1 <= 900.0);
 }
 
 #[test]
@@ -626,6 +743,45 @@ fn a_hidden_panel_wakes_once_for_its_countdown() {
     );
 }
 
+/// Hidden, the panel still clears its copy on time.
+#[test]
+fn a_hidden_panel_clears_its_copy_on_time() {
+    let mut rt = runtime("empty", true);
+    let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
+    frames(&mut rt, 2);
+    rt.key(key(Key::Enter));
+    frames(&mut rt, 120);
+    assert_eq!(phase(&rt), Phase::Hidden);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    let clears = rt.state.copy.as_ref().unwrap().remaining(rt.state.clock);
+    rt.frame(clears - 0.1);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD), "not early");
+    rt.frame(0.2);
+    assert_eq!(board(&clip), None, "cleared on time");
+}
+
+/// A lock that reaches the hidden panel clears its copy and leaves nothing
+/// to show when it next opens.
+#[test]
+fn a_lock_while_hidden_leaves_nothing_behind() {
+    let mut rt = runtime("empty", true);
+    let clip = share_clipboard([&mut rt, &mut runtime("empty", true)]);
+    frames(&mut rt, 2);
+    rt.key(key(Key::Enter));
+    frames(&mut rt, 120);
+    assert_eq!(phase(&rt), Phase::Hidden);
+
+    rt.update(|s, tx| s.apply(Done::Locked(Ok(())), tx));
+    rt.frame(FRAME);
+    assert_eq!(board(&clip), None, "the lock clears the copy");
+    assert!(rt.state.copy.is_none());
+    assert!(rt.state.items.is_empty() && rt.state.detail.is_none());
+    rt.update(|s, tx| s.summon(tx));
+    frames(&mut rt, 2);
+    assert!(shows(&rt, "Unlock Deadbolt"), "it opens locked");
+    assert!(!shows(&rt, "github.com"));
+}
+
 /// Scenario A: the panel copies, hides with its countdown running, and the
 /// main window copies the same value later. The panel's countdown mustn't
 /// clear the main window's copy early.
@@ -638,6 +794,7 @@ fn a_replaced_copy_never_clears_the_newer_one() {
     both(&mut quick, &mut main, FRAME);
     assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
 
+    both(&mut quick, &mut main, FRAME);
     both(&mut quick, &mut main, 15.0);
     assert_eq!(phase(&quick), Phase::Hidden);
     main.update(|s, tx| s.copy_field("password", tx));
@@ -756,6 +913,41 @@ fn with_the_main_window_around_it_stays() {
     assert_eq!(rt.shell_request, None);
 }
 
+/// A `--panel` start has no app menu, so the main window it opens quits on
+/// ⌘Q itself, even from the search field under Settings. The panel doesn't.
+#[test]
+fn command_q_quits_from_the_main_window() {
+    let cmd_q = KeyEvent {
+        key: Key::Command('q'),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    };
+    let mut main = main_window();
+    let clip = share_clipboard([&mut main, &mut runtime("empty", true)]);
+    let mut installer = deadbolt_app::install::Installer::fixture();
+    installer.show();
+    installer.settings_open = true;
+    main.update(|s, tx| {
+        s.installer = Some(installer);
+        s.copy_field("password", tx);
+    });
+    main.frame(FRAME);
+    assert!(main.state.search.focused);
+    assert_eq!(board(&clip).as_deref(), Some(PASSWORD));
+    main.key(cmd_q.clone());
+    main.frame(FRAME);
+    assert_eq!(main.shell_request, Some(Shell::Quit));
+    assert_eq!(board(&clip), None, "quitting clears the copy");
+
+    let mut quick = runtime("empty", true);
+    quick.key(cmd_q);
+    quick.frame(FRAME);
+    assert_eq!(quick.shell_request, None);
+    assert_eq!(phase(&quick), Phase::Open);
+}
+
 #[test]
 fn closing_its_window_cleans_up_like_the_main_one() {
     let mut rt = runtime("locked", true);
@@ -775,4 +967,88 @@ fn closing_its_window_cleans_up_like_the_main_one() {
     assert!(rt.state.detail.is_none() && rt.state.items.is_empty());
     assert_eq!(board(&clip), None);
     assert_eq!(rt.shell_request, Some(Shell::Quit), "alone, it leaves");
+}
+
+/// Hidden, the panel follows a lock but reads nothing: changes that would
+/// refetch the list, and replies that arrive anyway, leave it holding nothing.
+#[test]
+fn a_hidden_panel_fetches_and_holds_nothing() {
+    let mut rt = runtime("empty", true);
+    let (agent, jobs, replies) = Agent::scripted();
+    rt.state.agent = agent;
+    let items = rt.state.items.clone();
+    let item = rt.state.detail.clone().expect("an item's values show");
+    let status = rt.state.status.clone().expect("a status");
+    frames(&mut rt, 2);
+    rt.key(key(Key::Escape));
+    frames(&mut rt, 30);
+    assert_eq!(phase(&rt), Phase::Hidden);
+    assert_eq!(jobs.try_iter().count(), 0);
+
+    let vault = status.vaults[0].id.clone();
+    let (generation, seq) = (rt.state.generation(), rt.state.seq());
+    for done in [
+        Done::Changed(Change::Watching),
+        Done::Changed(Change::Resync),
+        Done::Changed(Change::Unlocked),
+        Done::Changed(Change::Items { vault }),
+        Done::Changed(Change::Vaults),
+        Done::Status(Some(status.clone())),
+        Done::Items {
+            generation,
+            result: Ok(items),
+        },
+        Done::Item {
+            seq,
+            result: Ok(Values::new(item)),
+        },
+    ] {
+        replies.send(done).unwrap();
+    }
+    frames(&mut rt, 2);
+    let sent: Vec<_> = jobs.try_iter().collect();
+    assert!(
+        !sent
+            .iter()
+            .any(|job| matches!(job, Job::List { .. } | Job::Get { .. })),
+        "nothing fetched"
+    );
+    assert!(
+        rt.state.items.is_empty() && rt.state.detail.is_none(),
+        "nothing held"
+    );
+
+    replies.send(Done::Changed(Change::Locked)).unwrap();
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.screen, Screen::Locked, "a lock still reaches it");
+}
+
+/// ⌘L locks from the open panel (when no field took it), but not once it's
+/// confirming a copy or closing.
+#[test]
+fn command_l_locks_only_while_open() {
+    let command_l = KeyEvent {
+        key: Key::Command('l'),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    };
+    let mut rt = runtime("empty", true);
+    let (agent, jobs, _replies) = Agent::scripted();
+    rt.state.agent = agent;
+    frames(&mut rt, 2);
+    for phase in [
+        Phase::Copied { until: None },
+        Phase::Closing { until: None },
+        Phase::Open,
+    ] {
+        let ev = command_l.clone();
+        rt.update(move |s, tx| {
+            s.panel.as_mut().unwrap().phase = phase;
+            s.panel_key(&ev, tx);
+        });
+        let locked = jobs.try_iter().any(|job| matches!(job, Job::Lock));
+        assert_eq!(locked, phase == Phase::Open, "{phase:?}");
+    }
 }

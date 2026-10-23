@@ -57,10 +57,14 @@ pub fn run() {
     } else {
         Clipboard::memory().0
     };
-    rune::run_windows(move |displays| {
+    // Started for the panel, Deadbolt runs without a Dock icon so launching
+    // doesn't activate it and the app you were in keeps focus; opening the
+    // main window brings the icon back (`Windows::open_main`).
+    let accessory = live && panel_first;
+    rune::run_windows_with(rune::RunOptions { accessory }, move |_| {
         let mut main = rune::App::new(spec());
         let quick = rune::App::new(panel::spec()).windowless();
-        let windows = panel::window::Windows::new(main.handle(), quick.handle(), displays);
+        let windows = panel::window::Windows::new(main.handle(), quick.handle());
         let main_windows = windows.clone();
         let main_clipboard = clipboard.clone();
         main = main
@@ -108,13 +112,14 @@ pub fn run() {
                 app.reduced_motion = reduced_motion;
                 app
             })
+            .on_focus(|s, focused, tx| s.panel_focus(focused, tx))
             .on_close(|s, tx| s.panel_closed(tx));
         if live && panel_first {
             main = windows.start_with_panel(main);
         }
         vec![
             rune::WindowSpec::from_app("main", main),
-            rune::WindowSpec::from_app("panel", quick).options(panel::window::options(displays)),
+            rune::WindowSpec::from_app("panel", quick).configured_options(panel::window::options()),
         ]
     });
 }

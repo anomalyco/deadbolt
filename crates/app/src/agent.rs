@@ -179,6 +179,20 @@ impl Agent {
         }
     }
 
+    /// A connection the caller answers for, in tests: it reads the jobs and
+    /// posts the replies.
+    pub fn scripted() -> (Agent, Receiver<Job>, Sender<Done>) {
+        let (jobs, requests) = channel();
+        let (results, inbox) = channel();
+        let agent = Agent {
+            jobs: Some(jobs),
+            inbox,
+            waker: Arc::default(),
+            _watching: None,
+        };
+        (agent, requests, results)
+    }
+
     pub fn send(&self, job: Job) {
         if let Some(jobs) = &self.jobs {
             // The worker only stops when this sender drops, so sending cannot fail while
