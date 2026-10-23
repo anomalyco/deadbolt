@@ -7,6 +7,10 @@ mod session;
 #[cfg(test)]
 mod sim;
 mod sync;
+mod system;
+#[cfg(test)]
+mod watch_tests;
+mod watchers;
 
 use std::collections::HashSet;
 use std::fs::{self, File, TryLockError};
@@ -31,9 +35,11 @@ use crate::client::{AgentError, version};
 use crate::config::Config;
 use crate::paths::Paths;
 use crate::protocol::{
-    Answer, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request, Status,
+    Answer, Change, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request, Status,
 };
 use session::{Loaded, Session, clean_name};
+use system::SystemEvent;
+use watchers::Watchers;
 
 /// Large enough for `item-import` of a big vault.
 const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -64,6 +70,26 @@ pub struct Agent {
     /// Requests in progress; the idle timeout waits for them (e.g. pairing).
     busy: AtomicUsize,
     shutdown: Notify,
+    watchers: Watchers,
+}
+
+impl Agent {
+    fn new(paths: Paths, local_net: bool, kdf: deadbolt_store::KdfParams) -> Arc<Agent> {
+        Arc::new(Agent {
+            paths,
+            local_net,
+            kdf,
+            session: Mutex::default(),
+            members: Arc::default(),
+            ready: watch::channel(false).0,
+            sync_now: Notify::new(),
+            transition: tokio::sync::Mutex::new(()),
+            idle: Mutex::default(),
+            busy: AtomicUsize::new(0),
+            shutdown: Notify::new(),
+            watchers: Watchers::default(),
+        })
+    }
 }
 
 #[cfg(test)]
@@ -73,25 +99,17 @@ mod tests {
     use deadbolt_core::DeviceSecret;
 
     fn locked_agent(dir: &std::path::Path) -> Arc<Agent> {
-        Arc::new(Agent {
-            paths: Paths {
-                data: dir.into(),
-                config: dir.join("config"),
-                socket: dir.join("socket"),
-                lock: dir.join("lock"),
-                log: dir.join("log"),
-            },
-            local_net: true,
-            kdf: deadbolt_store::KdfParams::DEFAULT,
-            session: Mutex::default(),
-            members: Arc::default(),
-            ready: watch::channel(false).0,
-            sync_now: Notify::new(),
-            transition: tokio::sync::Mutex::new(()),
-            idle: Mutex::default(),
-            busy: AtomicUsize::new(0),
-            shutdown: Notify::new(),
-        })
+        Agent::new(test_paths(dir), true, deadbolt_store::KdfParams::DEFAULT)
+    }
+
+    pub(super) fn test_paths(dir: &std::path::Path) -> Paths {
+        Paths {
+            data: dir.into(),
+            config: dir.join("config"),
+            socket: dir.join("socket"),
+            lock: dir.join("lock"),
+            log: dir.join("log"),
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -294,25 +312,7 @@ mod tests {
             .unwrap();
         drop(loaded);
         let loaded = Loaded::open(dir.path(), b"test").unwrap();
-        let agent = Arc::new(Agent {
-            paths: Paths {
-                data: dir.path().into(),
-                config: dir.path().join("config"),
-                socket: dir.path().join("socket"),
-                lock: dir.path().join("lock"),
-                log: dir.path().join("log"),
-            },
-            local_net: true,
-            kdf: deadbolt_store::KdfParams::DEFAULT,
-            session: Mutex::default(),
-            members: Arc::default(),
-            ready: watch::channel(false).0,
-            sync_now: Notify::new(),
-            transition: tokio::sync::Mutex::new(()),
-            idle: Mutex::default(),
-            busy: AtomicUsize::new(0),
-            shutdown: Notify::new(),
-        });
+        let agent = locked_agent(dir.path());
         let node = Node::spawn(
             NodeConfig::local_only(key),
             Arc::new(|_: &PeerId| false),
@@ -455,20 +455,11 @@ pub async fn serve(paths: Paths) -> Result<()> {
     let env = crate::config::Environment::load();
     let local_net = env.local_net;
     let socket = paths.socket.clone();
-    let agent = Arc::new(Agent {
-        paths,
-        local_net,
-        kdf: env.kdf,
-        session: Mutex::default(),
-        members: Arc::default(),
-        ready: watch::channel(false).0,
-        sync_now: Notify::new(),
-        transition: tokio::sync::Mutex::new(()),
-        idle: Mutex::default(),
-        busy: AtomicUsize::new(0),
-        shutdown: Notify::new(),
-    });
+    let agent = Agent::new(paths, local_net, env.kdf);
     info!(pid = std::process::id(), version = %version(), local_net, "agent started");
+    let (system, events) = mpsc::channel(8);
+    let _sources = system::spawn(system);
+    let _follow = AbortOnDrop(tokio::spawn(agent.clone().follow_system(events)));
 
     let mut connections = JoinSet::new();
     let mut terminate = signal(SignalKind::terminate())?;
@@ -490,6 +481,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     }
     info!("agent stopping");
     drop(listener);
+    agent.watchers.stopping();
     drain_connections(&mut connections).await;
     agent.lock().await;
     remove_socket(&socket)?;
@@ -636,6 +628,11 @@ impl Agent {
         };
         let mut stop = false;
         let result = match request {
+            Ok(request)
+                if matches!(request.command, Command::Watch) && request.v == PROTOCOL_VERSION =>
+            {
+                return self.watch(&conversation).await;
+            }
             Ok(request) => {
                 stop = matches!(request.command, Command::Stop);
                 let always = matches!(request.command, Command::Status | Command::Stop);
@@ -712,6 +709,7 @@ impl Agent {
                 self.lock().await;
                 Ok(Reply::Done)
             }
+            Command::Watch => bail!("watch streams on a connection of its own"),
             Command::VaultCreate { name } => {
                 let vault = self.with(|s| {
                     let id = s.create_vault(&name)?;
@@ -880,7 +878,65 @@ impl Agent {
                 )
             });
         };
-        f(session)
+        let result = f(session);
+        // Publish even if `f` failed: it may have committed earlier changes.
+        if !session.changes.is_empty() {
+            self.watchers.changed(&std::mem::take(&mut session.changes));
+        }
+        result
+    }
+
+    /// Streams changes to one watcher until it hangs up or the agent stops.
+    /// A watcher that stops reading is dropped after [`watchers::SEND_TIMEOUT`];
+    /// publishing never waits for it.
+    async fn watch(&self, conv: &Conversation) -> Result<()> {
+        let subscription = self.watchers.subscribe();
+        let send = |change| async move {
+            tokio::time::timeout(
+                watchers::SEND_TIMEOUT,
+                conv.send(&Message::Change { change }),
+            )
+            .await
+            .context("the watcher stopped reading")?
+        };
+        send(Change::Watching).await?;
+        loop {
+            let changes = tokio::select! {
+                changes = subscription.next() => changes,
+                () = conv.closed() => return Ok(()),
+            };
+            for change in changes {
+                let stopping = change == Change::Stopping;
+                send(change).await?;
+                if stopping {
+                    conv.send(&Message::Ok { reply: Reply::Done }).await?;
+                    conv.write.lock().await.shutdown().await?;
+                    return Ok(());
+                }
+            }
+        }
+    }
+
+    /// Locks on each sleep or screen-lock event unless `lock_on_sleep` is off.
+    async fn follow_system(self: Arc<Self>, mut events: mpsc::Receiver<SystemEvent>) {
+        while let Some(event) = events.recv().await {
+            let enabled = match Config::load(&self.paths.config) {
+                Ok(config) => config.lock_on_sleep(),
+                Err(error) => {
+                    warn!("{error:#}; locking anyway");
+                    true
+                }
+            };
+            let unlocked = self
+                .session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some();
+            if enabled && unlocked {
+                info!(?event, "locking");
+                self.lock().await;
+            }
+        }
     }
 
     /// Updates the membership gate and closes open sync connections to devices
@@ -1022,6 +1078,7 @@ impl Agent {
         self.ready.send_replace(session.peer_set().is_empty());
         let id: DeviceId = session.id;
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
+        self.watchers.unlocked();
         self.set_timeout(timeout_secs)?;
         self.with(|s| {
             s.sync_task = Some(AbortOnDrop(tokio::spawn(sync::run(self.clone()))));
@@ -1045,6 +1102,7 @@ impl Agent {
         self.ready.send_replace(false);
         *self.idle.lock().unwrap_or_else(|e| e.into_inner()) = Idle::default();
         if let Some(mut session) = session {
+            self.watchers.locked();
             session.sync_task.take();
             session.node.shutdown().await;
             drop(session);

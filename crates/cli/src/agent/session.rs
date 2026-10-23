@@ -1,12 +1,14 @@
 //! The unlocked state: store, device key, vaults and the local address book.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
 use data_encoding::HEXLOWER;
-use deadbolt_core::{DeviceId, DeviceSecret, Entry, Vault, VaultId, valid_name};
+use deadbolt_core::{
+    DeviceId, DeviceSecret, Entry, MembershipOp, Payload, Vault, VaultId, valid_name,
+};
 use deadbolt_net::{Node, PeerAddr, PeerId};
 use deadbolt_store::{KdfParams, Unlocked};
 use indexmap::IndexMap;
@@ -102,6 +104,41 @@ pub struct Meta {
     pub peers: BTreeMap<String, Peer>,
 }
 
+/// What changed since the agent last told its watchers. Recorded where
+/// changes become durable, so local writes, sync and pairing all report.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Changes {
+    pub vaults: bool,
+    pub items: BTreeSet<VaultId>,
+    pub devices: BTreeSet<VaultId>,
+}
+
+impl Changes {
+    pub fn is_empty(&self) -> bool {
+        !self.vaults && self.items.is_empty() && self.devices.is_empty()
+    }
+
+    /// Records entries newly committed to `vault`.
+    fn committed(&mut self, vault: VaultId, entries: &[Entry]) {
+        for entry in entries {
+            match entry.payload() {
+                Payload::Data(_) => {
+                    self.items.insert(vault);
+                }
+                Payload::Membership(MembershipOp::Rename { .. }) => self.vaults = true,
+                Payload::Membership(op) => {
+                    self.vaults = true;
+                    self.devices.insert(vault);
+                    // A removed device's later writes stop counting.
+                    if matches!(op, MembershipOp::Remove { .. }) {
+                        self.items.insert(vault);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The store opened and decoded, before the network node starts.
 pub struct Loaded {
     pub store: Unlocked,
@@ -109,6 +146,7 @@ pub struct Loaded {
     pub id: DeviceId,
     pub meta: Meta,
     pub vaults: IndexMap<VaultId, Vault>,
+    pub changes: Changes,
 }
 
 fn get_json<T: DeserializeOwned>(store: &Unlocked, name: &str) -> Result<Option<T>> {
@@ -132,9 +170,14 @@ impl Loaded {
     ) -> Result<T> {
         let store = &self.store;
         let secret = &self.secret;
+        let changes = &mut self.changes;
         update(
             self.vaults.get_mut(&id).context("vault not held")?,
-            |entries| persist(store, entries),
+            |entries| {
+                persist(store, entries)?;
+                changes.committed(id, entries);
+                Ok(())
+            },
             |vault| change(vault, secret),
         )
     }
@@ -158,6 +201,7 @@ impl Loaded {
             secret,
             meta,
             vaults: IndexMap::new(),
+            changes: Changes::default(),
         };
         save_meta(&loaded.store, &loaded.meta)?;
         Ok(loaded)
@@ -194,6 +238,7 @@ impl Loaded {
             secret,
             meta,
             vaults,
+            changes: Changes::default(),
         })
     }
 }
@@ -242,8 +287,11 @@ impl Session {
 }
 
 impl Loaded {
-    pub fn save_meta(&self) -> Result<()> {
-        save_meta(&self.store, &self.meta)
+    /// Saves the device name, default vault and address book.
+    pub fn save_meta(&mut self) -> Result<()> {
+        save_meta(&self.store, &self.meta)?;
+        self.changes.vaults = true;
+        Ok(())
     }
 
     pub fn save_peers(&self) -> Result<()> {
@@ -385,6 +433,9 @@ impl Loaded {
         }
         persist(&self.store, vault.entries())?;
         self.vaults.insert(id, vault);
+        self.changes.vaults = true;
+        self.changes.items.insert(id);
+        self.changes.devices.insert(id);
         if self.meta.default_vault.is_none() {
             self.meta.default_vault = Some(id);
         }

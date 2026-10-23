@@ -5,6 +5,10 @@
 //! # "never" (the default) keeps it unlocked until `deadbolt lock`, the agent
 //! # stops, or the machine reboots. Units: s, m, h, d.
 //! unlock_timeout = "8h"
+//!
+//! # Lock when this computer sleeps or its screen locks (default true).
+//! # macOS sees both as they happen; Linux sees sleep on wake.
+//! lock_on_sleep = true
 //! ```
 
 use std::path::Path;
@@ -55,11 +59,23 @@ pub fn now() -> u64 {
         .unwrap_or_default()
 }
 
+#[expect(
+    clippy::disallowed_methods,
+    reason = "wall-clock adapter for noticing that the computer slept"
+)]
+pub fn wall_clock() -> Duration {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+}
+
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
     pub unlock_timeout: Option<String>,
+    #[serde(default)]
+    pub lock_on_sleep: Option<bool>,
 }
 
 impl Config {
@@ -78,6 +94,11 @@ impl Config {
         self.unlock_timeout
             .as_deref()
             .map_or(Ok(None), parse_timeout)
+    }
+
+    /// Whether to lock when the computer sleeps or its screen locks.
+    pub fn lock_on_sleep(&self) -> bool {
+        self.lock_on_sleep.unwrap_or(true)
     }
 }
 
@@ -124,5 +145,13 @@ mod tests {
         );
         assert!(parse_timeout("2x").is_err());
         assert!(parse_timeout("m").is_err());
+    }
+
+    #[test]
+    fn lock_on_sleep_is_on_unless_turned_off() {
+        let parse = |text: &str| toml::from_str::<Config>(text).unwrap().lock_on_sleep();
+        assert!(parse(""));
+        assert!(parse("lock_on_sleep = true"));
+        assert!(!parse("lock_on_sleep = false\nunlock_timeout = \"8h\""));
     }
 }

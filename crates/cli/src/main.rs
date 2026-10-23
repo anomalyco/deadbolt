@@ -94,6 +94,9 @@ enum Commands {
     Status,
     /// Sync now with every device (or only the devices in --vault).
     Sync,
+    /// Print what changes in the agent as JSON lines: lock state, items,
+    /// vaults and devices, never values. Ends when the agent stops.
+    Watch,
     /// Run the background agent in the foreground, or manage it.
     Agent {
         #[command(subcommand)]
@@ -184,6 +187,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Unlock { .. }
                 | Commands::Lock
                 | Commands::Status
+                | Commands::Watch
                 | Commands::Agent { .. }
                 | Commands::Vault(_)
         )
@@ -338,6 +342,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Status => {
             let status = client::ensure_running(&paths).await?;
             print_status(&status);
+        }
+        Commands::Watch => {
+            client::ensure_running(&paths).await?;
+            let mut changes = deadbolt_client::watch(&paths).await?;
+            while let Some(change) = changes.next().await? {
+                println!("{}", serde_json::to_string(&change)?);
+            }
         }
         Commands::Sync => {
             client::ensure_running(&paths).await?;

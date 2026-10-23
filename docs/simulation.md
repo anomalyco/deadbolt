@@ -47,6 +47,9 @@ and compares its wire digest.
   successful scan.
 - **Durability:** accepted entry hashes equal persisted hashes after each step.
   Crash/reopen also compares heads before and after rebuilding from disk.
+- **Watch coverage:** every accepted sync batch records a change for each vault
+  whose items or membership grew, which is what `watch` streams, and none for
+  a vault's items or devices that didn't.
 - **Convergence:** after healing and unlocking, current members must agree on
   heads and items within twelve rounds. Stop early once they agree and their
   membership barriers are open. Removed devices need not converge.

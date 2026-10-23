@@ -854,3 +854,48 @@ fn import_bitwarden() {
         "{err}"
     );
 }
+
+#[test]
+fn watch_prints_changes_as_json_lines() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let vault = a.run(&["vault", "ls"]);
+    let short = vault.split('\t').nth(1).unwrap().to_string();
+    let mut child = a.cmd(&["watch"]).stdout(Stdio::piped()).spawn().unwrap();
+    let stdout = child.stdout.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).lines() {
+            if tx.send(line.unwrap()).is_err() {
+                break;
+            }
+        }
+    });
+    let next = || -> serde_json::Value {
+        let line = rx.recv_timeout(Duration::from_secs(30)).expect("a change");
+        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"))
+    };
+    assert_eq!(next(), serde_json::json!({"change": "watching"}));
+
+    new(
+        &a,
+        &["login", "username=dax", "url=github.com", "password=pw"],
+    );
+    let items = next();
+    assert_eq!(items["change"], "items");
+    assert!(
+        items["vault"].as_str().unwrap().starts_with(&short),
+        "{items}"
+    );
+    a.run(&["lock"]);
+    assert_eq!(next(), serde_json::json!({"change": "locked"}));
+    a.run(&["unlock"]);
+    assert_eq!(next(), serde_json::json!({"change": "unlocked"}));
+    a.run(&["agent", "stop"]);
+    assert_eq!(next(), serde_json::json!({"change": "stopping"}));
+    assert!(wait(&mut child, Duration::from_secs(10)).success());
+    assert!(
+        rx.recv_timeout(Duration::from_secs(1)).is_err(),
+        "the stream ended"
+    );
+}
