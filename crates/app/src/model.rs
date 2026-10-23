@@ -845,9 +845,8 @@ mod tests {
         }
     }
 
-    /// Rune doesn't poll a hidden window, so the panel forgets everything as
-    /// it hides; a lock and the replies to what it asked before, landing
-    /// while it's hidden, bring nothing back.
+    /// The panel forgets everything as it hides; a lock and the replies to
+    /// what it asked before, landing while it's hidden, bring nothing back.
     #[test]
     fn a_hidden_panel_keeps_nothing() {
         let mut rt = panel("filtering");

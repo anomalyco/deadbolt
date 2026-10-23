@@ -185,9 +185,8 @@ impl App {
     }
 
     /// The card has faded: hide the window and forget everything read and
-    /// typed. Rune doesn't poll a hidden window when the agent replies, so
-    /// nothing is kept for later: what's waiting is applied now, and anything
-    /// later is from an older generation and dropped. A copy keeps counting
+    /// typed, so nothing outlives the card: what's waiting is applied now, and
+    /// anything later is from an older generation and dropped. A copy keeps counting
     /// down and is cleared on time.
     fn hide_panel(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
