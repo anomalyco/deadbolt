@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use deadbolt_app::agent::{Agent, Job};
 use deadbolt_app::clipboard::Clipboard;
 use deadbolt_app::model::{App, Screen};
-use deadbolt_app::onboarding::worker::Worker;
+use deadbolt_app::onboarding::worker::{ALREADY_SET_UP, NewDevice, Progress, Stage, Worker};
 use deadbolt_app::onboarding::{Flow, Severity, Step};
 use deadbolt_client::{Launch, Paths};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
@@ -87,6 +87,13 @@ impl Device {
             bin: deadbolt(),
             vars,
         }
+    }
+
+    /// Production Argon2 instead of the fast test setting: seconds in a debug
+    /// build, long enough to act while it runs.
+    fn with_slow_kdf(mut self) -> Device {
+        self.vars.insert("DEADBOLT_KDF", "default".into());
+        self
     }
 
     fn run(&self, args: &[&str]) {
@@ -525,4 +532,85 @@ fn declining_or_cancelling_a_join_keeps_the_device_set_up() {
     assert!(shows(&rt, "Join cancelled"));
     assert!(rt.state.onboarding.ticket.is_none());
     assert!(device.output(&["vault", "ls"]).trim().is_empty());
+}
+
+#[test]
+fn cancelling_a_join_during_setup_waits_for_it() {
+    let device = Device::new().with_slow_kdf();
+    let mut rt = app(&device);
+    fill_form(&mut rt, Flow::Join, "beta");
+    until(&mut rt, "the slow setup", |s| {
+        s.onboarding.stage == Some(Stage::Protecting)
+    });
+    rt.key(key(Key::Escape));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(
+        rt.state.onboarding.step,
+        Step::Working(Flow::Join),
+        "it waits for the setup the agent is running"
+    );
+    until(&mut rt, "the neutral notice", |s| {
+        s.onboarding.step == Step::Join && s.onboarding.notice.is_some()
+    });
+    let o = &rt.state.onboarding;
+    // The form matches the agent: set up, so no passphrase to type again
+    // (one typed now would never be used).
+    assert!(o.device_ready, "the form still asks for a passphrase");
+    let notice = o.notice.clone().unwrap();
+    assert_eq!(notice.severity, Severity::Neutral, "{notice:?}");
+    assert!(notice.body.contains("set up now"), "{notice:?}");
+    assert!(o.ticket.is_none(), "no ticket after the cancel");
+    assert!(device.output(&["status"]).contains("beta"));
+}
+
+/// Runs `worker` until it reports the end of its request, collecting what it said.
+fn finish(worker: &mut Worker) -> Vec<Progress> {
+    let start = Instant::now();
+    let mut seen = Vec::new();
+    loop {
+        let (progress, _) = worker.drain(0.0);
+        for p in progress {
+            let end = matches!(p, Progress::Created(_) | Progress::Joined(_));
+            seen.push(p);
+            if end {
+                return seen;
+            }
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "timed out: {seen:?}"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn a_device_set_up_meanwhile_refuses_the_new_passphrase() {
+    let device = Device::new();
+    // Set up behind the screen's back, after it showed the form.
+    device.run(&["init"]);
+    let new_device = || {
+        Some(NewDevice {
+            name: "beta".into(),
+            passphrase: zeroize::Zeroizing::new("another passphrase".into()),
+        })
+    };
+    let mut worker = Worker::new(device.paths(), device.launch());
+    worker.create(new_device(), "work".into());
+    let seen = finish(&mut worker);
+    assert!(
+        matches!(seen.last(), Some(Progress::Created(Err(f))) if f.message == ALREADY_SET_UP),
+        "{seen:?}"
+    );
+    worker.join(new_device());
+    let seen = finish(&mut worker);
+    assert!(
+        matches!(seen.last(), Some(Progress::Joined(Err(f))) if f.message == ALREADY_SET_UP),
+        "{seen:?}"
+    );
+    assert!(!seen.iter().any(|p| matches!(p, Progress::Ticket(_))));
+    assert!(!device.output(&["vault", "ls"]).contains("work"));
+    // The passphrase it was set up with still unlocks it.
+    device.run(&["lock"]);
+    device.run(&["unlock"]);
 }

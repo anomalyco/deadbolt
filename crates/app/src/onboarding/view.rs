@@ -568,6 +568,17 @@ fn progress(s: &App, k: &Kit, dark: bool, flow: Flow) -> El {
             "Creating your vault".to_owned(),
             "It lives on this device, encrypted with your passphrase.".to_owned(),
         ),
+        // Cancelled while the device was being set up: that finishes first.
+        (_, Flow::Join) if o.stopping() => (
+            "Stopping".to_owned(),
+            if o.stage == Some(Stage::Protecting) {
+                "This device finishes setting up with the passphrase you chose, then the \
+                 join stops."
+            } else {
+                "Nothing was shared."
+            }
+            .to_owned(),
+        ),
         (_, Flow::Join) => match &o.pairing {
             Some(p) => (
                 format!("Joining {}", p.vault),
@@ -620,7 +631,7 @@ fn progress(s: &App, k: &Kit, dark: bool, flow: Flow) -> El {
         Flow::Join => "progress-join",
     };
     // Getting a ticket can wait on a relay; until the codes match, a join can stop.
-    let cancel = (flow == Flow::Join && !done && o.pairing.is_none())
+    let cancel = (flow == Flow::Join && !done && o.pairing.is_none() && !o.stopping())
         .then(|| bar(k, "Cancel", k.glyph.close, |s| s.cancel_join()));
     page(key, cancel, panel)
 }

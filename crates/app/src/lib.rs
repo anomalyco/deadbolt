@@ -129,7 +129,7 @@ const SCENES: &[Scene] = &[
         welcome(s);
         s.onboarding.device_ready = true;
         s.onboarding.step = Step::Ticket;
-        let text = fixture_ticket();
+        let text = zeroize::Zeroizing::new(fixture_ticket());
         s.onboarding.ticket = Some(onboarding::Ticket {
             qr: onboarding::qr::Matrix::new(&text),
             text,

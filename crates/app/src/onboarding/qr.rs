@@ -3,8 +3,10 @@
 
 use qrcode::{Color as Module, EcLevel, QrCode};
 use rune::{Color, Shape};
+use zeroize::Zeroize;
 
-/// A QR code's modules, row by row.
+/// A QR code's modules, row by row; they encode the ticket, so they're
+/// wiped when dropped.
 pub struct Matrix {
     pub width: usize,
     dark: Vec<bool>,
@@ -50,6 +52,12 @@ impl Matrix {
             }
         }
         shape
+    }
+}
+
+impl Drop for Matrix {
+    fn drop(&mut self) {
+        self.dark.zeroize();
     }
 }
 

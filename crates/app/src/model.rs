@@ -147,11 +147,10 @@ impl App {
             Done::Unlocked(result) => {
                 self.unlocking = false;
                 match result {
-                    Ok(()) => {
+                    // The status says where to go: the vault, or onboarding if it has none.
+                    Ok(status) => {
                         self.unlock_error = None;
-                        self.agent.send(Job::Status);
-                        self.agent.send(Job::List);
-                        self.enter_vault(tx);
+                        self.on_status(status, tx);
                     }
                     Err(failure) => {
                         self.unlock_error = Some(unlock_message(&failure));
@@ -227,6 +226,7 @@ impl App {
             }
             (Screen::Vault, Screen::Locked) => self.on_locked(tx),
             (_, Screen::Locked) => {
+                self.forget_onboarding();
                 self.screen = Screen::Locked;
                 self.passphrase.mask.focused = true;
             }
@@ -235,7 +235,7 @@ impl App {
     }
 
     pub(crate) fn enter_vault(&mut self, tx: &mut Tx) {
-        self.onboarding.forget();
+        self.forget_onboarding();
         self.screen = Screen::Vault;
         self.search.focused = true;
         self.next_status = self.clock + STATUS_EVERY.as_secs_f64();
@@ -252,6 +252,7 @@ impl App {
 
     fn fail(&mut self, message: String, tx: &mut Tx) {
         self.forget_vault(tx);
+        self.forget_onboarding();
         self.screen = Screen::Failed(message);
     }
 
@@ -266,11 +267,13 @@ impl App {
         self.passphrase.mask.focused = true;
     }
 
-    /// The window is closing: clear our clipboard copy and wipe what we read.
+    /// The window is closing: clear our clipboard copies, wipe what we read
+    /// and typed, and hang up a join.
     pub fn close(&mut self, tx: &mut Tx) {
         self.forget_vault(tx);
         self.passphrase.clear();
-        self.onboarding.forget();
+        self.forget_onboarding();
+        self.onboarding.worker.stop();
     }
 
     fn forget_vault(&mut self, _tx: &mut Tx) {

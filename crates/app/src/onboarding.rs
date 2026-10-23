@@ -14,6 +14,7 @@ use std::time::Duration;
 
 use deadbolt_client::protocol::VaultInfo;
 use rune::{Key, KeyEvent, TextEdit, Tx};
+use zeroize::Zeroizing;
 
 use crate::agent::{Failure, Job};
 use crate::clipboard::Copied;
@@ -103,8 +104,10 @@ pub struct Pairing {
     pub inviter: String,
 }
 
+/// The pairing ticket: until it's used or expires, anyone holding it can ask
+/// to join the vault, so it's wiped when dropped.
 pub struct Ticket {
-    pub text: String,
+    pub text: Zeroizing<String>,
     pub qr: Option<qr::Matrix>,
 }
 
@@ -112,6 +115,7 @@ pub struct Onboarding {
     pub step: Step,
     /// The stages the running request will report, in order.
     pub plan: Vec<Stage>,
+    /// The stage the worker last reported, if it's in the plan.
     pub stage: Option<Stage>,
     pub device: TextEdit,
     pub vault: TextEdit,
@@ -137,6 +141,8 @@ pub struct Onboarding {
     declined: bool,
     /// The person cancelled the join.
     cancelled: bool,
+    /// The running request set this device up (it wasn't before).
+    set_up_now: bool,
 }
 
 impl Onboarding {
@@ -161,11 +167,13 @@ impl Onboarding {
             worker,
             declined: false,
             cancelled: false,
+            set_up_now: false,
         }
     }
 
-    /// Back to the welcome screen with empty fields; keeps the worker.
-    pub fn reset(&mut self, device_ready: bool) {
+    /// Back to the welcome screen with empty fields; keeps the worker. Only
+    /// through [`App::reset_onboarding`], which clears a copied ticket first.
+    fn reset(&mut self, device_ready: bool) {
         let worker = std::mem::replace(&mut self.worker, Worker::offline());
         self.passphrase.clear();
         self.repeat.clear();
@@ -173,6 +181,11 @@ impl Onboarding {
             device_ready,
             ..Onboarding::new(worker)
         };
+    }
+
+    /// A cancelled join waits for a device setup already under way.
+    pub fn stopping(&self) -> bool {
+        self.cancelled && matches!(self.step, Step::Working(Flow::Join))
     }
 
     /// A request is running or its result is showing: status changes from
@@ -360,7 +373,21 @@ impl App {
             self.onboarding.device_ready |= device_ready;
             return;
         }
+        self.reset_onboarding(device_ready);
+    }
+
+    /// Onboarding from scratch, leaving nothing of the last attempt behind.
+    fn reset_onboarding(&mut self, device_ready: bool) {
+        self.forget_onboarding();
         self.onboarding.reset(device_ready);
+    }
+
+    /// Leaving onboarding (or the app): takes a copied ticket off the clipboard
+    /// if it's still there, wipes the ticket and passphrases, and hangs up a join.
+    pub(crate) fn forget_onboarding(&mut self) {
+        self.forget_ticket();
+        self.onboarding.worker.cancel();
+        self.onboarding.forget();
     }
 
     pub fn choose(&mut self, flow: Flow) {
@@ -406,12 +433,14 @@ impl App {
         }
         o.notice = None;
         o.blur();
+        o.set_up_now = false;
         o.plan = if o.needs_device() {
             vec![Stage::Protecting, Stage::CreatingVault]
         } else {
             vec![Stage::CreatingVault]
         };
-        o.stage = o.plan.first().copied();
+        // Until the worker reports a stage the first shows as active.
+        o.stage = None;
         o.step = Step::Working(Flow::Create);
         let device = o.new_device();
         o.repeat.clear();
@@ -433,12 +462,14 @@ impl App {
         o.blur();
         o.declined = false;
         o.cancelled = false;
+        o.set_up_now = false;
         o.plan = if o.needs_device() {
             vec![Stage::Protecting, Stage::MakingTicket]
         } else {
             vec![Stage::MakingTicket]
         };
-        o.stage = o.plan.first().copied();
+        // Until the worker reports a stage the first shows as active.
+        o.stage = None;
         o.step = Step::Working(Flow::Join);
         let device = o.new_device();
         o.repeat.clear();
@@ -448,7 +479,7 @@ impl App {
     /// The person compared the codes.
     pub fn answer_code(&mut self, matches: bool) {
         let o = &mut self.onboarding;
-        if !matches!(o.step, Step::Confirm { .. }) {
+        if !matches!(o.step, Step::Confirm { .. }) || o.declined || o.cancelled {
             return;
         }
         if matches {
@@ -465,7 +496,7 @@ impl App {
     pub fn cancel_join(&mut self) {
         let o = &mut self.onboarding;
         let joining = matches!(o.step, Step::Working(Flow::Join)) && o.pairing.is_none();
-        if !(joining || matches!(o.step, Step::Ticket | Step::Confirm { .. })) {
+        if o.cancelled || !(joining || matches!(o.step, Step::Ticket | Step::Confirm { .. })) {
             return;
         }
         o.cancelled = true;
@@ -477,7 +508,7 @@ impl App {
         let Some(ticket) = &self.onboarding.ticket else {
             return;
         };
-        let command = format!("deadbolt pair {}", ticket.text);
+        let command = Zeroizing::new(format!("deadbolt pair {}", ticket.text.as_str()));
         match self.clipboard.copy(&command) {
             Ok(copied) => self.onboarding.copied = Some(copied),
             Err(error) => {
@@ -501,6 +532,8 @@ impl App {
         }
     }
 
+    /// Takes the copied ticket off the clipboard if it's still there, and
+    /// wipes the ticket.
     fn forget_ticket(&mut self) {
         if let Some(copied) = self.onboarding.copied.take() {
             self.clipboard.clear(copied);
@@ -552,6 +585,10 @@ impl App {
                 if o.plan.contains(&stage) {
                     o.stage = Some(stage);
                 }
+            }
+            Progress::DeviceReady => {
+                o.set_up_now |= !o.device_ready;
+                o.device_ready = true;
             }
             // A cancel is on its way; its result will say so.
             Progress::Ticket(_) | Progress::Code { .. } if o.cancelled => {}
@@ -611,7 +648,7 @@ impl App {
     }
 
     fn open_vault(&mut self, tx: &mut Tx) {
-        self.onboarding.reset(true);
+        self.reset_onboarding(true);
         self.agent.send(Job::Status);
         self.agent.send(Job::List);
         self.enter_vault(tx);
@@ -626,7 +663,13 @@ impl App {
             Notice {
                 severity: Severity::Neutral,
                 title: "Join cancelled".into(),
-                body: "Nothing was shared. Make a new ticket when you're ready.".into(),
+                body: if o.set_up_now {
+                    "Nothing was shared. This device is set up now, with the passphrase you \
+                     chose. Make a new ticket when you're ready."
+                } else {
+                    "Nothing was shared. Make a new ticket when you're ready."
+                }
+                .into(),
             }
         } else if flow == Flow::Join && o.declined {
             Notice {
@@ -642,6 +685,7 @@ impl App {
         };
         o.cancelled = false;
         o.declined = false;
+        o.set_up_now = false;
         o.notice = Some(notice);
         o.attempted = false;
         o.step = match flow {
@@ -660,7 +704,15 @@ impl App {
 /// What a failed request means for the person, from the agent's message.
 fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
     let message = failure.message.as_str();
-    let (severity, title, body) = if message.contains("not confirmed") {
+    let (severity, title, body) = if message.contains(worker::ALREADY_SET_UP) {
+        (
+            Severity::Caution,
+            "This device is already set up",
+            "It was set up meanwhile, so the passphrase you just typed wasn't used. The \
+             passphrase it was set up with is the one that unlocks it."
+                .to_owned(),
+        )
+    } else if message.contains("not confirmed") {
         (
             Severity::Caution,
             "The other device didn't confirm",
@@ -738,6 +790,17 @@ mod tests {
         assert_eq!(strength("aaaaaaaaaaaaaaaaaaaaaaaa"), Strength::Weak);
         assert_eq!(strength("Hunter22-x"), Strength::Fair);
         assert_eq!(strength("correct horse battery staple"), Strength::Strong);
+    }
+
+    #[test]
+    fn a_device_set_up_meanwhile_is_a_caution_not_a_failure() {
+        let failure = Failure {
+            code: None,
+            message: worker::ALREADY_SET_UP.into(),
+        };
+        let notice = failure_notice(Flow::Join, &failure);
+        assert_eq!(notice.severity, Severity::Caution);
+        assert_eq!(notice.title, "This device is already set up");
     }
 
     #[test]

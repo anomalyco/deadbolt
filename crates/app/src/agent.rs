@@ -29,7 +29,8 @@ pub enum Job {
 pub enum Done {
     Connected(Result<Status, Failure>),
     Status(Option<Status>),
-    Unlocked(Result<(), Failure>),
+    /// The status right after unlocking.
+    Unlocked(Result<Status, Failure>),
     Locked(Result<(), Failure>),
     Items(Result<Vec<ItemInfo>, Failure>),
     Item {
@@ -182,10 +183,17 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                     passphrase,
                     timeout_secs: None,
                 };
-                deadbolt_client::simple(paths, command).await.map(drop)
+                deadbolt_client::simple(paths, command).await?;
+                Ok::<_, Error>(deadbolt_client::status(paths).await)
             }
             .await
-            .map_err(Failure::from),
+            .map_err(Failure::from)
+            .and_then(|status| {
+                status.ok_or_else(|| Failure {
+                    code: None,
+                    message: "The agent stopped.".into(),
+                })
+            }),
         ),
         Job::Lock => Done::Locked(
             deadbolt_client::simple(paths, Command::Lock)

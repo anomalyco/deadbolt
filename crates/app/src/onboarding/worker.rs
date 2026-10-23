@@ -6,8 +6,9 @@
 
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::thread::JoinHandle;
 
-use deadbolt_client::protocol::{Command, DeviceInfo, Event, Reply, VaultInfo};
+use deadbolt_client::protocol::{Command, DeviceInfo, Event, Reply, Status, VaultInfo};
 use deadbolt_client::{Launch, Paths};
 use rune::Waker;
 use tokio::sync::{mpsc, oneshot};
@@ -32,8 +33,10 @@ pub enum Stage {
 #[derive(Debug)]
 pub enum Progress {
     Stage(Stage),
+    /// This device is set up (it was, or the request just did it).
+    DeviceReady,
     /// This device's pairing ticket.
-    Ticket(String),
+    Ticket(Zeroizing<String>),
     /// The confirmation code; waits for [`Worker::answer`].
     Code {
         code: String,
@@ -57,6 +60,8 @@ pub struct Worker {
     waker: Arc<Mutex<Option<Waker>>>,
     answer: Option<mpsc::UnboundedSender<bool>>,
     cancel: Option<oneshot::Sender<()>>,
+    /// The running request's thread, so one runs at a time and close can wait for it.
+    thread: Option<JoinHandle<()>>,
     /// Progress to deliver at set times, for scenes (no agent).
     script: Vec<(f64, Progress)>,
 }
@@ -79,6 +84,7 @@ impl Worker {
             waker: Arc::default(),
             answer: None,
             cancel: None,
+            thread: None,
             script: Vec::new(),
         }
     }
@@ -120,11 +126,7 @@ impl Worker {
         self.answer = Some(answer);
         self.cancel = Some(cancel);
         self.start(Progress::Joined, move |paths, launch, report| async move {
-            let result = tokio::select! {
-                result = join(&paths, &launch, device, answers, &report) => result,
-                // Dropping the request hangs up, which cancels the join in the agent.
-                _ = cancelled => Err(Failure { code: None, message: "cancelled".into() }),
-            };
+            let result = join(&paths, &launch, device, answers, cancelled, &report).await;
             report(Progress::Joined(result));
         });
     }
@@ -136,11 +138,20 @@ impl Worker {
         }
     }
 
-    /// Hangs up a pending join.
+    /// Hangs up a pending join. A device setup already sent finishes first:
+    /// the agent completes it either way, so the join stops after it.
     pub fn cancel(&mut self) {
         self.answer = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send(()).ok();
+        }
+    }
+
+    /// Cancels, then waits for the request's thread to end (the window is closing).
+    pub fn stop(&mut self) {
+        self.cancel();
+        if let Some(thread) = self.thread.take() {
+            thread.join().ok();
         }
     }
 
@@ -153,6 +164,11 @@ impl Worker {
         let Some((paths, launch)) = self.agent.clone() else {
             return;
         };
+        // The screen starts a request only once the last one has reported, after
+        // which its thread just exits.
+        if let Some(previous) = self.thread.take() {
+            previous.join().ok();
+        }
         let sender = self.sender.clone();
         let waker = self.waker.clone();
         let report: Report = Arc::new(move |progress| {
@@ -178,41 +194,61 @@ impl Worker {
                     }))),
                 }
             });
-        if let Err(error) = spawned {
-            failed(done(Err(Failure {
+        match spawned {
+            Ok(thread) => self.thread = Some(thread),
+            Err(error) => failed(done(Err(Failure {
                 code: None,
                 message: format!("starting the request thread: {error}"),
-            })));
+            }))),
         }
     }
 }
 
 type Report = Arc<dyn Fn(Progress) + Send + Sync>;
 
-/// Starts the agent and sets up this device if needed.
-async fn prepare(
+/// The agent's refusal when a device is set up twice; the app says the same.
+pub const ALREADY_SET_UP: &str = "this device is already set up";
+
+/// Starts the agent and reads its status.
+async fn start(paths: &Paths, launch: &Launch, report: &Report) -> Result<Status, Failure> {
+    report(Progress::Stage(Stage::Starting));
+    Ok(deadbolt_client::ensure_running(paths, launch).await?)
+}
+
+/// Sets this device up with `device`, which the screen sends only while it
+/// believes the device isn't set up. If it is after all (set up elsewhere
+/// meanwhile), the passphrase just typed would not be the one protecting it,
+/// so this refuses rather than carry on with the old one.
+async fn set_up(
     paths: &Paths,
-    launch: &Launch,
+    status: &Status,
     device: Option<NewDevice>,
     report: &Report,
 ) -> Result<(), Failure> {
-    report(Progress::Stage(Stage::Starting));
-    let status = deadbolt_client::ensure_running(paths, launch).await?;
-    if status.initialized {
-        return Ok(());
+    match (status.initialized, device) {
+        (true, None) => {}
+        (true, Some(_)) => {
+            return Err(Failure {
+                code: None,
+                message: ALREADY_SET_UP.into(),
+            });
+        }
+        (false, None) => {
+            return Err(Failure {
+                code: None,
+                message: "This device isn't set up yet.".into(),
+            });
+        }
+        (false, Some(device)) => {
+            report(Progress::Stage(Stage::Protecting));
+            let command = Command::Setup {
+                passphrase: device.passphrase,
+                device_name: device.name,
+            };
+            deadbolt_client::simple(paths, command).await?;
+        }
     }
-    let Some(device) = device else {
-        return Err(Failure {
-            code: None,
-            message: "This device isn't set up yet.".into(),
-        });
-    };
-    report(Progress::Stage(Stage::Protecting));
-    let command = Command::Setup {
-        passphrase: device.passphrase,
-        device_name: device.name,
-    };
-    deadbolt_client::simple(paths, command).await?;
+    report(Progress::DeviceReady);
     Ok(())
 }
 
@@ -223,7 +259,8 @@ async fn create(
     vault: String,
     report: &Report,
 ) -> Result<VaultInfo, Failure> {
-    prepare(paths, launch, device, report).await?;
+    let status = start(paths, launch, report).await?;
+    set_up(paths, &status, device, report).await?;
     report(Progress::Stage(Stage::CreatingVault));
     match deadbolt_client::simple(paths, Command::VaultCreate { name: vault }).await? {
         Reply::Vault { vault } => Ok(vault),
@@ -231,14 +268,41 @@ async fn create(
     }
 }
 
+/// Sets up the device if needed, then joins until the other device finishes,
+/// the person answers no, or `cancelled` fires (or its sender drops). A cancel
+/// during setup waits for it: the agent finishes a setup it has started even
+/// if this hangs up, and the screen must know the device is set up.
 async fn join(
     paths: &Paths,
     launch: &Launch,
     device: Option<NewDevice>,
     answers: mpsc::UnboundedReceiver<bool>,
+    mut cancelled: oneshot::Receiver<()>,
     report: &Report,
 ) -> Result<VaultInfo, Failure> {
-    prepare(paths, launch, device, report).await?;
+    let cancel = || Failure {
+        code: None,
+        message: "cancelled".into(),
+    };
+    let status = tokio::select! {
+        status = start(paths, launch, report) => status?,
+        _ = &mut cancelled => return Err(cancel()),
+    };
+    set_up(paths, &status, device, report).await?;
+    tokio::select! {
+        biased;
+        // Dropping the request hangs up, which cancels the join in the agent.
+        _ = &mut cancelled => Err(cancel()),
+        result = pair(paths, answers, report) => result,
+    }
+}
+
+/// Shows a ticket, waits for the code and its answer, and receives the vault.
+async fn pair(
+    paths: &Paths,
+    answers: mpsc::UnboundedReceiver<bool>,
+    report: &Report,
+) -> Result<VaultInfo, Failure> {
     report(Progress::Stage(Stage::MakingTicket));
     let answers = Arc::new(tokio::sync::Mutex::new(answers));
     let reply = deadbolt_client::converse(paths, Command::Join { confirm: true }, |event| {
@@ -247,7 +311,7 @@ async fn join(
         async move {
             Ok::<_, std::convert::Infallible>(match event {
                 Event::Ticket { ticket } => {
-                    report(Progress::Ticket(ticket));
+                    report(Progress::Ticket(Zeroizing::new(ticket)));
                     None
                 }
                 Event::Joining {

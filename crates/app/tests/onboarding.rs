@@ -4,7 +4,12 @@
 
 #![cfg(test)]
 
+use std::sync::{Arc, Mutex};
+
+use deadbolt_app::agent::{Done, Failure};
+use deadbolt_app::clipboard::Clipboard;
 use deadbolt_app::model::{App, Screen};
+use deadbolt_app::onboarding::worker::{Progress, Stage, Worker};
 use deadbolt_app::onboarding::{Flow, Severity, Step, moment};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -269,4 +274,107 @@ fn nothing_animates_on_first_paint() {
             );
         }
     }
+}
+
+type Board = Arc<Mutex<Option<String>>>;
+
+/// The ticket scene after "Copy command", with a clipboard the test can read.
+fn ticket_copied() -> (Runtime<App>, Board) {
+    let mut rt = runtime("ticket", true);
+    let (clipboard, board) = Clipboard::memory();
+    rt.state.clipboard = clipboard;
+    rt.frame(FRAME);
+    rt.update(|s, _| s.copy_ticket());
+    rt.frame(FRAME);
+    assert!(
+        board
+            .lock()
+            .unwrap()
+            .as_deref()
+            .is_some_and(|t| t.starts_with("deadbolt pair DBPAIR")),
+        "the whole command is on the clipboard"
+    );
+    (rt, board)
+}
+
+fn failure(message: &str) -> Failure {
+    Failure {
+        code: None,
+        message: message.into(),
+    }
+}
+
+#[test]
+fn a_copied_ticket_leaves_the_clipboard_with_the_screen() {
+    // Closing the window.
+    let (mut rt, board) = ticket_copied();
+    rt.update(|s, tx| s.close(tx));
+    assert_eq!(*board.lock().unwrap(), None, "close clears it");
+    assert!(rt.state.onboarding.ticket.is_none());
+
+    // The agent stopping, which leaves onboarding for the failed screen.
+    let (mut rt, board) = ticket_copied();
+    rt.update(|s, tx| s.apply(Done::Status(None), tx));
+    assert!(matches!(rt.state.screen, Screen::Failed(_)));
+    assert_eq!(*board.lock().unwrap(), None, "leaving clears it");
+
+    // The ticket expiring, which ends the join.
+    let (mut rt, board) = ticket_copied();
+    rt.state.onboarding.worker = Worker::scripted(vec![(
+        0.0,
+        Progress::Joined(Err(failure("the ticket expired"))),
+    )]);
+    rt.frame(FRAME);
+    assert_eq!(rt.state.onboarding.step, Step::Join);
+    assert_eq!(
+        *board.lock().unwrap(),
+        None,
+        "the end of the join clears it"
+    );
+
+    // Something the person copied since stays.
+    let (mut rt, board) = ticket_copied();
+    *board.lock().unwrap() = Some("mine".into());
+    rt.update(|s, tx| s.close(tx));
+    assert_eq!(board.lock().unwrap().as_deref(), Some("mine"));
+}
+
+#[test]
+fn a_late_they_match_after_they_dont_does_nothing() {
+    let mut rt = runtime("code", true);
+    rt.frame(FRAME);
+    rt.update(|s, _| s.answer_code(false));
+    rt.update(|s, _| s.answer_code(true));
+    assert!(matches!(rt.state.onboarding.step, Step::Confirm { .. }));
+}
+
+#[test]
+fn cancelling_while_the_device_is_set_up_waits_for_it() {
+    let mut rt = runtime("join", true);
+    rt.update(|s, _| {
+        let o = &mut s.onboarding;
+        o.plan = vec![Stage::Protecting, Stage::MakingTicket];
+        o.stage = Some(Stage::Protecting);
+        o.step = Step::Working(Flow::Join);
+    });
+    settle(&mut rt, 0.1);
+    assert!(shows(&rt, "Cancel"));
+    rt.key(key(Key::Escape));
+    settle(&mut rt, 0.4);
+    assert_eq!(rt.state.onboarding.step, Step::Working(Flow::Join));
+    assert!(shows(&rt, "Stopping") && shows(&rt, "finishes setting up"));
+    assert!(!shows(&rt, "Cancel"), "nothing more to cancel");
+
+    // The setup finishes, then the join stops; the form knows the device is set up.
+    rt.state.onboarding.worker = Worker::scripted(vec![
+        (0.0, Progress::DeviceReady),
+        (0.0, Progress::Joined(Err(failure("cancelled")))),
+    ]);
+    settle(&mut rt, 0.4);
+    let o = &rt.state.onboarding;
+    assert_eq!(o.step, Step::Join);
+    assert!(o.device_ready, "no passphrase asked again");
+    let notice = o.notice.as_ref().unwrap();
+    assert_eq!(notice.severity, Severity::Neutral);
+    assert!(notice.body.contains("set up now"), "{notice:?}");
 }
