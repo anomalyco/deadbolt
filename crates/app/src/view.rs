@@ -21,6 +21,8 @@ use rune_kit::{
 use crate::model::{App, BAR_W, Copy, Screen, is_secret, title_case};
 
 const LIST_W: f32 = 300.0;
+/// How far a list's edges fade over hidden rows, and how far a row brought into view stops from them.
+pub(crate) const LIST_EDGE: f32 = 24.0;
 pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
 
 fn replace() -> Transition {
@@ -200,6 +202,7 @@ pub(crate) fn unlock_error(s: &App, k: &Kit) -> Option<El> {
 fn vault(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     col()
         .key("vault")
+        .min_h(0.0)
         .child(toolbar(s, k))
         .child(el().key("rule").h(1.0).w_full().fill(k.c.border_weak))
         .child(
@@ -207,6 +210,7 @@ fn vault(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .key("body")
                 .grow(1.0)
                 .shrink()
+                .min_h(0.0)
                 .w_full()
                 .child(list(s, k))
                 .child(el().key("split").w(1.0).h_full().fill(k.c.border_weak))
@@ -274,6 +278,8 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+        .scroll_edge_fade(LIST_EDGE)
+        .scroll_margin(LIST_EDGE)
         .child(rows(s, k))
 }
 

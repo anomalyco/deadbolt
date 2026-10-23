@@ -18,7 +18,7 @@ use deadbolt_client::protocol::ItemInfo;
 
 use super::{CLOSE, MARGIN, Phase};
 use crate::model::{App, Screen};
-use crate::view::{copy_line, hint, passphrase_field, rows, search_input, unlock_error};
+use crate::view::{LIST_EDGE, copy_line, hint, passphrase_field, rows, search_input, unlock_error};
 
 const HEADER_H: f32 = 56.0;
 const FOOTER_H: f32 = 40.0;
@@ -158,6 +158,8 @@ fn list(s: &App, k: &Kit) -> El {
         .scroll(ScrollSpec {
             stick_bottom: false,
         })
+        .scroll_edge_fade(LIST_EDGE)
+        .scroll_margin(LIST_EDGE)
         .child(rows(s, k))
 }
 
