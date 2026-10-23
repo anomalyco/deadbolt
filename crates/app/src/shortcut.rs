@@ -8,7 +8,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rune::{AppHandle, El, Shortcut, ShortcutError, Transition, Tx, col, row, text};
-use rune_kit::{Button, ButtonSize, ButtonVariant, Kit, ShortcutRecorder, ShortcutRecorderState};
+use rune_kit::{
+    Button, ButtonSize, ButtonVariant, Kit, ShortcutRecorder, ShortcutRecorderState,
+    shortcut_error_message,
+};
 
 use crate::model::{App, Screen};
 
@@ -59,8 +62,9 @@ pub fn register(
 enum Target {
     /// The panel's `App`, when the app runs both windows.
     Panel(AppHandle<App>),
-    /// Tests and tooling runs: every chord registers except `taken`, as if
-    /// another app held them, named `owner` when the desktop would say.
+    /// Tests and tooling runs: every chord Rune would take registers except
+    /// `taken`, as if another app held them, named `owner` when the desktop
+    /// would say.
     Virtual {
         taken: Vec<Shortcut>,
         owner: Option<String>,
@@ -157,10 +161,12 @@ impl Hotkey {
     fn register(&mut self, shortcut: &Shortcut) -> Result<Registration, ShortcutError> {
         let result = match &self.target {
             Target::Panel(panel) => register(panel, shortcut),
-            Target::Virtual { taken, .. } if taken.contains(shortcut) => {
-                Err(ShortcutError::Conflict)
-            }
-            Target::Virtual { .. } => Ok(Registration(None)),
+            Target::Virtual { taken, .. } => shortcut.require_modifier().and_then(|()| match taken
+                .contains(shortcut)
+            {
+                true => Err(ShortcutError::Conflict),
+                false => Ok(Registration(None)),
+            }),
         };
         self.holders.retain(|(held, _)| held != shortcut);
         if let Err(ShortcutError::Conflict) = result
@@ -203,16 +209,11 @@ impl Hotkey {
     }
 
     /// The recorder's proposal (None clears it). The new shortcut registers
-    /// before the old one lets go, so a failure keeps the old one working. A
-    /// chord without ⌘, ⌃ or ⌥ is refused (F1–F20 alone are fine): it would
-    /// take that key from typing everywhere.
+    /// before the old one lets go, so a failure keeps the old one working.
+    /// Rune refuses a chord without ⌘, ⌃ or ⌥ (F-keys alone are fine): it
+    /// would take that key from typing everywhere.
     pub fn change(&mut self, next: Option<&Shortcut>) -> Result<(), ShortcutError> {
-        let registration = next
-            .map(|next| match allowed(next) {
-                false => Err(ShortcutError::InvalidAccelerator(next.to_string())),
-                true => self.register(next),
-            })
-            .transpose()?;
+        let registration = next.map(|next| self.register(next)).transpose()?;
         self.registration = registration;
         self.shortcut = next.cloned();
         self.error = None;
@@ -266,41 +267,6 @@ impl Hotkey {
     }
 }
 
-/// Holds ⌘, ⌃ or ⌥ (Ctrl or Alt off macOS), or is F1–F20, which type nothing.
-/// Shift alone doesn't count.
-// Rune gap (unmodified chords): Rune's rule, applied here because the recorder
-// and `register_shortcut` still take bare keys. Waits on both refusing them by
-// default; then delete this and its uses in `change`, `load` and `refusal`.
-pub fn allowed(shortcut: &Shortcut) -> bool {
-    use rune::PhysicalKeyCode::*;
-    let m = shortcut.modifiers();
-    m.cmd
-        || m.ctrl
-        || m.alt
-        || matches!(
-            shortcut.physical_key(),
-            F1 | F2
-                | F3
-                | F4
-                | F5
-                | F6
-                | F7
-                | F8
-                | F9
-                | F10
-                | F11
-                | F12
-                | F13
-                | F14
-                | F15
-                | F16
-                | F17
-                | F18
-                | F19
-                | F20
-        )
-}
-
 /// The saved choice: the default without a file, None if it was cleared.
 pub fn load(file: &Path) -> Option<Shortcut> {
     let Ok(saved) = fs::read_to_string(file) else {
@@ -310,12 +276,15 @@ pub fn load(file: &Path) -> Option<Shortcut> {
     if saved.is_empty() {
         return None;
     }
-    match saved.parse() {
-        Ok(shortcut) if allowed(&shortcut) => Some(shortcut),
-        Ok(_) => {
-            eprintln!("Ignoring the saved quick panel shortcut: {saved} has no modifier");
-            Some(default())
-        }
+    match saved.parse::<Shortcut>() {
+        // Rune would refuse to register it.
+        Ok(shortcut) => match shortcut.require_modifier() {
+            Ok(()) => Some(shortcut),
+            Err(e) => {
+                eprintln!("Ignoring the saved quick panel shortcut: {e}");
+                Some(default())
+            }
+        },
         Err(e) => {
             eprintln!("Ignoring the saved quick panel shortcut: {e}");
             Some(default())
@@ -342,14 +311,8 @@ fn refusal(
             None => format!("{} is in use by another app.", name(chord)),
         },
         (ShortcutError::Conflict, None) => "That shortcut is in use by another app.".to_owned(),
-        (ShortcutError::InvalidAccelerator(_), Some(chord)) if !allowed(chord) => {
-            if cfg!(target_os = "macos") {
-                "Add ⌘, ⌃ or ⌥.".to_owned()
-            } else {
-                "Add Ctrl or Alt.".to_owned()
-            }
-        }
-        (ShortcutError::InvalidAccelerator(_), _) => "That key can't be a shortcut.".to_owned(),
+        // "Add ⌘, ⌃ or ⌥." for a chord without one.
+        (ShortcutError::InvalidAccelerator(_), _) => shortcut_error_message(error, chord),
         (ShortcutError::Unsupported, _) => {
             "This desktop doesn't support global shortcuts.".to_owned()
         }
