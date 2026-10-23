@@ -1,23 +1,36 @@
 //! Deadbolt's look as Rune theme data: the site's black, white and red, IBM
-//! Plex Mono for everything, small radii and flat surfaces. `assets/theme.json`
+//! Plex Mono for everything but the wordmark, which is Anton, small radii and
+//! flat surfaces. `assets/theme.json`
 //! holds the colours; rune-kit derives the semantic tokens from three of them
 //! and this overrides the few where Deadbolt's look differs.
 
 use std::sync::OnceLock;
 
-use rune::{Shadow, TextStyle, Theme};
+use rune::{Color, Shadow, TextStyle, Theme};
 use rune_kit::{Elevation, Kit, PaletteSeed, Radius, StateColors, Type};
 
 pub const THEME: &str = include_str!("../assets/theme.json");
 
-/// IBM Plex Mono (OFL, `assets/fonts/IBMPlexMono-LICENSE.txt`), for `AppSpec::fonts`.
+/// IBM Plex Mono and Anton (both OFL, `assets/fonts/*-LICENSE.txt`), for
+/// `AppSpec::fonts`. Anton is the site's subset (Latin), decompressed to TTF.
 pub const FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/IBMPlexMono-Regular.ttf"),
     include_bytes!("../assets/fonts/IBMPlexMono-Medium.ttf"),
+    include_bytes!("../assets/fonts/Anton-Regular.ttf"),
 ];
 
-/// `AppSpec::families`: Plex Mono is both, as on the site.
-pub const FAMILIES: (&str, &str) = ("IBM Plex Mono", "IBM Plex Mono");
+/// `AppSpec::families`. Rune styles name one of two families, so Plex Mono is
+/// the sans (everything) and Anton takes the mono slot for the wordmark. No
+/// style here uses `.mono()` except [`wordmark`].
+pub const FAMILIES: (&str, &str) = ("IBM Plex Mono", "Anton");
+
+/// The wordmark, in Anton, for the lock and onboarding screens only.
+pub fn wordmark(size: f32) -> TextStyle {
+    TextStyle::new(size, 400.0)
+        .mono()
+        .lh(size)
+        .tracking(size * 0.01)
+}
 
 /// The kit tokens for one appearance.
 pub fn kit(dark: bool) -> &'static Kit {
@@ -30,8 +43,24 @@ pub fn kit(dark: bool) -> &'static Kit {
     }
 }
 
+/// A colour from `assets/theme.json` that rune-kit has no token for.
+pub fn color(dark: bool, name: &str) -> Color {
+    theme(dark).color(name)
+}
+
+fn theme(dark: bool) -> &'static Theme {
+    static DARK: OnceLock<Theme> = OnceLock::new();
+    static LIGHT: OnceLock<Theme> = OnceLock::new();
+    let parse = || Theme::from_json(THEME, dark).unwrap_or_else(|e| panic!("{e}"));
+    if dark {
+        DARK.get_or_init(parse)
+    } else {
+        LIGHT.get_or_init(parse)
+    }
+}
+
 fn build(dark: bool) -> Kit {
-    let t = Theme::from_json(THEME, dark).unwrap_or_else(|e| panic!("{e}"));
+    let t = theme(dark);
     let c = |n: &str| t.color(n);
     let mut k = Kit::from_palette(PaletteSeed {
         bg: c("bg"),
@@ -71,6 +100,12 @@ fn build(dark: bool) -> Kit {
         border: c("danger-border"),
         icon: c("danger"),
     };
+    p.warning = StateColors {
+        bg: c("warning-bg"),
+        fg: c("warning"),
+        border: c("warning-border"),
+        icon: c("warning"),
+    };
     // Flat surfaces: a hairline ring, and a drop only where something floats.
     let ring = Shadow {
         spread: 0.5,
@@ -108,7 +143,8 @@ fn build(dark: bool) -> Kit {
         text_small_medium: mono(12.0, 500.0, 18.0),
         text_xsmall: mono(11.0, 400.0, 16.0),
         text_xsmall_medium: mono(11.0, 500.0, 16.0),
-        mono: mono(12.0, 400.0, 18.0).mono(),
+        // Plex Mono through the sans slot: the mono slot is Anton's.
+        mono: mono(12.0, 400.0, 18.0),
     };
     let r = |n: &str| t.num(n);
     k.radius = Radius {

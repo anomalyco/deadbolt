@@ -36,6 +36,10 @@
     "danger": "#ff5c5c",
     "danger-bg": "#ff2a2a1a",
     "danger-border": "#ff2a2a4d",
+    "warning": "#ffb547",
+    "warning-bg": "#ffb5471a",
+    "warning-border": "#ffb5474d",
+    "hot": "#fff1e6",
     "shadow": "#00000099"
   },
   "light": {
@@ -56,6 +60,10 @@
     "danger": "#c01515",
     "danger-bg": "#d814141a",
     "danger-border": "#d814144d",
+    "warning": "#9a5b00",
+    "warning-bg": "#c278001a",
+    "warning-border": "#c278004d",
+    "hot": "#ff7a5c",
     "shadow": "#00000026"
   },
   "numbers": { "radius-sm": 3, "radius-md": 4, "radius-lg": 6 }
