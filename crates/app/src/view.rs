@@ -2,7 +2,7 @@
 //! into `model.rs`.
 //!
 //! Motion (docs/app.md has the full table): screens swap with Kit's
-//! whole-state replacement (blur 4, scale .96, fade; exits shorter). Filter
+//! whole-state replacement (blur σ 1.5, scale .96, fade; exits shorter). Filter
 //! results reflow on `REFLOW` while rows that stay never blur; rows that leave
 //! or arrive fade in place. Keyboard selection and the selected item's fields
 //! land at once. Nothing animates on first paint, and reduced motion keeps
