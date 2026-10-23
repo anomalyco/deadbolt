@@ -73,9 +73,14 @@ impl Failure {
 impl From<Error> for Failure {
     fn from(error: Error) -> Self {
         let message = match &error {
-            Error::Spawn(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                "Couldn't find the deadbolt command. Install it, or set DEADBOLT_BIN to its path."
-                    .into()
+            Error::Spawn(program, e) if e.kind() == std::io::ErrorKind::NotFound => {
+                if crate::binary::is_helper(program) {
+                    "Deadbolt is damaged: its deadbolt helper is missing. Reinstall Deadbolt."
+                        .into()
+                } else {
+                    "Couldn't find the deadbolt command. Install it, or set DEADBOLT_BIN to its path."
+                        .into()
+                }
             }
             _ => error_chain(&error),
         };
@@ -337,27 +342,32 @@ fn unexpected() -> Failure {
     }
 }
 
-/// The `deadbolt` binary that runs the agent: `DEADBOLT_BIN`, else one next to
-/// this app, else the usual install locations, else `deadbolt` on `PATH`.
-/// Apps opened from the Finder get a minimal `PATH`, hence the fixed places.
+/// Bundles always launch their own helper. Development runs allow an override.
 pub fn launch() -> Launch {
-    let mut candidates = std::env::var_os("DEADBOLT_BIN")
-        .map(PathBuf::from)
-        .into_iter()
-        .chain(
-            std::env::current_exe()
-                .ok()
-                .and_then(|exe| Some(exe.parent()?.join("deadbolt"))),
-        )
-        .chain(["/opt/homebrew/bin/deadbolt", "/usr/local/bin/deadbolt"].map(PathBuf::from))
-        .chain(
-            std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/bin/deadbolt")),
+    let program = crate::binary::discover(
+        std::env::current_exe().ok().as_deref(),
+        std::env::var_os("DEADBOLT_BIN").as_deref(),
+        &std::env::var_os("PATH").unwrap_or_default(),
+        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
+    );
+    Launch { program }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_missing_helper_means_a_damaged_app_not_a_missing_command() {
+        let missing = || std::io::Error::from(std::io::ErrorKind::NotFound);
+        let helper = "/Applications/Deadbolt.app/Contents/Helpers/deadbolt";
+        let failure = Failure::from(Error::Spawn(helper.into(), missing()));
+        assert!(
+            failure.message.contains("Reinstall Deadbolt"),
+            "{failure:?}"
         );
-    let program = candidates
-        .find(|p| p.is_file())
-        .unwrap_or_else(|| "deadbolt".into());
-    Launch {
-        program,
-        version: None,
+        assert!(!failure.message.contains("DEADBOLT_BIN"));
+        let failure = Failure::from(Error::Spawn("deadbolt".into(), missing()));
+        assert!(failure.message.contains("DEADBOLT_BIN"), "{failure:?}");
     }
 }

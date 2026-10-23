@@ -21,7 +21,7 @@ use super::{Flow, Notice, Severity, Step, Strength};
 use crate::model::App;
 use crate::theme;
 
-const PANEL_W: f32 = 400.0;
+pub(crate) const PANEL_W: f32 = 400.0;
 /// The bolt's throw: the one sanctioned flourish (Kit's "playful", .3 / .3).
 const THROW: Spring = Spring::new(0.3, 0.3);
 
@@ -73,7 +73,7 @@ pub fn screen(s: &App, k: &Kit, dark: bool) -> El {
     }
 }
 
-fn muted(k: &Kit, key: &str, s: impl Into<String>) -> El {
+pub(crate) fn muted(k: &Kit, key: &str, s: impl Into<String>) -> El {
     text(s.into())
         .key(key)
         .font(k.ty.text_small)
@@ -82,7 +82,7 @@ fn muted(k: &Kit, key: &str, s: impl Into<String>) -> El {
         .w_full()
 }
 
-fn title(k: &Kit, key: &str, s: impl Into<String>) -> El {
+pub(crate) fn title(k: &Kit, key: &str, s: impl Into<String>) -> El {
     text(s.into())
         .key(key)
         .font(TextStyle::new(17.0, 500.0).lh(22.0))
@@ -91,7 +91,7 @@ fn title(k: &Kit, key: &str, s: impl Into<String>) -> El {
 
 /// A step: the panel centred in the window, with an optional button over
 /// the top-left corner, so the panel has the window's whole height.
-fn page(key: &str, bar: Option<El>, panel: El) -> El {
+pub(crate) fn page(key: &str, bar: Option<El>, panel: El) -> El {
     let mut page = col().key(key).w_full().h_full().center().child(panel);
     if let Some(bar) = bar {
         page = page.child(bar);
@@ -99,7 +99,7 @@ fn page(key: &str, bar: Option<El>, panel: El) -> El {
     page
 }
 
-fn bar(k: &Kit, label: &str, glyph: &'static Icon, press: fn(&mut App)) -> El {
+pub(crate) fn bar(k: &Kit, label: &str, glyph: &'static Icon, press: fn(&mut App)) -> El {
     row().key("bar").absolute(12.0, 12.0).child(
         Button::new(label)
             .variant(ButtonVariant::Ghost)

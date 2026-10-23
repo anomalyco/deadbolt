@@ -257,6 +257,7 @@ fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
         pid: 1,
         version: "fixture".into(),
         protocol: deadbolt_client::protocol::PROTOCOL_VERSION,
+        program: None,
         home: String::new(),
         initialized: true,
         unlocked: false,

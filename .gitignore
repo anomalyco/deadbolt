@@ -1,4 +1,5 @@
 /target
+/.lab-output
 node_modules
 dist
 .wrangler
