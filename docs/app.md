@@ -27,9 +27,9 @@
 | Add / edit | — (CLI: `deadbolt new`, `set`) | Add login or card from the schema, edit in place, delete with confirm in place and a dim red surface |
 | Generate | — (CLI generates when `password=` is omitted) | Length and symbols, regenerate, used by Add |
 | Devices | — (CLI: `devices`, `pair`, `devices remove`) | List with presence; Add device (paste the new device's ticket, confirm the code); remove with confirm in place |
-| Import | — (CLI: `import bitwarden`) | Pick a Bitwarden export, show counts, import |
+| Import | — (CLI: `import`) | Pick a 1Password, Apple Passwords or Bitwarden export, show the dry-run counts, import |
 | Lock | ⌘L or the lock button, or the agent locking (idle timeout, sleep, screen lock, CLI); clears our clipboard copy and forgets every value | |
-| Errors, empty | Can't reach the agent (with the reason and Try again); an empty vault shows how to add a login or import from Bitwarden with the CLI, with copy buttons; no matches; agent errors inline | Agent version mismatch help |
+| Errors, empty | Can't reach the agent (with the reason and Try again); an empty vault shows how to add a login or import from 1Password, Apple Passwords or Bitwarden with the CLI, with copy buttons; no matches; agent errors inline | Agent version mismatch help |
 
 ## Keyboard
 

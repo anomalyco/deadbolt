@@ -2,6 +2,7 @@
 //! starting it on demand, replacing an agent of an older protocol, and sending
 //! requests. The CLI and the desktop app are both clients of this crate.
 
+pub mod export;
 pub mod paths;
 pub mod protocol;
 

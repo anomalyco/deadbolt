@@ -93,7 +93,10 @@ fn every_state_renders_in_both_appearances() {
         ("join-declined", &["Stopped: the codes didn't match"]),
         ("join-cancelled", &["Join cancelled"]),
         ("join-failed", &["Couldn't join"]),
-        ("empty", &["personal is empty", "deadbolt import bitwarden"]),
+        (
+            "empty",
+            &["personal is empty", "deadbolt import export.1pux"],
+        ),
         ("locked", &["DEADBOLT", "Locked"]),
     ];
     for dark in [true, false] {

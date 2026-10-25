@@ -5,14 +5,16 @@
 //! brand field or last four digits; a word of 4+ hex digits also matches an
 //! id prefix. Secret values and the derived label are never searched.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, bail};
 use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
+use zeroize::Zeroize;
 
 use super::session::Loaded;
+use crate::import::Imported;
 use crate::items::{format_month, line, with_scheme};
-use crate::protocol::{FieldInfo, FieldInput, ItemInfo, NewItem};
+use crate::protocol::{FieldInfo, FieldInput, ImportReport, ItemInfo};
 
 const MIN_SHORT: usize = 4;
 
@@ -21,7 +23,12 @@ pub fn host(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host.split(':').next().unwrap_or_default().to_lowercase();
+    // An IPv6 address is bracketed and has colons of its own.
+    let host = match host.strip_prefix('[') {
+        Some(rest) => rest.find(']').map_or(host, |end| &host[..end + 2]),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    let host = host.to_lowercase();
     host.strip_prefix("www.")
         .map(str::to_string)
         .unwrap_or(host)
@@ -295,21 +302,116 @@ pub fn create(
 }
 
 /// Creates all `items` or none.
-pub fn import(s: &mut Loaded, vault: Option<&str>, items: Vec<NewItem>) -> Result<()> {
+/// What makes two items the same to an import: a login's URL host,
+/// username and password, or a card's number. A login without a URL host
+/// (a database, a Wi-Fi network) is also told apart by its name. Wiped
+/// when dropped.
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum Key {
+    Login {
+        host: String,
+        name: String,
+        username: String,
+        password: String,
+    },
+    Card {
+        number: String,
+    },
+}
+
+impl Drop for Key {
+    fn drop(&mut self) {
+        match self {
+            Self::Login {
+                host,
+                name,
+                username,
+                password,
+            } => {
+                host.zeroize();
+                name.zeroize();
+                username.zeroize();
+                password.zeroize();
+            }
+            Self::Card { number } => number.zeroize(),
+        }
+    }
+}
+
+fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Option<Key> {
+    let value = |field| {
+        fields
+            .get(field)
+            .map_or(String::new(), |f: &Field| f.value.clone())
+    };
+    match kind {
+        "login" => {
+            let host = fields
+                .get("url")
+                .filter(|f| f.kind == FieldType::Url)
+                .map(|f| host(&f.value))
+                .unwrap_or_default();
+            let name = if host.is_empty() {
+                name.unwrap_or_default().to_string()
+            } else {
+                String::new()
+            };
+            Some(Key::Login {
+                host,
+                name,
+                username: value("username"),
+                password: value("password"),
+            })
+        }
+        "card" => Some(Key::Card {
+            number: value("number")
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect(),
+        }),
+        _ => None,
+    }
+}
+
+/// Imports a mapped export. Items the vault already has, or the export
+/// repeats, are left out, so importing again changes nothing. With
+/// `apply`, the rest are created, all or none.
+pub fn import(
+    s: &mut Loaded,
+    vault: Option<&str>,
+    (items, mut report): (Vec<Imported>, ImportReport),
+    apply: bool,
+) -> Result<ImportReport> {
     let vault = s.resolve(vault)?;
-    let items = items
-        .into_iter()
-        .enumerate()
-        .map(|(i, item)| {
-            let fields = fields(&item.kind, None, item.fields)
-                .map_err(|e| e.context(format!("item {}", i + 1)))?;
-            Ok((item.kind, item.name.filter(|n| !n.is_empty()), fields))
-        })
-        .collect::<Result<Vec<_>>>()?;
-    s.update(vault, |v, secret| {
-        v.create_items(secret, items)?;
-        Ok(())
-    })
+    let mut seen: BTreeSet<Key> = s
+        .vault(&vault)
+        .items()
+        .iter()
+        .filter_map(|item| key(&item.kind, item.name.as_deref(), &item.fields))
+        .collect();
+    let mut new = Vec::new();
+    for item in items {
+        if key(item.kind, item.name.as_deref(), &item.fields).is_some_and(|key| !seen.insert(key)) {
+            report.duplicates += 1;
+            match item.kind {
+                "card" => report.cards -= 1,
+                _ => report.logins -= 1,
+            }
+            continue;
+        }
+        new.push((
+            item.kind.to_string(),
+            item.name,
+            item.fields.into_iter().collect::<Vec<_>>(),
+        ));
+    }
+    if apply && !new.is_empty() {
+        s.update(vault, |v, secret| {
+            v.create_items(secret, new)?;
+            Ok(())
+        })?;
+    }
+    Ok(report)
 }
 
 pub fn set(
@@ -363,6 +465,84 @@ pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<I
 mod tests {
     use super::*;
 
+    fn loaded(dir: &std::path::Path) -> Loaded {
+        let params = deadbolt_store::KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let mut loaded = Loaded::setup(dir, b"test", "test", params).unwrap();
+        loaded.create_vault("personal").unwrap();
+        loaded
+    }
+
+    fn import(s: &mut Loaded, export: &str, apply: bool) -> ImportReport {
+        super::import(s, None, crate::import::parse(export).unwrap(), apply).unwrap()
+    }
+
+    fn count(s: &Loaded) -> usize {
+        let vault = s.resolve(None).unwrap();
+        s.vault(&vault).items().len()
+    }
+
+    #[test]
+    fn imports_skip_duplicates_and_a_dry_run_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let export = "name,url,username,password\n\
+            GitHub,https://github.com/login,dax,pw-1\n\
+            GitHub again,https://www.GitHub.com/,dax,pw-1\n\
+            Other user,https://github.com,kit,pw-1\n\
+            New password,https://github.com,dax,pw-2\n\
+            No url,,dax,pw-1\n\
+            No url again,not a url,dax,pw-1\n\
+            Prod DB,,postgres,pg-pw\n\
+            Staging DB,,postgres,pg-pw\n\
+            Prod DB,,postgres,pg-pw\n\
+            ,,postgres,pg-pw\n\
+            ,,postgres,pg-pw\n";
+        let report = import(&mut s, export, false);
+        assert_eq!((report.logins, report.duplicates), (8, 3));
+        assert_eq!(count(&s), 0);
+        let report = import(&mut s, export, true);
+        assert_eq!((report.logins, report.duplicates), (8, 3));
+        assert_eq!(count(&s), 8);
+        let again = import(&mut s, export, true);
+        assert_eq!((again.logins, again.duplicates), (0, 11));
+        assert_eq!(
+            again.lines(true)[..2],
+            [
+                "imported 0 from CSV (logins 0, cards 0)",
+                "skipped 11 duplicates",
+            ]
+        );
+        assert_eq!(count(&s), 8);
+    }
+
+    #[test]
+    fn cards_are_the_same_by_number() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let vault = s.resolve(None).unwrap();
+        let fields = vec![(
+            "number".to_string(),
+            Field::new(FieldType::Secret, "4242424242424242"),
+        )];
+        s.update(vault, |v, secret| {
+            v.create_items(secret, [("card".to_string(), None, fields)])?;
+            Ok(())
+        })
+        .unwrap();
+        let export = r#"{"encrypted": false, "items": [
+            {"type": 3, "name": "Visa", "card": {"number": "4242 4242 4242 4242", "code": "123"}},
+            {"type": 3, "name": "Amex", "card": {"number": "378282246310005"}},
+            {"type": 3, "name": "Amex", "card": {"number": "3782-822463-10005"}}
+        ]}"#;
+        let report = import(&mut s, export, true);
+        assert_eq!((report.cards, report.duplicates), (1, 2));
+        assert_eq!(count(&s), 2);
+    }
+
     #[test]
     fn hosts() {
         for (url, host_) in [
@@ -373,6 +553,9 @@ mod tests {
             ),
             ("example.com/path", "example.com"),
             ("ssh://git@host", "host"),
+            ("https://[::1]:8080/x", "[::1]"),
+            ("https://[2001:DB8::1]", "[2001:db8::1]"),
+            ("https://user@[::1]", "[::1]"),
         ] {
             assert_eq!(host(url), host_);
         }
