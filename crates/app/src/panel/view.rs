@@ -12,7 +12,7 @@ use rune::{
     Cx, El, Icon, ScrollSpec, Spring, SpringPair, TextStyle, Transition, col, el, icon, row,
     spacer, text,
 };
-use rune_kit::{Button, ButtonVariant, Kit};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
 use deadbolt_client::protocol::ItemInfo;
 
@@ -55,6 +55,7 @@ fn card(s: &App, k: &Kit) -> El {
                 Some(
                     Button::new("Open Deadbolt")
                         .variant(ButtonVariant::Contrast)
+                        .control_size(ControlSize::Large)
                         .on_press_tx(|s: &mut App, tx| s.open_main(tx))
                         .build(k),
                 ),
@@ -69,6 +70,7 @@ fn card(s: &App, k: &Kit) -> El {
                 Some(
                     Button::new("Try again")
                         .variant(ButtonVariant::Neutral)
+                        .control_size(ControlSize::Large)
                         .on_press(|s: &mut App| s.retry())
                         .build(k),
                 ),

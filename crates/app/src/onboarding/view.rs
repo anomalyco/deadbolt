@@ -13,7 +13,7 @@ use rune::{
     canvas, col, el, icon, row, text,
 };
 use rune_kit::{
-    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Kit, StateColors, TextInput,
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, StateColors, TextInput,
 };
 
 use super::worker::Stage;
@@ -103,6 +103,7 @@ pub(crate) fn bar(k: &Kit, label: &str, glyph: &'static Icon, press: fn(&mut App
     row().key("bar").absolute(12.0, 12.0).child(
         Button::new(label)
             .variant(ButtonVariant::Ghost)
+            .control_size(ControlSize::Large)
             .icon(glyph)
             .on_press(press)
             .build(k)
@@ -328,7 +329,7 @@ fn form(s: &App, k: &Kit, flow: Flow) -> El {
     panel = panel.child(
         Button::new(submit)
             .variant(ButtonVariant::Contrast)
-            .size(ButtonSize::Large)
+            .control_size(ControlSize::Large)
             .on_press(press)
             .build(k)
             .key("submit")
@@ -943,6 +944,7 @@ fn ticket(s: &App, k: &Kit) -> El {
         .child(
             Button::new(if copied { "Copied" } else { "Copy command" })
                 .variant(ButtonVariant::Neutral)
+                .control_size(ControlSize::Large)
                 .icon(if copied {
                     k.glyph.check_small
                 } else {
@@ -1009,7 +1011,7 @@ fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str) -> El {
                 .child(
                     Button::new("They match")
                         .variant(ButtonVariant::Contrast)
-                        .size(ButtonSize::Large)
+                        .control_size(ControlSize::Large)
                         .on_press(|s: &mut App| s.answer_code(true))
                         .build(k)
                         .key("match"),
@@ -1017,7 +1019,7 @@ fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str) -> El {
                 .child(
                     Button::new("They don't match")
                         .variant(ButtonVariant::Neutral)
-                        .size(ButtonSize::Large)
+                        .control_size(ControlSize::Large)
                         .on_press(|s: &mut App| s.answer_code(false))
                         .build(k)
                         .key("mismatch"),

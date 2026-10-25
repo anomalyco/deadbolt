@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use rune::{AppHandle, El, Shortcut, ShortcutError, Transition, Tx, col, row, text};
 use rune_kit::{
-    Button, ButtonSize, ButtonVariant, Kit, ShortcutRecorder, ShortcutRecorderState,
+    Button, ButtonVariant, ControlSize, Kit, ShortcutRecorder, ShortcutRecorderState,
     shortcut_error_message,
 };
 
@@ -434,6 +434,7 @@ pub fn notice(s: &App, k: &Kit) -> Option<El> {
                 .child(
                     Button::new("Choose another…")
                         .variant(ButtonVariant::Neutral)
+                        .control_size(ControlSize::Large)
                         .on_press(|s: &mut App| s.choose_shortcut())
                         .build(k)
                         .key("choose"),
@@ -441,6 +442,7 @@ pub fn notice(s: &App, k: &Kit) -> Option<El> {
                 .child(
                     Button::new("Not now")
                         .variant(ButtonVariant::Ghost)
+                        .control_size(ControlSize::Large)
                         .on_press(|s: &mut App| s.hotkey.dismissed = true)
                         .build(k)
                         .key("dismiss"),
@@ -493,7 +495,7 @@ pub fn setting(s: &App, k: &Kit) -> El {
     let action = |label: String, key: &str, press: fn(&mut App)| {
         Button::new(label)
             .variant(ButtonVariant::Ghost)
-            .size(ButtonSize::Small)
+            .control_size(ControlSize::Regular)
             .on_press(press)
             .build(k)
             .key(key)
