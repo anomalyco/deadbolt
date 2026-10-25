@@ -3,12 +3,10 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, anyhow, bail};
-use deadbolt_core::FieldType;
+use anyhow::{Result, anyhow, bail};
 
 use super::{
-    ARCHIVED, BAD_OTP, Builder, COLUMN, FAVORITE, Imported, NO_PASSWORD, SUPPORTED, Summary, TAG,
-    item_name,
+    ARCHIVED, Builder, COLUMN, FAVORITE, Imported, NO_PASSWORD, SUPPORTED, Summary, TAG, item_name,
 };
 use crate::protocol::ImportSource;
 
@@ -24,10 +22,7 @@ enum Column {
     Username,
     Password,
     Notes,
-    /// An `otpauth://` URI.
-    OtpAuth,
-    /// A one-time password secret in any form.
-    Totp,
+    Otp,
     Favorite,
     Archived,
     Tags,
@@ -42,8 +37,7 @@ impl Column {
             "username" | "login" | "login_username" => Self::Username,
             "password" | "login_password" => Self::Password,
             "notes" | "note" => Self::Notes,
-            "otpauth" => Self::OtpAuth,
-            "totp" | "login_totp" => Self::Totp,
+            "otpauth" | "totp" | "login_totp" => Self::Otp,
             "favorite" => Self::Favorite,
             "archived" => Self::Archived,
             "tags" => Self::Tags,
@@ -60,7 +54,7 @@ struct Row {
     username: Option<String>,
     password: Option<String>,
     notes: Option<String>,
-    otp: Option<(String, bool)>,
+    otps: Vec<String>,
     favorite: bool,
     archived: bool,
     tags: Vec<String>,
@@ -97,7 +91,7 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
     let columns: Vec<Column> = headers
         .iter()
         .map(|h| match Column::of(h) {
-            Column::Url => Column::Url,
+            column @ (Column::Url | Column::Otp) => column,
             column if seen.insert(column) => column,
             _ => Column::Other,
         })
@@ -110,9 +104,7 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
     let mut tags = BTreeSet::new();
     let mut record = ::csv::StringRecord::new();
     let mut out = Vec::new();
-    let mut n = 0;
     while reader.read_record(&mut record).map_err(|e| error(&e))? {
-        n += 1;
         let mut row = Row {
             empty: true,
             ..Row::default()
@@ -130,8 +122,7 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
                 Column::Username => row.username = trimmed(),
                 Column::Password => row.password = Some(value.into()),
                 Column::Notes => row.notes = Some(value.into()),
-                Column::OtpAuth => row.otp = Some((value.trim().into(), true)),
-                Column::Totp => row.otp = Some((value.trim().into(), false)),
+                Column::Otp => row.otps.push(value.trim().into()),
                 Column::Favorite => row.favorite = truthy(value),
                 Column::Archived => row.archived = truthy(value),
                 Column::Tags => {
@@ -153,10 +144,7 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
         }
         let favorite = row.favorite;
         let row_tags = std::mem::take(&mut row.tags);
-        let Some(item) = login(row, &mut summary)
-            .transpose()
-            .with_context(|| format!("mapping row {n}"))?
-        else {
+        let Some(item) = login(row, &mut summary) else {
             continue;
         };
         if favorite {
@@ -177,7 +165,7 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
 }
 
 /// A login from a row; `None` if it has no password.
-fn login(row: Row, summary: &mut Summary) -> Option<Result<Imported>> {
+fn login(row: Row, summary: &mut Summary) -> Option<Imported> {
     let Some(password) = row.password else {
         summary.skip(NO_PASSWORD);
         return None;
@@ -185,17 +173,13 @@ fn login(row: Row, summary: &mut Summary) -> Option<Result<Imported>> {
     let mut b = Builder::new("login");
     b.known("password", Some(password));
     b.known("username", row.username);
-    match row.otp {
-        Some((otp, true)) if !otp.to_lowercase().starts_with("otpauth://") => {
-            b.extra("otp", FieldType::Secret, otp);
-            summary.warn(BAD_OTP);
-        }
-        Some((otp, _)) => b.known_or_extra("otp", Some(otp), BAD_OTP, summary),
-        None => {}
+    // The first is `otp`; any others become extra fields.
+    for otp in row.otps {
+        b.known("otp", Some(otp));
     }
     b.known("notes", row.notes);
     b.urls(row.urls, summary);
-    Some(b.finish("login", item_name(row.title)))
+    b.finish("login", item_name(row.title), summary)
 }
 
 #[cfg(test)]
@@ -235,7 +219,7 @@ No password,https://nopw.example,someone,,,
         assert_eq!(
             fields(&items[1]),
             [
-                ("otp-2", "secret", "JBSWY3DPEHPK3PXP"),
+                ("otp", "otp", "JBSWY3DPEHPK3PXP"),
                 ("password", "secret", "apple-pw-2"),
                 ("url", "url", "https://site.example"),
             ]
@@ -247,7 +231,6 @@ No password,https://nopw.example,someone,,,
             [
                 "imported 3 from Apple Passwords (logins 3, cards 0)",
                 "skipped 1 login without password",
-                "warning: 1 invalid one-time password secret kept as an extra field",
             ]
         );
     }
@@ -315,6 +298,30 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
                 "dropped: 3 unrecognized columns",
             ]
         );
+    }
+
+    #[test]
+    fn a_second_one_time_password_is_kept_as_an_extra_field() {
+        let export = "name,password,otpauth,totp\n\
+            Site,pw,otpauth://totp/Site?secret=JBSWY3DPEHPK3PXP,KRSXG5CTMVRXEZLU\n\
+            Other,pw-2,, KRSXG5CTMVRXEZLU \n";
+        let (items, report) = parse(export).unwrap();
+        assert_eq!(
+            fields(&items[0]),
+            [
+                ("otp", "otp", "otpauth://totp/Site?secret=JBSWY3DPEHPK3PXP"),
+                ("otp-2", "otp", "KRSXG5CTMVRXEZLU"),
+                ("password", "secret", "pw"),
+            ]
+        );
+        assert_eq!(
+            fields(&items[1]),
+            [
+                ("otp", "otp", "KRSXG5CTMVRXEZLU"),
+                ("password", "secret", "pw-2")
+            ]
+        );
+        assert_eq!(lines(&report), ["imported 2 from CSV (logins 2, cards 0)"]);
     }
 
     #[test]

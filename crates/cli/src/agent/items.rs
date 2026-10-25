@@ -23,7 +23,12 @@ pub fn host(url: &str) -> String {
     let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
     let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
     let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    let host = host.split(':').next().unwrap_or_default().to_lowercase();
+    // An IPv6 address is bracketed and has colons of its own.
+    let host = match host.strip_prefix('[') {
+        Some(rest) => rest.find(']').map_or(host, |end| &host[..end + 2]),
+        None => host.split(':').next().unwrap_or_default(),
+    };
+    let host = host.to_lowercase();
     host.strip_prefix("www.")
         .map(str::to_string)
         .unwrap_or(host)
@@ -298,18 +303,47 @@ pub fn create(
 
 /// Creates all `items` or none.
 /// What makes two items the same to an import: a login's URL host,
-/// username and password, or a card's number. Wiped when dropped.
+/// username and password, or a card's number. A login without a URL host
+/// (a database, a Wi-Fi network) is also told apart by its name. Wiped
+/// when dropped.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
-struct Key(String);
+enum Key {
+    Login {
+        host: String,
+        name: String,
+        username: String,
+        password: String,
+    },
+    Card {
+        number: String,
+    },
+}
 
 impl Drop for Key {
     fn drop(&mut self) {
-        self.0.zeroize();
+        match self {
+            Self::Login {
+                host,
+                name,
+                username,
+                password,
+            } => {
+                host.zeroize();
+                name.zeroize();
+                username.zeroize();
+                password.zeroize();
+            }
+            Self::Card { number } => number.zeroize(),
+        }
     }
 }
 
-fn key(kind: &str, fields: &BTreeMap<String, Field>) -> Option<Key> {
-    let value = |name| fields.get(name).map_or("", |f: &Field| f.value.as_str());
+fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Option<Key> {
+    let value = |field| {
+        fields
+            .get(field)
+            .map_or(String::new(), |f: &Field| f.value.clone())
+    };
     match kind {
         "login" => {
             let host = fields
@@ -317,16 +351,24 @@ fn key(kind: &str, fields: &BTreeMap<String, Field>) -> Option<Key> {
                 .filter(|f| f.kind == FieldType::Url)
                 .map(|f| host(&f.value))
                 .unwrap_or_default();
-            Some(Key(format!(
-                "login\0{host}\0{}\0{}",
-                value("username"),
-                value("password")
-            )))
+            let name = if host.is_empty() {
+                name.unwrap_or_default().to_string()
+            } else {
+                String::new()
+            };
+            Some(Key::Login {
+                host,
+                name,
+                username: value("username"),
+                password: value("password"),
+            })
         }
-        "card" => {
-            let digits = value("number").chars().filter(char::is_ascii_digit);
-            Some(Key(format!("card\0{}", digits.collect::<String>())))
-        }
+        "card" => Some(Key::Card {
+            number: value("number")
+                .chars()
+                .filter(char::is_ascii_digit)
+                .collect(),
+        }),
         _ => None,
     }
 }
@@ -345,11 +387,11 @@ pub fn import(
         .vault(&vault)
         .items()
         .iter()
-        .filter_map(|item| key(&item.kind, &item.fields))
+        .filter_map(|item| key(&item.kind, item.name.as_deref(), &item.fields))
         .collect();
     let mut new = Vec::new();
     for item in items {
-        if key(item.kind, &item.fields).is_some_and(|key| !seen.insert(key)) {
+        if key(item.kind, item.name.as_deref(), &item.fields).is_some_and(|key| !seen.insert(key)) {
             report.duplicates += 1;
             match item.kind {
                 "card" => report.cards -= 1,
@@ -453,23 +495,28 @@ mod tests {
             Other user,https://github.com,kit,pw-1\n\
             New password,https://github.com,dax,pw-2\n\
             No url,,dax,pw-1\n\
-            No url again,not a url,dax,pw-1\n";
+            No url again,not a url,dax,pw-1\n\
+            Prod DB,,postgres,pg-pw\n\
+            Staging DB,,postgres,pg-pw\n\
+            Prod DB,,postgres,pg-pw\n\
+            ,,postgres,pg-pw\n\
+            ,,postgres,pg-pw\n";
         let report = import(&mut s, export, false);
-        assert_eq!((report.logins, report.duplicates), (4, 2));
+        assert_eq!((report.logins, report.duplicates), (8, 3));
         assert_eq!(count(&s), 0);
         let report = import(&mut s, export, true);
-        assert_eq!((report.logins, report.duplicates), (4, 2));
-        assert_eq!(count(&s), 4);
+        assert_eq!((report.logins, report.duplicates), (8, 3));
+        assert_eq!(count(&s), 8);
         let again = import(&mut s, export, true);
-        assert_eq!((again.logins, again.duplicates), (0, 6));
+        assert_eq!((again.logins, again.duplicates), (0, 11));
         assert_eq!(
             again.lines(true)[..2],
             [
                 "imported 0 from CSV (logins 0, cards 0)",
-                "skipped 6 duplicates",
+                "skipped 11 duplicates",
             ]
         );
-        assert_eq!(count(&s), 4);
+        assert_eq!(count(&s), 8);
     }
 
     #[test]
@@ -506,6 +553,9 @@ mod tests {
             ),
             ("example.com/path", "example.com"),
             ("ssh://git@host", "host"),
+            ("https://[::1]:8080/x", "[::1]"),
+            ("https://[2001:DB8::1]", "[2001:db8::1]"),
+            ("https://user@[::1]", "[::1]"),
         ] {
             assert_eq!(host(url), host_);
         }

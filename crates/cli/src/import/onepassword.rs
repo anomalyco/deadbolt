@@ -4,15 +4,15 @@
 
 use std::collections::BTreeSet;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use deadbolt_core::FieldType;
 use serde_json::Value;
 
 use super::{
-    ARCHIVED, ATTACHMENT, BAD_CVV, BAD_EXPIRY, BAD_OTP, BANK_ACCOUNT, Builder, DRIVERS_LICENSE,
-    FAVORITE, IDENTITY, Imported, LINKED_FIELD, NO_NUMBER, NO_PASSWORD, PASSPORT, PASSWORD_HISTORY,
-    Reason, SECURE_NOTE, SSH_KEY, Summary, TAG, UNKNOWN_TYPE, array, field_name, item_name, month,
-    number, scalar, text,
+    ARCHIVED, ATTACHMENT, BAD_CVV, BAD_EXPIRY, BANK_ACCOUNT, Builder, DRIVERS_LICENSE, FAVORITE,
+    IDENTITY, Imported, LINKED_FIELD, NO_NUMBER, NO_PASSWORD, PASSPORT, PASSWORD_HISTORY, Reason,
+    SECURE_NOTE, SSH_KEY, Summary, TAG, UNKNOWN_TYPE, array, field_name, item_name, month, number,
+    scalar, text,
 };
 use crate::protocol::ImportSource;
 
@@ -216,7 +216,16 @@ fn brand(code: String) -> String {
     name.into()
 }
 
-fn login(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
+/// An item's website and its other URLs.
+fn urls(overview: &Value) -> impl Iterator<Item = String> + '_ {
+    text(overview, "url").into_iter().chain(
+        array(overview, "urls")
+            .iter()
+            .filter_map(|u| text(u, "url")),
+    )
+}
+
+fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut entries = Entries::new(details);
@@ -236,28 +245,26 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
         .take(|e| e.designation.as_deref() == Some("username"))
         .or_else(|| entries.take(|e| e.designation.is_none() && e.is("username")));
     b.known("username", username);
-    b.known_or_extra("otp", entries.take(Entry::is_totp), BAD_OTP, summary);
+    b.known("otp", entries.take(Entry::is_totp));
     b.known("notes", text(details, "notesPlain"));
-    let urls = text(overview, "url").into_iter().chain(
-        array(overview, "urls")
-            .iter()
-            .filter_map(|u| text(u, "url")),
-    );
-    b.urls(urls, summary);
+    b.urls(urls(overview), summary);
     entries.extras(&mut b, summary);
-    Some(b.finish("login", item_name(text(overview, "title"))))
+    b.finish("login", item_name(text(overview, "title")), summary)
 }
 
-fn card(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
+fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut entries = Entries::new(details);
     let mut b = Builder::new("card");
-    let number = entries.take(|e| e.id == "ccnum").map(|n| {
-        n.chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '.'))
-            .collect()
-    });
+    let number = entries
+        .take(|e| e.id == "ccnum")
+        .map(|n| {
+            n.chars()
+                .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '.'))
+                .collect::<String>()
+        })
+        .filter(|n| !n.is_empty());
     if number.is_none() || !b.known("number", number) {
         summary.skip(NO_NUMBER);
         return None;
@@ -276,8 +283,9 @@ fn card(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
     b.known("brand", entries.take(|e| e.id == "type").map(brand));
     b.known("pin", entries.take(|e| e.id == "pin"));
     b.known("notes", text(details, "notesPlain"));
+    b.urls(urls(overview), summary);
     entries.extras(&mut b, summary);
-    Some(b.finish("card", item_name(text(overview, "title"))))
+    b.finish("card", item_name(text(overview, "title")), summary)
 }
 
 /// Maps a 1PUX `export.data`.
@@ -292,7 +300,7 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
         .iter()
         .flat_map(|account| array(account, "vaults"))
         .flat_map(|vault| array(vault, "items"));
-    for (n, item) in items.enumerate() {
+    for item in items {
         if text(item, "state").as_deref() == Some("archived") {
             summary.skip(ARCHIVED);
             continue;
@@ -306,10 +314,7 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
                 continue;
             }
         };
-        let Some(mapped) = mapped
-            .transpose()
-            .with_context(|| format!("mapping item {}", n + 1))?
-        else {
+        let Some(mapped) = mapped else {
             continue;
         };
         let details = item.get("details").unwrap_or(&Value::Null);
@@ -320,12 +325,6 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
         tags.extend(array(overview, "tags").iter().filter_map(scalar));
         if !array(details, "passwordHistory").is_empty() {
             summary.drop_some(PASSWORD_HISTORY, 1);
-        }
-        if details
-            .get("documentAttributes")
-            .is_some_and(|d| !d.is_null())
-        {
-            summary.drop_some(ATTACHMENT, 1);
         }
         summary.add(&mapped);
         out.push(mapped);
@@ -383,7 +382,9 @@ mod tests {
                       { "title": "backup email", "id": "f4", "value": { "email": { "email_address": "backup@example.com", "provider": null } } },
                       { "title": "renews", "id": "f5", "value": { "monthYear": 202812 } },
                       { "title": "other login", "id": "f6", "value": { "reference": "item9item9item9item9item9a" } },
-                      { "title": "empty", "id": "f7", "value": { "string": "" } }
+                      { "title": "empty", "id": "f7", "value": { "string": "" } },
+                      { "title": "blank", "id": "f9", "value": { "concealed": "   " } },
+                      { "title": "", "id": "f10", "value": { "file": { "documentId": "doc1doc1doc1doc1doc1doc1d1", "fileName": "recovery.pdf", "decryptedSize": 1024 } } }
                     ]
                   },
                   { "title": "Docs", "name": "docs", "fields": [
@@ -450,6 +451,7 @@ mod tests {
                       { "title": "type", "id": "type", "value": { "creditCardType": "visa" } },
                       { "title": "number", "id": "ccnum", "value": { "creditCardNumber": "4242 4242 4242 4242" } },
                       { "title": "verification number", "id": "cvv", "value": { "concealed": "321" } },
+                      { "title": "website", "id": "site", "value": { "url": "https://bank.example" } },
                       { "title": "expiry date", "id": "expiry", "value": { "monthYear": 202704 } },
                       { "title": "valid from", "id": "validFrom", "value": { "monthYear": 202204 } },
                       { "title": "PIN", "id": "pin", "value": { "concealed": "9876" } }
@@ -467,7 +469,7 @@ mod tests {
                 ],
                 "passwordHistory": []
               },
-              "overview": { "title": "Visa", "subtitle": "4242 ****" }
+              "overview": { "title": "Visa", "subtitle": "4242 ****", "url": "bank.example", "urls": [ { "url": "https://bank.example" }, { "url": "https://cards.bank.example" } ] }
             },
             {
               "uuid": "item6item6item6item6item6a",
@@ -550,6 +552,8 @@ mod tests {
                 ("number", "secret", "4242424242424242"),
                 ("phone-intl", "text", "+1 555 0100"),
                 ("pin", "secret", "9876"),
+                ("url", "url", "https://bank.example"),
+                ("url-2", "url", "https://cards.bank.example"),
                 ("valid-from", "month", "2022-04"),
             ]
         );
@@ -572,7 +576,7 @@ mod tests {
                 "skipped 1 login without password",
                 "skipped 1 secure note",
                 "skipped 1 ssh key",
-                "dropped: 2 favorites, 1 item's password history, 1 linked field, 3 tags",
+                "dropped: 1 attachment, 2 favorites, 1 item's password history, 1 linked field, 3 tags",
             ]
         );
     }

@@ -38,7 +38,7 @@ pub enum ExportError {
     #[error("the export is larger than {} MiB", MAX_TEXT >> 20)]
     TooLarge,
     #[error(
-        "a .1pux on stdin can be at most {} MiB; pass the file instead",
+        "a .1pux read from a pipe can be at most {} MiB; pass the file itself",
         MAX_ARCHIVE >> 20
     )]
     ArchiveTooLarge,
@@ -52,10 +52,19 @@ pub enum ExportError {
     Zip(#[source] ZipError),
 }
 
-/// Reads an export file: a `.1pux` in place, anything else as text.
+/// Reads an export file: a `.1pux` in place, anything else as text. A
+/// pipe or other file that can't seek, such as `<(...)` or `/dev/stdin`,
+/// is read as a stream.
 pub fn read(path: &Path) -> Result<Zeroizing<String>, ExportError> {
     let error = |e| ExportError::Read(path.into(), e);
     let mut file = File::open(path).map_err(error)?;
+    let metadata = file.metadata().map_err(error)?;
+    if !metadata.is_file() {
+        return read_from(file).map_err(|e| match e {
+            ExportError::Io(e) => error(e),
+            e => e,
+        });
+    }
     let mut magic = [0; 4];
     let mut len = 0;
     while len < magic.len() {
@@ -70,11 +79,12 @@ pub fn read(path: &Path) -> Result<Zeroizing<String>, ExportError> {
         return onepux(file);
     }
     file.rewind().map_err(error)?;
-    let size = file.metadata().map_err(error)?.len();
-    if size > MAX_TEXT as u64 + BOM.len() as u64 {
+    if metadata.len() > MAX_TEXT as u64 + BOM.len() as u64 {
         return Err(ExportError::TooLarge);
     }
-    let buffer = Zeroizing::new(Vec::with_capacity(size as usize));
+    let buffer = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(metadata.len()).unwrap_or(MAX_TEXT),
+    ));
     let bytes = bounded(file, MAX_TEXT + BOM.len(), buffer)
         .map_err(error)?
         .ok_or(ExportError::TooLarge)?;
@@ -112,8 +122,6 @@ pub fn decode(bytes: Vec<u8>) -> Result<Zeroizing<String>, ExportError> {
 }
 
 /// Reads at most `max` bytes onto `buffer`, or `None` if there are more.
-/// The buffer grows by copying into a new one and wiping the old, so no
-/// reallocation leaves a copy behind.
 fn bounded(
     mut reader: impl Read,
     max: usize,
@@ -130,14 +138,22 @@ fn bounded(
         if buffer.len() + n > max {
             return Ok(None);
         }
-        if buffer.capacity() - buffer.len() < n {
-            let capacity = (buffer.len() + n).max(buffer.capacity() * 2).min(max);
-            let mut grown = Zeroizing::new(Vec::with_capacity(capacity));
-            grown.extend_from_slice(&buffer);
-            buffer = grown;
-        }
-        buffer.extend_from_slice(&chunk[..n]);
+        append(&mut buffer, &chunk[..n], max);
     }
+}
+
+/// Appends `bytes` to a buffer of secrets. It grows by copying into a new
+/// buffer (to at most `max`, unless `bytes` need more) and wiping the old
+/// one, so no reallocation leaves a copy behind.
+pub fn append(buffer: &mut Zeroizing<Vec<u8>>, bytes: &[u8], max: usize) {
+    if buffer.capacity() - buffer.len() < bytes.len() {
+        let needed = buffer.len() + bytes.len();
+        let capacity = (buffer.capacity() * 2).min(max).max(needed);
+        let mut grown = Zeroizing::new(Vec::with_capacity(capacity));
+        grown.extend_from_slice(buffer);
+        *buffer = grown;
+    }
+    buffer.extend_from_slice(bytes);
 }
 
 /// The `export.data` of a 1Password `.1pux`.
@@ -261,6 +277,35 @@ mod tests {
         let short = dir.path().join("short.csv");
         std::fs::write(&short, "a").unwrap();
         assert_eq!(read(&short).unwrap().as_str(), "a");
+    }
+
+    #[test]
+    fn reads_a_pipe_as_a_stream() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in [
+            ("csv", b"Title,Password\nx,y\n".to_vec()),
+            ("1pux", onepux_bytes()),
+        ] {
+            let fifo = dir.path().join(name);
+            let status = std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let writer = {
+                let fifo = fifo.clone();
+                let bytes = bytes.clone();
+                std::thread::spawn(move || std::fs::write(fifo, bytes).unwrap())
+            };
+            let text = read(&fifo).unwrap();
+            writer.join().unwrap();
+            let expected = if name == "csv" {
+                "Title,Password\nx,y\n"
+            } else {
+                DATA
+            };
+            assert_eq!(text.as_str(), expected);
+        }
     }
 
     #[test]

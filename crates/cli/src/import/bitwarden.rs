@@ -1,13 +1,13 @@
 //! Bitwarden's unencrypted JSON export (`{encrypted, folders[], items[]}`,
 //! see bitwarden/clients `libs/common/src/models/export`).
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Result, bail};
 use deadbolt_core::FieldType;
 use serde_json::Value;
 
 use super::{
-    ATTACHMENT, BAD_CVV, BAD_EXPIRY, BAD_OTP, BANK_ACCOUNT, Builder, COLLECTION, DRIVERS_LICENSE,
-    FAVORITE, FOLDER, IDENTITY, Imported, LINKED_FIELD, NO_NUMBER, NO_PASSWORD, PASSKEYS, PASSPORT,
+    ATTACHMENT, BAD_CVV, BAD_EXPIRY, BANK_ACCOUNT, Builder, COLLECTION, DRIVERS_LICENSE, FAVORITE,
+    FOLDER, IDENTITY, Imported, LINKED_FIELD, NO_NUMBER, NO_PASSWORD, PASSKEYS, PASSPORT,
     PASSWORD_HISTORY, SECURE_NOTE, SSH_KEY, Summary, UNKNOWN_TYPE, array, field_name, item_name,
     month, number, text,
 };
@@ -41,7 +41,7 @@ impl Builder {
     }
 }
 
-fn login(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
+fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let login = item.get("login").unwrap_or(&Value::Null);
     let password = text(login, "password");
     if password.is_none() {
@@ -51,7 +51,7 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
     let mut b = Builder::new("login");
     b.known("password", password);
     b.known("username", text(login, "username"));
-    b.known_or_extra("otp", text(login, "totp"), BAD_OTP, summary);
+    b.known("otp", text(login, "totp"));
     b.known("notes", text(item, "notes"));
     b.urls(
         array(login, "uris").iter().filter_map(|u| text(u, "uri")),
@@ -61,17 +61,19 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
         summary.drop_some(PASSKEYS, 1);
     }
     b.custom_fields(item, summary);
-    Some(b.finish("login", item_name(text(item, "name"))))
+    b.finish("login", item_name(text(item, "name")), summary)
 }
 
-fn card(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
+fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let card = item.get("card").unwrap_or(&Value::Null);
     let mut b = Builder::new("card");
-    let number = text(card, "number").map(|n| {
-        n.chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '.'))
-            .collect()
-    });
+    let number = text(card, "number")
+        .map(|n| {
+            n.chars()
+                .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '.'))
+                .collect::<String>()
+        })
+        .filter(|n| !n.is_empty());
     if number.is_none() || !b.known("number", number) {
         summary.skip(NO_NUMBER);
         return None;
@@ -89,7 +91,7 @@ fn card(item: &Value, summary: &mut Summary) -> Option<Result<Imported>> {
     b.known("brand", text(card, "brand"));
     b.known("notes", text(item, "notes"));
     b.custom_fields(item, summary);
-    Some(b.finish("card", item_name(text(item, "name"))))
+    b.finish("card", item_name(text(item, "name")), summary)
 }
 
 /// Maps a Bitwarden JSON export.
@@ -125,10 +127,7 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
         } else {
             card(item, &mut summary)
         };
-        let Some(mapped) = mapped
-            .transpose()
-            .with_context(|| format!("mapping item {}", out.len() + 1))?
-        else {
+        let Some(mapped) = mapped else {
             continue;
         };
         if item.get("favorite").and_then(Value::as_bool) == Some(true) {
@@ -386,6 +385,30 @@ mod tests {
             .unwrap()
             .to_string();
         assert!(!error.contains("s3cret"), "{error}");
+    }
+
+    #[test]
+    fn blank_values_are_left_out() {
+        let export = r#"{"encrypted": false, "items": [
+            {"type": 3, "name": "Visa", "card": {"number": "4242424242424242", "code": " ", "brand": "  "},
+             "fields": [{"name": "pin", "value": "   ", "type": 1}]},
+            {"type": 3, "name": "Dashes", "card": {"number": "--"}},
+            {"type": 1, "name": "Blank", "login": {"username": "dax", "password": "  "}}
+        ]}"#;
+        let (items, summary) = bitwarden(export).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(
+            fields(&items[0]),
+            [("number", "secret", "4242424242424242")]
+        );
+        assert_eq!(
+            lines(&summary),
+            [
+                "imported 1 from Bitwarden (logins 0, cards 1)",
+                "skipped 1 card without a valid number",
+                "skipped 1 login without password",
+            ]
+        );
     }
 
     #[test]

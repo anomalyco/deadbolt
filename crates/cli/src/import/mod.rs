@@ -95,13 +95,13 @@ const BAD_EXPIRY: Reason = (
     "invalid card expiry kept as an extra field",
     "invalid card expiries kept as extra fields",
 );
-const BAD_OTP: Reason = (
-    "invalid one-time password secret kept as an extra field",
-    "invalid one-time password secrets kept as extra fields",
-);
 const URL_AS_TEXT: Reason = (
     "URL that is not an absolute URL kept as text",
     "URLs that are not absolute URLs kept as text",
+);
+const INVALID: Reason = (
+    "item that could not be imported",
+    "items that could not be imported",
 );
 const FOLDER: Reason = ("folder", "folders");
 const COLLECTION: Reason = ("collection", "collections");
@@ -169,17 +169,17 @@ impl Summary {
     }
 }
 
-/// A JSON scalar as text; numbers and booleans too. Empty is `None`.
+/// A JSON scalar as text; numbers and booleans too. Blank is `None`.
 fn scalar(value: &Value) -> Option<String> {
     match value {
-        Value::String(s) if !s.is_empty() => Some(s.clone()),
+        Value::String(s) if !s.trim().is_empty() => Some(s.clone()),
         Value::Number(n) => Some(n.to_string()),
         Value::Bool(b) => Some(b.to_string()),
         _ => None,
     }
 }
 
-/// A string value; numbers and booleans as text. Empty and missing are `None`.
+/// A string value; numbers and booleans as text. Blank and missing are `None`.
 fn text(value: &Value, key: &str) -> Option<String> {
     scalar(value.get(key)?)
 }
@@ -277,10 +277,13 @@ fn url_field(uri: &str) -> Field {
 }
 
 /// Builds one item's fields, tracking names so extras never collide.
+/// Blank values are left out everywhere: deadbolt has no empty fields.
 struct Builder {
     schema: &'static Schema,
     fields: BTreeMap<String, Field>,
     taken: BTreeSet<String>,
+    /// URL values already added, so each is added once.
+    urls: BTreeSet<String>,
 }
 
 impl Builder {
@@ -294,31 +297,38 @@ impl Builder {
             schema,
             fields: BTreeMap::new(),
             taken: schema.fields.iter().map(|f| f.name.to_string()).collect(),
+            urls: BTreeSet::new(),
         }
     }
 
-    /// Sets a known field; `false` if the value is invalid for it.
     #[expect(
         clippy::expect_used,
         reason = "mapping code passes known fields of its built-in schema"
     )]
+    fn kind(&self, name: &str) -> FieldType {
+        self.schema.field(name).expect("known field").kind.clone()
+    }
+
+    /// Sets a known field; `false` if the value is invalid for it. If the
+    /// field is already set, the value becomes an extra field instead.
     fn known(&mut self, name: &str, value: Option<String>) -> bool {
-        let Some(value) = value else { return true };
-        let kind = self.schema.field(name).expect("known field").kind.clone();
-        let field = Field::new(kind, value);
+        let Some(value) = value.filter(|v| !v.trim().is_empty()) else {
+            return true;
+        };
+        let mut field = Field::new(self.kind(name), value);
         if check_field(self.schema, name, &field).is_err() {
             return false;
         }
-        self.fields.insert(name.into(), field);
+        if self.fields.contains_key(name) {
+            self.extra(name, field.kind.clone(), std::mem::take(&mut field.value));
+        } else {
+            self.fields.insert(name.into(), field);
+        }
         true
     }
 
     /// Sets a known field, or keeps a value that is invalid for it as an
     /// extra field, with a warning: an import never drops a value silently.
-    #[expect(
-        clippy::expect_used,
-        reason = "mapping code passes known fields of its built-in schema"
-    )]
     fn known_or_extra(
         &mut self,
         name: &str,
@@ -326,19 +336,11 @@ impl Builder {
         reason: Reason,
         summary: &mut Summary,
     ) {
-        let Some(value) = value else { return };
-        if self.fields.contains_key(name) {
-            let kind = self.schema.field(name).expect("known field").kind.clone();
-            return self.extra(name, kind, value);
-        }
+        let Some(value) = value.filter(|v| !v.trim().is_empty()) else {
+            return;
+        };
         if !self.known(name, Some(value.clone())) {
-            let secret = self
-                .schema
-                .field(name)
-                .expect("known field")
-                .kind
-                .is_secret();
-            let kind = if secret {
+            let kind = if self.kind(name).is_secret() {
                 FieldType::Secret
             } else {
                 FieldType::Text
@@ -351,6 +353,9 @@ impl Builder {
     /// Adds an extra field under a free name based on `base`. A value that
     /// isn't valid for `kind` becomes secret or text.
     fn extra(&mut self, base: &str, kind: FieldType, value: String) {
+        if value.trim().is_empty() {
+            return;
+        }
         let name = unique(base, &self.taken);
         let mut field = Field::new(kind, value);
         if check_field(self.schema, &name, &field).is_err() {
@@ -365,19 +370,22 @@ impl Builder {
     }
 
     /// The first absolute URL is `url`; the others are `url-2`, `url-3`,
-    /// ... of type url, or text if they are not absolute URLs. Repeats are
-    /// left out.
+    /// ... of type url, or text if they are not absolute URLs. A URL
+    /// already added is left out.
     fn urls(&mut self, uris: impl IntoIterator<Item = String>, summary: &mut Summary) {
-        let mut seen = BTreeSet::new();
         for uri in uris {
-            let uri = uri.trim().to_string();
-            if uri.is_empty() || !seen.insert(uri.clone()) {
+            let uri = uri.trim();
+            if uri.is_empty() {
                 continue;
             }
-            let mut field = url_field(&uri);
+            let mut field = url_field(uri);
+            if !self.urls.insert(field.value.clone()) {
+                continue;
+            }
             if field.kind != FieldType::Url {
                 summary.warn(URL_AS_TEXT);
             } else if !self.fields.contains_key("url") {
+                self.taken.insert("url".into());
                 self.fields.insert("url".into(), field);
                 continue;
             }
@@ -385,9 +393,19 @@ impl Builder {
         }
     }
 
-    fn finish(self, kind: &'static str, name: Option<String>) -> Result<Imported> {
-        check_create(kind, name.as_deref(), &self.fields)?;
-        Ok(Imported {
+    /// The item, or `None`, counted, if it is still not valid: one bad
+    /// item never stops the others.
+    fn finish(
+        self,
+        kind: &'static str,
+        name: Option<String>,
+        summary: &mut Summary,
+    ) -> Option<Imported> {
+        if check_create(kind, name.as_deref(), &self.fields).is_err() {
+            summary.skip(INVALID);
+            return None;
+        }
+        Some(Imported {
             kind,
             name,
             fields: self.fields,
@@ -489,6 +507,44 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn urls_never_overwrite_or_repeat() {
+        let mut summary = Summary::new(ImportSource::Csv);
+        let mut b = Builder::new("card");
+        b.known("number", Some("4242424242424242".into()));
+        b.urls(
+            ["https://a.example".into(), "b.example".into()],
+            &mut summary,
+        );
+        b.urls(
+            ["a.example".into(), " https://b.example ".into()],
+            &mut summary,
+        );
+        let item = b.finish("card", None, &mut summary).unwrap();
+        assert_eq!(
+            fields(&item),
+            [
+                ("number", "secret", "4242424242424242"),
+                ("url", "url", "https://a.example"),
+                ("url-2", "url", "https://b.example"),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_item_that_is_still_invalid_is_skipped_and_counted() {
+        let mut summary = Summary::new(ImportSource::Csv);
+        assert!(
+            Builder::new("card")
+                .finish("card", None, &mut summary)
+                .is_none()
+        );
+        assert_eq!(
+            lines(&summary.report())[1..],
+            ["skipped 1 item that could not be imported"]
+        );
+    }
+
+    #[test]
     fn keeps_invalid_known_values_as_extra_fields() {
         let mut summary = Summary::new(ImportSource::Csv);
         let mut b = Builder::new("card");
@@ -497,7 +553,7 @@ pub(crate) mod tests {
         b.known_or_extra("expiry", Some("13/2031".into()), BAD_EXPIRY, &mut summary);
         b.known_or_extra("cvv", Some("123".into()), BAD_CVV, &mut summary);
         b.extra("valid-from", FieldType::Month, "not a month".into());
-        let item = b.finish("card", None).unwrap();
+        let item = b.finish("card", None, &mut summary).unwrap();
         assert_eq!(
             fields(&item),
             [

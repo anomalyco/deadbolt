@@ -20,9 +20,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+use deadbolt_client::export;
 use deadbolt_core::DeviceId;
 use deadbolt_net::{Membership, Node, NodeConfig, PeerId};
-use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::signal::unix::{SignalKind, signal};
@@ -30,6 +31,7 @@ use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::{JoinHandle, JoinSet};
 use tokio::time::Instant;
 use tracing::{info, warn};
+use zeroize::Zeroizing;
 
 use crate::client::{AgentError, protocol, version};
 use crate::config::Config;
@@ -96,6 +98,7 @@ mod tests {
     use crate::protocol::FieldInput;
     use crate::protocol::PROTOCOL_VERSION;
     use deadbolt_core::DeviceSecret;
+    use tokio::io::AsyncReadExt;
 
     fn locked_agent(dir: &std::path::Path) -> Arc<Agent> {
         Agent::new(test_paths(dir), true, deadbolt_store::KdfParams::DEFAULT)
@@ -257,15 +260,36 @@ mod tests {
         assert_eq!(error.message, "locked: run `deadbolt unlock`");
     }
 
+    #[test]
+    fn invalid_requests_are_described_without_their_values() {
+        let line = r#"{"v":3,"cmd":"import","export":"hunter2","apply":"hunter2"}"#;
+        let error = serde_json::from_str::<Request>(line).unwrap_err();
+        assert!(error.to_string().contains("hunter2"), "serde quotes values");
+        let message = invalid_request(&error).to_string();
+        assert!(!message.contains("hunter2"), "{message}");
+        assert!(
+            message.starts_with("invalid request: not a request"),
+            "{message}"
+        );
+    }
+
     #[tokio::test]
     async fn line_limit_preserves_answers_and_rejects_unterminated_oversize() {
         let mut read = BufReader::new(&b"request\nyes\n"[..]);
         assert_eq!(
-            request_line(&mut read, 7).await.unwrap().as_deref(),
+            request_line(&mut read, 7)
+                .await
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
             Some("request")
         );
         assert_eq!(
-            request_line(&mut read, 7).await.unwrap().as_deref(),
+            request_line(&mut read, 7)
+                .await
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
             Some("yes")
         );
         let mut read = BufReader::new(&b"1234567890123456"[..]);
@@ -276,7 +300,11 @@ mod tests {
         let mut read = BufReader::new(&b"1234567890123456\nyes\n"[..]);
         assert!(request_line(&mut read, 7).await.is_err());
         assert_eq!(
-            request_line(&mut read, 7).await.unwrap().as_deref(),
+            request_line(&mut read, 7)
+                .await
+                .unwrap()
+                .as_deref()
+                .map(String::as_str),
             Some("yes")
         );
     }
@@ -519,39 +547,68 @@ async fn drain_connections(connections: &mut JoinSet<Result<()>>) {
 async fn request_line(
     read: &mut (impl AsyncBufRead + Unpin),
     max: usize,
-) -> Result<Option<String>> {
-    let mut line = Vec::new();
-    if (&mut *read)
-        .take(max as u64 + 1)
-        .read_until(b'\n', &mut line)
-        .await?
-        == 0
-    {
+) -> Result<Option<Zeroizing<String>>> {
+    // Requests carry passphrases and whole exports: the line grows in a
+    // buffer that is wiped, also when it is outgrown. Past `max` (plus a
+    // `\r`) it stops growing and the rest of the line is skipped.
+    let mut line = Zeroizing::new(Vec::new());
+    let mut read_any = false;
+    let mut too_large = false;
+    loop {
+        let bytes = read.fill_buf().await?;
+        if bytes.is_empty() {
+            break;
+        }
+        read_any = true;
+        let newline = bytes.iter().position(|b| *b == b'\n');
+        let end = newline.unwrap_or(bytes.len());
+        if !too_large && line.len() + end > max + 1 {
+            too_large = true;
+            line = Zeroizing::new(Vec::new());
+        }
+        if !too_large {
+            export::append(&mut line, &bytes[..end], max + 1);
+        }
+        read.consume(newline.map_or(end, |i| i + 1));
+        if newline.is_some() {
+            break;
+        }
+    }
+    if !read_any {
         return Ok(None);
     }
-    let terminated = line.ends_with(b"\n");
-    if terminated {
+    if line.ends_with(b"\r") {
         line.pop();
-        if line.ends_with(b"\r") {
-            line.pop();
-        }
     }
-    if line.len() > max {
-        // Let a client finish its write before replying, without retaining the rest.
-        if !terminated {
-            loop {
-                let bytes = read.fill_buf().await?;
-                let newline = bytes.iter().position(|b| *b == b'\n');
-                let consumed = newline.map_or(bytes.len(), |i| i + 1);
-                read.consume(consumed);
-                if consumed == 0 || newline.is_some() {
-                    break;
-                }
-            }
-        }
+    if too_large || line.len() > max {
         return Err(fail(ErrorCode::Failed, "request too large"));
     }
-    Ok(Some(String::from_utf8(line)?))
+    match String::from_utf8(std::mem::take(&mut *line)) {
+        Ok(line) => Ok(Some(Zeroizing::new(line))),
+        Err(error) => {
+            drop(Zeroizing::new(error.into_bytes()));
+            Err(fail(ErrorCode::Failed, "invalid request: not UTF-8"))
+        }
+    }
+}
+
+/// Why a request isn't valid, by position only: serde's messages can
+/// quote the values in it.
+fn invalid_request(error: &serde_json::Error) -> anyhow::Error {
+    let what = match error.classify() {
+        serde_json::error::Category::Io => "unreadable",
+        serde_json::error::Category::Syntax => "not valid JSON",
+        serde_json::error::Category::Data => "not a request this agent knows",
+        serde_json::error::Category::Eof => "cut short",
+    };
+    fail(
+        ErrorCode::Failed,
+        format!(
+            "invalid request: {what} (line {} column {})",
+            error.line(),
+            error.column()
+        ),
+    )
 }
 
 /// One control connection: sends events and reads answers.
@@ -601,8 +658,9 @@ impl Agent {
         let mut read = BufReader::new(read);
         let request =
             match tokio::time::timeout(IO_TIMEOUT, request_line(&mut read, max_line)).await? {
-                Ok(Some(line)) => serde_json::from_str::<Request>(&line)
-                    .map_err(|error| fail(ErrorCode::Failed, format!("invalid request: {error}"))),
+                Ok(Some(line)) => {
+                    serde_json::from_str::<Request>(&line).map_err(|e| invalid_request(&e))
+                }
                 Ok(None) => return Ok(()),
                 Err(error) => Err(error),
             };
