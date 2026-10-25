@@ -14,7 +14,7 @@ use rune::{
     row, spacer, text, text_input,
 };
 use rune_kit::{
-    Button, ButtonSize, ButtonVariant, IconButton, IconButtonVariant, Keybind, Kit, Placement,
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Keybind, Kit, Placement,
     Popover, RollingText, TextInput,
 };
 
@@ -110,6 +110,7 @@ fn failed(k: &Kit, message: &str) -> El {
             .child(
                 Button::new("Try again")
                     .variant(ButtonVariant::Neutral)
+                    .control_size(ControlSize::Large)
                     .on_press(|s: &mut App| s.retry())
                     .build(k),
             ),
@@ -148,7 +149,7 @@ fn unlock(s: &App, k: &Kit) -> El {
     body = body.child(
         Button::new(label)
             .variant(ButtonVariant::Contrast)
-            .size(ButtonSize::Large)
+            .control_size(ControlSize::Large)
             .disabled(s.unlocking || s.passphrase.text.is_empty())
             .on_press(|s: &mut App| s.submit_unlock())
             .build(k)
@@ -704,7 +705,7 @@ fn settings(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .trigger(
             Button::new("Settings")
                 .variant(ButtonVariant::GhostMuted)
-                .size(ButtonSize::Small)
+                .control_size(ControlSize::Regular)
                 .on_press(|s: &mut App| {
                     if s.settings_open {
                         s.close_settings();

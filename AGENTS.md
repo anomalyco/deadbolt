@@ -21,6 +21,16 @@ See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 `DEADBOLT_MEMBERSHIP_DEPTH`; other property tests use `PROPTEST_CASES`.
 CLI integration tests use `DEADBOLT_NET=local` and `DEADBOLT_KDF=fast`.
 
+## Rune
+
+`crates/app` pins Rune to an exact rev on its `dev` branch. At the start of each
+work round, unless mid-release, bump both `rev`s in `crates/app/Cargo.toml` to the
+head of Rune `dev` and run `cargo update -p rune -p rune-kit`. Read the
+`CHANGELOG.md` "## dev" entries since the old pin first, and adapt to anything
+marked breaking. Run the app tests and compare `crates/app/scripts/snap.sh` stills
+before and after. If a bump breaks on Rune's side, report it to Rune rather than
+working around it.
+
 ## Shipping
 
 Branch from `main`, make focused commits, and open a PR. Kit merges; do not enable

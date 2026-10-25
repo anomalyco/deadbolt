@@ -499,7 +499,7 @@ impl Installer {
 
 mod view {
     use rune::{El, Transition, col, row, text};
-    use rune_kit::{Button, ButtonSize, ButtonVariant, Kit};
+    use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
     use super::{Copied, Existing, InstallError, Installer, quote, temporary};
     use crate::model::App;
@@ -532,6 +532,7 @@ mod view {
             .child(
                 Button::new(if copied { "Copied" } else { label })
                     .variant(ButtonVariant::Neutral)
+                    .control_size(ControlSize::Large)
                     .icon(if copied {
                         k.glyph.check_small
                     } else {
@@ -552,7 +553,7 @@ mod view {
     fn action(k: &Kit, label: &str, busy: bool, press: fn(&mut Installer)) -> El {
         Button::new(label)
             .variant(ButtonVariant::Contrast)
-            .size(ButtonSize::Large)
+            .control_size(ControlSize::Large)
             .disabled(busy)
             .on_press(move |s: &mut App| {
                 if let Some(i) = installer(s) {
@@ -648,7 +649,7 @@ mod view {
                         .child(
                             Button::new(label)
                                 .variant(ButtonVariant::Neutral)
-                                .size(ButtonSize::Large)
+                                .control_size(ControlSize::Large)
                                 .disabled(i.busy)
                                 .on_press(|s: &mut App| {
                                     if let Some(i) = installer(s) {
@@ -779,6 +780,7 @@ mod view {
                     .child(
                         Button::new(label)
                             .variant(ButtonVariant::Neutral)
+                            .control_size(ControlSize::Large)
                             .on_press(|s: &mut App| {
                                 if let Some(i) = installer(s) {
                                     i.show();
@@ -790,6 +792,7 @@ mod view {
                     .child(
                         Button::new("Not now")
                             .variant(ButtonVariant::Ghost)
+                            .control_size(ControlSize::Large)
                             .on_press(|s: &mut App| {
                                 if let Some(i) = installer(s) {
                                     i.dismiss();
@@ -813,6 +816,7 @@ mod view {
         Some(
             Button::new(label)
                 .variant(ButtonVariant::Ghost)
+                .control_size(ControlSize::Large)
                 .on_press(|s: &mut App| {
                     s.close_settings();
                     if let Some(i) = installer(s) {
