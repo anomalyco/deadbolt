@@ -13,11 +13,12 @@ mod items;
 mod prompt;
 
 use std::io::IsTerminal;
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
-use deadbolt_client::{paths, protocol};
+use deadbolt_client::{export, paths, protocol};
 use deadbolt_net::{PairingTicket, QrStyle};
 
 use crate::paths::Paths;
@@ -104,9 +105,31 @@ enum Commands {
     },
     #[command(flatten)]
     Item(items::ItemCommand),
-    /// Import items from another password manager into the vault.
-    #[command(subcommand)]
-    Import(import::ImportCommand),
+    /// Import logins and cards from 1Password, Apple Passwords, Bitwarden or CSV.
+    ///
+    /// The format is detected from the file. To export:
+    ///
+    ///   1Password 8: File › Export › (account) › 1PUX (or CSV, logins only)
+    ///
+    ///   Apple Passwords (macOS 15+): File › Export All Passwords…
+    ///   (Safari: File › Export › Passwords…)
+    ///
+    ///   Bitwarden: Tools › Export vault › .json
+    ///
+    /// Any other CSV with a password column also works (title, url,
+    /// username, password, notes, otpauth). Other item types, tags, folders,
+    /// favorites, attachments and password history are skipped and counted.
+    /// Items already in the vault are skipped, so importing again changes
+    /// nothing. Delete the export file afterwards: it is not encrypted.
+    #[command(verbatim_doc_comment)]
+    Import {
+        /// The export file; stdin if omitted or `-`.
+        #[arg(value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Show what would be imported without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Args)]
@@ -199,9 +222,31 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             client::ensure_running(&paths).await?;
             items::run(&paths, command, vault, from_stdin).await?;
         }
-        Commands::Import(command) => {
+        Commands::Import { file, dry_run } => {
+            let export = match file.filter(|f| f.as_os_str() != "-") {
+                Some(file) => export::read(&file)?,
+                None => {
+                    if std::io::stdin().is_terminal() {
+                        bail!("pass the export file, or pipe it on stdin");
+                    }
+                    if from_stdin {
+                        bail!("--passphrase-stdin cannot be used when the export comes from stdin");
+                    }
+                    export::read_from(std::io::stdin().lock())?
+                }
+            };
             client::ensure_running(&paths).await?;
-            import::run(&paths, command, vault, from_stdin).await?;
+            let command = Command::Import {
+                vault,
+                export,
+                apply: !dry_run,
+            };
+            let Reply::Import { report } = request(&paths, command, from_stdin).await? else {
+                bail!("unexpected reply");
+            };
+            for line in report.lines(!dry_run) {
+                println!("{line}");
+            }
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
         Commands::Agent {

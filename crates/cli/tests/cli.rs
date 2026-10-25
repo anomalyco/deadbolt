@@ -452,7 +452,7 @@ fn replaces_an_agent_of_an_older_protocol() {
 #[test]
 fn leaves_an_agent_of_a_newer_protocol_running() {
     let a = Device::new();
-    let newer = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "3"));
+    let newer = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "4"));
     assert!(newer.status.success());
     let pid = a.agent_pid().unwrap();
 
@@ -807,7 +807,7 @@ const BITWARDEN_EXPORT: &str = r#"{
 }"#;
 
 #[test]
-fn import_bitwarden() {
+fn import() {
     let a = Device::new();
     a.run(&["init", "--device-name", "alpha"]);
     let file = a.path("export.json");
@@ -831,15 +831,25 @@ fn import_bitwarden() {
         }
     };
 
-    let output = a.try_run(&["import", "bitwarden", file.to_str().unwrap()]);
+    let summary = "1 from Bitwarden (logins 1, cards 1)\n\
+        skipped 1 login without password\n\
+        skipped 1 secure note\n\
+        dropped: 1 favorite, 1 folder, 1 item's password history\n";
+    let output = a.try_run(&["import", "--dry-run", file.to_str().unwrap()]);
     assert!(output.status.success());
     no_secrets(&output);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        "imported 2 (logins 1, cards 1)\n\
-         skipped 1 login without password\n\
-         skipped 1 secure note\n\
-         dropped: 1 folder, 1 favorite, password history on 1 item\n"
+        format!("dry run: would import 2{}", &summary[1..])
+    );
+    assert_eq!(a.run(&["ls"]), "");
+
+    let output = a.try_run(&["import", file.to_str().unwrap()]);
+    assert!(output.status.success());
+    no_secrets(&output);
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        format!("imported 2{}", &summary[1..])
     );
 
     let ls = a.run(&["ls"]);
@@ -866,17 +876,22 @@ fn import_bitwarden() {
         "{show}"
     );
 
-    // From stdin, into another vault; no dedupe, so re-running imports again.
+    // Importing again changes nothing.
+    let output = a.try_run(&["import", file.to_str().unwrap()]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("imported 0 from Bitwarden (logins 0, cards 0)\nskipped 2 duplicates\n"),
+        "{stdout}"
+    );
+    assert_eq!(a.run(&["ls"]).lines().count(), 2);
+
+    // From stdin, into another vault.
     a.run(&["init", "work"]);
-    for _ in 0..2 {
-        let output = a.try_run_stdin(
-            &["-v", "work", "import", "bitwarden", "-"],
-            BITWARDEN_EXPORT,
-        );
-        assert!(output.status.success());
-        no_secrets(&output);
-    }
-    assert_eq!(a.run(&["-v", "work", "ls"]).lines().count(), 4);
+    let output = a.try_run_stdin(&["-v", "work", "import", "-"], BITWARDEN_EXPORT);
+    assert!(output.status.success());
+    no_secrets(&output);
+    assert_eq!(a.run(&["-v", "work", "ls"]).lines().count(), 2);
     assert_eq!(a.run(&["ls"]).lines().count(), 2);
 
     let encrypted = a.path("encrypted.json");
@@ -885,7 +900,7 @@ fn import_bitwarden() {
         r#"{"encrypted": true, "passwordProtected": true, "salt": "x", "data": "2.y"}"#,
     )
     .unwrap();
-    let err = a.fail(&["import", "bitwarden", encrypted.to_str().unwrap()]);
+    let err = a.fail(&["import", encrypted.to_str().unwrap()]);
     assert!(
         err.contains("this is an encrypted export; export as unencrypted .json"),
         "{err}"

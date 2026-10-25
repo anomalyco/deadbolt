@@ -34,13 +34,13 @@ use tracing::{info, warn};
 use crate::client::{AgentError, protocol, version};
 use crate::config::Config;
 use crate::paths::Paths;
-use crate::protocol::{Answer, Change, Command, ErrorCode, Event, Message, Reply, Request, Status};
+use crate::protocol::{
+    Answer, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request, Status,
+};
 use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
 use watchers::Watchers;
 
-/// Large enough for `item-import` of a big vault.
-const MAX_LINE: usize = 64 * 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -369,13 +369,12 @@ mod tests {
                 query: vec!["offline-login".into()],
                 field: "notes".into(),
             },
-            Command::ItemImport {
+            Command::Import {
                 vault: None,
-                items: vec![crate::protocol::NewItem {
-                    kind: "login".into(),
-                    name: Some("imported".into()),
-                    fields: fields(),
-                }],
+                export: "name,password\nimported,offline-import\n"
+                    .to_string()
+                    .into(),
+                apply: true,
             },
             Command::ItemRemove {
                 vault: None,
@@ -813,10 +812,19 @@ impl Agent {
             Command::ItemRemove { vault, query } => {
                 self.item_write(|s| items::remove(s, vault.as_deref(), &query))
             }
-            Command::ItemImport { vault, items } => {
-                self.with(|s| items::import(s, vault.as_deref(), items))?;
-                self.sync_now.notify_one();
-                Ok(Reply::Done)
+            Command::Import {
+                vault,
+                export,
+                apply,
+            } => {
+                // Mapping needs no session: it runs before taking the lock.
+                let parsed = crate::import::parse(&export)?;
+                drop(export);
+                let report = self.with(|s| items::import(s, vault.as_deref(), parsed, apply))?;
+                if apply {
+                    self.sync_now.notify_one();
+                }
+                Ok(Reply::Import { report })
             }
         }
     }

@@ -33,10 +33,15 @@
 //! exchanged between different builds, so `Request` and `Status` must stay
 //! readable by older and newer ones.
 
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub const PROTOCOL_VERSION: u32 = 2;
+pub const PROTOCOL_VERSION: u32 = 3;
+
+/// The longest line the agent reads, large enough for `import` of a big export.
+pub const MAX_LINE: usize = 64 * 1024 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -128,19 +133,16 @@ pub enum Command {
         vault: Option<String>,
         query: Vec<String>,
     },
-    /// Creates all items or none, in as few entries as fit; replies `done`.
-    ItemImport {
+    /// Imports another password manager's export (the text of the file, see
+    /// [`crate::export`]); the agent detects the format. Items already in the
+    /// vault, or earlier in the export, are skipped as duplicates. With
+    /// `apply` it creates all new items or none, in as few entries as fit;
+    /// without, it writes nothing. Replies `import`.
+    Import {
         vault: Option<String>,
-        items: Vec<NewItem>,
+        export: Zeroizing<String>,
+        apply: bool,
     },
-}
-
-/// An item to create, as in `item-new`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NewItem {
-    pub kind: String,
-    pub name: Option<String>,
-    pub fields: Vec<FieldInput>,
 }
 
 /// A field as typed by the user. Without `kind`, the agent uses the item
@@ -257,6 +259,100 @@ pub enum Reply {
     Items {
         items: Vec<ItemInfo>,
     },
+    Import {
+        report: ImportReport,
+    },
+}
+
+/// What an import did, or would do. Counts only, never values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportReport {
+    pub source: ImportSource,
+    /// New logins and cards; duplicates are not counted here.
+    pub logins: usize,
+    pub cards: usize,
+    /// Items already in the vault, or earlier in the export.
+    pub duplicates: usize,
+    /// Items not imported, by reason.
+    pub skipped: Vec<Tally>,
+    /// Values not imported or imported differently, by reason.
+    pub warnings: Vec<Tally>,
+    /// What deadbolt has no place for (folders, favorites, attachments, ...).
+    pub dropped: Vec<Tally>,
+}
+
+/// The app an export came from, detected from its content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ImportSource {
+    Bitwarden,
+    OnePassword,
+    ApplePasswords,
+    /// A CSV with recognizable columns, such as a browser's export.
+    Csv,
+}
+
+impl fmt::Display for ImportSource {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Bitwarden => "Bitwarden",
+            Self::OnePassword => "1Password",
+            Self::ApplePasswords => "Apple Passwords",
+            Self::Csv => "CSV",
+        })
+    }
+}
+
+/// A count of something, named in the singular and the plural.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tally {
+    pub count: usize,
+    pub one: String,
+    pub many: String,
+}
+
+impl fmt::Display for Tally {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let what = if self.count == 1 {
+            &self.one
+        } else {
+            &self.many
+        };
+        write!(f, "{} {what}", self.count)
+    }
+}
+
+impl ImportReport {
+    /// The report as lines of text; `applied` is false for a preview.
+    pub fn lines(&self, applied: bool) -> Vec<String> {
+        let mut lines = vec![format!(
+            "{} {} from {} (logins {}, cards {})",
+            if applied {
+                "imported"
+            } else {
+                "dry run: would import"
+            },
+            self.logins + self.cards,
+            self.source,
+            self.logins,
+            self.cards
+        )];
+        if self.duplicates > 0 {
+            let duplicates = Tally {
+                count: self.duplicates,
+                one: "duplicate".into(),
+                many: "duplicates".into(),
+            };
+            lines.push(format!("skipped {duplicates}"));
+        }
+        lines.extend(self.skipped.iter().map(|t| format!("skipped {t}")));
+        lines.extend(self.warnings.iter().map(|t| format!("warning: {t}")));
+        if !self.dropped.is_empty() {
+            let dropped: Vec<String> = self.dropped.iter().map(Tally::to_string).collect();
+            lines.push(format!("dropped: {}", dropped.join(", ")));
+        }
+        lines
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -333,13 +429,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn import_reports_read_as_lines() {
+        let tally = |count, one: &str, many: &str| Tally {
+            count,
+            one: one.into(),
+            many: many.into(),
+        };
+        let report = ImportReport {
+            source: ImportSource::OnePassword,
+            logins: 3,
+            cards: 1,
+            duplicates: 2,
+            skipped: vec![tally(1, "secure note", "secure notes")],
+            warnings: vec![tally(2, "URL kept as text", "URLs kept as text")],
+            dropped: vec![tally(1, "favorite", "favorites"), tally(3, "tag", "tags")],
+        };
+        assert_eq!(
+            report.lines(true),
+            [
+                "imported 4 from 1Password (logins 3, cards 1)",
+                "skipped 2 duplicates",
+                "skipped 1 secure note",
+                "warning: 2 URLs kept as text",
+                "dropped: 1 favorite, 3 tags",
+            ]
+        );
+        let empty = ImportReport {
+            source: ImportSource::ApplePasswords,
+            logins: 0,
+            cards: 0,
+            duplicates: 1,
+            skipped: vec![],
+            warnings: vec![],
+            dropped: vec![],
+        };
+        assert_eq!(
+            empty.lines(false),
+            [
+                "dry run: would import 0 from Apple Passwords (logins 0, cards 0)",
+                "skipped 1 duplicate",
+            ]
+        );
+        let json = serde_json::to_string(&Reply::Import { report: empty }).unwrap();
+        assert!(json.contains(r#""source":"apple-passwords""#), "{json}");
+    }
+
+    #[test]
     fn watch_round_trips_as_flat_json_lines() {
         let request = serde_json::to_string(&Request {
             v: PROTOCOL_VERSION,
             command: Command::Watch,
         })
         .unwrap();
-        assert_eq!(request, r#"{"v":2,"cmd":"watch"}"#);
+        assert_eq!(request, r#"{"v":3,"cmd":"watch"}"#);
         assert!(matches!(
             serde_json::from_str::<Request>(&request).unwrap().command,
             Command::Watch
