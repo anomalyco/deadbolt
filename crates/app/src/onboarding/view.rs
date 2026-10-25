@@ -1041,7 +1041,7 @@ fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str) -> El {
 // The empty vault
 
 const ADD: &str = "deadbolt new login url=github.com username=you";
-const IMPORT: &str = "deadbolt import bitwarden export.json";
+const IMPORT: &str = "deadbolt import export.1pux";
 
 /// What to do with a vault that has nothing in it yet. Adding and importing
 /// happen in the CLI for now.
@@ -1078,9 +1078,9 @@ pub fn empty_vault(s: &App, k: &Kit) -> El {
             s,
             k,
             "import",
-            "Import from Bitwarden",
+            "Import from 1Password, Apple Passwords or Bitwarden",
             IMPORT,
-            Some("Export first: Bitwarden › Tools › Export vault › .json"),
+            Some("Export first: in 1Password or Apple Passwords, File › Export; in Bitwarden, Tools › Export vault"),
         ))
         .child(
             col()
