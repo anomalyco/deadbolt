@@ -39,7 +39,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -65,6 +65,15 @@ pub enum Command {
         passphrase: Zeroizing<String>,
         /// Idle timeout in seconds; `None` uses the config file, `Some(0)` never locks.
         timeout_secs: Option<u64>,
+    },
+    /// Unlocks the store with Touch ID using the enrolled biometric key set.
+    UnlockBiometric {
+        /// Idle timeout in seconds; `None` uses the config file, `Some(0)` never locks.
+        timeout_secs: Option<u64>,
+    },
+    /// Turns Touch ID unlock on (requires the store unlocked) or off.
+    TouchIdSet {
+        enabled: bool,
     },
     Lock,
     /// Streams [`Change`]s until the client hangs up or the agent stops.
@@ -534,6 +543,15 @@ pub struct Status {
     pub vaults: Vec<VaultInfo>,
     pub peers_online: usize,
     pub peers: usize,
+    /// Whether this device has Touch ID hardware and an enrolled finger.
+    pub touch_id_available: bool,
+    /// Whether Touch ID unlock is turned on in config.toml.
+    pub touch_id_enabled: bool,
+    /// Whether the locked store can be unlocked with Touch ID right now.
+    pub touch_id_ready: bool,
+    /// Whether Touch ID is enabled on this store, but its enrolled slot was
+    /// reset (expired after 14 days, fingerprint set changed, or passphrase changed).
+    pub touch_id_reset: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -665,7 +683,7 @@ mod tests {
             command: Command::Watch,
         })
         .unwrap();
-        assert_eq!(request, r#"{"v":4,"cmd":"watch"}"#);
+        assert_eq!(request, r#"{"v":5,"cmd":"watch"}"#);
         assert!(matches!(
             serde_json::from_str::<Request>(&request).unwrap().command,
             Command::Watch

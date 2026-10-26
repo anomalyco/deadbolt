@@ -210,6 +210,11 @@ impl Loaded {
     /// Unlocks the store and rebuilds every vault. Blocking (Argon2).
     pub fn open(dir: &Path, passphrase: &[u8]) -> Result<Self> {
         let store = deadbolt_store::unlock(dir, passphrase)?;
+        Self::from_unlocked(store)
+    }
+
+    /// Rebuilds every vault from an already-unlocked store.
+    pub fn from_unlocked(store: Unlocked) -> Result<Self> {
         let secret = DeviceSecret::from_bytes(store.device_secret());
         // Setup stores `null` until the first vault exists.
         let default: Option<String> =

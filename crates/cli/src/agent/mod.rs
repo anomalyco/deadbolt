@@ -1,6 +1,7 @@
 //! The background agent: the only process that opens the store. Holds it
 //! unlocked, runs the iroh node while unlocked, and serves the control socket.
 
+pub mod biometric;
 mod items;
 mod pairing;
 mod session;
@@ -15,7 +16,7 @@ mod watchers;
 use std::collections::HashSet;
 use std::fs::{self, File, TryLockError};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
@@ -45,6 +46,7 @@ use watchers::Watchers;
 
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+const BIOMETRIC_CANCEL_COOLDOWN: Duration = Duration::from_secs(2);
 
 struct AbortOnDrop(JoinHandle<()>);
 
@@ -53,6 +55,19 @@ impl Drop for AbortOnDrop {
         self.0.abort();
     }
 }
+
+#[derive(Clone)]
+struct BiometricFlight {
+    cancel: Arc<biometric::CancelHandle>,
+    rx: watch::Receiver<Option<Result<(), String>>>,
+}
+
+#[cfg(test)]
+type BiometricUnsealHook = Arc<
+    dyn Fn(&biometric::CancelHandle) -> Result<Zeroizing<[u8; 32]>, biometric::UnlockError>
+        + Send
+        + Sync,
+>;
 
 pub struct Agent {
     paths: Paths,
@@ -66,6 +81,24 @@ pub struct Agent {
     sync_now: Notify,
     /// Serializes setup, unlock and lock.
     transition: tokio::sync::Mutex<()>,
+    /// In-memory metadata of `"biometric.token"`, loaded once at startup and
+    /// updated on enrollment/clear/wipe so `status()` never opens `store.redb`.
+    biometric_slot: Mutex<Option<biometric::TokenMeta>>,
+    /// True once Touch ID has been enrolled for this store (`initial_slot.is_some()`
+    /// or enrolled during this agent's lifetime) and not explicitly turned off,
+    /// so `touch_id_reset` distinguishes a wiped/expired slot from a store
+    /// where `touch_id = true` was set in `config.toml` before ever enrolling.
+    biometric_was_enrolled: AtomicBool,
+    /// Coalesces concurrent `UnlockBiometric` requests and lets `Unlock`,
+    /// `Lock`, `TouchIdSet`, or `Stop` cancel an in-flight Touch ID prompt.
+    biometric_flight: Mutex<Option<BiometricFlight>>,
+    /// Short cooldown after a user-cancelled Touch ID prompt so rapid window
+    /// focus or summon events do not immediately re-prompt.
+    biometric_cooldown_until: Mutex<Option<Instant>>,
+    #[cfg(test)]
+    touch_id_available_override: Mutex<Option<bool>>,
+    #[cfg(test)]
+    biometric_hook: Mutex<Option<BiometricUnsealHook>>,
     idle: Mutex<Idle>,
     /// Requests in progress; the idle timeout waits for them (e.g. pairing).
     busy: AtomicUsize,
@@ -75,6 +108,8 @@ pub struct Agent {
 
 impl Agent {
     fn new(paths: Paths, local_net: bool, kdf: deadbolt_store::KdfParams) -> Arc<Agent> {
+        let initial_slot = biometric::read_token_meta(&paths.data);
+        biometric::spawn_background_refresh();
         Arc::new(Agent {
             paths,
             local_net,
@@ -84,11 +119,36 @@ impl Agent {
             ready: watch::channel(false).0,
             sync_now: Notify::new(),
             transition: tokio::sync::Mutex::new(()),
+            biometric_was_enrolled: AtomicBool::new(initial_slot.is_some()),
+            biometric_slot: Mutex::new(initial_slot),
+            biometric_flight: Mutex::default(),
+            biometric_cooldown_until: Mutex::default(),
+            #[cfg(test)]
+            touch_id_available_override: Mutex::default(),
+            #[cfg(test)]
+            biometric_hook: Mutex::default(),
             idle: Mutex::default(),
             busy: AtomicUsize::new(0),
             shutdown: Notify::new(),
             watchers: Watchers::default(),
         })
+    }
+
+    fn cancel_biometric_prompt(&self) {
+        if let Some(flight) = self
+            .biometric_flight
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            flight.cancel.cancel();
+        }
+    }
+}
+
+impl Drop for Agent {
+    fn drop(&mut self) {
+        self.cancel_biometric_prompt();
     }
 }
 
@@ -439,6 +499,196 @@ mod tests {
         assert!(start.elapsed() <= sync::STARTUP_TIMEOUT + Duration::from_millis(1));
         agent.lock().await;
     }
+
+    fn make_valid_biometric_token(now_secs: u64) -> Vec<u8> {
+        let mut token = Vec::new();
+        token.extend_from_slice(b"DBSE");
+        token.push(1); // version
+        token.push(1); // FLAG_BIOMETRY_CURRENT_SET
+        token.extend_from_slice(&now_secs.to_le_bytes());
+        token.extend_from_slice(b"payload");
+        token
+    }
+
+    #[tokio::test]
+    async fn touch_id_set_off_clears_slot_and_updates_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let loaded = Loaded::setup(
+            dir.path(),
+            b"test",
+            "device",
+            deadbolt_store::KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        let now = session::now();
+        let token = make_valid_biometric_token(now);
+        let bio_key = deadbolt_store::generate_biometric_key().unwrap();
+        loaded.store.set_biometric(&bio_key, &token).unwrap();
+        drop(loaded);
+
+        let agent = locked_agent(dir.path());
+        *agent.touch_id_available_override.lock().unwrap() = Some(true);
+        crate::config::set_touch_id(&agent.paths.config, true).unwrap();
+
+        // While another handle holds `store.redb` open, `agent.status()` still
+        // reports `touch_id_ready = true` from in-memory metadata without
+        // opening the store or hitting `Error::InUse`.
+        let held = deadbolt_store::unlock(dir.path(), b"test").unwrap();
+        let before = agent.status();
+        assert!(before.touch_id_available);
+        assert!(before.touch_id_enabled);
+        assert!(before.touch_id_ready);
+        assert!(!before.touch_id_reset);
+        drop(held);
+
+        agent.set_touch_id(false).await.unwrap();
+        assert!(!Config::load(&agent.paths.config).unwrap().touch_id());
+        assert!(
+            deadbolt_store::biometric_token(dir.path())
+                .unwrap()
+                .is_none()
+        );
+        let st = agent.status();
+        assert!(st.touch_id_available);
+        assert!(!st.touch_id_enabled);
+        assert!(!st.touch_id_ready);
+        assert!(!st.touch_id_reset);
+    }
+
+    #[tokio::test]
+    async fn touch_id_coalesces_overlapping_requests_and_cancels_on_passphrase_unlock() {
+        let dir = tempfile::tempdir().unwrap();
+        let fast = deadbolt_store::KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let loaded = Loaded::setup(dir.path(), b"test", "device", fast).unwrap();
+        let now = session::now();
+        let token = make_valid_biometric_token(now);
+        let bio_key = deadbolt_store::generate_biometric_key().unwrap();
+        loaded.store.set_biometric(&bio_key, &token).unwrap();
+        drop(loaded);
+
+        let agent = Agent::new(test_paths(dir.path()), true, fast);
+        *agent.touch_id_available_override.lock().unwrap() = Some(true);
+        crate::config::set_touch_id(&agent.paths.config, true).unwrap();
+
+        // 1. Two overlapping `unlock_biometric` calls coalesce onto one unseal invocation.
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_for_hook = calls.clone();
+        let key_copy = *bio_key;
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_cancel| {
+            calls_for_hook.fetch_add(1, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(80));
+            Ok(Zeroizing::new(key_copy))
+        }));
+
+        let a1 = agent.clone();
+        let a2 = agent.clone();
+        let (r1, r2) = tokio::join!(a1.unlock_biometric(None), a2.unlock_biometric(None));
+        r1.unwrap();
+        r2.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(agent.status().unlocked);
+        agent.lock().await;
+
+        // 2. A cancelled prompt sets a short cooldown so an immediate retry is
+        // rejected without invoking the helper again.
+        let cancel_calls = Arc::new(AtomicUsize::new(0));
+        let cancel_calls_hook = cancel_calls.clone();
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_cancel| {
+            cancel_calls_hook.fetch_add(1, Ordering::SeqCst);
+            Err(biometric::UnlockError::Cancelled)
+        }));
+        assert!(agent.unlock_biometric(None).await.is_err());
+        assert!(agent.unlock_biometric(None).await.is_err());
+        assert_eq!(cancel_calls.load(Ordering::SeqCst), 1);
+
+        // 3. Programmatic cancellation (e.g. `lock()`) does not arm the user-cancel
+        // cooldown, so the next `unlock_biometric` call runs immediately.
+        *agent.biometric_cooldown_until.lock().unwrap() = None;
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |cancel| {
+            while !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(biometric::UnlockError::Cancelled)
+        }));
+        let bio_agent = agent.clone();
+        let bio_task = tokio::spawn(async move { bio_agent.unlock_biometric(None).await });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        agent.lock().await;
+        assert!(bio_task.await.unwrap().is_err());
+        assert!(
+            agent.biometric_cooldown_until.lock().unwrap().is_none(),
+            "programmatic cancel must not set user-cancel cooldown"
+        );
+
+        // 4. An `Invalidated` error from a cancelled flight (or when the stored token
+        // no longer matches the unsealed token) must not wipe the current slot.
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |cancel| {
+            cancel.cancel();
+            Err(biometric::UnlockError::Invalidated("stale flight".into()))
+        }));
+        assert!(agent.unlock_biometric(None).await.is_err());
+        assert!(
+            deadbolt_store::biometric_token(dir.path())
+                .unwrap()
+                .is_some(),
+            "cancelled flight must not clear biometric slot"
+        );
+        assert!(agent.status().touch_id_ready);
+        assert!(!agent.status().touch_id_reset);
+
+        // 5. A passphrase unlock cancels an in-flight biometric prompt and clears cooldown.
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |cancel| {
+            while !cancel.is_cancelled() {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(biometric::UnlockError::Cancelled)
+        }));
+        let bio_agent = agent.clone();
+        let bio_task = tokio::spawn(async move { bio_agent.unlock_biometric(None).await });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        agent
+            .unlock(Zeroizing::new("test".into()), None)
+            .await
+            .unwrap();
+        assert!(bio_task.await.unwrap().is_err());
+        assert!(agent.status().unlocked);
+        agent.lock().await;
+
+        // 6. A genuine `Invalidated` error clears the matching slot and marks
+        // `touch_id_reset = true`, whereas a fresh store with `touch_id = true`
+        // that has never enrolled has `touch_id_reset = false`.
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_cancel| {
+            Err(biometric::UnlockError::Invalidated(
+                "biometry changed".into(),
+            ))
+        }));
+        assert!(agent.unlock_biometric(None).await.is_err());
+        let reset_st = agent.status();
+        assert!(reset_st.touch_id_enabled);
+        assert!(!reset_st.touch_id_ready);
+        assert!(reset_st.touch_id_reset);
+
+        let never_dir = tempfile::tempdir().unwrap();
+        drop(Loaded::setup(never_dir.path(), b"test", "device", fast).unwrap());
+        let never_agent = Agent::new(test_paths(never_dir.path()), true, fast);
+        *never_agent.touch_id_available_override.lock().unwrap() = Some(true);
+        crate::config::set_touch_id(&never_agent.paths.config, true).unwrap();
+        let never_st = never_agent.status();
+        assert!(never_st.touch_id_enabled);
+        assert!(!never_st.touch_id_ready);
+        assert!(
+            !never_st.touch_id_reset,
+            "never-enrolled store must not report touch_id_reset"
+        );
+    }
 }
 
 #[derive(Default)]
@@ -482,6 +732,13 @@ pub async fn serve(paths: Paths) -> Result<()> {
     let env = crate::config::Environment::load();
     let local_net = env.local_net;
     let socket = paths.socket.clone();
+    drop(
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::task::spawn_blocking(biometric::refresh_status),
+        )
+        .await,
+    );
     let agent = Agent::new(paths, local_net, env.kdf);
     info!(pid = std::process::id(), version = %version(), local_net, "agent started");
     let (system, events) = mpsc::channel(8);
@@ -508,6 +765,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     }
     info!("agent stopping");
     drop(listener);
+    agent.cancel_biometric_prompt();
     agent.watchers.stopping();
     drain_connections(&mut connections).await;
     agent.lock().await;
@@ -753,7 +1011,10 @@ impl Agent {
     async fn run(self: Arc<Self>, command: Command, conv: &Conversation) -> Result<Reply> {
         match command {
             Command::Status => Ok(Reply::Status(Box::new(self.status()))),
-            Command::Stop => Ok(Reply::Done),
+            Command::Stop => {
+                self.cancel_biometric_prompt();
+                Ok(Reply::Done)
+            }
             Command::Setup {
                 passphrase,
                 device_name,
@@ -766,6 +1027,14 @@ impl Agent {
                 timeout_secs,
             } => {
                 self.unlock(passphrase, timeout_secs).await?;
+                Ok(Reply::Done)
+            }
+            Command::UnlockBiometric { timeout_secs } => {
+                self.unlock_biometric(timeout_secs).await?;
+                Ok(Reply::Done)
+            }
+            Command::TouchIdSet { enabled } => {
+                self.set_touch_id(enabled).await?;
                 Ok(Reply::Done)
             }
             Command::Lock => {
@@ -1024,9 +1293,60 @@ impl Agent {
         if closed > 0 {
             info!(closed, "closed sync connections to removed devices");
         }
+        if !session.vaults.is_empty() && !session.vaults.values().any(|v| v.is_member(&session.id))
+        {
+            drop(session.store.clear_biometric());
+            self.biometric_was_enrolled.store(false, Ordering::SeqCst);
+            *self
+                .biometric_slot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+        }
+    }
+
+    fn is_touch_id_available(&self) -> bool {
+        #[cfg(test)]
+        if let Some(override_val) = *self
+            .touch_id_available_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            return override_val;
+        }
+        biometric::cached_status().is_available()
+    }
+
+    async fn refresh_touch_id_available(&self) -> bool {
+        #[cfg(test)]
+        if let Some(override_val) = *self
+            .touch_id_available_override
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+        {
+            return override_val;
+        }
+        tokio::task::spawn_blocking(|| biometric::refresh_status().is_available())
+            .await
+            .unwrap_or(false)
     }
 
     fn status(&self) -> Status {
+        let initialized = deadbolt_store::is_initialized(&self.paths.data);
+        let touch_id_available = self.is_touch_id_available();
+        let touch_id_cfg = Config::load(&self.paths.config)
+            .map(|c| c.touch_id())
+            .unwrap_or(false);
+        let touch_id_enabled = touch_id_available && touch_id_cfg;
+        let now = session::now();
+        let slot = *self
+            .biometric_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let was_enrolled = slot.is_some() || self.biometric_was_enrolled.load(Ordering::SeqCst);
+        let slot_ready = touch_id_enabled && initialized && slot.is_some_and(|m| m.is_ready(now));
+        let touch_id_ready = slot_ready;
+        let touch_id_reset = touch_id_enabled && initialized && was_enrolled && !slot_ready;
+
         let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
         let session = guard.as_ref();
         let connected: HashSet<PeerId> = session
@@ -1034,6 +1354,7 @@ impl Agent {
             .unwrap_or_default();
         let peers = session.map(|s| s.peer_set()).unwrap_or_default();
         let idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let unlocked = session.is_some();
         Status {
             pid: std::process::id(),
             version: version(),
@@ -1042,11 +1363,11 @@ impl Agent {
                 .ok()
                 .map(|p| p.display().to_string()),
             home: self.paths.data.display().to_string(),
-            initialized: deadbolt_store::is_initialized(&self.paths.data),
-            unlocked: session.is_some(),
+            initialized,
+            unlocked,
             locks_in_secs: idle
                 .deadline
-                .filter(|_| session.is_some())
+                .filter(|_| unlocked)
                 .map(|d| d.saturating_duration_since(Instant::now()).as_secs()),
             device: session.map(|s| s.device_info(&s.id, &connected)),
             vaults: session.map(|s| s.vault_infos()).unwrap_or_default(),
@@ -1054,6 +1375,10 @@ impl Agent {
                 .map(|s| peers.iter().filter(|p| s.online(p, &connected)).count())
                 .unwrap_or_default(),
             peers: peers.len(),
+            touch_id_available,
+            touch_id_enabled,
+            touch_id_ready,
+            touch_id_reset,
         }
     }
 
@@ -1091,7 +1416,12 @@ impl Agent {
         passphrase: zeroize::Zeroizing<String>,
         device_name: String,
     ) -> Result<()> {
+        self.cancel_biometric_prompt();
         let _transition = self.transition.lock().await;
+        *self
+            .biometric_cooldown_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         if deadbolt_store::is_initialized(&self.paths.data) {
             bail!("this device is already set up");
         }
@@ -1108,6 +1438,11 @@ impl Agent {
             Loaded::setup(&dir, passphrase.as_bytes(), &device_name, params)
         })
         .await??;
+        self.biometric_was_enrolled.store(false, Ordering::SeqCst);
+        *self
+            .biometric_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         self.start(loaded, None).await
     }
 
@@ -1116,7 +1451,12 @@ impl Agent {
         passphrase: zeroize::Zeroizing<String>,
         timeout_secs: Option<u64>,
     ) -> Result<()> {
+        self.cancel_biometric_prompt();
         let _transition = self.transition.lock().await;
+        *self
+            .biometric_cooldown_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         if self
             .session
             .lock()
@@ -1132,9 +1472,426 @@ impl Agent {
             ));
         }
         let dir = self.paths.data.clone();
-        let loaded = tokio::task::spawn_blocking(move || Loaded::open(&dir, passphrase.as_bytes()))
-            .await??;
+        let want_touch_id = Config::load(&self.paths.config)
+            .map(|c| c.touch_id())
+            .unwrap_or(false);
+        let enroll_touch_id = want_touch_id && self.refresh_touch_id_available().await;
+        let now = session::now();
+        let (loaded, slot_meta) = tokio::task::spawn_blocking(move || {
+            let loaded = Loaded::open(&dir, passphrase.as_bytes())?;
+            if enroll_touch_id && let Err(error) = biometric::enroll(&loaded.store, now) {
+                warn!("Touch ID enrollment on unlock failed: {error:#}");
+            }
+            let meta =
+                biometric::token_meta(loaded.store.biometric_token().ok().flatten().as_deref());
+            Ok::<_, anyhow::Error>((loaded, meta))
+        })
+        .await??;
+        if slot_meta.is_some() {
+            self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+        }
+        *self
+            .biometric_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = slot_meta;
         self.start(loaded, timeout_secs).await
+    }
+
+    async fn unlock_biometric(self: &Arc<Self>, timeout_secs: Option<u64>) -> Result<()> {
+        if self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return self.set_timeout(timeout_secs);
+        }
+        if !deadbolt_store::is_initialized(&self.paths.data) {
+            return Err(fail(
+                ErrorCode::NotInitialized,
+                "this device is not set up; run `deadbolt init` or `deadbolt join`",
+            ));
+        }
+        if !Config::load(&self.paths.config)?.touch_id() {
+            bail!(
+                "Touch ID unlock is not enabled; turn it on in Settings or run `deadbolt touchid on`"
+            );
+        }
+        if let Some(until) = *self
+            .biometric_cooldown_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            && Instant::now() < until
+        {
+            bail!("{}", biometric::UnlockError::Cancelled);
+        }
+
+        let flight_or_wait = {
+            let mut guard = self
+                .biometric_flight
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if let Some(existing) = guard.as_ref() {
+                Err(existing.rx.clone())
+            } else {
+                let cancel = biometric::CancelHandle::new();
+                let (tx, rx) = watch::channel(None);
+                *guard = Some(BiometricFlight {
+                    cancel: cancel.clone(),
+                    rx,
+                });
+                Ok((cancel, tx))
+            }
+        };
+
+        let (cancel, done_tx) = match flight_or_wait {
+            Err(mut rx) => {
+                let outcome = rx
+                    .wait_for(Option::is_some)
+                    .await
+                    .ok()
+                    .and_then(|v| v.clone())
+                    .unwrap_or_else(|| Err(biometric::UnlockError::Cancelled.to_string()));
+                return match outcome {
+                    Ok(()) => self.set_timeout(timeout_secs),
+                    Err(msg) => bail!("{msg}"),
+                };
+            }
+            Ok(pair) => pair,
+        };
+
+        struct FlightCleanup<'a> {
+            agent: &'a Agent,
+            cancel: Arc<biometric::CancelHandle>,
+            done_tx: Option<watch::Sender<Option<Result<(), String>>>>,
+        }
+        impl FlightCleanup<'_> {
+            fn clear_flight(&self) {
+                let mut guard = self
+                    .agent
+                    .biometric_flight
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner());
+                if guard
+                    .as_ref()
+                    .is_some_and(|f| Arc::ptr_eq(&f.cancel, &self.cancel))
+                {
+                    *guard = None;
+                }
+            }
+        }
+        impl Drop for FlightCleanup<'_> {
+            fn drop(&mut self) {
+                self.cancel.cancel();
+                self.clear_flight();
+                if let Some(tx) = self.done_tx.take() {
+                    tx.send_replace(Some(Err(biometric::UnlockError::Cancelled.to_string())));
+                }
+            }
+        }
+
+        let mut cleanup = FlightCleanup {
+            agent: self,
+            cancel: cancel.clone(),
+            done_tx: Some(done_tx),
+        };
+
+        let res = self
+            .run_biometric_leader(timeout_secs, cancel.clone())
+            .await;
+        cleanup.clear_flight();
+        if let Some(tx) = cleanup.done_tx.take() {
+            let broadcast = match &res {
+                Ok(()) => Ok(()),
+                Err(err) => Err(format!("{err:#}")),
+            };
+            tx.send_replace(Some(broadcast));
+        }
+        res
+    }
+
+    async fn run_biometric_leader(
+        self: &Arc<Self>,
+        timeout_secs: Option<u64>,
+        cancel: Arc<biometric::CancelHandle>,
+    ) -> Result<()> {
+        let now = session::now();
+        let token = {
+            let _transition = self.transition.lock().await;
+            if self
+                .session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+            {
+                return self.set_timeout(timeout_secs);
+            }
+            let dir = self.paths.data.clone();
+            let raw =
+                tokio::task::spawn_blocking(move || deadbolt_store::biometric_token(&dir)).await?;
+            let token = match raw {
+                Ok(Some(token)) => token,
+                Ok(None) => {
+                    *self
+                        .biometric_slot
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                    bail!("{}", biometric::UnlockError::NotEnrolled);
+                }
+                Err(ref err) if biometric::is_biometric_slot_error(err) => {
+                    let msg = err.to_string();
+                    let dir = self.paths.data.clone();
+                    drop(
+                        tokio::task::spawn_blocking(move || deadbolt_store::clear_biometric(&dir))
+                            .await,
+                    );
+                    self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+                    *self
+                        .biometric_slot
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                    bail!("{}", biometric::UnlockError::Invalidated(msg));
+                }
+                Err(err) => return Err(err.into()),
+            };
+            if let Err(err) = biometric::validate_token(&token, true, now) {
+                let dir = self.paths.data.clone();
+                let expected = token.clone();
+                drop(
+                    tokio::task::spawn_blocking(move || {
+                        biometric::clear_biometric_if_matches(&dir, &expected)
+                    })
+                    .await,
+                );
+                self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+                *self
+                    .biometric_slot
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner()) = None;
+                bail!("{err}");
+            }
+            token
+        };
+
+        // Run the interactive Touch ID unseal WITHOUT holding `self.transition`
+        // or keeping `store.redb` open, so a concurrent passphrase Unlock or
+        // Lock can cancel the prompt immediately and never hits `Error::InUse`.
+        let unsealed = {
+            #[cfg(test)]
+            let hook = self
+                .biometric_hook
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
+            #[cfg(test)]
+            if let Some(hook) = hook {
+                let cancel_for_hook = cancel.clone();
+                tokio::task::spawn_blocking(move || hook(&cancel_for_hook)).await?
+            } else {
+                let cancel_for_unseal = cancel.clone();
+                let token_for_unseal = token.clone();
+                tokio::task::spawn_blocking(move || {
+                    biometric::unseal_token(
+                        &token_for_unseal,
+                        now,
+                        "unlock your Deadbolt vaults",
+                        &cancel_for_unseal,
+                        biometric::PROMPT_TIMEOUT,
+                    )
+                })
+                .await?
+            }
+            #[cfg(not(test))]
+            {
+                let cancel_for_unseal = cancel.clone();
+                let token_for_unseal = token.clone();
+                tokio::task::spawn_blocking(move || {
+                    biometric::unseal_token(
+                        &token_for_unseal,
+                        now,
+                        "unlock your Deadbolt vaults",
+                        &cancel_for_unseal,
+                        biometric::PROMPT_TIMEOUT,
+                    )
+                })
+                .await?
+            }
+        };
+
+        let key = match unsealed {
+            Ok(key) => key,
+            Err(biometric::UnlockError::Cancelled) => {
+                if !cancel.is_cancelled() {
+                    *self
+                        .biometric_cooldown_until
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) =
+                        Some(Instant::now() + BIOMETRIC_CANCEL_COOLDOWN);
+                }
+                bail!("{}", biometric::UnlockError::Cancelled);
+            }
+            Err(
+                err @ (biometric::UnlockError::Invalidated(_) | biometric::UnlockError::Expired(_)),
+            ) => {
+                if !cancel.is_cancelled() {
+                    let _transition = self.transition.lock().await;
+                    if !cancel.is_cancelled()
+                        && self
+                            .session
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .is_none()
+                    {
+                        let dir = self.paths.data.clone();
+                        let expected = token.clone();
+                        let cleared = tokio::task::spawn_blocking(move || {
+                            biometric::clear_biometric_if_matches(&dir, &expected)
+                        })
+                        .await
+                        .unwrap_or(false);
+                        if cleared {
+                            self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+                            *self
+                                .biometric_slot
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner()) = None;
+                        }
+                    }
+                }
+                bail!("{err}");
+            }
+            Err(err) => bail!("{err}"),
+        };
+
+        let _transition = self.transition.lock().await;
+        if self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_some()
+        {
+            return self.set_timeout(timeout_secs);
+        }
+        if cancel.is_cancelled() {
+            bail!("{}", biometric::UnlockError::Cancelled);
+        }
+
+        let dir = self.paths.data.clone();
+        let expected_token = token;
+        let opened = tokio::task::spawn_blocking(move || {
+            match deadbolt_store::unlock_biometric(&dir, &key) {
+                Ok(store) => {
+                    let meta =
+                        biometric::token_meta(store.biometric_token().ok().flatten().as_deref());
+                    let loaded = Loaded::from_unlocked(store)
+                        .map_err(|e| (biometric::UnlockError::from(e), false))?;
+                    Ok((loaded, meta))
+                }
+                Err(ref err) if biometric::is_biometric_slot_error(err) => {
+                    let cleared = biometric::clear_biometric_if_matches(&dir, &expected_token);
+                    Err((
+                        biometric::UnlockError::Invalidated(
+                            "biometric key rejected by store header".into(),
+                        ),
+                        cleared,
+                    ))
+                }
+                Err(err) => Err((biometric::UnlockError::Store(err), false)),
+            }
+        })
+        .await?;
+
+        let (loaded, meta) = match opened {
+            Ok(pair) => pair,
+            Err((err, cleared)) => {
+                if cleared {
+                    self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+                    *self
+                        .biometric_slot
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                }
+                bail!("{err}");
+            }
+        };
+
+        if meta.is_some() {
+            self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+        }
+        *self
+            .biometric_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = meta;
+        self.start(loaded, timeout_secs).await
+    }
+
+    async fn set_touch_id(&self, enabled: bool) -> Result<()> {
+        self.cancel_biometric_prompt();
+        let _transition = self.transition.lock().await;
+        *self
+            .biometric_cooldown_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        if enabled {
+            if !self.refresh_touch_id_available().await {
+                bail!("Touch ID is not available on this Mac");
+            }
+            if self
+                .session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_none()
+            {
+                return Err(if deadbolt_store::is_initialized(&self.paths.data) {
+                    fail(ErrorCode::Locked, "locked: run `deadbolt unlock`")
+                } else {
+                    fail(
+                        ErrorCode::NotInitialized,
+                        "this device is not set up; run `deadbolt init` or `deadbolt join`",
+                    )
+                });
+            }
+            let now = session::now();
+            let sealed = tokio::task::spawn_blocking(move || biometric::seal_new(now)).await??;
+            self.with(|s| {
+                s.store
+                    .set_biometric(&sealed.key, &sealed.token)
+                    .context("saving Touch ID key slot")?;
+                crate::config::set_touch_id(&self.paths.config, true)
+                    .context("updating config.toml")
+            })?;
+            self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+            *self
+                .biometric_slot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = Some(sealed.meta);
+            Ok(())
+        } else {
+            crate::config::set_touch_id(&self.paths.config, false)
+                .context("updating config.toml")?;
+            self.biometric_was_enrolled.store(false, Ordering::SeqCst);
+            *self
+                .biometric_slot
+                .lock()
+                .unwrap_or_else(|e| e.into_inner()) = None;
+            let clear_open = {
+                let guard = self.session.lock().unwrap_or_else(|e| e.into_inner());
+                guard.as_ref().map(|s| s.store.clear_biometric())
+            };
+            match clear_open {
+                Some(res) => {
+                    res.context("clearing Touch ID key slot")?;
+                }
+                None if deadbolt_store::is_initialized(&self.paths.data) => {
+                    let dir = self.paths.data.clone();
+                    tokio::task::spawn_blocking(move || deadbolt_store::clear_biometric(&dir))
+                        .await?
+                        .context("clearing Touch ID key slot")?;
+                }
+                None => {}
+            }
+            Ok(())
+        }
     }
 
     async fn start(self: &Arc<Self>, loaded: Loaded, timeout_secs: Option<u64>) -> Result<()> {
@@ -1169,7 +1926,12 @@ impl Agent {
     }
 
     async fn lock(&self) {
+        self.cancel_biometric_prompt();
         let _transition = self.transition.lock().await;
+        *self
+            .biometric_cooldown_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
         let session = self
             .session
             .lock()

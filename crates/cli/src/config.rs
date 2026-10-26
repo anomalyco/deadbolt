@@ -9,13 +9,17 @@
 //! # Lock when this computer sleeps or its screen locks (default true).
 //! # macOS sees both as they happen; Linux sees sleep on wake.
 //! lock_on_sleep = true
+//!
+//! # Unlock with Touch ID on macOS after unlocking once with your passphrase
+//! # (default false).
+//! touch_id = true
 //! ```
 
 use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// Runtime switches are read once when the agent starts.
 pub struct Environment {
@@ -69,13 +73,15 @@ pub fn wall_clock() -> Duration {
         .unwrap_or_default()
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unlock_timeout: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lock_on_sleep: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub touch_id: Option<bool>,
 }
 
 impl Config {
@@ -100,6 +106,23 @@ impl Config {
     pub fn lock_on_sleep(&self) -> bool {
         self.lock_on_sleep.unwrap_or(true)
     }
+
+    /// Whether Touch ID unlock is enabled in `config.toml`.
+    pub fn touch_id(&self) -> bool {
+        self.touch_id.unwrap_or(false)
+    }
+}
+
+/// Updates `touch_id` in `path` (`config.toml`), preserving other settings.
+pub fn set_touch_id(path: &Path, enabled: bool) -> Result<()> {
+    let mut cfg = Config::load(path)?;
+    cfg.touch_id = Some(enabled);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    let body = toml::to_string_pretty(&cfg).context("serializing config.toml")?;
+    std::fs::write(path, body).with_context(|| format!("writing {}", path.display()))
 }
 
 /// Parses `30s`, `15m`, `8h`, `1d` (a bare number is seconds), or
@@ -153,5 +176,26 @@ mod tests {
         assert!(parse(""));
         assert!(parse("lock_on_sleep = true"));
         assert!(!parse("lock_on_sleep = false\nunlock_timeout = \"8h\""));
+    }
+
+    #[test]
+    fn set_touch_id_preserves_existing_settings() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("deadbolt/config.toml");
+        set_touch_id(&path, true).unwrap();
+        assert!(Config::load(&path).unwrap().touch_id());
+
+        std::fs::write(&path, "unlock_timeout = \"4h\"\nlock_on_sleep = false\n").unwrap();
+        set_touch_id(&path, true).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(cfg.touch_id());
+        assert!(!cfg.lock_on_sleep());
+        assert_eq!(cfg.unlock_timeout.as_deref(), Some("4h"));
+
+        set_touch_id(&path, false).unwrap();
+        let cfg = Config::load(&path).unwrap();
+        assert!(!cfg.touch_id());
+        assert!(!cfg.lock_on_sleep());
+        assert_eq!(cfg.unlock_timeout.as_deref(), Some("4h"));
     }
 }

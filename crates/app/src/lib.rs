@@ -584,6 +584,10 @@ fn status(unlocked: bool) -> Status {
         }],
         peers_online: 1,
         peers: 1,
+        touch_id_available: false,
+        touch_id_enabled: false,
+        touch_id_ready: false,
+        touch_id_reset: false,
     }
 }
 

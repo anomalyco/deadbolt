@@ -20,18 +20,19 @@ if $universal; then
   for arch in aarch64 x86_64; do
     cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app --target "$arch-apple-darwin" -j 2
   done
-  for bin in deadbolt deadbolt-app; do
+  for bin in deadbolt deadbolt-enclave deadbolt-app; do
     lipo -create "$target/aarch64-apple-darwin/release/$bin" "$target/x86_64-apple-darwin/release/$bin" -output "$scratch/$bin"
   done
 else
   cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app -j 2
-  cp "$target/release/deadbolt" "$target/release/deadbolt-app" "$scratch/"
+  cp "$target/release/deadbolt" "$target/release/deadbolt-enclave" "$target/release/deadbolt-app" "$scratch/"
 fi
 app="$scratch/Deadbolt.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
 cp "$scratch/deadbolt-app" "$app/Contents/MacOS/Deadbolt"
 cp "$scratch/deadbolt" "$app/Contents/Helpers/deadbolt"
-chmod 755 "$app/Contents/MacOS/Deadbolt" "$app/Contents/Helpers/deadbolt"
+cp "$scratch/deadbolt-enclave" "$app/Contents/Helpers/deadbolt-enclave"
+chmod 755 "$app/Contents/MacOS/Deadbolt" "$app/Contents/Helpers/deadbolt" "$app/Contents/Helpers/deadbolt-enclave"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -57,7 +58,8 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" "$scratch/icon.png" --out "$scratch/Deadbolt.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbolt.icns"
-# Nested executable first, outer seal last. Development-only ad-hoc signature.
+# Nested executable first (`deadbolt-enclave` is already signed and SHA-256
+# pinned by `crates/cli/build.rs`), outer seal last.
 codesign --force --sign - "$app/Contents/Helpers/deadbolt"
 codesign --force --sign - "$app"
 plutil -lint "$app/Contents/Info.plist"
