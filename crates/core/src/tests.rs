@@ -843,8 +843,8 @@ fn schema_is_enforced_at_commit() {
             ItemError::UnknownType("wifi".into()),
         ),
         (
-            create("login", vec![("username", text("dax"))]),
-            ItemError::MissingField("password"),
+            create("ssh", vec![("public-key", text("ssh-ed25519 AAAA"))]),
+            ItemError::MissingField("private-key"),
         ),
         (
             create("card", vec![("cvv", secret("123"))]),
@@ -940,12 +940,39 @@ fn schema_is_enforced_at_commit() {
     let card = ItemId::of_create(&entry.hash(), 0);
     assert_eq!(a.vault.item(&card).unwrap().fields.len(), 7);
 
+    // Valid: a login without a password, a note, an identity with a birthday.
+    a.write(vec![
+        create("login", vec![("username", text("dax"))]),
+        create("note", vec![("notes", secret("line one\nline two"))]),
+        create(
+            "identity",
+            vec![("birthday", Field::new(FieldType::Date, "1990-02-28"))],
+        ),
+    ]);
+    assert!(matches!(
+        a.vault.write(
+            &a.secret,
+            vec![create(
+                "identity",
+                vec![("birthday", Field::new(FieldType::Date, "1990-02-30"))],
+            )],
+        ),
+        Err(Error::Item(ItemError::InvalidValue { .. }))
+    ));
+    // Nothing at all is no item, though nothing is required.
+    for kind in ["login", "note", "identity"] {
+        assert!(matches!(
+            a.vault.write(&a.secret, vec![create(kind, vec![])]),
+            Err(Error::Item(ItemError::Empty))
+        ));
+    }
+
     // Edits.
     let item = a.login("pw");
     let edits = [
         (
-            DataOp::remove(item, "password"),
-            ItemError::RequiredField("password".into()),
+            DataOp::remove(item, "Bad Name"),
+            ItemError::InvalidFieldName("Bad Name".into()),
         ),
         (
             DataOp::remove(card, "number"),
@@ -980,7 +1007,7 @@ fn schema_is_enforced_at_commit() {
     // One bad op rejects the whole entry.
     let mixed = vec![
         DataOp::set(item, "username", text("dax")),
-        DataOp::remove(item, "password"),
+        DataOp::remove(card, "number"),
     ];
     assert!(a.vault.write(&a.secret, mixed).is_err());
     assert!(!a.vault.item(&item).unwrap().fields.contains_key("username"));
@@ -1000,7 +1027,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
     sync(&a, &mut b);
 
     a.raw(vec![
-        DataOp::remove(item, "password"),
+        DataOp::remove(item, "Bad Name"),
         DataOp::set(item, "username", text("dax")),
         DataOp::set(item, "password", text("wrong type")),
         DataOp::set(item, "url", Field::new(FieldType::Url, "not a url")),
@@ -1029,7 +1056,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
     // the creation happens to be applied first.
     c.raw(vec![
         DataOp::set(ids[2], "cvv", secret("999")),
-        DataOp::remove(item, "password"),
+        DataOp::remove(ids[2], "number"),
         DataOp::set(item, "notes", Field::new(FieldType::Note, "from c")),
     ]);
 
@@ -1050,7 +1077,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
     assert!(!card.fields.contains_key("cvv"));
     // Ignored ops leave no trace in the history.
     assert!(vault.history(&item).iter().all(|v| match &v.change {
-        Change::Remove { field } => field != "password",
+        Change::Remove { field } => field != "Bad Name",
         Change::Set { value, .. } => value.kind != FieldType::Text || value.value == "dax",
         _ => true,
     }));

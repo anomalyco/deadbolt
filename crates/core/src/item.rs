@@ -32,6 +32,8 @@ pub enum FieldType {
     Otp,
     /// A month, stored `YYYY-MM`.
     Month,
+    /// A day, stored `YYYY-MM-DD`.
+    Date,
     /// Multi-line text.
     Note,
     Other(String),
@@ -47,6 +49,7 @@ impl FieldType {
             "email" => Self::Email,
             "otp" => Self::Otp,
             "month" => Self::Month,
+            "date" => Self::Date,
             "note" => Self::Note,
             other => Self::Other(other.into()),
         }
@@ -60,6 +63,7 @@ impl FieldType {
             Self::Email => "email",
             Self::Otp => "otp",
             Self::Month => "month",
+            Self::Date => "date",
             Self::Note => "note",
             Self::Other(s) => s,
         }
@@ -142,6 +146,10 @@ pub struct SchemaField {
     pub kind: FieldType,
     pub required: bool,
     pub format: Format,
+    /// Whether values usually span lines (edit in a multi-line editor). Any
+    /// value of a text, secret or note field may hold line breaks; this is
+    /// the hint, not a rule. Always true for [`FieldType::Note`].
+    pub multiline: bool,
 }
 
 /// A built-in item type.
@@ -159,10 +167,22 @@ impl Schema {
 
 const fn known(name: &'static str, kind: FieldType, required: bool) -> SchemaField {
     SchemaField {
+        multiline: matches!(kind, FieldType::Note),
         name,
         kind,
         required,
         format: Format::Any,
+    }
+}
+
+/// A secret that spans lines: a secure note's body, a private key.
+const fn secret_lines(name: &'static str, required: bool) -> SchemaField {
+    SchemaField {
+        name,
+        kind: FieldType::Secret,
+        required,
+        format: Format::Any,
+        multiline: true,
     }
 }
 
@@ -172,14 +192,15 @@ const fn digits(name: &'static str, required: bool, min: usize, max: usize) -> S
         kind: FieldType::Secret,
         required,
         format: Format::Digits { min, max },
+        multiline: false,
     }
 }
 
-static SCHEMAS: [Schema; 2] = [
+static SCHEMAS: [Schema; 5] = [
     Schema {
         kind: "login",
         fields: &[
-            known("password", FieldType::Secret, true),
+            known("password", FieldType::Secret, false),
             known("username", FieldType::Text, false),
             known("url", FieldType::Url, false),
             known("otp", FieldType::Otp, false),
@@ -195,6 +216,36 @@ static SCHEMAS: [Schema; 2] = [
             known("cardholder", FieldType::Text, false),
             known("pin", FieldType::Secret, false),
             known("brand", FieldType::Text, false),
+            known("notes", FieldType::Note, false),
+        ],
+    },
+    // A secure note: the name is its title, and its body is secret.
+    Schema {
+        kind: "note",
+        fields: &[secret_lines("notes", false)],
+    },
+    Schema {
+        kind: "ssh",
+        fields: &[
+            secret_lines("private-key", true),
+            known("public-key", FieldType::Text, false),
+            known("fingerprint", FieldType::Text, false),
+            known("passphrase", FieldType::Secret, false),
+            known("comment", FieldType::Text, false),
+            known("notes", FieldType::Note, false),
+        ],
+    },
+    Schema {
+        kind: "identity",
+        fields: &[
+            known("name", FieldType::Text, false),
+            known("email", FieldType::Email, false),
+            known("phone", FieldType::Text, false),
+            known("address", FieldType::Note, false),
+            known("birthday", FieldType::Date, false),
+            known("national-id", FieldType::Secret, false),
+            known("passport", FieldType::Secret, false),
+            known("license", FieldType::Secret, false),
             known("notes", FieldType::Note, false),
         ],
     },
@@ -244,6 +295,8 @@ pub enum ItemError {
     RequiredField(String),
     #[error("invalid item name: use 1-128 characters without control characters")]
     InvalidItemName,
+    #[error("an item needs a name or a field")]
+    Empty,
 }
 
 fn invalid(field: &str, reason: impl Into<String>) -> ItemError {
@@ -286,9 +339,57 @@ fn check_value(name: &str, field: &Field) -> Result<(), ItemError> {
                 return Err(invalid(name, "not a month (YYYY-MM)"));
             }
         }
+        FieldType::Date if !valid_date(value) => {
+            return Err(invalid(name, "not a date (YYYY-MM-DD)"));
+        }
         _ => {}
     }
     Ok(())
+}
+
+/// `YYYY-MM-DD`, a day that exists.
+fn valid_date(value: &str) -> bool {
+    let b = value.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    let digits = |r: std::ops::Range<usize>| {
+        b[r.clone()]
+            .iter()
+            .all(u8::is_ascii_digit)
+            .then(|| value[r].parse::<u32>().ok())
+            .flatten()
+    };
+    let (Some(year), Some(month), Some(day)) = (digits(0..4), digits(5..7), digits(8..10)) else {
+        return false;
+    };
+    let leap = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    (1..=days).contains(&day)
+}
+
+#[test]
+fn dates() {
+    for ok in ["2024-02-29", "1970-01-01", "2026-12-31"] {
+        assert!(valid_date(ok), "{ok}");
+    }
+    for bad in [
+        "2023-02-29",
+        "2026-13-01",
+        "2026-04-31",
+        "2026-1-01",
+        "26-01-01",
+        "2026-01-00",
+        "+026-01-01",
+    ] {
+        assert!(!valid_date(bad), "{bad}");
+    }
 }
 
 /// Checks one field of an item of type `schema` (known type, name, value).
@@ -349,6 +450,9 @@ pub fn check_create(
     }
     if name.is_some_and(|n| !valid_item_name(n)) {
         return Err(ItemError::InvalidItemName);
+    }
+    if name.is_none() && fields.is_empty() {
+        return Err(ItemError::Empty);
     }
     fields
         .iter()
