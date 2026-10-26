@@ -635,3 +635,138 @@ fn kdf_header_encoding() {
         Err(Error::InvalidKdfParams(_))
     ));
 }
+
+#[test]
+fn biometric_roundtrip_and_invalidation() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    let store = init(dir);
+    assert!(append(&store, &body(0)).unwrap());
+    store.meta_set("k", b"v").unwrap();
+    assert!(store.biometric_token().unwrap().is_none());
+
+    let key = crate::generate_biometric_key().unwrap();
+    let token = b"opaque-se-token-v1";
+    assert!(matches!(
+        store.set_biometric(&key, b""),
+        Err(Error::InvalidBiometric)
+    ));
+    store.set_biometric(&key, token).unwrap();
+    assert_eq!(
+        store.biometric_token().unwrap().as_deref(),
+        Some(&token[..])
+    );
+    drop(store);
+
+    assert_eq!(
+        crate::biometric_token(dir).unwrap().as_deref(),
+        Some(&token[..])
+    );
+
+    // Wrong biometric key is rejected without disturbing the slot.
+    let mut wrong_key = *key;
+    wrong_key[0] ^= 0x01;
+    assert!(matches!(
+        crate::unlock_biometric(dir, &wrong_key),
+        Err(Error::InvalidBiometric)
+    ));
+
+    // Correct biometric key unlocks the same data_key and device_secret.
+    let bio = crate::unlock_biometric(dir, &key).unwrap();
+    assert_eq!(bio.device_secret(), &SECRET);
+    assert_eq!(all(&bio), vec![body(0)]);
+    assert_eq!(
+        bio.meta_get("k").unwrap().as_deref().map(Vec::as_slice),
+        Some(&b"v"[..])
+    );
+    assert!(append(&bio, &body(1)).unwrap());
+    drop(bio);
+
+    // Re-setting biometric key rotates the slot cleanly.
+    let key2 = crate::generate_biometric_key().unwrap();
+    let token2 = b"opaque-se-token-v2";
+    let store = unlock(dir);
+    store.set_biometric(&key2, token2).unwrap();
+    drop(store);
+    assert!(matches!(
+        crate::unlock_biometric(dir, &key),
+        Err(Error::InvalidBiometric)
+    ));
+    let bio = crate::unlock_biometric(dir, &key2).unwrap();
+    assert_eq!(all(&bio), vec![body(0), body(1)]);
+
+    // Changing the passphrase wipes the biometric slot atomically.
+    bio.change_passphrase_with_params(PASS, b"new passphrase", FAST)
+        .unwrap();
+    assert!(bio.biometric_token().unwrap().is_none());
+    drop(bio);
+    assert!(crate::biometric_token(dir).unwrap().is_none());
+    assert!(matches!(
+        crate::unlock_biometric(dir, &key2),
+        Err(Error::InvalidBiometric)
+    ));
+
+    // Re-enrolling and clearing while locked removes the slot.
+    let store = crate::unlock(dir, b"new passphrase").unwrap();
+    store.set_biometric(&key2, token2).unwrap();
+    drop(store);
+    assert!(crate::clear_biometric(dir).unwrap());
+    assert!(!crate::clear_biometric(dir).unwrap());
+    assert!(crate::biometric_token(dir).unwrap().is_none());
+}
+
+#[test]
+fn biometric_tamper_and_incomplete_header_rejected() {
+    let tmp = TempDir::new().unwrap();
+    let dir = tmp.path();
+
+    let store = init(dir);
+    let key = crate::generate_biometric_key().unwrap();
+    store.set_biometric(&key, b"se-token-bytes").unwrap();
+    drop(store);
+
+    // Tampering with the token breaks the AEAD AAD on keyset.biometric.
+    mutate_raw(dir, |txn| {
+        let mut t = txn.open_table(raw::HEADER).unwrap();
+        t.insert(raw::H_BIOMETRIC_TOKEN, &b"se-token-tampered"[..])
+            .unwrap();
+    });
+    assert!(matches!(
+        crate::unlock_biometric(dir, &key),
+        Err(Error::InvalidBiometric)
+    ));
+
+    // Restore token and flip a byte in keyset.biometric ciphertext.
+    mutate_raw(dir, |txn| {
+        let mut t = txn.open_table(raw::HEADER).unwrap();
+        t.insert(raw::H_BIOMETRIC_TOKEN, &b"se-token-bytes"[..])
+            .unwrap();
+        let mut ks = t
+            .get(raw::H_KEYSET_BIOMETRIC)
+            .unwrap()
+            .unwrap()
+            .value()
+            .to_vec();
+        ks[0] ^= 0xff;
+        t.insert(raw::H_KEYSET_BIOMETRIC, ks.as_slice()).unwrap();
+    });
+    assert!(matches!(
+        crate::unlock_biometric(dir, &key),
+        Err(Error::InvalidBiometric)
+    ));
+
+    // Removing only one of the two biometric header keys is detected as corruption.
+    mutate_raw(dir, |txn| {
+        let mut t = txn.open_table(raw::HEADER).unwrap();
+        t.remove(raw::H_BIOMETRIC_TOKEN).unwrap();
+    });
+    assert!(matches!(
+        crate::biometric_token(dir),
+        Err(Error::Corrupt(_))
+    ));
+    assert!(matches!(
+        crate::unlock_biometric(dir, &key),
+        Err(Error::Corrupt(_))
+    ));
+}

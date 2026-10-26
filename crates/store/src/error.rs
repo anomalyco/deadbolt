@@ -9,6 +9,10 @@ pub enum Error {
     /// header is indistinguishable from a wrong passphrase and also lands here.
     #[error("wrong passphrase")]
     WrongPassphrase,
+    /// The biometric key did not decrypt the biometric key set, or no biometric
+    /// key set is enrolled.
+    #[error("biometric unlock is not enrolled or its key was rejected")]
+    InvalidBiometric,
     #[error("a store already exists at {}", .0.display())]
     AlreadyExists(PathBuf),
     #[error("no store at {}", .0.display())]

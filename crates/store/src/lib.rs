@@ -100,10 +100,14 @@
 //! [`zeroize::Zeroizing`] buffers and wiped on drop, as is Argon2's working
 //! memory. Dropping [`Unlocked`] locks the store.
 //!
-//! # OS keychain
+//! # OS keychain / Secure Enclave
 //!
-//! Not implemented. It would add a second key set slot wrapped under a
-//! keychain-held key; see the note on [`unlock`].
+//! Optional biometric unlock stores a second wrapped copy of the key set
+//! (`"keyset.biometric"`) alongside an opaque platform token
+//! (`"biometric.token"`), sealed with a random 256-bit key
+//! ([`generate_biometric_key`]) that the caller wraps in the Secure Enclave.
+//! [`unlock_biometric`] opens the store with that key; changing the passphrase
+//! or calling [`clear_biometric`] removes the slot.
 
 mod crypto;
 mod error;
@@ -116,6 +120,7 @@ mod tests;
 pub use error::{Error, Result};
 pub use kdf::KdfParams;
 pub use store::{
-    DB_FILE, FORMAT_VERSION, LogIter, Unlocked, init, init_with_params, is_initialized, unlock,
+    DB_FILE, FORMAT_VERSION, LogIter, Unlocked, biometric_token, clear_biometric,
+    generate_biometric_key, init, init_with_params, is_initialized, unlock, unlock_biometric,
 };
 pub use zeroize::Zeroizing;
