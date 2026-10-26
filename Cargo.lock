@@ -990,7 +990,6 @@ dependencies = [
  "deadbolt-core",
  "deadbolt-net",
  "deadbolt-store",
- "getrandom 0.4.3",
  "indexmap",
  "memchr",
  "rpassword",
@@ -4278,7 +4277,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=9bbffd95ae6fcdcd16d263885e6c67853831baf0#9bbffd95ae6fcdcd16d263885e6c67853831baf0"
+source = "git+https://github.com/anomalyco/rune?rev=5da6b63d42d59a5ce2f5fc198fbac70a232387d9#5da6b63d42d59a5ce2f5fc198fbac70a232387d9"
 dependencies = [
  "arboard",
  "blake3",
@@ -4340,7 +4339,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=9bbffd95ae6fcdcd16d263885e6c67853831baf0#9bbffd95ae6fcdcd16d263885e6c67853831baf0"
+source = "git+https://github.com/anomalyco/rune?rev=5da6b63d42d59a5ce2f5fc198fbac70a232387d9#5da6b63d42d59a5ce2f5fc198fbac70a232387d9"
 dependencies = [
  "rune",
  "rune-motion",
@@ -4350,12 +4349,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=9bbffd95ae6fcdcd16d263885e6c67853831baf0#9bbffd95ae6fcdcd16d263885e6c67853831baf0"
+source = "git+https://github.com/anomalyco/rune?rev=5da6b63d42d59a5ce2f5fc198fbac70a232387d9#5da6b63d42d59a5ce2f5fc198fbac70a232387d9"
 
 [[package]]
 name = "rune-theme-opencode"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=9bbffd95ae6fcdcd16d263885e6c67853831baf0#9bbffd95ae6fcdcd16d263885e6c67853831baf0"
+source = "git+https://github.com/anomalyco/rune?rev=5da6b63d42d59a5ce2f5fc198fbac70a232387d9#5da6b63d42d59a5ce2f5fc198fbac70a232387d9"
 dependencies = [
  "rune",
  "rune-kit",
