@@ -79,7 +79,26 @@ pub enum Error {
         .0.protocol,
         PROTOCOL_VERSION
     )]
-    NewerAgent(Box<Status>),
+    NewerAgent(Box<AgentId>),
+    #[error(
+        "a Deadbolt agent of another build is running ({}, version {}, pid {}): it says protocol {} but its status doesn't match this copy's. Stop it with `deadbolt agent stop` and try again",
+        .0.program.as_deref().unwrap_or("unknown program"),
+        .0.version,
+        .0.pid,
+        .0.protocol
+    )]
+    MismatchedAgent(Box<AgentId>),
+}
+
+/// The fields every protocol's status reply carries, so a client can tell
+/// which agent is running even when the rest of its reply has another shape.
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct AgentId {
+    pub pid: u32,
+    pub version: String,
+    pub protocol: u32,
+    #[serde(default)]
+    pub program: Option<String>,
 }
 
 impl Error {
@@ -246,12 +265,54 @@ pub async fn watch(paths: &Paths) -> Result<Watch, Error> {
     })
 }
 
-/// The running agent's status, or `None` when none is running.
+/// The running agent's status, or `None` when none is running or it speaks
+/// a protocol whose status this copy can't read.
 pub async fn status(paths: &Paths) -> Option<Status> {
-    match tokio::time::timeout(STATUS_TIMEOUT, simple(paths, Command::Status)).await {
-        Ok(Ok(Reply::Status(status))) => Some(*status),
-        _ => None,
+    probe(paths).await.and_then(|(_, status)| status)
+}
+
+/// Which agent is running, whatever its protocol, or `None` when none is.
+pub async fn running(paths: &Paths) -> Option<AgentId> {
+    probe(paths).await.map(|(agent, _)| agent)
+}
+
+/// Asks the running agent for its status once. Every agent answers `status`
+/// whatever the request's protocol, but a status of another protocol may not
+/// decode as ours, so its identity is read on its own.
+async fn probe(paths: &Paths) -> Option<(AgentId, Option<Status>)> {
+    #[derive(serde::Deserialize)]
+    struct Head {
+        reply: AgentId,
     }
+    let line = tokio::time::timeout(STATUS_TIMEOUT, status_line(paths))
+        .await
+        .ok()?
+        .ok()?;
+    let agent = serde_json::from_str::<Head>(&line).ok()?.reply;
+    let status = match serde_json::from_str::<Message>(&line) {
+        Ok(Message::Ok {
+            reply: Reply::Status(status),
+        }) => Some(*status),
+        _ => None,
+    };
+    Some((agent, status))
+}
+
+async fn status_line(paths: &Paths) -> Result<String, Error> {
+    let stream = UnixStream::connect(&paths.socket)
+        .await
+        .map_err(Error::Connect)?;
+    let (read, mut write) = stream.into_split();
+    let body = encode_line(&Request {
+        v: PROTOCOL_VERSION,
+        command: Command::Status,
+    })?;
+    write.write_all(&body).await?;
+    BufReader::new(read)
+        .lines()
+        .next_line()
+        .await?
+        .ok_or(Error::Closed)
 }
 
 /// Starts the agent unless one that speaks [`PROTOCOL_VERSION`] is running.
@@ -266,10 +327,12 @@ pub async fn status(paths: &Paths) -> Option<Status> {
 /// A rebuilt agent of the same protocol is only picked up once the running
 /// one stops (`deadbolt agent stop`).
 pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Error> {
-    if let Some(status) = status(paths).await {
-        match status.protocol.cmp(&PROTOCOL_VERSION) {
-            std::cmp::Ordering::Equal => return Ok(status),
-            std::cmp::Ordering::Greater => return Err(Error::NewerAgent(Box::new(status))),
+    if let Some((agent, status)) = probe(paths).await {
+        match agent.protocol.cmp(&PROTOCOL_VERSION) {
+            std::cmp::Ordering::Equal => {
+                return status.ok_or_else(|| Error::MismatchedAgent(Box::new(agent)));
+            }
+            std::cmp::Ordering::Greater => return Err(Error::NewerAgent(Box::new(agent))),
             std::cmp::Ordering::Less => {
                 stop(paths).await?;
             }
@@ -320,12 +383,12 @@ fn lock_free(paths: &Paths) -> bool {
 /// doesn't fail with "the agent is already running" while the old process is
 /// still releasing the lock.
 pub async fn stop(paths: &Paths) -> Result<bool, Error> {
-    if status(paths).await.is_none() {
+    if running(paths).await.is_none() {
         return Ok(false);
     }
     simple(paths, Command::Stop).await?;
     for _ in 0..150 {
-        if status(paths).await.is_none() && lock_free(paths) {
+        if running(paths).await.is_none() && lock_free(paths) {
             return Ok(true);
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -396,6 +459,7 @@ mod tests {
 
     /// A running agent of `protocol` that answers `status` and `stop`, and
     /// records what it was asked. It goes away on `stop`, like a real one.
+    /// Of another protocol, its status has another shape, as a real one's does.
     fn fake_agent(paths: &Paths, protocol: u32) -> Arc<Mutex<Vec<&'static str>>> {
         let asked = Arc::new(Mutex::new(Vec::new()));
         let listener = UnixListener::bind(&paths.socket).unwrap();
@@ -434,7 +498,24 @@ mod tests {
                 log.lock()
                     .unwrap()
                     .push(if stopping { "stop" } else { "status" });
-                let reply = encode_line(&Message::Ok { reply }).unwrap();
+                let reply = if stopping || protocol == PROTOCOL_VERSION {
+                    encode_line(&Message::Ok { reply }).unwrap().to_vec()
+                } else {
+                    let mut line = serde_json::to_vec(&serde_json::json!({
+                        "type": "ok",
+                        "reply": {
+                            "reply": "status",
+                            "pid": 41,
+                            "version": "another-build",
+                            "protocol": protocol,
+                            "program": "/opt/homebrew/bin/deadbolt",
+                            "a-field-of-another-protocol": true,
+                        },
+                    }))
+                    .unwrap();
+                    line.push(b'\n');
+                    line
+                };
                 write.write_all(&reply).await.unwrap();
                 if stopping {
                     fs::remove_file(&socket).unwrap();

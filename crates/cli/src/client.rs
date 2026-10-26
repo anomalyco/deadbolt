@@ -3,7 +3,7 @@
 use anyhow::Result;
 use deadbolt_client::{Error, Launch};
 
-pub use deadbolt_client::{AgentError, simple, status, stop};
+pub use deadbolt_client::{AgentError, running, simple, status, stop};
 
 use crate::paths::Paths;
 use crate::protocol::{Command, ErrorCode, Event, PROTOCOL_VERSION, Reply, Status};
