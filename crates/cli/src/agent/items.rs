@@ -25,20 +25,18 @@ use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo};
 
 const MIN_SHORT: usize = 4;
 
-/// The host of a URL, lowercased, without `www.`.
+/// The host of a URL as autofill reads it ([`crate::site::url_host`]),
+/// without `www.`, so a label or a search shows the site a login fills on.
 pub fn host(url: &str) -> String {
-    let rest = url.split_once("://").map_or(url, |(_, rest)| rest);
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
-    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-    // An IPv6 address is bracketed and has colons of its own.
-    let host = match host.strip_prefix('[') {
-        Some(rest) => rest.find(']').map_or(host, |end| &host[..end + 2]),
-        None => host.split(':').next().unwrap_or_default(),
+    let Some(host) = crate::site::url_host(url) else {
+        return String::new();
     };
-    let host = host.to_lowercase();
-    host.strip_prefix("www.")
-        .map(str::to_string)
-        .unwrap_or(host)
+    let host = host.strip_prefix("www.").unwrap_or(&host);
+    if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    }
 }
 
 fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
@@ -943,8 +941,15 @@ mod tests {
             ("https://[::1]:8080/x", "[::1]"),
             ("https://[2001:DB8::1]", "[2001:db8::1]"),
             ("https://user@[::1]", "[::1]"),
+            ("https://bücher.de", "xn--bcher-kva.de"),
+            // Labelled where autofill would fill it, not where it seems to go.
+            ("https://evil.com\\@github.com", "evil.com"),
+            ("https://evil.com\\@www.github.com/login", "evil.com"),
+            ("https://github.com@evil.com", "evil.com"),
+            ("https://exa mple.com", ""),
+            ("", ""),
         ] {
-            assert_eq!(host(url), host_);
+            assert_eq!(host(url), host_, "{url}");
         }
     }
 

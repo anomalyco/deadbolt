@@ -39,7 +39,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 6;
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -172,6 +172,117 @@ pub enum Command {
         length: usize,
         symbols: bool,
     },
+    /// Browser autofill: the logins, in every vault, saved for the site of
+    /// the web page at `origin`, without values; replies `site-logins`.
+    /// Each carries only its URLs on that site. Doesn't count as use for the
+    /// idle lock.
+    SiteLogins {
+        origin: String,
+    },
+    /// Browser autofill: the values `want` names of one login, refused
+    /// (`domain-mismatch`) unless one of its URLs is on the site of
+    /// `origin`. A one-time password comes as its current code, never its
+    /// secret. Replies `site-fill`.
+    SiteFill {
+        origin: String,
+        login: LoginRef,
+        want: Vec<Fill>,
+    },
+    /// Browser autofill: whether a login typed into the page at `origin` is
+    /// new, a changed password or already saved, revealing nothing; replies
+    /// `site-check`. Doesn't count as use for the idle lock.
+    SiteCheck {
+        origin: String,
+        username: String,
+        password: Secret,
+    },
+    /// Browser autofill: saves a login typed into the page at `origin`
+    /// (`url` must be on its site): a new one in the default vault, or with
+    /// `login` that login's new password, refused unless one of its URLs is
+    /// on the site. Replies `site-saved`.
+    SiteSave {
+        origin: String,
+        login: Option<LoginRef>,
+        title: String,
+        url: String,
+        username: String,
+        password: Secret,
+    },
+}
+
+/// A secret on the wire: wiped on drop; Debug leaves it out.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(Zeroizing<String>);
+
+impl Secret {
+    pub fn new(value: impl Into<String>) -> Self {
+        Self(Zeroizing::new(value.into()))
+    }
+
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<redacted>")
+    }
+}
+
+/// One login, unambiguously: its vault's id and its item id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LoginRef {
+    pub vault: String,
+    pub item: String,
+}
+
+/// A value autofill can ask for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Fill {
+    Username,
+    Password,
+    /// The current one-time code.
+    Totp,
+}
+
+/// A login saved for a site, without values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteLogin {
+    pub login: LoginRef,
+    /// The name of its vault.
+    pub vault: String,
+    pub title: String,
+    pub username: Option<String>,
+    pub has_password: bool,
+    pub has_otp: bool,
+    /// The login's URLs that match the site; others are left out.
+    pub urls: Vec<String>,
+}
+
+/// What a fill asked for and the login has.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteValues {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub password: Option<Secret>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub totp: Option<Secret>,
+}
+
+/// How a login typed into a page compares with the saved ones.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SiteStatus {
+    /// No saved login for the site has that username.
+    New,
+    /// Saved, with another password.
+    Update,
+    /// Saved with that password.
+    Same,
 }
 
 /// A field as typed by the user. Without `kind`, the agent uses the item
@@ -246,6 +357,10 @@ pub enum ErrorCode {
     Locked,
     /// No device is set up yet.
     NotInitialized,
+    /// The item a request names doesn't exist.
+    NotFound,
+    /// The login a request names isn't saved for the site it names.
+    DomainMismatch,
     /// The request's protocol version is not supported.
     Version,
     Failed,
@@ -307,6 +422,24 @@ pub enum Reply {
     },
     Password {
         password: Zeroizing<String>,
+    },
+    SiteLogins {
+        /// The page's site: its registrable domain.
+        site: String,
+        logins: Vec<SiteLogin>,
+    },
+    SiteFill {
+        values: SiteValues,
+    },
+    SiteCheck {
+        status: SiteStatus,
+        /// The logins with that username: those with another password for
+        /// `update`, those with the same one for `same`.
+        matches: Vec<LoginRef>,
+    },
+    SiteSaved {
+        login: LoginRef,
+        created: bool,
     },
 }
 

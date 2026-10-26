@@ -11,6 +11,7 @@ mod config;
 mod import;
 mod items;
 mod prompt;
+mod site;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

@@ -1,6 +1,7 @@
 //! The background agent: the only process that opens the store. Holds it
 //! unlocked, runs the iroh node while unlocked, and serves the control socket.
 
+mod autofill;
 pub mod biometric;
 mod items;
 mod pairing;
@@ -919,8 +920,8 @@ pub struct Conversation {
 
 impl Conversation {
     async fn send(&self, message: &Message) -> Result<()> {
-        let mut body = serde_json::to_vec(message)?;
-        body.push(b'\n');
+        // Replies carry secrets.
+        let body = deadbolt_client::encode_json(b"", message, b"\n")?;
         tokio::time::timeout(IO_TIMEOUT, async {
             self.write.lock().await.write_all(&body).await
         })
@@ -1035,7 +1036,11 @@ impl Agent {
         }
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
-        let used = !matches!(command, Command::ItemCode { .. });
+        // Nor is a browser looking at a page: it asks for every page loaded.
+        let used = !matches!(
+            command,
+            Command::ItemCode { .. } | Command::SiteLogins { .. } | Command::SiteCheck { .. }
+        );
         self.busy.fetch_add(1, Ordering::SeqCst);
         if used {
             self.touch();
@@ -1210,6 +1215,52 @@ impl Agent {
             Command::Generate { length, symbols } => Ok(Reply::Password {
                 password: deadbolt_core::password::generate(length, symbols)?,
             }),
+            Command::SiteLogins { origin } => {
+                let (site, logins) = self.with(|s| autofill::list(s, &origin))?;
+                Ok(Reply::SiteLogins { site, logins })
+            }
+            Command::SiteFill {
+                origin,
+                login,
+                want,
+            } => Ok(Reply::SiteFill {
+                values: self.with(|s| {
+                    autofill::fill(s, &origin, &login, &want, crate::config::wall_clock())
+                })?,
+            }),
+            Command::SiteCheck {
+                origin,
+                username,
+                password,
+            } => {
+                let (status, matches) =
+                    self.with(|s| autofill::check(s, &origin, &username, &password))?;
+                Ok(Reply::SiteCheck { status, matches })
+            }
+            Command::SiteSave {
+                origin,
+                login,
+                title,
+                url,
+                username,
+                password,
+            } => {
+                let (login, created) = self.with(|s| {
+                    autofill::save(
+                        s,
+                        autofill::Save {
+                            origin: &origin,
+                            login: login.as_ref(),
+                            title: &title,
+                            url: &url,
+                            username: &username,
+                            password: &password,
+                        },
+                    )
+                })?;
+                self.sync_now.notify_one();
+                Ok(Reply::SiteSaved { login, created })
+            }
         }
     }
 
