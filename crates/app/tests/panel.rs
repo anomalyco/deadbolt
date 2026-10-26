@@ -666,8 +666,9 @@ fn a_failed_copy_stays_open_and_says_why() {
     assert_eq!(phase(&rt), Phase::Open, "no confirmation to close on");
 }
 
+/// Typing replaces the list in the frame it happens, as in the vault.
 #[test]
-fn rows_that_stay_slide_when_filtering() {
+fn a_search_replaces_the_list_at_once() {
     let mut rt = runtime("empty", true);
     frames(&mut rt, 10);
     let github = rt
@@ -685,14 +686,11 @@ fn rows_that_stay_slide_when_filtering() {
     }
     rt.frame(FRAME);
     let y = find(&rt, &row).unwrap().0[1];
+    assert!(!shows(&rt, "fly.io"), "gone at once");
     frames(&mut rt, 60);
     let to = find(&rt, &row).unwrap().0[1];
     assert!(to < from - 40.0, "github.com moves up ({from} -> {to})");
-    assert!(
-        to < y && y < from,
-        "it slides, not jumps ({from} -> {y} -> {to})"
-    );
-    assert!(!shows(&rt, "fly.io"));
+    assert_eq!(y, to, "it's there at once ({from} -> {y} -> {to})");
 }
 
 /// From `--reduced-motion` or the system's setting.

@@ -121,3 +121,84 @@ fn the_agent_locking_swaps_to_the_lock_screen_softly() {
     assert_eq!(at(&rt, "vault"), None);
     assert_eq!(at(&rt, "passphrase").map(|(_, o)| o), Some(1.0));
 }
+
+fn tap(rt: &mut Runtime<App>, key: rune::Key) {
+    rt.key(rune::KeyEvent {
+        key,
+        mods: rune::Mods::default(),
+    });
+    rt.frame(FRAME);
+}
+
+fn row_keys(rt: &Runtime<App>) -> Vec<String> {
+    rt.state
+        .visible()
+        .iter()
+        .map(|i| format!("item-{}", i.id))
+        .collect()
+}
+
+/// Typing and esc replace the list in the frame they happen: no row fades
+/// or slides, and the item pane never swaps out for "No matches".
+#[test]
+fn a_search_replaces_the_list_at_once() {
+    let mut rt = runtime("vault");
+    rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+    let all = row_keys(&rt);
+    let shown = |rt: &Runtime<App>, key: &str| at(rt, key).map(|(_, o)| o);
+
+    for c in "git".chars() {
+        tap(&mut rt, rune::Key::Text(c.into()));
+    }
+    let kept = row_keys(&rt);
+    assert!(!kept.is_empty() && kept.len() < all.len());
+    for key in &all {
+        let want = kept.contains(key).then_some(1.0);
+        assert_eq!(shown(&rt, key), want, "{key} after typing");
+    }
+
+    for c in "zzz".chars() {
+        tap(&mut rt, rune::Key::Text(c.into()));
+    }
+    assert_eq!(shown(&rt, "no-match"), Some(1.0));
+    assert!(all.iter().all(|key| shown(&rt, key).is_none()));
+    assert_eq!(shown(&rt, "item"), Some(1.0), "the pane stays put");
+
+    tap(&mut rt, rune::Key::Escape);
+    assert_eq!(rt.state.search.text, "");
+    assert_eq!(shown(&rt, "no-match"), None);
+    for key in &all {
+        assert_eq!(shown(&rt, key), Some(1.0), "{key} after esc");
+    }
+}
+
+/// A new selection, by ↑↓ or a click, drops the old item's fields in the
+/// same frame, and its title replaces in place.
+#[test]
+fn a_new_selection_replaces_the_item_at_once() {
+    let mut rt = runtime("vault");
+    let rows = row_keys(&rt);
+    let title = |rt: &Runtime<App>| {
+        let e = rt
+            .elements()
+            .into_iter()
+            .rfind(|e| e.key.as_deref() == Some("title"))
+            .unwrap();
+        (e.text.unwrap(), e.opacity)
+    };
+    let label = |rt: &Runtime<App>| rt.state.selected_item().unwrap().label.clone();
+    let before = label(&rt);
+    assert_eq!(at(&rt, "field-password").map(|(_, o)| o), Some(1.0));
+
+    tap(&mut rt, rune::Key::Down);
+    assert_ne!(label(&rt), before);
+    assert_eq!(at(&rt, "field-password"), None, "no field lingers after ↓");
+    assert_eq!(title(&rt), (label(&rt), 1.0));
+
+    let (x, y) = rt.find(&rows[0]).unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(FRAME);
+    assert_eq!(rt.state.selected.as_deref(), rows[0].strip_prefix("item-"));
+    assert_eq!(title(&rt), (label(&rt), 1.0), "the click's title");
+}

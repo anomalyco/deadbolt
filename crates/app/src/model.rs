@@ -598,6 +598,8 @@ impl App {
     fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         match ev.key {
             Key::Up | Key::Down => {
+                // The selection moves under the user's hand: the item replaces at once.
+                tx.instant();
                 self.step(if ev.key == Key::Up { -1 } else { 1 });
                 if let Some(id) = &self.selected {
                     tx.scroll_into_view(format!("item-{id}"));
@@ -612,6 +614,8 @@ impl App {
                 self.copy_selected(field, tx);
             }
             Key::Escape if !self.search.text.is_empty() => {
+                // As typing does, clearing the search replaces the list at once.
+                tx.instant();
                 self.search.clear();
                 self.keep_selection_visible();
             }

@@ -2,11 +2,10 @@
 //! into `model.rs`.
 //!
 //! Motion (docs/app.md has the full table): screens swap with Kit's
-//! whole-state replacement (blur σ 1.5, scale .96, fade; exits shorter). Filter
-//! results reflow on `REFLOW` while rows that stay never blur; rows that leave
-//! or arrive fade in place. Keyboard selection and the selected item's fields
-//! land at once. Nothing animates on first paint, and reduced motion keeps
-//! only fades (Rune's runtime does both).
+//! whole-state replacement (blur σ 1.5, scale .96, fade; exits shorter). A
+//! search replaces the list at once, and any new selection (search, arrows,
+//! a click) replaces the item's title and fields at once. Nothing animates on
+//! first paint, and reduced motion keeps only fades (Rune's runtime does both).
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
@@ -272,7 +271,6 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
         .color(k.c.text_strong)
         .placeholder(search_placeholder(s), k.c.text_faint)
         .caret(k.c.text_strong, k.alpha(k.c.text_accent, 0.3))
-        .animate_edit_layout()
         .on_edit(|s: &mut App| &mut s.search)
         .on_input_key(keys)
         .on_input_change(|s: &mut App, _| s.keep_selection_visible())
@@ -285,7 +283,6 @@ fn search(s: &App, k: &Kit) -> El {
         .placeholder(search_placeholder(s))
         .leading_icon(k.glyph.search)
         .width(Some(SEARCH_W))
-        .animate_edit_layout()
         .on_edit(|s: &mut App| &mut s.search)
         .on_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
         .on_change(|s: &mut App, _| s.keep_selection_visible())
@@ -380,7 +377,9 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         .py(6.0)
         .radius(k.radius.md)
         .cursor(Cursor::Pointer)
-        // Rows that stay slide to their new place; rows that leave or arrive fade in place.
+        // A search replaces the list at once (an edit is instant: no
+        // `animate_edit_layout`). Rows an agent change adds or removes fade
+        // in place while the rest slide to their new places.
         .motion(rune::tok::motion::REFLOW)
         .transition(
             Transition::blur(3.0)
@@ -391,8 +390,12 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
                 )),
         )
         // The click blurs the search; keys stay with it, so ↑↓ and ⏎ go on
-        // from the clicked row.
-        .on_press(move |s: &mut App| {
+        // from the clicked row. The item replaces at once, unless the import
+        // view swaps back to it.
+        .on_press_tx(move |s: &mut App, tx| {
+            if !s.import.showing() {
+                tx.instant();
+            }
             s.cancel_import();
             s.select(Some(id.clone()));
             s.search.focused = true;
@@ -477,13 +480,24 @@ fn detail(s: &App, k: &Kit) -> El {
                     .then(|| col().key("foot").w_full().px(RING).gap(20.0).children(foot)),
             );
     }
+    // One element, item or not, so leaving for the import view and coming back
+    // swap whole, while a new selection (or none) replaces what's in it at once.
+    let item_el = || {
+        col()
+            .key("item")
+            .w_full()
+            .gap(20.0)
+            .transition(crate::import::view::swap())
+    };
     let Some(item) = s.selected_item() else {
         if s.loaded {
             pane = pane.child(
-                text("Select an item")
-                    .key("none")
-                    .font(k.ty.text_small)
-                    .color(k.c.text_faint),
+                item_el().child(
+                    text("Select an item")
+                        .key("none")
+                        .font(k.ty.text_small)
+                        .color(k.c.text_faint),
+                ),
             );
         }
         if offer.is_some() || shortcut.is_some() || imported.is_some() {
@@ -519,17 +533,8 @@ fn detail(s: &App, k: &Kit) -> El {
             fields = fields.child(field_row(s, &full.id, field, k));
         }
     }
-    // One element, so leaving for the import view and coming back swap whole.
     pane = pane
-        .child(
-            col()
-                .key("item")
-                .w_full()
-                .gap(20.0)
-                .transition(crate::import::view::swap())
-                .child(head)
-                .child(fields),
-        )
+        .child(item_el().child(head).child(fields))
         .child(spacer())
         .children(shortcut)
         .children(offer)
@@ -623,7 +628,8 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     };
     row()
         .key(format!("field-{}", field.name))
-        // A field a background refresh adds or removes fades; a new selection lands at once.
+        // A field a background refresh adds or removes fades; a new selection
+        // replaces them at once (`Tx::instant`).
         .transition(Transition::opacity())
         .w_full()
         .min_h(40.0)
@@ -759,7 +765,6 @@ pub(crate) fn copy_line(k: &Kit, key: &str, copy: Option<&Copy>, does: &str, wra
 }
 
 fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    let hint = |key: &str, keys: &[&str], label: &str| hint(k, key, keys, label);
     row()
         .key("hints")
         .w_full()
