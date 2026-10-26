@@ -282,8 +282,10 @@ fn vault(s: &App, k: &Kit, inset: f32, layer: &mut Vec<El>) -> El {
 pub(crate) type SearchKeys = fn(&mut App, &KeyEvent, &mut Tx) -> bool;
 
 /// The search field: typing filters the list live; `keys` takes ↑↓, Enter and Escape.
+/// Read-only while the quick panel is inert, so no press, paste or IME
+/// text lands in it.
 pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys) -> El {
-    text_input(&s.search, style)
+    let field = text_input(&s.search, style)
         .single_line()
         .key("search-input")
         .label("Search items")
@@ -292,9 +294,13 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
         .color(k.c.text_strong)
         .placeholder(search_placeholder(s), k.c.text_faint)
         .caret(k.c.text_strong, k.alpha(k.c.text_accent, 0.3))
-        .on_edit(|s: &mut App| &mut s.search)
         .on_input_key(keys)
-        .on_input_change(|s: &mut App, _| s.search_changed())
+        .on_input_change(|s: &mut App, _| s.search_changed());
+    if s.panel_inert() {
+        field
+    } else {
+        field.on_edit(|s: &mut App| &mut s.search)
+    }
 }
 
 /// The vault's search field: typing filters the list live; `search_key`

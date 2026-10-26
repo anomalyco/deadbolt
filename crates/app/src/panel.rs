@@ -135,22 +135,28 @@ impl App {
         tx.wake_after(Duration::ZERO);
     }
 
-    /// A copy landed: show the confirmation, then close.
+    /// A copy landed: show the confirmation, then close. The search lets go
+    /// of focus, so no paste or IME text reaches it meanwhile; Escape and the
+    /// shortcut still reach `panel_key`.
     pub(crate) fn panel_copied(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
         if panel.phase == Phase::Open {
             panel.phase = Phase::Copied { until: None };
+            self.search.focused = false;
             tx.wake_after(Duration::ZERO);
         }
     }
 
     /// The copy's write failed after all: stay open and show why, rather
-    /// than close on the confirmation.
+    /// than close on the confirmation, with the search back and the list
+    /// refetched for the changes dropped meanwhile.
     pub(crate) fn panel_copy_failed(&mut self) {
         if let Some(panel) = &mut self.panel
             && matches!(panel.phase, Phase::Copied { .. })
         {
             panel.phase = Phase::Open;
+            self.search.focused = true;
+            self.refresh();
         }
     }
 

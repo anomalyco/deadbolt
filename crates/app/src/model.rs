@@ -194,11 +194,11 @@ impl App {
             },
             // A reply from before a lock (or stop) can land after it: drop
             // anything from an older generation, for a screen that's gone, or
-            // for a panel that's going.
+            // for a panel that's confirming a copy or going.
             Done::Items { generation, result } => {
                 if generation != self.generation
                     || self.screen != Screen::Vault
-                    || self.panel_away()
+                    || self.panel_inert()
                 {
                     return;
                 }
@@ -247,8 +247,9 @@ impl App {
 
     /// A change the agent streamed. It says what changed; this refetches.
     fn on_change(&mut self, change: Change, tx: &mut Tx) {
-        // A panel that's going only follows the vault closing; its summon fetches the rest.
-        if self.panel_away() && !matches!(change, Change::Locked | Change::Stopping) {
+        // A panel that's confirming a copy or going only follows the vault
+        // closing; its summon fetches the rest.
+        if self.panel_inert() && !matches!(change, Change::Locked | Change::Stopping) {
             return;
         }
         match change {
@@ -282,7 +283,7 @@ impl App {
     }
 
     /// Refetches the list, and with it the selected item.
-    fn refresh(&mut self) {
+    pub(crate) fn refresh(&mut self) {
         if self.screen == Screen::Vault {
             self.list();
         }
@@ -290,7 +291,7 @@ impl App {
 
     /// Fetches the list for the current generation.
     pub(crate) fn list(&self) {
-        if self.panel_away() {
+        if self.panel_inert() {
             return;
         }
         self.agent.send(Job::List {
@@ -637,6 +638,9 @@ impl App {
     /// that's running, or a preview in an empty vault, stays, and so does
     /// the item it hides until it's gone (`on_imported`, `cancel_import`).
     pub fn search_changed(&mut self) {
+        if self.panel_inert() {
+            return;
+        }
         self.sidebar.set_open(true);
         if self.import.showing() && !self.items.is_empty() {
             self.cancel_import();
