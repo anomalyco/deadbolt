@@ -28,6 +28,8 @@ pub enum Job {
     Connect,
     Status,
     Unlock(Zeroizing<String>),
+    UnlockBiometric,
+    TouchIdSet(bool),
     Lock,
     /// The list; `generation` tells a reply from before a lock from a current one.
     List {
@@ -61,6 +63,13 @@ pub enum Done {
     Status(Option<Status>),
     /// The status right after unlocking.
     Unlocked(Result<Status, Failure>),
+    /// The outcome of a Touch ID unlock attempt, plus the fresh status when it
+    /// failed so the lock screen sees if the biometric slot was reset.
+    UnlockedBiometric(Result<Status, (Failure, Option<Box<Status>>)>),
+    TouchIdSet {
+        enabled: bool,
+        result: Result<Status, (Failure, Option<Box<Status>>)>,
+    },
     Locked(Result<(), Failure>),
     Items {
         generation: u64,
@@ -266,6 +275,10 @@ impl Agent {
         (agent, requests, results)
     }
 
+    pub fn is_live(&self) -> bool {
+        self.jobs.is_some()
+    }
+
     pub fn send(&self, job: Job) {
         if let Some(jobs) = &self.jobs {
             // The worker only stops when this sender drops, so sending cannot fail while
@@ -414,6 +427,51 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 })
             }),
         ),
+        Job::UnlockBiometric => {
+            let result = async {
+                deadbolt_client::ensure_running(paths, launch).await?;
+                let command = Command::UnlockBiometric { timeout_secs: None };
+                deadbolt_client::simple(paths, command).await?;
+                Ok::<_, Error>(deadbolt_client::status(paths).await)
+            }
+            .await
+            .map_err(Failure::from)
+            .and_then(|status| {
+                status.ok_or_else(|| Failure {
+                    code: None,
+                    message: "The agent stopped.".into(),
+                })
+            });
+            match result {
+                Ok(status) => Done::UnlockedBiometric(Ok(status)),
+                Err(failure) => {
+                    let status = deadbolt_client::status(paths).await.map(Box::new);
+                    Done::UnlockedBiometric(Err((failure, status)))
+                }
+            }
+        }
+        Job::TouchIdSet(enabled) => {
+            let result = async {
+                deadbolt_client::simple(paths, Command::TouchIdSet { enabled }).await?;
+                Ok::<_, Error>(deadbolt_client::status(paths).await)
+            }
+            .await
+            .map_err(Failure::from)
+            .and_then(|status| {
+                status.ok_or_else(|| Failure {
+                    code: None,
+                    message: "The agent stopped.".into(),
+                })
+            });
+            let result = match result {
+                Ok(status) => Ok(status),
+                Err(failure) => {
+                    let status = deadbolt_client::status(paths).await.map(Box::new);
+                    Err((failure, status))
+                }
+            };
+            Done::TouchIdSet { enabled, result }
+        }
         Job::Lock => Done::Locked(
             deadbolt_client::simple(paths, Command::Lock)
                 .await

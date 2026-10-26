@@ -58,13 +58,26 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" "$scratch/icon.png" --out "$scratch/Deadbolt.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbolt.icns"
-# Nested executable first (`deadbolt-enclave` is already signed and SHA-256
-# pinned by `crates/cli/build.rs`), outer seal last.
-codesign --force --sign - "$app/Contents/Helpers/deadbolt"
-codesign --force --sign - "$app"
+# Nested executable first, outer seal last.
+# Do NOT re-sign `Contents/Helpers/deadbolt-enclave` here: `crates/cli/build.rs`
+# already signed it (using `DEADBOLT_APPLE_SIGNING_IDENTITY` with `--options runtime
+# --timestamp` when set, or ad-hoc `-` otherwise) before embedding its whole-file
+# SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt`. Re-signing `deadbolt-enclave`
+# after `deadbolt` is compiled would alter its `__LINKEDIT` signature bytes and
+# break the agent's SHA-256 verification.
+sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
+if [[ $sign_id != "-" ]]; then
+  codesign --force --options runtime --timestamp --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
+  codesign --force --options runtime --timestamp --sign "$sign_id" "$app"
+else
+  codesign --force --sign - "$app/Contents/Helpers/deadbolt"
+  codesign --force --sign - "$app"
+fi
 plutil -lint "$app/Contents/Info.plist"
+codesign --verify --strict "$app/Contents/Helpers/deadbolt-enclave"
 codesign --verify --deep --strict "$app"
 "$app/Contents/Helpers/deadbolt" --version
+"$app/Contents/Helpers/deadbolt-enclave" status >/dev/null
 "$app/Contents/MacOS/Deadbolt" --list-scenes >/dev/null
 mkdir -p "$(dirname "$out")"
 mv "$app" "$out"

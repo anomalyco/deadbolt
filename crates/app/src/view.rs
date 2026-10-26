@@ -15,7 +15,7 @@ use rune::{
 use rune_kit::shell::{Page, SidebarRow, SplitView, Toolbar};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Keybind, Kit, Placement,
-    Popover, RollingText, TextInput,
+    Popover, RollingText, Switch, TextInput,
 };
 
 use crate::model::{
@@ -200,16 +200,42 @@ fn unlock(s: &App, k: &Kit) -> El {
     } else {
         "Unlock"
     };
-    body = body.child(
-        Button::new(label)
-            .variant(ButtonVariant::Contrast)
-            .control_size(ControlSize::Large)
-            .disabled(s.unlocking || s.passphrase.text.is_empty())
-            .on_press(|s: &mut App| s.submit_unlock())
-            .build(k)
-            .key("unlock")
-            .mt(4.0),
-    );
+    let unlock_button = Button::new(label)
+        .variant(ButtonVariant::Contrast)
+        .control_size(ControlSize::Large)
+        .disabled(s.unlocking || s.passphrase.text.is_empty())
+        .on_press(|s: &mut App| s.submit_unlock())
+        .build(k)
+        .key("unlock");
+    body = if s.touch_id_ready() {
+        let touch_label = if s.touch_id_unlocking {
+            "Touch ID…"
+        } else {
+            "Use Touch ID"
+        };
+        body.child(
+            row()
+                .key("actions")
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .mt(4.0)
+                .motion(k.motion.control)
+                .child(unlock_button.grow(1.0))
+                .child(
+                    Button::new(touch_label)
+                        .variant(ButtonVariant::Neutral)
+                        .control_size(ControlSize::Large)
+                        .disabled(s.busy_unlocking())
+                        .on_press(|s: &mut App| s.unlock_touch_id())
+                        .build(k)
+                        .key("touch-id")
+                        .grow(1.0),
+                ),
+        )
+    } else {
+        body.child(unlock_button.mt(4.0))
+    };
     col().key("unlock").center().child(
         col()
             .key("panel")
@@ -238,17 +264,49 @@ pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
         .key("passphrase")
 }
 
+/// Shown when the enrolled Touch ID slot was wiped (expired, fingerprint set
+/// changed, or passphrase changed).
+pub const TOUCH_ID_RESET: &str = "Touch ID was reset; enter your passphrase.";
+
+/// Shown when Touch ID is enabled in `config.toml` before a biometric slot has
+/// ever been enrolled.
+pub const TOUCH_ID_FINISH_SETUP: &str = "Enter your passphrase once to finish turning on Touch ID.";
+
 pub(crate) fn unlock_error(s: &App, k: &Kit) -> Option<El> {
-    let e = s.unlock_error.as_ref()?;
-    Some(
-        text(e.clone())
-            .key("error")
-            .font(k.ty.text_small)
-            .color(k.c.danger.fg)
-            .wrap()
-            .w_full()
-            .transition(Transition::opacity()),
-    )
+    if let Some(e) = &s.unlock_error {
+        return Some(
+            text(e.clone())
+                .key("error")
+                .font(k.ty.text_small)
+                .color(k.c.danger.fg)
+                .wrap()
+                .w_full()
+                .transition(Transition::opacity()),
+        );
+    }
+    if s.touch_id_reset() {
+        return Some(
+            text(TOUCH_ID_RESET)
+                .key("touch-id-reset")
+                .font(k.ty.text_small)
+                .color(k.c.text_muted)
+                .wrap()
+                .w_full()
+                .transition(Transition::opacity()),
+        );
+    }
+    if s.touch_id_enabled() && !s.touch_id_ready() {
+        return Some(
+            text(TOUCH_ID_FINISH_SETUP)
+                .key("touch-id-finish")
+                .font(k.ty.text_small)
+                .color(k.c.text_muted)
+                .wrap()
+                .w_full()
+                .transition(Transition::opacity()),
+        );
+    }
+    None
 }
 
 // -------------------------------------------------------------------------------------------
@@ -972,8 +1030,49 @@ fn settings(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
             col()
                 .key("settings-body")
                 .gap(12.0)
+                .children(touch_id_setting(s, k))
                 .child(crate::shortcut::setting(s, k))
                 .children(crate::install::setting(s, k)),
         )
         .build(k, layer)
+}
+
+fn touch_id_setting(s: &App, k: &Kit) -> Option<El> {
+    if !s.touch_id_available() {
+        return None;
+    }
+    let mut section = col().key("touch-id-setting").w(240.0).gap(6.0).child(
+        row()
+            .key("touch-id-row")
+            .w_full()
+            .center_y()
+            .child(
+                text("Unlock with Touch ID")
+                    .key("touch-id-label")
+                    .font(k.ty.text_small)
+                    .color(k.c.text_base)
+                    .grow(1.0),
+            )
+            .child(
+                Switch::new(s.touch_id_enabled())
+                    .label("Unlock with Touch ID")
+                    .hide_label()
+                    .disabled(s.touch_id_busy)
+                    .on_toggle(|s: &mut App| s.toggle_touch_id())
+                    .build(k)
+                    .key("touch-id-switch"),
+            ),
+    );
+    if let Some(error) = &s.touch_id_error {
+        section = section.child(
+            text(error.clone())
+                .key("touch-id-error")
+                .font(k.ty.small_medium)
+                .color(k.c.danger.fg)
+                .wrap()
+                .w_full()
+                .transition(Transition::opacity()),
+        );
+    }
+    Some(section)
 }

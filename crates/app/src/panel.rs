@@ -93,6 +93,7 @@ impl App {
         let Some(panel) = &mut self.panel else { return };
         panel.phase = Phase::Open;
         panel.opens += 1;
+        self.window_focused = true;
         // The card's own transition has no entrance, but its contents and a card
         // revived mid-close would still animate in.
         tx.settle();
@@ -102,14 +103,17 @@ impl App {
         }
         self.forget_items();
         self.search.focused = self.screen == Screen::Vault;
-        if !self.unlocking {
+        if !self.busy_unlocking() {
             self.passphrase.clear();
             self.unlock_error = None;
+            self.touch_id_prompted = false;
         }
         self.passphrase.focused = self.screen == Screen::Locked;
         self.agent.send(Job::Connect);
         if self.screen == Screen::Vault {
             self.list();
+        } else if self.should_auto_prompt_touch_id() {
+            self.unlock_touch_id();
         }
     }
 
@@ -235,6 +239,7 @@ impl App {
     fn hide_panel(&mut self, tx: &mut Tx) {
         let Some(panel) = &mut self.panel else { return };
         panel.phase = Phase::Hidden;
+        self.window_focused = false;
         if let Some(windows) = &self.windows {
             windows.hide_panel();
         }
@@ -242,15 +247,17 @@ impl App {
             self.apply(done, tx);
         }
         self.forget_items();
-        if !self.unlocking {
+        if !self.busy_unlocking() {
             self.unlock_error = None;
+            self.touch_id_prompted = false;
         }
     }
 
     /// The panel's window lost focus (another app or window was clicked):
-    /// it goes as Escape sends it.
+    /// it goes as Escape sends it, unless the macOS Touch ID sheet is up.
     pub fn panel_focus(&mut self, focused: bool, tx: &mut Tx) {
-        if !focused {
+        self.window_focused = focused;
+        if !focused && !self.touch_id_unlocking {
             self.dismiss(tx);
         }
     }
@@ -301,6 +308,7 @@ impl App {
         }
         match ev.key {
             Key::Escape => self.dismiss(tx),
+            Key::Enter if self.screen == Screen::Locked => self.submit_unlock(),
             Key::Enter if self.screen == Screen::Onboarding => self.open_main(tx),
             Key::Enter if matches!(self.screen, Screen::Failed(_)) => self.retry(),
             Key::Command('l')

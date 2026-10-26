@@ -130,6 +130,16 @@ pub struct App {
     pub onboarding: Onboarding,
     pub unlocking: bool,
     pub unlock_error: Option<String>,
+    /// Whether the main window currently has focus.
+    pub window_focused: bool,
+    /// A Touch ID prompt is in flight on the agent thread.
+    pub touch_id_unlocking: bool,
+    /// Touch ID was already auto-prompted for this lock/focus session.
+    pub touch_id_prompted: bool,
+    /// A Settings toggle to enable or disable Touch ID is in flight.
+    pub touch_id_busy: bool,
+    /// Why enabling or disabling Touch ID failed, shown in Settings.
+    pub touch_id_error: Option<String>,
     pub search: TextEdit,
     pub items: Vec<ItemInfo>,
     pub loaded: bool,
@@ -176,6 +186,11 @@ impl App {
             onboarding: Onboarding::new(Worker::offline()),
             unlocking: false,
             unlock_error: None,
+            window_focused: false,
+            touch_id_unlocking: false,
+            touch_id_prompted: false,
+            touch_id_busy: false,
+            touch_id_error: None,
             search: TextEdit::new(""),
             items: Vec::new(),
             loaded: false,
@@ -231,7 +246,13 @@ impl App {
 
     pub fn apply(&mut self, done: Done, tx: &mut Tx) {
         match done {
-            Done::Connected(Ok(status)) | Done::Status(Some(status)) => self.on_status(status, tx),
+            Done::Connected(Ok(status)) => {
+                self.on_status(status, tx);
+                if self.should_auto_prompt_touch_id() {
+                    self.unlock_touch_id();
+                }
+            }
+            Done::Status(Some(status)) => self.on_status(status, tx),
             Done::Connected(Err(failure)) => self.show(Screen::Failed(failure.message)),
             Done::Status(None) => self.fail("The agent stopped.".into(), tx),
             Done::Unlocked(result) => {
@@ -248,8 +269,70 @@ impl App {
                     }
                 }
             }
+            Done::UnlockedBiometric(result) => {
+                self.touch_id_unlocking = false;
+                if self.screen != Screen::Locked {
+                    return;
+                }
+                match result {
+                    Ok(status) => {
+                        self.unlock_error = None;
+                        self.on_status(status, tx);
+                        if self.panel_phase() == Some(crate::panel::Phase::Open) {
+                            self.window_focused = true;
+                            if let Some(windows) = &self.windows {
+                                windows.focus_panel();
+                            }
+                        }
+                    }
+                    Err((failure, status)) => {
+                        if let Some(st) = status {
+                            self.status = Some(*st);
+                        } else if failure.message.contains("Touch ID was reset")
+                            && let Some(st) = &mut self.status
+                        {
+                            st.touch_id_ready = false;
+                            st.touch_id_reset = true;
+                        }
+                        self.unlock_error =
+                            biometric_unlock_message(&failure, self.touch_id_reset());
+                        self.passphrase.focused = true;
+                        if self.panel.is_some() && !self.window_focused {
+                            self.dismiss(tx);
+                        }
+                    }
+                }
+            }
+            Done::TouchIdSet { enabled, result } => {
+                self.touch_id_busy = false;
+                match result {
+                    Ok(status) => {
+                        self.touch_id_error = None;
+                        self.on_status(status, tx);
+                    }
+                    Err((failure, status)) => {
+                        if let Some(st) = status {
+                            self.on_status(*st, tx);
+                        } else if let Some(st) = &mut self.status {
+                            st.touch_id_enabled = !enabled;
+                        }
+                        if failure.locked() {
+                            if self.screen != Screen::Locked {
+                                self.on_locked(tx);
+                            }
+                        } else {
+                            self.touch_id_error = Some(failure.message);
+                        }
+                    }
+                }
+            }
             Done::Locked(result) => match result {
-                Ok(()) => self.on_locked(tx),
+                Ok(()) => {
+                    self.on_locked(tx);
+                    if !self.panel_inert() {
+                        self.agent.send(Job::Status);
+                    }
+                }
                 Err(failure) => self.notice = Some(failure.message),
             },
             // A reply from before a lock (or stop) can land after it: drop
@@ -327,7 +410,12 @@ impl App {
                 self.agent.send(Job::Status);
                 self.refresh();
             }
-            Change::Locked if self.screen == Screen::Vault => self.on_locked(tx),
+            Change::Locked if self.screen == Screen::Vault => {
+                self.on_locked(tx);
+                if !self.panel_inert() {
+                    self.agent.send(Job::Status);
+                }
+            }
             // Onboarding decides from the status whether it can carry on.
             Change::Locked if self.screen == Screen::Onboarding => self.agent.send(Job::Status),
             Change::Unlocked if self.screen != Screen::Vault => self.agent.send(Job::Status),
@@ -412,7 +500,12 @@ impl App {
         }
     }
 
-    fn on_status(&mut self, status: Status, tx: &mut Tx) {
+    fn on_status(&mut self, mut status: Status, tx: &mut Tx) {
+        if self.touch_id_busy
+            && let Some(prev) = &self.status
+        {
+            status.touch_id_enabled = prev.touch_id_enabled;
+        }
         let ready = status.initialized;
         let screen = if !status.initialized {
             Screen::Onboarding
@@ -489,7 +582,15 @@ impl App {
         self.forget_vault(tx);
         if let Some(status) = &mut self.status {
             status.unlocked = false;
+            if !status.touch_id_enabled || status.touch_id_reset {
+                status.touch_id_ready = false;
+            }
         }
+        self.touch_id_unlocking = false;
+        // A lock while the main window is frontmost (⌘L, Lock button, or idle
+        // timeout) stays at rest until the user asks for Touch ID or leaves and
+        // returns; a lock while in the background waits to auto-prompt on focus.
+        self.touch_id_prompted = self.window_focused && self.panel.is_none();
         self.show(Screen::Locked);
         self.passphrase.clear();
         self.passphrase.focused = true;
@@ -642,8 +743,97 @@ impl App {
     // ---------------------------------------------------------------------------------------
     // Unlock
 
+    pub fn touch_id_available(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.touch_id_available)
+    }
+
+    pub fn touch_id_enabled(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.touch_id_enabled)
+    }
+
+    pub fn touch_id_ready(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.touch_id_ready)
+    }
+
+    pub fn touch_id_reset(&self) -> bool {
+        self.status.as_ref().is_some_and(|s| s.touch_id_reset)
+    }
+
+    pub fn busy_unlocking(&self) -> bool {
+        self.unlocking || self.touch_id_unlocking
+    }
+
+    /// True when the lock screen is frontmost and should auto-prompt Touch ID
+    /// once (launch while locked, main window regaining focus, or panel summon).
+    pub fn should_auto_prompt_touch_id(&self) -> bool {
+        let active = match self.panel_phase() {
+            Some(phase) => phase == crate::panel::Phase::Open,
+            None => self.window_focused,
+        };
+        active
+            && self.screen == Screen::Locked
+            && self.touch_id_ready()
+            && !self.touch_id_prompted
+            && !self.busy_unlocking()
+            && self.passphrase.text.is_empty()
+    }
+
+    /// Prompts Touch ID to unlock the store.
+    pub fn unlock_touch_id(&mut self) {
+        if self.busy_unlocking() || !self.touch_id_ready() {
+            return;
+        }
+        self.touch_id_prompted = true;
+        self.unlock_error = None;
+        if self.agent.is_live() {
+            self.touch_id_unlocking = true;
+            self.agent.send(Job::UnlockBiometric);
+        }
+    }
+
+    /// The main window gained or lost focus. Focusing the locked window
+    /// prompts Touch ID once if a biometric slot is ready; background lock
+    /// events wait until the user brings the window forward.
+    pub fn main_focus(&mut self, focused: bool, _tx: &mut Tx) {
+        self.window_focused = focused;
+        if !focused {
+            // The macOS Touch ID sheet takes key-window status while it is up;
+            // only a genuine focus loss outside a Touch ID prompt resets
+            // `touch_id_prompted` for the next time the user returns.
+            if !self.touch_id_unlocking {
+                self.touch_id_prompted = false;
+            }
+            return;
+        }
+        if self.should_auto_prompt_touch_id() {
+            self.unlock_touch_id();
+        }
+    }
+
+    /// Toggles "Unlock with Touch ID" in the Settings popover.
+    pub fn toggle_touch_id(&mut self) {
+        if self.touch_id_busy || !self.touch_id_available() {
+            return;
+        }
+        let next = !self.touch_id_enabled();
+        self.touch_id_error = None;
+        if let Some(status) = &mut self.status {
+            status.touch_id_enabled = next;
+        }
+        if self.agent.is_live() {
+            self.touch_id_busy = true;
+            self.agent.send(Job::TouchIdSet(next));
+        }
+    }
+
     pub fn submit_unlock(&mut self) {
-        if self.unlocking || self.passphrase.text.is_empty() {
+        if self.unlocking {
+            return;
+        }
+        if self.passphrase.text.is_empty() {
+            if self.touch_id_ready() && !self.touch_id_unlocking {
+                self.unlock_touch_id();
+            }
             return;
         }
         self.unlocking = true;
@@ -658,10 +848,12 @@ impl App {
     }
 
     pub fn lock(&mut self) {
+        self.touch_id_prompted = true;
         self.agent.send(Job::Lock);
     }
 
     pub fn retry(&mut self) {
+        self.touch_id_prompted = false;
         self.show(Screen::Connecting);
         self.agent.send(Job::Connect);
     }
@@ -1056,6 +1248,7 @@ impl App {
         self.settings_open = false;
         self.hotkey.recorder.cancel();
         self.hotkey.reset_error = None;
+        self.touch_id_error = None;
     }
 
     /// App-level keys: before the focused field when there is none, after it
@@ -1074,6 +1267,10 @@ impl App {
         match ev.key {
             Key::Command('l') if self.screen == Screen::Vault => {
                 self.lock();
+                true
+            }
+            Key::Enter if self.screen == Screen::Locked => {
+                self.submit_unlock();
                 true
             }
             _ if self.screen == Screen::Vault
@@ -1119,6 +1316,17 @@ fn unlock_message(failure: &Failure) -> String {
         "That passphrase didn't unlock this device.".into()
     } else {
         failure.message.clone()
+    }
+}
+
+fn biometric_unlock_message(failure: &Failure, reset: bool) -> Option<String> {
+    if reset
+        || failure.message.contains("Touch ID was reset")
+        || failure.message.contains("cancelled")
+    {
+        None
+    } else {
+        Some("Touch ID couldn't unlock this device. Enter your passphrase.".into())
     }
 }
 
@@ -1347,5 +1555,254 @@ mod tests {
                 assert_eq!(rt.state.passphrase.text, "", "left {:?}", rt.state.screen);
             }
         }
+    }
+
+    #[test]
+    fn touch_id_auto_prompts_on_launch_and_focus_never_on_background_lock() {
+        use crate::agent::{Agent, Failure, Job};
+
+        let mut rt = vault();
+        let (agent, jobs, _replies) = Agent::scripted();
+        rt.state.agent = agent;
+        if let Some(st) = &mut rt.state.status {
+            st.touch_id_available = true;
+            st.touch_id_enabled = true;
+        }
+        let mut locked_status = rt.state.status.clone().unwrap();
+        locked_status.unlocked = false;
+        locked_status.touch_id_ready = true;
+
+        // Window loses focus (user switches to another app), then agent locks in background.
+        rt.update(|s, tx| s.main_focus(false, tx));
+        rt.update(|s, tx| {
+            s.apply(Done::Changed(Change::Locked), tx);
+            s.apply(Done::Status(Some(locked_status.clone())), tx);
+        });
+        assert_eq!(rt.state.screen, Screen::Locked);
+        assert!(
+            !jobs.try_iter().any(|j| matches!(j, Job::UnlockBiometric)),
+            "background lock must not prompt Touch ID"
+        );
+
+        // User brings the window forward: Touch ID auto-prompts once.
+        rt.update(|s, tx| s.main_focus(true, tx));
+        assert!(
+            jobs.try_iter().any(|j| matches!(j, Job::UnlockBiometric)),
+            "focusing the locked window prompts Touch ID"
+        );
+        assert!(rt.state.touch_id_unlocking);
+
+        // The macOS Touch ID sheet takes and returns focus when cancelled;
+        // it must not re-prompt in a loop.
+        rt.update(|s, tx| s.main_focus(false, tx));
+        rt.update(|s, tx| {
+            s.apply(
+                Done::UnlockedBiometric(Err((
+                    Failure {
+                        code: None,
+                        message: "Touch ID was cancelled: user cancel".into(),
+                    },
+                    Some(Box::new(locked_status.clone())),
+                ))),
+                tx,
+            );
+            s.main_focus(true, tx);
+        });
+        assert!(
+            !jobs.try_iter().any(|j| matches!(j, Job::UnlockBiometric)),
+            "cancelling Touch ID must not loop on focus return"
+        );
+        assert_eq!(rt.state.unlock_error, None);
+        assert!(rt.state.passphrase.focused);
+
+        // If the biometric slot was reset, the lock screen says so and hides Use Touch ID.
+        let mut reset_status = locked_status.clone();
+        reset_status.touch_id_ready = false;
+        reset_status.touch_id_reset = true;
+        rt.update(|s, tx| {
+            s.unlock_touch_id();
+            s.apply(
+                Done::UnlockedBiometric(Err((
+                    Failure {
+                        code: None,
+                        message:
+                            "Touch ID was reset (expired after 14 days); enter your passphrase"
+                                .into(),
+                    },
+                    Some(Box::new(reset_status)),
+                ))),
+                tx,
+            );
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.touch_id_reset());
+        assert!(!rt.state.touch_id_ready());
+        assert!(
+            rt.elements().iter().any(|e| {
+                e.text
+                    .as_deref()
+                    .is_some_and(|t| t.contains("Touch ID was reset; enter your passphrase"))
+            }),
+            "shows reset notice"
+        );
+        assert!(rt.find("touch-id").is_none());
+
+        // When Touch ID is enabled in config.toml before a biometric slot has ever
+        // been enrolled (`touch_id_reset == false`, `touch_id_ready == false`),
+        // the lock screen asks for the passphrase once rather than claiming a reset.
+        let mut never_enrolled_status = locked_status.clone();
+        never_enrolled_status.touch_id_ready = false;
+        never_enrolled_status.touch_id_reset = false;
+        rt.update(|s, tx| {
+            s.apply(Done::Status(Some(never_enrolled_status)), tx);
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(!rt.state.touch_id_reset());
+        assert!(!rt.state.touch_id_ready());
+        assert!(
+            rt.elements().iter().any(|e| {
+                e.text.as_deref().is_some_and(|t| {
+                    t.contains("Enter your passphrase once to finish turning on Touch ID")
+                })
+            }),
+            "shows first-time finish setup notice instead of reset notice"
+        );
+
+        // Hidden main window (`window_focused == false` on `--panel` launch) does not
+        // auto-prompt on `Connected` until the window is actually focused.
+        let mut hidden = App::new(Agent::offline());
+        let (hidden_agent, hidden_jobs, _hidden_replies) = Agent::scripted();
+        hidden.agent = hidden_agent;
+        assert!(!hidden.window_focused);
+        hidden.apply(
+            Done::Connected(Ok(locked_status.clone())),
+            &mut rune::Tx::default(),
+        );
+        assert_eq!(hidden.screen, Screen::Locked);
+        assert!(
+            !hidden_jobs
+                .try_iter()
+                .any(|j| matches!(j, Job::UnlockBiometric)),
+            "unfocused main window must not auto-prompt on Connected"
+        );
+        hidden.main_focus(true, &mut rune::Tx::default());
+        assert!(
+            hidden_jobs
+                .try_iter()
+                .any(|j| matches!(j, Job::UnlockBiometric)),
+            "focusing main window after Connected prompts Touch ID"
+        );
+    }
+
+    #[test]
+    fn quick_panel_touch_id_unlocks_and_dismisses_if_unfocused_on_cancel() {
+        use crate::agent::{Agent, Failure, Job};
+        use crate::panel::Phase;
+
+        let mut rt = panel("locked-touch-id");
+        let (agent, jobs, _replies) = Agent::scripted();
+        rt.state.agent = agent;
+        let locked_status = rt.state.status.clone().unwrap();
+        let mut unlocked_status = locked_status.clone();
+        unlocked_status.unlocked = true;
+        unlocked_status.touch_id_ready = false;
+
+        // Summoning the locked panel marks it focused and auto-prompts Touch ID.
+        rt.update(|s, tx| s.summon(tx));
+        assert!(rt.state.window_focused);
+        assert!(
+            jobs.try_iter().any(|j| matches!(j, Job::UnlockBiometric)),
+            "summon prompts Touch ID"
+        );
+        assert!(rt.state.touch_id_unlocking);
+
+        // Focus loss while the Touch ID sheet is up does not immediately dismiss the panel.
+        rt.update(|s, tx| s.panel_focus(false, tx));
+        assert_eq!(rt.state.panel_phase(), Some(Phase::Open));
+
+        // If the Touch ID prompt fails/cancels while the panel is still unfocused
+        // (user clicked away to another app), the panel dismisses itself.
+        rt.update(|s, tx| {
+            s.apply(
+                Done::UnlockedBiometric(Err((
+                    Failure {
+                        code: None,
+                        message: "Touch ID prompt was cancelled".into(),
+                    },
+                    Some(Box::new(locked_status)),
+                ))),
+                tx,
+            );
+        });
+        assert!(matches!(
+            rt.state.panel_phase(),
+            Some(Phase::Closing { .. })
+        ));
+
+        // Summon again and complete Touch ID: the panel enters the vault and
+        // re-arms focus so a subsequent blur dismisses it.
+        rt.update(|s, tx| s.summon(tx));
+        rt.update(|s, tx| s.panel_focus(false, tx));
+        rt.update(|s, tx| {
+            s.apply(Done::UnlockedBiometric(Ok(unlocked_status)), tx);
+        });
+        assert_eq!(rt.state.screen, Screen::Vault);
+        assert_eq!(rt.state.panel_phase(), Some(Phase::Open));
+        assert!(rt.state.search.focused);
+        assert!(rt.state.window_focused);
+
+        rt.update(|s, tx| s.panel_focus(false, tx));
+        assert!(matches!(
+            rt.state.panel_phase(),
+            Some(Phase::Closing { .. })
+        ));
+    }
+
+    #[test]
+    fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
+        use crate::agent::{Agent, Failure, Job};
+
+        let mut rt = main("settings-touch-id");
+        let (agent, jobs, _replies) = Agent::scripted();
+        rt.state.agent = agent;
+        assert!(rt.state.touch_id_enabled());
+        let initial_status = rt.state.status.clone().unwrap();
+
+        rt.update(|s, _| s.toggle_touch_id());
+        assert!(!rt.state.touch_id_enabled());
+        assert!(rt.state.touch_id_busy);
+        assert!(jobs.try_iter().any(|j| matches!(j, Job::TouchIdSet(false))));
+
+        // While `touch_id_busy` is true, an incoming Status reply (e.g. from watch)
+        // must not flip the switch back to its pre-toggle value.
+        rt.update(|s, tx| {
+            s.apply(Done::Status(Some(initial_status.clone())), tx);
+        });
+        assert!(
+            !rt.state.touch_id_enabled(),
+            "pending toggle value preserved across intermediate Status replies"
+        );
+
+        // On TouchIdSet failure, the fresh Status from the agent restores the switch.
+        rt.update(|s, tx| {
+            s.apply(
+                Done::TouchIdSet {
+                    enabled: false,
+                    result: Err((
+                        Failure {
+                            code: None,
+                            message: "Touch ID failed".into(),
+                        },
+                        Some(Box::new(initial_status)),
+                    )),
+                },
+                tx,
+            );
+        });
+        assert!(
+            rt.state.touch_id_enabled(),
+            "restored from fresh Status on failure"
+        );
+        assert_eq!(rt.state.touch_id_error.as_deref(), Some("Touch ID failed"));
     }
 }

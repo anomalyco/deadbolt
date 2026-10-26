@@ -65,3 +65,19 @@ fn the_quick_panel_names_its_controls() {
     assert!(has(&rt, "textbox", "Search items"), "{:?}", labels(&rt));
     assert!(has(&rt, "listbox", "Items"), "{:?}", labels(&rt));
 }
+
+#[test]
+fn touch_id_controls_name_themselves() {
+    let locked = runtime(&deadbolt_app::spec(), (820.0, 540.0), "locked-touch-id");
+    assert!(
+        has(&locked, "button", "Use Touch ID"),
+        "{:?}",
+        labels(&locked)
+    );
+    let settings = runtime(&deadbolt_app::spec(), (820.0, 540.0), "settings-touch-id");
+    assert!(
+        has(&settings, "switch", "Unlock with Touch ID"),
+        "{:?}",
+        labels(&settings)
+    );
+}

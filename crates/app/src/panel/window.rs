@@ -70,6 +70,11 @@ impl Windows {
         self.panel.open();
     }
 
+    /// Gives key focus back to the open panel after the system Touch ID sheet closes.
+    pub fn focus_panel(&self) {
+        self.panel.open();
+    }
+
     /// For `--panel`: the main window waits to be opened, and the panel comes up.
     pub fn start_with_panel(&self, main: rune::App<App>) -> rune::App<App> {
         self.summon_panel();
