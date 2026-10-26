@@ -232,6 +232,8 @@ impl App {
         self.import.phase = Phase::Idle;
         self.import.error = None;
         self.import.open = false;
+        // A search typed while it showed now picks the item that shows.
+        self.keep_selection_visible();
     }
 
     /// Forgets the import wherever it was, and drops replies still on their way.
@@ -366,6 +368,7 @@ impl App {
             // An empty vault has nothing to go back to, and its preview stays.
             Key::Up | Key::Down if showing => {
                 if !self.items.is_empty() {
+                    self.sidebar.set_open(true);
                     self.cancel_import();
                 }
                 Some(true)

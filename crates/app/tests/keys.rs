@@ -4,6 +4,7 @@
 
 #![cfg(test)]
 
+use deadbolt_app::import::Phase;
 use deadbolt_app::model::App;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -190,7 +191,7 @@ fn a_press_anywhere_on_the_search_focuses_it() {
     let r = rt
         .elements()
         .into_iter()
-        .find(|e| e.key.as_deref() == Some("search-input"))
+        .find(|e| e.key.as_deref() == Some("search"))
         .unwrap()
         .rect;
     let (mid, right) = (r[1] + r[3] / 2.0, r[0] + r[2]);
@@ -248,4 +249,97 @@ fn a_search_edit_closes_the_import_view() {
     );
     settle(&mut rt, 0.6);
     assert!(rt.find("title").is_some(), "the item shows");
+}
+
+/// The search box's rect.
+fn search_box(rt: &Runtime<App>) -> [f32; 4] {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("search"))
+        .unwrap()
+        .rect
+}
+
+/// A press on the icon of a focused search keeps the focus all the way,
+/// with frames between down and up, and when the pointer leaves before
+/// it's released.
+#[test]
+fn a_press_on_the_focused_search_never_blurs_it() {
+    let mut rt = scene("vault");
+    let r = search_box(&rt);
+    let (x, y) = (r[0] + 16.0, r[1] + r[3] / 2.0);
+    let held = |rt: &Runtime<App>, what: &str| {
+        assert!(rt.state.search.focused, "focused {what}");
+    };
+    for leave in [false, true] {
+        assert!(rt.state.search.focused);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        assert_eq!(rt.take_titlebar_action(), None, "no window drag");
+        rt.frame(FRAME);
+        held(&rt, "after the press");
+        let (ux, uy) = if leave {
+            (r[0] + r[2] + 120.0, y + 60.0)
+        } else {
+            (x, y)
+        };
+        rt.pointer_move(ux, uy);
+        rt.frame(FRAME);
+        held(&rt, "while held");
+        rt.pointer_up(ux, uy);
+        settle(&mut rt, 0.1);
+        held(&rt, &format!("after the release (left {leave})"));
+    }
+}
+
+/// From the import view too, ↑↓ and a search edit open a hidden list, and a
+/// search edit during an import that can't be cancelled opens it while
+/// leaving the import view up.
+#[test]
+fn the_import_view_opens_a_hidden_list() {
+    let toggle = Mods {
+        cmd: true,
+        shift: true,
+        ..Mods::default()
+    };
+    let mut rt = scene("import-nothing-new");
+    press(&mut rt, Key::Command('b'), toggle);
+    assert!(!rt.state.sidebar.is_open());
+    tap(&mut rt, Key::Down);
+    assert!(
+        !rt.state.import.showing() && rt.state.sidebar.is_open(),
+        "↓"
+    );
+
+    let mut rt = scene("import-nothing-new");
+    rt.update(|s, _| {
+        let preview = s.import.preview().unwrap().0.clone();
+        s.import.phase = Phase::Importing(preview);
+    });
+    press(&mut rt, Key::Command('b'), toggle);
+    command(&mut rt, 'f');
+    tap(&mut rt, Key::Text("f".into()));
+    assert!(rt.state.import.showing(), "the import runs on");
+    assert!(rt.state.sidebar.is_open(), "a search edit");
+}
+
+/// A search typed while an import runs leaves the item it hides alone, and
+/// picks a match once the view it ends on (here "nothing new") goes.
+#[test]
+fn a_search_during_an_import_is_honoured_once_it_goes() {
+    let mut rt = scene("import-nothing-new");
+    let preview = rt.state.import.preview().unwrap().0.clone();
+    rt.update(|s, _| s.import.phase = Phase::Importing(preview.clone()));
+    let github = rt.state.selected.clone();
+    command(&mut rt, 'f');
+    for c in "fly".chars() {
+        tap(&mut rt, Key::Text(c.into()));
+    }
+    assert_eq!(rt.state.search.text, "fly");
+    assert_eq!(rt.state.selected, github, "the hidden item stays");
+
+    rt.update(|s, _| s.import.phase = Phase::Preview(preview));
+    tap(&mut rt, Key::Escape);
+    assert!(!rt.state.import.showing());
+    assert_eq!(rt.state.selected_item().unwrap().label, "fly.io");
 }

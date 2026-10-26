@@ -278,20 +278,53 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
 
 /// The vault's search field: typing filters the list live; `search_key`
 /// takes ↑↓, Enter and Escape.
+///
+/// Rune-kit's `TextInput` look, built here so the field itself spans the
+/// box: a press on the icon or the padding lands in the field, as on its
+/// text, rather than on the title bar under it (a window drag) or on a box
+/// around it (a blur on the way down). Back to `TextInput` once it routes
+/// those presses to its field.
 fn search(s: &App, k: &Kit) -> El {
-    TextInput::new(&s.search)
-        .placeholder(search_placeholder(s))
-        .leading_icon(k.glyph.search)
-        .width(Some(SEARCH_W))
-        .on_edit(|s: &mut App| &mut s.search)
-        .on_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
-        .on_change(|s: &mut App, _| s.search_changed())
-        .build(k)
+    let c = &k.c;
+    let field = text_input(&s.search, k.ty.ui_compact)
+        .single_line()
         .key("search-input")
         .label("Search items")
-        // The icon and the padding inside the border are the field too, not
-        // the title bar under it: a press there focuses it.
-        .on_press(|s: &mut App| s.search.focused = true)
+        .w_full()
+        .h_full()
+        .pl(30.0)
+        .pr(8.0)
+        .py(6.0)
+        .color(c.text_base)
+        .placeholder(search_placeholder(s), c.text_faint)
+        .caret(c.text_base, k.selection())
+        .on_edit(|s: &mut App| &mut s.search)
+        .on_input_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
+        .on_input_change(|s: &mut App, _| s.search_changed());
+    let mut search = el()
+        .key("search")
+        .w(SEARCH_W)
+        .h(28.0)
+        .radius(k.radius.md)
+        .fill(c.bg_base)
+        .gradient(k.light(0.06), k.light(0.02))
+        .motion(k.motion.control)
+        .child(field)
+        .child(
+            icon(k.glyph.search, 16.0)
+                .key("search-icon")
+                .color(c.icon_muted)
+                .absolute(8.0, 6.0),
+        );
+    if s.search.focused {
+        search = search.outline(1.0, 0.0, c.border_focus);
+    } else {
+        for shadow in k.shadow_layers(&k.elevation.button_neutral) {
+            search = search.box_shadow(shadow);
+        }
+        search = search.hover(c.hover);
+    }
+    search
 }
 
 fn search_placeholder(s: &App) -> String {

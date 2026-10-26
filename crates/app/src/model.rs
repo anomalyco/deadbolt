@@ -635,16 +635,15 @@ impl App {
     /// The search changed: the list it filters shows (a hidden sidebar opens,
     /// the import view closes), and the selection follows it. An import
     /// that's running, or a preview in an empty vault, stays, and so does
-    /// the item it hides until it's gone (`on_imported`).
+    /// the item it hides until it's gone (`on_imported`, `cancel_import`).
     pub fn search_changed(&mut self) {
+        self.sidebar.set_open(true);
         if self.import.showing() && !self.items.is_empty() {
             self.cancel_import();
         }
-        if self.import.showing() {
-            return;
+        if !self.import.showing() {
+            self.keep_selection_visible();
         }
-        self.sidebar.set_open(true);
-        self.keep_selection_visible();
     }
 
     /// Focuses the search field with its text selected, so typing replaces it.
