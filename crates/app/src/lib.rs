@@ -6,6 +6,7 @@ pub mod binary;
 pub mod edit;
 pub mod import;
 pub mod install;
+pub mod mirror;
 pub mod model;
 pub mod onboarding;
 pub mod panel;
@@ -14,7 +15,8 @@ pub mod view;
 
 use deadbolt_client::Paths;
 use deadbolt_client::protocol::{
-    Code, DeviceInfo, FieldInfo, ImportReport, ImportSource, ItemInfo, Status, Tally, VaultInfo,
+    Code, DeviceInfo, FieldInfo, ImportReport, ImportSource, ItemInfo, MirrorAction, MirrorReport,
+    Status, Tally, VaultInfo,
 };
 use rune::{AppSpec, KeyEvent, SecretCopy, Tx, Waker};
 
@@ -576,7 +578,67 @@ const SCENES: &[Scene] = &[
         s.start_shortcut(false);
         s.settings_open = true;
     }),
+    // github.com mirrored from 1Password, shown, then opened with ⌘E.
+    ("mirrored", mirrored),
+    ("edit-mirrored", |s| {
+        mirrored(s);
+        s.edit_selected();
+    }),
+    // Settings after a sync from 1Password, and one 1Password refused.
+    ("settings-synced", |s| {
+        vault(s);
+        s.settings_open = true;
+        s.sync_one_password();
+        let item = |action, title: &str| deadbolt_client::protocol::MirrorItem {
+            action,
+            title: title.into(),
+            reason: None,
+        };
+        let mut items = vec![item(MirrorAction::Update, "github.com"); 12];
+        items.extend(vec![item(MirrorAction::Add, "Cloudflare"); 3]);
+        let report = MirrorReport {
+            applied: true,
+            unchanged: 214,
+            items,
+            warnings: Vec::new(),
+            dropped: Vec::new(),
+        };
+        s.apply(
+            agent::Done::Mirrored {
+                seq: 1,
+                result: Ok(report),
+            },
+            &mut Tx::default(),
+        );
+    }),
+    ("settings-sync-failed", |s| {
+        vault(s);
+        s.settings_open = true;
+        s.sync_one_password();
+        let failure = agent::Failure {
+            code: None,
+            message: "1Password: not signed in. Sign in to the 1Password app and turn on \
+                Settings › Developer › Integrate with 1Password CLI"
+                .into(),
+        };
+        s.apply(
+            agent::Done::Mirrored {
+                seq: 1,
+                result: Err(failure),
+            },
+            &mut Tx::default(),
+        );
+    }),
 ];
+
+/// The vault with github.com mirrored from 1Password, selected.
+fn mirrored(s: &mut App) {
+    vault(s);
+    for item in s.items.iter_mut().filter(|i| i.label == "github.com") {
+        item.source = Some("1Password".into());
+    }
+    detail_for_selection(s);
+}
 
 /// ⌥⌘Space, the scenes' other shortcut.
 #[expect(clippy::expect_used, reason = "a constant")]

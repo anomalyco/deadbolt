@@ -1975,3 +1975,132 @@ fn a_login_saves_without_a_password() {
         _ => panic!("expected a create"),
     }
 }
+
+/// A mirrored item says where it's from, and editing it warns that the
+/// next sync puts the source's version back, but still saves.
+#[test]
+fn a_mirrored_item_warns_on_edit_but_saves() {
+    let mut r = rig("vault");
+    r.command('e');
+    assert!(!r.shows("From 1Password"));
+    r.tap(Key::Escape);
+
+    let mut r = rig("mirrored");
+    let github = r.github();
+    let kind = format!("login · {} · From 1Password", github.short);
+    assert!(r.shows(&kind));
+    r.command('e');
+    assert!(r.shows("From 1Password"));
+    r.fill("username", "kit");
+    r.sent();
+    r.command('s');
+    assert!(
+        matches!(r.sent().pop(), Some(Job::Save { id, .. }) if id == github.id),
+        "the edit saves"
+    );
+}
+
+#[test]
+fn syncing_from_1password_says_what_it_did() {
+    use deadbolt_client::protocol::{ErrorCode, MirrorAction, MirrorItem, MirrorReport};
+
+    let mut r = rig("vault");
+    r.sent();
+    r.rt.update(|s, _| {
+        s.sync_one_password();
+        // Pressed again while it runs: still one sync.
+        s.sync_one_password();
+    });
+    let syncs = r.sent();
+    assert!(matches!(syncs[..], [Job::SyncOnePassword { seq: 1 }]));
+    assert!(r.rt.state.mirror.syncing);
+    let item = |action| MirrorItem {
+        action,
+        title: "github.com".into(),
+        reason: None,
+    };
+    let report = MirrorReport {
+        applied: true,
+        unchanged: 3,
+        items: vec![
+            item(MirrorAction::Update),
+            item(MirrorAction::Add),
+            item(MirrorAction::Skip),
+        ],
+        warnings: Vec::new(),
+        dropped: Vec::new(),
+    };
+    r.reply(Done::Mirrored {
+        seq: 1,
+        result: Ok(report),
+    });
+    assert!(!r.rt.state.mirror.syncing);
+    assert_eq!(
+        r.rt.state.mirror.result,
+        Some(Ok("1 updated, 1 added".into()))
+    );
+
+    r.rt.update(|s, _| s.sync_one_password());
+    r.reply(Done::Mirrored {
+        seq: 2,
+        result: Err(failure("1Password is locked")),
+    });
+    assert_eq!(
+        r.rt.state.mirror.result,
+        Some(Err("1Password is locked".into()))
+    );
+    // Gone with the popover.
+    r.rt.update(|s, _| s.close_settings());
+    assert_eq!(r.rt.state.mirror.result, None);
+
+    // Deadbolt locked meanwhile: the window locks too.
+    r.rt.update(|s, _| s.sync_one_password());
+    r.reply(Done::Mirrored {
+        seq: 3,
+        result: Err(Failure {
+            code: Some(ErrorCode::Locked),
+            message: "locked".into(),
+        }),
+    });
+    assert_eq!(r.rt.state.screen, Screen::Locked);
+}
+
+#[test]
+fn a_sync_from_1password_ends_with_the_lock() {
+    use deadbolt_client::protocol::MirrorReport;
+
+    let report = || MirrorReport {
+        applied: true,
+        unchanged: 3,
+        items: Vec::new(),
+        warnings: Vec::new(),
+        dropped: Vec::new(),
+    };
+    let mut r = rig("vault");
+    r.rt.update(|s, _| s.sync_one_password());
+    r.reply(Done::Mirrored {
+        seq: 1,
+        result: Ok(report()),
+    });
+    assert!(r.rt.state.mirror.result.is_some());
+    r.rt.update(|s, _| s.sync_one_password());
+    r.command('l');
+    r.reply(Done::Locked(Ok(())));
+    assert!(!r.rt.state.mirror.syncing);
+    assert_eq!(r.rt.state.mirror.result, None);
+
+    // Its reply comes once another has started (after an unlock): it is
+    // not the new sync's.
+    r.rt.update(|s, _| s.sync_one_password());
+    r.reply(Done::Mirrored {
+        seq: 2,
+        result: Ok(report()),
+    });
+    assert!(r.rt.state.mirror.syncing);
+    assert_eq!(r.rt.state.mirror.result, None);
+    r.reply(Done::Mirrored {
+        seq: 4,
+        result: Ok(report()),
+    });
+    assert_eq!(r.rt.state.mirror.result, Some(Ok("Up to date".into())));
+}

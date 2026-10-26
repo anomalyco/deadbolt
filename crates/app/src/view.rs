@@ -572,7 +572,10 @@ fn detail(s: &App, k: &Kit) -> El {
         }
         return pane;
     };
-    let kind = format!("{} · {}", noun(&item.kind, 1), item.short);
+    let mut kind = format!("{} · {}", noun(&item.kind, 1), item.short);
+    if let Some(source) = &item.source {
+        kind = format!("{kind} · From {source}");
+    }
     let titles = col()
         .key("titles")
         .grow(1.0)
@@ -1083,6 +1086,7 @@ fn settings(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(12.0)
                 .children(touch_id_setting(s, k))
                 .child(crate::shortcut::setting(s, k))
+                .child(crate::mirror::setting(s, k))
                 .children(crate::install::setting(s, k)),
         )
         .build(k, layer)

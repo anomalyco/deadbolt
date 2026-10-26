@@ -61,6 +61,13 @@ for theme in dark light; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done
+# Mirrored from 1Password, dark and light: an item, its edit's warning, and
+# Settings after a sync and after one 1Password refused.
+for theme in dark light; do
+  for scene in mirrored edit-mirrored settings-synced settings-sync-failed; do
+    "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
+  done
+done
 # The quick panel, dark and light: just opened, filtering, nothing found, an
 # empty vault, locked, a wrong passphrase, not set up, failed, and 0.6 s after
 # a copy (the footer shows the countdown).

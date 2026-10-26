@@ -152,6 +152,7 @@ pub struct App {
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub import: crate::import::Import,
+    pub mirror: crate::mirror::Mirror,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
@@ -203,6 +204,7 @@ impl App {
             copy: None,
             notice: None,
             import: crate::import::Import::default(),
+            mirror: crate::mirror::Mirror::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
@@ -401,6 +403,7 @@ impl App {
                 applied,
                 result,
             } => self.on_imported(seq, applied, result, tx),
+            Done::Mirrored { seq, result } => self.on_mirrored(seq, result, tx),
             Done::Saved { seq, result } => self.on_saved(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
@@ -640,6 +643,7 @@ impl App {
         self.notice = None;
         self.forget_import();
         self.forget_edit();
+        self.mirror.forget();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -1287,6 +1291,7 @@ impl App {
         self.hotkey.recorder.cancel();
         self.hotkey.reset_error = None;
         self.touch_id_error = None;
+        self.mirror.result = None;
     }
 
     /// App-level keys: before the focused field when there is none, after it

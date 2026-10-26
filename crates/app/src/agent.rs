@@ -11,7 +11,8 @@ use std::time::Duration;
 
 use deadbolt_client::export::{self, ExportError};
 use deadbolt_client::protocol::{
-    Change, Code, Command, ErrorCode, FieldInput, ImportReport, ItemInfo, Reply, Status, code_field,
+    Change, Code, Command, ErrorCode, FieldInput, ImportReport, ItemInfo, MirrorReport, Reply,
+    Status, code_field,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -54,6 +55,12 @@ pub enum Job {
         /// The digest of the export as previewed, to import it; `None` to
         /// preview. The file imports only if it still has that digest.
         apply: Option<blake3::Hash>,
+        seq: u64,
+    },
+    /// Mirrors 1Password into the default vault. It runs beside the other
+    /// jobs, since 1Password may wait on its approval prompt. `seq` tells
+    /// the sync it's for (`mirror::Mirror`).
+    SyncOnePassword {
         seq: u64,
     },
     /// Adds an item to the default vault. `seq` tells the edit it's for (`edit::Edit`).
@@ -115,6 +122,10 @@ pub enum Done {
         /// that turned into one because the file changed.
         applied: bool,
         result: Result<Imported, ImportFailure>,
+    },
+    Mirrored {
+        seq: u64,
+        result: Result<MirrorReport, Failure>,
     },
     /// An item added or changed, without its values.
     Saved {
@@ -427,6 +438,37 @@ fn work(
         }
     };
     for job in requests {
+        if let Job::SyncOnePassword { seq } = job {
+            let post = || Post {
+                results: results.clone(),
+                waker: waker.clone(),
+            };
+            let failed = move |error: std::io::Error| Done::Mirrored {
+                seq,
+                result: Err(Failure {
+                    code: None,
+                    message: format!("starting the sync: {error}"),
+                }),
+            };
+            let paths = paths.clone();
+            let thread = post();
+            let spawned = std::thread::Builder::new()
+                .name("deadbolt-1password".into())
+                .spawn(move || {
+                    let done = match tokio::runtime::Builder::new_current_thread()
+                        .enable_all()
+                        .build()
+                    {
+                        Ok(runtime) => runtime.block_on(mirror(&paths, seq)),
+                        Err(error) => failed(error),
+                    };
+                    thread.send(done);
+                });
+            if let Err(error) = spawned {
+                post().send(failed(error));
+            }
+            continue;
+        }
         let done = runtime.block_on(run(&paths, &launch, job));
         if results.send(done).is_err() {
             return;
@@ -559,6 +601,7 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 result,
             }
         }
+        Job::SyncOnePassword { seq } => mirror(paths, seq).await,
         Job::Create {
             kind,
             name,
@@ -662,6 +705,21 @@ async fn import(
             changed,
         }
     })
+}
+
+async fn mirror(paths: &Paths, seq: u64) -> Done {
+    let command = Command::SyncOnePassword {
+        vault: None,
+        account: None,
+        op_vaults: Vec::new(),
+        dry_run: false,
+    };
+    let result = match deadbolt_client::simple(paths, command).await {
+        Ok(Reply::Mirror { report }) => Ok(report),
+        Ok(_) => Err(unexpected()),
+        Err(error) => Err(error.into()),
+    };
+    Done::Mirrored { seq, result }
 }
 
 async fn code(paths: &Paths, id: String) -> Result<Code, Failure> {
