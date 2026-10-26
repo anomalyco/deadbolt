@@ -2,6 +2,7 @@
 compile_error!("deadbolt currently supports Unix platforms only");
 
 mod agent;
+mod browser;
 #[expect(
     clippy::disallowed_methods,
     reason = "client version override awaits the separate client-crate extraction"
@@ -11,6 +12,7 @@ mod config;
 mod import;
 mod items;
 mod prompt;
+mod site;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;
@@ -140,6 +142,28 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Connect Deadbolt's browser extension to this computer's Deadbolt.
+    #[command(subcommand)]
+    Browser(BrowserCommand),
+    /// Serve the browser extension at ORIGIN over stdin/stdout. Browsers
+    /// run this; `deadbolt browser install` sets it up.
+    #[command(hide = true)]
+    BrowserHost { origin: String },
+}
+
+#[derive(Subcommand)]
+enum BrowserCommand {
+    /// Let the extension reach Deadbolt in Chrome, Brave, Arc, Edge or
+    /// Chromium (default: those installed here).
+    Install {
+        #[arg(long, value_enum)]
+        browser: Vec<browser::Browser>,
+    },
+    /// Stop the extension reaching Deadbolt (default: in every browser).
+    Uninstall {
+        #[arg(long, value_enum)]
+        browser: Vec<browser::Browser>,
+    },
 }
 
 #[derive(Args)]
@@ -183,11 +207,22 @@ enum TouchIdCommand {
 }
 
 fn main() -> ExitCode {
-    let cli = Cli::parse();
+    // A browser runs a native messaging host with the caller's origin as its
+    // only argument, which can't name a subcommand.
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    if args.len() == 2
+        && args[1]
+            .to_str()
+            .is_some_and(|a| a.starts_with("chrome-extension://"))
+    {
+        args.insert(1, "browser-host".into());
+    }
+    let cli = Cli::parse_from(args);
     let agent = matches!(cli.command, Commands::Agent { command: None });
-    // Commands die quietly when piped into `head`. The agent keeps Rust's
-    // ignored SIGPIPE: a client hanging up mid-reply must not kill it.
-    if !agent {
+    // Commands die quietly when piped into `head`. The agent and the browser
+    // host keep Rust's ignored SIGPIPE: a client hanging up mid-reply must
+    // not kill them before they clean up.
+    if !agent && !matches!(cli.command, Commands::BrowserHost { .. }) {
         sigpipe::reset();
     }
     tracing_subscriber::fmt()
@@ -234,6 +269,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Agent { .. }
                 | Commands::TouchId { .. }
                 | Commands::Vault(_)
+                | Commands::Browser(_)
+                | Commands::BrowserHost { .. }
         )
     {
         bail!("--vault does not apply to this command");
@@ -270,6 +307,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
+        Commands::Browser(BrowserCommand::Install { browser }) => browser::install(&browser)?,
+        Commands::Browser(BrowserCommand::Uninstall { browser }) => browser::uninstall(&browser)?,
+        Commands::BrowserHost { origin } => browser::host::run(paths, &origin).await?,
         Commands::Agent {
             command: Some(AgentCommand::Stop),
         } => {

@@ -1040,3 +1040,785 @@ fn watch_prints_changes_as_json_lines() {
         "the stream ended"
     );
 }
+
+const EXTENSION: &str = "chrome-extension://jhocodkhpifjndffenppfmdkmiolngal/";
+
+/// `deadbolt browser-host`, run as a browser runs it: the extension's origin
+/// as the only argument, length-prefixed JSON both ways.
+struct Host {
+    child: Child,
+    stdin: std::process::ChildStdin,
+    messages: mpsc::Receiver<serde_json::Value>,
+    /// `changed` messages that arrived while waiting for a reply.
+    pushed: Vec<serde_json::Value>,
+    next_id: u64,
+}
+
+impl Host {
+    fn start(device: &Device) -> Self {
+        let mut child = device
+            .cmd(&[EXTENSION])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()
+            .unwrap();
+        let stdin = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let (tx, messages) = mpsc::channel();
+        std::thread::spawn(move || {
+            loop {
+                let mut prefix = [0u8; 4];
+                if stdout.read_exact(&mut prefix).is_err() {
+                    break;
+                }
+                let len = u32::from_ne_bytes(prefix) as usize;
+                assert!(len <= 1024 * 1024, "a message over the browser's limit");
+                let mut body = vec![0u8; len];
+                stdout.read_exact(&mut body).unwrap();
+                let text = String::from_utf8(body).unwrap();
+                eprintln!("host -> {text}");
+                if tx.send(serde_json::from_str(&text).unwrap()).is_err() {
+                    break;
+                }
+            }
+        });
+        Self {
+            child,
+            stdin,
+            messages,
+            pushed: Vec::new(),
+            next_id: 0,
+        }
+    }
+
+    fn send_raw(&mut self, body: &[u8]) {
+        let len = u32::try_from(body.len()).unwrap();
+        self.stdin.write_all(&len.to_ne_bytes()).unwrap();
+        self.stdin.write_all(body).unwrap();
+        self.stdin.flush().unwrap();
+    }
+
+    fn recv(&self, timeout: Duration) -> Option<serde_json::Value> {
+        self.messages.recv_timeout(timeout).ok()
+    }
+
+    /// The next reply, keeping pushes aside.
+    fn reply(&mut self) -> serde_json::Value {
+        loop {
+            let message = self.recv(Duration::from_secs(30)).expect("a reply");
+            if message["type"] == "changed" {
+                self.pushed.push(message);
+            } else {
+                return message;
+            }
+        }
+    }
+
+    /// Sends `request` with a fresh id and returns the reply to it.
+    fn ask(&mut self, mut request: serde_json::Value) -> serde_json::Value {
+        self.next_id += 1;
+        let id = format!("r{}", self.next_id);
+        request["id"] = id.clone().into();
+        self.send_raw(request.to_string().as_bytes());
+        let reply = self.reply();
+        assert_eq!(reply["id"], id, "{reply}");
+        reply
+    }
+
+    /// The next `changed` push, from those set aside first.
+    fn pushed(&mut self, timeout: Duration) -> Option<serde_json::Value> {
+        if !self.pushed.is_empty() {
+            return Some(self.pushed.remove(0));
+        }
+        let message = self.recv(timeout)?;
+        assert_eq!(message["type"], "changed", "{message}");
+        Some(message)
+    }
+
+    /// Hangs up as the browser does, and expects the host to exit cleanly.
+    fn close(self) {
+        let Self {
+            mut child, stdin, ..
+        } = self;
+        drop(stdin);
+        assert!(wait(&mut child, Duration::from_secs(10)).success());
+    }
+}
+
+fn list(host: &mut Host, origin: &str) -> serde_json::Value {
+    let reply = host.ask(serde_json::json!({"type": "list", "origin": origin}));
+    assert_eq!(reply["type"], "list", "{reply}");
+    reply
+}
+
+fn refs(reply: &serde_json::Value) -> Vec<String> {
+    reply["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|a| a["ref"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn assert_error(reply: &serde_json::Value, code: &str) {
+    assert_eq!(reply["type"], "error", "{reply}");
+    assert_eq!(reply["code"], code, "{reply}");
+}
+
+const OTP_SECRET: &str = "JBSWY3DPEHPK3PXP";
+
+#[test]
+fn browser_host_lists_and_fills_only_for_the_page_site() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "username=dax",
+            "url=github.com",
+            "password=hunter2",
+            &format!("otp={OTP_SECRET}"),
+        ],
+    );
+    new(
+        &a,
+        &[
+            "login",
+            "username=kit",
+            "url=https://gitlab.com",
+            "password=gl-pw",
+        ],
+    );
+    new(
+        &a,
+        &[
+            "login",
+            "username=evil",
+            "url=https://github.com.evil.com",
+            "password=evil-pw",
+        ],
+    );
+    let mut host = Host::start(&a);
+
+    let hello = host.ask(serde_json::json!({"type": "hello"}));
+    assert_eq!(hello["type"], "hello", "{hello}");
+    assert_eq!(hello["status"], "ready");
+    assert_eq!(hello["protocol"], 1);
+    assert_eq!(
+        hello["capabilities"],
+        serde_json::json!(["list", "fill", "check", "save"])
+    );
+
+    // Only the github.com login, on github.com and its subdomains, and no
+    // values in the list.
+    let github = list(&mut host, "https://github.com");
+    assert_eq!(github["site"], "github.com");
+    let accounts = github["accounts"].as_array().unwrap();
+    assert_eq!(accounts.len(), 1, "{github}");
+    assert_eq!(accounts[0]["username"], "dax");
+    assert_eq!(accounts[0]["title"], "github.com");
+    assert_eq!(accounts[0]["vault"], "personal");
+    assert_eq!(accounts[0]["hasPassword"], true);
+    assert_eq!(accounts[0]["hasTotp"], true);
+    assert_eq!(
+        accounts[0]["urls"],
+        serde_json::json!(["https://github.com"])
+    );
+    let text = github.to_string();
+    for secret in ["hunter2", OTP_SECRET, "gl-pw", "evil-pw"] {
+        assert!(!text.contains(secret), "the list holds {secret}: {text}");
+    }
+    let github_ref = accounts[0]["ref"].as_str().unwrap().to_string();
+    assert_eq!(
+        refs(&list(&mut host, "https://gist.github.com:8443")),
+        std::slice::from_ref(&github_ref)
+    );
+    let gitlab_ref = refs(&list(&mut host, "https://gitlab.com")).pop().unwrap();
+    assert!(refs(&list(&mut host, "https://evilgithub.com")).is_empty());
+    assert_eq!(
+        refs(&list(&mut host, "https://github.com.evil.com")).len(),
+        1
+    );
+
+    let fill = host.ask(serde_json::json!({
+        "type": "fill", "origin": "https://github.com", "ref": github_ref,
+        "want": ["username", "password", "totp"],
+    }));
+    assert_eq!(fill["type"], "fill", "{fill}");
+    assert_eq!(fill["username"], "dax");
+    assert_eq!(fill["password"], "hunter2");
+    let totp = fill["totp"].as_str().unwrap();
+    assert!(
+        totp.len() == 6 && totp.bytes().all(|b| b.is_ascii_digit()),
+        "{fill}"
+    );
+    let only = host.ask(serde_json::json!({
+        "type": "fill", "origin": "https://github.com", "ref": github_ref, "want": ["password"],
+    }));
+    assert_eq!(
+        only,
+        serde_json::json!({"id": only["id"], "type": "fill", "password": "hunter2"})
+    );
+
+    // Another site's login, from this page or a lookalike, is refused.
+    for (origin, login) in [
+        ("https://github.com", &gitlab_ref),
+        ("https://gitlab.com", &github_ref),
+        ("https://github.com.evil.com", &github_ref),
+        ("https://evilgithub.com", &github_ref),
+    ] {
+        let reply = host.ask(serde_json::json!({
+            "type": "fill", "origin": origin, "ref": login, "want": ["password"],
+        }));
+        assert_error(&reply, "domain_mismatch");
+        assert!(!reply.to_string().contains("pw"), "{reply}");
+    }
+    let (vault, _) = github_ref.split_once(':').unwrap();
+    let missing = format!("{vault}:{}", "0".repeat(32));
+    let reply = host.ask(serde_json::json!({
+        "type": "fill", "origin": "https://github.com", "ref": missing, "want": ["password"],
+    }));
+    assert_error(&reply, "not_found");
+
+    // Pages that get nothing: not https, not a site of their own.
+    for origin in [
+        "http://github.com",
+        "https://github.io",
+        "github.com",
+        "javascript:alert(1)",
+        EXTENSION,
+    ] {
+        let reply = host.ask(serde_json::json!({"type": "list", "origin": origin}));
+        assert_error(&reply, "bad_request");
+        let reply = host.ask(serde_json::json!({
+            "type": "fill", "origin": origin, "ref": github_ref, "want": ["password"],
+        }));
+        assert_error(&reply, "bad_request");
+    }
+    let reply = host.ask(serde_json::json!({
+        "type": "fill", "origin": "https://github.com", "ref": "1234", "want": ["password"],
+    }));
+    assert_error(&reply, "bad_request");
+    let reply = host.ask(serde_json::json!({
+        "type": "fill", "origin": "https://github.com", "ref": github_ref, "want": [],
+    }));
+    assert_error(&reply, "bad_request");
+    let reply = host.ask(serde_json::json!({"type": "unlock", "passphrase": "x"}));
+    assert_error(&reply, "bad_request");
+    host.close();
+}
+
+#[test]
+fn browser_host_checks_and_saves_logins() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "username=Dax",
+            "url=github.com",
+            "password=hunter2",
+        ],
+    );
+    let mut host = Host::start(&a);
+    let github_ref = refs(&list(&mut host, "https://github.com")).pop().unwrap();
+
+    let check = |host: &mut Host, origin: &str, username: &str, password: &str| {
+        let reply = host.ask(serde_json::json!({
+            "type": "check", "origin": origin, "username": username, "password": password,
+        }));
+        assert_eq!(reply["type"], "check", "{reply}");
+        assert!(!reply.to_string().contains("hunter2"), "{reply}");
+        (
+            reply["status"].as_str().unwrap().to_string(),
+            reply["matches"].clone(),
+        )
+    };
+    let refs_of = |r: &str| serde_json::json!([r]);
+    assert_eq!(
+        check(&mut host, "https://github.com", " dAX ", "hunter2"),
+        ("same".into(), refs_of(&github_ref))
+    );
+    assert_eq!(
+        check(&mut host, "https://github.com", "dax", "hunter3"),
+        ("update".into(), refs_of(&github_ref))
+    );
+    assert_eq!(
+        check(&mut host, "https://github.com", "octocat", "hunter2"),
+        ("new".into(), serde_json::json!([]))
+    );
+    // The same login on another site is new there.
+    assert_eq!(
+        check(&mut host, "https://gitlab.com", "dax", "hunter2"),
+        ("new".into(), serde_json::json!([]))
+    );
+    let reply = host.ask(serde_json::json!({
+        "type": "check", "origin": "https://github.com", "username": "dax", "password": "",
+    }));
+    assert_error(&reply, "bad_request");
+
+    // A new login goes to the default vault.
+    let saved = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://example.com",
+        "entry": {"title": "example.com", "url": "https://example.com/login",
+                  "username": "kit", "password": "first-pw"},
+    }));
+    assert_eq!(saved["type"], "save", "{saved}");
+    assert_eq!(saved["created"], true);
+    let example_ref = saved["ref"].as_str().unwrap().to_string();
+    assert_eq!(
+        refs(&list(&mut host, "https://www.example.com")),
+        std::slice::from_ref(&example_ref)
+    );
+    assert_eq!(a.run(&["get", "example"]), "first-pw\n");
+    assert_eq!(a.run(&["get", "example", "-f", "username"]), "kit\n");
+    assert_eq!(
+        check(&mut host, "https://example.com", "kit", "first-pw").0,
+        "same"
+    );
+
+    // With a ref, only that login's password changes.
+    let updated = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://example.com", "ref": example_ref,
+        "entry": {"title": "example.com", "url": "https://example.com",
+                  "username": "kit", "password": "second-pw"},
+    }));
+    assert_eq!(
+        updated,
+        serde_json::json!({"id": updated["id"], "type": "save", "ref": example_ref, "created": false})
+    );
+    assert_eq!(a.run(&["get", "example"]), "second-pw\n");
+
+    // Never another site's login, nor a URL off the page's site.
+    let reply = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://example.com", "ref": github_ref,
+        "entry": {"title": "example.com", "url": "https://example.com",
+                  "username": "dax", "password": "stolen"},
+    }));
+    assert_error(&reply, "domain_mismatch");
+    assert_eq!(a.run(&["get", "github"]), "hunter2\n");
+    let reply = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://example.com",
+        "entry": {"title": "github.com", "url": "https://github.com",
+                  "username": "dax", "password": "stolen"},
+    }));
+    assert_error(&reply, "domain_mismatch");
+    assert!(
+        a.fail(&["get", "github", "dax", "stolen"])
+            .contains("no item")
+    );
+    let reply = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://example.com",
+        "entry": {"title": "", "url": "https://example.com", "username": "kit", "password": "pw"},
+    }));
+    assert_error(&reply, "bad_request");
+
+    // Page titles become item names the vault takes.
+    let saved = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://news.example.net",
+        "entry": {"title": "News\t\u{7} —\n Sign in", "url": "https://news.example.net/login",
+                  "username": "kit", "password": "news-pw"},
+    }));
+    assert_eq!(saved["created"], true, "{saved}");
+    let news = list(&mut host, "https://news.example.net");
+    assert_eq!(news["accounts"][0]["title"], "News — Sign in", "{news}");
+    let long = "t".repeat(128);
+    let saved = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://long.example.dev",
+        "entry": {"title": long, "url": "https://long.example.dev", "username": "kit", "password": "pw"},
+    }));
+    assert_eq!(saved["created"], true, "{saved}");
+    let reply = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://long.example.dev",
+        "entry": {"title": format!("{long}t"), "url": "https://long.example.dev", "username": "kit", "password": "pw"},
+    }));
+    assert_error(&reply, "bad_request");
+
+    // Only secure pages' URLs are saved, and no spaces.
+    for url in [
+        "javascript:alert(1)//example.com",
+        "data:text/html,example.com",
+        "ftp://example.com",
+        "http://example.com",
+        "example.com",
+        "https://example.com/a b",
+    ] {
+        let reply = host.ask(serde_json::json!({
+            "type": "save", "origin": "https://example.com",
+            "entry": {"title": "Example", "url": url, "username": "new", "password": "pw"},
+        }));
+        assert_error(&reply, "bad_request");
+    }
+    let saved = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://trim.example.io",
+        "entry": {"title": "Trim", "url": "  https://trim.example.io/login\n",
+                  "username": "kit", "password": "pw"},
+    }));
+    assert_eq!(saved["created"], true, "{saved}");
+    assert_eq!(
+        list(&mut host, "https://trim.example.io")["accounts"][0]["urls"],
+        serde_json::json!(["https://trim.example.io/login"])
+    );
+    host.close();
+}
+
+/// Checks guess passwords and fills hand them out: a runaway caller gets
+/// a burst, then slows down.
+#[test]
+fn browser_host_rate_limits_checks_and_fills() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "username=dax",
+            "url=github.com",
+            "password=hunter2",
+        ],
+    );
+    let mut host = Host::start(&a);
+    let github_ref = refs(&list(&mut host, "https://github.com")).pop().unwrap();
+    let check = serde_json::json!({
+        "type": "check", "origin": "https://github.com", "username": "dax", "password": "guess",
+    });
+    let fill = serde_json::json!({
+        "type": "fill", "origin": "https://github.com", "ref": github_ref, "want": ["password"],
+    });
+    for (request, burst) in [(check, 20), (fill, 60)] {
+        let mut answered = 0;
+        loop {
+            let reply = host.ask(request.clone());
+            if reply["type"] == "error" {
+                assert_error(&reply, "rate_limited");
+                break;
+            }
+            answered += 1;
+            assert!(answered < burst * 3, "never limited: {request}");
+        }
+        assert!(answered >= burst, "limited after {answered}: {request}");
+    }
+    // Lists aren't limited.
+    for _ in 0..100 {
+        list(&mut host, "https://github.com");
+    }
+    host.close();
+}
+
+/// The browser hanging up mid-reply ends the host, not a SIGPIPE.
+#[test]
+fn browser_host_survives_a_closed_pipe() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut child = a
+        .cmd(&[EXTENSION])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take());
+    let mut stdin = child.stdin.take().unwrap();
+    let hello = br#"{"id":1,"type":"hello"}"#;
+    stdin
+        .write_all(&u32::try_from(hello.len()).unwrap().to_ne_bytes())
+        .unwrap();
+    stdin.write_all(hello).unwrap();
+    stdin.flush().unwrap();
+    let status = wait(&mut child, Duration::from_secs(30));
+    assert!(status.success(), "{status:?}");
+    drop(stdin);
+}
+
+#[test]
+fn browser_host_frames_and_refusals() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut host = Host::start(&a);
+
+    // A message over the limit is skipped whole; the connection carries on.
+    let mut big = br#"{"id":"big","type":"list","origin":""#.to_vec();
+    big.resize(70_000, b'a');
+    big.extend_from_slice(br#""}"#);
+    host.send_raw(&big);
+    let reply = host.reply();
+    assert_error(&reply, "bad_request");
+    assert_eq!(reply["id"], serde_json::Value::Null);
+    host.send_raw(b"not json");
+    let reply = host.reply();
+    assert_error(&reply, "bad_request");
+    assert_eq!(reply["id"], serde_json::Value::Null);
+    host.send_raw(br#"{"type":"hello"}"#);
+    assert_error(&host.reply(), "bad_request");
+    host.send_raw(br#"{"id":7,"type":"hello"}"#);
+    let reply = host.reply();
+    assert_eq!(reply["id"], 7);
+    assert_eq!(reply["status"], "ready");
+    // Many requests on one connection, answered in order.
+    for _ in 0..20 {
+        let reply = host.ask(serde_json::json!({"type": "list", "origin": "https://github.com"}));
+        assert_eq!(reply["accounts"], serde_json::json!([]));
+    }
+    host.close();
+
+    // Only the Deadbolt extension may run the host.
+    for args in [
+        &["chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/"][..],
+        &[
+            "browser-host",
+            "chrome-extension://aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/",
+        ],
+        &["browser-host", "https://github.com"],
+    ] {
+        let output = a.try_run(args);
+        assert!(!output.status.success(), "{args:?}");
+        assert!(output.stdout.is_empty(), "{args:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("only the Deadbolt extension"),
+            "{args:?}"
+        );
+    }
+}
+
+#[test]
+fn browser_host_when_locked_or_not_set_up() {
+    let fresh = Device::new();
+    let mut host = Host::start(&fresh);
+    let hello = host.ask(serde_json::json!({"type": "hello"}));
+    assert_eq!(hello["status"], "not-set-up", "{hello}");
+    let reply = host.ask(serde_json::json!({"type": "list", "origin": "https://github.com"}));
+    assert_error(&reply, "locked");
+    host.close();
+
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "username=dax",
+            "url=github.com",
+            "password=hunter2",
+        ],
+    );
+    let mut host = Host::start(&a);
+    let github_ref = refs(&list(&mut host, "https://github.com")).pop().unwrap();
+    a.run(&["lock"]);
+    let hello = host.ask(serde_json::json!({"type": "hello"}));
+    assert_eq!(hello["status"], "locked", "{hello}");
+    assert_eq!(hello["detail"], "Unlock Deadbolt to fill passwords");
+    for request in [
+        serde_json::json!({"type": "list", "origin": "https://github.com"}),
+        serde_json::json!({"type": "fill", "origin": "https://github.com", "ref": github_ref, "want": ["password"]}),
+        serde_json::json!({"type": "check", "origin": "https://github.com", "username": "dax", "password": "x"}),
+        serde_json::json!({"type": "save", "origin": "https://github.com",
+            "entry": {"title": "github.com", "url": "https://github.com", "username": "dax", "password": "x"}}),
+    ] {
+        assert_error(&host.ask(request), "locked");
+    }
+    // A stopped agent is locked too, and the host never starts one but
+    // for hello, nor prompts.
+    a.run(&["agent", "stop"]);
+    assert_error(
+        &host.ask(serde_json::json!({"type": "list", "origin": "https://github.com"})),
+        "locked",
+    );
+    assert!(a.agent_pid().is_none());
+    host.close();
+}
+
+/// The agent hello starts isn't news.
+#[test]
+fn browser_host_announces_only_agents_that_come_back() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    a.run(&["agent", "stop"]);
+    let mut host = Host::start(&a);
+    let hello = host.ask(serde_json::json!({"type": "hello"}));
+    assert_eq!(hello["status"], "locked", "{hello}");
+    // The watcher looks for an agent every 2 s.
+    if let Some(message) = host.pushed(Duration::from_secs(5)) {
+        panic!("pushed {message}");
+    }
+    a.run(&["unlock"]);
+    assert_eq!(
+        host.pushed(Duration::from_secs(30)).unwrap()["change"],
+        "unlocked"
+    );
+    host.close();
+}
+
+#[test]
+fn browser_host_pushes_changes() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut host = Host::start(&a);
+    assert_eq!(
+        host.ask(serde_json::json!({"type": "hello"}))["status"],
+        "ready"
+    );
+    // The watch connects on its own; wait until an edit shows up. Edits are
+    // all it pushes: no `started` for the agent hello found running.
+    let mut n = 0;
+    eventually("the host to watch the agent", || {
+        n += 1;
+        new(
+            &a,
+            &["login", &format!("url=site{n}.example"), "password=pw"],
+        );
+        host.pushed(Duration::from_secs(1))
+            .is_some_and(|m| m["change"] == "items")
+    });
+    while let Some(message) = host.pushed(Duration::from_millis(500)) {
+        assert_eq!(message["change"], "items", "{message}");
+    }
+
+    let change = |host: &mut Host| {
+        host.pushed(Duration::from_secs(30)).expect("a change")["change"]
+            .as_str()
+            .unwrap()
+            .to_string()
+    };
+    a.run(&["lock"]);
+    assert_eq!(change(&mut host), "locked");
+    a.run(&["unlock"]);
+    assert_eq!(change(&mut host), "unlocked");
+    a.run(&["agent", "stop"]);
+    assert_eq!(change(&mut host), "stopped");
+    a.run(&["unlock"]);
+    assert_eq!(change(&mut host), "started");
+    host.close();
+}
+
+/// Listing pages and checking typed logins, as a browser does on every
+/// page, doesn't hold the vault open; filling does.
+#[test]
+fn browser_lookups_do_not_hold_off_the_idle_lock() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "username=dax",
+            "url=github.com",
+            "password=hunter2",
+        ],
+    );
+    let mut host = Host::start(&a);
+    let github_ref = refs(&list(&mut host, "https://github.com")).pop().unwrap();
+
+    a.run(&["unlock", "--timeout", "2s"]);
+    let start = Instant::now();
+    loop {
+        let reply = host.ask(serde_json::json!({"type": "list", "origin": "https://github.com"}));
+        if reply["type"] == "error" {
+            assert_error(&reply, "locked");
+            break;
+        }
+        host.ask(serde_json::json!({
+            "type": "check", "origin": "https://github.com", "username": "dax", "password": "x",
+        }));
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "still unlocked while pages are looked at"
+        );
+        std::thread::sleep(Duration::from_millis(250));
+    }
+
+    a.run(&["unlock", "--timeout", "2s"]);
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(4) {
+        let fill = host.ask(serde_json::json!({
+            "type": "fill", "origin": "https://github.com", "ref": github_ref, "want": ["password"],
+        }));
+        assert_eq!(fill["password"], "hunter2", "locked while filling");
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    host.close();
+}
+
+#[test]
+fn browser_install_registers_the_host() {
+    let a = Device::new();
+    let home = a.path("user");
+    let browsers = |dir: &str| -> Vec<(&'static str, PathBuf)> {
+        let base = if cfg!(target_os = "macos") {
+            home.join("Library/Application Support")
+        } else {
+            a.path("config")
+        };
+        let names: &[(&str, &str)] = if cfg!(target_os = "macos") {
+            &[
+                ("Chrome", "Google/Chrome"),
+                ("Brave", "BraveSoftware/Brave-Browser"),
+                ("Arc", "Arc/User Data"),
+                ("Edge", "Microsoft Edge"),
+                ("Chromium", "Chromium"),
+            ]
+        } else {
+            &[
+                ("Chrome", "google-chrome"),
+                ("Brave", "BraveSoftware/Brave-Browser"),
+                ("Edge", "microsoft-edge"),
+                ("Chromium", "chromium"),
+            ]
+        };
+        names
+            .iter()
+            .map(|(name, path)| (*name, base.join(path).join(dir)))
+            .collect()
+    };
+    let manifests: Vec<(&str, PathBuf)> = browsers("NativeMessagingHosts/pw.deadbolt.browser.json");
+    let run = |args: &[&str]| a.output(a.cmd(args).env("HOME", &home));
+
+    // Nothing installed: say so rather than guess.
+    let output = run(&["browser", "install"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--browser"));
+
+    // By default, only the browsers that are here.
+    let (chrome, chrome_manifest) = &manifests[0];
+    std::fs::create_dir_all(chrome_manifest.parent().unwrap().parent().unwrap()).unwrap();
+    let output = run(&["browser", "install"]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.contains(&format!("{chrome}: wrote {}", chrome_manifest.display())),
+        "{stdout}"
+    );
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(chrome_manifest).unwrap()).unwrap();
+    assert_eq!(manifest["name"], "pw.deadbolt.browser");
+    assert_eq!(manifest["type"], "stdio");
+    assert_eq!(manifest["allowed_origins"], serde_json::json!([EXTENSION]));
+    let path = PathBuf::from(manifest["path"].as_str().unwrap());
+    assert!(path.is_absolute());
+    assert_eq!(
+        std::fs::canonicalize(&path).unwrap(),
+        std::fs::canonicalize(BIN).unwrap()
+    );
+    for (_, other) in &manifests[1..] {
+        assert!(!other.exists(), "{}", other.display());
+    }
+
+    // Every browser on request, then gone again.
+    assert!(
+        run(&["browser", "install", "--browser", "all"])
+            .status
+            .success()
+    );
+    for (_, manifest) in &manifests {
+        assert!(manifest.is_file(), "{}", manifest.display());
+    }
+    let output = run(&["browser", "uninstall"]);
+    assert!(output.status.success());
+    for (_, manifest) in &manifests {
+        assert!(!manifest.exists(), "{}", manifest.display());
+    }
+    let output = run(&["browser", "uninstall"]);
+    assert!(String::from_utf8_lossy(&output.stdout).contains("wasn't registered"));
+}

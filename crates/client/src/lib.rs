@@ -243,9 +243,19 @@ impl<R: AsyncBufRead + Unpin> LineReader<R> {
     }
 }
 
-/// `value` as one JSON line. Requests can carry a passphrase, so the buffer
-/// is sized up front (no reallocation leaves a copy behind) and wiped on drop.
+/// `value` as one JSON line. Requests can carry a passphrase.
 fn encode_line(value: &impl serde::Serialize) -> Result<Zeroizing<Vec<u8>>, Error> {
+    encode_json(b"", value, b"\n").map_err(Error::Encode)
+}
+
+/// `value` as JSON between `before` and `after`, for messages that can
+/// carry secrets: the buffer is sized up front, so no reallocation leaves a
+/// copy behind, and wiped on drop.
+pub fn encode_json(
+    before: &[u8],
+    value: &impl serde::Serialize,
+    after: &[u8],
+) -> serde_json::Result<Zeroizing<Vec<u8>>> {
     struct Count(usize);
     impl std::io::Write for Count {
         fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
@@ -257,10 +267,11 @@ fn encode_line(value: &impl serde::Serialize) -> Result<Zeroizing<Vec<u8>>, Erro
         }
     }
     let mut len = Count(0);
-    serde_json::to_writer(&mut len, value).map_err(Error::Encode)?;
-    let mut body = Zeroizing::new(Vec::with_capacity(len.0 + 1));
-    serde_json::to_writer(&mut *body, value).map_err(Error::Encode)?;
-    body.push(b'\n');
+    serde_json::to_writer(&mut len, value)?;
+    let mut body = Zeroizing::new(Vec::with_capacity(before.len() + len.0 + after.len()));
+    body.extend_from_slice(before);
+    serde_json::to_writer(&mut *body, value)?;
+    body.extend_from_slice(after);
     Ok(body)
 }
 
@@ -447,6 +458,20 @@ mod tests {
     use protocol::DeviceInfo;
     use std::sync::{Arc, Mutex};
     use tokio::net::UnixListener;
+
+    /// Encoding never reallocates, which would leave a copy of a secret in
+    /// freed memory.
+    #[test]
+    fn encoded_messages_fit_their_buffers_exactly() {
+        let secret = "s".repeat(1000);
+        for (before, after) in [(&b""[..], &b"\n"[..]), (&[7, 0, 0, 0][..], &b""[..])] {
+            let body =
+                encode_json(before, &serde_json::json!({"password": secret}), after).unwrap();
+            assert_eq!(body.capacity(), body.len());
+            assert!(body.starts_with(before) && body.ends_with(after));
+            assert_eq!(body.len(), before.len() + 1015 + after.len());
+        }
+    }
 
     /// Reply lines land in wiped buffers, whole however the reads split them.
     #[test]
