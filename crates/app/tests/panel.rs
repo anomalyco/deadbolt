@@ -1245,3 +1245,74 @@ fn a_press_on_the_search_icon_lands_in_the_field() {
     frames(&mut rt, 2);
     assert!(rt.state.search.focused, "kept after a release outside");
 }
+
+/// The row that has focus, if any.
+fn focused_row(rt: &Runtime<App>) -> Option<String> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && e.key.as_deref().is_some_and(|k| k.starts_with("item-")))
+        .and_then(|e| e.key)
+}
+
+/// Rows never take the search's focus: Tab passes them by, and after a
+/// press released off an unselected row, typing (Space too) still goes to
+/// the search and ↑↓ still move the selection.
+#[test]
+fn rows_never_take_the_search_focus() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 2);
+    assert!(rt.state.search.focused);
+    let selected = rt.state.selected.clone();
+    for _ in 0..6 {
+        rt.key(key(Key::Tab));
+        rt.frame(FRAME);
+        assert_eq!(focused_row(&rt), None, "Tab");
+    }
+    assert!(rt.state.search.focused, "Tab leaves the search focused");
+
+    let row = rt
+        .state
+        .visible()
+        .iter()
+        .map(|i| i.id.clone())
+        .find(|i| Some(i) != selected.as_ref())
+        .unwrap();
+    let (r, _) = find(&rt, &format!("item-{row}")).unwrap();
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    let (fr, _) = find(&rt, "footer").unwrap();
+    let (ux, uy) = (fr[0] + fr[2] / 2.0, fr[1] + fr[3] / 2.0);
+    rt.pointer_move(x, y);
+    rt.pointer_down(x, y);
+    rt.frame(FRAME);
+    rt.pointer_move(ux, uy);
+    rt.frame(FRAME);
+    rt.pointer_up(ux, uy);
+    frames(&mut rt, 6);
+    assert_eq!(focused_row(&rt), None, "a press released off a row");
+    assert!(rt.state.search.focused, "the search keeps focus");
+    assert_eq!(rt.state.selected, selected, "nothing was selected");
+
+    rt.key(key(Key::Text(" ".into())));
+    rt.key(key(Key::Text("g".into())));
+    rt.frame(FRAME);
+    assert_eq!(
+        rt.state.search.text, " g",
+        "Space and g typed into the search"
+    );
+}
+
+/// A pasted or typed newline never lands in either window's search: it's
+/// one line.
+#[test]
+fn the_search_is_one_line() {
+    for mut rt in [runtime("empty", true), main_window()] {
+        frames(&mut rt, 2);
+        assert!(rt.state.search.focused);
+        rt.paste("git\nhub\r\n");
+        rt.frame(FRAME);
+        rt.key(key(Key::Text("\n".into())));
+        rt.frame(FRAME);
+        let text = rt.state.search.text.clone();
+        assert!(!text.contains(['\n', '\r']), "{text:?}");
+    }
+}

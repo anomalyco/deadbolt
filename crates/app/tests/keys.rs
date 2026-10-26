@@ -342,3 +342,67 @@ fn a_search_during_an_import_is_honoured_once_it_goes() {
     assert!(!rt.state.import.showing());
     assert_eq!(rt.state.selected_item().unwrap().label, "fly.io");
 }
+
+/// The row that has focus, if any.
+fn focused_row(rt: &Runtime<App>) -> Option<String> {
+    rt.elements()
+        .into_iter()
+        .find(|e| e.focused && e.key.as_deref().is_some_and(|k| k.starts_with("item-")))
+        .and_then(|e| e.key)
+}
+
+/// Rows never take focus, so the keys stay with the search and the
+/// selection: Tab passes them by, a press released off an unselected row
+/// leaves the search focused, and Space with nothing focused selects
+/// nothing, nor closes the import view.
+#[test]
+fn rows_never_take_focus() {
+    for name in ["vault", "import"] {
+        let mut rt = scene(name);
+        let selected = rt.state.selected.clone();
+        let importing = rt.state.import.showing();
+        for _ in 0..12 {
+            tap(&mut rt, Key::Tab);
+            assert_eq!(focused_row(&rt), None, "Tab ({name})");
+        }
+
+        blur(&mut rt);
+        let row = ids(&rt)
+            .into_iter()
+            .find(|i| Some(i) != selected.as_ref())
+            .unwrap();
+        let (x, y) = rt.find(&format!("item-{row}")).unwrap();
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        rt.frame(FRAME);
+        rt.pointer_move(x + 400.0, y);
+        rt.frame(FRAME);
+        rt.pointer_up(x + 400.0, y);
+        settle(&mut rt, 0.1);
+        assert_eq!(
+            focused_row(&rt),
+            None,
+            "a press released off a row ({name})"
+        );
+        assert!(
+            rt.state.search.focused,
+            "the search has focus back ({name})"
+        );
+        assert_eq!(rt.state.selected, selected, "the press selected ({name})");
+        assert_eq!(
+            rt.state.import.showing(),
+            importing,
+            "the press closed the import view"
+        );
+
+        blur(&mut rt);
+        tap(&mut rt, Key::Text(" ".into()));
+        settle(&mut rt, 0.1);
+        assert_eq!(rt.state.selected, selected, "Space selected a row ({name})");
+        assert_eq!(
+            rt.state.import.showing(),
+            importing,
+            "Space closed the import view"
+        );
+    }
+}

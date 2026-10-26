@@ -284,6 +284,7 @@ pub(crate) type SearchKeys = fn(&mut App, &KeyEvent, &mut Tx) -> bool;
 /// The search field: typing filters the list live; `keys` takes ↑↓, Enter and Escape.
 pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys) -> El {
     text_input(&s.search, style)
+        .single_line()
         .key("search-input")
         .label("Search items")
         .grow(1.0)
@@ -396,20 +397,28 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         .subtitle(sub)
         .height(ROW_H)
         .selected(s.selected.as_deref() == Some(item.id.as_str()))
-        // The click takes focus from the search; it goes straight back, so
-        // ↑↓ and ⏎ go on from the clicked row. The item replaces at once,
-        // unless the import view swaps back to it.
+        // The item replaces at once, unless the import view swaps back to it.
         .on_select(move |s: &mut App, tx| {
             if !s.import.showing() {
                 tx.instant();
             }
             s.cancel_import();
             s.select(Some(id.clone()));
-            s.search.focused = true;
         })
         .build(k)
         .key(format!("item-{}", item.id))
         .role("option")
+        // Rows aren't focusable: the keys stay with the search, and with the
+        // selection rather than a focus ring of their own (Tab, Space). A
+        // press on one blurs the search, so it goes straight back on the way
+        // down, and ↑↓, ⏎ and typing go on, released on the row or off it.
+        .focusable(false)
+        .focus_selected(false)
+        .on_drag(|s: &mut App, d: &mut rune::Drag, _: &mut Tx| {
+            if d.phase == rune::Phase::Down {
+                s.search.focused = true;
+            }
+        })
         // A search replaces the list at once (an edit is instant: no
         // `animate_edit_layout`). Rows an agent change adds or removes fade
         // in place while the rest slide to their new places.
