@@ -241,11 +241,15 @@ impl App {
         match result {
             Ok(Some(path)) => self.read_export(path),
             Ok(None) => {}
+            // Linux without a FileChooser portal lands here; dropping still works.
             Err(message) => {
                 self.import.error = Some(Notice {
-                    severity: Severity::Danger,
+                    severity: Severity::Caution,
                     title: "Couldn't show the file dialog".into(),
-                    body: sentence(&message),
+                    body: format!(
+                        "{} Drag the export onto this window instead.",
+                        sentence(&message)
+                    ),
                 })
             }
         }
