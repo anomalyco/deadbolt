@@ -11,12 +11,12 @@ use std::time::Duration;
 
 use deadbolt_client::export::{self, ExportError};
 use deadbolt_client::protocol::{
-    Change, Command, ErrorCode, ImportReport, ItemInfo, Reply, Status,
+    Change, Code, Command, ErrorCode, ImportReport, ItemInfo, Reply, Status,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
 use tokio::sync::oneshot;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// The first wait before watching again after the agent went away.
 const RECONNECT_FIRST: Duration = Duration::from_millis(100);
@@ -33,8 +33,15 @@ pub enum Job {
     List {
         generation: u64,
     },
-    /// One item with its values; `seq` tells a stale reply from the current one.
+    /// One item with its values, and its one-time code if it has one (the
+    /// otp's own value is wiped here); `seq` tells a stale reply from the
+    /// current one.
     Get {
+        id: String,
+        seq: u64,
+    },
+    /// The item's current one-time code, tagged like `Get`.
+    Code {
         id: String,
         seq: u64,
     },
@@ -63,6 +70,10 @@ pub enum Done {
         seq: u64,
         result: Result<Values, Failure>,
     },
+    Code {
+        seq: u64,
+        result: Result<Code, Failure>,
+    },
     Imported {
         seq: u64,
         /// An import was attempted: false for a preview, or for an import
@@ -76,22 +87,28 @@ pub enum Done {
     WatchLost,
 }
 
-/// An item with its values, wiped when dropped, so a reply nobody takes (a
-/// stale one, or one left in a hidden window's inbox) doesn't keep them.
-pub struct Values(ItemInfo);
+/// An item with its values, and its one-time code if it has one, wiped when
+/// dropped, so a reply nobody takes (a stale one, or one left in a hidden
+/// window's inbox) doesn't keep them.
+pub struct Values(ItemInfo, Option<Result<Code, Failure>>);
 
 impl Values {
     pub fn new(item: ItemInfo) -> Values {
-        Values(item)
+        Values(item, None)
     }
 
-    /// The item, for the taker to wipe (`model::forget`).
-    pub fn take(mut self) -> ItemInfo {
+    pub fn with_code(item: ItemInfo, code: Result<Code, Failure>) -> Values {
+        Values(item, Some(code))
+    }
+
+    /// The item, for the taker to wipe (`model::forget`), and its code.
+    pub fn take(mut self) -> (ItemInfo, Option<Result<Code, Failure>>) {
         let fields = std::mem::take(&mut self.0.fields);
-        ItemInfo {
+        let item = ItemInfo {
             fields,
             ..self.0.clone()
-        }
+        };
+        (item, self.1.take())
     }
 }
 
@@ -415,15 +432,25 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         Job::Get { id, seq } => {
             let command = Command::ItemGet {
                 vault: None,
-                query: vec![id],
+                query: vec![id.clone()],
             };
             let result = match deadbolt_client::simple(paths, command).await {
-                Ok(Reply::Item { item }) => Ok(Values::new(item)),
+                Ok(Reply::Item { mut item }) => match crate::model::code_field(&item.fields) {
+                    Some(otp) => {
+                        item.fields[otp].value.zeroize();
+                        Ok(Values::with_code(item, code(paths, id).await))
+                    }
+                    None => Ok(Values::new(item)),
+                },
                 Ok(_) => Err(unexpected()),
                 Err(error) => Err(error.into()),
             };
             Done::Item { seq, result }
         }
+        Job::Code { id, seq } => Done::Code {
+            seq,
+            result: code(paths, id).await,
+        },
         Job::Import { path, apply, seq } => {
             let mut applied = false;
             let result = import(paths, &path, apply, &mut applied).await;
@@ -468,6 +495,18 @@ async fn import(
             changed,
         }
     })
+}
+
+async fn code(paths: &Paths, id: String) -> Result<Code, Failure> {
+    let command = Command::ItemCode {
+        vault: None,
+        query: vec![id],
+    };
+    match deadbolt_client::simple(paths, command).await {
+        Ok(Reply::Code { code }) => Ok(code),
+        Ok(_) => Err(unexpected()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn unexpected() -> Failure {

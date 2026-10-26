@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status, noun, primary_field};
+use deadbolt_client::protocol::{Change, Code, FieldInfo, ItemInfo, Status, noun, primary_field};
 use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -20,6 +20,11 @@ const CLEARED_NOTICE: f64 = 1.6;
 const EXPIRY_SLACK: f64 = 0.5;
 /// The countdown bar's full width, in points.
 pub const BAR_W: f32 = 272.0;
+/// The one-time code's countdown bar, in points.
+pub const CODE_BAR: [f32; 2] = [40.0, 3.0];
+/// How long after a code's period ends the next is asked for, so the
+/// agent's clock is past the boundary too.
+const CODE_SLACK: f64 = 0.05;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Screen {
@@ -56,6 +61,52 @@ impl Copy {
     }
 }
 
+/// The shown item's one-time code. The agent computes each one; the app
+/// never holds the secret. Wiped when dropped.
+pub struct Otp {
+    pub item: String,
+    /// The field it comes from (`code_field`).
+    pub field: String,
+    pub code: Option<Zeroizing<String>>,
+    /// Why there's no code: an otp value saved before codes were checked.
+    pub error: Option<String>,
+    /// When the code stops being valid, on Rune's clock.
+    pub until: f64,
+    /// When it stops, in unix seconds: a new value is a new period.
+    valid_until: u64,
+    /// Counts periods, so each period's countdown bar is a new one.
+    pub turns: u64,
+    /// The countdown bar's rect, emptying linearly over the rest of the period.
+    pub bar: rune::Tween<[f32; 4]>,
+    /// A request for the next code is out.
+    fetching: bool,
+    /// Copy the next code that lands: none was current when asked.
+    copy_next: bool,
+}
+
+impl Otp {
+    fn new(item: String, field: String) -> Otp {
+        let [_, h] = CODE_BAR;
+        Otp {
+            item,
+            field,
+            code: None,
+            error: None,
+            until: 0.0,
+            valid_until: 0,
+            turns: 0,
+            bar: rune::Tween::linear([0.0; 4], [0.0, 0.0, 0.0, h], Duration::ZERO),
+            fetching: false,
+            copy_next: false,
+        }
+    }
+
+    /// The code, while it's valid at `now`.
+    pub fn current(&self, now: f64) -> Option<&Zeroizing<String>> {
+        self.code.as_ref().filter(|_| now < self.until)
+    }
+}
+
 pub struct App {
     pub installer: Option<crate::install::Installer>,
     /// The vault footer's Settings popover is open.
@@ -81,6 +132,8 @@ pub struct App {
     /// The selected item with its values.
     pub detail: Option<ItemInfo>,
     pub revealed: Vec<String>,
+    /// The shown item's one-time code, when it has an otp.
+    pub otp: Option<Otp>,
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub import: crate::import::Import,
@@ -124,6 +177,7 @@ impl App {
             selected: None,
             detail: None,
             revealed: Vec::new(),
+            otp: None,
             copy: None,
             notice: None,
             import: crate::import::Import::default(),
@@ -153,6 +207,7 @@ impl App {
         }
         changed |= self.poll_onboarding(now, tx);
         changed |= self.tick_copy(now, tx);
+        self.tick_code(now);
         changed |= self.tick_import(now);
         if let Some(installer) = &mut self.installer {
             changed |= installer.poll(now);
@@ -217,8 +272,8 @@ impl App {
                     return;
                 }
                 match result {
-                    Ok(item) => {
-                        let item = item.take();
+                    Ok(values) => {
+                        let (item, code) = values.take();
                         // A new selection's fields land in place, not animated: the
                         // selection moved under the user's own hand. A refresh of the
                         // shown item animates what changed.
@@ -226,6 +281,9 @@ impl App {
                             tx.instant();
                         }
                         self.set_detail(Some(item));
+                        if let Some(code) = code {
+                            self.on_code(code, tx);
+                        }
                         if let Some((pending, field)) = self.pending_copy.take()
                             && pending == seq
                         {
@@ -234,6 +292,12 @@ impl App {
                     }
                     Err(failure) => self.on_failure(failure, tx),
                 }
+            }
+            Done::Code { seq, result } => {
+                if seq != self.seq || self.screen != Screen::Vault || self.panel_away() {
+                    return;
+                }
+                self.on_code(result, tx);
             }
             Done::Imported {
                 seq,
@@ -456,15 +520,104 @@ impl App {
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
-    /// revealed only while the same item is shown.
-    fn set_detail(&mut self, item: Option<ItemInfo>) {
+    /// revealed only while the same item is shown, and its code while it
+    /// still has one from the same field.
+    pub(crate) fn set_detail(&mut self, item: Option<ItemInfo>) {
         let same = matches!((&self.detail, &item), (Some(a), Some(b)) if a.id == b.id);
+        let code = item
+            .as_ref()
+            .and_then(|i| Some((i.id.clone(), i.fields[code_field(&i.fields)?].name.clone())));
         if let Some(mut old) = std::mem::replace(&mut self.detail, item) {
             forget(&mut old);
         }
         if !same {
             self.revealed.clear();
         }
+        let keep = matches!((&self.otp, &code), (Some(o), Some((item, field))) if &o.item == item && &o.field == field);
+        if !keep {
+            self.otp = code.map(|(item, field)| Otp::new(item, field));
+        }
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // One-time codes
+
+    /// A code (or why there is none) for the shown item. Its countdown runs
+    /// on the render clock; the next is asked for once this one's period ends.
+    pub(crate) fn on_code(&mut self, result: Result<Code, Failure>, tx: &mut Tx) {
+        let now = self.clock;
+        let Some(otp) = &mut self.otp else { return };
+        otp.fetching = false;
+        let code = match result {
+            Ok(code) => code,
+            Err(failure) if failure.locked() => return self.on_locked(tx),
+            Err(failure) => {
+                otp.code = None;
+                otp.error = Some(failure.message);
+                if std::mem::take(&mut otp.copy_next) {
+                    self.notice = otp.error.clone();
+                }
+                return;
+            }
+        };
+        let period = code.period.max(1) as f64;
+        let remaining = (code.remaining_ms as f64 / 1000.0).clamp(0.0, period);
+        if code.valid_until != otp.valid_until {
+            otp.valid_until = code.valid_until;
+            otp.turns += 1;
+        }
+        otp.code = Some(code.code.clone());
+        otp.error = None;
+        otp.until = now + remaining;
+        let [w, h] = CODE_BAR;
+        otp.bar = rune::Tween::linear(
+            [0.0, 0.0, w * (remaining / period) as f32, h],
+            [0.0, 0.0, 0.0, h],
+            Duration::from_secs_f64(remaining),
+        );
+        tx.wake_after(Duration::from_secs_f64(remaining + CODE_SLACK));
+        if std::mem::take(&mut otp.copy_next) {
+            let field = otp.field.clone();
+            self.copy_field(&field, tx);
+        }
+    }
+
+    /// Once a code's period is over, asks for the next. The quick panel shows
+    /// no code, so it asks only when one is copied.
+    fn tick_code(&mut self, now: f64) {
+        let Some(otp) = &mut self.otp else { return };
+        if otp.fetching || otp.code.is_none() || otp.current(now).is_some() || self.panel.is_some()
+        {
+            return;
+        }
+        otp.fetching = true;
+        self.agent.send(Job::Code {
+            id: otp.item.clone(),
+            seq: self.seq,
+        });
+    }
+
+    /// The shown item's code, or `None` after asking the agent for the next
+    /// one, which is copied as it lands.
+    fn code_for_copy(&mut self) -> Option<String> {
+        let now = self.clock;
+        let otp = self.otp.as_mut()?;
+        if let Some(code) = otp.current(now) {
+            return Some(code.to_string());
+        }
+        if let Some(error) = &otp.error {
+            self.notice = Some(error.clone());
+            return None;
+        }
+        otp.copy_next = true;
+        if !otp.fetching {
+            otp.fetching = true;
+            self.agent.send(Job::Code {
+                id: otp.item.clone(),
+                seq: self.seq,
+            });
+        }
+        None
     }
 
     // ---------------------------------------------------------------------------------------
@@ -602,7 +755,7 @@ impl App {
         self.list_key(ev, tx)
     }
 
-    /// ↑↓ select, ⏎ and ⇧⏎ copy, esc clears the search.
+    /// ↑↓ select, ⏎, ⇧⏎ and ⌥⏎ copy, esc clears the search.
     fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         match ev.key {
             Key::Up | Key::Down => {
@@ -616,7 +769,9 @@ impl App {
                 }
             }
             Key::Enter => {
-                let field = if ev.mods.shift {
+                let field = if ev.mods.alt {
+                    "otp"
+                } else if ev.mods.shift {
                     "username"
                 } else {
                     self.primary_field()
@@ -698,17 +853,37 @@ impl App {
         }
     }
 
+    /// Copies a field of the shown item; its otp (`"otp"` names whichever
+    /// field the code comes from) copies the current code.
     pub fn copy_field(&mut self, field: &str, tx: &mut Tx) {
         let Some(item) = &self.detail else { return };
-        let Some(info) = item.fields.iter().find(|f| f.name == field) else {
-            self.notice = Some(format!("{} has no {field}", item.label));
-            return;
+        let id = item.id.clone();
+        let code = self
+            .otp
+            .as_ref()
+            .filter(|o| field == "otp" || field == o.field)
+            .map(|o| o.field.clone());
+        let (field, value) = match code {
+            Some(code_field) => match self.code_for_copy() {
+                Some(code) => (code_field, code),
+                None => return,
+            },
+            None => {
+                let Some(info) = item.fields.iter().find(|f| f.name == field) else {
+                    self.notice = Some(match field {
+                        "otp" => format!("{} has no one-time code", item.label),
+                        _ => format!("{} has no {field}", item.label),
+                    });
+                    return;
+                };
+                (field.to_owned(), info.value.clone())
+            }
         };
         let lasts = Duration::from_secs_f64(self.clear_after);
-        let copied = tx.copy_secret(info.value.clone(), lasts);
+        let copied = tx.copy_secret(value, lasts);
         self.copy = Some(Copy {
-            item: item.id.clone(),
-            field: field.into(),
+            item: id,
+            field,
             at: self.clock,
             lasts: self.clear_after,
             cleared_at: None,
@@ -881,6 +1056,33 @@ impl App {
             _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev, tx),
             _ => false,
         }
+    }
+}
+
+/// The field an item's one-time code comes from, as the agent picks it:
+/// `otp`, else the first field of type otp.
+pub fn code_field(fields: &[FieldInfo]) -> Option<usize> {
+    let otp = |f: &FieldInfo| f.kind == "otp";
+    fields
+        .iter()
+        .position(|f| f.name == "otp" && otp(f))
+        .or_else(|| fields.iter().position(otp))
+}
+
+/// The selected item has a one-time code ⌥⏎ can copy.
+pub fn has_code(s: &App) -> bool {
+    let selected = s.selected_item().map(|i| i.id.as_str());
+    s.otp
+        .as_ref()
+        .is_some_and(|o| o.error.is_none() && Some(o.item.as_str()) == selected)
+}
+
+/// Groups a code's digits for reading: 123 456, 123 4567, 1234 5678.
+pub fn group_code(code: &str) -> String {
+    let at = code.len() / 2;
+    match (code.get(..at), code.get(at..)) {
+        (Some(a), Some(b)) if code.len() >= 6 => format!("{a} {b}"),
+        _ => code.to_owned(),
     }
 }
 

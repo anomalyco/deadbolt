@@ -280,6 +280,14 @@ mod tests {
         assert_eq!(totp.valid_until(60), 90);
     }
 
+    /// The code the desktop app's scenes show (`fixture_code`).
+    #[test]
+    fn the_app_scenes_code() {
+        let totp = Totp::parse(&BASE32_NOPAD.encode(b"12345678901234567890")).unwrap();
+        assert_eq!(totp.code(1_999_999_992), "279037");
+        assert_eq!(totp.valid_until(1_999_999_992), 2_000_000_010);
+    }
+
     #[test]
     fn bare_secrets_tolerate_spaces_lowercase_and_padding() {
         let canonical = Totp::parse("JBSWY3DPEHPK3PXP").unwrap();
