@@ -748,14 +748,34 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(16.0)
                 .center_y()
                 .clip_fade(0.0, 0.0, 16.0, 0.0)
-                .child(hint("h-copy", &["⏎"], "Copy password"))
-                .child(hint("h-user", &["⇧", "⏎"], "Copy username"))
-                .child(hint("h-move", &["↑", "↓"], "Select")),
+                .children(key_hints(s, k)),
         )
         .child(spacer())
         .children(crate::panel::window::entry(s, k))
         .child(hint("h-lock", &["⌘", "L"], "Lock"))
         .child(settings(s, k, layer))
+}
+
+/// What ⏎ and the arrows do: the item's copies, or the import view's steps while it shows.
+fn key_hints(s: &App, k: &Kit) -> Vec<El> {
+    let hint = |key: &str, keys: &[&str], label: &str| hint(k, key, keys, label);
+    if !(s.import.showing() || s.drop_hovering()) {
+        return vec![
+            hint("h-copy", &["⏎"], "Copy password"),
+            hint("h-user", &["⇧", "⏎"], "Copy username"),
+            hint("h-move", &["↑", "↓"], "Select"),
+        ];
+    }
+    let mut hints = Vec::new();
+    match &s.import.phase {
+        crate::import::Phase::Preview(p) if p.new_items() > 0 => {
+            hints.push(hint("h-import", &["⏎"], "Import"))
+        }
+        crate::import::Phase::Preview(_) => hints.push(hint("h-done", &["⏎"], "Done")),
+        _ => {}
+    }
+    hints.push(hint("h-cancel", &["esc"], "Cancel"));
+    hints
 }
 
 /// Settings in the vault's footer: the quick panel's shortcut and the
