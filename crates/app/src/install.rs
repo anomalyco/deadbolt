@@ -515,6 +515,7 @@ mod view {
     use super::{Copied, Existing, InstallError, Installer, quote, temporary};
     use crate::model::App;
     use crate::onboarding::view::{PANEL_W, bar, muted, page as centred, title};
+    use crate::view::Paged;
 
     fn installer(s: &mut App) -> Option<&mut Installer> {
         s.installer.as_mut()
@@ -576,9 +577,9 @@ mod view {
     }
 
     /// The install page, in place of the vault.
-    pub fn page(s: &App, k: &Kit, inset: f32) -> El {
+    pub fn page(s: &App, k: &Kit) -> Paged {
         let Some(i) = &s.installer else {
-            return col();
+            return col().into();
         };
         let mut body = col().w_full().gap(14.0).items_start();
         let key = match &i.scan {
@@ -734,17 +735,11 @@ mod view {
                     .transition(Transition::opacity()),
             );
         }
-        let back = bar(
-            k,
-            inset,
-            "Back",
-            &crate::onboarding::view::CHEVRON_LEFT,
-            |s| {
-                if let Some(i) = installer(s) {
-                    i.close();
-                }
-            },
-        );
+        let back = bar(k, "Back", &crate::onboarding::view::CHEVRON_LEFT, |s| {
+            if let Some(i) = installer(s) {
+                i.close();
+            }
+        });
         centred("install-command", Some(back), panel)
     }
 

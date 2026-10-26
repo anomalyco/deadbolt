@@ -12,7 +12,6 @@ use rune::{
     Color, Cursor, Curve, Cycle, Easing, El, Icon, ScrollSpec, Shadow, Spring, TextEdit, TextStyle,
     Transition, canvas, col, el, icon, row, text,
 };
-use rune_kit::shell::TOOLBAR_HEIGHT;
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, StateColors, TextInput,
 };
@@ -20,6 +19,7 @@ use rune_kit::{
 use super::worker::Stage;
 use super::{Flow, Notice, Severity, Step, Strength};
 use crate::model::App;
+use crate::view::Paged;
 
 pub(crate) const PANEL_W: f32 = 400.0;
 /// The bolt's throw: the one sanctioned flourish (Kit's "playful", .3 / .3).
@@ -56,21 +56,20 @@ pub static INFO: Icon = Icon {
     body: r#"<circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.25"/><path d="M8 7.25v4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".8" fill="currentColor"/>"#,
 };
 
-/// `inset` is the traffic lights' width (`Cx::titlebar_inset`): the bars sit past them.
-pub fn screen(s: &App, k: &Kit, dark: bool, inset: f32) -> El {
+pub fn screen(s: &App, k: &Kit, dark: bool) -> Paged {
     let o = &s.onboarding;
     match &o.step {
         Step::Welcome => welcome(s, k),
-        Step::Create => form(s, k, Flow::Create, inset),
-        Step::Join => form(s, k, Flow::Join, inset),
-        Step::Working(flow) => progress(s, k, dark, *flow, inset),
-        Step::Done { flow, .. } => progress(s, k, dark, *flow, inset),
-        Step::Ticket => ticket(s, k, inset),
+        Step::Create => form(s, k, Flow::Create),
+        Step::Join => form(s, k, Flow::Join),
+        Step::Working(flow) => progress(s, k, dark, *flow),
+        Step::Done { flow, .. } => progress(s, k, dark, *flow),
+        Step::Ticket => ticket(s, k),
         Step::Confirm {
             code,
             vault,
             inviter,
-        } => confirm(k, code, vault, inviter, inset),
+        } => confirm(k, code, vault, inviter),
     }
 }
 
@@ -90,11 +89,9 @@ pub(crate) fn title(k: &Kit, key: &str, s: impl Into<String>) -> El {
         .color(k.c.text_strong)
 }
 
-/// A step: the panel centred in the window, with an optional button in the
-/// title bar. With one, the panel keeps clear of the title bar band; a panel
-/// taller than the room left scrolls.
-pub(crate) fn page(key: &str, bar: Option<El>, panel: El) -> El {
-    let top = if bar.is_some() { TOOLBAR_HEIGHT } else { 0.0 };
+/// A step: the panel centred in the page, with an optional button in the
+/// title bar. A panel taller than the page scrolls.
+pub(crate) fn page(key: &str, bar: Option<El>, panel: El) -> Paged {
     let body = col()
         .key("page-scroll")
         .w_full()
@@ -104,42 +101,27 @@ pub(crate) fn page(key: &str, bar: Option<El>, panel: El) -> El {
             stick_bottom: false,
         })
         .child(col().w_full().grow(1.0).center().py(16.0).child(panel));
-    col()
-        .key(key)
-        .w_full()
-        .h_full()
-        .pt(top)
-        .child(body)
-        .children(bar)
+    Paged {
+        body: col().key(key).w_full().h_full().child(body),
+        back: bar,
+    }
 }
 
-/// A button in the title bar band, just past the traffic lights (`inset`).
-pub(crate) fn bar(
-    k: &Kit,
-    inset: f32,
-    label: &str,
-    glyph: &'static Icon,
-    press: fn(&mut App),
-) -> El {
-    let x = if inset > 0.0 { inset + 8.0 } else { 12.0 };
-    row()
-        .key("bar")
-        .absolute(x, (TOOLBAR_HEIGHT - 28.0) / 2.0)
-        .child(
-            Button::new(label)
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Large)
-                .icon(glyph)
-                .on_press(press)
-                .build(k)
-                .key("back"),
-        )
+/// A button for the title bar: Back or Cancel.
+pub(crate) fn bar(k: &Kit, label: &str, glyph: &'static Icon, press: fn(&mut App)) -> El {
+    Button::new(label)
+        .variant(ButtonVariant::Ghost)
+        .control_size(ControlSize::Large)
+        .icon(glyph)
+        .on_press(press)
+        .build(k)
+        .key("back")
 }
 
 // -------------------------------------------------------------------------------------------
 // Welcome
 
-fn welcome(s: &App, k: &Kit) -> El {
+fn welcome(s: &App, k: &Kit) -> Paged {
     let o = &s.onboarding;
     let about = if o.device_ready {
         "This device is set up but holds no vault yet. Create one, or join yours from another device."
@@ -297,7 +279,7 @@ pub fn banner(k: &Kit, n: &Notice) -> El {
 // -------------------------------------------------------------------------------------------
 // The forms
 
-fn form(s: &App, k: &Kit, flow: Flow, inset: f32) -> El {
+fn form(s: &App, k: &Kit, flow: Flow) -> Paged {
     let o = &s.onboarding;
     let device = !o.device_ready;
     let (key, heading, about, submit) = match (flow, device) {
@@ -367,9 +349,7 @@ fn form(s: &App, k: &Kit, flow: Flow, inset: f32) -> El {
     );
     page(
         key,
-        Some(bar(k, inset, "Back", &CHEVRON_LEFT, |s| {
-            s.onboarding_back()
-        })),
+        Some(bar(k, "Back", &CHEVRON_LEFT, |s| s.onboarding_back())),
         panel,
     )
 }
@@ -575,7 +555,7 @@ fn repeat_field(s: &App, k: &Kit, flow: Flow) -> El {
 // -------------------------------------------------------------------------------------------
 // Progress and the moment
 
-fn progress(s: &App, k: &Kit, dark: bool, flow: Flow, inset: f32) -> El {
+fn progress(s: &App, k: &Kit, dark: bool, flow: Flow) -> Paged {
     let o = &s.onboarding;
     let done = matches!(o.step, Step::Done { .. });
     let vault = o.vault.text.trim();
@@ -658,7 +638,7 @@ fn progress(s: &App, k: &Kit, dark: bool, flow: Flow, inset: f32) -> El {
     };
     // Getting a ticket can wait on a relay; until the codes match, a join can stop.
     let cancel = (flow == Flow::Join && !done && o.pairing.is_none() && !o.stopping())
-        .then(|| bar(k, inset, "Cancel", k.glyph.close, |s| s.cancel_join()));
+        .then(|| bar(k, "Cancel", k.glyph.close, |s| s.cancel_join()));
     page(key, cancel, panel)
 }
 
@@ -803,13 +783,13 @@ mod geo {
 /// through red to rest.
 fn bolt(k: &Kit, dark: bool, done: bool, phase: usize) -> El {
     // The theme's ember: red, and its pale end for the flash.
-    let ember = |step: u8| {
-        let mode = if dark { "dark" } else { "light" };
-        rune_theme_opencode::theme(dark).color(&format!("ember-{mode}-{step}"))
-    };
-    let accent = ember(9);
+    let accent = rune_theme_opencode::brand(dark);
     let rest = k.c.layer_03;
-    let hot = if dark { ember(12) } else { ember(7) };
+    let hot = if dark {
+        rune_theme_opencode::theme(dark).color("ember-dark-12")
+    } else {
+        rune_theme_opencode::theme(dark).color("ember-light-7")
+    };
     // (strike fill, its colour spring, glow opacity, glow curve) per phase.
     let (strike, spring, glow, curve): (Color, Spring, f32, Curve) = match (done, phase) {
         (false, _) | (true, 0) => (rest, Spring::new(0.3, 0.0), 0.0, Curve::linear(0.1)),
@@ -902,7 +882,7 @@ fn bolt(k: &Kit, dark: bool, done: bool, phase: usize) -> El {
 // -------------------------------------------------------------------------------------------
 // Pairing
 
-fn ticket(s: &App, k: &Kit, inset: f32) -> El {
+fn ticket(s: &App, k: &Kit) -> Paged {
     let o = &s.onboarding;
     let Some(t) = &o.ticket else {
         return page("ticket", None, col());
@@ -1010,12 +990,12 @@ fn ticket(s: &App, k: &Kit, inset: f32) -> El {
     );
     page(
         "ticket",
-        Some(bar(k, inset, "Cancel", k.glyph.close, |s| s.cancel_join())),
+        Some(bar(k, "Cancel", k.glyph.close, |s| s.cancel_join())),
         pair.child(how),
     )
 }
 
-fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str, inset: f32) -> El {
+fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str) -> Paged {
     let spaced = if code.len() == 6 {
         format!("{} {}", &code[..3], &code[3..])
     } else {
@@ -1069,7 +1049,7 @@ fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str, inset: f32) -> El {
         ));
     page(
         "confirm",
-        Some(bar(k, inset, "Cancel", k.glyph.close, |s| s.cancel_join())),
+        Some(bar(k, "Cancel", k.glyph.close, |s| s.cancel_join())),
         panel,
     )
 }

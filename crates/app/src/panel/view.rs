@@ -126,8 +126,11 @@ fn header(key: &str) -> El {
         .center_y()
 }
 
+/// A press anywhere in the header, the icon too, lands in the field.
 fn search(s: &App, k: &Kit) -> El {
     header("search")
+        .role("textbox")
+        .label("Search items")
         .child(
             icon(k.glyph.search, 18.0)
                 .key("search-icon")

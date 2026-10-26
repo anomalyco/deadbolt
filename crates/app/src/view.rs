@@ -9,10 +9,10 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
-    Chrome, Cursor, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el,
-    icon, row, spacer, text, text_input,
+    Chrome, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
+    row, spacer, text, text_input,
 };
-use rune_kit::shell::{SplitView, TOOLBAR_HEIGHT, Toolbar};
+use rune_kit::shell::{Page, SidebarRow, SplitView, Toolbar};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Keybind, Kit, Placement,
     Popover, RollingText, TextInput,
@@ -29,6 +29,8 @@ pub const CHROME: Chrome = Chrome {
 };
 /// The search field in the vault's toolbar.
 const SEARCH_W: f32 = 260.0;
+/// A list row: the item's label over its detail and kind.
+const ROW_H: f32 = 46.0;
 /// How far a list's edges fade over hidden rows, and how far a row brought into view stops from them.
 pub(crate) const LIST_EDGE: f32 = 24.0;
 pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
@@ -44,29 +46,23 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     let k = rune_theme_opencode::kit(cx.system_dark());
     let inset = cx.titlebar_inset();
     let mut layer = Vec::new();
-    let shell = s.screen == Screen::Vault && !s.installing();
     let screen = match &s.screen {
-        Screen::Vault if s.installing() => crate::install::page(s, k, inset),
-        Screen::Connecting => connecting(k),
-        Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark(), inset),
-        Screen::Locked => unlock(s, k),
-        Screen::Vault => vault(s, k, inset, &mut layer),
-        Screen::Failed(message) => failed(k, message),
+        Screen::Vault if !s.installing() => vault(s, k, inset, &mut layer),
+        Screen::Vault => page(k, inset, crate::install::page(s, k)),
+        Screen::Connecting => page(k, inset, connecting(k).into()),
+        Screen::Onboarding => page(
+            k,
+            inset,
+            crate::onboarding::view::screen(s, k, cx.system_dark()),
+        ),
+        Screen::Locked => page(k, inset, unlock(s, k).into()),
+        Screen::Failed(message) => page(k, inset, failed(k, message).into()),
     };
-    // The vault's shell has its own title bar; every other screen gets an
-    // empty band to drag the window by, under what it draws.
-    let band = (!shell).then(|| {
-        el().key("titlebar")
-            .pin(Some(0.0), Some(0.0), Some(0.0), None)
-            .h(TOOLBAR_HEIGHT)
-            .window_drag()
-    });
     let root = col()
         .key("window")
         .w_full()
         .h_full()
-        .fill(k.c.bg_base)
-        .children(band)
+        .fill(k.c.bg_deep)
         .child(screen.grow(1.0).w_full().transition(replace()))
         .children(layer);
     // An export dropped anywhere on the open vault goes straight to its preview.
@@ -83,6 +79,29 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     } else {
         root
     }
+}
+
+/// A screen other than the vault: what its page holds, and the button in its
+/// title bar (Back or Cancel).
+pub struct Paged {
+    pub body: El,
+    pub back: Option<El>,
+}
+
+impl From<El> for Paged {
+    fn from(body: El) -> Paged {
+        Paged { body, back: None }
+    }
+}
+
+/// The frame and title bar of the vault's shell, for every other screen.
+/// Within it, one screen replaces the next.
+fn page(k: &Kit, inset: f32, p: Paged) -> El {
+    let mut page = Page::new(p.body.grow(1.0).w_full().transition(replace())).titlebar_inset(inset);
+    if let Some(back) = p.back {
+        page = page.leading(back.transition(Transition::opacity()));
+    }
+    el().key("page").w_full().h_full().child(page.build(k))
 }
 
 /// A centred column for the screens that aren't the vault.
@@ -246,7 +265,8 @@ fn vault(s: &App, k: &Kit, inset: f32, layer: &mut Vec<El>) -> El {
     let toolbar = Toolbar::new().leading(search(s, k)).trailing(
         IconButton::new(k.glyph.lock)
             .variant(IconButtonVariant::GhostMuted)
-            .label("Lock")
+            .help("Lock")
+            .shortcut("⌘L")
             .on_press(|s: &mut App| s.lock())
             .build(k)
             .key("lock"),
@@ -264,6 +284,7 @@ pub(crate) type SearchKeys = fn(&mut App, &KeyEvent, &mut Tx) -> bool;
 /// The search field: typing filters the list live; `keys` takes ↑↓, Enter and Escape.
 pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys) -> El {
     text_input(&s.search, style)
+        .single_line()
         .key("search-input")
         .label("Search items")
         .grow(1.0)
@@ -277,54 +298,19 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
 }
 
 /// The vault's search field: typing filters the list live; `search_key`
-/// takes ↑↓, Enter and Escape.
-///
-/// Rune-kit's `TextInput` look, built here so the field itself spans the
-/// box: a press on the icon or the padding lands in the field, as on its
-/// text, rather than on the title bar under it (a window drag) or on a box
-/// around it (a blur on the way down). Back to `TextInput` once it routes
-/// those presses to its field.
+/// takes ↑↓, Enter and Escape. A press anywhere in its box, the icon too,
+/// lands in the field.
 fn search(s: &App, k: &Kit) -> El {
-    let c = &k.c;
-    let field = text_input(&s.search, k.ty.ui_compact)
-        .single_line()
-        .key("search-input")
-        .label("Search items")
-        .w_full()
-        .h_full()
-        .pl(30.0)
-        .pr(8.0)
-        .py(6.0)
-        .color(c.text_base)
-        .placeholder(search_placeholder(s), c.text_faint)
-        .caret(c.text_base, k.selection())
+    TextInput::new(&s.search)
+        .placeholder(search_placeholder(s))
+        .leading_icon(k.glyph.search)
+        .width(Some(SEARCH_W))
         .on_edit(|s: &mut App| &mut s.search)
-        .on_input_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
-        .on_input_change(|s: &mut App, _| s.search_changed());
-    let mut search = el()
+        .on_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
+        .on_change(|s: &mut App, _| s.search_changed())
+        .build(k)
         .key("search")
-        .w(SEARCH_W)
-        .h(28.0)
-        .radius(k.radius.md)
-        .fill(c.bg_base)
-        .gradient(k.light(0.06), k.light(0.02))
-        .motion(k.motion.control)
-        .child(field)
-        .child(
-            icon(k.glyph.search, 16.0)
-                .key("search-icon")
-                .color(c.icon_muted)
-                .absolute(8.0, 6.0),
-        );
-    if s.search.focused {
-        search = search.outline(1.0, 0.0, c.border_focus);
-    } else {
-        for shadow in k.shadow_layers(&k.elevation.button_neutral) {
-            search = search.box_shadow(shadow);
-        }
-        search = search.hover(c.hover);
-    }
-    search
+        .label("Search items")
 }
 
 fn search_placeholder(s: &App) -> String {
@@ -402,17 +388,37 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
 /// Row `i` of the visible items. Rows are built only here, by index, ready for a lazy list.
 fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
     let item = visible[i];
-    let selected = s.selected.as_deref() == Some(item.id.as_str());
     let id = item.id.clone();
-    let mut r = col()
+    let sub = match &item.detail {
+        Some(d) => format!("{d} · {}", item.kind),
+        None => item.kind.clone(),
+    };
+    SidebarRow::new(item.label.clone())
+        .subtitle(sub)
+        .height(ROW_H)
+        .selected(s.selected.as_deref() == Some(item.id.as_str()))
+        // The item replaces at once, unless the import view swaps back to it.
+        .on_select(move |s: &mut App, tx| {
+            if !s.import.showing() {
+                tx.instant();
+            }
+            s.cancel_import();
+            s.select(Some(id.clone()));
+        })
+        .build(k)
         .key(format!("item-{}", item.id))
         .role("option")
-        .label(item.label.clone())
-        .w_full()
-        .px(8.0)
-        .py(6.0)
-        .radius(k.radius.md)
-        .cursor(Cursor::Pointer)
+        // Rows aren't focusable: the keys stay with the search, and with the
+        // selection rather than a focus ring of their own (Tab, Space). A
+        // press on one blurs the search, so it goes straight back on the way
+        // down, and ↑↓, ⏎ and typing go on, released on the row or off it.
+        .focusable(false)
+        .focus_selected(false)
+        .on_drag(|s: &mut App, d: &mut rune::Drag, _: &mut Tx| {
+            if d.phase == rune::Phase::Down {
+                s.search.focused = true;
+            }
+        })
         // A search replaces the list at once (an edit is instant: no
         // `animate_edit_layout`). Rows an agent change adds or removes fade
         // in place while the rest slide to their new places.
@@ -425,44 +431,6 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
                     rune::tok::motion::SNAP,
                 )),
         )
-        // The click blurs the search; keys stay with it, so ↑↓ and ⏎ go on
-        // from the clicked row. The item replaces at once, unless the import
-        // view swaps back to it.
-        .on_press_tx(move |s: &mut App, tx| {
-            if !s.import.showing() {
-                tx.instant();
-            }
-            s.cancel_import();
-            s.select(Some(id.clone()));
-            s.search.focused = true;
-        })
-        .child(
-            text(item.label.clone())
-                .key("label")
-                .font(k.ty.ui_medium.lh(18.0))
-                .color(k.c.text_base)
-                .truncate_fade(),
-        );
-    let sub = match &item.detail {
-        Some(d) => format!("{d} · {}", item.kind),
-        None => item.kind.clone(),
-    };
-    r = r.child(
-        text(sub)
-            .key("sub")
-            .font(k.ty.small.lh(16.0))
-            .color(if selected {
-                k.c.text_muted
-            } else {
-                k.c.text_faint
-            })
-            .truncate_fade(),
-    );
-    if selected {
-        r.fill(k.c.pressed)
-    } else {
-        r.hover(k.c.hover)
-    }
 }
 
 fn detail(s: &App, k: &Kit) -> El {
