@@ -390,9 +390,12 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
                     rune::tok::motion::SNAP,
                 )),
         )
+        // The click blurs the search; keys stay with it, so ↑↓ and ⏎ go on
+        // from the clicked row.
         .on_press(move |s: &mut App| {
             s.cancel_import();
             s.select(Some(id.clone()));
+            s.search.focused = true;
         })
         .child(
             text(item.label.clone())

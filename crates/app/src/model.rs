@@ -568,7 +568,8 @@ impl App {
         self.select(Some(id));
     }
 
-    /// Keys in the search field, before its editor. True when handled.
+    /// Keys in the search field (the vault's and the panel's), before its
+    /// editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
@@ -579,6 +580,22 @@ impl App {
         if self.panel_shortcut(ev, tx) {
             return true;
         }
+        self.list_key(ev, tx)
+    }
+
+    /// The vault's keys wherever focus is, after overlays and the import view
+    /// (`on_key`): the list's, and ⌘F and ⌘K to the search.
+    fn vault_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let chord = |c| ev.is_command(c) && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
+        if chord('f') || chord('k') {
+            self.focus_search();
+            return true;
+        }
+        self.list_key(ev, tx)
+    }
+
+    /// ↑↓ select, ⏎ and ⇧⏎ copy, esc clears the search.
+    fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         match ev.key {
             Key::Up | Key::Down => {
                 self.step(if ev.key == Key::Up { -1 } else { 1 });
@@ -602,6 +619,12 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    /// Focuses the search field with its text selected, so typing replaces it.
+    pub fn focus_search(&mut self) {
+        self.search.focused = true;
+        self.search.set_selection(0, self.search.text.len());
     }
 
     fn primary_field(&self) -> &'static str {
@@ -780,7 +803,9 @@ impl App {
         self.hotkey.reset_error = None;
     }
 
-    /// App-level keys: before the focused field when there is none, after it otherwise.
+    /// App-level keys: before the focused field when there is none, after it
+    /// otherwise. In the vault that includes the list's keys, so they work
+    /// with focus on a button or nowhere.
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
@@ -803,6 +828,7 @@ impl App {
                 self.sidebar.toggle();
                 true
             }
+            _ if self.screen == Screen::Vault && self.panel.is_none() => self.vault_key(ev, tx),
             _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev, tx),
             _ => false,
         }
