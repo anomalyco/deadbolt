@@ -273,7 +273,7 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
         .caret(k.c.text_strong, k.alpha(k.c.text_accent, 0.3))
         .on_edit(|s: &mut App| &mut s.search)
         .on_input_key(keys)
-        .on_input_change(|s: &mut App, _| s.keep_selection_visible())
+        .on_input_change(|s: &mut App, _| s.search_changed())
 }
 
 /// The vault's search field: typing filters the list live; `search_key`
@@ -285,10 +285,13 @@ fn search(s: &App, k: &Kit) -> El {
         .width(Some(SEARCH_W))
         .on_edit(|s: &mut App| &mut s.search)
         .on_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
-        .on_change(|s: &mut App, _| s.keep_selection_visible())
+        .on_change(|s: &mut App, _| s.search_changed())
         .build(k)
         .key("search-input")
         .label("Search items")
+        // The icon and the padding inside the border are the field too, not
+        // the title bar under it: a press there focuses it.
+        .on_press(|s: &mut App| s.search.focused = true)
 }
 
 fn search_placeholder(s: &App) -> String {

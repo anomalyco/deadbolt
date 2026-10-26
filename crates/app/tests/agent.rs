@@ -578,3 +578,56 @@ fn the_app_follows_the_agent() {
         s.screen == Screen::Vault && s.items.len() == 2
     });
 }
+
+/// The selected item deleted from the CLI: the next one replaces it in the
+/// frame the list lands, and nothing of the old item, its revealed password
+/// least of all, fades out under the new title.
+#[test]
+fn a_deleted_selection_goes_at_once() {
+    let device = Device::new();
+    device.run(&["init"]);
+    for (url, user, password) in [
+        ("github.com", "dax", "hunter22"),
+        ("fly.io", "ops", "flyfly"),
+    ] {
+        let (url, user, password) = (
+            format!("url={url}"),
+            format!("username={user}"),
+            format!("password={password}"),
+        );
+        device.run(&["new", "login", &user, &url, &password]);
+    }
+    let mut rt = app(&device);
+    until(&mut rt, "the vault", |s| {
+        s.screen == Screen::Vault && s.items.len() == 2 && s.detail.is_some()
+    });
+    assert_eq!(rt.state.selected_item().unwrap().label, "fly.io");
+    rt.update(|s, _| s.revealed.push("password".into()));
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert!(shows(&rt, "flyfly"), "the password shows");
+
+    device.run(&["rm", "fly.io"]);
+    let start = Instant::now();
+    while rt.state.items.len() == 2 {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the delete lands"
+        );
+        rt.frame(1.0 / 60.0);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(rt.state.selected_item().unwrap().label, "github.com");
+    let elements = rt.elements();
+    let old: Vec<_> = elements
+        .iter()
+        .filter(|e| {
+            let field = e.key.as_deref().is_some_and(|k| k.starts_with("field-"));
+            let text = e.text.as_deref();
+            (field && e.opacity < 1.0) || matches!(text, Some("flyfly" | "ops" | "fly.io"))
+        })
+        .map(|e| (e.key.clone(), e.text.clone(), e.opacity))
+        .collect();
+    assert!(old.is_empty(), "the old item lingers: {old:?}");
+}

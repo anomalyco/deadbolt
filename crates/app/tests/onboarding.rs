@@ -462,3 +462,39 @@ fn cancelling_while_the_device_is_set_up_waits_for_it() {
     assert_eq!(notice.severity, Severity::Neutral);
     assert!(notice.body.contains("set up now"), "{notice:?}");
 }
+
+/// At the smallest window a tall step (Create with its hints and a notice)
+/// keeps clear of the title bar band and Back, and scrolls to its button.
+#[test]
+fn a_tall_step_stays_under_the_title_bar_and_scrolls() {
+    let mut rt = runtime("create-typing", true);
+    rt.update(|s, _| {
+        s.onboarding.notice = Some(deadbolt_app::onboarding::Notice {
+            severity: Severity::Danger,
+            title: "Couldn't create the vault".into(),
+            body: "Connecting to the agent: connection refused. Try again.".into(),
+        })
+    });
+    rt.set_viewport((640.0, 420.0), 1.0);
+    settle(&mut rt, 0.6);
+    let rect = |rt: &Runtime<App>, key: &str| find(rt, key).unwrap().rect;
+    let back = rect(&rt, "back");
+    let panel = rect(&rt, "panel");
+    assert!(
+        panel[1] >= 48.0 && panel[1] >= back[1] + back[3],
+        "the panel starts under the band: {panel:?}, Back {back:?}"
+    );
+    let submit = rect(&rt, "submit");
+    assert!(
+        submit[1] + submit[3] > 420.0,
+        "the step is taller than the room: {submit:?}"
+    );
+    rt.wheel(320.0, 300.0, -600.0);
+    settle(&mut rt, 0.4);
+    let submit = rect(&rt, "submit");
+    assert!(
+        submit[1] + submit[3] <= 420.0,
+        "scrolled to the button: {submit:?}"
+    );
+    assert_eq!(rect(&rt, "back"), back, "Back stays in the band");
+}

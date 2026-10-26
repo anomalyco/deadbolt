@@ -9,8 +9,8 @@
 //! drops the travel and keeps the fades (Rune's runtime).
 
 use rune::{
-    Color, Cursor, Curve, Cycle, Easing, El, Icon, Shadow, Spring, TextEdit, TextStyle, Transition,
-    canvas, col, el, icon, row, text,
+    Color, Cursor, Curve, Cycle, Easing, El, Icon, ScrollSpec, Shadow, Spring, TextEdit, TextStyle,
+    Transition, canvas, col, el, icon, row, text,
 };
 use rune_kit::shell::TOOLBAR_HEIGHT;
 use rune_kit::{
@@ -91,13 +91,26 @@ pub(crate) fn title(k: &Kit, key: &str, s: impl Into<String>) -> El {
 }
 
 /// A step: the panel centred in the window, with an optional button in the
-/// title bar, so the panel has the window's whole height.
+/// title bar. With one, the panel keeps clear of the title bar band; a panel
+/// taller than the room left scrolls.
 pub(crate) fn page(key: &str, bar: Option<El>, panel: El) -> El {
-    let mut page = col().key(key).w_full().h_full().center().child(panel);
-    if let Some(bar) = bar {
-        page = page.child(bar);
-    }
-    page
+    let top = if bar.is_some() { TOOLBAR_HEIGHT } else { 0.0 };
+    let body = col()
+        .key("page-scroll")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(col().w_full().grow(1.0).center().py(16.0).child(panel));
+    col()
+        .key(key)
+        .w_full()
+        .h_full()
+        .pt(top)
+        .child(body)
+        .children(bar)
 }
 
 /// A button in the title bar band, just past the traffic lights (`inset`).

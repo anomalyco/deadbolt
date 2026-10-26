@@ -207,7 +207,7 @@ impl App {
                     tx.instant();
                 }
                 match result {
-                    Ok(items) => self.on_items(items),
+                    Ok(items) => self.on_items(items, tx),
                     Err(failure) => self.on_failure(failure, tx),
                 }
             }
@@ -310,13 +310,18 @@ impl App {
 
     /// A list arrived. The selection and the search stay; if the selected
     /// item is still there and this replaced a list, its values are fetched
-    /// again in place.
-    fn on_items(&mut self, items: Vec<ItemInfo>) {
+    /// again in place. If it's gone (deleted, or no longer matching), the
+    /// next one replaces it at once, so its fields never fade under the new
+    /// title.
+    fn on_items(&mut self, items: Vec<ItemInfo>, tx: &mut Tx) {
         let refresh = self.loaded;
         let before = self.selected.clone();
         self.items = items;
         self.loaded = true;
         self.keep_selection_visible();
+        if before.is_some() && self.selected != before {
+            tx.instant();
+        }
         if refresh
             && self.selected == before
             && let Some(id) = self.selected.clone()
@@ -598,8 +603,10 @@ impl App {
     fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         match ev.key {
             Key::Up | Key::Down => {
-                // The selection moves under the user's hand: the item replaces at once.
+                // The selection moves under the user's hand: the item replaces at
+                // once, and a hidden list opens to show where it went.
                 tx.instant();
+                self.sidebar.set_open(true);
                 self.step(if ev.key == Key::Up { -1 } else { 1 });
                 if let Some(id) = &self.selected {
                     tx.scroll_into_view(format!("item-{id}"));
@@ -617,12 +624,27 @@ impl App {
                 // As typing does, clearing the search replaces the list at once.
                 tx.instant();
                 self.search.clear();
-                self.keep_selection_visible();
+                self.search_changed();
             }
             Key::Escape => {}
             _ => return false,
         }
         true
+    }
+
+    /// The search changed: the list it filters shows (a hidden sidebar opens,
+    /// the import view closes), and the selection follows it. An import
+    /// that's running, or a preview in an empty vault, stays, and so does
+    /// the item it hides until it's gone (`on_imported`).
+    pub fn search_changed(&mut self) {
+        if self.import.showing() && !self.items.is_empty() {
+            self.cancel_import();
+        }
+        if self.import.showing() {
+            return;
+        }
+        self.sidebar.set_open(true);
+        self.keep_selection_visible();
     }
 
     /// Focuses the search field with its text selected, so typing replaces it.

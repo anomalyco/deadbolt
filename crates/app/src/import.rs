@@ -300,6 +300,10 @@ impl App {
                 self.import.error = Some(problem(failure, &file, applied));
             }
         }
+        // A search typed while the import ran now picks the item that shows.
+        if !self.import.showing() {
+            self.keep_selection_visible();
+        }
     }
 
     fn on_chosen(&mut self, seq: u64, result: Result<Option<PathBuf>, String>) {

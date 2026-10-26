@@ -139,7 +139,8 @@ fn row_keys(rt: &Runtime<App>) -> Vec<String> {
 }
 
 /// Typing and esc replace the list in the frame they happen: no row fades
-/// or slides, and the item pane never swaps out for "No matches".
+/// or slides, a selection the search filters out takes its fields with it,
+/// and the item pane never swaps out for "No matches".
 #[test]
 fn a_search_replaces_the_list_at_once() {
     let mut rt = runtime("vault");
@@ -156,6 +157,12 @@ fn a_search_replaces_the_list_at_once() {
         let want = kept.contains(key).then_some(1.0);
         assert_eq!(shown(&rt, key), want, "{key} after typing");
     }
+    let github = rt.state.selected.clone();
+    assert_eq!(shown(&rt, "field-password"), Some(1.0), "github.com stays");
+
+    tap(&mut rt, rune::Key::Text("l".into()));
+    assert_ne!(rt.state.selected, github, "gitlab.com is selected");
+    assert_eq!(shown(&rt, "field-password"), None, "github.com's fields go");
 
     for c in "zzz".chars() {
         tap(&mut rt, rune::Key::Text(c.into()));
@@ -170,6 +177,24 @@ fn a_search_replaces_the_list_at_once() {
     for key in &all {
         assert_eq!(shown(&rt, key), Some(1.0), "{key} after esc");
     }
+}
+
+/// The selected item's values, as the agent's reply brings them.
+fn deliver(rt: &mut Runtime<App>) {
+    use deadbolt_app::agent::{Done, Values};
+    use deadbolt_client::protocol::FieldInfo;
+    let mut item = rt.state.selected_item().unwrap().clone();
+    item.fields = vec![FieldInfo {
+        name: "password".into(),
+        kind: "secret".into(),
+        value: "hunter22".into(),
+    }];
+    let seq = rt.state.seq();
+    rt.update(|s, tx| {
+        let result = Ok(Values::new(item));
+        s.apply(Done::Item { seq, result }, tx)
+    });
+    rt.frame(FRAME);
 }
 
 /// A new selection, by ↑↓ or a click, drops the old item's fields in the
@@ -195,10 +220,18 @@ fn a_new_selection_replaces_the_item_at_once() {
     assert_eq!(at(&rt, "field-password"), None, "no field lingers after ↓");
     assert_eq!(title(&rt), (label(&rt), 1.0));
 
+    deliver(&mut rt);
+    assert_eq!(at(&rt, "field-password").map(|(_, o)| o), Some(1.0));
+
     let (x, y) = rt.find(&rows[0]).unwrap();
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(FRAME);
     assert_eq!(rt.state.selected.as_deref(), rows[0].strip_prefix("item-"));
+    assert_eq!(
+        at(&rt, "field-password"),
+        None,
+        "no field lingers after a click"
+    );
     assert_eq!(title(&rt), (label(&rt), 1.0), "the click's title");
 }

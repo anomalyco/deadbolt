@@ -181,3 +181,71 @@ fn the_import_view_keeps_keys_from_the_item_with_nothing_focused() {
     tap(&mut rt, Key::Enter);
     assert_eq!(copied(&rt), None, "nor once the search has focus");
 }
+
+/// The whole search control takes a press, not just its text line: the
+/// icon and the padding inside its border focus it and never drag the window.
+#[test]
+fn a_press_anywhere_on_the_search_focuses_it() {
+    let mut rt = scene("vault");
+    let r = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("search-input"))
+        .unwrap()
+        .rect;
+    let (mid, right) = (r[1] + r[3] / 2.0, r[0] + r[2]);
+    let points = [
+        ("the icon", r[0] + 16.0, mid),
+        ("the top padding", r[0] + r[2] / 2.0, r[1] + 2.0),
+        ("the trailing padding", right - 3.0, mid),
+    ];
+    for (what, x, y) in points {
+        blur(&mut rt);
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        assert_eq!(rt.take_titlebar_action(), None, "{what} drags the window");
+        rt.pointer_up(x, y);
+        settle(&mut rt, 0.1);
+        assert!(rt.state.search.focused, "{what} focuses the search");
+    }
+}
+
+/// With the list hidden (⇧⌘B), ↑↓ and a search edit open it again, so the
+/// selection never moves out of sight.
+#[test]
+fn a_hidden_list_opens_when_the_selection_moves() {
+    let toggle = Mods {
+        cmd: true,
+        shift: true,
+        ..Mods::default()
+    };
+    let mut rt = scene("vault");
+    for step in [Key::Down, Key::Text("g".into()), Key::Escape] {
+        if step == Key::Escape {
+            tap(&mut rt, Key::Text("i".into()));
+        }
+        press(&mut rt, Key::Command('b'), toggle);
+        assert!(!rt.state.sidebar.is_open(), "⇧⌘B hides the list");
+        // Rune hands focus to the sidebar button as the list hides.
+        command(&mut rt, 'f');
+        tap(&mut rt, step.clone());
+        assert!(rt.state.sidebar.is_open(), "{step:?} opens it");
+    }
+}
+
+/// Typing in the search with the import view showing closes it, so the list
+/// it filters and the item it picks show.
+#[test]
+fn a_search_edit_closes_the_import_view() {
+    let mut rt = scene("import");
+    assert!(rt.state.import.showing());
+    tap(&mut rt, Key::Text("f".into()));
+    assert!(!rt.state.import.showing(), "the import view closed");
+    let selected = rt.state.selected.clone().unwrap();
+    assert!(
+        rt.state.visible().iter().any(|i| i.id == selected),
+        "the selection is a match"
+    );
+    settle(&mut rt, 0.6);
+    assert!(rt.find("title").is_some(), "the item shows");
+}
