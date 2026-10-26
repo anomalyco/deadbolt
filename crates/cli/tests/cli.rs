@@ -452,7 +452,10 @@ fn replaces_an_agent_of_an_older_protocol() {
 #[test]
 fn leaves_an_agent_of_a_newer_protocol_running() {
     let a = Device::new();
-    let newer = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "6"));
+    let newer = a.output(a.cmd(&["status"]).env(
+        "DEADBOLT_TEST_PROTOCOL",
+        (deadbolt_client::protocol::PROTOCOL_VERSION + 1).to_string(),
+    ));
     assert!(newer.status.success());
     let pid = a.agent_pid().unwrap();
 

@@ -133,53 +133,6 @@ fn hostname() -> String {
     }
 }
 
-const LETTERS: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-const DIGITS: &[u8] = b"0123456789";
-pub const SYMBOLS: &[u8] = b"!#$%&()*+,-./:;<=>?@[]^_{|}~";
-
-#[expect(
-    clippy::expect_used,
-    reason = "OS CSPRNG failure is unrecoverable; never substitute weak randomness"
-)]
-fn random_index(n: usize) -> usize {
-    // Rejection sampling keeps every index equally likely.
-    let limit = 256 - 256 % n;
-    loop {
-        let mut byte = [0u8; 1];
-        getrandom::fill(&mut byte).expect("OS random number generator failed");
-        if (byte[0] as usize) < limit {
-            return byte[0] as usize % n;
-        }
-    }
-}
-
-/// A random password from the OS random number generator, containing at
-/// least one character of every class used.
-pub fn generate_password(length: usize, symbols: bool) -> Result<Zeroizing<String>> {
-    if !(8..=256).contains(&length) {
-        bail!("--length must be between 8 and 256");
-    }
-    let classes: Vec<&[u8]> = if symbols {
-        vec![LETTERS, DIGITS, SYMBOLS]
-    } else {
-        vec![LETTERS, DIGITS]
-    };
-    let alphabet: Vec<u8> = classes.concat();
-    loop {
-        let password: Zeroizing<String> = Zeroizing::new(
-            (0..length)
-                .map(|_| alphabet[random_index(alphabet.len())] as char)
-                .collect(),
-        );
-        if classes
-            .iter()
-            .all(|class| password.bytes().any(|b| class.contains(&b)))
-        {
-            return Ok(password);
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -201,17 +154,6 @@ mod tests {
         assert_eq!(fill(None, true, || Ok(2), missing).unwrap(), 2);
         let err = fill(None, false, || -> Result<u8> { panic!("asked") }, missing);
         assert_eq!(err.unwrap_err().to_string(), "missing");
-    }
-
-    #[test]
-    fn generated_passwords() {
-        let password = generate_password(24, true).unwrap();
-        assert_eq!(password.len(), 24);
-        assert!(password.bytes().any(|b| SYMBOLS.contains(&b)));
-        let plain = generate_password(40, false).unwrap();
-        assert!(plain.bytes().all(|b| b.is_ascii_alphanumeric()));
-        assert!(generate_password(4, true).is_err());
-        assert_ne!(*generate_password(24, true).unwrap(), *password);
     }
 
     #[test]

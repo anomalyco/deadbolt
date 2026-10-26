@@ -215,6 +215,45 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn a_locked_agent_generates_passwords() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = locked_agent(dir.path());
+        let ask = |length, symbols| {
+            let agent = agent.clone();
+            async move {
+                let (server, mut client) = UnixStream::pair().unwrap();
+                let mut request = serde_json::to_vec(&Request {
+                    v: PROTOCOL_VERSION,
+                    command: Command::Generate { length, symbols },
+                })
+                .unwrap();
+                request.push(b'\n');
+                client.write_all(&request).await.unwrap();
+                agent.handle(server, MAX_LINE).await.unwrap();
+                let mut reply = String::new();
+                client.read_to_string(&mut reply).await.unwrap();
+                serde_json::from_str::<Message>(&reply).unwrap()
+            }
+        };
+        match ask(12, false).await {
+            Message::Ok {
+                reply: Reply::Password { password },
+            } => {
+                assert_eq!(password.len(), 12);
+                assert!(password.bytes().all(|b| b.is_ascii_alphanumeric()));
+            }
+            other => panic!("expected a password, got {other:?}"),
+        }
+        match ask(4, true).await {
+            Message::Error { code, message } => {
+                assert_eq!(code, ErrorCode::Failed);
+                assert_eq!(message, "a generated password must be 8 to 256 characters");
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
+    }
+
     #[tokio::test(start_paused = true)]
     async fn shutdown_drain_cancels_idle_connections() {
         let dir = tempfile::tempdir().unwrap();
@@ -452,6 +491,7 @@ mod tests {
                 query: vec!["offline-login".into()],
                 fields: fields(),
                 name: None,
+                unset: Vec::new(),
             },
             Command::ItemUnset {
                 vault: None,
@@ -1143,7 +1183,8 @@ impl Agent {
                 query,
                 fields,
                 name,
-            } => self.item_write(|s| items::set(s, vault.as_deref(), &query, fields, name)),
+                unset,
+            } => self.item_write(|s| items::set(s, vault.as_deref(), &query, fields, name, &unset)),
             Command::ItemUnset {
                 vault,
                 query,
@@ -1166,6 +1207,9 @@ impl Agent {
                 }
                 Ok(Reply::Import { report })
             }
+            Command::Generate { length, symbols } => Ok(Reply::Password {
+                password: deadbolt_core::password::generate(length, symbols)?,
+            }),
         }
     }
 

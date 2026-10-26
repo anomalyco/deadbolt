@@ -13,7 +13,9 @@ use std::time::Duration;
 use anyhow::{Result, anyhow, bail};
 use deadbolt_core::item::check_new_value;
 use deadbolt_core::totp::Totp;
-use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
+use deadbolt_core::{
+    DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
+};
 use zeroize::{Zeroize, Zeroizing};
 
 use super::session::Loaded;
@@ -258,22 +260,22 @@ fn fields(
     let mut seen = BTreeSet::new();
     inputs
         .into_iter()
-        .map(|input| {
+        .map(|mut input| {
             if !seen.insert(input.name.clone()) {
                 bail!("field {} given twice", input.name);
             }
-            let field = match input.kind {
-                Some(k) => FieldType::parse(&k),
+            let field = match input.kind.as_deref() {
+                Some(k) => FieldType::parse(k),
                 None => schema(kind)
                     .and_then(|s| s.field(&input.name))
                     .map(|f| f.kind.clone())
                     .or_else(|| existing?.fields.get(&input.name).map(|f| f.kind.clone()))
                     .unwrap_or(FieldType::Text),
             };
-            let value = normalize(kind, &input.name, &field, input.value);
+            let value = normalize(kind, &input.name, &field, std::mem::take(&mut input.value));
             let field = Field::new(field, value);
             check_new_value(&input.name, &field)?;
-            Ok((input.name, field))
+            Ok((std::mem::take(&mut input.name), field))
         })
         .collect()
 }
@@ -507,20 +509,44 @@ pub fn set(
     query: &[String],
     inputs: Vec<FieldInput>,
     name: Option<String>,
+    unset: &[String],
 ) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
     let item = Listing::new(s.vault(&vault)).find(query)?.clone();
-    let mut ops: Vec<DataOp> = fields(&item.kind, Some(&item), inputs)?
+    let set = fields(&item.kind, Some(&item), inputs)?;
+    let mut seen: BTreeSet<&str> = set.iter().map(|(name, _)| name.as_str()).collect();
+    for field in unset {
+        if !seen.insert(field) {
+            bail!("field {field} given twice");
+        }
+    }
+    let mut ops: Vec<DataOp> = set
         .into_iter()
         .map(|(name, field)| DataOp::set(item.id, name, field))
         .collect();
+    // A field already gone (removed on another device) has nothing left to
+    // remove, but the name must still be one the item could have.
+    for field in unset {
+        if item.fields.contains_key(field) {
+            ops.push(DataOp::remove(item.id, field));
+        } else if !valid_name(field) {
+            return Err(ItemError::InvalidFieldName(field.clone()).into());
+        } else if schema(&item.kind)
+            .and_then(|s| s.field(field))
+            .is_some_and(|f| f.required)
+        {
+            return Err(ItemError::RequiredField(field.clone()).into());
+        }
+    }
     if let Some(name) = name {
         ops.push(DataOp::name(item.id, Some(name).filter(|n| !n.is_empty())));
     }
-    if ops.is_empty() {
+    if ops.is_empty() && unset.is_empty() {
         bail!("nothing to change: give field=value assignments or --name");
     }
-    write(s, vault, ops)?;
+    if !ops.is_empty() {
+        write(s, vault, ops)?;
+    }
     Ok(info(s, vault, &item.id))
 }
 
@@ -580,6 +606,14 @@ mod tests {
         }
     }
 
+    fn otp_input(name: &str, value: &str) -> FieldInput {
+        FieldInput {
+            name: name.into(),
+            kind: Some("otp".into()),
+            value: value.into(),
+        }
+    }
+
     fn at(secs: u64) -> Duration {
         Duration::from_secs(secs)
     }
@@ -608,11 +642,8 @@ mod tests {
         create(&mut s, None, "login", Some("Plain".into()), fields).unwrap();
         let error = super::code(&s, None, &words("plain"), at(59)).unwrap_err();
         assert_eq!(error.to_string(), "Plain has no one-time password");
-        let fields = vec![FieldInput {
-            kind: Some("otp".into()),
-            ..input("backup", &secret.to_lowercase())
-        }];
-        set(&mut s, None, &words("plain"), fields, None).unwrap();
+        let fields = vec![otp_input("backup", &secret.to_lowercase())];
+        set(&mut s, None, &words("plain"), fields, None, &[]).unwrap();
         let code = super::code(&s, None, &words("plain"), at(59)).unwrap();
         assert_eq!(code.code.as_str(), "287082");
     }
@@ -633,10 +664,7 @@ mod tests {
     fn items_leave_otp_secrets_out_unless_asked() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = loaded(dir.path());
-        let extra = FieldInput {
-            kind: Some("otp".into()),
-            ..input("backup", "KRSXG5CTMVRXEZLU")
-        };
+        let extra = otp_input("backup", "KRSXG5CTMVRXEZLU");
         let fields = vec![
             input("password", "pw"),
             input("otp", "JBSWY3DPEHPK3PXP"),
@@ -647,7 +675,7 @@ mod tests {
             let item = get(&s, None, &words("site"), otp).unwrap();
             item.fields
                 .into_iter()
-                .map(|f| (f.name, f.value))
+                .map(|f| (f.name.clone(), f.value.clone()))
                 .collect::<Vec<_>>()
         };
         let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
@@ -684,6 +712,7 @@ mod tests {
             &words("site"),
             vec![input("otp", "123456")],
             None,
+            &[],
         );
         assert_eq!(
             error.unwrap_err().to_string(),
@@ -740,6 +769,98 @@ mod tests {
             ]
         );
         assert_eq!(count(&s), 8);
+    }
+
+    /// The app saves an edit as one change: fields set, emptied ones
+    /// removed and the name, in one entry.
+    #[test]
+    fn a_set_removes_its_unset_fields_in_the_same_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let input = |name: &str, value: &str| FieldInput {
+            name: name.into(),
+            kind: None,
+            value: value.into(),
+        };
+        let fields = vec![input("password", "pw-1"), input("notes", "old")];
+        let id = create(&mut s, None, "login", None, fields).unwrap().id;
+        let vault = s.resolve(None).unwrap();
+        let before = s.vault(&vault).entries().len();
+        let query = [id];
+        let unset = ["notes".to_string()];
+        let fields = vec![input("password", "pw-2")];
+        let name = Some("GitHub".into());
+        let item = set(&mut s, None, &query, fields, name, &unset).unwrap();
+        assert_eq!(s.vault(&vault).entries().len(), before + 1);
+        assert_eq!(item.label, "GitHub");
+        let item = get(&s, None, &query, false).unwrap();
+        let fields: Vec<(&str, &str)> = item
+            .fields
+            .iter()
+            .map(|f| (f.name.as_str(), f.value.as_str()))
+            .collect();
+        assert_eq!(fields, [("password", "pw-2")]);
+
+        let card = vec![input("number", "4242424242424242")];
+        let card = [create(&mut s, None, "card", None, card).unwrap().id];
+        let required = ["number".to_string()];
+        let error = set(&mut s, None, &card, vec![], None, &required).unwrap_err();
+        assert!(error.to_string().contains("required"), "{error}");
+        let twice = set(
+            &mut s,
+            None,
+            &query,
+            vec![input("url", "a.com")],
+            None,
+            &["url".into()],
+        );
+        assert!(twice.unwrap_err().to_string().contains("twice"));
+        // The card's creation, and nothing refused.
+        assert_eq!(s.vault(&vault).entries().len(), before + 2);
+    }
+
+    /// An edit that empties a field another device already removed still
+    /// saves, and only its other changes are written. A name the item could
+    /// never have, or a required field, is still refused.
+    #[test]
+    fn a_set_skips_unset_fields_already_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let input = |name: &str, value: &str| FieldInput {
+            name: name.into(),
+            kind: None,
+            value: value.into(),
+        };
+        let fields = vec![input("password", "pw-1"), input("url", "a.com")];
+        let id = create(&mut s, None, "login", None, fields).unwrap().id;
+        let vault = s.resolve(None).unwrap();
+        let before = s.vault(&vault).entries().len();
+        let query = [id];
+        let gone = ["notes".to_string(), "pin-hint".to_string()];
+        set(&mut s, None, &query, vec![], None, &gone).unwrap();
+        assert_eq!(s.vault(&vault).entries().len(), before, "nothing to write");
+        let unset = ["notes".to_string(), "url".to_string()];
+        let item = set(
+            &mut s,
+            None,
+            &query,
+            vec![input("password", "pw-2")],
+            None,
+            &unset,
+        );
+        assert!(item.is_ok(), "{item:?}");
+        assert_eq!(s.vault(&vault).entries().len(), before + 1);
+        let item = get(&s, None, &query, false).unwrap();
+        let names: Vec<&str> = item.fields.iter().map(|f| f.name.as_str()).collect();
+        assert_eq!(names, ["password"]);
+
+        let bad = set(&mut s, None, &query, vec![], None, &["Not A Name".into()]);
+        assert!(bad.unwrap_err().to_string().contains("invalid field name"));
+        let card = vec![input("number", "4242424242424242")];
+        let card = create(&mut s, None, "card", None, card).unwrap().id;
+        let error = set(&mut s, None, &[card], vec![], None, &["expiry".into()]);
+        assert!(error.is_ok(), "an optional field: {error:?}");
+        assert_eq!(s.vault(&vault).entries().len(), before + 2);
     }
 
     #[test]
