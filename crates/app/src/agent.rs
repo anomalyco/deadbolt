@@ -65,7 +65,9 @@ pub enum Done {
     },
     Imported {
         seq: u64,
-        apply: bool,
+        /// An import was attempted: false for a preview, or for an import
+        /// that turned into one because the file changed.
+        applied: bool,
         result: Result<Imported, ImportFailure>,
     },
     /// The file Choose File… picked; `None` if it was cancelled.
@@ -170,17 +172,24 @@ impl DialogSlot {
 
 /// Marks the dialog gone when it answers, or when its thread ends (or never
 /// starts) without answering.
-struct DialogUp(Arc<Mutex<DialogSlot>>);
+/// Ends it exactly once, so a Choose File… landing just after the answer
+/// keeps its own dialog.
+struct DialogUp(Option<Arc<Mutex<DialogSlot>>>);
 
 impl DialogUp {
-    fn answered(self) -> u64 {
-        lock(&self.0).end().unwrap_or_default()
+    fn answered(mut self) -> u64 {
+        self.end().unwrap_or_default()
+    }
+
+    fn end(&mut self) -> Option<u64> {
+        let slot = self.0.take()?;
+        lock(&slot).end()
     }
 }
 
 impl Drop for DialogUp {
     fn drop(&mut self) {
-        lock(&self.0).end();
+        self.end();
     }
 }
 
@@ -329,7 +338,7 @@ impl Agent {
             return;
         }
         let post = self.post.clone();
-        let up = DialogUp(self.dialog.clone());
+        let up = DialogUp(Some(self.dialog.clone()));
         let spawned = std::thread::Builder::new()
             .name("deadbolt-file-dialog".into())
             .spawn(move || {
@@ -513,11 +522,15 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             };
             Done::Item { seq, result }
         }
-        Job::Import { path, apply, seq } => Done::Imported {
-            seq,
-            apply: apply.is_some(),
-            result: import(paths, &path, apply).await,
-        },
+        Job::Import { path, apply, seq } => {
+            let mut applied = false;
+            let result = import(paths, &path, apply, &mut applied).await;
+            Done::Imported {
+                seq,
+                applied,
+                result,
+            }
+        }
     }
 }
 
@@ -528,14 +541,16 @@ async fn import(
     paths: &Paths,
     path: &Path,
     apply: Option<blake3::Hash>,
+    applied: &mut bool,
 ) -> Result<Imported, ImportFailure> {
     let export = export::read(path)?;
     let digest = blake3::hash(export.as_bytes());
     let changed = apply.is_some_and(|previewed| previewed != digest);
+    *applied = apply.is_some() && !changed;
     let command = Command::Import {
         vault: None,
         export,
-        apply: apply.is_some() && !changed,
+        apply: *applied,
     };
     let report = match deadbolt_client::simple(paths, command).await {
         Ok(Reply::Import { report }) => report,
@@ -574,6 +589,18 @@ pub fn launch() -> Launch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_dialog_ends_once() {
+        let slot = Arc::new(Mutex::new(DialogSlot::default()));
+        assert!(lock(&slot).begin(1));
+        let mut up = DialogUp(Some(slot.clone()));
+        assert_eq!(up.end(), Some(1));
+        // Choose File… again, between the answer and the guard going.
+        assert!(lock(&slot).begin(2));
+        drop(up);
+        assert!(!lock(&slot).begin(3), "the new dialog is still up");
+    }
 
     #[test]
     fn a_missing_helper_means_a_damaged_app_not_a_missing_command() {

@@ -219,7 +219,7 @@ impl App {
     pub(crate) fn on_imported(
         &mut self,
         seq: u64,
-        apply: bool,
+        applied: bool,
         result: Result<Imported, ImportFailure>,
         tx: &mut Tx,
     ) {
@@ -227,8 +227,8 @@ impl App {
             return;
         }
         let (path, file, previewed) = match &self.import.phase {
-            Phase::Reading { path, name } if !apply => (path.clone(), name.clone(), None),
-            Phase::Importing(p) if apply => (p.path.clone(), p.name.clone(), Some(p.digest)),
+            Phase::Reading { path, name } => (path.clone(), name.clone(), None),
+            Phase::Importing(p) => (p.path.clone(), p.name.clone(), Some(p.digest)),
             _ => return,
         };
         match result {
@@ -269,7 +269,7 @@ impl App {
             Err(ImportFailure::Agent(f)) if f.locked() => self.on_locked(tx),
             Err(failure) => {
                 self.import.phase = Phase::Idle;
-                self.import.error = Some(problem(failure, &file, apply));
+                self.import.error = Some(problem(failure, &file, applied));
             }
         }
     }
@@ -319,7 +319,7 @@ impl App {
         if self.screen != Screen::Vault || self.panel.is_some() {
             return None;
         }
-        if ev.is_command('i') && ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl {
+        if is_shortcut(ev) {
             self.show_import();
             return Some(true);
         }
@@ -345,6 +345,11 @@ impl App {
             _ => None,
         }
     }
+}
+
+/// ⇧⌘I, Import Passwords…'s key.
+pub fn is_shortcut(ev: &KeyEvent) -> bool {
+    ev.is_command('i') && ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl
 }
 
 /// Whether the window takes this file from a drag.

@@ -368,6 +368,25 @@ fn a_file_changed_since_its_preview_is_previewed_again() {
 }
 
 #[test]
+fn a_file_changed_into_something_else_says_it_isnt_an_export() {
+    let device = device();
+    let file = device.file("export.json", BITWARDEN);
+    let mut rt = vault(&device);
+    drop_file(&mut rt, file.clone());
+    until(&mut rt, "the preview", previewing);
+
+    std::fs::write(&file, "this is not an export\n").unwrap();
+    rt.key(key(Key::Enter));
+    until(&mut rt, "the error", |s| s.import.error.is_some());
+    let error = rt.state.import.error.clone().unwrap();
+    assert_eq!(error.severity, Severity::Caution, "{error:?}");
+    assert_eq!(error.title, "export.json isn't an export Deadbolt can read");
+    assert!(!error.body.contains("; import a"), "{error:?}");
+    assert_eq!(rt.state.import.phase, Phase::Idle);
+    assert!(device.output(&["ls"]).is_empty(), "nothing was imported");
+}
+
+#[test]
 fn an_export_with_nothing_deadbolt_takes_says_so() {
     let device = device();
     let mut rt = vault(&device);
@@ -394,10 +413,23 @@ fn scene(name: &str) -> Runtime<App> {
             scale: 1.0,
         },
     );
+    rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
     for _ in 0..60 {
         rt.frame(1.0 / 60.0);
     }
     rt
+}
+
+fn import_passwords(rt: &mut Runtime<App>) {
+    rt.key(KeyEvent {
+        key: Key::Command('i'),
+        mods: Mods {
+            cmd: true,
+            shift: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(1.0 / 60.0);
 }
 
 fn rect(rt: &Runtime<App>, key: &str) -> [f32; 4] {
@@ -484,17 +516,31 @@ fn a_drag_cut_short_doesnt_stick() {
 }
 
 /// ⇧⌘I from the install page leaves it as Close would, so its offer in the
-/// vault stays answered; with the page shut, the offer is left alone.
+/// vault stays answered; with the page shut, the offer is left alone. From
+/// Settings it closes them, unless the shortcut recorder is recording.
 #[test]
-fn import_passwords_closes_the_install_page_as_answered() {
+fn import_passwords_leaves_the_install_page_and_settings() {
     let mut rt = scene("install-command");
-    rt.state.show_import();
+    import_passwords(&mut rt);
     let installer = rt.state.installer.as_ref().unwrap();
     assert!(!installer.open && !installer.offering());
+    assert!(rt.state.import.open && rt.find("drop-zone").is_some());
 
     let mut rt = scene("command-offer");
-    rt.state.show_import();
+    import_passwords(&mut rt);
+    assert!(rt.state.import.open);
     assert!(rt.state.installer.as_ref().unwrap().offering());
+
+    let mut rt = scene("settings");
+    rt.state.hotkey.recorder().begin();
+    import_passwords(&mut rt);
+    assert!(
+        rt.state.settings_open && !rt.state.import.open,
+        "recording it"
+    );
+    rt.state.hotkey.recorder().cancel();
+    import_passwords(&mut rt);
+    assert!(!rt.state.settings_open && rt.state.import.open);
 }
 
 /// A second Choose File… while a dialog is still up (its import cancelled

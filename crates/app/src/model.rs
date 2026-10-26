@@ -233,7 +233,11 @@ impl App {
                     Err(failure) => self.on_failure(failure, tx),
                 }
             }
-            Done::Imported { seq, apply, result } => self.on_imported(seq, apply, result, tx),
+            Done::Imported {
+                seq,
+                applied,
+                result,
+            } => self.on_imported(seq, applied, result, tx),
             Done::Chosen { seq, result } => self.on_chosen(seq, result),
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
@@ -748,6 +752,11 @@ impl App {
         }
         let installing = self.installing();
         if !self.settings_open && !installing {
+            return None;
+        }
+        // Import Passwords… leaves either for the import view, as the menu
+        // item does; without native menus the key is the only way.
+        if crate::import::is_shortcut(ev) && !self.hotkey.recorder.is_recording() {
             return None;
         }
         match ev.key {
