@@ -84,6 +84,8 @@ pub struct App {
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub import: crate::import::Import,
+    /// The list's pane in the vault's shell: its width and whether it shows.
+    pub sidebar: rune_kit::shell::PaneState,
     /// `--reduced-motion`; otherwise Rune follows the system's setting.
     pub reduced_motion: bool,
     /// Set in the quick panel's `App` only.
@@ -125,6 +127,9 @@ impl App {
             copy: None,
             notice: None,
             import: crate::import::Import::default(),
+            // Narrow enough to leave the toolbar its search field and Lock at
+            // the window's smallest.
+            sidebar: rune_kit::shell::PaneState::new(272.0).range(200.0, 312.0),
             reduced_motion: false,
             panel: None,
             windows: None,
@@ -202,7 +207,7 @@ impl App {
                     tx.instant();
                 }
                 match result {
-                    Ok(items) => self.on_items(items),
+                    Ok(items) => self.on_items(items, tx),
                     Err(failure) => self.on_failure(failure, tx),
                 }
             }
@@ -305,13 +310,18 @@ impl App {
 
     /// A list arrived. The selection and the search stay; if the selected
     /// item is still there and this replaced a list, its values are fetched
-    /// again in place.
-    fn on_items(&mut self, items: Vec<ItemInfo>) {
+    /// again in place. If it's gone (deleted, or no longer matching), the
+    /// next one replaces it at once, so its fields never fade under the new
+    /// title.
+    fn on_items(&mut self, items: Vec<ItemInfo>, tx: &mut Tx) {
         let refresh = self.loaded;
         let before = self.selected.clone();
         self.items = items;
         self.loaded = true;
         self.keep_selection_visible();
+        if before.is_some() && self.selected != before {
+            tx.instant();
+        }
         if refresh
             && self.selected == before
             && let Some(id) = self.selected.clone()
@@ -563,7 +573,8 @@ impl App {
         self.select(Some(id));
     }
 
-    /// Keys in the search field, before its editor. True when handled.
+    /// Keys in the search field (the vault's and the panel's), before its
+    /// editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
@@ -574,8 +585,28 @@ impl App {
         if self.panel_shortcut(ev, tx) {
             return true;
         }
+        self.list_key(ev, tx)
+    }
+
+    /// The vault's keys wherever focus is, after overlays and the import view
+    /// (`on_key`): the list's, and ⌘F and ⌘K to the search.
+    fn vault_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let chord = |c| ev.is_command(c) && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
+        if chord('f') || chord('k') {
+            self.focus_search();
+            return true;
+        }
+        self.list_key(ev, tx)
+    }
+
+    /// ↑↓ select, ⏎ and ⇧⏎ copy, esc clears the search.
+    fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         match ev.key {
             Key::Up | Key::Down => {
+                // The selection moves under the user's hand: the item replaces at
+                // once, and a hidden list opens to show where it went.
+                tx.instant();
+                self.sidebar.set_open(true);
                 self.step(if ev.key == Key::Up { -1 } else { 1 });
                 if let Some(id) = &self.selected {
                     tx.scroll_into_view(format!("item-{id}"));
@@ -590,13 +621,35 @@ impl App {
                 self.copy_selected(field, tx);
             }
             Key::Escape if !self.search.text.is_empty() => {
+                // As typing does, clearing the search replaces the list at once.
+                tx.instant();
                 self.search.clear();
-                self.keep_selection_visible();
+                self.search_changed();
             }
             Key::Escape => {}
             _ => return false,
         }
         true
+    }
+
+    /// The search changed: the list it filters shows (a hidden sidebar opens,
+    /// the import view closes), and the selection follows it. An import
+    /// that's running, or a preview in an empty vault, stays, and so does
+    /// the item it hides until it's gone (`on_imported`, `cancel_import`).
+    pub fn search_changed(&mut self) {
+        self.sidebar.set_open(true);
+        if self.import.showing() && !self.items.is_empty() {
+            self.cancel_import();
+        }
+        if !self.import.showing() {
+            self.keep_selection_visible();
+        }
+    }
+
+    /// Focuses the search field with its text selected, so typing replaces it.
+    pub fn focus_search(&mut self) {
+        self.search.focused = true;
+        self.search.set_selection(0, self.search.text.len());
     }
 
     fn primary_field(&self) -> &'static str {
@@ -775,7 +828,9 @@ impl App {
         self.hotkey.reset_error = None;
     }
 
-    /// App-level keys: before the focused field when there is none, after it otherwise.
+    /// App-level keys: before the focused field when there is none, after it
+    /// otherwise. In the vault that includes the list's keys, so they work
+    /// with focus on a button or nowhere.
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(handled) = self.overlay_key(ev) {
             return handled;
@@ -791,6 +846,14 @@ impl App {
                 self.lock();
                 true
             }
+            _ if self.screen == Screen::Vault
+                && self.panel.is_none()
+                && rune_kit::shell::is_sidebar_toggle(ev) =>
+            {
+                self.sidebar.toggle();
+                true
+            }
+            _ if self.screen == Screen::Vault && self.panel.is_none() => self.vault_key(ev, tx),
             _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev, tx),
             _ => false,
         }

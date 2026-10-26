@@ -104,7 +104,7 @@ fn the_offer_and_settings_live_in_the_vault_only() {
 }
 
 #[test]
-fn the_hint_bar_keeps_settings_at_the_narrowest_window() {
+fn lock_and_settings_stay_in_the_narrowest_window() {
     let mut rt = runtime("command-offer");
     rt.set_viewport((640.0, 540.0), 1.0);
     settle(&mut rt, 0.5);
@@ -114,7 +114,7 @@ fn the_hint_bar_keeps_settings_at_the_narrowest_window() {
     for label in panel.into_iter().chain(["Lock", "Settings"]) {
         let e = elements
             .iter()
-            .rfind(|e| e.text.as_deref() == Some(label))
+            .rfind(|e| e.text.as_deref() == Some(label) || e.label.as_deref() == Some(label))
             .unwrap_or_else(|| panic!("no {label:?}"));
         assert!(
             e.rect[0] + e.rect[2] <= 640.0,
@@ -196,7 +196,8 @@ fn the_page_is_centred_and_installs_in_place() {
     settle(&mut rt, 0.6);
     let (panel, _) = rt.presented("panel").unwrap();
     let middle = panel[1] + panel[3] / 2.0;
-    assert!((middle - 270.0).abs() < 2.0, "panel centred at {middle}");
+    // Under the 48 pt title bar band: (48 + 540) / 2.
+    assert!((middle - 294.0).abs() < 2.0, "panel centred at {middle}");
     press(&mut rt, "action");
     assert!(installer(&rt).installed());
     assert!(shows(&rt, "Command installed"));
@@ -226,4 +227,30 @@ fn copying_a_command_confirms_in_place() {
     settle(&mut rt, 1.4);
     assert!(shows(&rt, "Copy PATH command"));
     assert!(!shows(&rt, "Copied"));
+}
+
+/// At the smallest window the manual path (two commands to copy) and an
+/// error keep clear of the title bar band and Back.
+#[test]
+fn the_manual_path_stays_under_the_title_bar() {
+    let mut rt = runtime("install-command");
+    rt.update(|s, _| {
+        let i = s.installer.as_mut().unwrap();
+        i.error = Some("Couldn't link /Users/dax/.local/bin/deadbolt: permission denied.".into());
+        let scan = i.scan.as_mut().unwrap();
+        scan.manual = true;
+        scan.on_path = false;
+    });
+    rt.set_viewport((640.0, 420.0), 1.0);
+    settle(&mut rt, 0.6);
+    let back = rt.presented("back").unwrap().0;
+    let panel = rt.presented("panel").unwrap().0;
+    assert!(
+        panel[1] >= 48.0 && panel[1] >= back[1] + back[3],
+        "the panel starts under the band: {panel:?}, Back {back:?}"
+    );
+    assert!(
+        panel[1] + panel[3] <= 420.0,
+        "and ends in the window: {panel:?}"
+    );
 }

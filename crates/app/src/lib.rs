@@ -9,7 +9,6 @@ pub mod model;
 pub mod onboarding;
 pub mod panel;
 pub mod shortcut;
-pub mod theme;
 pub mod view;
 
 use deadbolt_client::Paths;
@@ -31,8 +30,8 @@ pub fn spec() -> AppSpec<App> {
         init: || App::new(Agent::offline()),
         view: view::app,
         scenes: SCENES,
-        fonts: theme::FONTS,
-        families: theme::FAMILIES,
+        fonts: rune_theme_opencode::FONTS,
+        families: rune_theme_opencode::FAMILIES,
         setup: Some(setup),
         poll: Some(|s, now, tx| s.poll(now, tx)),
         on_key: Some(|s: &mut App, ev: &KeyEvent, tx: &mut Tx| s.on_key(ev, tx)),
@@ -66,7 +65,7 @@ pub fn run() {
         .as_deref()
         .map_or_else(|| Some(shortcut::default()), shortcut::load);
     rune::run_windows_with(rune::RunOptions { accessory }, move |_| {
-        let mut main = rune::App::new(spec());
+        let mut main = rune::App::new(spec()).chrome(view::CHROME);
         let mut quick = rune::App::new(panel::spec()).windowless();
         // Native menus are macOS's; headless scripts reach them everywhere.
         if cfg!(target_os = "macos") || headless {
