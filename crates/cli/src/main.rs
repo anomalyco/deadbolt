@@ -278,8 +278,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Commands::Agent {
             command: Some(AgentCommand::Status),
-        } => match client::status(&paths).await {
-            Some(status) => println!("running pid {} version {}", status.pid, status.version),
+        } => match client::running(&paths).await {
+            Some(agent) => println!("running pid {} version {}", agent.pid, agent.version),
             None => {
                 println!("not running");
                 return Ok(ExitCode::FAILURE);
