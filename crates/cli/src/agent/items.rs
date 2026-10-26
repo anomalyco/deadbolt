@@ -8,6 +8,7 @@
 //! searched.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
 use deadbolt_core::item::check_new_value;
@@ -292,8 +293,8 @@ pub fn get(s: &Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo
 }
 
 /// The current one-time code of the item's `otp` field, else of its first
-/// field of type otp, at `now` (unix seconds).
-pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: u64) -> Result<Code> {
+/// field of type otp, at `now` (since the unix epoch).
+pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: Duration) -> Result<Code> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
     let item = listing.find(query)?;
     let field = item
@@ -306,10 +307,13 @@ pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: u64) -> Resu
     };
     let totp = Totp::parse(&field.value)
         .map_err(|e| anyhow!("the one-time password of {} is invalid: {e}", label(item)))?;
+    let valid_until = totp.valid_until(now.as_secs());
+    let remaining = Duration::from_secs(valid_until).saturating_sub(now);
     Ok(Code {
-        code: Zeroizing::new(totp.code(now)),
+        code: Zeroizing::new(totp.code(now.as_secs())),
         period: totp.period(),
-        valid_until: totp.valid_until(now),
+        valid_until,
+        remaining_ms: remaining.as_millis() as u64,
     })
 }
 
@@ -569,6 +573,10 @@ mod tests {
         }
     }
 
+    fn at(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
     fn words(query: &str) -> Vec<String> {
         query.split(' ').map(String::from).collect()
     }
@@ -582,20 +590,23 @@ mod tests {
         let otp = format!("otpauth://totp/Site:dax?secret={secret}&digits=8&issuer=Site");
         let fields = vec![input("password", "pw"), input("otp", &otp)];
         create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
-        let code = code(&s, None, &words("site"), 59).unwrap();
+        let code = code(&s, None, &words("site"), Duration::from_millis(59_250)).unwrap();
         assert_eq!(code.code.as_str(), "94287082");
-        assert_eq!((code.period, code.valid_until), (30, 60));
+        assert_eq!(
+            (code.period, code.valid_until, code.remaining_ms),
+            (30, 60, 750)
+        );
 
         let fields = vec![input("password", "pw"), input("backup", "x")];
         create(&mut s, None, "login", Some("Plain".into()), fields).unwrap();
-        let error = super::code(&s, None, &words("plain"), 59).unwrap_err();
+        let error = super::code(&s, None, &words("plain"), at(59)).unwrap_err();
         assert_eq!(error.to_string(), "Plain has no one-time password");
         let fields = vec![FieldInput {
             kind: Some("otp".into()),
             ..input("backup", &secret.to_lowercase())
         }];
         set(&mut s, None, &words("plain"), fields, None).unwrap();
-        let code = super::code(&s, None, &words("plain"), 59).unwrap();
+        let code = super::code(&s, None, &words("plain"), at(59)).unwrap();
         assert_eq!(code.code.as_str(), "287082");
     }
 
@@ -635,7 +646,7 @@ mod tests {
             Ok(v.create_item(secret, "login", Some("Old".into()), fields)?)
         })
         .unwrap();
-        let error = code(&s, None, &words("old"), 59).unwrap_err();
+        let error = code(&s, None, &words("old"), at(59)).unwrap_err();
         assert_eq!(
             error.to_string(),
             "the one-time password of Old is invalid: counter-based (HOTP) codes are not supported"

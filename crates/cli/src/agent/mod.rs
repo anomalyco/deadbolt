@@ -848,8 +848,9 @@ impl Agent {
                 item: self.with(|s| items::get(s, vault.as_deref(), &query))?,
             }),
             Command::ItemCode { vault, query } => Ok(Reply::Code {
-                code: self
-                    .with(|s| items::code(s, vault.as_deref(), &query, crate::config::now()))?,
+                code: self.with(|s| {
+                    items::code(s, vault.as_deref(), &query, crate::config::wall_clock())
+                })?,
             }),
             Command::ItemList { vault, query, kind } => Ok(Reply::Items {
                 items: self.with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,

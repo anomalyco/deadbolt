@@ -292,6 +292,8 @@ pub struct Code {
     pub period: u64,
     /// Unix seconds when the next code takes over.
     pub valid_until: u64,
+    /// Milliseconds until then, from the agent's clock.
+    pub remaining_ms: u64,
 }
 
 impl fmt::Debug for Code {
@@ -300,6 +302,7 @@ impl fmt::Debug for Code {
             .field("code", &"<redacted>")
             .field("period", &self.period)
             .field("valid_until", &self.valid_until)
+            .field("remaining_ms", &self.remaining_ms)
             .finish()
     }
 }
