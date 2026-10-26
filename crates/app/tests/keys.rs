@@ -353,8 +353,9 @@ fn focused_row(rt: &Runtime<App>) -> Option<String> {
 
 /// Rows never take focus, so the keys stay with the search and the
 /// selection: Tab passes them by, a press released off an unselected row
-/// leaves the search focused, and Space with nothing focused selects
-/// nothing, nor closes the import view.
+/// leaves the search focused, Space with nothing focused selects nothing,
+/// nor closes the import view, and a click on a row with nothing focused
+/// focuses the search.
 #[test]
 fn rows_never_take_focus() {
     for name in ["vault", "import"] {
@@ -366,7 +367,8 @@ fn rows_never_take_focus() {
             assert_eq!(focused_row(&rt), None, "Tab ({name})");
         }
 
-        blur(&mut rt);
+        command(&mut rt, 'f');
+        assert!(rt.state.search.focused);
         let row = ids(&rt)
             .into_iter()
             .find(|i| Some(i) != selected.as_ref())
@@ -384,10 +386,7 @@ fn rows_never_take_focus() {
             None,
             "a press released off a row ({name})"
         );
-        assert!(
-            rt.state.search.focused,
-            "the search has focus back ({name})"
-        );
+        assert!(rt.state.search.focused, "the search kept focus ({name})");
         assert_eq!(rt.state.selected, selected, "the press selected ({name})");
         assert_eq!(
             rt.state.import.showing(),
@@ -404,5 +403,13 @@ fn rows_never_take_focus() {
             importing,
             "Space closed the import view"
         );
+
+        click(&mut rt, &format!("item-{row}"));
+        assert_eq!(rt.state.selected.as_deref(), Some(row.as_str()));
+        assert!(
+            rt.state.search.focused,
+            "the click focused the search ({name})"
+        );
+        assert_eq!(focused_row(&rt), None, "a click ({name})");
     }
 }

@@ -39,7 +39,7 @@ fn the_vault_names_its_controls() {
     for (role, label) in [
         ("textbox", "Search items"),
         ("listbox", "Items"),
-        ("option", "github.com"),
+        ("option", "github.com, dax · login"),
         ("button", "Show password"),
         ("button", "Password copied"),
         ("button", "Copy username"),

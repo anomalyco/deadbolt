@@ -649,6 +649,109 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
     assert_eq!(footer(&rt), "Copy password");
 }
 
+/// While the copy's confirmation shows, a click on another row picks
+/// nothing: the selection, its values and the copy stay, and it still closes.
+#[test]
+fn a_row_click_during_the_confirmation_does_nothing() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    let selected = rt.state.selected.clone();
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    let other = rt
+        .state
+        .visible()
+        .iter()
+        .map(|i| i.id.clone())
+        .find(|i| Some(i) != selected.as_ref())
+        .unwrap();
+    let (x, y) = rt.find(&format!("item-{other}")).unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.selected, selected, "the click selected a row");
+    assert!(rt.state.detail.is_some(), "the values stay");
+    assert!(rt.state.copy_pending(), "the copy stays");
+    frames(&mut rt, 34);
+    assert_eq!(footer(&rt), COPIED);
+    frames(&mut rt, 40);
+    assert!(matches!(phase(&rt), Phase::Closing { .. } | Phase::Hidden));
+}
+
+/// While the copy's confirmation shows, the search takes nothing: a paste
+/// (the just-copied password, say), even after a click on the field, leaves
+/// it empty and the selection where it was, and Escape still closes.
+#[test]
+fn a_paste_during_the_confirmation_does_nothing() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    let selected = rt.state.selected.clone();
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    assert!(!rt.state.search.focused, "the search let go");
+    rt.paste(PASSWORD);
+    frames(&mut rt, 2);
+    let (x, y) = rt.find("search-input").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.paste(PASSWORD);
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.search.text, "");
+    assert!(!rt.state.search.focused);
+    assert_eq!(rt.state.selected, selected);
+    rt.key(key(Key::Escape));
+    frames(&mut rt, 2);
+    assert!(matches!(phase(&rt), Phase::Closing { .. } | Phase::Hidden));
+}
+
+/// While the copy's confirmation shows, the list holds still: changes and
+/// replies are dropped and nothing is fetched, and the next summon fetches
+/// the list again with the search focused.
+#[test]
+fn the_list_holds_still_during_the_confirmation() {
+    let mut rt = runtime("empty", true);
+    let (agent, jobs, replies) = Agent::scripted();
+    rt.state.agent = agent;
+    frames(&mut rt, 10);
+    let items = rt.state.items.clone();
+    let selected = rt.state.selected.clone();
+    let vault = rt.state.status.clone().unwrap().vaults[0].id.clone();
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    jobs.try_iter().count();
+
+    let mut moved = items.clone();
+    moved.retain(|i| Some(&i.id) != selected.as_ref());
+    for done in [
+        Done::Changed(Change::Items { vault }),
+        Done::Changed(Change::Resync),
+        Done::Items {
+            generation: rt.state.generation(),
+            result: Ok(moved),
+        },
+    ] {
+        replies.send(done).unwrap();
+    }
+    frames(&mut rt, 2);
+    assert!(
+        !jobs.try_iter().any(|j| matches!(j, Job::List { .. })),
+        "nothing fetched"
+    );
+    let ids = |items: &[ItemInfo]| items.iter().map(|i| i.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&rt.state.items), ids(&items));
+    assert_eq!(rt.state.selected, selected);
+
+    frames(&mut rt, 120);
+    assert_eq!(phase(&rt), Phase::Hidden);
+    rt.update(|s, tx| s.summon(tx));
+    frames(&mut rt, 2);
+    assert!(jobs.try_iter().any(|j| matches!(j, Job::List { .. })));
+    assert!(rt.state.search.focused);
+}
+
 /// A copy whose write fails says why in the footer, and the panel stays
 /// open rather than closing on a confirmation.
 #[test]
@@ -661,6 +764,7 @@ fn a_failed_copy_stays_open_and_says_why() {
     frames(&mut rt, 30);
     assert!(shows(&rt, "Couldn't copy: no pasteboard"));
     assert!(!rt.state.copy_pending());
+    assert!(rt.state.search.focused, "the search is back");
     assert_eq!(board(&clip), None);
     frames(&mut rt, 90);
     assert_eq!(phase(&rt), Phase::Open, "no confirmation to close on");
@@ -1126,12 +1230,9 @@ fn command_l_locks_only_while_open() {
     }
 }
 
-/// Rows that ↑ and ↓ bring into view stop clear of the list's faded edges, in
-/// both windows, while the list's own ends still sit flush.
-#[test]
-fn a_selected_row_stops_clear_of_the_lists_fade() {
-    const EDGE: f32 = 24.0;
-    let items: Vec<ItemInfo> = (0..40)
+/// Forty logins: more than either window's list shows.
+fn many_items() -> Vec<ItemInfo> {
+    (0..40)
         .map(|i| ItemInfo {
             id: format!("{i:064x}"),
             short: format!("{i:04x}"),
@@ -1140,7 +1241,38 @@ fn a_selected_row_stops_clear_of_the_lists_fade() {
             detail: Some("dax".into()),
             fields: Vec::new(),
         })
-        .collect();
+        .collect()
+}
+
+/// Scrolling the list under a held press on a row cancels the press, in
+/// both windows: the release selects nothing and the search keeps focus.
+#[test]
+fn scrolling_under_a_pressed_row_cancels_it() {
+    let items = many_items();
+    for (name, mut rt) in [("panel", runtime("empty", true)), ("main", main_window())] {
+        answer_list(&mut rt, &items);
+        rt.update(|s, _| s.selected = s.visible().first().map(|i| i.id.clone()));
+        frames(&mut rt, 10);
+        let selected = rt.state.selected.clone();
+        let (x, y) = rt.find(&format!("item-{}", items[2].id)).unwrap();
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        frames(&mut rt, 2);
+        rt.wheel(x, y, -120.0);
+        frames(&mut rt, 2);
+        rt.pointer_up(x, y);
+        frames(&mut rt, 2);
+        assert_eq!(rt.state.selected, selected, "{name}: the release selected");
+        assert!(rt.state.search.focused, "{name}: the search keeps focus");
+    }
+}
+
+/// Rows that ↑ and ↓ bring into view stop clear of the list's faded edges, in
+/// both windows, while the list's own ends still sit flush.
+#[test]
+fn a_selected_row_stops_clear_of_the_lists_fade() {
+    const EDGE: f32 = 24.0;
+    let items = many_items();
     for (name, mut rt) in [("panel", runtime("empty", true)), ("main", main_window())] {
         answer_list(&mut rt, &items);
         rt.update(|s, _| s.selected = s.visible().first().map(|i| i.id.clone()));
