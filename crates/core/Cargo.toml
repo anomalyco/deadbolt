@@ -11,8 +11,12 @@ workspace = true
 
 [dependencies]
 blake3 = { version = "1.8", features = ["zeroize"] }
+data-encoding = "2.11.1"
 ed25519-dalek = "3.0"
 getrandom = "0.4"
+hmac = "0.13.0"
+sha1 = { version = "0.11.0", default-features = false }
+sha2 = { version = "0.11.1", default-features = false }
 thiserror = "2.0"
 zeroize = "1.9"
 

@@ -415,6 +415,16 @@ pub fn check_field(schema: &Schema, name: &str, field: &Field) -> Result<(), Ite
     Ok(())
 }
 
+/// Checks what only values written now must satisfy: an otp must be a TOTP
+/// secret ([`crate::totp::Totp::parse`]). Entries are not held to it, so
+/// values already in a vault stay valid on every device.
+pub fn check_new_value(name: &str, field: &Field) -> Result<(), ItemError> {
+    if field.kind == FieldType::Otp {
+        crate::totp::Totp::parse(&field.value).map_err(|e| invalid(name, e.to_string()))?;
+    }
+    Ok(())
+}
+
 /// Checks a change to an existing item of type `kind`.
 pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError> {
     let schema = schema(kind).ok_or_else(|| ItemError::UnknownType(kind.into()))?;

@@ -112,6 +112,12 @@ pub enum Command {
         vault: Option<String>,
         query: Vec<String>,
     },
+    /// Finds exactly one item and computes its current one-time code from
+    /// its `otp` field; replies `code`. The secret itself never leaves.
+    ItemCode {
+        vault: Option<String>,
+        query: Vec<String>,
+    },
     /// Lists matching items without field values; replies `items`.
     ItemList {
         vault: Option<String>,
@@ -273,6 +279,29 @@ pub enum Reply {
     Import {
         report: ImportReport,
     },
+    Code {
+        code: Code,
+    },
+}
+
+/// A one-time code and when it stops being valid.
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Code {
+    pub code: Zeroizing<String>,
+    /// Seconds each code lasts.
+    pub period: u64,
+    /// Unix seconds when the next code takes over.
+    pub valid_until: u64,
+}
+
+impl fmt::Debug for Code {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Code")
+            .field("code", &"<redacted>")
+            .field("period", &self.period)
+            .field("valid_until", &self.valid_until)
+            .finish()
+    }
 }
 
 /// What an import did, or would do. Counts only, never values.

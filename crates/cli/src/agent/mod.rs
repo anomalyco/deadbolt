@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn invalid_requests_are_described_without_their_values() {
-        let line = r#"{"v":3,"cmd":"import","export":"hunter2","apply":"hunter2"}"#;
+        let line = r#"{"v":4,"cmd":"import","export":"hunter2","apply":"hunter2"}"#;
         let error = serde_json::from_str::<Request>(line).unwrap_err();
         assert!(error.to_string().contains("hunter2"), "serde quotes values");
         let message = invalid_request(&error).to_string();
@@ -846,6 +846,10 @@ impl Agent {
             } => pairing::pair(&self, conv, ticket, vault, confirm).await,
             Command::ItemGet { vault, query } => Ok(Reply::Item {
                 item: self.with(|s| items::get(s, vault.as_deref(), &query))?,
+            }),
+            Command::ItemCode { vault, query } => Ok(Reply::Code {
+                code: self
+                    .with(|s| items::code(s, vault.as_deref(), &query, crate::config::now()))?,
             }),
             Command::ItemList { vault, query, kind } => Ok(Reply::Items {
                 items: self.with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,

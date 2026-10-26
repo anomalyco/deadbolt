@@ -9,14 +9,16 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
+use deadbolt_core::item::check_new_value;
+use deadbolt_core::totp::Totp;
 use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::session::Loaded;
 use crate::import::Imported;
 use crate::items::{format_month, line, with_scheme};
-use crate::protocol::{FieldInfo, FieldInput, ImportReport, ItemInfo};
+use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo};
 
 const MIN_SHORT: usize = 4;
 
@@ -263,7 +265,9 @@ fn fields(
                     .unwrap_or(FieldType::Text),
             };
             let value = normalize(kind, &input.name, &field, input.value);
-            Ok((input.name, Field::new(field, value)))
+            let field = Field::new(field, value);
+            check_new_value(&input.name, &field)?;
+            Ok((input.name, field))
         })
         .collect()
 }
@@ -285,6 +289,28 @@ fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
 pub fn get(s: &Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
     Ok(listing.info(listing.find(query)?, true))
+}
+
+/// The current one-time code of the item's `otp` field, else of its first
+/// field of type otp, at `now` (unix seconds).
+pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: u64) -> Result<Code> {
+    let listing = Listing::new(s.vault(&s.resolve(vault)?));
+    let item = listing.find(query)?;
+    let field = item
+        .fields
+        .get("otp")
+        .filter(|f| f.kind == FieldType::Otp)
+        .or_else(|| item.fields.values().find(|f| f.kind == FieldType::Otp));
+    let Some(field) = field else {
+        bail!("{} has no one-time password", label(item));
+    };
+    let totp = Totp::parse(&field.value)
+        .map_err(|e| anyhow!("the one-time password of {} is invalid: {e}", label(item)))?;
+    Ok(Code {
+        code: Zeroizing::new(totp.code(now)),
+        period: totp.period(),
+        valid_until: totp.valid_until(now),
+    })
 }
 
 pub fn list(
@@ -533,6 +559,87 @@ mod tests {
     fn count(s: &Loaded) -> usize {
         let vault = s.resolve(None).unwrap();
         s.vault(&vault).items().len()
+    }
+
+    fn input(name: &str, value: &str) -> FieldInput {
+        FieldInput {
+            name: name.into(),
+            kind: None,
+            value: value.into(),
+        }
+    }
+
+    fn words(query: &str) -> Vec<String> {
+        query.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn codes_come_from_the_otp_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        // RFC 6238's SHA-1 secret, "12345678901234567890".
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let otp = format!("otpauth://totp/Site:dax?secret={secret}&digits=8&issuer=Site");
+        let fields = vec![input("password", "pw"), input("otp", &otp)];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let code = code(&s, None, &words("site"), 59).unwrap();
+        assert_eq!(code.code.as_str(), "94287082");
+        assert_eq!((code.period, code.valid_until), (30, 60));
+
+        let fields = vec![input("password", "pw"), input("backup", "x")];
+        create(&mut s, None, "login", Some("Plain".into()), fields).unwrap();
+        let error = super::code(&s, None, &words("plain"), 59).unwrap_err();
+        assert_eq!(error.to_string(), "Plain has no one-time password");
+        let fields = vec![FieldInput {
+            kind: Some("otp".into()),
+            ..input("backup", &secret.to_lowercase())
+        }];
+        set(&mut s, None, &words("plain"), fields, None).unwrap();
+        let code = super::code(&s, None, &words("plain"), 59).unwrap();
+        assert_eq!(code.code.as_str(), "287082");
+    }
+
+    #[test]
+    fn otp_values_must_be_totp_secrets_when_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let hotp = "otpauth://hotp/Site?secret=JBSWY3DPEHPK3PXP&counter=1";
+        let fields = vec![input("password", "pw"), input("otp", hotp)];
+        let error = create(&mut s, None, "login", Some("Site".into()), fields).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid value for otp: counter-based (HOTP) codes are not supported"
+        );
+        let fields = vec![input("password", "pw")];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let error = set(
+            &mut s,
+            None,
+            &words("site"),
+            vec![input("otp", "123456")],
+            None,
+        );
+        assert_eq!(
+            error.unwrap_err().to_string(),
+            "invalid value for otp: the secret is not base32"
+        );
+        assert_eq!(count(&s), 1);
+
+        // A value written before the check is still in the vault, and says why it has no code.
+        let vault = s.resolve(None).unwrap();
+        s.update(vault, |v, secret| {
+            let fields = vec![
+                ("password".to_string(), Field::new(FieldType::Secret, "pw")),
+                ("otp".to_string(), Field::new(FieldType::Otp, hotp)),
+            ];
+            Ok(v.create_item(secret, "login", Some("Old".into()), fields)?)
+        })
+        .unwrap();
+        let error = code(&s, None, &words("old"), 59).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the one-time password of Old is invalid: counter-based (HOTP) codes are not supported"
+        );
     }
 
     #[test]

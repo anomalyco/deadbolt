@@ -41,6 +41,11 @@ pub enum ItemCommand {
         #[arg(short, long)]
         field: Option<String>,
     },
+    /// Print the current one-time code from an item's otp field.
+    Code {
+        #[arg(required = true, value_name = "QUERY")]
+        query: Vec<String>,
+    },
     /// Show an item's fields, secrets masked.
     Show {
         #[arg(required = true, value_name = "QUERY")]
@@ -287,6 +292,13 @@ pub async fn run(
                 .find(|f| f.name == name)
                 .ok_or_else(|| anyhow!("{} has no field {name}", item.label))?;
             println!("{}", field.value);
+        }
+        ItemCommand::Code { query } => {
+            let command = Command::ItemCode { vault, query };
+            let Reply::Code { code } = crate::request(paths, command, from_stdin).await? else {
+                bail!("unexpected reply");
+            };
+            println!("{}", code.code.as_str());
         }
         ItemCommand::Show { query, reveal } => {
             let command = Command::ItemGet { vault, query };

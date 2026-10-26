@@ -6,10 +6,10 @@ use deadbolt_core::FieldType;
 use serde_json::Value;
 
 use super::{
-    ATTACHMENT, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BANK_ACCOUNT, Builder, COLLECTION, DRIVERS_LICENSE,
-    FAVORITE, FOLDER, Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSKEYS, PASSPORT,
-    PASSWORD_HISTORY, Summary, UNKNOWN_TYPE, address, array, field_name, item_name, join, month,
-    number, text,
+    ATTACHMENT, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, BANK_ACCOUNT, Builder, COLLECTION,
+    DRIVERS_LICENSE, FAVORITE, FOLDER, Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSKEYS,
+    PASSPORT, PASSWORD_HISTORY, Summary, UNKNOWN_TYPE, address, array, field_name, item_name, join,
+    month, number, text,
 };
 use crate::protocol::ImportSource;
 
@@ -46,7 +46,7 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let mut b = Builder::new("login");
     b.known("password", text(login, "password"));
     b.known("username", text(login, "username"));
-    b.known("otp", text(login, "totp"));
+    b.known_or_extra("otp", text(login, "totp"), BAD_OTP, summary);
     b.known("notes", text(item, "notes"));
     b.urls(
         array(login, "uris").iter().filter_map(|u| text(u, "uri")),

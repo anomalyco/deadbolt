@@ -5,7 +5,9 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{ARCHIVED, Builder, COLUMN, FAVORITE, Imported, SUPPORTED, Summary, TAG, item_name};
+use super::{
+    ARCHIVED, BAD_OTP, Builder, COLUMN, FAVORITE, Imported, SUPPORTED, Summary, TAG, item_name,
+};
 use crate::protocol::ImportSource;
 
 /// Apple Passwords' header (macOS 15+, and Safari's before it).
@@ -169,7 +171,7 @@ fn login(row: Row, summary: &mut Summary) -> Option<Imported> {
     b.known("username", row.username);
     // The first is `otp`; any others become extra fields.
     for otp in row.otps {
-        b.known("otp", Some(otp));
+        b.known_or_extra("otp", Some(otp), BAD_OTP, summary);
     }
     b.known("notes", row.notes);
     b.urls(row.urls, summary);

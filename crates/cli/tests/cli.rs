@@ -724,6 +724,44 @@ fn items() {
 }
 
 #[test]
+fn one_time_codes() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "url=github.com",
+            "password=pw",
+            "otp=otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
+        ],
+    );
+    new(&a, &["login", "url=gitlab.com", "password=pw"]);
+
+    let code = a.run(&["code", "github"]);
+    let code = code.trim_end_matches('\n');
+    assert!(
+        code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
+        "{code}"
+    );
+    assert!(
+        a.run(&["show", "github"])
+            .contains("\notp       ••••••••\n")
+    );
+    assert!(
+        a.fail(&["code", "gitlab"])
+            .contains("gitlab.com has no one-time password")
+    );
+    let err = a.fail(&["set", "gitlab", "otp=123456"]);
+    assert!(
+        err.contains("invalid value for otp: the secret is not base32"),
+        "{err}"
+    );
+    a.run(&["set", "gitlab", "otp=jbsw y3dp ehpk 3pxp"]);
+    assert_eq!(a.run(&["code", "gitlab"]).trim_end().len(), 6);
+}
+
+#[test]
 fn concurrent_item_edits_on_two_devices() {
     let a = Device::new();
     let b = Device::new();
