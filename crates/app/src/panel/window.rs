@@ -111,6 +111,21 @@ impl Windows {
         self.open_main();
     }
 
+    /// "New Item": the main window, in front, with a form for a new login.
+    pub fn new_item(&self) {
+        self.main.update(|s, _| s.from_menu(App::new_item));
+    }
+
+    /// "Edit Item": the main window, in front, editing the selected item.
+    pub fn edit_item(&self) {
+        self.main.update(|s, _| s.from_menu(App::edit_selected));
+    }
+
+    /// "Delete Item…": the main window, in front, asking to delete the selected item.
+    pub fn delete_item(&self) {
+        self.main.update(|s, _| s.from_menu(App::ask_delete));
+    }
+
     /// Quits from the main window through the panel, so the panel clears its copy first.
     pub fn quit(&self) {
         self.panel.update(|panel, tx| {
@@ -142,7 +157,42 @@ pub fn menu(shortcut: Option<&Shortcut>) -> Vec<MenuItem<App>> {
     })
     .menu("File")
     .key_equivalent(import_shortcut());
-    vec![item, dock, import]
+    let new = MenuItem::new(crate::edit::NEW, |s: &mut App, _| {
+        windows(s, Windows::new_item)
+    })
+    .menu("File")
+    .key_equivalent(edit_shortcut('n'));
+    let edit = MenuItem::new(crate::edit::EDIT, |s: &mut App, _| {
+        windows(s, Windows::edit_item)
+    })
+    .menu("File")
+    .key_equivalent(edit_shortcut('e'));
+    // No ⌘⌫ here: a menu's key equivalent comes before the window, and ⌘⌫ in a
+    // text field deletes to the line's start. The window takes it (`App::edit_key`).
+    let delete = MenuItem::new(crate::edit::DELETE, |s: &mut App, _| {
+        windows(s, Windows::delete_item)
+    })
+    .menu("File");
+    vec![item, dock, new, edit, delete, import]
+}
+
+/// An item menu's action, on the windows. Nothing while the quick panel is
+/// up: its keys are its own.
+fn windows(s: &App, f: fn(&Windows)) {
+    if s.panel_phase()
+        .is_some_and(|p| p != crate::panel::Phase::Hidden)
+    {
+        return;
+    }
+    if let Some(windows) = &s.windows {
+        f(windows);
+    }
+}
+
+/// ⌘N and ⌘E, "New Item" and "Edit Item".
+#[expect(clippy::expect_used, reason = "constants")]
+fn edit_shortcut(key: char) -> Shortcut {
+    format!("super+{key}").parse().expect("parses")
 }
 
 /// ⇧⌘I, "Import Passwords…".

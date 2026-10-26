@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use deadbolt_client::export::{self, ExportError};
 use deadbolt_client::protocol::{
-    Change, Code, Command, ErrorCode, ImportReport, ItemInfo, Reply, Status, code_field,
+    Change, Code, Command, ErrorCode, FieldInput, ImportReport, ItemInfo, Reply, Status, code_field,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -56,6 +56,32 @@ pub enum Job {
         apply: Option<blake3::Hash>,
         seq: u64,
     },
+    /// Adds an item to the default vault. `seq` tells the edit it's for (`edit::Edit`).
+    Create {
+        kind: String,
+        name: Option<String>,
+        fields: Vec<FieldInput>,
+        seq: u64,
+    },
+    /// Changes an item in one entry: sets `fields`, removes `unset` and
+    /// renames it (`Some("")` clears the name).
+    Save {
+        id: String,
+        name: Option<String>,
+        fields: Vec<FieldInput>,
+        unset: Vec<String>,
+        seq: u64,
+    },
+    Remove {
+        id: String,
+        seq: u64,
+    },
+    /// A password from the agent's generator.
+    Generate {
+        length: usize,
+        symbols: bool,
+        seq: u64,
+    },
 }
 
 pub enum Done {
@@ -89,6 +115,19 @@ pub enum Done {
         /// that turned into one because the file changed.
         applied: bool,
         result: Result<Imported, ImportFailure>,
+    },
+    /// An item added or changed, without its values.
+    Saved {
+        seq: u64,
+        result: Result<ItemInfo, Failure>,
+    },
+    Removed {
+        seq: u64,
+        result: Result<ItemInfo, Failure>,
+    },
+    Generated {
+        seq: u64,
+        result: Result<Zeroizing<String>, Failure>,
     },
     /// From the watch stream.
     Changed(Change),
@@ -520,6 +559,74 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 result,
             }
         }
+        Job::Create {
+            kind,
+            name,
+            fields,
+            seq,
+        } => {
+            let command = Command::ItemNew {
+                vault: None,
+                kind,
+                name,
+                fields,
+            };
+            Done::Saved {
+                seq,
+                result: item(paths, command).await,
+            }
+        }
+        Job::Save {
+            id,
+            name,
+            fields,
+            unset,
+            seq,
+        } => {
+            let command = Command::ItemSet {
+                vault: None,
+                query: vec![id],
+                fields,
+                name,
+                unset,
+            };
+            Done::Saved {
+                seq,
+                result: item(paths, command).await,
+            }
+        }
+        Job::Remove { id, seq } => {
+            let command = Command::ItemRemove {
+                vault: None,
+                query: vec![id],
+            };
+            Done::Removed {
+                seq,
+                result: item(paths, command).await,
+            }
+        }
+        Job::Generate {
+            length,
+            symbols,
+            seq,
+        } => {
+            let command = Command::Generate { length, symbols };
+            let result = match deadbolt_client::simple(paths, command).await {
+                Ok(Reply::Password { password }) => Ok(password),
+                Ok(_) => Err(unexpected()),
+                Err(error) => Err(error.into()),
+            };
+            Done::Generated { seq, result }
+        }
+    }
+}
+
+/// A write that replies with the item, without its values.
+async fn item(paths: &Paths, command: Command) -> Result<ItemInfo, Failure> {
+    match deadbolt_client::simple(paths, command).await {
+        Ok(Reply::Item { item }) => Ok(item),
+        Ok(_) => Err(unexpected()),
+        Err(error) => Err(error.into()),
     }
 }
 

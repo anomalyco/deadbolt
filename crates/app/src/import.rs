@@ -111,9 +111,10 @@ impl Import {
 impl App {
     /// "Import Passwords…": the import view, in the vault.
     pub fn show_import(&mut self) {
-        if self.screen != Screen::Vault || self.panel.is_some() {
+        if self.screen != Screen::Vault || self.panel.is_some() || !self.leave_edit() {
             return;
         }
+        self.edit.delete = None;
         if let Some(installer) = self.installer.as_mut().filter(|i| i.open) {
             installer.close();
         }
@@ -123,7 +124,7 @@ impl App {
 
     /// The window takes dropped files: the vault is showing, not the install page.
     pub fn accepts_drops(&self) -> bool {
-        self.screen == Screen::Vault && !self.installing()
+        self.screen == Screen::Vault && !self.installing() && !self.editing() && !self.deleting()
     }
 
     /// An export is being dragged over the window, which would take it.

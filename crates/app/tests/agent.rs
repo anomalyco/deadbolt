@@ -631,3 +631,122 @@ fn a_deleted_selection_goes_at_once() {
         .collect();
     assert!(old.is_empty(), "the old item lingers: {old:?}");
 }
+
+/// The open form's field `name`.
+fn form_value(s: &App, name: &str) -> String {
+    let form = s.edit.form.as_ref().expect("a form");
+    let input = form.fields.iter().find(|f| f.name == name).unwrap();
+    input.edit.text.to_string()
+}
+
+fn fill(rt: &mut Runtime<App>, name: &str, value: &str) {
+    rt.update(|s, _| {
+        let form = s.edit.form.as_mut().expect("a form");
+        let input = form.fields.iter_mut().find(|f| f.name == name).unwrap();
+        input.edit.replace_text(value);
+        s.form_changed();
+    });
+    rt.frame(1.0 / 60.0);
+}
+
+fn command(c: char) -> KeyEvent {
+    KeyEvent {
+        key: Key::Command(c),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    }
+}
+
+/// Adding, changing and deleting against a real agent: ⌘N with the agent's
+/// generated password, an edit that changes one field and empties another,
+/// and a delete, each as the CLI then sees it.
+#[test]
+fn add_edit_and_delete_items() {
+    let device = Device::new();
+    device.run(&["init"]);
+    device.run(&[
+        "new",
+        "login",
+        "username=dax",
+        "url=github.com",
+        "password=hunter22",
+    ]);
+    let agent = Agent::spawn(device.paths(), device.launch());
+    let mut rt = Runtime::new(
+        App::new(agent),
+        deadbolt_app::view::app,
+        (820.0, 540.0),
+        Env {
+            system_dark: false,
+            scale: 1.0,
+        },
+    );
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+    rt.state.agent.send(Job::Connect);
+    until(&mut rt, "the vault", |s| {
+        s.screen == Screen::Vault && s.loaded && s.detail.is_some()
+    });
+
+    // ⌘N: a new login, its password from the agent's generator.
+    rt.key(command('n'));
+    until(&mut rt, "a generated password", |s| {
+        s.editing() && !form_value(s, "password").is_empty()
+    });
+    let password = form_value(&rt.state, "password");
+    assert_eq!(password.chars().count(), 24);
+    for c in "Linear".chars() {
+        rt.key(key(Key::Text(c.into())));
+    }
+    fill(&mut rt, "username", "kit");
+    rt.key(command('s'));
+    until(&mut rt, "the new login, selected", |s| {
+        !s.editing()
+            && s.selected_item().is_some_and(|i| i.label == "Linear")
+            && s.detail.as_ref().is_some_and(|d| d.label == "Linear")
+    });
+    assert_eq!(rt.state.items.len(), 2);
+    assert_eq!(device.output(&["get", "Linear"]).trim(), password);
+    assert_eq!(
+        device.output(&["get", "-f", "username", "Linear"]).trim(),
+        "kit"
+    );
+
+    // ⌘E: a new URL, the username emptied, saved as one change.
+    rt.key(command('e'));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(form_value(&rt.state, "username"), "kit");
+    fill(&mut rt, "username", "");
+    fill(&mut rt, "url", "linear.app");
+    rt.key(command('s'));
+    until(&mut rt, "the edit, saved", |s| {
+        !s.editing()
+            && s.detail.as_ref().is_some_and(|d| {
+                d.fields.iter().any(|f| f.value == "https://linear.app")
+                    && !d.fields.iter().any(|f| f.name == "username")
+            })
+    });
+    assert_eq!(
+        device.output(&["get", "-f", "url", "Linear"]).trim(),
+        "https://linear.app"
+    );
+    assert_eq!(device.output(&["get", "Linear"]).trim(), password);
+
+    // ⌘⌫ asks; ⏎ deletes, and github.com takes its place.
+    rt.key(KeyEvent {
+        key: Key::Backspace,
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(shows(&rt, "Delete “Linear”?"));
+    rt.key(key(Key::Enter));
+    until(&mut rt, "the delete", |s| {
+        s.items.len() == 1 && s.detail.as_ref().is_some_and(|d| d.label == "github.com")
+    });
+    assert!(!device.output(&["ls"]).contains("Linear"));
+}

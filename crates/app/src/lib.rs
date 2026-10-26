@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod binary;
+pub mod edit;
 pub mod import;
 pub mod install;
 pub mod model;
@@ -56,6 +57,9 @@ pub fn run() {
     let extra = rune::extra_args();
     let reduced_motion = extra.iter().any(|a| a == "--reduced-motion");
     let panel_first = extra.iter().any(|a| a == panel::window::FLAG);
+    // A headless `--desktop` run drives every window, so they can reach each
+    // other as in a live run (the menus' items act on the main window).
+    let wired = live || std::env::args().any(|a| a == "--desktop");
     // Started for the panel, Deadbolt runs without a Dock icon so launching
     // doesn't activate it and the app you were in keeps focus; opening the
     // main window brings the icon back (`Windows::open_main`).
@@ -96,11 +100,13 @@ pub fn run() {
                     if let Some(file) = shortcut_file {
                         app.hotkey = shortcut::Hotkey::live(quick_handle, file, chosen);
                     }
-                    app.windows = Some(main_windows);
                     app
                 } else {
                     App::new(Agent::offline())
                 };
+                if wired {
+                    app.windows = Some(main_windows);
+                }
                 app.reduced_motion = reduced_motion;
                 app
             })
@@ -116,15 +122,16 @@ pub fn run() {
         let mut quick = quick
             .init(move || {
                 let mut app = if live {
-                    let mut app = App::panel(Agent::spawn(Paths::get(), agent::launch()));
+                    App::panel(Agent::spawn(Paths::get(), agent::launch()))
+                } else {
+                    App::panel(Agent::offline())
+                };
+                if wired {
                     app.windows = Some(panel_windows);
                     if let Some(panel) = &mut app.panel {
                         panel.phase = panel::Phase::Hidden;
                     }
-                    app
-                } else {
-                    App::panel(Agent::offline())
-                };
+                }
                 app.reduced_motion = reduced_motion;
                 app
             })
@@ -414,6 +421,84 @@ const SCENES: &[Scene] = &[
     ("import", |s| {
         vault(s);
         s.show_import();
+    }),
+    // ⌘N: a new login, with a password from the generator.
+    ("new-login", |s| {
+        vault(s);
+        s.new_item();
+        generated(s);
+    }),
+    // A new card, its number typed.
+    ("new-card", |s| {
+        vault(s);
+        s.new_item();
+        s.pick_kind("card");
+        if let Some(form) = &mut s.edit.form {
+            form.name.replace_text("Visa");
+        }
+        typed(s, "cardholder", "Dax Raad");
+        typed(s, "number", "4242 4242 4242 4242");
+        typed(s, "expiry", "08/29");
+    }),
+    // A new identity, its address over two lines.
+    ("new-identity", |s| {
+        vault(s);
+        s.new_item();
+        s.pick_kind("identity");
+        if let Some(form) = &mut s.edit.form {
+            form.name.replace_text("Dax Raad");
+        }
+        typed(s, "email", "dax@anoma.ly");
+        typed(s, "address", "1 Main St\nSpringfield, IL 12345");
+    }),
+    // ⌘E on an SSH key: its private key shows but stays as it is.
+    ("edit-ssh", |s| {
+        kind_scene(s, "ssh");
+        s.edit_selected();
+        s.toggle_shown(0);
+    }),
+    // ⌘E on github.com, its username changed.
+    ("edit", |s| {
+        vault(s);
+        s.edit_selected();
+        typed(s, "username", "kit@anoma.ly");
+    }),
+    // The agent refused a card number.
+    ("edit-invalid", |s| {
+        vault(s);
+        s.new_item();
+        s.pick_kind("card");
+        typed(s, "number", "4242 4242");
+        s.save();
+        let seq = s.edit_seq();
+        s.apply(
+            agent::Done::Saved {
+                seq,
+                result: Err(agent::Failure {
+                    code: None,
+                    message: "invalid value for number: must be 12-19 digits".into(),
+                }),
+            },
+            &mut Tx::default(),
+        );
+    }),
+    // ⌘⌫ on github.com.
+    ("delete-confirm", |s| {
+        vault(s);
+        s.ask_delete();
+    }),
+    // Another device changed github.com while it was open here.
+    ("edit-conflict", |s| {
+        vault(s);
+        s.edit_selected();
+        typed(s, "username", "kit@anoma.ly");
+        if let Some(mut item) = s.detail.clone() {
+            if let Some(f) = item.fields.iter_mut().find(|f| f.name == "password") {
+                f.value = "a-new-password-from-the-studio".into();
+            }
+            s.edit_item_landed(&item);
+            s.detail = Some(item);
+        }
     }),
     // macOS's Finder search holds ⌥⌘Space: recording it shows the conflict
     // in place (scripts/settings-shortcut.json).
@@ -739,6 +824,31 @@ fn kind_scene(s: &mut App, kind: &str) {
         .find(|i| i.kind == kind)
         .map(|i| i.id.clone());
     detail_for_selection(s);
+}
+
+/// The open form's field `name`, typed into.
+fn typed(s: &mut App, name: &str, value: &str) {
+    if let Some(input) = s
+        .edit
+        .form
+        .as_mut()
+        .and_then(|f| f.fields.iter_mut().find(|i| i.name == name))
+    {
+        input.edit.replace_text(value);
+    }
+}
+
+/// The generator's answer to the open form, as the agent would give it.
+fn generated(s: &mut App) {
+    let Some(seq) = s.generating() else { return };
+    let password = zeroize::Zeroizing::new("Vq7#mRz2!pKx9@wLt4&nBe8".to_owned());
+    s.apply(
+        agent::Done::Generated {
+            seq,
+            result: Ok(password),
+        },
+        &mut Tx::default(),
+    );
 }
 
 fn detail_for_selection(s: &mut App) {
