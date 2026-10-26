@@ -1043,6 +1043,13 @@ impl App {
         }
     }
 
+    /// The quick panel's clear button: an empty search, still focused.
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+        self.search.focused = true;
+        self.search_changed();
+    }
+
     /// Focuses the search field with its text selected, so typing replaces it.
     pub fn focus_search(&mut self) {
         self.search.focused = true;

@@ -9,8 +9,7 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field, noun};
 use rune::{
-    Chrome, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
-    row, spacer, text, text_input,
+    Chrome, Cx, Edge, El, Icon, ScrollSpec, TextStyle, Transition, col, el, icon, row, spacer, text,
 };
 use rune_kit::shell::{Page, SidebarRow, SplitView, Toolbar};
 use rune_kit::{
@@ -341,31 +340,6 @@ fn vault(s: &App, k: &Kit, inset: f32, layer: &mut Vec<El>) -> El {
         .build(k)
 }
 
-/// Keys the search field handles before its editor; true when handled.
-pub(crate) type SearchKeys = fn(&mut App, &KeyEvent, &mut Tx) -> bool;
-
-/// The search field: typing filters the list live; `keys` takes ↑↓, Enter and Escape.
-/// Read-only while the quick panel is inert, so no press, paste or IME
-/// text lands in it.
-pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys) -> El {
-    let field = text_input(&s.search, style)
-        .single_line()
-        .key("search-input")
-        .label("Search items")
-        .grow(1.0)
-        .shrink()
-        .color(k.c.text_strong)
-        .placeholder(search_placeholder(s), k.c.text_faint)
-        .caret(k.c.text_strong, k.alpha(k.c.text_accent, 0.3))
-        .on_input_key(keys)
-        .on_input_change(|s: &mut App, _| s.search_changed());
-    if s.panel_inert() {
-        field
-    } else {
-        field.on_edit(|s: &mut App| &mut s.search)
-    }
-}
-
 /// The vault's search field: typing filters the list live; `search_key`
 /// takes ↑↓, Enter and Escape. A press anywhere in its box, the icon too,
 /// lands in the field.
@@ -382,7 +356,7 @@ fn search(s: &App, k: &Kit) -> El {
         .label("Search items")
 }
 
-fn search_placeholder(s: &App) -> String {
+pub(crate) fn search_placeholder(s: &App) -> String {
     match s.items.len() {
         1 => "Search 1 item".to_owned(),
         n => format!("Search {n} items"),
