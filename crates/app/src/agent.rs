@@ -4,14 +4,17 @@
 //! open, reconnecting with backoff, and posts each change to the same inbox.
 //! Both wake the window when something lands; nothing polls.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use deadbolt_client::protocol::{Change, Command, ErrorCode, ItemInfo, Reply, Status};
+use deadbolt_client::export::{self, ExportError};
+use deadbolt_client::protocol::{
+    Change, Command, ErrorCode, ImportReport, ItemInfo, Reply, Status,
+};
 use deadbolt_client::{Error, Launch, Paths};
-use rune::Waker;
+use rune::{FileDialogOptions, FileDialogs, Waker};
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -35,6 +38,13 @@ pub enum Job {
         id: String,
         seq: u64,
     },
+    /// Reads an export and has the agent import it into the default vault,
+    /// or only say what it would import. The text never leaves this thread.
+    Import {
+        path: PathBuf,
+        apply: bool,
+        seq: u64,
+    },
 }
 
 pub enum Done {
@@ -50,6 +60,16 @@ pub enum Done {
     Item {
         seq: u64,
         result: Result<Values, Failure>,
+    },
+    Imported {
+        seq: u64,
+        apply: bool,
+        result: Result<ImportReport, ImportFailure>,
+    },
+    /// The file Choose File… picked; `None` if it was cancelled.
+    Chosen {
+        seq: u64,
+        result: Result<Option<PathBuf>, String>,
     },
     /// From the watch stream.
     Changed(Change),
@@ -116,6 +136,26 @@ impl From<Error> for Failure {
     }
 }
 
+/// Why an export wasn't read or imported.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ImportFailure {
+    /// The file isn't an export Deadbolt reads: not text, empty, too large.
+    NotExport(String),
+    /// The file couldn't be read.
+    Read(String),
+    Agent(Failure),
+}
+
+impl From<ExportError> for ImportFailure {
+    fn from(error: ExportError) -> Self {
+        match error {
+            // The path is on screen already; say only what went wrong.
+            ExportError::Read(_, e) | ExportError::Io(e) => ImportFailure::Read(e.to_string()),
+            e => ImportFailure::NotExport(error_chain(&e)),
+        }
+    }
+}
+
 fn error_chain(error: &dyn std::error::Error) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
@@ -131,6 +171,8 @@ pub struct Agent {
     jobs: Option<Sender<Job>>,
     inbox: Receiver<Done>,
     waker: Arc<Mutex<Option<Waker>>>,
+    /// For file dialogs, which answer on threads of their own.
+    post: Post,
     /// Dropping it ends the watch thread.
     _watching: Option<oneshot::Sender<()>>,
 }
@@ -150,10 +192,11 @@ impl Agent {
             results: results.clone(),
             waker: waker.clone(),
         };
+        let watch_post = post.clone();
         let watch_paths = paths.clone();
         std::thread::Builder::new()
             .name("deadbolt-watch".into())
-            .spawn(move || watch(watch_paths, post, stop))
+            .spawn(move || watch(watch_paths, watch_post, stop))
             .expect("spawning the watch thread");
         let wake = waker.clone();
         std::thread::Builder::new()
@@ -163,6 +206,7 @@ impl Agent {
         Agent {
             jobs: Some(jobs),
             inbox,
+            post,
             waker,
             _watching: Some(watching),
         }
@@ -170,11 +214,16 @@ impl Agent {
 
     /// A connection that never answers, for scenes and snapshots.
     pub fn offline() -> Agent {
-        let (_, inbox) = channel();
+        let (results, inbox) = channel();
+        let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
         Agent {
             jobs: None,
             inbox,
-            waker: Arc::default(),
+            post: Post {
+                results,
+                waker: waker.clone(),
+            },
+            waker,
             _watching: None,
         }
     }
@@ -184,10 +233,15 @@ impl Agent {
     pub fn scripted() -> (Agent, Receiver<Job>, Sender<Done>) {
         let (jobs, requests) = channel();
         let (results, inbox) = channel();
+        let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
         let agent = Agent {
             jobs: Some(jobs),
             inbox,
-            waker: Arc::default(),
+            post: Post {
+                results: results.clone(),
+                waker: waker.clone(),
+            },
+            waker,
             _watching: None,
         };
         (agent, requests, results)
@@ -208,9 +262,34 @@ impl Agent {
     pub fn drain(&self) -> Vec<Done> {
         self.inbox.try_iter().collect()
     }
+
+    /// Shows Choose File…'s Open dialog on a thread of its own, which waits
+    /// for it (a native one is presented on the main thread's run loop, which
+    /// must not wait), and posts `Done::Chosen`.
+    pub fn choose_file(&self, dialogs: FileDialogs, options: FileDialogOptions, seq: u64) {
+        let post = self.post.clone();
+        let spawned = std::thread::Builder::new()
+            .name("deadbolt-file-dialog".into())
+            .spawn(move || {
+                let result = match tokio::runtime::Builder::new_current_thread().build() {
+                    Ok(runtime) => runtime
+                        .block_on(dialogs.open(options))
+                        .map_err(|e| e.to_string()),
+                    Err(e) => Err(e.to_string()),
+                };
+                post.send(Done::Chosen { seq, result });
+            });
+        if let Err(e) = spawned {
+            self.post.send(Done::Chosen {
+                seq,
+                result: Err(e.to_string()),
+            });
+        }
+    }
 }
 
 /// Posts to the UI's inbox and wakes the window.
+#[derive(Clone)]
 struct Post {
     results: Sender<Done>,
     waker: Arc<Mutex<Option<Waker>>>,
@@ -371,6 +450,26 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             };
             Done::Item { seq, result }
         }
+        Job::Import { path, apply, seq } => Done::Imported {
+            seq,
+            apply,
+            result: import(paths, &path, apply).await,
+        },
+    }
+}
+
+/// The export's text goes into the request, and with it is wiped once sent.
+async fn import(paths: &Paths, path: &Path, apply: bool) -> Result<ImportReport, ImportFailure> {
+    let export = export::read(path)?;
+    let command = Command::Import {
+        vault: None,
+        export,
+        apply,
+    };
+    match deadbolt_client::simple(paths, command).await {
+        Ok(Reply::Import { report }) => Ok(report),
+        Ok(_) => Err(ImportFailure::Agent(unexpected())),
+        Err(error) => Err(ImportFailure::Agent(error.into())),
     }
 }
 

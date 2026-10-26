@@ -100,6 +100,12 @@ impl Windows {
         }
     }
 
+    /// "Import Passwords…": the main window, in front, with its import view.
+    pub fn show_import(&self) {
+        self.main.update(|s, _| s.show_import());
+        self.open_main();
+    }
+
     /// Quits from the main window through the panel, so the panel clears its copy first.
     pub fn quit(&self) {
         self.panel.update(|panel, tx| {
@@ -114,7 +120,8 @@ pub const OPEN: &str = "Open Quick Panel";
 
 /// The panel's `App` owns the menus, so headless `--window panel` scripts
 /// reach them (`{"menu": "Open Quick Panel"}`). Native menus are macOS's;
-/// elsewhere the hint bar's `entry` is the way in.
+/// elsewhere the hint bar's `entry` is the way in, and the main window takes
+/// ⇧⌘I itself (`App::import_key`).
 pub fn menu(shortcut: Option<&Shortcut>) -> Vec<MenuItem<App>> {
     let mut item = MenuItem::new(OPEN, |s: &mut App, tx| s.show_panel(tx));
     if let Some(shortcut) = shortcut {
@@ -123,7 +130,20 @@ pub fn menu(shortcut: Option<&Shortcut>) -> Vec<MenuItem<App>> {
     let dock = MenuItem::new(OPEN, |s: &mut App, tx| s.show_panel(tx))
         .id("dock-quick")
         .dock();
-    vec![item, dock]
+    let import = MenuItem::new(crate::import::MENU, |s: &mut App, _| {
+        if let Some(windows) = &s.windows {
+            windows.show_import();
+        }
+    })
+    .menu("File")
+    .key_equivalent(import_shortcut());
+    vec![item, dock, import]
+}
+
+/// ⇧⌘I, "Import Passwords…".
+#[expect(clippy::expect_used, reason = "a constant")]
+pub fn import_shortcut() -> Shortcut {
+    "shift+super+i".parse().expect("parses")
 }
 
 /// The main window's way in off macOS, where there are no native menus: the

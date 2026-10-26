@@ -1,0 +1,332 @@
+//! Drawing the import: the drop zone, the preview and "Imported 12 from
+//! 1Password".
+//!
+//! Motion: the pane's states (drop zone, preview, nothing new) swap with the
+//! app's whole-state replacement at .3 in and .25 out. A drag over the window
+//! highlights the drop zone at once, and labels that change in place roll.
+//! Nothing animates on first paint; reduced motion keeps only the fades
+//! (Rune's runtime).
+
+use rune::{El, Icon, Spring, SpringPair, TextStyle, Transition, col, icon, row, text};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, RollingText};
+
+use super::{Phase, Preview, details, import_label, new_items};
+use crate::model::App;
+
+pub static IMPORT: Icon = Icon {
+    name: "deadbolt-import",
+    view: 16.0,
+    body: r#"<path d="M8 2.25v7.5M4.75 6.5 8 9.75l3.25-3.25" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.25 10.5v1.75c0 .69.56 1.25 1.25 1.25h9c.69 0 1.25-.56 1.25-1.25V10.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
+};
+
+/// Counts line up digit for digit.
+const TNUM: &str = "'tnum' 1";
+
+/// Where each app's export is.
+const SOURCES: &[(&str, &str)] = &[
+    ("1Password 8", "File › Export › (account) › 1PUX"),
+    ("Apple Passwords", "File › Export All Passwords…"),
+    ("Bitwarden", "Tools › Export vault › .json"),
+];
+
+/// Whole-state swaps in the pane.
+pub(crate) fn swap() -> Transition {
+    Transition::blur_replace().springs(SpringPair::new(
+        Spring::new(0.3, 0.0),
+        Spring::new(0.25, 0.0),
+    ))
+}
+
+/// The detail pane of a vault with items, while importing.
+pub fn pane(s: &App, k: &Kit) -> El {
+    if let Some((preview, importing)) = s.import.preview() {
+        return self::preview(s, k, preview, importing);
+    }
+    col()
+        .key("import")
+        .w_full()
+        .gap(20.0)
+        .transition(swap())
+        .child(
+            text("Import passwords")
+                .key("title")
+                .font(TextStyle::new(20.0, 500.0).lh(26.0))
+                .color(k.c.text_strong),
+        )
+        .child(drop_zone(s, k))
+        .children(error(s, k))
+}
+
+/// Why the last file wasn't previewed or imported, under the drop zone.
+pub fn error(s: &App, k: &Kit) -> Option<El> {
+    let notice = s.import.error.as_ref()?;
+    Some(crate::onboarding::view::banner(k, notice).key("import-error"))
+}
+
+/// Where each app's export is, and Choose File…. A file dragged over the
+/// window lights it up.
+pub fn drop_zone(s: &App, k: &Kit) -> El {
+    let hover = s.import.hover;
+    let title = match &s.import.phase {
+        Phase::Reading { name, .. } => format!("Reading {name}…"),
+        _ => "Drop an export here".to_owned(),
+    };
+    let mut sources = col().key("sources").w_full().gap(6.0);
+    for (app, how) in SOURCES {
+        sources = sources.child(
+            row()
+                .key(*app)
+                .w_full()
+                .gap(12.0)
+                .child(
+                    text(*app)
+                        .key("app")
+                        .w(124.0)
+                        .font(k.ty.text_small)
+                        .color(k.c.text_base),
+                )
+                .child(
+                    text(*how)
+                        .key("how")
+                        .font(k.ty.text_small)
+                        .color(k.c.text_muted)
+                        .wrap()
+                        .grow(1.0)
+                        .shrink()
+                        .min_w(0.0),
+                ),
+        );
+    }
+    let mut actions = row().key("actions").gap(8.0).center_y().child(
+        Button::new("Choose File…")
+            .variant(ButtonVariant::Neutral)
+            .control_size(ControlSize::Regular)
+            .disabled(s.import.busy())
+            .on_press(|s: &mut App| s.choose_file())
+            .build(k)
+            .key("choose"),
+    );
+    if s.import.open && !s.items.is_empty() {
+        actions = actions.child(
+            Button::new("Cancel")
+                .variant(ButtonVariant::GhostMuted)
+                .control_size(ControlSize::Regular)
+                .on_press(|s: &mut App| s.cancel_import())
+                .build(k)
+                .key("cancel"),
+        );
+    }
+    col()
+        .key("drop-zone")
+        .w_full()
+        .padding(16.0)
+        .gap(14.0)
+        .radius(k.radius.lg)
+        .fill(if hover { k.c.layer_02 } else { k.c.layer_01 })
+        .border(
+            1.0,
+            if hover {
+                k.c.text_strong
+            } else {
+                k.c.border_base
+            },
+        )
+        .child(
+            row()
+                .key("drop-head")
+                .gap(10.0)
+                .center_y()
+                .child(icon(&IMPORT, 16.0).key("icon").color(if hover {
+                    k.c.icon_base
+                } else {
+                    k.c.icon_muted
+                }))
+                .child(
+                    RollingText::new("drop-title", title)
+                        .font(k.ty.ui_medium)
+                        .color(k.c.text_strong)
+                        .build(k),
+                ),
+        )
+        .child(sources)
+        .child(actions)
+}
+
+/// What the export holds that's new, what's already here, and what can't
+/// come across; Return imports, Escape cancels.
+fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
+    let report = &p.report;
+    let n = p.new_items();
+    let mut counts = col().key("counts").w_full().gap(4.0);
+    if n > 0 {
+        counts = counts.child(
+            text(new_items(report))
+                .key("new")
+                .font(k.ty.body_medium.features(TNUM))
+                .color(k.c.text_strong),
+        );
+        if report.duplicates > 0 {
+            counts = counts.child(
+                text(format!("{} already in Deadbolt", report.duplicates))
+                    .key("duplicates")
+                    .font(k.ty.text_small.features(TNUM))
+                    .color(k.c.text_muted),
+            );
+        }
+    } else {
+        counts = counts.child(
+            text(format!(
+                "Everything in this export is already in {}",
+                vault_name(s)
+            ))
+            .key("nothing-new")
+            .font(k.ty.body_medium)
+            .color(k.c.text_strong)
+            .wrap()
+            .w_full(),
+        );
+    }
+    let lines = details(report);
+    let quiet = (!lines.is_empty()).then(|| {
+        let mut quiet = col().key("details").w_full().gap(2.0);
+        for (i, line) in lines.into_iter().enumerate() {
+            quiet = quiet.child(
+                text(line)
+                    .key(format!("detail-{i}"))
+                    .font(k.ty.text_small.features(TNUM))
+                    .color(k.c.text_faint)
+                    .wrap()
+                    .w_full(),
+            );
+        }
+        quiet
+    });
+    let mut buttons = row().key("buttons").gap(8.0).center_y();
+    if n == 0 {
+        buttons = buttons.child(
+            Button::new("Done")
+                .variant(ButtonVariant::Contrast)
+                .control_size(ControlSize::Regular)
+                .on_press(|s: &mut App| s.cancel_import())
+                .build(k)
+                .key("done")
+                .default_button(),
+        );
+    } else {
+        let label = if importing {
+            "Importing…".to_owned()
+        } else {
+            import_label(n)
+        };
+        buttons = buttons
+            .child(
+                rolling_button(k, "import-label", label, importing)
+                    .key("import")
+                    .default_button(),
+            )
+            .child(
+                Button::new("Cancel")
+                    .variant(ButtonVariant::GhostMuted)
+                    .control_size(ControlSize::Regular)
+                    .disabled(importing)
+                    .on_press(|s: &mut App| s.cancel_import())
+                    .build(k)
+                    .key("cancel"),
+            );
+    }
+    col()
+        .key(if n > 0 {
+            "import-preview"
+        } else {
+            "import-nothing"
+        })
+        .w_full()
+        .gap(20.0)
+        .transition(swap())
+        .child(
+            col()
+                .key("head")
+                .w_full()
+                .gap(4.0)
+                .child(
+                    text(format!("Import from {}", report.source))
+                        .key("title")
+                        .font(TextStyle::new(20.0, 500.0).lh(26.0))
+                        .color(k.c.text_strong),
+                )
+                .child(
+                    text(p.name.clone())
+                        .key("file")
+                        .font(k.ty.text_small)
+                        .color(k.c.text_muted)
+                        .truncate_fade(),
+                ),
+        )
+        .child(counts)
+        .children(quiet)
+        .child(buttons)
+}
+
+/// The primary button, its label rolling from "Import 12 items" to
+/// "Importing…". rune-kit's `Button` takes only a string label, so this one
+/// has an empty label with a `RollingText` after it, and takes the empty
+/// label's width and the gap after it back out of its leading padding.
+fn rolling_button(k: &Kit, key: &str, label: String, importing: bool) -> El {
+    // `ControlSize::Regular`'s padding and gap.
+    const PAD: f32 = 12.0;
+    const GAP: f32 = 6.0;
+    let (empty, _) = rune::text::measure("", &[], k.ty.ui_medium, None);
+    Button::new("")
+        .variant(ButtonVariant::Contrast)
+        .control_size(ControlSize::Regular)
+        .disabled(importing)
+        .on_press(|s: &mut App| s.confirm_import())
+        .build(k)
+        .label(label.clone())
+        .pl((PAD - GAP - empty).max(0.0))
+        .child(
+            RollingText::new(key, label)
+                .font(k.ty.ui_medium)
+                .color(k.c.text_contrast)
+                .build(k),
+        )
+}
+
+/// "Imported 12 from 1Password", in the copy notice's place and style.
+pub fn imported(s: &App, k: &Kit) -> Option<El> {
+    let (message, _) = s.import.imported.as_ref()?;
+    let mut pill = row()
+        .key("imported")
+        .role("status")
+        .w(crate::view::NOTICE_W)
+        .self_center()
+        .padding(12.0)
+        .gap(8.0)
+        .center_y()
+        .radius(k.radius.lg)
+        .fill(k.c.layer_01)
+        .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
+    for shadow in k.shadow_layers(&k.elevation.floating) {
+        pill = pill.box_shadow(shadow);
+    }
+    Some(
+        pill.child(
+            icon(k.glyph.check_small, 16.0)
+                .key("check")
+                .color(k.c.icon_base),
+        )
+        .child(
+            text(message.clone())
+                .key("message")
+                .font(k.ty.small)
+                .color(k.c.text_base),
+        ),
+    )
+}
+
+fn vault_name(s: &App) -> String {
+    s.status
+        .as_ref()
+        .and_then(|st| st.vaults.iter().find(|v| v.default).or(st.vaults.first()))
+        .map_or_else(|| "your vault".to_owned(), |v| v.name.clone())
+}

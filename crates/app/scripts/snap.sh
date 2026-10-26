@@ -33,6 +33,14 @@ for theme in dark light; do
   "$bin" --scene shortcut-conflict --theme "$theme" --snap "$out/shortcut-conflict-$theme.png" "$@"
   "$bin" --scene settings-unavailable --theme "$theme" --snap "$out/settings-unavailable-$theme.png" "$@"
 done
+# Importing, dark and light: the empty vault's drop zone, an export dragged
+# over it, a preview, one with nothing new, a file it can't read, and ⇧⌘I in
+# a vault with items.
+for theme in dark light; do
+  for scene in empty import-hover import-preview import-nothing-new import-error import; do
+    "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
+  done
+done
 # The quick panel, dark and light: just opened, filtering, nothing found, an
 # empty vault, locked, a wrong passphrase, not set up, failed, and 0.6 s after
 # a copy (the footer shows the countdown).

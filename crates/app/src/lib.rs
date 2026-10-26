@@ -3,6 +3,7 @@
 
 pub mod agent;
 pub mod binary;
+pub mod import;
 pub mod install;
 pub mod model;
 pub mod onboarding;
@@ -12,7 +13,9 @@ pub mod theme;
 pub mod view;
 
 use deadbolt_client::Paths;
-use deadbolt_client::protocol::{DeviceInfo, FieldInfo, ItemInfo, Status, VaultInfo};
+use deadbolt_client::protocol::{
+    DeviceInfo, FieldInfo, ImportReport, ImportSource, ItemInfo, Status, Tally, VaultInfo,
+};
 use rune::{AppSpec, KeyEvent, SecretCopy, Tx, Waker};
 
 use agent::{Agent, Job};
@@ -95,6 +98,7 @@ pub fn run() {
                         app.hotkey = shortcut::Hotkey::live(quick_handle, file, chosen);
                     }
                     app.windows = Some(main_windows);
+                    app.dialogs = rune::FileDialogs::native();
                     app
                 } else {
                     App::new(Agent::offline())
@@ -316,11 +320,46 @@ const SCENES: &[Scene] = &[
         vault(s);
         s.toggle_reveal("password");
     }),
-    ("empty", |s| {
+    ("empty", empty_vault),
+    // A 1Password export dragged over the empty vault.
+    ("import-hover", |s| {
+        empty_vault(s);
+        s.import.hover = true;
+    }),
+    // What a 1Password export would bring in.
+    ("import-preview", |s| {
+        empty_vault(s);
+        s.import.open = true;
+        s.import.phase = import::Phase::Preview(import_preview(ImportReport {
+            logins: 214,
+            cards: 3,
+            duplicates: 0,
+            ..import_report()
+        }));
+    }),
+    // A second look at an export already imported, from a vault with items.
+    ("import-nothing-new", |s| {
         vault(s);
-        s.items.clear();
-        s.selected = None;
-        s.detail = None;
+        s.import.open = true;
+        s.import.phase = import::Phase::Preview(import_preview(ImportReport {
+            logins: 0,
+            cards: 0,
+            duplicates: 217,
+            ..import_report()
+        }));
+    }),
+    ("import-error", |s| {
+        empty_vault(s);
+        s.import.error = Some(Notice {
+            severity: Severity::Caution,
+            title: "Passwords.json isn't an export Deadbolt can read".into(),
+            body: "This is an encrypted export; export as unencrypted .json.".into(),
+        });
+    }),
+    // ⇧⌘I in a vault with items.
+    ("import", |s| {
+        vault(s);
+        s.show_import();
     }),
     // macOS's Finder search holds ⌥⌘Space: recording it shows the conflict
     // in place (scripts/settings-shortcut.json).
@@ -526,6 +565,41 @@ const FIXTURE: &[(&str, &str, &str, Option<&str>)] = &[
     ("f5c312", "login", "Cloudflare", Some("dax@anoma.ly")),
     ("09ad7e", "login", "Hetzner", Some("billing@anoma.ly")),
 ];
+
+fn empty_vault(s: &mut App) {
+    vault(s);
+    s.items.clear();
+    s.selected = None;
+    s.detail = None;
+}
+
+fn import_report() -> ImportReport {
+    let tally = |count, one: &str, many: &str| Tally {
+        count,
+        one: one.into(),
+        many: many.into(),
+    };
+    ImportReport {
+        source: ImportSource::OnePassword,
+        logins: 0,
+        cards: 0,
+        duplicates: 0,
+        skipped: vec![tally(12, "secure note", "secure notes")],
+        warnings: vec![tally(2, "URL kept as text", "URLs kept as text")],
+        dropped: vec![
+            tally(9, "tag", "tags"),
+            tally(4, "attachment", "attachments"),
+        ],
+    }
+}
+
+fn import_preview(report: ImportReport) -> import::Preview {
+    import::Preview {
+        path: "/fixture/1PasswordExport-2026-10-25.1pux".into(),
+        name: "1PasswordExport-2026-10-25.1pux".into(),
+        report,
+    }
+}
 
 fn vault(s: &mut App) {
     s.status = Some(status(true));
