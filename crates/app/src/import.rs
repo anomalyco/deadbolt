@@ -38,6 +38,10 @@ pub struct Import {
     pub imported: Option<(String, f64)>,
     /// Tells the current file's replies from older ones; bumped on forgetting.
     seq: u64,
+    /// Choose File…'s dialog is up, answering for this `seq`. It outlives
+    /// a cancel or a lock, and a Choose File… meanwhile takes it over rather
+    /// than asking for a second (which Rune refuses).
+    dialog: Option<u64>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -139,7 +143,25 @@ impl App {
         self.import.hover = over && self.accepts_drops();
     }
 
-    pub fn choose_file(&mut self) {
+    /// Files dropped that aren't exports: says so, unless an export dropped
+    /// with them is being read.
+    pub fn drop_rejected(&mut self, files: &[PathBuf]) {
+        self.import.hover = false;
+        let Some(file) = files.first() else { return };
+        if !self.accepts_drops() || self.import.busy() {
+            return;
+        }
+        self.import.seq += 1;
+        self.import.phase = Phase::Idle;
+        self.import.open = true;
+        self.import.error = Some(Notice {
+            severity: Severity::Caution,
+            title: format!("{} isn't an export Deadbolt can read", name(file)),
+            body: "Drop a .1pux, .csv or .json export.".into(),
+        });
+    }
+
+    pub fn choose_file(&mut self, tx: &mut Tx) {
         if self.import.busy() {
             return;
         }
@@ -153,8 +175,13 @@ impl App {
             ..FileDialogOptions::default()
         }
         .filter("Exports", EXTENSIONS);
-        self.agent
-            .choose_file(self.dialogs.clone(), options, self.import.seq);
+        if self.import.dialog.replace(self.import.seq).is_none() {
+            tx.open_file(options, |s: &mut App, result, _| {
+                if let Some(seq) = s.import.dialog.take() {
+                    s.on_chosen(seq, result.map_err(|e| e.to_string()));
+                }
+            });
+        }
     }
 
     fn read_export(&mut self, path: PathBuf) {
@@ -212,6 +239,7 @@ impl App {
         let seq = self.import.seq + 1;
         self.import = Import {
             seq,
+            dialog: self.import.dialog,
             ..Import::default()
         };
     }
@@ -274,7 +302,7 @@ impl App {
         }
     }
 
-    pub(crate) fn on_chosen(&mut self, seq: u64, result: Result<Option<PathBuf>, String>) {
+    fn on_chosen(&mut self, seq: u64, result: Result<Option<PathBuf>, String>) {
         if seq != self.import.seq || self.import.phase != Phase::Choosing {
             return;
         }

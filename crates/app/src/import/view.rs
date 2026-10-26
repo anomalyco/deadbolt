@@ -102,7 +102,7 @@ pub fn drop_zone(s: &App, k: &Kit) -> El {
             .variant(ButtonVariant::Neutral)
             .control_size(ControlSize::Regular)
             .disabled(s.import.busy())
-            .on_press(|s: &mut App| s.choose_file())
+            .on_press_tx(|s: &mut App, tx| s.choose_file(tx))
             .build(k)
             .key("choose"),
     );
@@ -217,7 +217,14 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
         };
         buttons = buttons
             .child(
-                rolling_button(k, "import-label", label, importing)
+                // Rolls to "Importing…", its width springing with the label.
+                Button::new(label)
+                    .rolling("import-label")
+                    .variant(ButtonVariant::Contrast)
+                    .control_size(ControlSize::Regular)
+                    .disabled(importing)
+                    .on_press(|s: &mut App| s.confirm_import())
+                    .build(k)
                     .key("import")
                     .default_button(),
             )
@@ -267,31 +274,6 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
         .child(counts)
         .children(quiet)
         .child(buttons)
-}
-
-/// The primary button, its label rolling from "Import 12 items" to
-/// "Importing…". rune-kit's `Button` takes only a string label, so this one
-/// has an empty label with a `RollingText` after it, and takes the empty
-/// label's width and the gap after it back out of its leading padding.
-fn rolling_button(k: &Kit, key: &str, label: String, importing: bool) -> El {
-    // `ControlSize::Regular`'s padding and gap.
-    const PAD: f32 = 12.0;
-    const GAP: f32 = 6.0;
-    let (empty, _) = rune::text::measure("", &[], k.ty.ui_medium, None);
-    Button::new("")
-        .variant(ButtonVariant::Contrast)
-        .control_size(ControlSize::Regular)
-        .disabled(importing)
-        .on_press(|s: &mut App| s.confirm_import())
-        .build(k)
-        .label(label.clone())
-        .pl((PAD - GAP - empty).max(0.0))
-        .child(
-            RollingText::new(key, label)
-                .font(k.ty.ui_medium)
-                .color(k.c.text_contrast)
-                .build(k),
-        )
 }
 
 /// "Imported 12 from 1Password", in the copy notice's place and style.

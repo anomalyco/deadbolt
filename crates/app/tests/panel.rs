@@ -132,11 +132,11 @@ fn find(rt: &Runtime<App>, key: &str) -> Option<([f32; 4], f32)> {
 fn shows(rt: &Runtime<App>, s: &str) -> bool {
     rt.elements()
         .iter()
-        .any(|e| (e.text.as_deref() == Some(s) || e.label.as_deref() == Some(s)) && e.opacity > 0.0)
+        .any(|e| e.text.as_deref() == Some(s) && e.opacity > 0.0)
 }
 
-/// The footer's line once it's fully in: what ⏎ does or the copy (the
-/// rolling label's text), a failed copy, or a notice.
+/// The footer's line once it's fully in: what ⏎ does or the copy, a failed
+/// copy, or a notice.
 fn footer(rt: &Runtime<App>) -> String {
     let elements = rt.elements();
     let Some(line) = elements.iter().rposition(|e| {
@@ -150,10 +150,7 @@ fn footer(rt: &Runtime<App>) -> String {
     elements
         .iter()
         .filter(|e| e.parent == Some(line))
-        .find_map(|e| match e.key.as_deref() {
-            Some("footer-line-label") => e.label.clone(),
-            _ => e.text.clone(),
-        })
+        .find_map(|e| e.text.clone())
         .unwrap_or_default()
 }
 

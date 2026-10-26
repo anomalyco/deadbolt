@@ -95,11 +95,7 @@ fn every_state_renders_in_both_appearances() {
         ("join-failed", &["Couldn't join"]),
         (
             "empty",
-            &[
-                "personal is empty",
-                "File › Export All Passwords…",
-                "Choose File…",
-            ],
+            &["personal is empty", "Drop an export here", "Choose File…"],
         ),
         (
             "import-preview",
