@@ -43,13 +43,24 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
         Screen::Vault => vault(s, k, &mut layer),
         Screen::Failed(message) => failed(k, message),
     };
-    col()
+    let root = col()
         .key("window")
         .w_full()
         .h_full()
         .fill(k.c.bg_base)
         .child(screen.grow(1.0).w_full().transition(replace()))
-        .children(layer)
+        .children(layer);
+    // An export dropped anywhere on the open vault goes straight to its preview.
+    if s.accepts_drops() {
+        root.on_drop_files(|s: &mut App, files, _| s.drop_files(files))
+            .accepts_extensions(crate::import::EXTENSIONS)
+            .on_drop_hover(|s: &mut App, over, tx| {
+                tx.instant();
+                s.drop_hover(over);
+            })
+    } else {
+        root
+    }
 }
 
 /// A centred column for the screens that aren't the vault.
@@ -361,7 +372,10 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
                     rune::tok::motion::SNAP,
                 )),
         )
-        .on_press(move |s: &mut App| s.select(Some(id.clone())))
+        .on_press(move |s: &mut App| {
+            s.cancel_import();
+            s.select(Some(id.clone()));
+        })
         .child(
             text(item.label.clone())
                 .key("label")
@@ -398,10 +412,47 @@ fn detail(s: &App, k: &Kit) -> El {
         .gap(20.0);
     let offer = s.loaded.then(|| crate::install::offer(s, k)).flatten();
     let shortcut = crate::shortcut::notice(s, k);
+    let imported = crate::import::view::imported(s, k);
+    let importing = s.loaded && (s.import.showing() || s.drop_hovering() || s.items.is_empty());
+    if importing {
+        // An empty vault keeps its guide, with the drop zone, until there's a preview.
+        let content = if s.items.is_empty() && s.import.preview().is_none() {
+            crate::onboarding::view::empty_vault(s, k)
+        } else {
+            crate::import::view::pane(s, k)
+        };
+        // A notice under the drop zone can take it past a short window. The
+        // viewport clips, so it pads for the rings drawn outside its content,
+        // and the pane gives that padding back.
+        const RING: f32 = 2.0;
+        let foot: Vec<El> = [shortcut, offer, imported, notice(s, k)]
+            .into_iter()
+            .flatten()
+            .collect();
+        return pane
+            .px(28.0 - RING)
+            .py(24.0 - RING)
+            .child(
+                col()
+                    .key("import-scroll")
+                    .w_full()
+                    .grow(1.0)
+                    .shrink()
+                    .min_h(0.0)
+                    .padding(RING)
+                    .scroll(ScrollSpec {
+                        stick_bottom: false,
+                    })
+                    .scroll_edge_fade(LIST_EDGE)
+                    .child(content),
+            )
+            .children(
+                (!foot.is_empty())
+                    .then(|| col().key("foot").w_full().px(RING).gap(20.0).children(foot)),
+            );
+    }
     let Some(item) = s.selected_item() else {
-        if s.loaded && s.items.is_empty() {
-            pane = pane.child(crate::onboarding::view::empty_vault(s, k));
-        } else if s.loaded {
+        if s.loaded {
             pane = pane.child(
                 text("Select an item")
                     .key("none")
@@ -409,42 +460,54 @@ fn detail(s: &App, k: &Kit) -> El {
                     .color(k.c.text_faint),
             );
         }
-        if offer.is_some() || shortcut.is_some() {
-            pane = pane.child(spacer()).children(shortcut).children(offer);
+        if offer.is_some() || shortcut.is_some() || imported.is_some() {
+            pane = pane
+                .child(spacer())
+                .children(shortcut)
+                .children(offer)
+                .children(imported);
         }
         return pane;
     };
     let kind = format!("{} · {}", item.kind, item.short);
-    pane = pane.child(
-        col()
-            .key("head")
-            .w_full()
-            .gap(4.0)
-            .child(
-                text(item.label.clone())
-                    .key("title")
-                    .font(TextStyle::new(20.0, 500.0).lh(26.0))
-                    .color(k.c.text_strong)
-                    .truncate_fade(),
-            )
-            .child(
-                text(kind)
-                    .key("kind")
-                    .font(k.ty.text_small)
-                    .color(k.c.text_muted),
-            ),
-    );
+    let head = col()
+        .key("head")
+        .w_full()
+        .gap(4.0)
+        .child(
+            text(item.label.clone())
+                .key("title")
+                .font(TextStyle::new(20.0, 500.0).lh(26.0))
+                .color(k.c.text_strong)
+                .truncate_fade(),
+        )
+        .child(
+            text(kind)
+                .key("kind")
+                .font(k.ty.text_small)
+                .color(k.c.text_muted),
+        );
     let mut fields = col().key("fields").w_full().gap(2.0);
     if let Some(full) = s.detail.as_ref().filter(|d| d.id == item.id) {
         for field in &full.fields {
             fields = fields.child(field_row(s, &full.id, field, k));
         }
     }
+    // One element, so leaving for the import view and coming back swap whole.
     pane = pane
-        .child(fields)
+        .child(
+            col()
+                .key("item")
+                .w_full()
+                .gap(20.0)
+                .transition(crate::import::view::swap())
+                .child(head)
+                .child(fields),
+        )
         .child(spacer())
         .children(shortcut)
-        .children(offer);
+        .children(offer)
+        .children(imported);
     if let Some(n) = notice(s, k) {
         pane = pane.child(n);
     }
@@ -685,14 +748,34 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .gap(16.0)
                 .center_y()
                 .clip_fade(0.0, 0.0, 16.0, 0.0)
-                .child(hint("h-copy", &["⏎"], "Copy password"))
-                .child(hint("h-user", &["⇧", "⏎"], "Copy username"))
-                .child(hint("h-move", &["↑", "↓"], "Select")),
+                .children(key_hints(s, k)),
         )
         .child(spacer())
         .children(crate::panel::window::entry(s, k))
         .child(hint("h-lock", &["⌘", "L"], "Lock"))
         .child(settings(s, k, layer))
+}
+
+/// What ⏎ and the arrows do: the item's copies, or the import view's steps while it shows.
+fn key_hints(s: &App, k: &Kit) -> Vec<El> {
+    let hint = |key: &str, keys: &[&str], label: &str| hint(k, key, keys, label);
+    if !(s.import.showing() || s.drop_hovering()) {
+        return vec![
+            hint("h-copy", &["⏎"], "Copy password"),
+            hint("h-user", &["⇧", "⏎"], "Copy username"),
+            hint("h-move", &["↑", "↓"], "Select"),
+        ];
+    }
+    let mut hints = Vec::new();
+    match &s.import.phase {
+        crate::import::Phase::Preview(p) if p.new_items() > 0 => {
+            hints.push(hint("h-import", &["⏎"], "Import"))
+        }
+        crate::import::Phase::Preview(_) => hints.push(hint("h-done", &["⏎"], "Done")),
+        _ => {}
+    }
+    hints.push(hint("h-cancel", &["esc"], "Cancel"));
+    hints
 }
 
 /// Settings in the vault's footer: the quick panel's shortcut and the

@@ -95,7 +95,23 @@ fn every_state_renders_in_both_appearances() {
         ("join-failed", &["Couldn't join"]),
         (
             "empty",
-            &["personal is empty", "deadbolt import export.1pux"],
+            &[
+                "personal is empty",
+                "File › Export All Passwords…",
+                "Choose File…",
+            ],
+        ),
+        (
+            "import-preview",
+            &["Import from 1Password", "214 new logins · 3 cards"],
+        ),
+        (
+            "import-nothing-new",
+            &["Everything in this export is already in personal", "Done"],
+        ),
+        (
+            "import-error",
+            &["Passwords.json isn't an export Deadbolt can read"],
         ),
         ("locked", &["DEADBOLT", "Locked"]),
     ];

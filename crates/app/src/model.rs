@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status};
-use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
+use rune::{FileDialogs, Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::agent::{Agent, Done, Failure, Job};
@@ -83,6 +83,9 @@ pub struct App {
     pub revealed: Vec<String>,
     pub copy: Option<Copy>,
     pub notice: Option<String>,
+    pub import: crate::import::Import,
+    /// Choose File…'s dialogs: native in a live run, scripted in tests.
+    pub dialogs: FileDialogs,
     /// `--reduced-motion`; otherwise Rune follows the system's setting.
     pub reduced_motion: bool,
     /// Set in the quick panel's `App` only.
@@ -123,6 +126,8 @@ impl App {
             revealed: Vec::new(),
             copy: None,
             notice: None,
+            import: crate::import::Import::default(),
+            dialogs: FileDialogs::scripted([]),
             reduced_motion: false,
             panel: None,
             windows: None,
@@ -146,6 +151,7 @@ impl App {
         }
         changed |= self.poll_onboarding(now, tx);
         changed |= self.tick_copy(now, tx);
+        changed |= self.tick_import(now);
         if let Some(installer) = &mut self.installer {
             changed |= installer.poll(now);
         }
@@ -227,6 +233,12 @@ impl App {
                     Err(failure) => self.on_failure(failure, tx),
                 }
             }
+            Done::Imported {
+                seq,
+                applied,
+                result,
+            } => self.on_imported(seq, applied, result, tx),
+            Done::Chosen { seq, result } => self.on_chosen(seq, result),
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
         }
@@ -370,6 +382,9 @@ impl App {
         if screen != Screen::Locked {
             self.passphrase.clear();
         }
+        if screen != self.screen {
+            self.import.hover = false;
+        }
         self.screen = screen;
     }
 
@@ -394,7 +409,7 @@ impl App {
     }
 
     /// The store is locked: drop everything read from it.
-    fn on_locked(&mut self, tx: &mut Tx) {
+    pub(crate) fn on_locked(&mut self, tx: &mut Tx) {
         self.forget_vault(tx);
         if let Some(status) = &mut self.status {
             status.unlocked = false;
@@ -430,6 +445,7 @@ impl App {
         self.search = TextEdit::new("");
         self.pending_copy = None;
         self.notice = None;
+        self.forget_import();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -554,6 +570,9 @@ impl App {
     /// Keys in the search field, before its editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(handled) = self.overlay_key(ev) {
+            return handled;
+        }
+        if let Some(handled) = self.import_key(ev) {
             return handled;
         }
         if self.panel_shortcut(ev, tx) {
@@ -735,6 +754,11 @@ impl App {
         if !self.settings_open && !installing {
             return None;
         }
+        // Import Passwords… leaves either for the import view, as the menu
+        // item does; without native menus the key is the only way.
+        if crate::import::is_shortcut(ev) && !self.hotkey.recorder.is_recording() {
+            return None;
+        }
         match ev.key {
             Key::Escape if self.settings_open => self.close_settings(),
             Key::Escape => {
@@ -758,6 +782,9 @@ impl App {
     /// App-level keys: before the focused field when there is none, after it otherwise.
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         if let Some(handled) = self.overlay_key(ev) {
+            return handled;
+        }
+        if let Some(handled) = self.import_key(ev) {
             return handled;
         }
         if self.panel_shortcut(ev, tx) {

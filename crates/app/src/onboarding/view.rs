@@ -1041,10 +1041,9 @@ fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str) -> El {
 // The empty vault
 
 const ADD: &str = "deadbolt new login url=github.com username=you";
-const IMPORT: &str = "deadbolt import export.1pux";
 
-/// What to do with a vault that has nothing in it yet. Adding and importing
-/// happen in the CLI for now.
+/// What to do with a vault that has nothing in it yet: import an export
+/// here, or add a login in the CLI for now.
 pub fn empty_vault(s: &App, k: &Kit) -> El {
     let vault = s
         .status
@@ -1057,30 +1056,20 @@ pub fn empty_vault(s: &App, k: &Kit) -> El {
         .gap(20.0)
         .transition(Transition::opacity())
         .child(
-            col()
-                .key("head")
-                .w_full()
-                .gap(4.0)
-                .child(
-                    text(format!("{vault} is empty"))
-                        .key("title")
-                        .font(TextStyle::new(20.0, 500.0).lh(26.0))
-                        .color(k.c.text_strong),
-                )
-                .child(muted(
-                    k,
-                    "about",
-                    "Adding and importing in the app come later. For now, in a terminal:",
-                )),
+            text(format!("{vault} is empty"))
+                .key("title")
+                .font(TextStyle::new(20.0, 500.0).lh(26.0))
+                .color(k.c.text_strong),
         )
-        .child(command(s, k, "add", "Add a login", ADD, None))
+        .child(crate::import::view::drop_zone(s, k))
+        .children(crate::import::view::error(s, k))
         .child(command(
             s,
             k,
-            "import",
-            "Import from 1Password, Apple Passwords or Bitwarden",
-            IMPORT,
-            Some("Export first: in 1Password or Apple Passwords, File › Export; in Bitwarden, Tools › Export vault"),
+            "add",
+            "Add a login",
+            ADD,
+            Some("In a terminal, for now."),
         ))
         .child(
             col()
