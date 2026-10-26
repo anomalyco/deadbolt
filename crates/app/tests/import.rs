@@ -229,7 +229,8 @@ fn a_file_that_isnt_an_export_says_so() {
     rt.drag_files(vec![notes.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
     assert!(!rt.state.drop_hovering());
-    assert_eq!(rt.find("notice"), None);
+    assert_eq!(rt.state.import.error, None);
+    assert_eq!(rt.find("import-error"), None);
     rt.drop_files(vec![notes.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
     let error = rt.state.import.error.clone().expect("a caution");
