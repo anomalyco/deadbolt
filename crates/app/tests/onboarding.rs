@@ -99,7 +99,10 @@ fn every_state_renders_in_both_appearances() {
         ),
         (
             "import-preview",
-            &["Import from 1Password", "214 new logins · 3 cards"],
+            &[
+                "Import from 1Password",
+                "214 new logins · 3 cards · 12 secure notes · 2 SSH keys · 1 identity",
+            ],
         ),
         (
             "import-nothing-new",

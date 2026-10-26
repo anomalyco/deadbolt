@@ -17,8 +17,8 @@ use rune::{Env, FileDialogKind, Key, KeyEvent, Mods, Runtime};
 
 use support::{Device, PASSPHRASE, key, shows, until};
 
-/// A Bitwarden unencrypted JSON export: a login and a card come across; a
-/// login without a password and a secure note don't.
+/// A Bitwarden unencrypted JSON export: a login, a card and a secure note
+/// come across; a bank account and a login with nothing in it don't.
 const BITWARDEN: &str = r#"{
   "encrypted": false,
   "folders": [{ "id": "4f5e2a3b-0c1d-4e2f-9a8b-7c6d5e4f3a2b", "name": "Work" }],
@@ -52,7 +52,8 @@ const BITWARDEN: &str = r#"{
       }
     },
     { "id": "6b1c", "type": 2, "name": "Wifi", "notes": "wifi-secret-666", "favorite": false, "secureNote": { "type": 0 } },
-    { "id": "7b1c", "type": 1, "name": "Nopass", "favorite": false, "login": { "username": "x", "password": null } }
+    { "id": "7b1c", "type": 1, "name": null, "favorite": false, "login": { "username": null, "password": null } },
+    { "id": "8b1c", "type": 6, "name": "Bank", "favorite": false }
   ]
 }"#;
 
@@ -66,18 +67,18 @@ const SECRETS: &[&str] = &[
     "nopass-secret-777",
 ];
 
-/// `BITWARDEN` with a password on its second login: what the file holds if
+/// `BITWARDEN` with a password on its empty login: what the file holds if
 /// it's exported again after the preview.
 fn bitwarden_again() -> String {
     BITWARDEN.replace(r#""password": null"#, r#""password": "nopass-secret-777""#)
 }
 
-/// A Bitwarden export of a secure note alone, which Deadbolt doesn't take.
-const NOTES_ONLY: &str = r#"{
+/// A Bitwarden export of a bank account alone, which Deadbolt doesn't take.
+const UNSUPPORTED_ONLY: &str = r#"{
   "encrypted": false,
   "folders": [],
   "items": [
-    { "id": "6b1c", "type": 2, "name": "Wifi", "notes": "wifi-secret-666", "favorite": false, "secureNote": { "type": 0 } }
+    { "id": "8b1c", "type": 6, "name": "Bank", "favorite": false }
   ]
 }"#;
 
@@ -161,12 +162,9 @@ fn a_dropped_export_is_previewed_then_imported() {
     until(&mut rt, "the preview", previewing);
     assert!(shows(&rt, "Import from Bitwarden"));
     assert!(shows(&rt, "bitwarden_export.json"));
-    assert!(shows(&rt, "1 new login · 1 card"));
-    assert!(shows(
-        &rt,
-        "Skipped 1 login without password, 1 secure note"
-    ));
-    assert!(shows(&rt, "Import 2 items"));
+    assert!(shows(&rt, "1 new login · 1 card · 1 secure note"));
+    assert!(shows(&rt, "Skipped 1 bank account, 1 empty item"));
+    assert!(shows(&rt, "Import 3 items"));
     no_secrets(&rt);
     assert!(
         device.output(&["ls"]).is_empty(),
@@ -178,12 +176,14 @@ fn a_dropped_export_is_previewed_then_imported() {
     rt.frame(1.0 / 60.0);
     assert!(matches!(rt.state.import.phase, Phase::Importing(_)));
     until(&mut rt, "the imported items", |s| {
-        s.items.len() == 2 && s.import.phase == Phase::Idle
+        s.items.len() == 3 && s.import.phase == Phase::Idle
     });
-    assert!(shows(&rt, "Imported 2 from Bitwarden"));
+    assert!(shows(&rt, "Imported 3 from Bitwarden"));
     assert!(!rt.state.import.showing());
+    // The note lists by its name, never its body.
+    assert!(shows(&rt, "Wifi") && shows(&rt, "secure note"));
     no_secrets(&rt);
-    assert_eq!(device.output(&["ls"]).lines().count(), 2);
+    assert_eq!(device.output(&["ls"]).lines().count(), 3);
 }
 
 #[test]
@@ -192,7 +192,7 @@ fn an_export_already_imported_has_nothing_new() {
     let file = device.file("export.json", BITWARDEN);
     device.run(&["import", file.to_str().unwrap()]);
     let mut rt = vault(&device);
-    until(&mut rt, "the items", |s| s.items.len() == 2);
+    until(&mut rt, "the items", |s| s.items.len() == 3);
 
     // ⇧⌘I opens the import view in a vault with items.
     rt.key(KeyEvent {
@@ -219,7 +219,7 @@ fn an_export_already_imported_has_nothing_new() {
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
     assert!(!rt.state.import.showing(), "Done closes it");
-    assert_eq!(rt.state.items.len(), 2);
+    assert_eq!(rt.state.items.len(), 3);
 }
 
 #[test]
@@ -305,7 +305,7 @@ fn choose_file_previews_the_chosen_export() {
     press(&mut rt, "choose");
     rt.resolve_file_dialog(Some(file)).unwrap();
     until(&mut rt, "the preview", previewing);
-    assert!(shows(&rt, "1 new login · 1 card"));
+    assert!(shows(&rt, "1 new login · 1 card · 1 secure note"));
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn a_file_changed_since_its_preview_is_previewed_again() {
     let mut rt = vault(&device);
     drop_file(&mut rt, file.clone());
     until(&mut rt, "the preview", previewing);
-    assert!(shows(&rt, "1 new login · 1 card"));
+    assert!(shows(&rt, "1 new login · 1 card · 1 secure note"));
     assert!(!shows(&rt, "changed since the preview"));
 
     // Exported again before Import: nothing unpreviewed is written.
@@ -366,17 +366,17 @@ fn a_file_changed_since_its_preview_is_previewed_again() {
         |s| matches!(&s.import.phase, Phase::Preview(p) if p.changed),
     );
     assert!(shows(&rt, "export.json changed since the preview"));
-    assert!(shows(&rt, "2 new logins · 1 card"));
-    assert!(shows(&rt, "Import 3 items"));
+    assert!(shows(&rt, "2 new logins · 1 card · 1 secure note"));
+    assert!(shows(&rt, "Import 4 items"));
     assert!(device.output(&["ls"]).is_empty(), "nothing was imported");
     no_secrets(&rt);
 
     // Import now brings in what that preview showed.
     rt.key(key(Key::Enter));
     until(&mut rt, "the imported items", |s| {
-        s.items.len() == 3 && s.import.phase == Phase::Idle
+        s.items.len() == 4 && s.import.phase == Phase::Idle
     });
-    assert_eq!(device.output(&["ls"]).lines().count(), 3);
+    assert_eq!(device.output(&["ls"]).lines().count(), 4);
 }
 
 #[test]
@@ -402,11 +402,11 @@ fn a_file_changed_into_something_else_says_it_isnt_an_export() {
 fn an_export_with_nothing_deadbolt_takes_says_so() {
     let device = device();
     let mut rt = vault(&device);
-    drop_file(&mut rt, device.file("notes.json", NOTES_ONLY));
+    drop_file(&mut rt, device.file("bank.json", UNSUPPORTED_ONLY));
     until(&mut rt, "the preview", previewing);
     assert!(shows(&rt, "Nothing in this export can be imported"));
     assert!(!shows(&rt, "Everything in this export is already in"));
-    assert!(shows(&rt, "Skipped 1 secure note"));
+    assert!(shows(&rt, "Skipped 1 bank account"));
     rt.key(key(Key::Enter));
     rt.frame(1.0 / 60.0);
     assert!(!rt.state.import.showing(), "Done closes it");

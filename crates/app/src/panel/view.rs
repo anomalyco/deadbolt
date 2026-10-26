@@ -14,8 +14,6 @@ use rune::{
 };
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
-use deadbolt_client::protocol::ItemInfo;
-
 use super::{CLOSE, MARGIN, Phase};
 use crate::model::{App, Screen};
 use crate::view::{LIST_EDGE, copy_line, hint, passphrase_field, rows, search_input, unlock_error};
@@ -256,25 +254,16 @@ fn footer(s: &App, k: &Kit) -> El {
         bar = bar.child(copy_line(k, "footer-line", copy, enter, false));
     }
     bar = bar.child(spacer());
-    if s.selected_item().is_some_and(has_username) {
+    if s.has_username() {
         bar =
             bar.child(hint(k, "h-user", &["⇧", "⏎"], "Username").transition(Transition::opacity()));
     }
     bar.child(hint(k, "h-close", &["esc"], "Close"))
 }
 
-/// A login's list row carries its username, if it has one; cards have none.
-fn has_username(item: &ItemInfo) -> bool {
-    item.kind == "login" && item.detail.is_some()
-}
-
 fn enter_does(s: &App) -> &'static str {
     match &s.screen {
-        Screen::Vault => match s.selected_item().map(|i| i.kind.as_str()) {
-            None => "",
-            Some("card") => "Copy number",
-            Some(_) => "Copy password",
-        },
+        Screen::Vault => s.enter_hint().unwrap_or_default(),
         Screen::Locked => "Unlock",
         Screen::Onboarding => "Open Deadbolt",
         Screen::Failed(_) => "Try again",

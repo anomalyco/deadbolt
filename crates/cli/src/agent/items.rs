@@ -1,9 +1,11 @@
 //! Item commands: lookup, labels, input normalization and writes.
 //!
 //! Lookup is search. Every query word must match (case-insensitively) part
-//! of the item's name, URL host, username, or for cards the cardholder,
-//! brand field or last four digits; a word of 4+ hex digits also matches an
-//! id prefix. Secret values and the derived label are never searched.
+//! of the item's name, URL host, a login's username, a card's cardholder,
+//! brand field or last four digits, an SSH key's comment, or an identity's
+//! name or email; a word of 4+ hex digits also matches an id prefix. Secret
+//! values (a secure note's body among them) and the derived label are never
+//! searched.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -59,17 +61,32 @@ pub fn label(item: &Item) -> String {
             value(item, "brand").unwrap_or("card"),
             last_four(item).unwrap_or_default()
         ),
+        "ssh" => value(item, "comment").unwrap_or("SSH key").into(),
+        "identity" => value(item, "name")
+            .or_else(|| value(item, "email"))
+            .unwrap_or("identity")
+            .into(),
+        // A secure note's body is secret: never a label.
         kind => kind.into(),
     }
 }
 
-/// Login username or card expiry (`MM/YY`).
+/// A login's username, a card's expiry (`MM/YY`), an SSH key's comment or
+/// fingerprint, an identity's email. A secure note has none.
 fn detail(item: &Item) -> Option<String> {
+    let first = |fields: &[&str]| {
+        fields
+            .iter()
+            .find_map(|f| value(item, f))
+            .map(str::to_string)
+    };
     match item.kind.as_str() {
-        "login" => value(item, "username").map(str::to_string),
+        "login" => first(&["username"]),
         "card" => value(item, "expiry")
             .and_then(|e| e.split_once('-'))
             .map(|(year, month)| format!("{month}/{}", &year[year.len().saturating_sub(2)..])),
+        "ssh" => first(&["comment", "fingerprint"]),
+        "identity" => first(&["email", "phone"]),
         _ => None,
     }
 }
@@ -81,6 +98,8 @@ fn searchable(item: &Item) -> Vec<String> {
     let fields: &[&str] = match item.kind.as_str() {
         "login" => &["username"],
         "card" => &["cardholder", "brand"],
+        "ssh" => &["comment", "fingerprint"],
+        "identity" => &["name", "email", "phone"],
         _ => &[],
     };
     texts.extend(
@@ -301,11 +320,11 @@ pub fn create(
     Ok(info(s, vault, &id))
 }
 
-/// Creates all `items` or none.
 /// What makes two items the same to an import: a login's URL host,
-/// username and password, or a card's number. A login without a URL host
-/// (a database, a Wi-Fi network) is also told apart by its name. Wiped
-/// when dropped.
+/// username and password, a card's number, an SSH key's private key. A
+/// login without a URL host (a database, a Wi-Fi network) is also told
+/// apart by its name. A secure note or an identity is the same only with
+/// the same name and every field the same. Wiped when dropped.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 enum Key {
     Login {
@@ -316,6 +335,14 @@ enum Key {
     },
     Card {
         number: String,
+    },
+    Ssh {
+        private_key: String,
+    },
+    Whole {
+        kind: String,
+        name: String,
+        fields: Vec<(String, String)>,
     },
 }
 
@@ -334,6 +361,15 @@ impl Drop for Key {
                 password.zeroize();
             }
             Self::Card { number } => number.zeroize(),
+            Self::Ssh { private_key } => private_key.zeroize(),
+            Self::Whole { kind, name, fields } => {
+                kind.zeroize();
+                name.zeroize();
+                for (field, value) in fields {
+                    field.zeroize();
+                    value.zeroize();
+                }
+            }
         }
     }
 }
@@ -344,7 +380,18 @@ fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Opti
             .get(field)
             .map_or(String::new(), |f: &Field| f.value.clone())
     };
+    let whole = || Key::Whole {
+        kind: kind.into(),
+        name: name.unwrap_or_default().into(),
+        fields: fields
+            .iter()
+            .map(|(field, f)| (field.clone(), f.value.clone()))
+            .collect(),
+    };
     match kind {
+        // A login without a password (a server, an API credential, an SSO
+        // account) is told apart by all of it, not by host and username.
+        "login" if !fields.contains_key("password") => Some(whole()),
         "login" => {
             let host = fields
                 .get("url")
@@ -369,6 +416,10 @@ fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Opti
                 .filter(char::is_ascii_digit)
                 .collect(),
         }),
+        "ssh" => Some(Key::Ssh {
+            private_key: value("private-key").trim().to_string(),
+        }),
+        "note" | "identity" => Some(whole()),
         _ => None,
     }
 }
@@ -393,9 +444,8 @@ pub fn import(
     for item in items {
         if key(item.kind, item.name.as_deref(), &item.fields).is_some_and(|key| !seen.insert(key)) {
             report.duplicates += 1;
-            match item.kind {
-                "card" => report.cards -= 1,
-                _ => report.logins -= 1,
+            if let Some(n) = report.new.get_mut(item.kind) {
+                *n -= 1;
             }
             continue;
         }
@@ -502,13 +552,13 @@ mod tests {
             ,,postgres,pg-pw\n\
             ,,postgres,pg-pw\n";
         let report = import(&mut s, export, false);
-        assert_eq!((report.logins, report.duplicates), (8, 3));
+        assert_eq!((report.count("login"), report.duplicates), (8, 3));
         assert_eq!(count(&s), 0);
         let report = import(&mut s, export, true);
-        assert_eq!((report.logins, report.duplicates), (8, 3));
+        assert_eq!((report.count("login"), report.duplicates), (8, 3));
         assert_eq!(count(&s), 8);
         let again = import(&mut s, export, true);
-        assert_eq!((again.logins, again.duplicates), (0, 11));
+        assert_eq!((again.count("login"), again.duplicates), (0, 11));
         assert_eq!(
             again.lines(true)[..2],
             [
@@ -539,8 +589,51 @@ mod tests {
             {"type": 3, "name": "Amex", "card": {"number": "3782-822463-10005"}}
         ]}"#;
         let report = import(&mut s, export, true);
-        assert_eq!((report.cards, report.duplicates), (1, 2));
+        assert_eq!((report.count("card"), report.duplicates), (1, 2));
         assert_eq!(count(&s), 2);
+    }
+
+    #[test]
+    fn notes_ssh_keys_and_identities_import_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let export = r#"{"encrypted": false, "items": [
+            {"type": 2, "name": "Alarm", "notes": "code 1234"},
+            {"type": 2, "name": "Alarm", "notes": "code 1234"},
+            {"type": 2, "name": "Alarm", "notes": "code 5678"},
+            {"type": 5, "name": "Deploy", "sshKey": {"privateKey": "-----BEGIN KEY-----\nabc\n"}},
+            {"type": 5, "name": "Deploy copy", "sshKey": {"privateKey": "-----BEGIN KEY-----\nabc"}},
+            {"type": 4, "name": "Me", "identity": {"firstName": "Dax", "email": "dax@example.com"}},
+            {"type": 4, "name": "Me", "identity": {"firstName": "Dax", "email": "dax@example.com"}}
+        ]}"#;
+        let report = import(&mut s, export, true);
+        assert_eq!(
+            (report.counts(), report.duplicates),
+            (vec![("note", 2), ("ssh", 1), ("identity", 1)], 3)
+        );
+        assert_eq!(count(&s), 4);
+        let again = import(&mut s, export, true);
+        assert_eq!((again.total(), again.duplicates), (0, 7));
+        assert_eq!(count(&s), 4);
+    }
+
+    #[test]
+    fn logins_without_a_password_are_the_same_only_when_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let export = r#"{"encrypted": false, "items": [
+            {"type": 1, "name": "Prod DB", "login": {"username": "admin", "uris": [{"uri": "https://db.example.com"}]},
+             "fields": [{"name": "port", "value": "5432", "type": 0}]},
+            {"type": 1, "name": "Prod DB", "login": {"username": "admin", "uris": [{"uri": "https://db.example.com"}]},
+             "fields": [{"name": "port", "value": "5433", "type": 0}]},
+            {"type": 1, "name": "Prod DB", "login": {"username": "admin", "uris": [{"uri": "https://db.example.com"}]},
+             "fields": [{"name": "port", "value": "5432", "type": 0}]}
+        ]}"#;
+        let report = import(&mut s, export, true);
+        assert_eq!((report.count("login"), report.duplicates), (2, 1));
+        assert_eq!(count(&s), 2);
+        let again = import(&mut s, export, true);
+        assert_eq!((again.total(), again.duplicates), (0, 3));
     }
 
     #[test]
@@ -585,8 +678,34 @@ mod tests {
         );
         let named = item("card", Some("Travel"), &[("number", "6011000990139424")]);
         let login = item("login", None, &[("password", "x")]);
+        let note = item("note", None, &[("notes", "body text")]);
         assert_eq!(label(&unbranded), "card •••• 4242");
         assert_eq!(label(&login), "login");
+        assert_eq!((label(&note), detail(&note)), ("note".into(), None));
+        assert!(!matches(&note, &q(&["body"])));
+        let key = item(
+            "ssh",
+            None,
+            &[("private-key", "k"), ("comment", "dax@laptop")],
+        );
+        assert_eq!(label(&key), "dax@laptop");
+        assert!(matches(&key, &q(&["laptop"])));
+        let printed = item(
+            "ssh",
+            None,
+            &[("private-key", "k"), ("fingerprint", "SHA256:xyz")],
+        );
+        assert!(matches(&printed, &q(&["sha256:xyz"])));
+        assert!(!matches(&printed, &q(&["k"])));
+        let me = item(
+            "identity",
+            Some("Me"),
+            &[("name", "Dax Raad"), ("email", "dax@example.com")],
+        );
+        assert_eq!(detail(&me).as_deref(), Some("dax@example.com"));
+        assert!(matches(&me, &q(&["raad", "example"])));
+        let phone = item("identity", None, &[("phone", "+1 555 0100")]);
+        assert!(matches(&phone, &q(&["0100"])));
         // The type word and the label's filler match no item, branded or not.
         for words in [&["card"][..], &["login"], &["••••"]] {
             for it in [&unbranded, &branded, &named, &login] {

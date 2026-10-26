@@ -64,8 +64,7 @@ pub fn parse(text: &str) -> Result<(Vec<Imported>, ImportReport)> {
 /// What a mapping did besides producing items.
 pub struct Summary {
     source: ImportSource,
-    logins: usize,
-    cards: usize,
+    new: BTreeMap<String, usize>,
     skipped: BTreeMap<Reason, usize>,
     warnings: BTreeMap<Reason, usize>,
     dropped: BTreeMap<Reason, usize>,
@@ -74,15 +73,16 @@ pub struct Summary {
 /// A reason, singular and plural.
 type Reason = (&'static str, &'static str);
 
-const SECURE_NOTE: Reason = ("secure note", "secure notes");
-const IDENTITY: Reason = ("identity", "identities");
-const SSH_KEY: Reason = ("ssh key", "ssh keys");
 const BANK_ACCOUNT: Reason = ("bank account", "bank accounts");
 const DRIVERS_LICENSE: Reason = ("driver's license", "driver's licenses");
 const PASSPORT: Reason = ("passport", "passports");
 const UNKNOWN_TYPE: Reason = ("item of unknown type", "items of unknown type");
 const ARCHIVED: Reason = ("archived item", "archived items");
-const NO_PASSWORD: Reason = ("login without password", "logins without password");
+const NO_PRIVATE_KEY: Reason = (
+    "SSH key without a private key",
+    "SSH keys without a private key",
+);
+const EMPTY: Reason = ("empty item", "empty items");
 const NO_NUMBER: Reason = (
     "card without a valid number",
     "cards without a valid number",
@@ -94,6 +94,14 @@ const BAD_CVV: Reason = (
 const BAD_EXPIRY: Reason = (
     "invalid card expiry kept as an extra field",
     "invalid card expiries kept as extra fields",
+);
+const BAD_EMAIL: Reason = (
+    "invalid email address kept as text",
+    "invalid email addresses kept as text",
+);
+const BAD_BIRTHDAY: Reason = (
+    "invalid birthday kept as text",
+    "invalid birthdays kept as text",
 );
 const URL_AS_TEXT: Reason = (
     "URL that is not an absolute URL kept as text",
@@ -117,8 +125,7 @@ impl Summary {
     fn new(source: ImportSource) -> Self {
         Self {
             source,
-            logins: 0,
-            cards: 0,
+            new: BTreeMap::new(),
             skipped: BTreeMap::new(),
             warnings: BTreeMap::new(),
             dropped: BTreeMap::new(),
@@ -141,10 +148,7 @@ impl Summary {
 
     /// Counts a mapped item.
     fn add(&mut self, item: &Imported) {
-        match item.kind {
-            "card" => self.cards += 1,
-            _ => self.logins += 1,
-        }
+        *self.new.entry(item.kind.into()).or_default() += 1;
     }
 
     fn report(self) -> ImportReport {
@@ -159,8 +163,7 @@ impl Summary {
         };
         ImportReport {
             source: self.source,
-            logins: self.logins,
-            cards: self.cards,
+            new: self.new,
             duplicates: 0,
             skipped: tallies(self.skipped),
             warnings: tallies(self.warnings),
@@ -255,6 +258,30 @@ fn item_name(name: Option<String>) -> Option<String> {
     valid_item_name(&name).then_some(name)
 }
 
+/// The non-blank parts, trimmed and joined by `sep`; `None` if all are blank.
+fn join(parts: impl IntoIterator<Item = Option<String>>, sep: &str) -> Option<String> {
+    let parts: Vec<String> = parts
+        .into_iter()
+        .flatten()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .collect();
+    (!parts.is_empty()).then(|| parts.join(sep))
+}
+
+/// A postal address as lines: the street lines, "city, region postcode",
+/// then the country.
+fn address(
+    street: impl IntoIterator<Item = Option<String>>,
+    city: Option<String>,
+    region: Option<String>,
+    postcode: Option<String>,
+    country: Option<String>,
+) -> Option<String> {
+    let town = join([city, join([region, postcode], " ")], ", ");
+    join(street.into_iter().chain([town, country]), "\n")
+}
+
 /// `M/YY`, `MM/YYYY` and the like as `YYYY-MM`, if they form one.
 fn month(month: &str, year: &str) -> Option<String> {
     let month = month.trim();
@@ -276,27 +303,22 @@ fn url_field(uri: &str) -> Field {
     }
 }
 
-/// Builds one item's fields, tracking names so extras never collide.
+/// Builds one item's fields, naming extras so they never collide.
 /// Blank values are left out everywhere: deadbolt has no empty fields.
 struct Builder {
     schema: &'static Schema,
     fields: BTreeMap<String, Field>,
-    taken: BTreeSet<String>,
     /// URL values already added, so each is added once.
     urls: BTreeSet<String>,
 }
 
 impl Builder {
-    #[expect(
-        clippy::expect_used,
-        reason = "callers pass only the built-in login and card schemas"
-    )]
+    #[expect(clippy::expect_used, reason = "callers pass only built-in item types")]
     fn new(kind: &str) -> Self {
         let schema = schema(kind).expect("built-in type");
         Self {
             schema,
             fields: BTreeMap::new(),
-            taken: schema.fields.iter().map(|f| f.name.to_string()).collect(),
             urls: BTreeSet::new(),
         }
     }
@@ -351,12 +373,31 @@ impl Builder {
     }
 
     /// Adds an extra field under a free name based on `base`. A value that
-    /// isn't valid for `kind` becomes secret or text.
+    /// isn't valid for `kind` becomes secret or text. A `base` naming one of
+    /// the schema's fields that is still unset fills it if the value is valid
+    /// there and no less secret; otherwise the schema's names stay free for
+    /// its own fields.
     fn extra(&mut self, base: &str, kind: FieldType, value: String) {
         if value.trim().is_empty() {
             return;
         }
-        let name = unique(base, &self.taken);
+        if let Some(known) = self.schema.field(base)
+            && !self.fields.contains_key(base)
+            && (known.kind == kind || known.kind.is_secret())
+        {
+            let field = Field::new(known.kind.clone(), value.clone());
+            if check_field(self.schema, base, &field).is_ok() {
+                self.fields.insert(base.into(), field);
+                return;
+            }
+        }
+        let taken: BTreeSet<String> = self
+            .fields
+            .keys()
+            .cloned()
+            .chain(self.schema.fields.iter().map(|f| f.name.to_string()))
+            .collect();
+        let name = unique(base, &taken);
         let mut field = Field::new(kind, value);
         if check_field(self.schema, &name, &field).is_err() {
             field.kind = if field.kind.is_secret() {
@@ -365,7 +406,6 @@ impl Builder {
                 FieldType::Text
             };
         }
-        self.taken.insert(name.clone());
         self.fields.insert(name, field);
     }
 
@@ -385,7 +425,6 @@ impl Builder {
             if field.kind != FieldType::Url {
                 summary.warn(URL_AS_TEXT);
             } else if !self.fields.contains_key("url") {
-                self.taken.insert("url".into());
                 self.fields.insert("url".into(), field);
                 continue;
             }
@@ -401,6 +440,10 @@ impl Builder {
         name: Option<String>,
         summary: &mut Summary,
     ) -> Option<Imported> {
+        if self.fields.is_empty() && name.is_none() {
+            summary.skip(EMPTY);
+            return None;
+        }
         if check_create(kind, name.as_deref(), &self.fields).is_err() {
             summary.skip(INVALID);
             return None;
@@ -457,6 +500,23 @@ pub(crate) mod tests {
         let long = "a".repeat(64);
         let taken: BTreeSet<String> = [long.clone()].into();
         assert_eq!(unique(&long, &taken), format!("{}-2", "a".repeat(62)));
+    }
+
+    #[test]
+    fn addresses() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            address(
+                [s("1 Main St"), s(" "), s("Apt 2")],
+                s("Springfield"),
+                s("IL"),
+                s("12345"),
+                s("US")
+            ),
+            s("1 Main St\nApt 2\nSpringfield, IL 12345\nUS")
+        );
+        assert_eq!(address([None], None, None, s("12345"), None), s("12345"));
+        assert_eq!(address([s("")], None, s(" "), None, None), None);
     }
 
     #[test]
@@ -535,12 +595,20 @@ pub(crate) mod tests {
         let mut summary = Summary::new(ImportSource::Csv);
         assert!(
             Builder::new("card")
-                .finish("card", None, &mut summary)
+                .finish("card", Some("Visa".into()), &mut summary)
+                .is_none()
+        );
+        assert!(
+            Builder::new("note")
+                .finish("note", None, &mut summary)
                 .is_none()
         );
         assert_eq!(
             lines(&summary.report())[1..],
-            ["skipped 1 item that could not be imported"]
+            [
+                "skipped 1 empty item",
+                "skipped 1 item that could not be imported"
+            ]
         );
     }
 

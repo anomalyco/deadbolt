@@ -21,6 +21,13 @@ done
 "$bin" --scene copied --at 2.4 --snap "$out/copied.png" "$@"
 "$bin" --scene copied --at 2.4 --theme light --snap "$out/copied-light.png" "$@"
 "$bin" --scene locked --theme light --snap "$out/locked-light.png" "$@"
+# Item kinds, dark and light: a secure note (masked, then shown), an SSH
+# key and an identity.
+for theme in dark light; do
+  for scene in note note-revealed ssh identity; do
+    "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
+  done
+done
 # The quick panel's shortcut, dark and light: Settings at rest, recording, a
 # conflict shown in place (Finder search holds ⌥⌘Space), changed (with a way
 # back to the default), and when it couldn't be registered: the vault's notice

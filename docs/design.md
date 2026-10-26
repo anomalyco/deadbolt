@@ -38,14 +38,14 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 - No compaction in v1. Deleted items stay in the history on your own devices, encrypted at rest under the local unlock key. (Later: snapshots.)
 
 ## Items
-- Every item has a **type**, fixed at creation. Built-in types in v1: `login` and `card`. User-defined types come later; keep the type an open identifier, not a closed enum on the wire.
+- Every item has a **type**, fixed at creation. Built-in types in v1: `login`, `card`, `note` (a secure note), `ssh` (an SSH key) and `identity`. User-defined types come later; keep the type an open identifier, not a closed enum on the wire.
 - A type defines its known fields, each with a fixed field type, and which of them are required. Items may carry extra fields of any field type on top.
-- Field types: `text`, `secret` (hidden unless asked), `url`, `email`, `otp` (TOTP secret; shown as the current code), `month` (stored `YYYY-MM`), `note` (multi-line).
+- Field types: `text`, `secret` (hidden unless asked), `url`, `email`, `otp` (TOTP secret; shown as the current code), `month` (stored `YYYY-MM`), `date` (stored `YYYY-MM-DD`), `note` (multi-line). A known field may be marked multi-line (a secure note's body, a private key, notes) so forms and the detail pane give it lines.
 - Guarantees, enforced in core on every device: an item is created in one entry that contains all required fields; a known field always has its fixed field type; required fields can't be removed; the type can't change. Ops that would break this are rejected at commit and ignored (deterministically, op by op, without rejecting the entry) at apply.
 
 | type | field | field type | required |
 |---|---|---|---|
-| login | password | secret | yes |
+| login | password | secret | |
 | | username | text | |
 | | url | url | |
 | | otp | otp | |
@@ -57,18 +57,35 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 | | pin | secret | |
 | | brand | text | |
 | | notes | note | |
+| note | notes | secret, multi-line | |
+| ssh | private-key | secret, multi-line | yes |
+| | public-key | text | |
+| | fingerprint | text | |
+| | passphrase | secret | |
+| | comment | text | |
+| | notes | note | |
+| identity | name | text | |
+| | email | email | |
+| | phone | text | |
+| | address | note | |
+| | birthday | date | |
+| | national-id | secret | |
+| | passport | secret | |
+| | license | secret | |
+| | notes | note | |
 
 - Card brand: the optional `brand` field, shown in the label when set. (Later: derive it from the number's prefix for major networks when the field is empty; a Luhn check as a CLI warning.)
-- **Names are optional labels on every item** (alongside the type, not one of its fields), **not identifiers**, and need not be unique. Without a name, an item displays as a derived label (login: the URL's host without `www.`; card: brand + last four digits). Identity is the item id; the CLI shows a short id prefix.
-- **Lookup is search**: query words are ANDed, case-insensitive, over name, URL host, username, and for cards cardholder, brand and last four (never secret values). An id prefix also matches. One match: use it. Several: fail listing the candidates (short id, label, username). Scripts that must be unambiguous use the id.
+- A login needs no password (a passkey-only or SSO account, an export's login without one); `new login` without one still generates one. No item may have neither a name nor a field (core rejects it at create), so a note or identity needs only one of them.
+- Each type has one field ⏎ and `get` use by default: login password, card number, note body, SSH private key, identity email.
+- **Names are optional labels on every item** (alongside the type, not one of its fields), **not identifiers**, and need not be unique. Without a name, an item displays as a derived label (login: the URL's host without `www.`; card: brand + last four digits; ssh: the comment, else "SSH key"; identity: the name, else the email). Identity is the item id; the CLI shows a short id prefix.
+- **Lookup is search**: query words are ANDed, case-insensitive, over name, URL host, username, for cards cardholder, brand and last four, for SSH keys the comment and for identities the name and email (never secret values, so never a note's body). An id prefix also matches. One match: use it. Several: fail listing the candidates (short id, label, username). Scripts that must be unambiguous use the id.
 - Two Google accounts are just two logins with the same URL and different usernames; nobody has to invent a naming scheme.
-- `new login` without a password generates one.
 
 ## CLI
 - Agent-first: every command works from flags, env (`DEADBOLT_PASSPHRASE`) and stdin (`field=-`, `--passphrase-stdin`) and never waits for a human without a TTY.
 - On a TTY (stdin and stderr), it prompts only for what would otherwise be an error: passphrase, `field=-` values, missing required fields, and confirming the pairing code (`--yes` skips).
 - A background agent (`deadbolt agent`, auto-started) holds the unlocked store and the iroh node; commands talk to it over a user-only Unix socket.
-- `deadbolt import [FILE] [--dry-run]` (stdin if omitted or `-`) imports another password manager's export into the vault: 1Password's `.1pux` or CSV, Apple Passwords' CSV, Bitwarden's unencrypted JSON, or any CSV with a password column. The client only turns the file into text (from a `.1pux` it reads only `export.data`, never the attachments); the agent detects the format and maps it. Logins and cards only; other item types, tags, folders, favorites, attachments and password history are skipped and counted, and a value that isn't valid for its field is kept as an extra field with a warning. Items the vault already has (a login with the same URL host, username and password, or a card with the same number) or that the export repeats are skipped, so importing again changes nothing. All items are checked first, then created together in as few entries as fit (~1 MiB each); `--dry-run` writes nothing. Prints only a summary, never values.
+- `deadbolt import [FILE] [--dry-run]` (stdin if omitted or `-`) imports another password manager's export into the vault: 1Password's `.1pux` or CSV, Apple Passwords' CSV, Bitwarden's unencrypted JSON, or any CSV with a password column. The client only turns the file into text (from a `.1pux` it reads only `export.data`, never the attachments); the agent detects the format and maps it. Logins, cards, secure notes, SSH keys and identities (1Password's other categories become secure notes with their fields, its ID and account numbers secret; its dates become the nearest day); documents, other item types, tags, folders, favorites, attachments and password history are skipped and counted, and a value that isn't valid for its field is kept as an extra field with a warning. Items the vault already has (a login with the same URL host, username and password, or for a login without a password the same name and every field, a card with the same number, an SSH key with the same private key, or a note or identity with the same name and every field the same) or that the export repeats are skipped, so importing again changes nothing. All items are checked first, then created together in as few entries as fit (~1 MiB each); `--dry-run` writes nothing. Prints only a summary, never values.
 - Basics only for now; convenience features (picker, history, generate, TOTP codes, `run`, clipboard, JSON output) get decided together later.
 
 ## Pairing

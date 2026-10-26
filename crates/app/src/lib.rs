@@ -303,6 +303,13 @@ const SCENES: &[Scene] = &[
         s.unlock_error = Some("That passphrase didn't unlock this device.".into());
     }),
     ("vault", vault),
+    ("note", |s| kind_scene(s, "note")),
+    ("note-revealed", |s| {
+        kind_scene(s, "note");
+        s.toggle_reveal("notes");
+    }),
+    ("ssh", |s| kind_scene(s, "ssh")),
+    ("identity", |s| kind_scene(s, "identity")),
     ("search", |s| {
         vault(s);
         s.search = rune::TextEdit::new("git");
@@ -329,8 +336,14 @@ const SCENES: &[Scene] = &[
         empty_vault(s);
         s.import.open = true;
         s.import.phase = import::Phase::Preview(import_preview(ImportReport {
-            logins: 214,
-            cards: 3,
+            new: [
+                ("login".into(), 214),
+                ("card".into(), 3),
+                ("note".into(), 12),
+                ("ssh".into(), 2),
+                ("identity".into(), 1),
+            ]
+            .into(),
             duplicates: 0,
             ..import_report()
         }));
@@ -340,19 +353,15 @@ const SCENES: &[Scene] = &[
         vault(s);
         s.import.open = true;
         s.import.phase = import::Phase::Preview(import_preview(ImportReport {
-            logins: 0,
-            cards: 0,
-            duplicates: 217,
+            duplicates: 232,
             ..import_report()
         }));
     }),
-    // An export of notes and identities only: nothing Deadbolt takes.
+    // An export of documents only: nothing Deadbolt takes.
     ("import-nothing-to-import", |s| {
         vault(s);
         s.import.open = true;
         s.import.phase = import::Phase::Preview(import_preview(ImportReport {
-            logins: 0,
-            cards: 0,
             duplicates: 0,
             warnings: Vec::new(),
             ..import_report()
@@ -365,8 +374,7 @@ const SCENES: &[Scene] = &[
         s.import.phase = import::Phase::Preview(import::Preview {
             changed: true,
             ..import_preview(ImportReport {
-                logins: 215,
-                cards: 3,
+                new: [("login".into(), 215), ("card".into(), 3)].into(),
                 duplicates: 0,
                 ..import_report()
             })
@@ -605,10 +613,9 @@ fn import_report() -> ImportReport {
     };
     ImportReport {
         source: ImportSource::OnePassword,
-        logins: 0,
-        cards: 0,
+        new: Default::default(),
         duplicates: 0,
-        skipped: vec![tally(12, "secure note", "secure notes")],
+        skipped: vec![tally(3, "document", "documents")],
         warnings: vec![tally(2, "URL kept as text", "URLs kept as text")],
         dropped: vec![
             tally(9, "tag", "tags"),
@@ -652,6 +659,32 @@ fn vault(s: &mut App) {
     detail_for_selection(s);
 }
 
+/// The vault with a secure note, an SSH key and an identity, one selected.
+fn kind_scene(s: &mut App, kind: &str) {
+    vault(s);
+    for (id, kind, label, detail) in [
+        ("b7c1e2", "note", "Alarm codes", None),
+        ("d2a9f0", "ssh", "Deploy key", Some("deploy@anoma.ly")),
+        ("5e8b31", "identity", "Dax Raad", Some("dax@anoma.ly")),
+    ] {
+        s.items.push(ItemInfo {
+            id: format!("{id}0000000000000000000000000000000000000000000000000000000000"),
+            short: id[..4].into(),
+            kind: kind.into(),
+            label: label.into(),
+            detail: detail.map(Into::into),
+            fields: Vec::new(),
+        });
+    }
+    s.items.sort_by_key(|i| i.label.to_lowercase());
+    s.selected = s
+        .items
+        .iter()
+        .find(|i| i.kind == kind)
+        .map(|i| i.id.clone());
+    detail_for_selection(s);
+}
+
 fn detail_for_selection(s: &mut App) {
     let Some(item) = s.selected_item().cloned() else {
         return;
@@ -667,6 +700,41 @@ fn detail_for_selection(s: &mut App) {
             field("expiry", "month", "2029-08"),
             field("cvv", "secret", "123"),
             field("cardholder", "text", "Dax Raad"),
+        ],
+        "note" => vec![field(
+            "notes",
+            "secret",
+            "Front door: 4417\nGarage: 0932\nThe panel is behind the coats.",
+        )],
+        "ssh" => vec![
+            field(
+                "private-key",
+                "secret",
+                "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFixtureFixtureFixtureFixtureFixture00\n-----END PRIVATE KEY-----",
+            ),
+            field(
+                "public-key",
+                "text",
+                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureFixtureFixtureFixtureFixture deploy@anoma.ly",
+            ),
+            field(
+                "fingerprint",
+                "text",
+                "SHA256:Fx7tQ2mVb9yLr4cWkP0sN8hJd3aZe6uGo1iTq5XwYnE",
+            ),
+            field("comment", "text", "deploy@anoma.ly"),
+        ],
+        "identity" => vec![
+            field("name", "text", "Dax Raad"),
+            field("email", "email", "dax@anoma.ly"),
+            field("phone", "text", "+1 555 0100"),
+            field(
+                "address",
+                "note",
+                "1 Main St\nApt 2\nSpringfield, IL 12345\nUS",
+            ),
+            field("birthday", "date", "1990-03-01"),
+            field("passport", "secret", "X1234567"),
         ],
         _ => vec![
             field("password", "secret", "correct-horse-battery-staple"),
