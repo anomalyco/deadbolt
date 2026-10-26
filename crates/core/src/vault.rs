@@ -5,7 +5,7 @@ use crate::encoding::{Reader, Writer};
 use crate::entry::{DataOp, Entry, Log, LogId, MembershipOp, Payload, consent_message, valid_name};
 use crate::error::{DecodeError, Error};
 use crate::id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
-use crate::item::Field;
+use crate::item::{Field, ItemError};
 use crate::membership::{self, Membership};
 
 /// Approximate field data per entry written by [`Vault::create_items`],
@@ -410,26 +410,37 @@ impl Vault {
     }
 
     /// Creates many items (an import) in as few entries as fit about
-    /// [`CREATE_BATCH_BYTES`] of field data each. Every item is checked
-    /// before anything is written, so either all are created or none.
+    /// [`CREATE_BATCH_BYTES`] of field data each. Every op must be a
+    /// [`DataOp::Create`] (an edit fails as [`ItemError::NoSuchItem`]). Every
+    /// item is checked before anything is written, so either all are
+    /// created or none.
     pub fn create_items(
         &mut self,
         secret: &DeviceSecret,
-        items: impl IntoIterator<Item = (String, Option<String>, Vec<(String, Field)>)>,
+        items: impl IntoIterator<Item = DataOp>,
     ) -> Result<(Vec<ItemId>, Vec<Entry>), Error> {
         if !self.is_member(&secret.device_id()) {
             return Err(Error::NotMember);
         }
         let mut batches: Vec<Vec<DataOp>> = Vec::new();
         let mut size = 0;
-        for (kind, name, fields) in items {
+        for op in items {
+            let DataOp::Create {
+                kind,
+                name,
+                fields,
+                source,
+            } = &op
+            else {
+                return Err(ItemError::NoSuchItem.into());
+            };
             let bytes = kind.len()
                 + name.as_ref().map_or(0, String::len)
+                + source.as_ref().map_or(0, |s| s.id.len() + s.version.len())
                 + fields
                     .iter()
                     .map(|(n, f)| n.len() + f.kind.as_str().len() + f.value.len() + 16)
                     .sum::<usize>();
-            let op = DataOp::create(kind, name, fields);
             data::check(&self.items, &op)?;
             match batches.last_mut() {
                 Some(batch) if size + bytes <= CREATE_BATCH_BYTES => batch.push(op),

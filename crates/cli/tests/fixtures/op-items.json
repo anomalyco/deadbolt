@@ -1,0 +1,226 @@
+{
+  "id": "item1item1item1item1item1a",
+  "title": "GitHub",
+  "version": 7,
+  "vault": { "id": "v1v1v1v1v1v1v1v1v1v1v1v1v1", "name": "Private" },
+  "category": "LOGIN",
+  "favorite": true,
+  "tags": ["work", "dev"],
+  "last_edited_by": "DAXDAXDAXDAXDAXDAXDAXDAXDA",
+  "created_at": "2023-11-14T22:13:20Z",
+  "updated_at": "2024-03-09T16:00:00Z",
+  "additional_information": "dax@example.com",
+  "urls": [
+    { "label": "website", "primary": true, "href": "https://github.com/login" },
+    { "label": "gist", "href": "gist.github.com" }
+  ],
+  "sections": [
+    { "id": "add more", "label": "Security" },
+    { "id": "docs", "label": "Docs" }
+  ],
+  "fields": [
+    { "id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "dax@example.com", "reference": "op://Private/GitHub/username" },
+    { "id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": "op-github-pw", "entropy": 80.0, "reference": "op://Private/GitHub/password", "password_details": { "entropy": 80, "generated": true, "strength": "FANTASTIC" } },
+    { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "work account\nsecond line", "reference": "op://Private/GitHub/notesPlain" },
+    { "id": "remember", "type": "STRING", "label": "remember_me", "value": "✓" },
+    { "id": "TOTP_abc123", "section": { "id": "add more", "label": "Security" }, "type": "OTP", "label": "one-time password", "value": "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub", "totp": "123456" },
+    { "id": "f1", "section": { "id": "add more", "label": "Security" }, "type": "CONCEALED", "label": "Recovery codes", "value": "op-recovery-111" },
+    { "id": "f2", "section": { "id": "add more", "label": "Security" }, "type": "STRING", "label": "", "value": "untitled value" },
+    { "id": "f3", "section": { "id": "add more", "label": "Security" }, "type": "DATE", "label": "member since", "value": "2024-01-01" },
+    { "id": "f4", "section": { "id": "add more", "label": "Security" }, "type": "EMAIL", "label": "backup email", "value": "backup@example.com" },
+    { "id": "f5", "section": { "id": "add more", "label": "Security" }, "type": "MONTH_YEAR", "label": "renews", "value": "202812" },
+    { "id": "f6", "section": { "id": "add more", "label": "Security" }, "type": "REFERENCE", "label": "other login", "value": "item9item9item9item9item9a" },
+    { "id": "f7", "section": { "id": "add more", "label": "Security" }, "type": "STRING", "label": "empty", "value": "" },
+    { "id": "f9", "section": { "id": "add more", "label": "Security" }, "type": "CONCEALED", "label": "blank", "value": "   " },
+    { "id": "f8", "section": { "id": "docs" }, "type": "URL", "label": "status page", "value": "https://www.githubstatus.com" },
+    { "id": "pk1", "type": "PASSKEY", "label": "passkey" }
+  ],
+  "files": [
+    { "id": "doc1doc1doc1doc1doc1doc1d1", "name": "recovery.pdf", "size": 1024, "content_path": "/v1/vaults/v1/items/item1/files/doc1/content" }
+  ]
+}
+{
+  "id": "item2item2item2item2item2a",
+  "title": "Garage door",
+  "version": 1,
+  "vault": { "id": "v1v1v1v1v1v1v1v1v1v1v1v1v1", "name": "Private" },
+  "category": "PASSWORD",
+  "tags": ["home"],
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": [
+    { "id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password", "value": "op-wifi-pw" },
+    { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "" }
+  ]
+}
+{
+  "id": "item3item3item3item3item3a",
+  "title": "A note",
+  "version": 1,
+  "vault": { "id": "v1v1v1v1v1v1v1v1v1v1v1v1v1", "name": "Private" },
+  "category": "SECURE_NOTE",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": [
+    { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "op-note-secret" }
+  ]
+}
+{
+  "id": "item5item5item5item5item5a",
+  "title": "Visa",
+  "version": 2,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "CREDIT_CARD",
+  "favorite": true,
+  "updated_at": "1970-01-01T00:00:00Z",
+  "urls": [
+    { "primary": true, "href": "https://bank.example" },
+    { "href": "https://cards.bank.example" }
+  ],
+  "sections": [ { "id": "contactInfo", "label": "Contact Information" } ],
+  "fields": [
+    { "id": "cardholder", "type": "STRING", "label": "cardholder name", "value": "Dax Raad" },
+    { "id": "type", "type": "CREDIT_CARD_TYPE", "label": "type", "value": "visa" },
+    { "id": "ccnum", "type": "CREDIT_CARD_NUMBER", "label": "number", "value": "4242 4242 4242 4242" },
+    { "id": "cvv", "type": "CONCEALED", "label": "verification number", "value": "321" },
+    { "id": "site", "type": "URL", "label": "website", "value": "https://bank.example" },
+    { "id": "expiry", "type": "MONTH_YEAR", "label": "expiry date", "value": "04/2027" },
+    { "id": "validFrom", "type": "MONTH_YEAR", "label": "valid from", "value": "202204" },
+    { "id": "pin", "type": "CONCEALED", "label": "PIN", "value": "9876" },
+    { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "" },
+    { "id": "bank", "section": { "id": "contactInfo", "label": "Contact Information" }, "type": "STRING", "label": "issuing bank", "value": "Example Bank" },
+    { "id": "phoneIntl", "section": { "id": "contactInfo", "label": "Contact Information" }, "type": "PHONE", "label": "phone (intl)", "value": "+1 555 0100" },
+    { "id": "addr", "section": { "id": "contactInfo", "label": "Contact Information" }, "type": "ADDRESS", "label": "address", "value": "1 Main St, Springfield, 12345, us" }
+  ]
+}
+{
+  "id": "item6item6item6item6item6a",
+  "title": "Deploy API",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "API_CREDENTIAL",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": [
+    { "id": "username", "type": "STRING", "label": "username", "value": "deploy-bot" },
+    { "id": "credential", "type": "CONCEALED", "label": "credential", "value": "op-api-key" },
+    { "id": "hostname", "type": "STRING", "label": "hostname", "value": "api.example.com" }
+  ]
+}
+{
+  "id": "item7item7item7item7item7a",
+  "title": "No password",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "LOGIN",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": [
+    { "id": "username", "type": "STRING", "purpose": "USERNAME", "label": "username", "value": "nobody" },
+    { "id": "password", "type": "CONCEALED", "purpose": "PASSWORD", "label": "password" }
+  ]
+}
+{
+  "id": "item8",
+  "title": "Me",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "IDENTITY",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "sections": [
+    { "id": "name", "label": "Identification" },
+    { "id": "address", "label": "Address" },
+    { "id": "internet", "label": "Internet Details" }
+  ],
+  "fields": [
+    { "id": "firstname", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "first name", "value": "Dax" },
+    { "id": "initial", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "initial", "value": "" },
+    { "id": "lastname", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "last name", "value": "Raad" },
+    { "id": "birthdate", "section": { "id": "name", "label": "Identification" }, "type": "DATE", "label": "birth date", "value": "636246000" },
+    { "id": "company", "section": { "id": "name", "label": "Identification" }, "type": "STRING", "label": "company", "value": "Anomaly" },
+    { "id": "address", "section": { "id": "address", "label": "Address" }, "type": "ADDRESS", "label": "address", "value": "1 Main St, Springfield, IL, 12345, us" },
+    { "id": "defphone", "section": { "id": "address", "label": "Address" }, "type": "PHONE", "label": "default phone", "value": "+1 555 0100" },
+    { "id": "email", "section": { "id": "internet", "label": "Internet Details" }, "type": "EMAIL", "label": "email", "value": "not an email" }
+  ]
+}
+{
+  "id": "itemC",
+  "title": "CI key",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "SSH_KEY",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "sections": [ { "id": "more", "label": "More" } ],
+  "fields": [
+    { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "for CI" },
+    { "id": "private_key", "type": "SSHKEY", "label": "private key", "value": "-----BEGIN PRIVATE KEY-----\npkcs8\n-----END PRIVATE KEY-----", "ssh_formats": { "openssh": { "value": "-----BEGIN OPENSSH PRIVATE KEY-----\nopenssh\n-----END OPENSSH PRIVATE KEY-----", "reference": "op://Shared/CI key/private key?ssh-format=openssh" } } },
+    { "id": "public_key", "type": "STRING", "label": "public key", "value": "ssh-ed25519 AAAAC3Nz deploy@ci" },
+    { "id": "fingerprint", "type": "STRING", "label": "fingerprint", "value": "SHA256:abc" },
+    { "id": "key_type", "type": "STRING", "label": "key type", "value": "ed25519" },
+    { "id": "f1", "section": { "id": "more", "label": "More" }, "type": "CONCEALED", "label": "passphrase", "value": "op-ssh-pass" },
+    { "id": "f2", "section": { "id": "more", "label": "More" }, "type": "STRING", "label": "comment", "value": "deploy@ci" }
+  ]
+}
+{
+  "id": "item9",
+  "title": "Deploy key",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "SSH_KEY",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": []
+}
+{
+  "id": "itemD",
+  "title": "Editor",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "SOFTWARE_LICENSE",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": [
+    { "id": "notesPlain", "type": "STRING", "purpose": "NOTES", "label": "notesPlain", "value": "bought 2024" },
+    { "id": "reg_code", "type": "STRING", "label": "license key", "value": "ABCD-1234" },
+    { "id": "product_version", "type": "STRING", "label": "version", "value": "5" },
+    { "id": "retail_password", "type": "CONCEALED", "label": "password", "value": "op-license-pw" }
+  ]
+}
+{
+  "id": "itemF",
+  "title": "Checking",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "BANK_ACCOUNT",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": [
+    { "id": "bankName", "type": "STRING", "label": "bank name", "value": "Example Bank" },
+    { "id": "accountNo", "type": "STRING", "label": "account number", "value": "op-account-12345678" },
+    { "id": "iban", "type": "STRING", "label": "IBAN", "value": "op-iban-DE00" },
+    { "id": "telephonePin", "type": "CONCEALED", "label": "PIN", "value": "op-phone-pin" }
+  ]
+}
+{
+  "id": "itemG",
+  "title": "Passport",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "PASSPORT",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": [
+    { "id": "fullname", "type": "STRING", "label": "full name", "value": "Dax Raad" },
+    { "id": "number", "type": "STRING", "label": "number", "value": "op-passport-X123" }
+  ]
+}
+{
+  "id": "itemA",
+  "title": "Scan",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "DOCUMENT",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": []
+}
+{
+  "id": "itemB",
+  "title": "Future",
+  "version": 1,
+  "vault": { "id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared" },
+  "category": "CRYPTO_WALLET",
+  "updated_at": "1970-01-01T00:00:00Z",
+  "fields": []
+}

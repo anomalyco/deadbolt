@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
-use crate::entry::{Change, valid_name};
+use crate::entry::{Change, Source, valid_name};
 
 /// How a field's value is interpreted and shown. An open identifier on the
 /// wire; [`FieldType::Other`] holds types this version does not know, which
@@ -272,6 +272,13 @@ pub fn valid_item_name(name: &str) -> bool {
     !name.trim().is_empty() && name.chars().count() <= 128 && !name.chars().any(char::is_control)
 }
 
+/// Whether `source` is valid: an id of 1–256 characters and a version of
+/// at most 2048, neither with control characters.
+pub fn valid_source(source: &Source) -> bool {
+    let clean = |s: &str, max: usize| s.chars().count() <= max && !s.chars().any(char::is_control);
+    !source.id.is_empty() && clean(&source.id, 256) && clean(&source.version, 2048)
+}
+
 /// Why an item op is invalid.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ItemError {
@@ -297,6 +304,8 @@ pub enum ItemError {
     InvalidItemName,
     #[error("an item needs a name or a field")]
     Empty,
+    #[error("invalid item source")]
+    InvalidSource,
 }
 
 fn invalid(field: &str, reason: impl Into<String>) -> ItemError {
@@ -440,7 +449,8 @@ pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError>
             Ok(())
         }
         Change::Name(Some(name)) if !valid_item_name(name) => Err(ItemError::InvalidItemName),
-        Change::Name(_) | Change::Delete => Ok(()),
+        Change::Source(Some(source)) if !valid_source(source) => Err(ItemError::InvalidSource),
+        Change::Name(_) | Change::Delete | Change::Source(_) => Ok(()),
     }
 }
 
@@ -449,8 +459,12 @@ pub fn check_create(
     kind: &str,
     name: Option<&str>,
     fields: &BTreeMap<String, Field>,
+    source: Option<&Source>,
 ) -> Result<(), ItemError> {
     let schema = schema(kind).ok_or_else(|| ItemError::UnknownType(kind.into()))?;
+    if source.is_some_and(|s| !valid_source(s)) {
+        return Err(ItemError::InvalidSource);
+    }
     if let Some(missing) = schema
         .fields
         .iter()

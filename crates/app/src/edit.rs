@@ -1228,6 +1228,7 @@ mod tests {
                     value: value.into(),
                 })
                 .collect(),
+            source: None,
         }
     }
 

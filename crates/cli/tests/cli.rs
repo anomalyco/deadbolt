@@ -37,6 +37,8 @@ impl Device {
             .env("DEADBOLT_NET", "local")
             .env("DEADBOLT_KDF", "fast")
             .env("DEADBOLT_PASSPHRASE", PASSPHRASE)
+            // Never the real 1Password CLI: a test writes a fake one here.
+            .env("DEADBOLT_OP", self.path("op"))
             .env_remove("DEADBOLT_TEST_VERSION")
             .env_remove("DEADBOLT_TEST_PROTOCOL")
             .env_remove("RUST_LOG")
@@ -992,6 +994,206 @@ fn import() {
     let err = a.fail(&["import", encrypted.to_str().unwrap()]);
     assert!(
         err.contains("this is an encrypted export; export as unencrypted .json"),
+        "{err}"
+    );
+}
+
+/// A fake 1Password CLI: logs its arguments and stdin, then answers from
+/// the files beside it, or fails as `op.mode` says. `item get` gives every
+/// item, asked for or not.
+const FAKE_OP: &str = r#"#!/bin/sh
+dir=$(dirname "$0")
+echo "$*" >> "$dir/op.log"
+case "$(cat "$dir/op.mode" 2>/dev/null)" in
+  signed-out)
+    echo '[ERROR] 2024/03/09 16:00:00 You are not currently signed in. Please run `op signin --help` for instructions' >&2
+    exit 1 ;;
+  dismissed)
+    echo '[ERROR] 2024/03/09 16:00:00 authorization prompt dismissed, please try again' >&2
+    exit 1 ;;
+esac
+case "$1 $2" in
+  "account list") cat "$dir/op-accounts.json" ;;
+  "vault list") echo '[{"id": "v1v1v1v1v1v1v1v1v1v1v1v1v1", "name": "Private"}, {"id": "v2v2v2v2v2v2v2v2v2v2v2v2v2", "name": "Shared"}]' ;;
+  "item list") cat "$dir/op-list.json" ;;
+  "item get") cat > "$dir/op.stdin"; cat "$dir/op-items.json" ;;
+  *) echo "unexpected: $*" >&2; exit 1 ;;
+esac
+"#;
+
+const OP_ITEMS: &str = include_str!("fixtures/op-items.json");
+
+#[test]
+fn sync_from_1password() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let sync = ["sync", "1password"];
+    let secrets = [
+        "op-github-pw",
+        "op-recovery-111",
+        "op-note-secret",
+        "op-api-key",
+        "op-ssh-pass",
+        "JBSWY3DPEHPK3PXP",
+        "4242",
+    ];
+    let no_secrets = |output: &Output| {
+        for text in [&output.stdout, &output.stderr] {
+            let text = String::from_utf8_lossy(text);
+            for secret in secrets {
+                assert!(!text.contains(secret), "{secret} leaked: {text}");
+            }
+        }
+    };
+
+    let err = a.fail(&sync);
+    assert!(
+        err.contains("the 1Password CLI (op) is not installed"),
+        "{err}"
+    );
+
+    let op = a.path("op");
+    std::fs::write(&op, FAKE_OP).unwrap();
+    std::fs::set_permissions(&op, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let account = r#"{"url": "https://my.1password.com/", "email": "dax@example.com", "user_uuid": "USERUSERUSERUSERUSERUSERUS", "account_uuid": "AAAABBBBCCCCDDDDEEEEFFFFGG", "shorthand": "my"}"#;
+    std::fs::write(a.path("op-accounts.json"), format!("[{account}]")).unwrap();
+    std::fs::write(a.path("op-items.json"), OP_ITEMS).unwrap();
+    // `op item list` gives no fields, sections or files.
+    let listed: Vec<serde_json::Value> = serde_json::Deserializer::from_str(OP_ITEMS)
+        .into_iter::<serde_json::Value>()
+        .map(|item| {
+            let mut item = item.unwrap();
+            for key in ["fields", "sections", "files"] {
+                item.as_object_mut().unwrap().remove(key);
+            }
+            item
+        })
+        .collect();
+    std::fs::write(
+        a.path("op-list.json"),
+        serde_json::to_string(&listed).unwrap(),
+    )
+    .unwrap();
+    let calls = || {
+        let calls = std::fs::read_to_string(a.path("op.log")).unwrap_or_default();
+        std::fs::remove_file(a.path("op.log")).ok();
+        calls
+    };
+    // The ids of the items the last sync asked `op item get` for.
+    let asked = || -> Vec<String> {
+        let Ok(stdin) = std::fs::read_to_string(a.path("op.stdin")) else {
+            return Vec::new();
+        };
+        std::fs::remove_file(a.path("op.stdin")).unwrap();
+        assert!(!secrets.iter().any(|s| stdin.contains(s)), "{stdin}");
+        let listed: Vec<serde_json::Value> = serde_json::from_str(&stdin).unwrap();
+        let mut ids: Vec<String> = listed
+            .iter()
+            .map(|i| i["id"].as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // Not signed in, or access not approved: says what to do.
+    std::fs::write(a.path("op.mode"), "signed-out").unwrap();
+    let err = a.fail(&sync);
+    assert!(err.contains("1Password: not signed in"), "{err}");
+    std::fs::write(a.path("op.mode"), "dismissed").unwrap();
+    let err = a.fail(&sync);
+    assert!(err.contains("approve it"), "{err}");
+    std::fs::remove_file(a.path("op.mode")).unwrap();
+    calls();
+
+    // Locked: exits 3 before 1Password is asked anything.
+    a.run(&["lock"]);
+    let output = a.try_run(&sync);
+    assert_eq!(output.status.code(), Some(3));
+    assert_eq!(calls(), "");
+    a.run(&["unlock"]);
+
+    let output = a.try_run(&["sync", "1password", "--dry-run"]);
+    assert!(output.status.success());
+    no_secrets(&output);
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("dry run: 11 would add (0 unchanged, 3 skipped)\n  add     A note\n"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("  skip    Scan (document)\n"), "{stdout}");
+    assert_eq!(a.run(&["ls"]), "");
+    // Values never go to `op` on argv or stdin.
+    let log = calls();
+    assert_eq!(
+        log,
+        "account list --format json\n\
+         item list --account AAAABBBBCCCCDDDDEEEEFFFFGG --format json\n\
+         item get - --account AAAABBBBCCCCDDDDEEEEFFFFGG --format json\n"
+    );
+    // Every item but the document and the one of a type unknown here.
+    let all = asked();
+    assert_eq!(all.len(), listed.len() - 2, "{all:?}");
+
+    let output = a.try_run(&sync);
+    assert!(output.status.success());
+    no_secrets(&output);
+    assert!(
+        String::from_utf8(output.stdout)
+            .unwrap()
+            .starts_with("11 added (0 unchanged, 3 skipped)\n")
+    );
+    assert_eq!(a.run(&["ls"]).lines().count(), 11);
+    assert_eq!(a.run(&["get", "github"]), "op-github-pw\n");
+
+    asked();
+
+    // Nothing changed: --quiet prints nothing, and only the SSH key that
+    // could not be mirrored is asked for again.
+    assert_eq!(a.run(&["sync", "1password", "--quiet"]), "");
+    assert_eq!(asked(), ["item9"]);
+
+    // Changed here: asked for again, and 1Password's copy wins.
+    a.run(&["set", "github", "password=mine"]);
+    let out = a.run(&["sync", "1password"]);
+    assert!(
+        out.starts_with("1 updated (10 unchanged, 3 skipped)\n"),
+        "{out}"
+    );
+    assert_eq!(asked(), ["item1item1item1item1item1a", "item9"]);
+    assert_eq!(a.run(&["get", "github"]), "op-github-pw\n");
+
+    // Only some vaults.
+    calls();
+    let out = a.run(&[
+        "sync",
+        "op",
+        "--op-vault",
+        "private",
+        "--account",
+        "dax@example.com",
+    ]);
+    assert!(out.starts_with("Up to date (3 unchanged)\n"), "{out}");
+    assert!(calls().contains("vault list --account AAAABBBBCCCCDDDDEEEEFFFFGG --format json\n"));
+    let err = a.fail(&["sync", "op", "--op-vault", "Nope"]);
+    assert!(err.contains("no 1Password vault named \"Nope\""), "{err}");
+
+    // Two accounts: the one mirrored here, else which one must be said.
+    let other = r#"{"url": "team.1password.com", "email": "dax@team.example", "user_uuid": "YYYY", "account_uuid": "ZZZZ"}"#;
+    std::fs::write(a.path("op-accounts.json"), format!("[{account}, {other}]")).unwrap();
+    a.run(&sync);
+    a.run(&["init", "work"]);
+    let err = a.fail(&["sync", "op", "--vault", "work"]);
+    assert!(
+        err.contains(
+            "2 1Password accounts: choose one with --account (my, dax@team.example on team.1password.com)"
+        ),
+        "{err}"
+    );
+    let err = a.fail(&["sync", "op", "--account", "nobody"]);
+    assert!(
+        err.contains("no 1Password account matches \"nobody\""),
         "{err}"
     );
 }

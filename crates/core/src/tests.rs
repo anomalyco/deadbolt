@@ -789,10 +789,10 @@ fn create_items_batches_entries_and_is_all_or_nothing() {
     let mut a = Dev::create();
     let big = "x".repeat(CREATE_BATCH_BYTES / 4);
     let login = |password: &str| {
-        (
-            "login".to_string(),
+        DataOp::create(
+            "login",
             None,
-            vec![
+            [
                 ("password".to_string(), secret(password)),
                 (
                     "notes".to_string(),
@@ -813,7 +813,7 @@ fn create_items_batches_entries_and_is_all_or_nothing() {
     assert_eq!(a.vault.items().len(), 10);
 
     let mut items: Vec<_> = (0..10).map(|i| login(&i.to_string())).collect();
-    items.push(("card".into(), None, vec![]));
+    items.push(DataOp::create("card", None, []));
     assert_eq!(
         a.vault.create_items(&a.secret, items).unwrap_err(),
         Error::Item(ItemError::MissingField("number"))
@@ -1441,4 +1441,74 @@ fn heads_encoding_round_trips() {
     ]
     .concat();
     assert_eq!(Heads::decode(&unsorted), Err(DecodeError::NotCanonical));
+}
+
+#[test]
+fn a_mirror_keeps_its_source_apart_from_its_fields() {
+    let mut a = Dev::create();
+    let source = |version: &str| Source {
+        id: "1password/acct/vault/item".into(),
+        version: version.into(),
+    };
+    let entry = a.write(vec![DataOp::create_mirror(
+        "login",
+        Some("GitHub".into()),
+        [("password".into(), secret("p"))],
+        source("1"),
+    )]);
+    let id = ItemId::of_create(&entry.hash(), 0);
+    let item = a.vault.item(&id).unwrap();
+    assert_eq!(item.source, Some(source("1")));
+    assert_eq!(item.fields.keys().collect::<Vec<_>>(), ["password"]);
+    assert!(
+        a.vault
+            .history(&id)
+            .iter()
+            .any(|v| v.change == Change::Source(Some(source("1"))))
+    );
+
+    let mut b = a.invite();
+    b.write(vec![DataOp::source(id, Some(source("2")))]);
+    sync_both(&mut a, &mut b);
+    assert_eq!(a.vault.item(&id).unwrap().source, Some(source("2")));
+
+    // Clearing the source makes it the user's own; a reload agrees.
+    a.write(vec![DataOp::source(id, None)]);
+    let reloaded = Vault::load(a.vault.entries().into_iter().cloned()).unwrap();
+    assert_eq!(reloaded.item(&id).unwrap().source, None);
+
+    // The user's own items have none.
+    let own = a.login("x");
+    assert_eq!(a.vault.item(&own).unwrap().source, None);
+}
+
+#[test]
+fn invalid_sources_are_rejected() {
+    let version = |n| Source {
+        id: "1password/a/v/i".into(),
+        version: "x".repeat(n),
+    };
+    assert!(crate::item::valid_source(&version(2048)));
+    assert!(!crate::item::valid_source(&version(2049)));
+    let mut a = Dev::create();
+    let id = a.login("x");
+    let blank = Source {
+        id: String::new(),
+        version: "1".into(),
+    };
+    assert_eq!(
+        a.vault
+            .write(&a.secret, vec![DataOp::source(id, Some(blank.clone()))])
+            .unwrap_err(),
+        Error::Item(ItemError::InvalidSource)
+    );
+    assert_eq!(
+        a.vault
+            .write(
+                &a.secret,
+                vec![DataOp::create_mirror("note", Some("n".into()), [], blank)]
+            )
+            .unwrap_err(),
+        Error::Item(ItemError::InvalidSource)
+    );
 }

@@ -1,6 +1,6 @@
 //! Item state.
 //!
-//! Every field, the name and the item's tombstone are registers holding the
+//! Every field, the name, the source and the item's tombstone are registers holding the
 //! frontier of writes that no other write was based on. A new write drops the
 //! frontier writes it causally follows. If several concurrent writes remain,
 //! the one with the highest entry hash wins and the rest are reported as
@@ -14,7 +14,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::entry::{Change, DataOp, LogId, Payload};
+use crate::entry::{Change, DataOp, LogId, Payload, Source};
 use crate::id::{DeviceId, Hash, ItemId};
 use crate::item::{self, Field, ItemError};
 use crate::vault::Node;
@@ -28,12 +28,15 @@ pub struct Item {
     /// An optional label; not unique, not an identifier.
     pub name: Option<String>,
     pub fields: BTreeMap<String, Field>,
+    /// Where the item is mirrored from; `None` for the user's own.
+    pub source: Option<Source>,
     /// Tombstone. Fields are kept so the item can be restored by a later edit.
     pub deleted: bool,
 }
 
 /// One past change to an item, from [`crate::Vault::history`]. An item's
-/// `Create` appears as one `Set` per field (and a `Name` if it had one).
+/// `Create` appears as one `Set` per field (and a `Name` and a `Source` if
+/// it had them).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Version {
     pub entry: Hash,
@@ -112,6 +115,7 @@ pub(crate) struct ItemState {
     kind: String,
     created: Write<()>,
     name: Vec<Write<Option<String>>>,
+    source: Vec<Write<Option<Source>>>,
     fields: BTreeMap<String, Vec<Write<Option<Field>>>>,
     /// `true` writes are edits, `false` writes are deletions.
     alive: Vec<Write<bool>>,
@@ -138,6 +142,7 @@ impl ItemState {
             kind: self.kind.clone(),
             name: winner(&self.name).and_then(|w| w.value.clone()),
             fields,
+            source: winner(&self.source).and_then(|w| w.value.clone()),
             deleted: self.deleted(),
         }
     }
@@ -166,6 +171,7 @@ impl ItemState {
                 of(&self.fields[field], record.at)
             }
             Change::Name(_) => of(&self.name, record.at),
+            Change::Source(_) => of(&self.source, record.at),
             Change::Delete => {
                 let live = self.alive.iter().any(|w| w.at == record.at);
                 (live, live && self.deleted())
@@ -199,6 +205,7 @@ impl ItemState {
                 );
             }
             Change::Name(name) => write(&mut self.name, node, at, name.clone()),
+            Change::Source(source) => write(&mut self.source, node, at, source.clone()),
             Change::Delete => {}
         }
         let alive = *change != Change::Delete;
@@ -209,7 +216,12 @@ impl ItemState {
 /// Checks a data op against the current items, as of a new local entry.
 pub(crate) fn check(items: &BTreeMap<ItemId, ItemState>, op: &DataOp) -> Result<(), ItemError> {
     match op {
-        DataOp::Create { kind, name, fields } => item::check_create(kind, name.as_deref(), fields),
+        DataOp::Create {
+            kind,
+            name,
+            fields,
+            source,
+        } => item::check_create(kind, name.as_deref(), fields, source.as_ref()),
         DataOp::Edit { item, change } => {
             let state = items.get(item).ok_or(ItemError::NoSuchItem)?;
             item::check_change(&state.kind, change)
@@ -229,8 +241,13 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
             index,
         };
         match op {
-            DataOp::Create { kind, name, fields } => {
-                if item::check_create(kind, name.as_deref(), fields).is_err() {
+            DataOp::Create {
+                kind,
+                name,
+                fields,
+                source,
+            } => {
+                if item::check_create(kind, name.as_deref(), fields, source.as_ref()).is_err() {
                     continue;
                 }
                 let id = ItemId::of_create(&node.entry.hash(), index);
@@ -238,6 +255,7 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                     kind: kind.clone(),
                     created: Write::new(node, at, ()),
                     name: Vec::new(),
+                    source: Vec::new(),
                     fields: BTreeMap::new(),
                     alive: Vec::new(),
                     history: Vec::new(),
@@ -249,6 +267,9 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                 }
                 if name.is_some() {
                     state.change(node, at, &Change::Name(name.clone()));
+                }
+                if source.is_some() {
+                    state.change(node, at, &Change::Source(source.clone()));
                 }
                 items.entry(id).or_insert(state);
             }

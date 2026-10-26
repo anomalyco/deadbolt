@@ -818,6 +818,7 @@ fn vault(s: &mut App) {
             label: (*label).into(),
             detail: detail.map(Into::into),
             fields: Vec::new(),
+            source: None,
         })
         .collect();
     s.items.sort_by_key(|i| i.label.to_lowercase());
@@ -846,6 +847,7 @@ fn kind_scene(s: &mut App, kind: &str) {
             label: label.into(),
             detail: detail.map(Into::into),
             fields: Vec::new(),
+            source: None,
         });
     }
     s.items.sort_by_key(|i| i.label.to_lowercase());

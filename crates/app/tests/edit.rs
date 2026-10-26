@@ -164,6 +164,7 @@ fn info(id: &str, kind: &str, label: &str) -> ItemInfo {
         label: label.into(),
         detail: None,
         fields: Vec::new(),
+        source: None,
     }
 }
 
