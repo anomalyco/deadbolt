@@ -758,6 +758,12 @@ fn one_time_codes() {
     let secret = "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub";
     assert!(a.run(&["show", "--reveal", "github"]).contains(secret));
     assert_eq!(a.run(&["get", "-f", "otp", "github"]).trim_end(), secret);
+    a.run(&["set", "github", "backup:otp=KRSXG5CTMVRXEZLU"]);
+    assert_eq!(
+        a.run(&["get", "-f", "backup", "github"]).trim_end(),
+        "KRSXG5CTMVRXEZLU"
+    );
+    assert_eq!(a.run(&["get", "github"]).trim_end(), "pw");
     assert!(
         a.fail(&["code", "gitlab"])
             .contains("gitlab.com has no one-time password")
