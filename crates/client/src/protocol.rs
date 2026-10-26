@@ -107,13 +107,18 @@ pub enum Command {
         name: Option<String>,
         fields: Vec<FieldInput>,
     },
-    /// Finds exactly one item, with all field values; replies `item`.
+    /// Finds exactly one item, with its field values; replies `item`. One-time
+    /// password secrets (fields of type otp) come back empty unless `otp`
+    /// asks for them: a client that shows codes asks `ItemCode` instead.
     ItemGet {
         vault: Option<String>,
         query: Vec<String>,
+        otp: bool,
     },
     /// Finds exactly one item and computes its current one-time code from
-    /// its `otp` field; replies `code`. The secret itself never leaves.
+    /// its code field (`code_field`); replies `code`. The secret itself
+    /// never leaves. It doesn't count as use for the idle lock: a client
+    /// showing a code asks once a period.
     ItemCode {
         vault: Option<String>,
         query: Vec<String>,
@@ -292,7 +297,7 @@ pub struct Code {
     pub period: u64,
     /// Unix seconds when the next code takes over.
     pub valid_until: u64,
-    /// Milliseconds until then, from the agent's clock.
+    /// Milliseconds until then, from the agent's clock; at least 1.
     pub remaining_ms: u64,
 }
 
@@ -482,6 +487,16 @@ pub struct ItemInfo {
     pub detail: Option<String>,
     /// Known fields in schema order, then extra fields by name. Empty in lists.
     pub fields: Vec<FieldInfo>,
+}
+
+/// The field an item's one-time code comes from, as the agent picks it:
+/// `otp`, else the first field of type otp.
+pub fn code_field(fields: &[FieldInfo]) -> Option<usize> {
+    let otp = |f: &FieldInfo| f.kind == "otp";
+    fields
+        .iter()
+        .position(|f| f.name == "otp" && otp(f))
+        .or_else(|| fields.iter().position(otp))
 }
 
 #[derive(Clone, Serialize, Deserialize)]

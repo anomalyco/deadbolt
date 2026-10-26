@@ -754,7 +754,7 @@ fn detail_for_selection(s: &mut App) {
     };
     let otp = matches!(item.label.as_str(), "github.com" | "Cloudflare");
     if otp {
-        // The app never holds the secret: the agent wipes it from the reply.
+        // The app never holds the secret: the agent leaves it out.
         fields.insert(3, field("otp", "otp", ""));
     }
     s.set_detail(Some(ItemInfo { fields, ..item }));

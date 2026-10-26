@@ -7,7 +7,7 @@
 //! a click) replaces the item's title and fields at once. Nothing animates on
 //! first paint, and reduced motion keeps only fades (Rune's runtime does both).
 
-use deadbolt_client::protocol::{FieldInfo, ItemInfo, noun};
+use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field, noun};
 use rune::{
     Chrome, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
     row, spacer, text, text_input,
@@ -19,8 +19,7 @@ use rune_kit::{
 };
 
 use crate::model::{
-    App, BAR_W, CODE_BAR, Copy, Otp, Screen, code_field, field_words, group_code, is_secret,
-    title_case,
+    App, BAR_W, CODE_BAR, Copy, Otp, Screen, field_words, group_code, is_secret, title_case,
 };
 
 /// The main window: content under a transparent title bar, with the traffic
@@ -721,7 +720,10 @@ fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
 
 fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     let secret = is_secret(&field.kind);
-    let revealed = s.revealed.iter().any(|f| f == &field.name);
+    // The agent leaves one-time password secrets out (only the code field
+    // gives a code), so there's nothing here to show or copy.
+    let held = field.kind != "otp";
+    let revealed = held && s.revealed.iter().any(|f| f == &field.name);
     let value = if secret && !revealed {
         "••••••••••••".to_owned()
     } else {
@@ -737,7 +739,7 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     let named = title_case(&name);
     let noun = field_words(&name);
     let mut actions = row().key("actions").gap(2.0).center_y();
-    if secret {
+    if secret && held {
         let n = name.clone();
         let glyph = if revealed {
             k.glyph.eye_off
@@ -757,7 +759,9 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
                 .key("reveal"),
         );
     }
-    actions = actions.child(copy_button(k, &name, &noun, is_copied(s, item, &name)));
+    if held {
+        actions = actions.child(copy_button(k, &name, &noun, is_copied(s, item, &name)));
+    }
     let lines = (!secret || revealed) && field.value.contains('\n');
     let value = text(value).key("value").font(style).color(k.c.text_base);
     // Multi-line text wraps: notes, an address, a secure note's body or a

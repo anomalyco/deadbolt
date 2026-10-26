@@ -407,7 +407,8 @@ impl Builder {
             .collect();
         let name = unique(base, &taken);
         let mut field = Field::new(kind, value);
-        if !valid(self.schema, &name, &field) {
+        // Only `otp` gives codes, so an extra one-time password is a secret.
+        if field.kind == FieldType::Otp || !valid(self.schema, &name, &field) {
             field.kind = if field.kind.is_secret() {
                 FieldType::Secret
             } else {
@@ -650,7 +651,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn keeps_one_time_passwords_that_are_not_totp_as_extra_secrets() {
+    fn keeps_extra_and_non_totp_one_time_passwords_as_secrets() {
         let mut summary = Summary::new(ImportSource::Csv);
         let mut b = Builder::new("login");
         b.known("password", Some("pw".into()));
@@ -663,6 +664,8 @@ pub(crate) mod tests {
             &mut summary,
         );
         b.extra("backup", FieldType::Otp, "not base32!".into());
+        // A valid one too: only `otp` gives codes.
+        b.extra("spare", FieldType::Otp, "KRSXG5CTMVRXEZLU".into());
         let item = b.finish("login", None, &mut summary).unwrap();
         assert_eq!(
             fields(&item),
@@ -671,6 +674,7 @@ pub(crate) mod tests {
                 ("otp", "otp", "jbsw y3dp ehpk 3pxp"),
                 ("otp-2", "secret", hotp),
                 ("password", "secret", "pw"),
+                ("spare", "secret", "KRSXG5CTMVRXEZLU"),
             ]
         );
         assert_eq!(

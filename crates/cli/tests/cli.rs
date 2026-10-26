@@ -744,10 +744,20 @@ fn one_time_codes() {
         code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
         "{code}"
     );
+    // `show` prints the current code with its time left; the secret takes
+    // `--reveal` or `get -f otp`.
+    let show = a.run(&["show", "github"]);
+    let line = show.lines().find(|l| l.starts_with("otp ")).unwrap();
+    let (digits, left) = line["otp".len()..].trim().split_once(' ').unwrap();
     assert!(
-        a.run(&["show", "github"])
-            .contains("\notp       ••••••••\n")
+        digits.len() == 6 && digits.bytes().all(|b| b.is_ascii_digit()),
+        "{line}"
     );
+    assert!(left.starts_with('(') && left.ends_with("s left)"), "{line}");
+    assert!(!show.contains("JBSWY3DPEHPK3PXP"));
+    let secret = "otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub";
+    assert!(a.run(&["show", "--reveal", "github"]).contains(secret));
+    assert_eq!(a.run(&["get", "-f", "otp", "github"]).trim_end(), secret);
     assert!(
         a.fail(&["code", "gitlab"])
             .contains("gitlab.com has no one-time password")
@@ -759,6 +769,33 @@ fn one_time_codes() {
     );
     a.run(&["set", "gitlab", "otp=jbsw y3dp ehpk 3pxp"]);
     assert_eq!(a.run(&["code", "gitlab"]).trim_end().len(), 6);
+}
+
+/// Asking for codes, as a client showing one does every period, doesn't
+/// hold the vault open: the idle lock still comes.
+#[test]
+fn codes_do_not_hold_off_the_idle_lock() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "url=github.com",
+            "password=pw",
+            "otp=JBSWY3DPEHPK3PXP",
+        ],
+    );
+    a.run(&["unlock", "--timeout", "2s"]);
+    let start = Instant::now();
+    while !a.run(&["status"]).contains("state\tlocked\n") {
+        assert!(
+            start.elapsed() < Duration::from_secs(8),
+            "still unlocked while codes are asked for"
+        );
+        a.try_run(&["code", "github"]);
+        std::thread::sleep(Duration::from_millis(250));
+    }
 }
 
 #[test]

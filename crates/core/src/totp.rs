@@ -9,7 +9,7 @@ use std::fmt;
 
 use data_encoding::{BASE32_NOPAD, Encoding};
 use hmac::{EagerHash, Hmac, KeyInit, Mac};
-use zeroize::Zeroize;
+use zeroize::Zeroizing;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Algorithm {
@@ -40,7 +40,7 @@ pub enum TotpError {
 /// A parsed TOTP secret. Wiped when dropped; `Debug` leaves the secret out.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Totp {
-    secret: Vec<u8>,
+    secret: Zeroizing<Vec<u8>>,
     algorithm: Algorithm,
     digits: u32,
     period: u64,
@@ -54,12 +54,6 @@ impl fmt::Debug for Totp {
             .field("digits", &self.digits)
             .field("period", &self.period)
             .finish()
-    }
-}
-
-impl Drop for Totp {
-    fn drop(&mut self) {
-        self.secret.zeroize();
     }
 }
 
@@ -83,7 +77,7 @@ impl Totp {
         let (mut secret, mut algorithm, mut digits, mut period) = (None, Algorithm::Sha1, 6, 30);
         for pair in query.split('&') {
             let (key, raw) = pair.split_once('=').unwrap_or((pair, ""));
-            let mut value = percent_decode(raw);
+            let value = percent_decode(raw);
             match key.to_ascii_lowercase().as_str() {
                 "secret" => secret = Some(base32(&value)),
                 "algorithm" => {
@@ -91,7 +85,7 @@ impl Totp {
                         "SHA1" => Algorithm::Sha1,
                         "SHA256" => Algorithm::Sha256,
                         "SHA512" => Algorithm::Sha512,
-                        _ => return Err(TotpError::Algorithm(value)),
+                        _ => return Err(TotpError::Algorithm(value.to_string())),
                     }
                 }
                 "digits" => {
@@ -99,18 +93,17 @@ impl Totp {
                         .parse()
                         .ok()
                         .filter(|d| (6..=8).contains(d))
-                        .ok_or_else(|| TotpError::Digits(value.clone()))?;
+                        .ok_or_else(|| TotpError::Digits(value.to_string()))?;
                 }
                 "period" => {
                     period = value
                         .parse()
                         .ok()
                         .filter(|p| (1..=3600).contains(p))
-                        .ok_or_else(|| TotpError::Period(value.clone()))?;
+                        .ok_or_else(|| TotpError::Period(value.to_string()))?;
                 }
                 _ => {}
             }
-            value.zeroize();
         }
         Self::new(
             secret.ok_or(TotpError::NoSecret)??,
@@ -121,7 +114,7 @@ impl Totp {
     }
 
     fn new(
-        secret: Vec<u8>,
+        secret: Zeroizing<Vec<u8>>,
         algorithm: Algorithm,
         digits: u32,
         period: u64,
@@ -186,34 +179,37 @@ fn lenient() -> Encoding {
     }
 }
 
-fn base32(value: &str) -> Result<Vec<u8>, TotpError> {
-    let mut clean: String = value
-        .chars()
-        .filter(|c| !c.is_whitespace() && *c != '-')
-        .map(|c| c.to_ascii_uppercase())
-        .collect();
+fn base32(value: &str) -> Result<Zeroizing<Vec<u8>>, TotpError> {
+    let clean: Zeroizing<String> = Zeroizing::new(
+        value
+            .chars()
+            .filter(|c| !c.is_whitespace() && *c != '-')
+            .map(|c| c.to_ascii_uppercase())
+            .collect(),
+    );
     let trimmed = clean.trim_end_matches('=');
-    let decoded = if trimmed.is_empty() {
-        Err(TotpError::NoSecret)
-    } else {
-        lenient()
-            .decode(trimmed.as_bytes())
-            .map_err(|_| TotpError::NotBase32)
-    };
-    clean.zeroize();
-    decoded
+    if trimmed.is_empty() {
+        return Err(TotpError::NoSecret);
+    }
+    lenient()
+        .decode(trimmed.as_bytes())
+        .map(Zeroizing::new)
+        .map_err(|_| TotpError::NotBase32)
 }
 
-/// Decodes `%XX` escapes and `+` as a space. Invalid escapes stay as they are.
-fn percent_decode(raw: &str) -> String {
+/// Decodes `%XX` escapes (two hex digits) and `+` as a space. Invalid
+/// escapes stay as they are.
+fn percent_decode(raw: &str) -> Zeroizing<String> {
     let bytes = raw.as_bytes();
-    let mut out = Vec::with_capacity(bytes.len());
+    let mut out = Zeroizing::new(Vec::with_capacity(bytes.len()));
     let mut i = 0;
     while i < bytes.len() {
-        let hex = bytes
-            .get(i + 1..i + 3)
-            .and_then(|h| std::str::from_utf8(h).ok())
-            .and_then(|h| u8::from_str_radix(h, 16).ok());
+        let hex = match bytes.get(i + 1..i + 3) {
+            Some(&[a, b]) if a.is_ascii_hexdigit() && b.is_ascii_hexdigit() => {
+                Some(hex_digit(a) << 4 | hex_digit(b))
+            }
+            _ => None,
+        };
         match (bytes[i], hex) {
             (b'%', Some(byte)) => {
                 out.push(byte);
@@ -229,9 +225,14 @@ fn percent_decode(raw: &str) -> String {
             }
         }
     }
-    let decoded = String::from_utf8_lossy(&out).into_owned();
-    out.zeroize();
-    decoded
+    Zeroizing::new(String::from_utf8_lossy(&out).into_owned())
+}
+
+fn hex_digit(c: u8) -> u8 {
+    match c {
+        b'0'..=b'9' => c - b'0',
+        _ => (c | 0x20) - b'a' + 10,
+    }
 }
 
 #[cfg(test)]
@@ -286,6 +287,15 @@ mod tests {
         let totp = Totp::parse(&BASE32_NOPAD.encode(b"12345678901234567890")).unwrap();
         assert_eq!(totp.code(1_999_999_992), "279037");
         assert_eq!(totp.valid_until(1_999_999_992), 2_000_000_010);
+    }
+
+    /// An escape takes exactly two hex digits: "%+f" isn't one.
+    #[test]
+    fn percent_escapes_need_two_hex_digits() {
+        assert_eq!(percent_decode("a%2Bb%2fc").as_str(), "a+b/c");
+        for raw in ["%+f", "%-1", "% f", "%zz", "%4"] {
+            assert_eq!(percent_decode(raw).as_str(), raw.replace('+', " "));
+        }
     }
 
     #[test]

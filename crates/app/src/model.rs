@@ -3,7 +3,9 @@
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::{Change, Code, FieldInfo, ItemInfo, Status, noun, primary_field};
+use deadbolt_client::protocol::{
+    Change, Code, FieldInfo, ItemInfo, Status, code_field, noun, primary_field,
+};
 use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -24,7 +26,7 @@ pub const BAR_W: f32 = 272.0;
 pub const CODE_BAR: [f32; 2] = [40.0, 3.0];
 /// How long after a code's period ends the next is asked for, so the
 /// agent's clock is past the boundary too.
-const CODE_SLACK: f64 = 0.05;
+pub const CODE_SLACK: f64 = 0.05;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Screen {
@@ -82,6 +84,8 @@ pub struct Otp {
     fetching: bool,
     /// Copy the next code that lands: none was current when asked.
     copy_next: bool,
+    /// A wake is set for when the next is due.
+    woken: bool,
 }
 
 impl Otp {
@@ -98,6 +102,7 @@ impl Otp {
             bar: rune::Tween::linear([0.0; 4], [0.0, 0.0, 0.0, h], Duration::ZERO),
             fetching: false,
             copy_next: false,
+            woken: false,
         }
     }
 
@@ -207,7 +212,7 @@ impl App {
         }
         changed |= self.poll_onboarding(now, tx);
         changed |= self.tick_copy(now, tx);
-        self.tick_code(now);
+        self.tick_code(now, tx);
         changed |= self.tick_import(now);
         if let Some(installer) = &mut self.installer {
             changed |= installer.poll(now);
@@ -268,7 +273,7 @@ impl App {
             }
             // Dropping a stale item wipes its values (`agent::Values`).
             Done::Item { seq, result } => {
-                if seq != self.seq || self.screen != Screen::Vault || self.panel_away() {
+                if seq != self.seq || self.screen != Screen::Vault || self.panel_inert() {
                     return;
                 }
                 match result {
@@ -294,7 +299,7 @@ impl App {
                 }
             }
             Done::Code { seq, result } => {
-                if seq != self.seq || self.screen != Screen::Vault || self.panel_away() {
+                if seq != self.seq || self.screen != Screen::Vault || self.panel_inert() {
                     return;
                 }
                 self.on_code(result, tx);
@@ -543,7 +548,8 @@ impl App {
     // One-time codes
 
     /// A code (or why there is none) for the shown item. Its countdown runs
-    /// on the render clock; the next is asked for once this one's period ends.
+    /// on the render clock; the next is asked for once this one's period
+    /// ends (`tick_code`).
     pub(crate) fn on_code(&mut self, result: Result<Code, Failure>, tx: &mut Tx) {
         let now = self.clock;
         let Some(otp) = &mut self.otp else { return };
@@ -569,25 +575,38 @@ impl App {
         otp.code = Some(code.code.clone());
         otp.error = None;
         otp.until = now + remaining;
+        otp.woken = false;
         let [w, h] = CODE_BAR;
         otp.bar = rune::Tween::linear(
             [0.0, 0.0, w * (remaining / period) as f32, h],
             [0.0, 0.0, 0.0, h],
             Duration::from_secs_f64(remaining),
         );
-        tx.wake_after(Duration::from_secs_f64(remaining + CODE_SLACK));
+        // The code that just came is the one asked for, however little of
+        // its period is left.
         if std::mem::take(&mut otp.copy_next) {
             let field = otp.field.clone();
-            self.copy_field(&field, tx);
+            self.put_on_clipboard(field, code.code.to_string(), tx);
         }
     }
 
-    /// Once a code's period is over, asks for the next. The quick panel shows
-    /// no code, so it asks only when one is copied.
-    fn tick_code(&mut self, now: f64) {
+    /// `CODE_SLACK` after a code's period ends, asks for the next, waking
+    /// for that moment (set from the first poll after the code came, so a
+    /// scene's code wakes too). The quick panel shows no code, so it asks
+    /// only when one is copied.
+    fn tick_code(&mut self, now: f64, tx: &mut Tx) {
+        if self.panel.is_some() {
+            return;
+        }
         let Some(otp) = &mut self.otp else { return };
-        if otp.fetching || otp.code.is_none() || otp.current(now).is_some() || self.panel.is_some()
-        {
+        if otp.fetching || otp.code.is_none() {
+            return;
+        }
+        let due = otp.until + CODE_SLACK;
+        if now < due - 1e-3 {
+            if !std::mem::replace(&mut otp.woken, true) {
+                tx.wake_after(Duration::from_secs_f64(due - now));
+            }
             return;
         }
         otp.fetching = true;
@@ -856,19 +875,24 @@ impl App {
     /// Copies a field of the shown item; its otp (`"otp"` names whichever
     /// field the code comes from) copies the current code.
     pub fn copy_field(&mut self, field: &str, tx: &mut Tx) {
-        let Some(item) = &self.detail else { return };
-        let id = item.id.clone();
+        if self.detail.is_none() {
+            return;
+        }
         let code = self
             .otp
             .as_ref()
-            .filter(|o| field == "otp" || field == o.field)
-            .map(|o| o.field.clone());
+            .map(|o| (o.field.clone(), field == "otp" || field == o.field));
         let (field, value) = match code {
-            Some(code_field) => match self.code_for_copy() {
+            Some((code_field, true)) => match self.code_for_copy() {
                 Some(code) => (code_field, code),
                 None => return,
             },
-            None => {
+            _ => {
+                // Another copy replaces a code still on its way.
+                if let Some(otp) = &mut self.otp {
+                    otp.copy_next = false;
+                }
+                let Some(item) = &self.detail else { return };
                 let Some(info) = item.fields.iter().find(|f| f.name == field) else {
                     self.notice = Some(match field {
                         "otp" => format!("{} has no one-time code", item.label),
@@ -879,6 +903,13 @@ impl App {
                 (field.to_owned(), info.value.clone())
             }
         };
+        self.put_on_clipboard(field, value, tx);
+    }
+
+    /// Copies `value`, the shown item's `field`, and starts its countdown.
+    fn put_on_clipboard(&mut self, field: String, value: String, tx: &mut Tx) {
+        let Some(item) = &self.detail else { return };
+        let id = item.id.clone();
         let lasts = Duration::from_secs_f64(self.clear_after);
         let copied = tx.copy_secret(value, lasts);
         self.copy = Some(Copy {
@@ -1057,16 +1088,6 @@ impl App {
             _ => false,
         }
     }
-}
-
-/// The field an item's one-time code comes from, as the agent picks it:
-/// `otp`, else the first field of type otp.
-pub fn code_field(fields: &[FieldInfo]) -> Option<usize> {
-    let otp = |f: &FieldInfo| f.kind == "otp";
-    fields
-        .iter()
-        .position(|f| f.name == "otp" && otp(f))
-        .or_else(|| fields.iter().position(otp))
 }
 
 /// The selected item has a one-time code ⌥⏎ can copy.

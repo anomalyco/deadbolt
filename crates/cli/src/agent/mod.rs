@@ -380,6 +380,7 @@ mod tests {
             Command::ItemGet {
                 vault: None,
                 query: vec!["offline-login".into()],
+                otp: false,
             },
             Command::ItemList {
                 vault: None,
@@ -734,10 +735,17 @@ impl Agent {
         if matches!(command, Command::Status | Command::Stop) {
             return self.run(command, conv).await;
         }
+        // A one-time code isn't use: a client showing one asks every period,
+        // which would otherwise hold the vault open for as long as it shows.
+        let used = !matches!(command, Command::ItemCode { .. });
         self.busy.fetch_add(1, Ordering::SeqCst);
-        self.touch();
+        if used {
+            self.touch();
+        }
         let result = self.clone().run(command, conv).await;
-        self.touch();
+        if used {
+            self.touch();
+        }
         self.busy.fetch_sub(1, Ordering::SeqCst);
         result
     }
@@ -844,8 +852,8 @@ impl Agent {
                 vault,
                 confirm,
             } => pairing::pair(&self, conv, ticket, vault, confirm).await,
-            Command::ItemGet { vault, query } => Ok(Reply::Item {
-                item: self.with(|s| items::get(s, vault.as_deref(), &query))?,
+            Command::ItemGet { vault, query, otp } => Ok(Reply::Item {
+                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp))?,
             }),
             Command::ItemCode { vault, query } => Ok(Reply::Code {
                 code: self.with(|s| {

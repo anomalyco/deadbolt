@@ -165,7 +165,9 @@ impl Listing {
         Self { items, ids }
     }
 
-    fn info(&self, item: &Item, with_fields: bool) -> ItemInfo {
+    /// The item, without field values unless `with_fields`, and without
+    /// one-time password secrets unless `with_otp` too.
+    fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
         let id = item.id.to_string();
         let mut fields = Vec::new();
         if with_fields {
@@ -186,7 +188,10 @@ impl Listing {
                 .map(|name| FieldInfo {
                     name: name.into(),
                     kind: item.fields[name].kind.to_string(),
-                    value: item.fields[name].value.clone(),
+                    value: match item.fields[name].kind {
+                        FieldType::Otp if !with_otp => String::new(),
+                        _ => item.fields[name].value.clone(),
+                    },
                 })
                 .collect();
         }
@@ -209,7 +214,7 @@ impl Listing {
             many => {
                 let mut lines: Vec<String> = many
                     .iter()
-                    .map(|item| line(&self.info(item, false)))
+                    .map(|item| line(&self.info(item, false, false)))
                     .collect();
                 lines.sort();
                 bail!(
@@ -284,12 +289,13 @@ fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
 fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");
-    Listing::new(vault).info(&item, false)
+    Listing::new(vault).info(&item, false, false)
 }
 
-pub fn get(s: &Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+/// One item with its values; one-time password secrets only with `otp`.
+pub fn get(s: &Loaded, vault: Option<&str>, query: &[String], otp: bool) -> Result<ItemInfo> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
-    Ok(listing.info(listing.find(query)?, true))
+    Ok(listing.info(listing.find(query)?, true, otp))
 }
 
 /// The current one-time code of the item's `otp` field, else of its first
@@ -313,7 +319,8 @@ pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: Duration) ->
         code: Zeroizing::new(totp.code(now.as_secs())),
         period: totp.period(),
         valid_until,
-        remaining_ms: remaining.as_millis() as u64,
+        // Never 0, which would read as already over.
+        remaining_ms: (remaining.as_millis() as u64).max(1),
     })
 }
 
@@ -328,7 +335,7 @@ pub fn list(
         .items
         .iter()
         .filter(|i| kind.is_none_or(|k| i.kind == k) && matches(i, query))
-        .map(|i| listing.info(i, false))
+        .map(|i| listing.info(i, false, false))
         .collect();
     items.sort_by_key(|i| (i.label.to_lowercase(), i.id.clone()));
     Ok(items)
@@ -536,7 +543,7 @@ pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<I
     let vault = s.resolve(vault)?;
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;
-    let info = listing.info(item, false);
+    let info = listing.info(item, false, false);
     write(s, vault, vec![DataOp::delete(item.id)])?;
     Ok(info)
 }
@@ -608,6 +615,54 @@ mod tests {
         set(&mut s, None, &words("plain"), fields, None).unwrap();
         let code = super::code(&s, None, &words("plain"), at(59)).unwrap();
         assert_eq!(code.code.as_str(), "287082");
+    }
+
+    /// Under a millisecond before the boundary still reads as time left.
+    #[test]
+    fn a_code_always_has_time_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let fields = vec![input("password", "pw"), input("otp", "JBSWY3DPEHPK3PXP")];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let code = code(&s, None, &words("site"), Duration::from_micros(59_999_700)).unwrap();
+        assert_eq!((code.valid_until, code.remaining_ms), (60, 1));
+    }
+
+    /// Every field of type otp comes back empty unless asked for.
+    #[test]
+    fn items_leave_otp_secrets_out_unless_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let extra = FieldInput {
+            kind: Some("otp".into()),
+            ..input("backup", "KRSXG5CTMVRXEZLU")
+        };
+        let fields = vec![
+            input("password", "pw"),
+            input("otp", "JBSWY3DPEHPK3PXP"),
+            extra,
+        ];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let values = |otp| {
+            let item = get(&s, None, &words("site"), otp).unwrap();
+            item.fields
+                .into_iter()
+                .map(|f| (f.name, f.value))
+                .collect::<Vec<_>>()
+        };
+        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            values(false),
+            [pair("password", "pw"), pair("otp", ""), pair("backup", "")]
+        );
+        assert_eq!(
+            values(true),
+            [
+                pair("password", "pw"),
+                pair("otp", "JBSWY3DPEHPK3PXP"),
+                pair("backup", "KRSXG5CTMVRXEZLU")
+            ]
+        );
     }
 
     #[test]

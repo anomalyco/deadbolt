@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use deadbolt_client::export::{self, ExportError};
 use deadbolt_client::protocol::{
-    Change, Code, Command, ErrorCode, ImportReport, ItemInfo, Reply, Status,
+    Change, Code, Command, ErrorCode, ImportReport, ItemInfo, Reply, Status, code_field,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -34,7 +34,7 @@ pub enum Job {
         generation: u64,
     },
     /// One item with its values, and its one-time code if it has one (the
-    /// otp's own value is wiped here); `seq` tells a stale reply from the
+    /// agent leaves otp secrets out); `seq` tells a stale reply from the
     /// current one.
     Get {
         id: String,
@@ -101,9 +101,13 @@ impl Values {
         Values(item, Some(code))
     }
 
-    /// The item, for the taker to wipe (`model::forget`), and its code.
+    /// The item, for the taker to wipe (`model::forget`), and its code. Any
+    /// one-time password secret is wiped here, should one have come.
     pub fn take(mut self) -> (ItemInfo, Option<Result<Code, Failure>>) {
-        let fields = std::mem::take(&mut self.0.fields);
+        let mut fields = std::mem::take(&mut self.0.fields);
+        for field in fields.iter_mut().filter(|f| f.kind == "otp") {
+            field.value.zeroize();
+        }
         let item = ItemInfo {
             fields,
             ..self.0.clone()
@@ -433,15 +437,13 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             let command = Command::ItemGet {
                 vault: None,
                 query: vec![id.clone()],
+                otp: false,
             };
             let result = match deadbolt_client::simple(paths, command).await {
-                Ok(Reply::Item { mut item }) => match crate::model::code_field(&item.fields) {
-                    Some(otp) => {
-                        item.fields[otp].value.zeroize();
-                        Ok(Values::with_code(item, code(paths, id).await))
-                    }
-                    None => Ok(Values::new(item)),
-                },
+                Ok(Reply::Item { item }) if code_field(&item.fields).is_some() => {
+                    Ok(Values::with_code(item, code(paths, id).await))
+                }
+                Ok(Reply::Item { item }) => Ok(Values::new(item)),
                 Ok(_) => Err(unexpected()),
                 Err(error) => Err(error.into()),
             };

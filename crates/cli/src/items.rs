@@ -7,7 +7,7 @@ use deadbolt_core::{FieldType, schema, schemas};
 
 use crate::paths::Paths;
 use crate::prompt;
-use crate::protocol::{Command, FieldInput, ItemInfo, Reply};
+use crate::protocol::{Code, Command, FieldInput, ItemInfo, Reply, code_field};
 
 #[derive(Subcommand)]
 pub enum ItemCommand {
@@ -46,7 +46,8 @@ pub enum ItemCommand {
         #[arg(required = true, value_name = "QUERY")]
         query: Vec<String>,
     },
-    /// Show an item's fields, secrets masked.
+    /// Show an item's fields, secrets masked and its one-time password as
+    /// the current code.
     Show {
         #[arg(required = true, value_name = "QUERY")]
         query: Vec<String>,
@@ -219,17 +220,20 @@ fn mask(item: &ItemInfo, field: &crate::protocol::FieldInfo) -> String {
     "••••••••".into()
 }
 
-fn show(item: &ItemInfo, reveal: bool) {
+/// `code` stands in for the code field's masked value.
+fn show(item: &ItemInfo, reveal: bool, code: Option<String>) {
+    let code_field = code_field(&item.fields);
     let mut rows: Vec<(&str, String)> = vec![
         ("type", item.kind.clone()),
         ("label", item.label.clone()),
         ("id", item.short.clone()),
     ];
-    for field in &item.fields {
-        let value = if reveal {
-            field.value.clone()
-        } else {
-            mask(item, field)
+    let mut code = code;
+    for (i, field) in item.fields.iter().enumerate() {
+        let value = match code.take_if(|_| code_field == Some(i)) {
+            Some(code) => code,
+            None if reveal => field.value.clone(),
+            None => mask(item, field),
         };
         rows.push((&field.name, value));
     }
@@ -245,6 +249,19 @@ fn show(item: &ItemInfo, reveal: bool) {
             println!("{:width$}  {line}", "");
         }
     }
+}
+
+async fn code(
+    paths: &Paths,
+    vault: Option<String>,
+    query: Vec<String>,
+    from_stdin: bool,
+) -> Result<Code> {
+    let command = Command::ItemCode { vault, query };
+    let Reply::Code { code } = crate::request(paths, command, from_stdin).await? else {
+        bail!("unexpected reply");
+    };
+    Ok(code)
 }
 
 pub async fn run(
@@ -279,7 +296,11 @@ pub async fn run(
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
         ItemCommand::Get { query, field } => {
-            let command = Command::ItemGet { vault, query };
+            let command = Command::ItemGet {
+                vault,
+                query,
+                otp: true,
+            };
             let item = item(paths, command, from_stdin).await?;
             let name = match field.as_deref() {
                 Some(name) => name,
@@ -294,15 +315,34 @@ pub async fn run(
             println!("{}", field.value);
         }
         ItemCommand::Code { query } => {
-            let command = Command::ItemCode { vault, query };
-            let Reply::Code { code } = crate::request(paths, command, from_stdin).await? else {
-                bail!("unexpected reply");
-            };
-            println!("{}", code.code.as_str());
+            println!(
+                "{}",
+                code(paths, vault, query, from_stdin).await?.code.as_str()
+            );
         }
         ItemCommand::Show { query, reveal } => {
-            let command = Command::ItemGet { vault, query };
-            show(&item(paths, command, from_stdin).await?, reveal);
+            let command = Command::ItemGet {
+                vault: vault.clone(),
+                query,
+                otp: reveal,
+            };
+            let item = item(paths, command, from_stdin).await?;
+            let code = match code_field(&item.fields) {
+                Some(_) if !reveal => {
+                    // By id, so it's this item's code even if the vault changed.
+                    let id = vec![item.id.clone()];
+                    match code(paths, vault, id, from_stdin).await {
+                        Ok(code) => Some(format!(
+                            "{} ({}s left)",
+                            code.code.as_str(),
+                            code.remaining_ms.div_ceil(1000)
+                        )),
+                        Err(error) => Some(format!("•••••••• (no code: {error:#})")),
+                    }
+                }
+                _ => None,
+            };
+            show(&item, reveal, code);
         }
         ItemCommand::Ls { query, kind } => {
             let command = Command::ItemList { vault, query, kind };

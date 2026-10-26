@@ -302,7 +302,7 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
     }
 
     #[test]
-    fn a_second_one_time_password_is_kept_as_an_extra_field() {
+    fn a_second_one_time_password_is_kept_as_an_extra_secret() {
         let export = "name,password,otpauth,totp\n\
             Site,pw,otpauth://totp/Site?secret=JBSWY3DPEHPK3PXP,KRSXG5CTMVRXEZLU\n\
             Other,pw-2,, KRSXG5CTMVRXEZLU \n";
@@ -311,7 +311,7 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
             fields(&items[0]),
             [
                 ("otp", "otp", "otpauth://totp/Site?secret=JBSWY3DPEHPK3PXP"),
-                ("otp-2", "otp", "KRSXG5CTMVRXEZLU"),
+                ("otp-2", "secret", "KRSXG5CTMVRXEZLU"),
                 ("password", "secret", "pw"),
             ]
         );
