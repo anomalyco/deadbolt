@@ -58,6 +58,9 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
                 tx.instant();
                 s.drop_hover(over);
             })
+            // Anything else is refused on the drop, with why; a drag of it
+            // lights nothing, as the drop zone only lights for what it takes.
+            .on_drop_rejected(|s: &mut App, files, _| s.drop_rejected(files))
     } else {
         root
     }

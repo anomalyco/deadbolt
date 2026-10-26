@@ -98,7 +98,6 @@ pub fn run() {
                         app.hotkey = shortcut::Hotkey::live(quick_handle, file, chosen);
                     }
                     app.windows = Some(main_windows);
-                    app.dialogs = rune::FileDialogs::native();
                     app
                 } else {
                     App::new(Agent::offline())

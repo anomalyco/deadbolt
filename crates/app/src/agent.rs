@@ -14,7 +14,7 @@ use deadbolt_client::protocol::{
     Change, Command, ErrorCode, ImportReport, ItemInfo, Reply, Status,
 };
 use deadbolt_client::{Error, Launch, Paths};
-use rune::{FileDialogOptions, FileDialogs, Waker};
+use rune::Waker;
 use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
@@ -69,11 +69,6 @@ pub enum Done {
         /// that turned into one because the file changed.
         applied: bool,
         result: Result<Imported, ImportFailure>,
-    },
-    /// The file Choose File… picked; `None` if it was cancelled.
-    Chosen {
-        seq: u64,
-        result: Result<Option<PathBuf>, String>,
     },
     /// From the watch stream.
     Changed(Change),
@@ -153,50 +148,6 @@ pub enum Imported {
     Done(ImportReport),
 }
 
-/// Whether a file dialog is up, and which Choose File… it answers.
-#[derive(Debug, Default)]
-pub struct DialogSlot(Option<u64>);
-
-impl DialogSlot {
-    /// True when no dialog is up, so one should be shown for `seq`. With one
-    /// up, that one answers for `seq` now.
-    pub fn begin(&mut self, seq: u64) -> bool {
-        self.0.replace(seq).is_none()
-    }
-
-    /// The dialog went: which Choose File… it answers.
-    pub fn end(&mut self) -> Option<u64> {
-        self.0.take()
-    }
-}
-
-/// Marks the dialog gone when it answers, or when its thread ends (or never
-/// starts) without answering.
-/// Ends it exactly once, so a Choose File… landing just after the answer
-/// keeps its own dialog.
-struct DialogUp(Option<Arc<Mutex<DialogSlot>>>);
-
-impl DialogUp {
-    fn answered(mut self) -> u64 {
-        self.end().unwrap_or_default()
-    }
-
-    fn end(&mut self) -> Option<u64> {
-        let slot = self.0.take()?;
-        lock(&slot).end()
-    }
-}
-
-impl Drop for DialogUp {
-    fn drop(&mut self) {
-        self.end();
-    }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|e| e.into_inner())
-}
-
 /// Why an export wasn't read or imported.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportFailure {
@@ -232,9 +183,6 @@ pub struct Agent {
     jobs: Option<Sender<Job>>,
     inbox: Receiver<Done>,
     waker: Arc<Mutex<Option<Waker>>>,
-    /// For file dialogs, which answer on threads of their own.
-    post: Post,
-    dialog: Arc<Mutex<DialogSlot>>,
     /// Dropping it ends the watch thread.
     _watching: Option<oneshot::Sender<()>>,
 }
@@ -254,11 +202,10 @@ impl Agent {
             results: results.clone(),
             waker: waker.clone(),
         };
-        let watch_post = post.clone();
         let watch_paths = paths.clone();
         std::thread::Builder::new()
             .name("deadbolt-watch".into())
-            .spawn(move || watch(watch_paths, watch_post, stop))
+            .spawn(move || watch(watch_paths, post, stop))
             .expect("spawning the watch thread");
         let wake = waker.clone();
         std::thread::Builder::new()
@@ -268,26 +215,18 @@ impl Agent {
         Agent {
             jobs: Some(jobs),
             inbox,
-            post,
             waker,
-            dialog: Arc::default(),
             _watching: Some(watching),
         }
     }
 
     /// A connection that never answers, for scenes and snapshots.
     pub fn offline() -> Agent {
-        let (results, inbox) = channel();
-        let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
+        let (_, inbox) = channel();
         Agent {
             jobs: None,
             inbox,
-            post: Post {
-                results,
-                waker: waker.clone(),
-            },
-            waker,
-            dialog: Arc::default(),
+            waker: Arc::default(),
             _watching: None,
         }
     }
@@ -297,16 +236,10 @@ impl Agent {
     pub fn scripted() -> (Agent, Receiver<Job>, Sender<Done>) {
         let (jobs, requests) = channel();
         let (results, inbox) = channel();
-        let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
         let agent = Agent {
             jobs: Some(jobs),
             inbox,
-            post: Post {
-                results: results.clone(),
-                waker: waker.clone(),
-            },
-            waker,
-            dialog: Arc::default(),
+            waker: Arc::default(),
             _watching: None,
         };
         (agent, requests, results)
@@ -326,37 +259,6 @@ impl Agent {
 
     pub fn drain(&self) -> Vec<Done> {
         self.inbox.try_iter().collect()
-    }
-
-    /// Shows Choose File…'s Open dialog on a thread of its own, which waits
-    /// for it (a native one is presented on the main thread's run loop, which
-    /// must not wait), and posts `Done::Chosen`. With a dialog already up
-    /// (its import cancelled, or the vault locked, meanwhile) it shows no
-    /// second one: that one answers for `seq` instead.
-    pub fn choose_file(&self, dialogs: FileDialogs, options: FileDialogOptions, seq: u64) {
-        if !lock(&self.dialog).begin(seq) {
-            return;
-        }
-        let post = self.post.clone();
-        let up = DialogUp(Some(self.dialog.clone()));
-        let spawned = std::thread::Builder::new()
-            .name("deadbolt-file-dialog".into())
-            .spawn(move || {
-                let result = match tokio::runtime::Builder::new_current_thread().build() {
-                    Ok(runtime) => runtime
-                        .block_on(dialogs.open(options))
-                        .map_err(|e| e.to_string()),
-                    Err(e) => Err(e.to_string()),
-                };
-                let seq = up.answered();
-                post.send(Done::Chosen { seq, result });
-            });
-        if let Err(e) = spawned {
-            self.post.send(Done::Chosen {
-                seq,
-                result: Err(e.to_string()),
-            });
-        }
     }
 }
 
@@ -589,18 +491,6 @@ pub fn launch() -> Launch {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn a_dialog_ends_once() {
-        let slot = Arc::new(Mutex::new(DialogSlot::default()));
-        assert!(lock(&slot).begin(1));
-        let mut up = DialogUp(Some(slot.clone()));
-        assert_eq!(up.end(), Some(1));
-        // Choose File… again, between the answer and the guard going.
-        assert!(lock(&slot).begin(2));
-        drop(up);
-        assert!(!lock(&slot).begin(3), "the new dialog is still up");
-    }
 
     #[test]
     fn a_missing_helper_means_a_damaged_app_not_a_missing_command() {

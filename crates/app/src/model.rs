@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status};
-use rune::{FileDialogs, Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
+use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::agent::{Agent, Done, Failure, Job};
@@ -84,8 +84,6 @@ pub struct App {
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub import: crate::import::Import,
-    /// Choose File…'s dialogs: native in a live run, scripted in tests.
-    pub dialogs: FileDialogs,
     /// `--reduced-motion`; otherwise Rune follows the system's setting.
     pub reduced_motion: bool,
     /// Set in the quick panel's `App` only.
@@ -127,7 +125,6 @@ impl App {
             copy: None,
             notice: None,
             import: crate::import::Import::default(),
-            dialogs: FileDialogs::scripted([]),
             reduced_motion: false,
             panel: None,
             windows: None,
@@ -238,7 +235,6 @@ impl App {
                 applied,
                 result,
             } => self.on_imported(seq, applied, result, tx),
-            Done::Chosen { seq, result } => self.on_chosen(seq, result),
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
         }

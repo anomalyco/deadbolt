@@ -194,7 +194,5 @@ pub fn until(rt: &mut Runtime<App>, what: &str, done: impl Fn(&App) -> bool) {
 }
 
 pub fn shows(rt: &Runtime<App>, s: &str) -> bool {
-    rt.elements()
-        .iter()
-        .any(|e| e.text.as_deref() == Some(s) || e.label.as_deref() == Some(s))
+    rt.elements().iter().any(|e| e.text.as_deref() == Some(s))
 }

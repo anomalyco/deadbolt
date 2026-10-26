@@ -8,12 +8,12 @@ mod support;
 
 use std::path::PathBuf;
 
-use deadbolt_app::agent::{Agent, DialogSlot, Job};
+use deadbolt_app::agent::{Agent, Job};
 use deadbolt_app::import::Phase;
 use deadbolt_app::install::Installer;
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::Severity;
-use rune::{Env, FileDialogKind, FileDialogs, Key, KeyEvent, Mods, Runtime, ScriptedFileDialog};
+use rune::{Env, FileDialogKind, Key, KeyEvent, Mods, Runtime};
 
 use support::{Device, PASSPHRASE, key, shows, until};
 
@@ -223,14 +223,28 @@ fn a_file_that_isnt_an_export_says_so() {
     let device = device();
     let mut rt = vault(&device);
 
-    // Not a file the window takes: no highlight, and dropping does nothing.
+    // Not a file the window takes: no highlight while it's dragged, and a
+    // caution once it's dropped.
     let notes = device.file("notes.txt", "hello");
     rt.drag_files(vec![notes.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
     assert!(!rt.state.drop_hovering());
-    rt.drop_files(vec![notes], Some((600.0, 300.0)));
+    assert_eq!(rt.state.import.error, None);
+    assert_eq!(rt.find("import-error"), None);
+    rt.drop_files(vec![notes.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
+    let error = rt.state.import.error.clone().expect("a caution");
+    assert_eq!(error.severity, Severity::Caution);
+    assert_eq!(error.title, "notes.txt isn't an export Deadbolt can read");
+    assert!(shows(&rt, &error.title));
     assert_eq!(rt.state.import.phase, Phase::Idle);
+
+    // With an export among them, the export wins.
+    let export = device.file("export.json", BITWARDEN);
+    rt.drop_files(vec![notes, export], Some((600.0, 300.0)));
+    rt.frame(1.0 / 60.0);
+    until(&mut rt, "the preview", previewing);
+    assert_eq!(rt.state.import.error, None);
 
     // JSON that isn't an export: the person's to change, so a caution.
     drop_file(&mut rt, device.file("package.json", r#"{"name": "x"}"#));
@@ -269,29 +283,23 @@ fn choose_file_previews_the_chosen_export() {
     let device = device();
     let file = device.file("export.json", BITWARDEN);
     let mut rt = vault(&device);
-    rt.state.dialogs = FileDialogs::scripted([
-        ScriptedFileDialog {
-            kind: FileDialogKind::Open,
-            path: None,
-        },
-        ScriptedFileDialog {
-            kind: FileDialogKind::Open,
-            path: Some(file),
-        },
-    ]);
 
     // Cancelling the dialog leaves the vault as it was: the view isn't
     // opened by Choose File…, so a vault that gains items isn't left on it.
     assert!(!rt.state.import.open);
     press(&mut rt, "choose");
+    let (kind, options) = rt.file_dialog().expect("an Open dialog");
+    assert_eq!(kind, FileDialogKind::Open);
+    assert_eq!(options.title, "Import Passwords");
     assert!(!rt.state.import.open, "not open while the dialog is up");
-    until(&mut rt, "the cancelled dialog", |s| {
-        s.import.phase == Phase::Idle
-    });
+    rt.resolve_file_dialog(None).unwrap();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.import.phase, Phase::Idle);
     assert_eq!(rt.state.import.error, None);
     assert!(!rt.state.import.open);
 
     press(&mut rt, "choose");
+    rt.resolve_file_dialog(Some(file)).unwrap();
     until(&mut rt, "the preview", previewing);
     assert!(shows(&rt, "1 new login · 1 card"));
 }
@@ -543,13 +551,31 @@ fn import_passwords_leaves_the_install_page_and_settings() {
     assert!(!rt.state.settings_open && rt.state.import.open);
 }
 
-/// A second Choose File… while a dialog is still up (its import cancelled
-/// meanwhile) shows no second dialog: the open one answers for it.
+/// A dialog answering after its import was cancelled is ignored; a Choose
+/// File… while it's still up takes it over rather than asking for another.
 #[test]
-fn one_file_dialog_at_a_time() {
-    let mut slot = DialogSlot::default();
-    assert!(slot.begin(1));
-    assert!(!slot.begin(2), "no second dialog");
-    assert_eq!(slot.end(), Some(2), "the open one answers the latest");
-    assert!(slot.begin(3), "another once it's gone");
+fn a_dialog_answers_the_latest_choose_file() {
+    let export = PathBuf::from("/fixture/export.1pux");
+    let mut rt = scene("empty");
+    press(&mut rt, "choose");
+    assert!(rt.file_dialog().is_some());
+    rt.key(key(Key::Escape));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.import.phase, Phase::Idle);
+    rt.resolve_file_dialog(Some(export.clone())).unwrap();
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.import.phase, Phase::Idle, "a stale answer");
+    assert!(!rt.state.import.open);
+
+    press(&mut rt, "choose");
+    rt.key(key(Key::Escape));
+    rt.frame(1.0 / 60.0);
+    press(&mut rt, "choose");
+    assert_eq!(rt.state.import.phase, Phase::Choosing);
+    rt.frame(1.0 / 60.0);
+    assert_eq!(rt.state.import.error, None, "no second dialog to refuse");
+    rt.resolve_file_dialog(Some(export)).unwrap();
+    rt.frame(1.0 / 60.0);
+    assert!(matches!(rt.state.import.phase, Phase::Reading { .. }));
+    assert!(rt.file_dialog().is_none());
 }
