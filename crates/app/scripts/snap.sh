@@ -7,7 +7,7 @@ out=${1:-snaps}
 [ $# -gt 0 ] && shift
 mkdir -p "$out"
 bin=$(cargo build --release --quiet -p deadbolt-app --message-format=json | sed -n 's/.*"executable":"\([^"]*deadbolt-app\)".*/\1/p' | tail -1)
-for scene in command-offer install-command command-installed locked locked-error vault search revealed empty failed \
+for scene in command-offer install-command command-installed locked locked-error vault search revealed code-copied empty failed \
   welcome welcome-set-up create create-typing create-ready create-invalid create-failed \
   join ticket code join-declined join-cancelled join-failed; do
   "$bin" --scene "$scene" --snap "$out/$scene.png" "$@"

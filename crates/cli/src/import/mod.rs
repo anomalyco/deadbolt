@@ -15,7 +15,7 @@ mod onepassword;
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, anyhow, bail};
-use deadbolt_core::item::{check_create, check_field, valid_item_name};
+use deadbolt_core::item::{check_create, check_field, check_new_value, valid_item_name};
 use deadbolt_core::{Field, FieldType, Schema, schema};
 use serde_json::Value;
 
@@ -90,6 +90,10 @@ const NO_NUMBER: Reason = (
 const BAD_CVV: Reason = (
     "invalid card code (cvv) kept as an extra field",
     "invalid card codes (cvv) kept as extra fields",
+);
+const BAD_OTP: Reason = (
+    "one-time password that is not a TOTP secret kept as an extra field",
+    "one-time passwords that are not TOTP secrets kept as extra fields",
 );
 const BAD_EXPIRY: Reason = (
     "invalid card expiry kept as an extra field",
@@ -303,6 +307,10 @@ fn url_field(uri: &str) -> Field {
     }
 }
 
+fn valid(schema: &Schema, name: &str, field: &Field) -> bool {
+    check_field(schema, name, field).is_ok() && check_new_value(name, field).is_ok()
+}
+
 /// Builds one item's fields, naming extras so they never collide.
 /// Blank values are left out everywhere: deadbolt has no empty fields.
 struct Builder {
@@ -338,7 +346,7 @@ impl Builder {
             return true;
         };
         let mut field = Field::new(self.kind(name), value);
-        if check_field(self.schema, name, &field).is_err() {
+        if !valid(self.schema, name, &field) {
             return false;
         }
         if self.fields.contains_key(name) {
@@ -386,7 +394,7 @@ impl Builder {
             && (known.kind == kind || known.kind.is_secret())
         {
             let field = Field::new(known.kind.clone(), value.clone());
-            if check_field(self.schema, base, &field).is_ok() {
+            if valid(self.schema, base, &field) {
                 self.fields.insert(base.into(), field);
                 return;
             }
@@ -399,7 +407,8 @@ impl Builder {
             .collect();
         let name = unique(base, &taken);
         let mut field = Field::new(kind, value);
-        if check_field(self.schema, &name, &field).is_err() {
+        // Only `otp` gives codes, so an extra one-time password is a secret.
+        if field.kind == FieldType::Otp || !valid(self.schema, &name, &field) {
             field.kind = if field.kind.is_secret() {
                 FieldType::Secret
             } else {
@@ -638,6 +647,39 @@ pub(crate) mod tests {
                 "warning: 1 invalid card code (cvv) kept as an extra field",
                 "warning: 1 invalid card expiry kept as an extra field",
             ]
+        );
+    }
+
+    #[test]
+    fn keeps_extra_and_non_totp_one_time_passwords_as_secrets() {
+        let mut summary = Summary::new(ImportSource::Csv);
+        let mut b = Builder::new("login");
+        b.known("password", Some("pw".into()));
+        let hotp = "otpauth://hotp/Site?secret=JBSWY3DPEHPK3PXP&counter=3";
+        b.known_or_extra("otp", Some(hotp.into()), BAD_OTP, &mut summary);
+        b.known_or_extra(
+            "otp",
+            Some("jbsw y3dp ehpk 3pxp".into()),
+            BAD_OTP,
+            &mut summary,
+        );
+        b.extra("backup", FieldType::Otp, "not base32!".into());
+        // A valid one too: only `otp` gives codes.
+        b.extra("spare", FieldType::Otp, "KRSXG5CTMVRXEZLU".into());
+        let item = b.finish("login", None, &mut summary).unwrap();
+        assert_eq!(
+            fields(&item),
+            [
+                ("backup", "secret", "not base32!"),
+                ("otp", "otp", "jbsw y3dp ehpk 3pxp"),
+                ("otp-2", "secret", hotp),
+                ("password", "secret", "pw"),
+                ("spare", "secret", "KRSXG5CTMVRXEZLU"),
+            ]
+        );
+        assert_eq!(
+            lines(&summary.report())[1..],
+            ["warning: 1 one-time password that is not a TOTP secret kept as an extra field"]
         );
     }
 }

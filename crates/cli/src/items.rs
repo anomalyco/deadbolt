@@ -4,10 +4,11 @@
 use anyhow::{Result, anyhow, bail};
 use clap::Subcommand;
 use deadbolt_core::{FieldType, schema, schemas};
+use zeroize::Zeroizing;
 
 use crate::paths::Paths;
 use crate::prompt;
-use crate::protocol::{Command, FieldInput, ItemInfo, Reply};
+use crate::protocol::{Code, Command, FieldInput, ItemInfo, Reply, code_field};
 
 #[derive(Subcommand)]
 pub enum ItemCommand {
@@ -41,7 +42,13 @@ pub enum ItemCommand {
         #[arg(short, long)]
         field: Option<String>,
     },
-    /// Show an item's fields, secrets masked.
+    /// Print the current one-time code from an item's otp field.
+    Code {
+        #[arg(required = true, value_name = "QUERY")]
+        query: Vec<String>,
+    },
+    /// Show an item's fields, secrets masked and its one-time password as
+    /// the current code.
     Show {
         #[arg(required = true, value_name = "QUERY")]
         query: Vec<String>,
@@ -214,17 +221,20 @@ fn mask(item: &ItemInfo, field: &crate::protocol::FieldInfo) -> String {
     "••••••••".into()
 }
 
-fn show(item: &ItemInfo, reveal: bool) {
+/// `code` stands in for the code field's masked value.
+fn show(item: &ItemInfo, reveal: bool, code: Option<String>) {
+    let code_field = code_field(&item.fields);
     let mut rows: Vec<(&str, String)> = vec![
         ("type", item.kind.clone()),
         ("label", item.label.clone()),
         ("id", item.short.clone()),
     ];
-    for field in &item.fields {
-        let value = if reveal {
-            field.value.clone()
-        } else {
-            mask(item, field)
+    let mut code = code;
+    for (i, field) in item.fields.iter().enumerate() {
+        let value = match code.take_if(|_| code_field == Some(i)) {
+            Some(code) => code,
+            None if reveal => field.value.clone(),
+            None => mask(item, field),
         };
         rows.push((&field.name, value));
     }
@@ -240,6 +250,67 @@ fn show(item: &ItemInfo, reveal: bool) {
             println!("{:width$}  {line}", "");
         }
     }
+}
+
+/// One field's raw value, the item's default field without `field`.
+/// One-time password secrets come only for the field asked: `-f otp` asks
+/// up front, and another field turns out to be of type otp only once it
+/// comes back empty, so that item is asked for again by id.
+async fn get(
+    vault: Option<String>,
+    query: Vec<String>,
+    field: Option<&str>,
+    mut fetch: impl AsyncFnMut(Command) -> Result<ItemInfo>,
+) -> Result<Zeroizing<String>> {
+    let otp = field == Some("otp");
+    let command = Command::ItemGet {
+        vault: vault.clone(),
+        query,
+        otp,
+    };
+    let mut item = fetch(command).await?;
+    let name = match field {
+        Some(name) => name.to_owned(),
+        None => crate::protocol::primary_field(&item.kind)
+            .ok_or_else(|| anyhow!("{} items have no default field; pass -f", item.kind))?
+            .to_owned(),
+    };
+    let find = |item: &mut ItemInfo| {
+        let label = item.label.clone();
+        item.fields
+            .iter_mut()
+            .find(|f| f.name == name)
+            .map(|f| {
+                (
+                    f.kind == "otp" && f.value.is_empty(),
+                    std::mem::take(&mut f.value),
+                )
+            })
+            .ok_or_else(|| anyhow!("{label} has no field {name}"))
+    };
+    let (withheld, mut value) = find(&mut item)?;
+    if withheld && !otp {
+        let command = Command::ItemGet {
+            vault,
+            query: vec![item.id.clone()],
+            otp: true,
+        };
+        (_, value) = find(&mut fetch(command).await?)?;
+    }
+    Ok(Zeroizing::new(value))
+}
+
+async fn code(
+    paths: &Paths,
+    vault: Option<String>,
+    query: Vec<String>,
+    from_stdin: bool,
+) -> Result<Code> {
+    let command = Command::ItemCode { vault, query };
+    let Reply::Code { code } = crate::request(paths, command, from_stdin).await? else {
+        bail!("unexpected reply");
+    };
+    Ok(code)
 }
 
 pub async fn run(
@@ -274,23 +345,41 @@ pub async fn run(
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
         ItemCommand::Get { query, field } => {
-            let command = Command::ItemGet { vault, query };
-            let item = item(paths, command, from_stdin).await?;
-            let name = match field.as_deref() {
-                Some(name) => name,
-                None => crate::protocol::primary_field(&item.kind)
-                    .ok_or_else(|| anyhow!("{} items have no default field; pass -f", item.kind))?,
-            };
-            let field = item
-                .fields
-                .iter()
-                .find(|f| f.name == name)
-                .ok_or_else(|| anyhow!("{} has no field {name}", item.label))?;
-            println!("{}", field.value);
+            let fetch = async |command| item(paths, command, from_stdin).await;
+            println!(
+                "{}",
+                get(vault, query, field.as_deref(), fetch).await?.as_str()
+            );
+        }
+        ItemCommand::Code { query } => {
+            println!(
+                "{}",
+                code(paths, vault, query, from_stdin).await?.code.as_str()
+            );
         }
         ItemCommand::Show { query, reveal } => {
-            let command = Command::ItemGet { vault, query };
-            show(&item(paths, command, from_stdin).await?, reveal);
+            let command = Command::ItemGet {
+                vault: vault.clone(),
+                query,
+                otp: reveal,
+            };
+            let item = item(paths, command, from_stdin).await?;
+            let code = match code_field(&item.fields) {
+                Some(_) if !reveal => {
+                    // By id, so it's this item's code even if the vault changed.
+                    let id = vec![item.id.clone()];
+                    match code(paths, vault, id, from_stdin).await {
+                        Ok(code) => Some(format!(
+                            "{} ({}s left)",
+                            code.code.as_str(),
+                            code.remaining_ms.div_ceil(1000)
+                        )),
+                        Err(error) => Some(format!("•••••••• (no code: {error:#})")),
+                    }
+                }
+                _ => None,
+            };
+            show(&item, reveal, code);
         }
         ItemCommand::Ls { query, kind } => {
             let command = Command::ItemList { vault, query, kind };
@@ -337,6 +426,65 @@ pub async fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `get` asks for one-time password secrets only for a field of type
+    /// otp: `-f otp` up front, another such field by id once it's seen.
+    #[tokio::test]
+    async fn get_asks_for_otp_secrets_only_for_an_otp_field() {
+        use crate::protocol::FieldInfo;
+        let field = |name: &str, kind: &str, value: &str| FieldInfo {
+            name: name.into(),
+            kind: kind.into(),
+            value: value.into(),
+        };
+        // The agent's side: otp values only when asked.
+        let agent = |otp: bool| ItemInfo {
+            id: "c0ffee".into(),
+            short: "c0ff".into(),
+            kind: "login".into(),
+            label: "github.com".into(),
+            detail: Some("dax".into()),
+            fields: [
+                field("password", "secret", "pw"),
+                field("username", "text", "dax"),
+                field("otp", "otp", "JBSWY3DPEHPK3PXP"),
+                field("backup", "otp", "KRSXG5CTMVRXEZLU"),
+            ]
+            .into_iter()
+            .map(|f| match f.kind.as_str() {
+                "otp" if !otp => FieldInfo {
+                    value: String::new(),
+                    ..f
+                },
+                _ => f,
+            })
+            .collect(),
+        };
+        let cases = [
+            (None, "pw", vec![("github", false)]),
+            (Some("username"), "dax", vec![("github", false)]),
+            (Some("otp"), "JBSWY3DPEHPK3PXP", vec![("github", true)]),
+            (
+                Some("backup"),
+                "KRSXG5CTMVRXEZLU",
+                vec![("github", false), ("c0ffee", true)],
+            ),
+        ];
+        for (name, value, asked) in cases {
+            let mut sent = Vec::new();
+            let fetch = async |command| {
+                let Command::ItemGet { query, otp, .. } = command else {
+                    bail!("not a get");
+                };
+                sent.push((query.join(" "), otp));
+                Ok(agent(otp))
+            };
+            let got = get(None, vec!["github".into()], name, fetch).await.unwrap();
+            assert_eq!(got.as_str(), value, "{name:?}");
+            let asked: Vec<_> = asked.into_iter().map(|(q, o)| (q.to_owned(), o)).collect();
+            assert_eq!(sent, asked, "{name:?}");
+        }
+    }
 
     #[test]
     fn parses_assignments() {

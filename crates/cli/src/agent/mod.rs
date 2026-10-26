@@ -262,7 +262,7 @@ mod tests {
 
     #[test]
     fn invalid_requests_are_described_without_their_values() {
-        let line = r#"{"v":3,"cmd":"import","export":"hunter2","apply":"hunter2"}"#;
+        let line = r#"{"v":4,"cmd":"import","export":"hunter2","apply":"hunter2"}"#;
         let error = serde_json::from_str::<Request>(line).unwrap_err();
         assert!(error.to_string().contains("hunter2"), "serde quotes values");
         let message = invalid_request(&error).to_string();
@@ -380,6 +380,7 @@ mod tests {
             Command::ItemGet {
                 vault: None,
                 query: vec!["offline-login".into()],
+                otp: false,
             },
             Command::ItemList {
                 vault: None,
@@ -734,10 +735,17 @@ impl Agent {
         if matches!(command, Command::Status | Command::Stop) {
             return self.run(command, conv).await;
         }
+        // A one-time code isn't use: a client showing one asks every period,
+        // which would otherwise hold the vault open for as long as it shows.
+        let used = !matches!(command, Command::ItemCode { .. });
         self.busy.fetch_add(1, Ordering::SeqCst);
-        self.touch();
+        if used {
+            self.touch();
+        }
         let result = self.clone().run(command, conv).await;
-        self.touch();
+        if used {
+            self.touch();
+        }
         self.busy.fetch_sub(1, Ordering::SeqCst);
         result
     }
@@ -844,8 +852,13 @@ impl Agent {
                 vault,
                 confirm,
             } => pairing::pair(&self, conv, ticket, vault, confirm).await,
-            Command::ItemGet { vault, query } => Ok(Reply::Item {
-                item: self.with(|s| items::get(s, vault.as_deref(), &query))?,
+            Command::ItemGet { vault, query, otp } => Ok(Reply::Item {
+                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp))?,
+            }),
+            Command::ItemCode { vault, query } => Ok(Reply::Code {
+                code: self.with(|s| {
+                    items::code(s, vault.as_deref(), &query, crate::config::wall_clock())
+                })?,
             }),
             Command::ItemList { vault, query, kind } => Ok(Reply::Items {
                 items: self.with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,

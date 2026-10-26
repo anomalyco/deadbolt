@@ -9,7 +9,7 @@ use deadbolt_core::FieldType;
 use serde_json::Value;
 
 use super::{
-    ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, Builder, FAVORITE,
+    ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, Builder, FAVORITE,
     Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSWORD_HISTORY, Reason, Summary, TAG,
     UNKNOWN_TYPE, address, array, field_name, item_name, join, month, number, scalar, text,
 };
@@ -235,7 +235,7 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
         .take(|e| e.designation.as_deref() == Some("username"))
         .or_else(|| entries.take(|e| e.designation.is_none() && e.is("username")));
     b.known("username", username);
-    b.known("otp", entries.take(Entry::is_totp));
+    b.known_or_extra("otp", entries.take(Entry::is_totp), BAD_OTP, summary);
     b.known("notes", text(details, "notesPlain"));
     b.urls(urls(overview), summary);
     entries.extras(&mut b, summary);

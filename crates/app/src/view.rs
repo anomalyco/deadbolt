@@ -7,7 +7,7 @@
 //! a click) replaces the item's title and fields at once. Nothing animates on
 //! first paint, and reduced motion keeps only fades (Rune's runtime does both).
 
-use deadbolt_client::protocol::{FieldInfo, ItemInfo, noun};
+use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field, noun};
 use rune::{
     Chrome, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
     row, spacer, text, text_input,
@@ -18,7 +18,9 @@ use rune_kit::{
     Popover, RollingText, TextInput,
 };
 
-use crate::model::{App, BAR_W, Copy, Screen, field_words, is_secret, title_case};
+use crate::model::{
+    App, BAR_W, CODE_BAR, Copy, Otp, Screen, field_words, group_code, is_secret, title_case,
+};
 
 /// The main window: content under a transparent title bar, with the traffic
 /// lights centred in the shell's 48 pt band.
@@ -538,8 +540,13 @@ fn detail(s: &App, k: &Kit) -> El {
         );
     let mut fields = col().key("fields").w_full().gap(2.0);
     if let Some(full) = s.detail.as_ref().filter(|d| d.id == item.id) {
-        for field in &full.fields {
-            fields = fields.child(field_row(s, &full.id, field, k));
+        let code = code_field(&full.fields);
+        for (i, field) in full.fields.iter().enumerate() {
+            fields = fields.child(if code == Some(i) {
+                code_row(s, &full.id, field, k)
+            } else {
+                field_row(s, &full.id, field, k)
+            });
         }
     }
     pane = pane
@@ -564,9 +571,159 @@ fn detail(s: &App, k: &Kit) -> El {
     pane
 }
 
+/// Whether this field of this item is on the clipboard, counting down.
+fn is_copied(s: &App, item: &str, field: &str) -> bool {
+    s.copy
+        .as_ref()
+        .is_some_and(|c| c.item == item && c.field == field && c.cleared_at.is_none())
+}
+
+/// A field's copy button; its glyph becomes a check while the field is on
+/// the clipboard.
+/// "one-time code" is "One-time code".
+fn capitalized(words: &str) -> String {
+    let mut chars = words.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().chain(chars).collect(),
+        None => String::new(),
+    }
+}
+
+fn copy_button(k: &Kit, name: &str, noun: &str, copied: bool) -> El {
+    let glyph = if copied {
+        k.glyph.check_small
+    } else {
+        k.glyph.copy
+    };
+    let n = name.to_owned();
+    IconButton::new(glyph)
+        .variant(IconButtonVariant::GhostMuted)
+        .label(if copied {
+            format!("{} copied", capitalized(noun))
+        } else {
+            format!("Copy {noun}")
+        })
+        .on_press_tx(move |s: &mut App, tx| s.copy_field(&n, tx))
+        .build(k)
+        .key(if copied { "copied" } else { "copy" })
+        .transition(replace())
+}
+
+/// A field row's frame: its name, then the value and the actions.
+fn field_frame(k: &Kit, name: &str, label: String, value: El, actions: El, lines: bool) -> El {
+    let row = row();
+    // Lines read from the top, beside their name and buttons.
+    let row = if lines {
+        row.items_start().py(10.0)
+    } else {
+        row.center_y()
+    };
+    row.key(format!("field-{name}"))
+        // A field a background refresh adds or removes fades; a new selection
+        // replaces them at once (`Tx::instant`).
+        .transition(Transition::opacity())
+        .w_full()
+        .min_h(40.0)
+        .px(10.0)
+        .gap(12.0)
+        .radius(k.radius.md)
+        .hover(k.c.hover)
+        .child(
+            text(label)
+                .key("name")
+                .w(104.0)
+                .font(k.ty.text_small)
+                .color(k.c.text_muted),
+        )
+        .child(value.grow(1.0).shrink())
+        .child(actions)
+}
+
+/// The one-time code: the agent's current code in 3+3 groups, rolling to
+/// the next as its period ends, beside a bar that empties over the period.
+/// Each period's bar wipes in from the left. Copy copies the current code.
+fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
+    let otp = s.otp.as_ref().filter(|o| o.item == item);
+    let style = k.ty.mono.lh(20.0).features("'tnum' 1");
+    let value = match (otp.and_then(|o| o.code.as_ref()), otp) {
+        (Some(code), Some(otp)) => {
+            let [w, h] = CODE_BAR;
+            let bar = el()
+                .key(format!("code-bar-{}", otp.turns))
+                .w(w)
+                .h(h)
+                .radius(h / 2.0)
+                .fill(k.c.text_accent)
+                .live_rect(&otp.bar)
+                .transition(Transition::reveal(Edge::Leading));
+            row()
+                .key("value")
+                .gap(12.0)
+                .center_y()
+                .child(
+                    RollingText::new(format!("code-{item}"), group_code(code))
+                        .font(style)
+                        .color(k.c.text_base)
+                        .from(Edge::Bottom)
+                        .build(k),
+                )
+                .child(
+                    el().key("code-track")
+                        .w(w)
+                        .h(h)
+                        .radius(h / 2.0)
+                        .fill(k.c.layer_03)
+                        .child(bar),
+                )
+        }
+        (
+            None,
+            Some(Otp {
+                error: Some(error), ..
+            }),
+        ) => row().key("value").child(
+            text(format!("No code: {error}"))
+                .key("code-error")
+                .font(k.ty.text_small.lh(20.0))
+                .color(k.c.danger.fg)
+                .truncate_fade(),
+        ),
+        _ => row().key("value").child(
+            text("••• •••")
+                .key("code-waiting")
+                .font(style)
+                .color(k.c.text_faint),
+        ),
+    };
+    let copyable = otp.is_some_and(|o| o.error.is_none());
+    let actions = row()
+        .key("actions")
+        .gap(2.0)
+        .center_y()
+        .children(copyable.then(|| {
+            copy_button(
+                k,
+                &field.name,
+                "one-time code",
+                is_copied(s, item, &field.name),
+            )
+        }));
+    field_frame(
+        k,
+        &field.name,
+        "One-time code".into(),
+        value,
+        actions,
+        false,
+    )
+}
+
 fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     let secret = is_secret(&field.kind);
-    let revealed = s.revealed.iter().any(|f| f == &field.name);
+    // The agent leaves one-time password secrets out (only the code field
+    // gives a code), so there's nothing here to show or copy.
+    let held = field.kind != "otp";
+    let revealed = held && s.revealed.iter().any(|f| f == &field.name);
     let value = if secret && !revealed {
         "••••••••••••".to_owned()
     } else {
@@ -578,15 +735,11 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     } else {
         k.ty.text_small.lh(20.0)
     };
-    let copied = s
-        .copy
-        .as_ref()
-        .is_some_and(|c| c.item == item && c.field == field.name && c.cleared_at.is_none());
     let name = field.name.clone();
     let named = title_case(&name);
     let noun = field_words(&name);
     let mut actions = row().key("actions").gap(2.0).center_y();
-    if secret {
+    if secret && held {
         let n = name.clone();
         let glyph = if revealed {
             k.glyph.eye_off
@@ -606,26 +759,9 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
                 .key("reveal"),
         );
     }
-    // The copy glyph becomes a check while this field is on the clipboard.
-    let glyph = if copied {
-        k.glyph.check_small
-    } else {
-        k.glyph.copy
-    };
-    let n = name.clone();
-    actions = actions.child(
-        IconButton::new(glyph)
-            .variant(IconButtonVariant::GhostMuted)
-            .label(if copied {
-                format!("{named} copied")
-            } else {
-                format!("Copy {noun}")
-            })
-            .on_press_tx(move |s: &mut App, tx| s.copy_field(&n, tx))
-            .build(k)
-            .key(if copied { "copied" } else { "copy" })
-            .transition(replace()),
-    );
+    if held {
+        actions = actions.child(copy_button(k, &name, &noun, is_copied(s, item, &name)));
+    }
     let lines = (!secret || revealed) && field.value.contains('\n');
     let value = text(value).key("value").font(style).color(k.c.text_base);
     // Multi-line text wraps: notes, an address, a secure note's body or a
@@ -635,32 +771,7 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     } else {
         value.truncate_fade()
     };
-    let row = row();
-    // Lines read from the top, beside their name and buttons.
-    let row = if lines {
-        row.items_start().py(10.0)
-    } else {
-        row.center_y()
-    };
-    row.key(format!("field-{}", field.name))
-        // A field a background refresh adds or removes fades; a new selection
-        // replaces them at once (`Tx::instant`).
-        .transition(Transition::opacity())
-        .w_full()
-        .min_h(40.0)
-        .px(10.0)
-        .gap(12.0)
-        .radius(k.radius.md)
-        .hover(k.c.hover)
-        .child(
-            text(title_case(&field.name))
-                .key("name")
-                .w(84.0)
-                .font(k.ty.text_small)
-                .color(k.c.text_muted),
-        )
-        .child(value.grow(1.0).shrink())
-        .child(actions)
+    field_frame(k, &name, named, value, actions, lines)
 }
 
 /// "Copied, clears in 0:28", with a bar that empties; then "Clipboard
@@ -815,7 +926,13 @@ fn key_hints(s: &App, k: &Kit) -> Vec<El> {
         if s.has_username() {
             hints.push(hint("h-user", &["⇧", "⏎"], "Copy username"));
         }
-        hints.push(hint("h-move", &["↑", "↓"], "Select"));
+        if crate::model::has_code(s) {
+            hints.push(hint("h-code", &["⌥", "⏎"], "Copy code").transition(replace()));
+        }
+        // Four don't fit: ⌥⏎ takes ↑↓'s place.
+        if hints.len() < 3 {
+            hints.push(hint("h-move", &["↑", "↓"], "Select").transition(replace()));
+        }
         return hints;
     }
     let mut hints = Vec::new();

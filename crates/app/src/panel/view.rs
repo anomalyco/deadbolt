@@ -258,6 +258,9 @@ fn footer(s: &App, k: &Kit) -> El {
         bar =
             bar.child(hint(k, "h-user", &["⇧", "⏎"], "Username").transition(Transition::opacity()));
     }
+    if crate::model::has_code(s) {
+        bar = bar.child(hint(k, "h-code", &["⌥", "⏎"], "Code").transition(Transition::opacity()));
+    }
     bar.child(hint(k, "h-close", &["esc"], "Close"))
 }
 

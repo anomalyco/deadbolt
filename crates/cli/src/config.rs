@@ -61,7 +61,7 @@ pub fn now() -> u64 {
 
 #[expect(
     clippy::disallowed_methods,
-    reason = "wall-clock adapter for noticing that the computer slept"
+    reason = "wall-clock adapter for noticing that the computer slept, and for one-time codes"
 )]
 pub fn wall_clock() -> Duration {
     std::time::SystemTime::now()

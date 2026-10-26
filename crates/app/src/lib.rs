@@ -13,7 +13,7 @@ pub mod view;
 
 use deadbolt_client::Paths;
 use deadbolt_client::protocol::{
-    DeviceInfo, FieldInfo, ImportReport, ImportSource, ItemInfo, Status, Tally, VaultInfo,
+    Code, DeviceInfo, FieldInfo, ImportReport, ImportSource, ItemInfo, Status, Tally, VaultInfo,
 };
 use rune::{AppSpec, KeyEvent, SecretCopy, Tx, Waker};
 
@@ -325,6 +325,11 @@ const SCENES: &[Scene] = &[
         vault(s);
         s.toggle_reveal("password");
     }),
+    // ⌥⏎ just copied github.com's one-time code.
+    ("code-copied", |s| {
+        vault(s);
+        staged(s, |s, tx| s.copy_field("otp", tx));
+    }),
     ("empty", empty_vault),
     // A 1Password export dragged over the empty vault.
     ("import-hover", |s| {
@@ -486,7 +491,7 @@ fn panel_vault(s: &mut App) {
     s.search = rune::TextEdit::new("");
     s.search.focused = true;
     s.selected = None;
-    s.detail = None;
+    s.set_detail(None);
     s.keep_selection_visible();
     detail_for_selection(s);
 }
@@ -602,7 +607,7 @@ fn empty_vault(s: &mut App) {
     vault(s);
     s.items.clear();
     s.selected = None;
-    s.detail = None;
+    s.set_detail(None);
 }
 
 fn import_report() -> ImportReport {
@@ -694,7 +699,7 @@ fn detail_for_selection(s: &mut App) {
         kind: kind.into(),
         value: value.into(),
     };
-    let fields = match item.kind.as_str() {
+    let mut fields = match item.kind.as_str() {
         "card" => vec![
             field("number", "secret", "4242424242424242"),
             field("expiry", "month", "2029-08"),
@@ -747,7 +752,26 @@ fn detail_for_selection(s: &mut App) {
             field("notes", "note", "Recovery codes are in the safe."),
         ],
     };
-    s.detail = Some(ItemInfo { fields, ..item });
+    let otp = matches!(item.label.as_str(), "github.com" | "Cloudflare");
+    if otp {
+        // The app never holds the secret: the agent leaves it out.
+        fields.insert(3, field("otp", "otp", ""));
+    }
+    s.set_detail(Some(ItemInfo { fields, ..item }));
+    if otp {
+        s.on_code(Ok(fixture_code()), &mut Tx::default());
+    }
+}
+
+/// RFC 6238's SHA-1 secret ("12345678901234567890") at a fixed time,
+/// 1999999992: 18 s of the code's 30 left (`totp::tests::the_app_scenes_code`).
+fn fixture_code() -> Code {
+    Code {
+        code: "279037".to_owned().into(),
+        period: 30,
+        valid_until: 2_000_000_010,
+        remaining_ms: 18_000,
+    }
 }
 
 #[cfg(test)]

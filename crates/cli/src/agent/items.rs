@@ -8,15 +8,18 @@
 //! searched.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
+use deadbolt_core::item::check_new_value;
+use deadbolt_core::totp::Totp;
 use deadbolt_core::{DataOp, Entry, Field, FieldType, Item, ItemId, Vault, VaultId, schema};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::session::Loaded;
 use crate::import::Imported;
 use crate::items::{format_month, line, with_scheme};
-use crate::protocol::{FieldInfo, FieldInput, ImportReport, ItemInfo};
+use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo};
 
 const MIN_SHORT: usize = 4;
 
@@ -162,7 +165,9 @@ impl Listing {
         Self { items, ids }
     }
 
-    fn info(&self, item: &Item, with_fields: bool) -> ItemInfo {
+    /// The item, without field values unless `with_fields`, and without
+    /// one-time password secrets unless `with_otp` too.
+    fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
         let id = item.id.to_string();
         let mut fields = Vec::new();
         if with_fields {
@@ -183,7 +188,10 @@ impl Listing {
                 .map(|name| FieldInfo {
                     name: name.into(),
                     kind: item.fields[name].kind.to_string(),
-                    value: item.fields[name].value.clone(),
+                    value: match item.fields[name].kind {
+                        FieldType::Otp if !with_otp => String::new(),
+                        _ => item.fields[name].value.clone(),
+                    },
                 })
                 .collect();
         }
@@ -206,7 +214,7 @@ impl Listing {
             many => {
                 let mut lines: Vec<String> = many
                     .iter()
-                    .map(|item| line(&self.info(item, false)))
+                    .map(|item| line(&self.info(item, false, false)))
                     .collect();
                 lines.sort();
                 bail!(
@@ -263,7 +271,9 @@ fn fields(
                     .unwrap_or(FieldType::Text),
             };
             let value = normalize(kind, &input.name, &field, input.value);
-            Ok((input.name, Field::new(field, value)))
+            let field = Field::new(field, value);
+            check_new_value(&input.name, &field)?;
+            Ok((input.name, field))
         })
         .collect()
 }
@@ -279,12 +289,39 @@ fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
 fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");
-    Listing::new(vault).info(&item, false)
+    Listing::new(vault).info(&item, false, false)
 }
 
-pub fn get(s: &Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+/// One item with its values; one-time password secrets only with `otp`.
+pub fn get(s: &Loaded, vault: Option<&str>, query: &[String], otp: bool) -> Result<ItemInfo> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
-    Ok(listing.info(listing.find(query)?, true))
+    Ok(listing.info(listing.find(query)?, true, otp))
+}
+
+/// The current one-time code of the item's `otp` field, else of its first
+/// field of type otp, at `now` (since the unix epoch).
+pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: Duration) -> Result<Code> {
+    let listing = Listing::new(s.vault(&s.resolve(vault)?));
+    let item = listing.find(query)?;
+    let field = item
+        .fields
+        .get("otp")
+        .filter(|f| f.kind == FieldType::Otp)
+        .or_else(|| item.fields.values().find(|f| f.kind == FieldType::Otp));
+    let Some(field) = field else {
+        bail!("{} has no one-time password", label(item));
+    };
+    let totp = Totp::parse(&field.value)
+        .map_err(|e| anyhow!("the one-time password of {} is invalid: {e}", label(item)))?;
+    let valid_until = totp.valid_until(now.as_secs());
+    let remaining = Duration::from_secs(valid_until).saturating_sub(now);
+    Ok(Code {
+        code: Zeroizing::new(totp.code(now.as_secs())),
+        period: totp.period(),
+        valid_until,
+        // Never 0, which would read as already over.
+        remaining_ms: (remaining.as_millis() as u64).max(1),
+    })
 }
 
 pub fn list(
@@ -298,7 +335,7 @@ pub fn list(
         .items
         .iter()
         .filter(|i| kind.is_none_or(|k| i.kind == k) && matches(i, query))
-        .map(|i| listing.info(i, false))
+        .map(|i| listing.info(i, false, false))
         .collect();
     items.sort_by_key(|i| (i.label.to_lowercase(), i.id.clone()));
     Ok(items)
@@ -506,7 +543,7 @@ pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<I
     let vault = s.resolve(vault)?;
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;
-    let info = listing.info(item, false);
+    let info = listing.info(item, false, false);
     write(s, vault, vec![DataOp::delete(item.id)])?;
     Ok(info)
 }
@@ -533,6 +570,142 @@ mod tests {
     fn count(s: &Loaded) -> usize {
         let vault = s.resolve(None).unwrap();
         s.vault(&vault).items().len()
+    }
+
+    fn input(name: &str, value: &str) -> FieldInput {
+        FieldInput {
+            name: name.into(),
+            kind: None,
+            value: value.into(),
+        }
+    }
+
+    fn at(secs: u64) -> Duration {
+        Duration::from_secs(secs)
+    }
+
+    fn words(query: &str) -> Vec<String> {
+        query.split(' ').map(String::from).collect()
+    }
+
+    #[test]
+    fn codes_come_from_the_otp_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        // RFC 6238's SHA-1 secret, "12345678901234567890".
+        let secret = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+        let otp = format!("otpauth://totp/Site:dax?secret={secret}&digits=8&issuer=Site");
+        let fields = vec![input("password", "pw"), input("otp", &otp)];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let code = code(&s, None, &words("site"), Duration::from_millis(59_250)).unwrap();
+        assert_eq!(code.code.as_str(), "94287082");
+        assert_eq!(
+            (code.period, code.valid_until, code.remaining_ms),
+            (30, 60, 750)
+        );
+
+        let fields = vec![input("password", "pw"), input("backup", "x")];
+        create(&mut s, None, "login", Some("Plain".into()), fields).unwrap();
+        let error = super::code(&s, None, &words("plain"), at(59)).unwrap_err();
+        assert_eq!(error.to_string(), "Plain has no one-time password");
+        let fields = vec![FieldInput {
+            kind: Some("otp".into()),
+            ..input("backup", &secret.to_lowercase())
+        }];
+        set(&mut s, None, &words("plain"), fields, None).unwrap();
+        let code = super::code(&s, None, &words("plain"), at(59)).unwrap();
+        assert_eq!(code.code.as_str(), "287082");
+    }
+
+    /// Under a millisecond before the boundary still reads as time left.
+    #[test]
+    fn a_code_always_has_time_left() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let fields = vec![input("password", "pw"), input("otp", "JBSWY3DPEHPK3PXP")];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let code = code(&s, None, &words("site"), Duration::from_micros(59_999_700)).unwrap();
+        assert_eq!((code.valid_until, code.remaining_ms), (60, 1));
+    }
+
+    /// Every field of type otp comes back empty unless asked for.
+    #[test]
+    fn items_leave_otp_secrets_out_unless_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let extra = FieldInput {
+            kind: Some("otp".into()),
+            ..input("backup", "KRSXG5CTMVRXEZLU")
+        };
+        let fields = vec![
+            input("password", "pw"),
+            input("otp", "JBSWY3DPEHPK3PXP"),
+            extra,
+        ];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let values = |otp| {
+            let item = get(&s, None, &words("site"), otp).unwrap();
+            item.fields
+                .into_iter()
+                .map(|f| (f.name, f.value))
+                .collect::<Vec<_>>()
+        };
+        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        assert_eq!(
+            values(false),
+            [pair("password", "pw"), pair("otp", ""), pair("backup", "")]
+        );
+        assert_eq!(
+            values(true),
+            [
+                pair("password", "pw"),
+                pair("otp", "JBSWY3DPEHPK3PXP"),
+                pair("backup", "KRSXG5CTMVRXEZLU")
+            ]
+        );
+    }
+
+    #[test]
+    fn otp_values_must_be_totp_secrets_when_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let hotp = "otpauth://hotp/Site?secret=JBSWY3DPEHPK3PXP&counter=1";
+        let fields = vec![input("password", "pw"), input("otp", hotp)];
+        let error = create(&mut s, None, "login", Some("Site".into()), fields).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "invalid value for otp: counter-based (HOTP) codes are not supported"
+        );
+        let fields = vec![input("password", "pw")];
+        create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
+        let error = set(
+            &mut s,
+            None,
+            &words("site"),
+            vec![input("otp", "123456")],
+            None,
+        );
+        assert_eq!(
+            error.unwrap_err().to_string(),
+            "invalid value for otp: the secret is not base32"
+        );
+        assert_eq!(count(&s), 1);
+
+        // A value written before the check is still in the vault, and says why it has no code.
+        let vault = s.resolve(None).unwrap();
+        s.update(vault, |v, secret| {
+            let fields = vec![
+                ("password".to_string(), Field::new(FieldType::Secret, "pw")),
+                ("otp".to_string(), Field::new(FieldType::Otp, hotp)),
+            ];
+            Ok(v.create_item(secret, "login", Some("Old".into()), fields)?)
+        })
+        .unwrap();
+        let error = code(&s, None, &words("old"), at(59)).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the one-time password of Old is invalid: counter-based (HOTP) codes are not supported"
+        );
     }
 
     #[test]

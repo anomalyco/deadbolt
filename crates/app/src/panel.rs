@@ -81,15 +81,6 @@ impl App {
         self.panel.as_ref().map(|p| p.phase)
     }
 
-    /// Closing or hidden: the panel reads nothing from the vault until it's
-    /// summoned, and drops what arrives.
-    pub(crate) fn panel_away(&self) -> bool {
-        matches!(
-            self.panel_phase(),
-            Some(Phase::Closing { .. } | Phase::Hidden)
-        )
-    }
-
     /// The panel takes no picks: its copy's confirmation shows, or the card
     /// is leaving or gone. Only Escape acts.
     pub(crate) fn panel_inert(&self) -> bool {
