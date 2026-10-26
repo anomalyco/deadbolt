@@ -397,8 +397,13 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         .subtitle(sub)
         .height(ROW_H)
         .selected(s.selected.as_deref() == Some(item.id.as_str()))
+        // The keys stay with the search: rows take no focus (Tab, Space), and
+        // a press selects while the search keeps focus.
+        .select_only()
         // The item replaces at once, unless the import view swaps back to it.
         .on_select(move |s: &mut App, tx| {
+            // Focus somewhere else (nothing, Lock) comes back to the search.
+            s.search.focused = true;
             if !s.import.showing() {
                 tx.instant();
             }
@@ -408,17 +413,6 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         .build(k)
         .key(format!("item-{}", item.id))
         .role("option")
-        // Rows aren't focusable: the keys stay with the search, and with the
-        // selection rather than a focus ring of their own (Tab, Space). A
-        // press on one blurs the search, so it goes straight back on the way
-        // down, and ↑↓, ⏎ and typing go on, released on the row or off it.
-        .focusable(false)
-        .focus_selected(false)
-        .on_drag(|s: &mut App, d: &mut rune::Drag, _: &mut Tx| {
-            if d.phase == rune::Phase::Down {
-                s.search.focused = true;
-            }
-        })
         // A search replaces the list at once (an edit is instant: no
         // `animate_edit_layout`). Rows an agent change adds or removes fade
         // in place while the rest slide to their new places.

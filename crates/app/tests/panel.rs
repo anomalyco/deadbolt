@@ -1126,12 +1126,9 @@ fn command_l_locks_only_while_open() {
     }
 }
 
-/// Rows that ↑ and ↓ bring into view stop clear of the list's faded edges, in
-/// both windows, while the list's own ends still sit flush.
-#[test]
-fn a_selected_row_stops_clear_of_the_lists_fade() {
-    const EDGE: f32 = 24.0;
-    let items: Vec<ItemInfo> = (0..40)
+/// Forty logins: more than either window's list shows.
+fn many_items() -> Vec<ItemInfo> {
+    (0..40)
         .map(|i| ItemInfo {
             id: format!("{i:064x}"),
             short: format!("{i:04x}"),
@@ -1140,7 +1137,38 @@ fn a_selected_row_stops_clear_of_the_lists_fade() {
             detail: Some("dax".into()),
             fields: Vec::new(),
         })
-        .collect();
+        .collect()
+}
+
+/// Scrolling the list under a held press on a row cancels the press, in
+/// both windows: the release selects nothing and the search keeps focus.
+#[test]
+fn scrolling_under_a_pressed_row_cancels_it() {
+    let items = many_items();
+    for (name, mut rt) in [("panel", runtime("empty", true)), ("main", main_window())] {
+        answer_list(&mut rt, &items);
+        rt.update(|s, _| s.selected = s.visible().first().map(|i| i.id.clone()));
+        frames(&mut rt, 10);
+        let selected = rt.state.selected.clone();
+        let (x, y) = rt.find(&format!("item-{}", items[2].id)).unwrap();
+        rt.pointer_move(x, y);
+        rt.pointer_down(x, y);
+        frames(&mut rt, 2);
+        rt.wheel(x, y, -120.0);
+        frames(&mut rt, 2);
+        rt.pointer_up(x, y);
+        frames(&mut rt, 2);
+        assert_eq!(rt.state.selected, selected, "{name}: the release selected");
+        assert!(rt.state.search.focused, "{name}: the search keeps focus");
+    }
+}
+
+/// Rows that ↑ and ↓ bring into view stop clear of the list's faded edges, in
+/// both windows, while the list's own ends still sit flush.
+#[test]
+fn a_selected_row_stops_clear_of_the_lists_fade() {
+    const EDGE: f32 = 24.0;
+    let items = many_items();
     for (name, mut rt) in [("panel", runtime("empty", true)), ("main", main_window())] {
         answer_list(&mut rt, &items);
         rt.update(|s, _| s.selected = s.visible().first().map(|i| i.id.clone()));

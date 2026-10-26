@@ -785,11 +785,7 @@ fn bolt(k: &Kit, dark: bool, done: bool, phase: usize) -> El {
     // The theme's ember: red, and its pale end for the flash.
     let accent = rune_theme_opencode::brand(dark);
     let rest = k.c.layer_03;
-    let hot = if dark {
-        rune_theme_opencode::theme(dark).color("ember-dark-12")
-    } else {
-        rune_theme_opencode::theme(dark).color("ember-light-7")
-    };
+    let hot = rune_theme_opencode::ember(dark, if dark { 12 } else { 7 });
     // (strike fill, its colour spring, glow opacity, glow curve) per phase.
     let (strike, spring, glow, curve): (Color, Spring, f32, Curve) = match (done, phase) {
         (false, _) | (true, 0) => (rest, Spring::new(0.3, 0.0), 0.0, Curve::linear(0.1)),
