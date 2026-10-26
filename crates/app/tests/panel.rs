@@ -1189,7 +1189,7 @@ fn a_selected_row_stops_clear_of_the_lists_fade() {
 #[test]
 fn the_rolled_label_is_as_wide_as_plain_text() {
     fn plain(_: &(), _: &mut rune::Cx<()>) -> rune::El {
-        rune::row().child(rune::text("Copy password").font(deadbolt_app::theme::kit(true).ty.small))
+        rune::row().child(rune::text("Copy password").font(rune_theme_opencode::kit(true).ty.small))
     }
     let env = Env {
         system_dark: true,

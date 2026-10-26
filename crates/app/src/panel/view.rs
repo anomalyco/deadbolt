@@ -27,7 +27,7 @@ pub fn panel(s: &App, cx: &mut Cx<App>) -> El {
     if s.reduced_motion {
         cx.reduced_motion(true);
     }
-    let k = crate::theme::kit(cx.system_dark());
+    let k = rune_theme_opencode::kit(cx.system_dark());
     let mut window = col().key("panel").w_full().h_full().padding(MARGIN);
     let showing = matches!(
         s.panel_phase(),

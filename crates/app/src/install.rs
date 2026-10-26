@@ -576,7 +576,7 @@ mod view {
     }
 
     /// The install page, in place of the vault.
-    pub fn page(s: &App, k: &Kit) -> El {
+    pub fn page(s: &App, k: &Kit, inset: f32) -> El {
         let Some(i) = &s.installer else {
             return col();
         };
@@ -734,11 +734,17 @@ mod view {
                     .transition(Transition::opacity()),
             );
         }
-        let back = bar(k, "Back", &crate::onboarding::view::CHEVRON_LEFT, |s| {
-            if let Some(i) = installer(s) {
-                i.close();
-            }
-        });
+        let back = bar(
+            k,
+            inset,
+            "Back",
+            &crate::onboarding::view::CHEVRON_LEFT,
+            |s| {
+                if let Some(i) = installer(s) {
+                    i.close();
+                }
+            },
+        );
         centred("install-command", Some(back), panel)
     }
 

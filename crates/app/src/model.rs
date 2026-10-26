@@ -84,6 +84,8 @@ pub struct App {
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub import: crate::import::Import,
+    /// The list's pane in the vault's shell: its width and whether it shows.
+    pub sidebar: rune_kit::shell::PaneState,
     /// `--reduced-motion`; otherwise Rune follows the system's setting.
     pub reduced_motion: bool,
     /// Set in the quick panel's `App` only.
@@ -125,6 +127,9 @@ impl App {
             copy: None,
             notice: None,
             import: crate::import::Import::default(),
+            // Narrow enough to leave the toolbar its search field and Lock at
+            // the window's smallest.
+            sidebar: rune_kit::shell::PaneState::new(272.0).range(200.0, 312.0),
             reduced_motion: false,
             panel: None,
             windows: None,
@@ -789,6 +794,13 @@ impl App {
         match ev.key {
             Key::Command('l') if self.screen == Screen::Vault => {
                 self.lock();
+                true
+            }
+            _ if self.screen == Screen::Vault
+                && self.panel.is_none()
+                && rune_kit::shell::is_sidebar_toggle(ev) =>
+            {
+                self.sidebar.toggle();
                 true
             }
             _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev, tx),

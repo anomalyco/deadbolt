@@ -68,7 +68,7 @@ fn every_state_renders_in_both_appearances() {
     let states: &[(&str, &[&str])] = &[
         (
             "welcome",
-            &["DEADBOLT", "Create a vault", "Join from another device"],
+            &["Deadbolt", "Create a vault", "Join from another device"],
         ),
         ("welcome-set-up", &["holds no vault yet"]),
         (
@@ -109,7 +109,7 @@ fn every_state_renders_in_both_appearances() {
             "import-error",
             &["Passwords.json isn't an export Deadbolt can read"],
         ),
-        ("locked", &["DEADBOLT", "Locked"]),
+        ("locked", &["Deadbolt", "Locked"]),
     ];
     for dark in [true, false] {
         for (scene, texts) in states {

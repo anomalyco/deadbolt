@@ -965,6 +965,7 @@ dependencies = [
  "qrcode",
  "rune",
  "rune-kit",
+ "rune-theme-opencode",
  "rustix 1.1.5",
  "serde_json",
  "tempfile",
@@ -3531,7 +3532,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4330,6 +4331,16 @@ dependencies = [
 name = "rune-motion"
 version = "0.1.0"
 source = "git+https://github.com/anomalyco/rune?rev=8775a529377700030bfc6407ea2de06714474504#8775a529377700030bfc6407ea2de06714474504"
+
+[[package]]
+name = "rune-theme-opencode"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=8775a529377700030bfc6407ea2de06714474504#8775a529377700030bfc6407ea2de06714474504"
+dependencies = [
+ "rune",
+ "rune-kit",
+ "serde_json",
+]
 
 [[package]]
 name = "rustc-hash"

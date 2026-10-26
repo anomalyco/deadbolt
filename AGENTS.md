@@ -24,8 +24,8 @@ CLI integration tests use `DEADBOLT_NET=local` and `DEADBOLT_KDF=fast`.
 ## Rune
 
 `crates/app` pins Rune to an exact rev on its `dev` branch. At the start of each
-work round, unless mid-release, bump both `rev`s in `crates/app/Cargo.toml` to the
-head of Rune `dev` and run `cargo update -p rune -p rune-kit`. Read the
+work round, unless mid-release, bump every Rune `rev` in `crates/app/Cargo.toml` to the
+head of Rune `dev` and run `cargo update -p rune -p rune-kit -p rune-theme-opencode`. Read the
 `CHANGELOG.md` "## dev" entries since the old pin first, and adapt to anything
 marked breaking. Run the app tests and compare `crates/app/scripts/snap.sh` stills
 before and after. If a bump breaks on Rune's side, report it to Rune rather than

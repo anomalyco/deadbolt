@@ -104,7 +104,7 @@ fn the_offer_and_settings_live_in_the_vault_only() {
 }
 
 #[test]
-fn the_hint_bar_keeps_settings_at_the_narrowest_window() {
+fn lock_and_settings_stay_in_the_narrowest_window() {
     let mut rt = runtime("command-offer");
     rt.set_viewport((640.0, 540.0), 1.0);
     settle(&mut rt, 0.5);
@@ -114,7 +114,7 @@ fn the_hint_bar_keeps_settings_at_the_narrowest_window() {
     for label in panel.into_iter().chain(["Lock", "Settings"]) {
         let e = elements
             .iter()
-            .rfind(|e| e.text.as_deref() == Some(label))
+            .rfind(|e| e.text.as_deref() == Some(label) || e.label.as_deref() == Some(label))
             .unwrap_or_else(|| panic!("no {label:?}"));
         assert!(
             e.rect[0] + e.rect[2] <= 640.0,

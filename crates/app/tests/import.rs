@@ -107,6 +107,10 @@ fn vault(device: &Device) -> Runtime<App> {
     until(&mut rt, "the vault", |s| {
         s.screen == Screen::Vault && s.loaded
     });
+    // Let the vault finish arriving, so presses land on what's drawn.
+    for _ in 0..40 {
+        rt.frame(1.0 / 60.0);
+    }
     rt
 }
 

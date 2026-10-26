@@ -54,7 +54,7 @@ fn unlock_search_copy_lock() {
     rt.state.agent.send(deadbolt_app::agent::Job::Connect);
 
     until(&mut rt, "the locked screen", |s| s.screen == Screen::Locked);
-    assert!(shows(&rt, "DEADBOLT"));
+    assert!(shows(&rt, "Deadbolt"));
 
     // A wrong passphrase stays on the unlock screen and says so.
     for c in "nope".chars() {
@@ -316,7 +316,7 @@ fn type_text(rt: &mut Runtime<App>, text: &str) {
 /// Picks `flow` on the welcome screen and fills the form for a new device.
 fn fill_form(rt: &mut Runtime<App>, flow: Flow, name: &str) {
     until(rt, "the welcome screen", |s| s.screen == Screen::Onboarding);
-    assert!(shows(rt, "DEADBOLT"));
+    assert!(shows(rt, "Deadbolt"));
     rt.update(|s, _| s.choose(flow));
     rt.update(|s, _| s.onboarding.device = rune::TextEdit::new(name));
     rt.frame(1.0 / 60.0);

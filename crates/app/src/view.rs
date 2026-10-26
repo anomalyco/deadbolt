@@ -10,9 +10,10 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo};
 use rune::{
-    Cursor, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
-    row, spacer, text, text_input,
+    Chrome, Cursor, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el,
+    icon, row, spacer, text, text_input,
 };
+use rune_kit::shell::{SplitView, TOOLBAR_HEIGHT, Toolbar};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Keybind, Kit, Placement,
     Popover, RollingText, TextInput,
@@ -20,7 +21,15 @@ use rune_kit::{
 
 use crate::model::{App, BAR_W, Copy, Screen, is_secret, title_case};
 
-const LIST_W: f32 = 300.0;
+/// The main window: content under a transparent title bar, with the traffic
+/// lights centred in the shell's 48 pt band.
+pub const CHROME: Chrome = Chrome {
+    full_size_content: true,
+    traffic_lights: Some((16.0, 17.0)),
+    drag_regions: true,
+};
+/// The search field in the vault's toolbar.
+const SEARCH_W: f32 = 260.0;
 /// How far a list's edges fade over hidden rows, and how far a row brought into view stops from them.
 pub(crate) const LIST_EDGE: f32 = 24.0;
 pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
@@ -33,21 +42,32 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     if s.reduced_motion {
         cx.reduced_motion(true);
     }
-    let k = crate::theme::kit(cx.system_dark());
+    let k = rune_theme_opencode::kit(cx.system_dark());
+    let inset = cx.titlebar_inset();
     let mut layer = Vec::new();
+    let shell = s.screen == Screen::Vault && !s.installing();
     let screen = match &s.screen {
-        Screen::Vault if s.installing() => crate::install::page(s, k),
+        Screen::Vault if s.installing() => crate::install::page(s, k, inset),
         Screen::Connecting => connecting(k),
-        Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark()),
+        Screen::Onboarding => crate::onboarding::view::screen(s, k, cx.system_dark(), inset),
         Screen::Locked => unlock(s, k),
-        Screen::Vault => vault(s, k, &mut layer),
+        Screen::Vault => vault(s, k, inset, &mut layer),
         Screen::Failed(message) => failed(k, message),
     };
+    // The vault's shell has its own title bar; every other screen gets an
+    // empty band to drag the window by, under what it draws.
+    let band = (!shell).then(|| {
+        el().key("titlebar")
+            .pin(Some(0.0), Some(0.0), Some(0.0), None)
+            .h(TOOLBAR_HEIGHT)
+            .window_drag()
+    });
     let root = col()
         .key("window")
         .w_full()
         .h_full()
         .fill(k.c.bg_base)
+        .children(band)
         .child(screen.grow(1.0).w_full().transition(replace()))
         .children(layer);
     // An export dropped anywhere on the open vault goes straight to its preview.
@@ -176,7 +196,7 @@ fn unlock(s: &App, k: &Kit) -> El {
             .w(320.0)
             .gap(20.0)
             .items_start()
-            .child(crate::onboarding::view::wordmark(k, 44.0))
+            .child(crate::onboarding::view::wordmark(k, 28.0))
             .child(body),
     )
 }
@@ -214,25 +234,29 @@ pub(crate) fn unlock_error(s: &App, k: &Kit) -> Option<El> {
 // -------------------------------------------------------------------------------------------
 // The vault: search, list, detail.
 
-fn vault(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
-    col()
+/// Rune-kit's shell: the list as the sidebar, search and Lock in the toolbar
+/// over the detail pane, and the key hints along the pane's foot.
+fn vault(s: &App, k: &Kit, inset: f32, layer: &mut Vec<El>) -> El {
+    let main = col()
         .key("vault")
+        .w_full()
         .min_h(0.0)
-        .child(toolbar(s, k))
+        .child(detail(s, k))
         .child(el().key("rule").h(1.0).w_full().fill(k.c.border_weak))
-        .child(
-            row()
-                .key("body")
-                .grow(1.0)
-                .shrink()
-                .min_h(0.0)
-                .w_full()
-                .child(list(s, k))
-                .child(el().key("split").w(1.0).h_full().fill(k.c.border_weak))
-                .child(detail(s, k)),
-        )
-        .child(el().key("rule2").h(1.0).w_full().fill(k.c.border_weak))
-        .child(hints(s, k, layer))
+        .child(hints(s, k, layer));
+    let toolbar = Toolbar::new().leading(search(s, k)).trailing(
+        IconButton::new(k.glyph.lock)
+            .variant(IconButtonVariant::GhostMuted)
+            .label("Lock")
+            .on_press(|s: &mut App| s.lock())
+            .build(k)
+            .key("lock"),
+    );
+    SplitView::new(main)
+        .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, list(s, k))
+        .toolbar(toolbar)
+        .titlebar_inset(inset)
+        .build(k)
 }
 
 /// Keys the search field handles before its editor; true when handled.
@@ -240,17 +264,13 @@ pub(crate) type SearchKeys = fn(&mut App, &KeyEvent, &mut Tx) -> bool;
 
 /// The search field: typing filters the list live; `keys` takes ↑↓, Enter and Escape.
 pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys) -> El {
-    let count = match s.items.len() {
-        1 => "Search 1 item".to_owned(),
-        n => format!("Search {n} items"),
-    };
     text_input(&s.search, style)
         .key("search-input")
         .label("Search items")
         .grow(1.0)
         .shrink()
         .color(k.c.text_strong)
-        .placeholder(count, k.c.text_faint)
+        .placeholder(search_placeholder(s), k.c.text_faint)
         .caret(k.c.text_strong, k.alpha(k.c.text_accent, 0.3))
         .animate_edit_layout()
         .on_edit(|s: &mut App| &mut s.search)
@@ -258,37 +278,33 @@ pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys)
         .on_input_change(|s: &mut App, _| s.keep_selection_visible())
 }
 
-fn toolbar(s: &App, k: &Kit) -> El {
-    let field = search_input(s, k, TextStyle::new(15.0, 400.0).lh(20.0), |s, ev, tx| {
-        s.search_key(ev, tx)
-    });
-    row()
-        .key("toolbar")
-        .w_full()
-        .h(52.0)
-        .px(16.0)
-        .gap(10.0)
-        .center_y()
-        .child(
-            icon(k.glyph.search, 16.0)
-                .key("search-icon")
-                .color(k.c.icon_muted),
-        )
-        .child(field)
-        .child(
-            IconButton::new(k.glyph.lock)
-                .variant(IconButtonVariant::Ghost)
-                .label("Lock")
-                .on_press(|s: &mut App| s.lock())
-                .build(k)
-                .key("lock"),
-        )
+/// The vault's search field: typing filters the list live; `search_key`
+/// takes ↑↓, Enter and Escape.
+fn search(s: &App, k: &Kit) -> El {
+    TextInput::new(&s.search)
+        .placeholder(search_placeholder(s))
+        .leading_icon(k.glyph.search)
+        .width(Some(SEARCH_W))
+        .animate_edit_layout()
+        .on_edit(|s: &mut App| &mut s.search)
+        .on_key(|s: &mut App, ev, tx| s.search_key(ev, tx))
+        .on_change(|s: &mut App, _| s.keep_selection_visible())
+        .build(k)
+        .key("search-input")
+        .label("Search items")
+}
+
+fn search_placeholder(s: &App) -> String {
+    match s.items.len() {
+        1 => "Search 1 item".to_owned(),
+        n => format!("Search {n} items"),
+    }
 }
 
 fn list(s: &App, k: &Kit) -> El {
     col()
         .key("list")
-        .w(LIST_W)
+        .w_full()
         .h_full()
         .scroll(ScrollSpec {
             stick_bottom: false,
@@ -360,9 +376,8 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         .role("option")
         .label(item.label.clone())
         .w_full()
-        .px(10.0)
-        .py(7.0)
-        .gap(1.0)
+        .px(8.0)
+        .py(6.0)
         .radius(k.radius.md)
         .cursor(Cursor::Pointer)
         // Rows that stay slide to their new place; rows that leave or arrive fade in place.
@@ -382,8 +397,8 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         .child(
             text(item.label.clone())
                 .key("label")
-                .font(k.ty.ui_medium.lh(20.0))
-                .color(k.c.text_strong)
+                .font(k.ty.ui_medium.lh(18.0))
+                .color(k.c.text_base)
                 .truncate_fade(),
         );
     let sub = match &item.detail {
@@ -394,11 +409,15 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         text(sub)
             .key("sub")
             .font(k.ty.small.lh(16.0))
-            .color(k.c.text_muted)
+            .color(if selected {
+                k.c.text_muted
+            } else {
+                k.c.text_faint
+            })
             .truncate_fade(),
     );
     if selected {
-        r.fill(k.c.surface_raised_hover)
+        r.fill(k.c.pressed)
     } else {
         r.hover(k.c.hover)
     }
@@ -407,9 +426,10 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
 fn detail(s: &App, k: &Kit) -> El {
     let mut pane = col()
         .key("detail")
+        .w_full()
         .grow(1.0)
         .shrink()
-        .h_full()
+        .min_h(0.0)
         .px(28.0)
         .py(24.0)
         .gap(20.0);
@@ -725,8 +745,10 @@ pub(crate) fn copy_line(k: &Kit, key: &str, copy: Option<&Copy>, does: &str, wra
         .transition(replace())
         .child(lead)
         .child(
+            // Tabular figures: the countdown's digits keep one width, so the
+            // line doesn't shake as it counts.
             RollingText::new(format!("{key}-label"), label)
-                .font(k.ty.small)
+                .font(k.ty.small.features("'tnum' 1"))
                 .color(ink)
                 .from(Edge::Top)
                 .build(k),
@@ -742,7 +764,8 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         .px(16.0)
         .gap(16.0)
         .center_y()
-        // At the narrowest window the key hints give way, never Lock or Settings.
+        // At the narrowest window the key hints give way, never Settings. Lock
+        // has its button in the toolbar, so ⌘L needs no hint here.
         .child(
             row()
                 .key("h-keys")
@@ -755,7 +778,6 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
         )
         .child(spacer())
         .children(crate::panel::window::entry(s, k))
-        .child(hint("h-lock", &["⌘", "L"], "Lock"))
         .child(settings(s, k, layer))
 }
 
