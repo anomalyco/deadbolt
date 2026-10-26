@@ -90,6 +90,12 @@ impl App {
         )
     }
 
+    /// The panel takes no picks: its copy's confirmation shows, or the card
+    /// is leaving or gone. Only Escape acts.
+    pub(crate) fn panel_inert(&self) -> bool {
+        self.panel_phase().is_some_and(|p| p != Phase::Open)
+    }
+
     /// Summoned: open fresh and at rest, with no animation: check on the
     /// agent and fetch the list again (empty search, the first item selected).
     pub fn summon(&mut self, tx: &mut Tx) {
@@ -275,7 +281,7 @@ impl App {
         if self.panel_shortcut(ev, tx) || self.panel_escape(ev, tx) {
             return true;
         }
-        if self.panel_phase() != Some(Phase::Open) {
+        if self.panel_inert() {
             return true;
         }
         self.search_key(ev, tx)

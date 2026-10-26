@@ -649,6 +649,36 @@ fn a_copy_confirms_then_closes_and_reopens_clean() {
     assert_eq!(footer(&rt), "Copy password");
 }
 
+/// While the copy's confirmation shows, a click on another row picks
+/// nothing: the selection, its values and the copy stay, and it still closes.
+#[test]
+fn a_row_click_during_the_confirmation_does_nothing() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 10);
+    let selected = rt.state.selected.clone();
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert!(matches!(phase(&rt), Phase::Copied { .. }));
+    let other = rt
+        .state
+        .visible()
+        .iter()
+        .map(|i| i.id.clone())
+        .find(|i| Some(i) != selected.as_ref())
+        .unwrap();
+    let (x, y) = rt.find(&format!("item-{other}")).unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.selected, selected, "the click selected a row");
+    assert!(rt.state.detail.is_some(), "the values stay");
+    assert!(rt.state.copy_pending(), "the copy stays");
+    frames(&mut rt, 34);
+    assert_eq!(footer(&rt), COPIED);
+    frames(&mut rt, 40);
+    assert!(matches!(phase(&rt), Phase::Closing { .. } | Phase::Hidden));
+}
+
 /// A copy whose write fails says why in the footer, and the panel stays
 /// open rather than closing on a confirmation.
 #[test]

@@ -402,6 +402,9 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
         .select_only()
         // The item replaces at once, unless the import view swaps back to it.
         .on_select(move |s: &mut App, tx| {
+            if s.panel_inert() {
+                return;
+            }
             // Focus somewhere else (nothing, Lock) comes back to the search.
             s.search.focused = true;
             if !s.import.showing() {
