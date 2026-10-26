@@ -9,8 +9,7 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field, noun};
 use rune::{
-    Chrome, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
-    row, spacer, text, text_input,
+    Chrome, Cx, Edge, El, Icon, ScrollSpec, TextStyle, Transition, col, el, icon, row, spacer, text,
 };
 use rune_kit::shell::{Page, SidebarRow, SplitView, Toolbar};
 use rune_kit::{
@@ -37,7 +36,7 @@ const ROW_H: f32 = 46.0;
 pub(crate) const LIST_EDGE: f32 = 24.0;
 pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
 
-fn replace() -> Transition {
+pub(crate) fn replace() -> Transition {
     Transition::blur_replace()
 }
 
@@ -322,45 +321,23 @@ fn vault(s: &App, k: &Kit, inset: f32, layer: &mut Vec<El>) -> El {
         .child(detail(s, k))
         .child(el().key("rule").h(1.0).w_full().fill(k.c.border_weak))
         .child(hints(s, k, layer));
-    let toolbar = Toolbar::new().leading(search(s, k)).trailing(
-        IconButton::new(k.glyph.lock)
-            .variant(IconButtonVariant::GhostMuted)
-            .help("Lock")
-            .shortcut("⌘L")
-            .on_press(|s: &mut App| s.lock())
-            .build(k)
-            .key("lock"),
-    );
+    let toolbar = Toolbar::new()
+        .leading(search(s, k))
+        .trailing(crate::edit::view::toolbar_new(s, k))
+        .trailing(
+            IconButton::new(k.glyph.lock)
+                .variant(IconButtonVariant::GhostMuted)
+                .help("Lock")
+                .shortcut("⌘L")
+                .on_press(|s: &mut App| s.lock())
+                .build(k)
+                .key("lock"),
+        );
     SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, list(s, k))
         .toolbar(toolbar)
         .titlebar_inset(inset)
         .build(k)
-}
-
-/// Keys the search field handles before its editor; true when handled.
-pub(crate) type SearchKeys = fn(&mut App, &KeyEvent, &mut Tx) -> bool;
-
-/// The search field: typing filters the list live; `keys` takes ↑↓, Enter and Escape.
-/// Read-only while the quick panel is inert, so no press, paste or IME
-/// text lands in it.
-pub(crate) fn search_input(s: &App, k: &Kit, style: TextStyle, keys: SearchKeys) -> El {
-    let field = text_input(&s.search, style)
-        .single_line()
-        .key("search-input")
-        .label("Search items")
-        .grow(1.0)
-        .shrink()
-        .color(k.c.text_strong)
-        .placeholder(search_placeholder(s), k.c.text_faint)
-        .caret(k.c.text_strong, k.alpha(k.c.text_accent, 0.3))
-        .on_input_key(keys)
-        .on_input_change(|s: &mut App, _| s.search_changed());
-    if s.panel_inert() {
-        field
-    } else {
-        field.on_edit(|s: &mut App| &mut s.search)
-    }
 }
 
 /// The vault's search field: typing filters the list live; `search_key`
@@ -379,7 +356,7 @@ fn search(s: &App, k: &Kit) -> El {
         .label("Search items")
 }
 
-fn search_placeholder(s: &App) -> String {
+pub(crate) fn search_placeholder(s: &App) -> String {
     match s.items.len() {
         1 => "Search 1 item".to_owned(),
         n => format!("Search {n} items"),
@@ -473,9 +450,18 @@ fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
             if s.panel_inert() {
                 return;
             }
+            // The item being edited stays as it is, focus and all.
+            if s.edit.form.as_ref().and_then(|f| f.id.as_deref()) == Some(id.as_str()) {
+                return;
+            }
+            // A form giving way keeps its exit; otherwise the item replaces at once.
+            let was_editing = s.editing();
+            if !s.leave_edit() {
+                return;
+            }
             // Focus somewhere else (nothing, Lock) comes back to the search.
             s.search.focused = true;
-            if !s.import.showing() {
+            if !s.import.showing() && !was_editing {
                 tx.instant();
             }
             s.cancel_import();
@@ -511,7 +497,8 @@ fn detail(s: &App, k: &Kit) -> El {
     let offer = s.loaded.then(|| crate::install::offer(s, k)).flatten();
     let shortcut = crate::shortcut::notice(s, k);
     let imported = crate::import::view::imported(s, k);
-    let importing = s.loaded && (s.import.showing() || s.drop_hovering() || s.items.is_empty());
+    let importing =
+        s.loaded && !s.editing() && (s.import.showing() || s.drop_hovering() || s.items.is_empty());
     if importing {
         // An empty vault keeps its guide, with the drop zone, until there's a preview.
         let content = if s.items.is_empty() && s.import.preview().is_none() {
@@ -551,6 +538,9 @@ fn detail(s: &App, k: &Kit) -> El {
     }
     // One element, item or not, so leaving for the import view and coming back
     // swap whole, while a new selection (or none) replaces what's in it at once.
+    if let Some(form) = &s.edit.form {
+        return pane.child(crate::edit::view::form(s, k, form));
+    }
     let item_el = || {
         col()
             .key("item")
@@ -579,9 +569,11 @@ fn detail(s: &App, k: &Kit) -> El {
         return pane;
     };
     let kind = format!("{} · {}", noun(&item.kind, 1), item.short);
-    let head = col()
-        .key("head")
-        .w_full()
+    let titles = col()
+        .key("titles")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
         .gap(4.0)
         .child(
             text(item.label.clone())
@@ -596,6 +588,18 @@ fn detail(s: &App, k: &Kit) -> El {
                 .font(k.ty.text_small)
                 .color(k.c.text_muted),
         );
+    let mut head = col().key("head").w_full().gap(12.0).child(
+        row()
+            .key("head-row")
+            .w_full()
+            .gap(12.0)
+            .items_start()
+            .child(titles)
+            .child(crate::edit::view::item_actions(s, k)),
+    );
+    if let Some(delete) = s.edit.delete.as_ref().filter(|d| d.id == item.id) {
+        head = head.child(crate::edit::view::confirm(k, delete));
+    }
     let mut fields = col().key("fields").w_full().gap(2.0);
     if let Some(full) = s.detail.as_ref().filter(|d| d.id == item.id) {
         let code = code_field(&full.fields);
@@ -975,6 +979,21 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 /// What ⏎ and the arrows do: the item's copies, or the import view's steps while it shows.
 fn key_hints(s: &App, k: &Kit) -> Vec<El> {
     let hint = |key: &str, keys: &[&str], label: &str| hint(k, key, keys, label);
+    if let Some(form) = &s.edit.form {
+        let mut hints = vec![hint("h-save", &["⌘", "S"], "Save")];
+        if form.is_new() {
+            hints.push(hint("h-cancel", &["esc"], "Cancel"));
+        } else {
+            hints.push(hint("h-cancel", &["esc"], "Cancel editing"));
+        }
+        return hints;
+    }
+    if s.edit.delete.is_some() {
+        return vec![
+            hint("h-delete", &["⏎"], "Delete"),
+            hint("h-cancel", &["esc"], "Cancel"),
+        ];
+    }
     if !(s.import.showing() || s.drop_hovering()) {
         let mut hints: Vec<El> = s
             .enter_hint()

@@ -37,9 +37,9 @@ use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 5;
+pub const PROTOCOL_VERSION: u32 = 6;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -138,12 +138,14 @@ pub enum Command {
         query: Vec<String>,
         kind: Option<String>,
     },
-    /// Sets fields and/or the name (`Some("")` clears it); replies `item`.
+    /// Sets fields, removes the `unset` ones and/or sets the name (`Some("")`
+    /// clears it), all in one change; replies `item`.
     ItemSet {
         vault: Option<String>,
         query: Vec<String>,
         fields: Vec<FieldInput>,
         name: Option<String>,
+        unset: Vec<String>,
     },
     ItemUnset {
         vault: Option<String>,
@@ -164,11 +166,18 @@ pub enum Command {
         export: Zeroizing<String>,
         apply: bool,
     },
+    /// A new random password of `length` characters (8 to 256): letters and
+    /// digits, and symbols if `symbols`. Needs no unlock; replies `password`.
+    Generate {
+        length: usize,
+        symbols: bool,
+    },
 }
 
 /// A field as typed by the user. Without `kind`, the agent uses the item
-/// type's field type, else the field's current type, else `text`.
-#[derive(Clone, Serialize, Deserialize)]
+/// type's field type, else the field's current type, else `text`. Wiped on
+/// drop; Debug leaves out the value.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct FieldInput {
     pub name: String,
     pub kind: Option<String>,
@@ -295,6 +304,9 @@ pub enum Reply {
     },
     Code {
         code: Code,
+    },
+    Password {
+        password: Zeroizing<String>,
     },
 }
 
@@ -508,7 +520,8 @@ pub fn code_field(fields: &[FieldInfo]) -> Option<usize> {
         .or_else(|| fields.iter().position(otp))
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+/// Wiped on drop; Debug leaves out the value.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct FieldInfo {
     pub name: String,
     pub kind: String,
@@ -585,6 +598,22 @@ pub struct PeerSync {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wiped_on_drop<T: ZeroizeOnDrop>() {}
+
+    /// Values are wiped as fields drop.
+    #[test]
+    fn field_values_are_wiped() {
+        wiped_on_drop::<FieldInput>();
+        wiped_on_drop::<FieldInfo>();
+        let mut input = FieldInput {
+            name: "password".into(),
+            kind: None,
+            value: "hunter22".into(),
+        };
+        input.zeroize();
+        assert!(input.value.is_empty());
+    }
 
     #[test]
     fn field_debug_redacts_values() {
@@ -683,7 +712,10 @@ mod tests {
             command: Command::Watch,
         })
         .unwrap();
-        assert_eq!(request, r#"{"v":5,"cmd":"watch"}"#);
+        assert_eq!(
+            request,
+            format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"watch"}}"#)
+        );
         assert!(matches!(
             serde_json::from_str::<Request>(&request).unwrap().command,
             Command::Watch
@@ -714,6 +746,65 @@ mod tests {
                 Message::Change { change: back } => assert_eq!(back, change),
                 other => panic!("expected a change, got {other:?}"),
             }
+        }
+    }
+
+    #[test]
+    fn an_item_set_carries_its_unset_fields() {
+        let command = Command::ItemSet {
+            vault: None,
+            query: vec!["a".into()],
+            fields: Vec::new(),
+            name: None,
+            unset: vec!["notes".into()],
+        };
+        let line = serde_json::to_string(&command).unwrap();
+        assert!(line.ends_with(r#""unset":["notes"]}"#), "{line}");
+        match serde_json::from_str::<Command>(&line).unwrap() {
+            Command::ItemSet { unset, .. } => assert_eq!(unset, ["notes"]),
+            other => panic!("expected item-set, got {other:?}"),
+        }
+        // An older client's item-set, without unset, is refused.
+        let old = r#"{"cmd":"item-set","vault":null,"query":["a"],"fields":[],"name":"x"}"#;
+        assert!(serde_json::from_str::<Command>(old).is_err());
+    }
+
+    #[test]
+    fn generate_round_trips() {
+        let request = serde_json::to_string(&Request {
+            v: PROTOCOL_VERSION,
+            command: Command::Generate {
+                length: 20,
+                symbols: false,
+            },
+        })
+        .unwrap();
+        assert!(
+            request.ends_with(r#""cmd":"generate","length":20,"symbols":false}"#),
+            "{request}"
+        );
+        assert!(matches!(
+            serde_json::from_str::<Request>(&request).unwrap().command,
+            Command::Generate {
+                length: 20,
+                symbols: false
+            }
+        ));
+        let reply = serde_json::to_string(&Message::Ok {
+            reply: Reply::Password {
+                password: Zeroizing::new("hunter2hunter2".into()),
+            },
+        })
+        .unwrap();
+        assert_eq!(
+            reply,
+            r#"{"type":"ok","reply":{"reply":"password","password":"hunter2hunter2"}}"#
+        );
+        match serde_json::from_str::<Message>(&reply).unwrap() {
+            Message::Ok {
+                reply: Reply::Password { password },
+            } => assert_eq!(*password, "hunter2hunter2"),
+            other => panic!("expected a password, got {other:?}"),
         }
     }
 }

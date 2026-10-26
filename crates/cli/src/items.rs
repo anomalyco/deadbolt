@@ -27,7 +27,7 @@ pub enum ItemCommand {
         #[arg(long)]
         name: Option<String>,
         /// Length of a generated password.
-        #[arg(long, default_value_t = 24)]
+        #[arg(long, default_value_t = deadbolt_core::password::DEFAULT_LENGTH)]
         length: usize,
         /// Generate a password of letters and digits only.
         #[arg(long)]
@@ -330,10 +330,19 @@ pub async fn run(
             let mut fields = assignments(&fields, Some(&kind))?;
             fill_required(&kind, &mut fields)?;
             if kind == "login" && !fields.iter().any(|f| f.name == "password") {
+                let command = Command::Generate {
+                    length,
+                    symbols: !no_symbols,
+                };
+                let Reply::Password { password } =
+                    crate::request(paths, command, from_stdin).await?
+                else {
+                    bail!("unexpected reply");
+                };
                 fields.push(FieldInput {
                     name: "password".into(),
                     kind: None,
-                    value: prompt::generate_password(length, !no_symbols)?.to_string(),
+                    value: password.to_string(),
                 });
             }
             let command = Command::ItemNew {
@@ -404,6 +413,7 @@ pub async fn run(
                 query: query.into_iter().cloned().collect(),
                 fields: assignments(assigns, None)?,
                 name,
+                unset: Vec::new(),
             };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
@@ -451,12 +461,11 @@ mod tests {
                 field("backup", "otp", "KRSXG5CTMVRXEZLU"),
             ]
             .into_iter()
-            .map(|f| match f.kind.as_str() {
-                "otp" if !otp => FieldInfo {
-                    value: String::new(),
-                    ..f
-                },
-                _ => f,
+            .map(|mut f| {
+                if f.kind == "otp" && !otp {
+                    f.value.clear();
+                }
+                f
             })
             .collect(),
         };
@@ -498,7 +507,7 @@ mod tests {
             ("url", Some("url"), "https://a=b")
         );
         let input = parse("password=").unwrap();
-        assert_eq!((input.kind, input.value.as_str()), (None, ""));
+        assert_eq!((input.kind.as_deref(), input.value.as_str()), (None, ""));
         assert!(parse("nope").is_err());
     }
 

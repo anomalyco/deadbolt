@@ -12,11 +12,13 @@ use rune::{
     Cx, El, Icon, ScrollSpec, Spring, SpringPair, TextStyle, Transition, col, el, icon, row,
     spacer, text,
 };
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
+use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 
 use super::{CLOSE, MARGIN, Phase};
 use crate::model::{App, Screen};
-use crate::view::{LIST_EDGE, copy_line, hint, passphrase_field, rows, search_input, unlock_error};
+use crate::view::{
+    LIST_EDGE, copy_line, hint, passphrase_field, rows, search_placeholder, unlock_error,
+};
 
 const HEADER_H: f32 = 56.0;
 const FOOTER_H: f32 = 40.0;
@@ -124,26 +126,37 @@ fn header(key: &str) -> El {
         .center_y()
 }
 
-/// A press anywhere in the header, the icon too, lands in the field.
+/// A flat field filling the header: a press anywhere on it, the icon too,
+/// lands in the field. While the copy's confirmation shows it takes nothing.
 fn search(s: &App, k: &Kit) -> El {
+    let inert = s.panel_inert();
+    let mut field = TextInput::new(&s.search)
+        .plain()
+        .placeholder(search_placeholder(s))
+        .leading_icon(k.glyph.search)
+        .leading_icon_size(18.0)
+        .text_style(TextStyle::new(17.0, 400.0).lh(24.0))
+        .height(HEADER_H)
+        .width(None)
+        .on_key(|s: &mut App, ev, tx| s.panel_search_key(ev, tx))
+        .on_change(|s: &mut App, _| s.search_changed());
+    if !inert {
+        field = field.on_edit(|s: &mut App| &mut s.search);
+        if !s.search.text.is_empty() {
+            field = field
+                .clear_button()
+                .on_action(|s: &mut App, _| s.clear_search());
+        }
+    }
     header("search")
-        .role("textbox")
-        .label("Search items")
-        .child(
-            icon(k.glyph.search, 18.0)
-                .key("search-icon")
-                .color(k.c.icon_muted),
-        )
-        .child(search_input(
-            s,
-            k,
-            TextStyle::new(17.0, 400.0).lh(24.0),
-            |s, ev, tx| s.panel_search_key(ev, tx),
-        ))
+        .px(10.0)
+        .child(field.build(k).key("search-field").label("Search items"))
 }
 
+/// Icon and text where the search field puts its own (its 6 pt gap).
 fn title(k: &Kit, key: &str, glyph: &'static Icon, label: &str) -> El {
     header(key)
+        .gap(6.0)
         .child(icon(glyph, 18.0).color(k.c.icon_muted))
         .child(
             text(label.to_owned())

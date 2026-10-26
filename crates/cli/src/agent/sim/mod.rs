@@ -571,7 +571,7 @@ impl World {
                     if matches!(action, Action::Edit(..))
                         && let Some(item) = s.vault(&self.vault).items().first()
                     {
-                        super::items::set(s, None, &[item.id.to_string()], fields, None)?;
+                        super::items::set(s, None, &[item.id.to_string()], fields, None, &[])?;
                     } else {
                         super::items::create(s, None, "login", None, fields)?;
                     }

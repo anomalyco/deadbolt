@@ -152,6 +152,8 @@ pub struct App {
     pub copy: Option<Copy>,
     pub notice: Option<String>,
     pub import: crate::import::Import,
+    /// Adding, changing or deleting an item.
+    pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
     pub sidebar: rune_kit::shell::PaneState,
     /// `--reduced-motion`; otherwise Rune follows the system's setting.
@@ -201,6 +203,7 @@ impl App {
             copy: None,
             notice: None,
             import: crate::import::Import::default(),
+            edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
             sidebar: rune_kit::shell::PaneState::new(272.0).range(200.0, 312.0),
@@ -364,10 +367,13 @@ impl App {
                         let (item, code) = values.take();
                         // A new selection's fields land in place, not animated: the
                         // selection moved under the user's own hand. A refresh of the
-                        // shown item animates what changed.
-                        if self.detail.as_ref().is_none_or(|d| d.id != item.id) {
+                        // shown item animates what changed, and so does a saved form
+                        // giving way to what it saved.
+                        let saved = self.editing();
+                        if !saved && self.detail.as_ref().is_none_or(|d| d.id != item.id) {
                             tx.instant();
                         }
+                        self.edit_item_landed(&item);
                         self.set_detail(Some(item));
                         if let Some(code) = code {
                             self.on_code(code, tx);
@@ -378,7 +384,10 @@ impl App {
                             self.copy_field(&field, tx);
                         }
                     }
-                    Err(failure) => self.on_failure(failure, tx),
+                    Err(failure) => {
+                        self.edit_item_failed();
+                        self.on_failure(failure, tx);
+                    }
                 }
             }
             Done::Code { seq, result } => {
@@ -392,6 +401,9 @@ impl App {
                 applied,
                 result,
             } => self.on_imported(seq, applied, result, tx),
+            Done::Saved { seq, result } => self.on_saved(seq, result, tx),
+            Done::Removed { seq, result } => self.on_removed(seq, result, tx),
+            Done::Generated { seq, result } => self.on_generated(seq, result, tx),
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
         }
@@ -476,13 +488,17 @@ impl App {
         let before = self.selected.clone();
         self.items = items;
         self.loaded = true;
+        self.edit_items_landed();
         self.keep_selection_visible();
         if before.is_some() && self.selected != before {
             tx.instant();
         }
+        // A form can hold the selection on an item deleted elsewhere; there's
+        // nothing left to fetch.
         if refresh
             && self.selected == before
             && let Some(id) = self.selected.clone()
+            && self.items.iter().any(|i| i.id == id)
         {
             self.seq += 1;
             if let Some((pending, _)) = &mut self.pending_copy {
@@ -623,6 +639,7 @@ impl App {
         self.pending_copy = None;
         self.notice = None;
         self.forget_import();
+        self.forget_edit();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -898,6 +915,10 @@ impl App {
     /// After the list or the search changed: keep the selection if it still
     /// matches, else select the first match.
     pub fn keep_selection_visible(&mut self) {
+        // An open form keeps its item selected, even when the search hides it.
+        if self.editing() {
+            return;
+        }
         let visible = self.visible();
         let keep = self
             .selected
@@ -915,6 +936,7 @@ impl App {
         }
         self.selected = id.clone();
         self.notice = None;
+        self.edit.delete = None;
         self.set_detail(None);
         self.pending_copy = None;
         self.seq += 1;
@@ -947,6 +969,9 @@ impl App {
             return handled;
         }
         if let Some(handled) = self.import_key(ev) {
+            return handled;
+        }
+        if let Some(handled) = self.edit_key(ev) {
             return handled;
         }
         if self.panel_shortcut(ev, tx) {
@@ -1016,6 +1041,13 @@ impl App {
         if !self.import.showing() {
             self.keep_selection_visible();
         }
+    }
+
+    /// The quick panel's clear button: an empty search, still focused.
+    pub fn clear_search(&mut self) {
+        self.search.clear();
+        self.search.focused = true;
+        self.search_changed();
     }
 
     /// Focuses the search field with its text selected, so typing replaces it.
@@ -1102,10 +1134,16 @@ impl App {
     fn put_on_clipboard(&mut self, field: String, value: String, tx: &mut Tx) {
         let Some(item) = &self.detail else { return };
         let id = item.id.clone();
+        self.copy_value(id, field, value, tx);
+    }
+
+    /// Puts `value` on the clipboard, concealed, to clear after the countdown.
+    /// `item` and `field` mark the item's copy button while it lasts.
+    pub(crate) fn copy_value(&mut self, item: String, field: String, value: String, tx: &mut Tx) {
         let lasts = Duration::from_secs_f64(self.clear_after);
         let copied = tx.copy_secret(value, lasts);
         self.copy = Some(Copy {
-            item: id,
+            item,
             field,
             at: self.clock,
             lasts: self.clear_after,
@@ -1259,6 +1297,9 @@ impl App {
             return handled;
         }
         if let Some(handled) = self.import_key(ev) {
+            return handled;
+        }
+        if let Some(handled) = self.edit_key(ev) {
             return handled;
         }
         if self.panel_shortcut(ev, tx) {

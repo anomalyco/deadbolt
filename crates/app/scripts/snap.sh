@@ -51,6 +51,15 @@ for theme in dark light; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done
+# Adding, changing and deleting, dark and light: a new login with a generated
+# password, a new card, a new identity, an edit, an SSH key's edit (its
+# private key shown, locked), a refused card number, the delete confirm,
+# and an edit another device changed meanwhile.
+for theme in dark light; do
+  for scene in new-login new-card new-identity edit edit-ssh edit-invalid delete-confirm edit-conflict; do
+    "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
+  done
+done
 # The quick panel, dark and light: just opened, filtering, nothing found, an
 # empty vault, locked, a wrong passphrase, not set up, failed, and 0.6 s after
 # a copy (the footer shows the countdown).

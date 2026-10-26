@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
 use std::time::Duration;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use zeroize::Zeroizing;
@@ -148,7 +148,7 @@ where
         .await
         .map_err(Error::Connect)?;
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
+    let mut lines = LineReader::new(BufReader::new(read));
     let body = encode_line(&Request {
         v: PROTOCOL_VERSION,
         command,
@@ -189,13 +189,58 @@ where
     }
 }
 
-async fn read_message(
-    lines: &mut tokio::io::Lines<BufReader<tokio::net::unix::OwnedReadHalf>>,
-) -> Result<Message, Error> {
+async fn read_message(lines: &mut LineReader<BufReader<OwnedReadHalf>>) -> Result<Message, Error> {
     let Some(line) = lines.next_line().await? else {
         return Err(Error::Closed);
     };
-    serde_json::from_str::<Message>(&line).map_err(Error::InvalidReply)
+    serde_json::from_slice::<Message>(&line).map_err(Error::InvalidReply)
+}
+
+/// Reads the agent's lines, which carry values, into buffers that are wiped
+/// on drop and grow without leaving copies behind (`export::append`).
+struct LineReader<R> {
+    reader: R,
+    /// The line so far, kept across a cancelled read.
+    line: Zeroizing<Vec<u8>>,
+}
+
+impl<R: AsyncBufRead + Unpin> LineReader<R> {
+    fn new(reader: R) -> Self {
+        Self {
+            reader,
+            line: Zeroizing::new(Vec::new()),
+        }
+    }
+
+    /// The next line without its `\n` (or `\r\n`), or `None` at the end.
+    /// Cancel-safe.
+    async fn next_line(&mut self) -> std::io::Result<Option<Zeroizing<Vec<u8>>>> {
+        loop {
+            let available = self.reader.fill_buf().await?;
+            if available.is_empty() {
+                if self.line.is_empty() {
+                    return Ok(None);
+                }
+                return Ok(Some(std::mem::take(&mut self.line)));
+            }
+            let (end, used) = match available.iter().position(|b| *b == b'\n') {
+                Some(at) => (Some(at), at + 1),
+                None => (None, available.len()),
+            };
+            export::append(
+                &mut self.line,
+                &available[..end.unwrap_or(used)],
+                usize::MAX,
+            );
+            self.reader.consume(used);
+            if end.is_some() {
+                if self.line.last() == Some(&b'\r') {
+                    self.line.pop();
+                }
+                return Ok(Some(std::mem::take(&mut self.line)));
+            }
+        }
+    }
 }
 
 /// `value` as one JSON line. Requests can carry a passphrase, so the buffer
@@ -226,7 +271,7 @@ pub async fn simple(paths: &Paths, command: Command) -> Result<Reply, Error> {
 
 /// A live `watch` stream. Dropping it hangs up.
 pub struct Watch {
-    lines: Lines<BufReader<OwnedReadHalf>>,
+    lines: LineReader<BufReader<OwnedReadHalf>>,
     /// Held open: the agent ends the stream when the client stops writing.
     _write: OwnedWriteHalf,
 }
@@ -238,7 +283,7 @@ impl Watch {
         let Some(line) = self.lines.next_line().await? else {
             return Err(Error::Closed);
         };
-        match serde_json::from_str::<Message>(&line).map_err(Error::InvalidReply)? {
+        match serde_json::from_slice::<Message>(&line).map_err(Error::InvalidReply)? {
             Message::Change { change } => Ok(Some(change)),
             Message::Ok { .. } => Ok(None),
             Message::Error { code, message } => Err(AgentError { code, message }.into()),
@@ -260,7 +305,7 @@ pub async fn watch(paths: &Paths) -> Result<Watch, Error> {
     })?;
     write.write_all(&body).await?;
     Ok(Watch {
-        lines: BufReader::new(read).lines(),
+        lines: LineReader::new(BufReader::new(read)),
         _write: write,
     })
 }
@@ -402,6 +447,22 @@ mod tests {
     use protocol::DeviceInfo;
     use std::sync::{Arc, Mutex};
     use tokio::net::UnixListener;
+
+    /// Reply lines land in wiped buffers, whole however the reads split them.
+    #[test]
+    fn reply_lines_are_read_into_wiped_buffers() {
+        run(async {
+            let bytes = b"{\"a\":1}\r\n{\"value\":\"hunter22\"}\npartial".as_slice();
+            let mut lines = LineReader::new(BufReader::with_capacity(3, bytes));
+            let mut read = Vec::new();
+            loop {
+                let line: Option<Zeroizing<Vec<u8>>> = lines.next_line().await.unwrap();
+                let Some(line) = line else { break };
+                read.push(String::from_utf8(line.to_vec()).unwrap());
+            }
+            assert_eq!(read, ["{\"a\":1}", "{\"value\":\"hunter22\"}", "partial"]);
+        });
+    }
 
     fn paths(dir: &std::path::Path) -> Paths {
         Paths {

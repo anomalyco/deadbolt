@@ -693,7 +693,7 @@ fn a_paste_during_the_confirmation_does_nothing() {
     assert!(!rt.state.search.focused, "the search let go");
     rt.paste(PASSWORD);
     frames(&mut rt, 2);
-    let (x, y) = rt.find("search-input").unwrap();
+    let (x, y) = rt.find("search-field").unwrap();
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.paste(PASSWORD);
@@ -1358,7 +1358,7 @@ fn the_rolled_label_is_as_wide_as_plain_text() {
 fn a_press_on_the_search_icon_lands_in_the_field() {
     let mut rt = runtime("empty", true);
     frames(&mut rt, 2);
-    let r = find(&rt, "search-icon").unwrap().0;
+    let r = find(&rt, "leading").unwrap().0;
     let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
     rt.update(|_, tx| tx.blur());
     frames(&mut rt, 2);
@@ -1447,4 +1447,31 @@ fn the_search_is_one_line() {
         let text = rt.state.search.text.clone();
         assert!(!text.contains(['\n', '\r']), "{text:?}");
     }
+}
+
+/// The search's clear button shows once something's typed, and empties it
+/// without losing focus or the list.
+#[test]
+fn the_clear_button_empties_the_search() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 2);
+    let clear = |rt: &Runtime<App>| {
+        rt.elements()
+            .into_iter()
+            .find(|e| !e.exiting && e.role == "button" && e.label.as_deref() == Some("Clear"))
+    };
+    assert!(clear(&rt).is_none(), "nothing to clear");
+    for c in "git".chars() {
+        rt.key(key(Key::Text(c.into())));
+    }
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.search.text, "git");
+    let r = clear(&rt).expect("a clear button").rect;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    frames(&mut rt, 2);
+    assert_eq!(rt.state.search.text, "");
+    assert!(rt.state.search.focused);
+    assert!(clear(&rt).is_none());
 }

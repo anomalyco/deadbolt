@@ -81,6 +81,7 @@ mod error;
 mod id;
 pub mod item;
 mod membership;
+pub mod password;
 pub mod totp;
 mod vault;
 
