@@ -10,7 +10,7 @@
 use rune::{El, Icon, Spring, SpringPair, TextStyle, Transition, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, RollingText};
 
-use super::{Phase, Preview, details, import_label, new_items};
+use super::{Phase, Preview, changed, details, import_label, new_items, nothing_new};
 use crate::model::App;
 
 pub static IMPORT: Icon = Icon {
@@ -66,7 +66,7 @@ pub fn error(s: &App, k: &Kit) -> Option<El> {
 /// Where each app's export is, and Choose File…. A file dragged over the
 /// window lights it up.
 pub fn drop_zone(s: &App, k: &Kit) -> El {
-    let hover = s.import.hover;
+    let hover = s.drop_hovering();
     let title = match &s.import.phase {
         Phase::Reading { name, .. } => format!("Reading {name}…"),
         _ => "Drop an export here".to_owned(),
@@ -175,15 +175,12 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
         }
     } else {
         counts = counts.child(
-            text(format!(
-                "Everything in this export is already in {}",
-                vault_name(s)
-            ))
-            .key("nothing-new")
-            .font(k.ty.body_medium)
-            .color(k.c.text_strong)
-            .wrap()
-            .w_full(),
+            text(nothing_new(p, &vault_name(s)))
+                .key("nothing-new")
+                .font(k.ty.body_medium)
+                .color(k.c.text_strong)
+                .wrap()
+                .w_full(),
         );
     }
     let lines = details(report);
@@ -261,6 +258,11 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
                         .color(k.c.text_muted)
                         .truncate_fade(),
                 ),
+        )
+        .children(
+            p.changed.then(|| {
+                crate::onboarding::view::banner(k, &changed(&p.name)).key("import-changed")
+            }),
         )
         .child(counts)
         .children(quiet)

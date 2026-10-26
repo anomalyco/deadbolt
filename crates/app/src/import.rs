@@ -12,7 +12,7 @@ use std::time::Duration;
 use deadbolt_client::protocol::{ErrorCode, ImportReport, Tally};
 use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
-use crate::agent::{ImportFailure, Job};
+use crate::agent::{ImportFailure, Imported, Job};
 use crate::model::{App, Screen};
 use crate::onboarding::{Notice, Severity};
 
@@ -28,8 +28,9 @@ pub struct Import {
     /// The import view is showing in the detail pane. An empty vault always
     /// shows the drop zone.
     pub open: bool,
-    /// A file the window takes is being dragged over it.
-    pub hover: bool,
+    /// A file the window takes is being dragged over it. Read it through
+    /// `App::drop_hovering`, which ignores it while the window takes no drops.
+    pub(crate) hover: bool,
     pub phase: Phase,
     /// Why the last file wasn't previewed or imported.
     pub error: Option<Notice>,
@@ -60,18 +61,30 @@ pub struct Preview {
     pub path: PathBuf,
     pub name: String,
     pub report: ImportReport,
+    /// The export as previewed: it imports only while the file still has it.
+    pub digest: blake3::Hash,
+    /// The file changed between the last preview and Import, so this is a
+    /// fresh preview and nothing was imported.
+    pub changed: bool,
 }
 
 impl Preview {
     pub fn new_items(&self) -> usize {
         self.report.logins + self.report.cards
     }
+
+    /// Nothing new, and that's because it's all here already (rather than
+    /// the export holding nothing Deadbolt takes).
+    pub fn all_here(&self) -> bool {
+        self.new_items() == 0 && self.report.duplicates > 0
+    }
 }
 
 impl Import {
-    /// The detail pane shows the import view rather than an item.
+    /// The detail pane shows the import view rather than an item. A drag
+    /// over the window shows it too, while it lasts (`App::drop_hovering`).
     pub fn showing(&self) -> bool {
-        self.open || self.hover || self.phase != Phase::Idle
+        self.open || self.phase != Phase::Idle
     }
 
     /// The preview or the import it confirmed.
@@ -97,11 +110,21 @@ impl App {
         if self.screen != Screen::Vault || self.panel.is_some() {
             return;
         }
-        if let Some(installer) = &mut self.installer {
-            installer.open = false;
+        if let Some(installer) = self.installer.as_mut().filter(|i| i.open) {
+            installer.close();
         }
         self.close_settings();
         self.import.open = true;
+    }
+
+    /// The window takes dropped files: the vault is showing, not the install page.
+    pub fn accepts_drops(&self) -> bool {
+        self.screen == Screen::Vault && !self.installing()
+    }
+
+    /// An export is being dragged over the window, which would take it.
+    pub fn drop_hovering(&self) -> bool {
+        self.import.hover && self.accepts_drops()
     }
 
     /// Files dropped on the window: the first one it takes is previewed.
@@ -113,7 +136,7 @@ impl App {
     }
 
     pub fn drop_hover(&mut self, over: bool) {
-        self.import.hover = over && self.screen == Screen::Vault;
+        self.import.hover = over && self.accepts_drops();
     }
 
     pub fn choose_file(&mut self) {
@@ -121,9 +144,10 @@ impl App {
             return;
         }
         self.import.seq += 1;
+        // The view opens once there's a file (or the dialog fails), so
+        // cancelling it leaves the vault as it was.
         self.import.phase = Phase::Choosing;
         self.import.error = None;
-        self.import.open = true;
         let options = FileDialogOptions {
             title: MENU.trim_end_matches('…').into(),
             ..FileDialogOptions::default()
@@ -146,7 +170,7 @@ impl App {
         self.import.open = true;
         self.agent.send(Job::Import {
             path,
-            apply: false,
+            apply: None,
             seq: self.import.seq,
         });
     }
@@ -164,7 +188,7 @@ impl App {
         self.import.seq += 1;
         self.agent.send(Job::Import {
             path: preview.path.clone(),
-            apply: true,
+            apply: Some(preview.digest),
             seq: self.import.seq,
         });
         self.import.phase = Phase::Importing(preview);
@@ -173,6 +197,7 @@ impl App {
     /// Closes the import view, dropping the preview or a file still being
     /// read. An import already confirmed runs to its end.
     pub fn cancel_import(&mut self) {
+        self.import.hover = false;
         if matches!(self.import.phase, Phase::Importing(_)) {
             return;
         }
@@ -195,19 +220,19 @@ impl App {
         &mut self,
         seq: u64,
         apply: bool,
-        result: Result<ImportReport, ImportFailure>,
+        result: Result<Imported, ImportFailure>,
         tx: &mut Tx,
     ) {
         if seq != self.import.seq || self.screen != Screen::Vault {
             return;
         }
-        let (path, file) = match &self.import.phase {
-            Phase::Reading { path, name } if !apply => (path.clone(), name.clone()),
-            Phase::Importing(p) if apply => (p.path.clone(), p.name.clone()),
+        let (path, file, previewed) = match &self.import.phase {
+            Phase::Reading { path, name } if !apply => (path.clone(), name.clone(), None),
+            Phase::Importing(p) if apply => (p.path.clone(), p.name.clone(), Some(p.digest)),
             _ => return,
         };
         match result {
-            Ok(report) if apply && report.logins + report.cards > 0 => {
+            Ok(Imported::Done(report)) if report.logins + report.cards > 0 => {
                 let n = report.logins + report.cards;
                 self.import.imported =
                     Some((format!("Imported {n} from {}", report.source), self.clock));
@@ -216,13 +241,29 @@ impl App {
                 self.import.open = false;
                 self.search.focused = true;
             }
-            // A preview; or an import that found nothing new by then (imported
-            // meanwhile from another device or the CLI) shows that instead.
-            Ok(report) => {
+            // An import that found nothing new by then (imported meanwhile
+            // from another device or the CLI) says so in place of the preview.
+            Ok(Imported::Done(report)) => {
+                let Some(digest) = previewed else { return };
                 self.import.phase = Phase::Preview(Preview {
                     path,
                     name: file,
                     report,
+                    digest,
+                    changed: false,
+                });
+            }
+            Ok(Imported::Preview {
+                report,
+                digest,
+                changed,
+            }) => {
+                self.import.phase = Phase::Preview(Preview {
+                    path,
+                    name: file,
+                    report,
+                    digest,
+                    changed,
                 });
             }
             Err(ImportFailure::Agent(f)) if f.locked() => self.on_locked(tx),
@@ -240,9 +281,11 @@ impl App {
         self.import.phase = Phase::Idle;
         match result {
             Ok(Some(path)) => self.read_export(path),
+            // Cancelled: the vault stays as it was.
             Ok(None) => {}
             // Linux without a FileChooser portal lands here; dropping still works.
             Err(message) => {
+                self.import.open = true;
                 self.import.error = Some(Notice {
                     severity: Severity::Caution,
                     title: "Couldn't show the file dialog".into(),
@@ -269,7 +312,9 @@ impl App {
     }
 
     /// Keys while the import view shows: Return imports from a preview and
-    /// Escape closes it. ⇧⌘I opens it. `None` for keys it leaves alone.
+    /// Escape closes it. ⇧⌘I opens it. The item under the view is hidden, so
+    /// Return and ⇧Return never copy from it, and ↑↓ go back to it as it was
+    /// selected before moving anything. `None` for keys it leaves alone.
     pub(crate) fn import_key(&mut self, ev: &KeyEvent) -> Option<bool> {
         if self.screen != Screen::Vault || self.panel.is_some() {
             return None;
@@ -278,17 +323,22 @@ impl App {
             self.show_import();
             return Some(true);
         }
-        let plain = ev.mods == rune::Mods::default();
+        let showing = self.import.showing() || self.drop_hovering();
         match ev.key {
-            Key::Enter if plain => match self.import.phase {
-                Phase::Preview(_) => {
+            Key::Enter if showing => {
+                if ev.mods == rune::Mods::default() {
                     self.confirm_import();
-                    Some(true)
                 }
-                Phase::Importing(_) => Some(true),
-                _ => None,
-            },
-            Key::Escape if self.import.showing() || self.import.error.is_some() => {
+                Some(true)
+            }
+            // An empty vault has nothing to go back to, and its preview stays.
+            Key::Up | Key::Down if showing => {
+                if !self.items.is_empty() {
+                    self.cancel_import();
+                }
+                Some(true)
+            }
+            Key::Escape if showing || self.import.error.is_some() => {
                 self.cancel_import();
                 Some(true)
             }
@@ -401,6 +451,25 @@ pub fn details(report: &ImportReport) -> Vec<String> {
         ));
     }
     lines
+}
+
+/// The preview's line when nothing in the export is new: it's all here
+/// already, or there's nothing Deadbolt takes in it (the details say why).
+pub fn nothing_new(p: &Preview, vault: &str) -> String {
+    if p.all_here() {
+        format!("Everything in this export is already in {vault}")
+    } else {
+        "Nothing in this export can be imported".to_owned()
+    }
+}
+
+/// Over a fresh preview when Import found the file changed since the last.
+pub fn changed(file: &str) -> Notice {
+    Notice {
+        severity: Severity::Caution,
+        title: format!("{file} changed since the preview"),
+        body: "Nothing was imported. This is what it holds now.".to_owned(),
+    }
 }
 
 /// The primary button: "Import 12 items".

@@ -37,7 +37,7 @@ done
 # over it, a preview, one with nothing new, a file it can't read, and ⇧⌘I in
 # a vault with items.
 for theme in dark light; do
-  for scene in empty import-hover import-preview import-nothing-new import-error import; do
+  for scene in empty import-hover import-preview import-nothing-new import-nothing-to-import import-changed import-error import; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done

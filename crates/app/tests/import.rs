@@ -8,8 +8,9 @@ mod support;
 
 use std::path::PathBuf;
 
-use deadbolt_app::agent::{Agent, Job};
+use deadbolt_app::agent::{Agent, DialogSlot, Job};
 use deadbolt_app::import::Phase;
+use deadbolt_app::install::Installer;
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::Severity;
 use rune::{Env, FileDialogKind, FileDialogs, Key, KeyEvent, Mods, Runtime, ScriptedFileDialog};
@@ -62,7 +63,23 @@ const SECRETS: &[&str] = &[
     "4242 4242",
     "42424242",
     "wifi-secret-666",
+    "nopass-secret-777",
 ];
+
+/// `BITWARDEN` with a password on its second login: what the file holds if
+/// it's exported again after the preview.
+fn bitwarden_again() -> String {
+    BITWARDEN.replace(r#""password": null"#, r#""password": "nopass-secret-777""#)
+}
+
+/// A Bitwarden export of a secure note alone, which Deadbolt doesn't take.
+const NOTES_ONLY: &str = r#"{
+  "encrypted": false,
+  "folders": [],
+  "items": [
+    { "id": "6b1c", "type": 2, "name": "Wifi", "notes": "wifi-secret-666", "favorite": false, "secureNote": { "type": 0 } }
+  ]
+}"#;
 
 /// The app for a set-up `device`, unlocked in its vault.
 fn vault(device: &Device) -> Runtime<App> {
@@ -102,10 +119,10 @@ fn device() -> Device {
 fn drop_file(rt: &mut Runtime<App>, path: PathBuf) {
     rt.drag_files(vec![path.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
-    assert!(rt.state.import.hover, "the drop zone lights up");
+    assert!(rt.state.drop_hovering(), "the drop zone lights up");
     rt.drop_files(vec![path], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
-    assert!(!rt.state.import.hover);
+    assert!(!rt.state.drop_hovering());
 }
 
 fn previewing(s: &App) -> bool {
@@ -210,7 +227,7 @@ fn a_file_that_isnt_an_export_says_so() {
     let notes = device.file("notes.txt", "hello");
     rt.drag_files(vec![notes.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
-    assert!(!rt.state.import.hover);
+    assert!(!rt.state.drop_hovering());
     rt.drop_files(vec![notes], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
     assert_eq!(rt.state.import.phase, Phase::Idle);
@@ -263,12 +280,16 @@ fn choose_file_previews_the_chosen_export() {
         },
     ]);
 
-    // Cancelling the dialog leaves the drop zone as it was.
+    // Cancelling the dialog leaves the vault as it was: the view isn't
+    // opened by Choose File…, so a vault that gains items isn't left on it.
+    assert!(!rt.state.import.open);
     press(&mut rt, "choose");
+    assert!(!rt.state.import.open, "not open while the dialog is up");
     until(&mut rt, "the cancelled dialog", |s| {
         s.import.phase == Phase::Idle
     });
     assert_eq!(rt.state.import.error, None);
+    assert!(!rt.state.import.open);
 
     press(&mut rt, "choose");
     until(&mut rt, "the preview", previewing);
@@ -314,6 +335,53 @@ fn locking_forgets_the_import() {
     assert!(device.output(&["ls"]).is_empty());
 }
 
+#[test]
+fn a_file_changed_since_its_preview_is_previewed_again() {
+    let device = device();
+    let file = device.file("export.json", BITWARDEN);
+    let mut rt = vault(&device);
+    drop_file(&mut rt, file.clone());
+    until(&mut rt, "the preview", previewing);
+    assert!(shows(&rt, "1 new login · 1 card"));
+    assert!(!shows(&rt, "changed since the preview"));
+
+    // Exported again before Import: nothing unpreviewed is written.
+    std::fs::write(&file, bitwarden_again()).unwrap();
+    rt.key(key(Key::Enter));
+    until(
+        &mut rt,
+        "the fresh preview",
+        |s| matches!(&s.import.phase, Phase::Preview(p) if p.changed),
+    );
+    assert!(shows(&rt, "export.json changed since the preview"));
+    assert!(shows(&rt, "2 new logins · 1 card"));
+    assert!(shows(&rt, "Import 3 items"));
+    assert!(device.output(&["ls"]).is_empty(), "nothing was imported");
+    no_secrets(&rt);
+
+    // Import now brings in what that preview showed.
+    rt.key(key(Key::Enter));
+    until(&mut rt, "the imported items", |s| {
+        s.items.len() == 3 && s.import.phase == Phase::Idle
+    });
+    assert_eq!(device.output(&["ls"]).lines().count(), 3);
+}
+
+#[test]
+fn an_export_with_nothing_deadbolt_takes_says_so() {
+    let device = device();
+    let mut rt = vault(&device);
+    drop_file(&mut rt, device.file("notes.json", NOTES_ONLY));
+    until(&mut rt, "the preview", previewing);
+    assert!(shows(&rt, "Nothing in this export can be imported"));
+    assert!(!shows(&rt, "Everything in this export is already in"));
+    assert!(shows(&rt, "Skipped 1 secure note"));
+    rt.key(key(Key::Enter));
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.import.showing(), "Done closes it");
+    assert!(device.output(&["ls"]).is_empty());
+}
+
 /// A scene, offline, settled.
 fn scene(name: &str) -> Runtime<App> {
     let app = rune::tooling::initial_state(&deadbolt_app::spec(), Some(name));
@@ -354,4 +422,88 @@ fn the_rolling_label_is_centred_in_its_button() {
         (left - right).abs() < 0.5,
         "insets {left} and {right}; button {button:?}, label {label:?}"
     );
+}
+
+/// The selected item is hidden under the import view, so Return and
+/// ⇧Return don't copy from it; ↑↓ go back to it without moving.
+#[test]
+fn keys_dont_reach_the_item_under_the_import_view() {
+    let mut rt = scene("import");
+    let selected = rt.state.selected.clone();
+    assert!(selected.is_some() && rt.state.search.focused && rt.state.import.showing());
+    for shift in [false, true] {
+        rt.key(KeyEvent {
+            key: Key::Enter,
+            mods: Mods {
+                shift,
+                ..Mods::default()
+            },
+        });
+        rt.frame(1.0 / 60.0);
+        assert!(rt.state.copy.is_none(), "copied with shift {shift}");
+        assert!(rt.state.import.showing());
+    }
+    rt.key(key(Key::Down));
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.import.showing());
+    assert_eq!(rt.state.selected, selected, "back to the item, unmoved");
+
+    rt.key(key(Key::Enter));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.copy.is_some(), "Return copies once it shows");
+}
+
+/// A drag the window stops hearing about (Escape, or the install page
+/// opening over the vault) doesn't leave the import view up.
+#[test]
+fn a_drag_cut_short_doesnt_stick() {
+    let export = PathBuf::from("/fixture/export.1pux");
+    let mut rt = scene("vault");
+    rt.drag_files(vec![export.clone()], Some((600.0, 300.0)));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.drop_hovering() && rt.find("drop-zone").is_some());
+    rt.key(key(Key::Escape));
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.drop_hovering() && rt.find("drop-zone").is_none());
+    rt.drag_files_leave();
+    rt.frame(1.0 / 60.0);
+
+    rt.state.installer = Some(Installer::fixture());
+    rt.drag_files(vec![export], Some((600.0, 300.0)));
+    rt.frame(1.0 / 60.0);
+    assert!(rt.state.drop_hovering());
+    rt.state.show_installer();
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.drop_hovering());
+    // The drag ends over the install page, which takes no drops.
+    rt.drag_files_leave();
+    rt.frame(1.0 / 60.0);
+    rt.state.installer.as_mut().unwrap().close();
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.drop_hovering() && rt.find("drop-zone").is_none());
+}
+
+/// ⇧⌘I from the install page leaves it as Close would, so its offer in the
+/// vault stays answered; with the page shut, the offer is left alone.
+#[test]
+fn import_passwords_closes_the_install_page_as_answered() {
+    let mut rt = scene("install-command");
+    rt.state.show_import();
+    let installer = rt.state.installer.as_ref().unwrap();
+    assert!(!installer.open && !installer.offering());
+
+    let mut rt = scene("command-offer");
+    rt.state.show_import();
+    assert!(rt.state.installer.as_ref().unwrap().offering());
+}
+
+/// A second Choose File… while a dialog is still up (its import cancelled
+/// meanwhile) shows no second dialog: the open one answers for it.
+#[test]
+fn one_file_dialog_at_a_time() {
+    let mut slot = DialogSlot::default();
+    assert!(slot.begin(1));
+    assert!(!slot.begin(2), "no second dialog");
+    assert_eq!(slot.end(), Some(2), "the open one answers the latest");
+    assert!(slot.begin(3), "another once it's gone");
 }

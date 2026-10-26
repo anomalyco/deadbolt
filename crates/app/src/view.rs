@@ -51,7 +51,7 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
         .child(screen.grow(1.0).w_full().transition(replace()))
         .children(layer);
     // An export dropped anywhere on the open vault goes straight to its preview.
-    if s.screen == Screen::Vault && !s.installing() {
+    if s.accepts_drops() {
         root.on_drop_files(|s: &mut App, files, _| s.drop_files(files))
             .accepts_extensions(crate::import::EXTENSIONS)
             .on_drop_hover(|s: &mut App, over, tx| {
@@ -413,7 +413,7 @@ fn detail(s: &App, k: &Kit) -> El {
     let offer = s.loaded.then(|| crate::install::offer(s, k)).flatten();
     let shortcut = crate::shortcut::notice(s, k);
     let imported = crate::import::view::imported(s, k);
-    let importing = s.loaded && (s.import.showing() || s.items.is_empty());
+    let importing = s.loaded && (s.import.showing() || s.drop_hovering() || s.items.is_empty());
     if importing {
         // An empty vault keeps its guide, with the drop zone, until there's a preview.
         let content = if s.items.is_empty() && s.import.preview().is_none() {

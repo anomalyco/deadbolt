@@ -348,6 +348,32 @@ const SCENES: &[Scene] = &[
             ..import_report()
         }));
     }),
+    // An export of notes and identities only: nothing Deadbolt takes.
+    ("import-nothing-to-import", |s| {
+        vault(s);
+        s.import.open = true;
+        s.import.phase = import::Phase::Preview(import_preview(ImportReport {
+            logins: 0,
+            cards: 0,
+            duplicates: 0,
+            warnings: Vec::new(),
+            ..import_report()
+        }));
+    }),
+    // Import found the file changed since its preview: a fresh preview.
+    ("import-changed", |s| {
+        empty_vault(s);
+        s.import.open = true;
+        s.import.phase = import::Phase::Preview(import::Preview {
+            changed: true,
+            ..import_preview(ImportReport {
+                logins: 215,
+                cards: 3,
+                duplicates: 0,
+                ..import_report()
+            })
+        });
+    }),
     ("import-error", |s| {
         empty_vault(s);
         s.import.error = Some(Notice {
@@ -598,6 +624,8 @@ fn import_preview(report: ImportReport) -> import::Preview {
         path: "/fixture/1PasswordExport-2026-10-25.1pux".into(),
         name: "1PasswordExport-2026-10-25.1pux".into(),
         report,
+        digest: blake3::hash(b"fixture"),
+        changed: false,
     }
 }
 

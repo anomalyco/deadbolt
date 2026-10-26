@@ -378,6 +378,9 @@ impl App {
         if screen != Screen::Locked {
             self.passphrase.clear();
         }
+        if screen != self.screen {
+            self.import.hover = false;
+        }
         self.screen = screen;
     }
 
@@ -573,10 +576,6 @@ impl App {
         }
         match ev.key {
             Key::Up | Key::Down => {
-                // Moving the selection goes back to the items.
-                if !self.items.is_empty() {
-                    self.cancel_import();
-                }
                 self.step(if ev.key == Key::Up { -1 } else { 1 });
                 if let Some(id) = &self.selected {
                     tx.scroll_into_view(format!("item-{id}"));

@@ -42,7 +42,9 @@ pub enum Job {
     /// or only say what it would import. The text never leaves this thread.
     Import {
         path: PathBuf,
-        apply: bool,
+        /// The digest of the export as previewed, to import it; `None` to
+        /// preview. The file imports only if it still has that digest.
+        apply: Option<blake3::Hash>,
         seq: u64,
     },
 }
@@ -64,7 +66,7 @@ pub enum Done {
     Imported {
         seq: u64,
         apply: bool,
-        result: Result<ImportReport, ImportFailure>,
+        result: Result<Imported, ImportFailure>,
     },
     /// The file Choose File… picked; `None` if it was cancelled.
     Chosen {
@@ -136,6 +138,56 @@ impl From<Error> for Failure {
     }
 }
 
+/// What the agent did with an export.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Imported {
+    /// What it would import. `changed` when this was to be an import but the
+    /// file no longer had the digest previewed, so nothing was imported.
+    Preview {
+        report: ImportReport,
+        digest: blake3::Hash,
+        changed: bool,
+    },
+    Done(ImportReport),
+}
+
+/// Whether a file dialog is up, and which Choose File… it answers.
+#[derive(Debug, Default)]
+pub struct DialogSlot(Option<u64>);
+
+impl DialogSlot {
+    /// True when no dialog is up, so one should be shown for `seq`. With one
+    /// up, that one answers for `seq` now.
+    pub fn begin(&mut self, seq: u64) -> bool {
+        self.0.replace(seq).is_none()
+    }
+
+    /// The dialog went: which Choose File… it answers.
+    pub fn end(&mut self) -> Option<u64> {
+        self.0.take()
+    }
+}
+
+/// Marks the dialog gone when it answers, or when its thread ends (or never
+/// starts) without answering.
+struct DialogUp(Arc<Mutex<DialogSlot>>);
+
+impl DialogUp {
+    fn answered(self) -> u64 {
+        lock(&self.0).end().unwrap_or_default()
+    }
+}
+
+impl Drop for DialogUp {
+    fn drop(&mut self) {
+        lock(&self.0).end();
+    }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Why an export wasn't read or imported.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ImportFailure {
@@ -173,6 +225,7 @@ pub struct Agent {
     waker: Arc<Mutex<Option<Waker>>>,
     /// For file dialogs, which answer on threads of their own.
     post: Post,
+    dialog: Arc<Mutex<DialogSlot>>,
     /// Dropping it ends the watch thread.
     _watching: Option<oneshot::Sender<()>>,
 }
@@ -208,6 +261,7 @@ impl Agent {
             inbox,
             post,
             waker,
+            dialog: Arc::default(),
             _watching: Some(watching),
         }
     }
@@ -224,6 +278,7 @@ impl Agent {
                 waker: waker.clone(),
             },
             waker,
+            dialog: Arc::default(),
             _watching: None,
         }
     }
@@ -242,6 +297,7 @@ impl Agent {
                 waker: waker.clone(),
             },
             waker,
+            dialog: Arc::default(),
             _watching: None,
         };
         (agent, requests, results)
@@ -265,9 +321,15 @@ impl Agent {
 
     /// Shows Choose File…'s Open dialog on a thread of its own, which waits
     /// for it (a native one is presented on the main thread's run loop, which
-    /// must not wait), and posts `Done::Chosen`.
+    /// must not wait), and posts `Done::Chosen`. With a dialog already up
+    /// (its import cancelled, or the vault locked, meanwhile) it shows no
+    /// second one: that one answers for `seq` instead.
     pub fn choose_file(&self, dialogs: FileDialogs, options: FileDialogOptions, seq: u64) {
+        if !lock(&self.dialog).begin(seq) {
+            return;
+        }
         let post = self.post.clone();
+        let up = DialogUp(self.dialog.clone());
         let spawned = std::thread::Builder::new()
             .name("deadbolt-file-dialog".into())
             .spawn(move || {
@@ -277,6 +339,7 @@ impl Agent {
                         .map_err(|e| e.to_string()),
                     Err(e) => Err(e.to_string()),
                 };
+                let seq = up.answered();
                 post.send(Done::Chosen { seq, result });
             });
         if let Err(e) = spawned {
@@ -452,25 +515,42 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         }
         Job::Import { path, apply, seq } => Done::Imported {
             seq,
-            apply,
+            apply: apply.is_some(),
             result: import(paths, &path, apply).await,
         },
     }
 }
 
 /// The export's text goes into the request, and with it is wiped once sent.
-async fn import(paths: &Paths, path: &Path, apply: bool) -> Result<ImportReport, ImportFailure> {
+/// An import goes ahead only if the file still reads as it was previewed;
+/// otherwise this previews it again.
+async fn import(
+    paths: &Paths,
+    path: &Path,
+    apply: Option<blake3::Hash>,
+) -> Result<Imported, ImportFailure> {
     let export = export::read(path)?;
+    let digest = blake3::hash(export.as_bytes());
+    let changed = apply.is_some_and(|previewed| previewed != digest);
     let command = Command::Import {
         vault: None,
         export,
-        apply,
+        apply: apply.is_some() && !changed,
     };
-    match deadbolt_client::simple(paths, command).await {
-        Ok(Reply::Import { report }) => Ok(report),
-        Ok(_) => Err(ImportFailure::Agent(unexpected())),
-        Err(error) => Err(ImportFailure::Agent(error.into())),
-    }
+    let report = match deadbolt_client::simple(paths, command).await {
+        Ok(Reply::Import { report }) => report,
+        Ok(_) => return Err(ImportFailure::Agent(unexpected())),
+        Err(error) => return Err(ImportFailure::Agent(error.into())),
+    };
+    Ok(if apply.is_some() && !changed {
+        Imported::Done(report)
+    } else {
+        Imported::Preview {
+            report,
+            digest,
+            changed,
+        }
+    })
 }
 
 fn unexpected() -> Failure {

@@ -497,6 +497,17 @@ impl Installer {
 // -------------------------------------------------------------------------------------------
 // Views: the install page, the vault's one-time offer, and the footer's Settings.
 
+impl crate::model::App {
+    /// Opens the install page over the vault. It takes no drops, so a drag in
+    /// progress is forgotten: the window won't hear when it ends.
+    pub fn show_installer(&mut self) {
+        if let Some(i) = &mut self.installer {
+            self.import.hover = false;
+            i.show();
+        }
+    }
+}
+
 mod view {
     use rune::{El, Transition, col, row, text};
     use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
@@ -781,11 +792,7 @@ mod view {
                         Button::new(label)
                             .variant(ButtonVariant::Neutral)
                             .control_size(ControlSize::Large)
-                            .on_press(|s: &mut App| {
-                                if let Some(i) = installer(s) {
-                                    i.show();
-                                }
-                            })
+                            .on_press(|s: &mut App| s.show_installer())
                             .build(k)
                             .key("open"),
                     )
@@ -819,9 +826,7 @@ mod view {
                 .control_size(ControlSize::Large)
                 .on_press(|s: &mut App| {
                     s.close_settings();
-                    if let Some(i) = installer(s) {
-                        i.show();
-                    }
+                    s.show_installer();
                 })
                 .build(k)
                 .key("install"),
