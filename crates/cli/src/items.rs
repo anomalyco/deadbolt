@@ -16,7 +16,7 @@ pub enum ItemCommand {
     ///
     /// Example: deadbolt new login username=dax url=github.com
     New {
-        /// Item type: login or card.
+        /// Item type: login, card, note, ssh or identity.
         #[arg(value_name = "TYPE")]
         kind: String,
         /// `field[:type]=value`; `field=-` reads the value from stdin.
@@ -32,7 +32,8 @@ pub enum ItemCommand {
         #[arg(long)]
         no_symbols: bool,
     },
-    /// Print one field's raw value (default: login password, card number).
+    /// Print one field's raw value (default: login password, card number,
+    /// note body, SSH private key, identity email).
     Get {
         /// Words that must all match, or an id prefix.
         #[arg(required = true, value_name = "QUERY")]
@@ -48,7 +49,8 @@ pub enum ItemCommand {
         #[arg(long)]
         reveal: bool,
     },
-    /// List items: short id, label, username or card expiry.
+    /// List items: short id, label, and username, card expiry, SSH key
+    /// comment or fingerprint, or identity email or phone.
     Ls {
         #[arg(value_name = "QUERY")]
         query: Vec<String>,
@@ -170,9 +172,7 @@ fn fill_required(kind: &str, inputs: &mut Vec<FieldInput>) -> Result<()> {
         bail!("unknown item type {kind:?} (known: {})", known.join(", "));
     };
     for field in schema.fields.iter().filter(|f| f.required) {
-        if inputs.iter().any(|i| i.name == field.name)
-            || (kind, field.name) == ("login", "password")
-        {
+        if inputs.iter().any(|i| i.name == field.name) {
             continue;
         }
         let value = prompt::fill(
@@ -278,11 +278,8 @@ pub async fn run(
             let item = item(paths, command, from_stdin).await?;
             let name = match field.as_deref() {
                 Some(name) => name,
-                None => match item.kind.as_str() {
-                    "login" => "password",
-                    "card" => "number",
-                    kind => bail!("{kind} items have no default field; pass -f"),
-                },
+                None => crate::protocol::primary_field(&item.kind)
+                    .ok_or_else(|| anyhow!("{} items have no default field; pass -f", item.kind))?,
             };
             let field = item
                 .fields

@@ -33,12 +33,13 @@
 //! exchanged between different builds, so `Request` and `Status` must stay
 //! readable by older and newer ones.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-pub const PROTOCOL_VERSION: u32 = 3;
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -147,11 +148,21 @@ pub enum Command {
 
 /// A field as typed by the user. Without `kind`, the agent uses the item
 /// type's field type, else the field's current type, else `text`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FieldInput {
     pub name: String,
     pub kind: Option<String>,
     pub value: String,
+}
+
+impl std::fmt::Debug for FieldInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldInput")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -268,9 +279,8 @@ pub enum Reply {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportReport {
     pub source: ImportSource,
-    /// New logins and cards; duplicates are not counted here.
-    pub logins: usize,
-    pub cards: usize,
+    /// New items by item type; duplicates are not counted here.
+    pub new: BTreeMap<String, usize>,
     /// Items already in the vault, or earlier in the export.
     pub duplicates: usize,
     /// Items not imported, by reason.
@@ -303,6 +313,40 @@ impl fmt::Display for ImportSource {
     }
 }
 
+/// The item types clients name, in the order they list them: the type, then
+/// what one and several are called.
+pub const KINDS: [(&str, &str, &str); 5] = [
+    ("login", "login", "logins"),
+    ("card", "card", "cards"),
+    ("note", "secure note", "secure notes"),
+    ("ssh", "SSH key", "SSH keys"),
+    ("identity", "identity", "identities"),
+];
+
+/// What `count` items of type `kind` are called: "secure note", "SSH keys".
+/// A type this version doesn't know is called by its identifier.
+pub fn noun(kind: &str, count: usize) -> &str {
+    KINDS
+        .iter()
+        .find(|(k, ..)| *k == kind)
+        .map_or(kind, |(_, one, many)| if count == 1 { one } else { many })
+}
+
+/// The field an item is for, which clients copy or print by default: a
+/// login's password, a card's number, a secure note's body, an SSH key's
+/// private key, an identity's email. `None` for a type this version
+/// doesn't know.
+pub fn primary_field(kind: &str) -> Option<&'static str> {
+    Some(match kind {
+        "login" => "password",
+        "card" => "number",
+        "note" => "notes",
+        "ssh" => "private-key",
+        "identity" => "email",
+        _ => return None,
+    })
+}
+
 /// A count of something, named in the singular and the plural.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Tally {
@@ -323,19 +367,56 @@ impl fmt::Display for Tally {
 }
 
 impl ImportReport {
+    /// How many new items of type `kind`.
+    pub fn count(&self, kind: &str) -> usize {
+        self.new.get(kind).copied().unwrap_or(0)
+    }
+
+    /// How many new items in all.
+    pub fn total(&self) -> usize {
+        self.new.values().sum()
+    }
+
+    /// New items by type, in [`KINDS`] order then by identifier, leaving out
+    /// types with none: `[("login", 12), ("note", 3)]`.
+    pub fn counts(&self) -> Vec<(&str, usize)> {
+        let known = KINDS.iter().map(|(kind, ..)| *kind);
+        let other = self
+            .new
+            .keys()
+            .map(String::as_str)
+            .filter(|k| !KINDS.iter().any(|(kind, ..)| kind == k));
+        known
+            .chain(other)
+            .map(|kind| (kind, self.count(kind)))
+            .filter(|(_, n)| *n > 0)
+            .collect()
+    }
+
     /// The report as lines of text; `applied` is false for a preview.
     pub fn lines(&self, applied: bool) -> Vec<String> {
+        // Logins and cards always, the other types when there are some.
+        let mut kinds = vec!["login", "card"];
+        kinds.extend(
+            self.counts()
+                .into_iter()
+                .map(|(kind, _)| kind)
+                .filter(|kind| !matches!(*kind, "login" | "card")),
+        );
+        let counts: Vec<String> = kinds
+            .into_iter()
+            .map(|kind| format!("{} {}", noun(kind, 2), self.count(kind)))
+            .collect();
         let mut lines = vec![format!(
-            "{} {} from {} (logins {}, cards {})",
+            "{} {} from {} ({})",
             if applied {
                 "imported"
             } else {
                 "dry run: would import"
             },
-            self.logins + self.cards,
+            self.total(),
             self.source,
-            self.logins,
-            self.cards
+            counts.join(", ")
         )];
         if self.duplicates > 0 {
             let duplicates = Tally {
@@ -363,17 +444,29 @@ pub struct ItemInfo {
     pub kind: String,
     /// The name, or one derived from the fields.
     pub label: String,
-    /// Login username or card expiry, if any.
+    /// What the item is, if anything says: a login's username, a card's
+    /// expiry, an SSH key's comment or fingerprint, an identity's email or
+    /// phone. Never a secure note's body.
     pub detail: Option<String>,
     /// Known fields in schema order, then extra fields by name. Empty in lists.
     pub fields: Vec<FieldInfo>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct FieldInfo {
     pub name: String,
     pub kind: String,
     pub value: String,
+}
+
+impl std::fmt::Debug for FieldInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FieldInfo")
+            .field("name", &self.name)
+            .field("kind", &self.kind)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -429,6 +522,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn field_debug_redacts_values() {
+        let input = FieldInput {
+            name: "password".into(),
+            kind: None,
+            value: "private-marker".into(),
+        };
+        let info = FieldInfo {
+            name: "notes".into(),
+            kind: "secret".into(),
+            value: "private-marker".into(),
+        };
+        for debug in [format!("{input:?}"), format!("{info:?}")] {
+            assert!(debug.contains("<redacted>"), "{debug}");
+            assert!(!debug.contains("private-marker"), "{debug}");
+        }
+    }
+
+    #[test]
     fn import_reports_read_as_lines() {
         let tally = |count, one: &str, many: &str| Tally {
             count,
@@ -437,8 +548,7 @@ mod tests {
         };
         let report = ImportReport {
             source: ImportSource::OnePassword,
-            logins: 3,
-            cards: 1,
+            new: [("login".into(), 3), ("card".into(), 1)].into(),
             duplicates: 2,
             skipped: vec![tally(1, "secure note", "secure notes")],
             warnings: vec![tally(2, "URL kept as text", "URLs kept as text")],
@@ -454,10 +564,37 @@ mod tests {
                 "dropped: 1 favorite, 3 tags",
             ]
         );
+        let kinds = ImportReport {
+            source: ImportSource::Bitwarden,
+            new: [
+                ("identity".into(), 1),
+                ("note".into(), 2),
+                ("ssh".into(), 1),
+                ("future".into(), 1),
+            ]
+            .into(),
+            duplicates: 0,
+            skipped: vec![],
+            warnings: vec![],
+            dropped: vec![],
+        };
+        assert_eq!(
+            kinds.lines(true),
+            [
+                "imported 5 from Bitwarden (logins 0, cards 0, secure notes 2, SSH keys 1, identities 1, future 1)"
+            ]
+        );
+        assert_eq!(
+            kinds.counts(),
+            [("note", 2), ("ssh", 1), ("identity", 1), ("future", 1)]
+        );
+        assert_eq!(
+            (noun("ssh", 1), noun("identity", 2)),
+            ("SSH key", "identities")
+        );
         let empty = ImportReport {
             source: ImportSource::ApplePasswords,
-            logins: 0,
-            cards: 0,
+            new: BTreeMap::new(),
             duplicates: 1,
             skipped: vec![],
             warnings: vec![],
@@ -481,7 +618,7 @@ mod tests {
             command: Command::Watch,
         })
         .unwrap();
-        assert_eq!(request, r#"{"v":3,"cmd":"watch"}"#);
+        assert_eq!(request, r#"{"v":4,"cmd":"watch"}"#);
         assert!(matches!(
             serde_json::from_str::<Request>(&request).unwrap().command,
             Command::Watch

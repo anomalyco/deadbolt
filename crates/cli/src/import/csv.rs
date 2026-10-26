@@ -5,9 +5,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{
-    ARCHIVED, Builder, COLUMN, FAVORITE, Imported, NO_PASSWORD, SUPPORTED, Summary, TAG, item_name,
-};
+use super::{ARCHIVED, Builder, COLUMN, FAVORITE, Imported, SUPPORTED, Summary, TAG, item_name};
 use crate::protocol::ImportSource;
 
 /// Apple Passwords' header (macOS 15+, and Safari's before it).
@@ -164,14 +162,10 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
     Ok((out, summary))
 }
 
-/// A login from a row; `None` if it has no password.
+/// A login from a row; `None` if it is empty or invalid.
 fn login(row: Row, summary: &mut Summary) -> Option<Imported> {
-    let Some(password) = row.password else {
-        summary.skip(NO_PASSWORD);
-        return None;
-    };
     let mut b = Builder::new("login");
-    b.known("password", Some(password));
+    b.known("password", row.password);
     b.known("username", row.username);
     // The first is `otp`; any others become extra fields.
     for otp in row.otps {
@@ -200,7 +194,7 @@ No password,https://nopw.example,someone,,,
 ";
         let (items, report) = parse(export).unwrap();
         assert_eq!(report.source, ImportSource::ApplePasswords);
-        assert_eq!(items.len(), 3);
+        assert_eq!(items.len(), 4);
         assert_eq!(items[0].name.as_deref(), Some("example.com (dax)"));
         assert_eq!(
             fields(&items[0]),
@@ -224,14 +218,19 @@ No password,https://nopw.example,someone,,,
                 ("url", "url", "https://site.example"),
             ]
         );
-        assert_eq!(items[2].name, None);
-        assert_eq!(fields(&items[2]), [("password", "secret", "apple-pw-3")]);
+        // A login needs no password.
+        assert_eq!(
+            fields(&items[2]),
+            [
+                ("url", "url", "https://nopw.example"),
+                ("username", "text", "someone"),
+            ]
+        );
+        assert_eq!(items[3].name, None);
+        assert_eq!(fields(&items[3]), [("password", "secret", "apple-pw-3")]);
         assert_eq!(
             lines(&report),
-            [
-                "imported 3 from Apple Passwords (logins 3, cards 0)",
-                "skipped 1 login without password",
-            ]
+            ["imported 4 from Apple Passwords (logins 4, cards 0)"]
         );
     }
 

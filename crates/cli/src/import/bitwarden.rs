@@ -6,10 +6,10 @@ use deadbolt_core::FieldType;
 use serde_json::Value;
 
 use super::{
-    ATTACHMENT, BAD_CVV, BAD_EXPIRY, BANK_ACCOUNT, Builder, COLLECTION, DRIVERS_LICENSE, FAVORITE,
-    FOLDER, IDENTITY, Imported, LINKED_FIELD, NO_NUMBER, NO_PASSWORD, PASSKEYS, PASSPORT,
-    PASSWORD_HISTORY, SECURE_NOTE, SSH_KEY, Summary, UNKNOWN_TYPE, array, field_name, item_name,
-    month, number, text,
+    ATTACHMENT, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BANK_ACCOUNT, Builder, COLLECTION, DRIVERS_LICENSE,
+    FAVORITE, FOLDER, Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSKEYS, PASSPORT,
+    PASSWORD_HISTORY, Summary, UNKNOWN_TYPE, address, array, field_name, item_name, join, month,
+    number, text,
 };
 use crate::protocol::ImportSource;
 
@@ -43,13 +43,8 @@ impl Builder {
 
 fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let login = item.get("login").unwrap_or(&Value::Null);
-    let password = text(login, "password");
-    if password.is_none() {
-        summary.skip(NO_PASSWORD);
-        return None;
-    }
     let mut b = Builder::new("login");
-    b.known("password", password);
+    b.known("password", text(login, "password"));
     b.known("username", text(login, "username"));
     b.known("otp", text(login, "totp"));
     b.known("notes", text(item, "notes"));
@@ -94,6 +89,65 @@ fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
     b.finish("card", item_name(text(item, "name")), summary)
 }
 
+fn note(item: &Value, summary: &mut Summary) -> Option<Imported> {
+    let mut b = Builder::new("note");
+    b.known("notes", text(item, "notes"));
+    b.custom_fields(item, summary);
+    b.finish("note", item_name(text(item, "name")), summary)
+}
+
+fn ssh(item: &Value, summary: &mut Summary) -> Option<Imported> {
+    let key = item.get("sshKey").unwrap_or(&Value::Null);
+    let Some(private) = text(key, "privateKey").filter(|k| !k.trim().is_empty()) else {
+        summary.skip(NO_PRIVATE_KEY);
+        return None;
+    };
+    let mut b = Builder::new("ssh");
+    b.known("private-key", Some(private));
+    b.known("public-key", text(key, "publicKey"));
+    b.known("fingerprint", text(key, "keyFingerprint"));
+    b.known("notes", text(item, "notes"));
+    b.custom_fields(item, summary);
+    b.finish("ssh", item_name(text(item, "name")), summary)
+}
+
+fn identity(item: &Value, summary: &mut Summary) -> Option<Imported> {
+    let id = item.get("identity").unwrap_or(&Value::Null);
+    let get = |key: &str| text(id, key);
+    let mut b = Builder::new("identity");
+    b.known(
+        "name",
+        join([get("firstName"), get("middleName"), get("lastName")], " "),
+    );
+    b.known_or_extra("email", get("email"), BAD_EMAIL, summary);
+    b.known("phone", get("phone"));
+    b.known(
+        "address",
+        address(
+            [get("address1"), get("address2"), get("address3")],
+            get("city"),
+            get("state"),
+            get("postalCode"),
+            get("country"),
+        ),
+    );
+    b.known("national-id", get("ssn"));
+    b.known("passport", get("passportNumber"));
+    b.known("license", get("licenseNumber"));
+    for (key, name) in [
+        ("title", "title"),
+        ("company", "company"),
+        ("username", "username"),
+    ] {
+        if let Some(value) = get(key) {
+            b.extra(name, FieldType::Text, value);
+        }
+    }
+    b.known("notes", text(item, "notes"));
+    b.custom_fields(item, summary);
+    b.finish("identity", item_name(text(item, "name")), summary)
+}
+
 /// Maps a Bitwarden JSON export.
 pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
     if export.get("encrypted").and_then(Value::as_bool) == Some(true) {
@@ -107,25 +161,21 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
     summary.drop_some(COLLECTION, array(export, "collections").len());
     let mut out = Vec::new();
     for item in items {
-        let skip = match number(item, "type") {
-            Some(1) => None,
-            Some(2) => Some(SECURE_NOTE),
-            Some(3) => None,
-            Some(4) => Some(IDENTITY),
-            Some(5) => Some(SSH_KEY),
-            Some(6) => Some(BANK_ACCOUNT),
-            Some(7) => Some(DRIVERS_LICENSE),
-            Some(8) => Some(PASSPORT),
-            _ => Some(UNKNOWN_TYPE),
-        };
-        if let Some(skip) = skip {
-            summary.skip(skip);
-            continue;
-        }
-        let mapped = if number(item, "type") == Some(1) {
-            login(item, &mut summary)
-        } else {
-            card(item, &mut summary)
+        let mapped = match number(item, "type") {
+            Some(1) => login(item, &mut summary),
+            Some(2) => note(item, &mut summary),
+            Some(3) => card(item, &mut summary),
+            Some(4) => identity(item, &mut summary),
+            Some(5) => ssh(item, &mut summary),
+            other => {
+                summary.skip(match other {
+                    Some(6) => BANK_ACCOUNT,
+                    Some(7) => DRIVERS_LICENSE,
+                    Some(8) => PASSPORT,
+                    _ => UNKNOWN_TYPE,
+                });
+                continue;
+            }
         };
         let Some(mapped) = mapped else {
             continue;
@@ -274,15 +324,24 @@ mod tests {
       "type": 4,
       "name": "Me",
       "favorite": false,
-      "identity": { "title": "Mr", "firstName": "Dax", "ssn": "000-00-0000" }
+      "notes": "primary",
+      "identity": {
+        "title": "Mr", "firstName": "Dax", "middleName": null, "lastName": "Raad",
+        "address1": "1 Main St", "address2": "Apt 2", "address3": null, "city": "Springfield",
+        "state": "IL", "postalCode": "12345", "country": "US", "company": "Anomaly",
+        "email": "dax@example.com", "phone": "+1 555 0100", "ssn": "000-00-0000",
+        "username": "dax", "passportNumber": "X1234567", "licenseNumber": null
+      }
     },
     {
       "id": "8b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e",
       "type": 5,
       "name": "Deploy key",
       "favorite": false,
-      "sshKey": { "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----", "publicKey": "ssh-ed25519 AAAA", "keyFingerprint": "SHA256:x" }
+      "sshKey": { "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==\n-----END OPENSSH PRIVATE KEY-----", "publicKey": "ssh-ed25519 AAAA", "keyFingerprint": "SHA256:x" }
     },
+    { "id": "ab1c", "type": 5, "name": "Half key", "favorite": false, "sshKey": { "privateKey": "", "publicKey": "ssh-ed25519 BBBB" } },
+    { "id": "bb1c", "type": 2, "name": null, "notes": "  ", "favorite": false, "secureNote": { "type": 0 } },
     {
       "id": "9b1c2d3e-4f5a-4b6c-8d7e-9f0a1b2c3d4e",
       "type": 4,
@@ -296,7 +355,13 @@ mod tests {
     #[test]
     fn maps_a_bitwarden_export() {
         let (items, summary) = bitwarden(EXPORT).unwrap();
-        assert_eq!(items.len(), 4);
+        let kinds: Vec<_> = items.iter().map(|i| i.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                "login", "login", "login", "card", "card", "note", "identity", "ssh", "identity"
+            ]
+        );
         let github = &items[0];
         assert_eq!(
             (github.kind, github.name.as_deref()),
@@ -320,10 +385,12 @@ mod tests {
                 ("username", "text", "dax"),
             ]
         );
-        assert_eq!(items[1].name, None);
-        assert_eq!(fields(&items[1]), [("password", "secret", "minimal-pw")]);
+        // A login needs no password.
+        assert_eq!(fields(&items[1]), [("username", "text", "someone")]);
+        assert_eq!(items[2].name, None);
+        assert_eq!(fields(&items[2]), [("password", "secret", "minimal-pw")]);
         assert_eq!(
-            fields(&items[2]),
+            fields(&items[3]),
             [
                 ("brand", "text", "Visa"),
                 ("cardholder", "text", "Dax Raad"),
@@ -333,23 +400,70 @@ mod tests {
             ]
         );
         assert_eq!(
-            fields(&items[3]),
+            fields(&items[4]),
             [
                 ("brand", "text", "Amex"),
                 ("cvv", "secret", "1234"),
                 ("number", "secret", "378282246310005"),
             ]
         );
-        assert_eq!((summary.logins, summary.cards), (2, 2));
+        // A secure note's body is secret.
+        assert_eq!(
+            (items[5].name.as_deref(), fields(&items[5])),
+            (Some("Wifi"), vec![("notes", "secret", "the wifi password")])
+        );
+        assert_eq!(
+            fields(&items[6]),
+            [
+                (
+                    "address",
+                    "note",
+                    "1 Main St\nApt 2\nSpringfield, IL 12345\nUS"
+                ),
+                ("company", "text", "Anomaly"),
+                ("email", "email", "dax@example.com"),
+                ("name", "text", "Dax Raad"),
+                ("national-id", "secret", "000-00-0000"),
+                ("notes", "note", "primary"),
+                ("passport", "secret", "X1234567"),
+                ("phone", "text", "+1 555 0100"),
+                ("title", "text", "Mr"),
+                ("username", "text", "dax"),
+            ]
+        );
+        assert_eq!(
+            fields(&items[7]),
+            [
+                ("fingerprint", "text", "SHA256:x"),
+                (
+                    "private-key",
+                    "secret",
+                    "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaA==\n-----END OPENSSH PRIVATE KEY-----"
+                ),
+                ("public-key", "text", "ssh-ed25519 AAAA"),
+            ]
+        );
+        assert_eq!(
+            (items[8].name.as_deref(), fields(&items[8])),
+            (Some("Also me"), vec![])
+        );
+        assert_eq!(
+            summary.counts(),
+            [
+                ("login", 3),
+                ("card", 2),
+                ("note", 1),
+                ("ssh", 1),
+                ("identity", 2)
+            ]
+        );
         assert_eq!(
             lines(&summary),
             [
-                "imported 4 from Bitwarden (logins 2, cards 2)",
+                "imported 9 from Bitwarden (logins 3, cards 2, secure notes 1, SSH keys 1, identities 2)",
+                "skipped 1 SSH key without a private key",
                 "skipped 1 card without a valid number",
-                "skipped 2 identities",
-                "skipped 1 login without password",
-                "skipped 1 secure note",
-                "skipped 1 ssh key",
+                "skipped 1 empty item",
                 "warning: 1 URL that is not an absolute URL kept as text",
                 "warning: 1 invalid card code (cvv) kept as an extra field",
                 "dropped: 1 favorite, 2 folders, 1 item's password history, 1 linked field",
@@ -396,17 +510,70 @@ mod tests {
             {"type": 1, "name": "Blank", "login": {"username": "dax", "password": "  "}}
         ]}"#;
         let (items, summary) = bitwarden(export).unwrap();
-        assert_eq!(items.len(), 1);
+        assert_eq!(items.len(), 2);
         assert_eq!(
             fields(&items[0]),
             [("number", "secret", "4242424242424242")]
         );
+        assert_eq!(fields(&items[1]), [("username", "text", "dax")]);
         assert_eq!(
             lines(&summary),
             [
-                "imported 1 from Bitwarden (logins 0, cards 1)",
+                "imported 2 from Bitwarden (logins 1, cards 1)",
                 "skipped 1 card without a valid number",
-                "skipped 1 login without password",
+            ]
+        );
+    }
+
+    /// A custom field named like one of the type's own fields fills it when
+    /// it's unset and the value fits, rather than becoming `pin-2`.
+    #[test]
+    fn custom_fields_fill_the_types_own_fields() {
+        let export = r#"{"encrypted": false, "items": [
+            {"type": 3, "name": "Visa", "card": {"number": "4242424242424242"},
+             "fields": [{"name": "PIN", "value": "1234", "type": 1}]},
+            {"type": 3, "name": "Amex", "card": {"number": "378282246310005"},
+             "fields": [{"name": "pin", "value": "5678", "type": 0}, {"name": "cvv", "value": "abc", "type": 1}]},
+            {"type": 5, "name": "Deploy", "sshKey": {"privateKey": "bw-key"},
+             "fields": [{"name": "passphrase", "value": "bw-pass", "type": 1}, {"name": "comment", "value": "me@host", "type": 0}]},
+            {"type": 4, "name": "Me", "identity": {"firstName": "Dax"},
+             "fields": [{"name": "passport", "value": "bw-pp", "type": 1}, {"name": "license", "value": "bw-dl", "type": 0},
+                        {"name": "email", "value": "not an email", "type": 0}, {"name": "phone", "value": "bw-phone", "type": 1}]}
+        ]}"#;
+        let (items, _) = bitwarden(export).unwrap();
+        assert_eq!(
+            fields(&items[0]),
+            [
+                ("number", "secret", "4242424242424242"),
+                ("pin", "secret", "1234"),
+            ]
+        );
+        // A plain-text PIN is made secret; a CVV that isn't one stays aside.
+        assert_eq!(
+            fields(&items[1]),
+            [
+                ("cvv-2", "secret", "abc"),
+                ("number", "secret", "378282246310005"),
+                ("pin", "secret", "5678"),
+            ]
+        );
+        assert_eq!(
+            fields(&items[2]),
+            [
+                ("comment", "text", "me@host"),
+                ("passphrase", "secret", "bw-pass"),
+                ("private-key", "secret", "bw-key"),
+            ]
+        );
+        // A hidden value never fills a plain-text field.
+        assert_eq!(
+            fields(&items[3]),
+            [
+                ("email-2", "text", "not an email"),
+                ("license", "secret", "bw-dl"),
+                ("name", "text", "Dax"),
+                ("passport", "secret", "bw-pp"),
+                ("phone-2", "secret", "bw-phone"),
             ]
         );
     }
@@ -415,7 +582,7 @@ mod tests {
     fn counts_unsupported_types() {
         let export = r#"{"encrypted": false, "folders": [], "items": [
             {"type": 6, "name": "Bank"}, {"type": 7, "name": "DL"}, {"type": 8, "name": "PP"},
-            {"type": 99, "name": "Future"}, {"name": "No type"}, {"type": "2", "name": "Note"},
+            {"type": 99, "name": "Future"}, {"name": "No type"},
             {"type": 3, "name": "No card", "card": null}
         ]}"#;
         let (items, summary) = bitwarden(export).unwrap();
@@ -429,7 +596,6 @@ mod tests {
                 "skipped 1 driver's license",
                 "skipped 2 items of unknown type",
                 "skipped 1 passport",
-                "skipped 1 secure note",
             ]
         );
     }

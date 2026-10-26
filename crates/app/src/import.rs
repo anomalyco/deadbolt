@@ -9,7 +9,7 @@ pub mod view;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use deadbolt_client::protocol::{ErrorCode, ImportReport, Tally};
+use deadbolt_client::protocol::{ErrorCode, ImportReport, Tally, noun};
 use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
 use crate::agent::{ImportFailure, Imported, Job};
@@ -74,7 +74,7 @@ pub struct Preview {
 
 impl Preview {
     pub fn new_items(&self) -> usize {
-        self.report.logins + self.report.cards
+        self.report.total()
     }
 
     /// Nothing new, and that's because it's all here already (rather than
@@ -262,8 +262,8 @@ impl App {
             _ => return,
         };
         match result {
-            Ok(Imported::Done(report)) if report.logins + report.cards > 0 => {
-                let n = report.logins + report.cards;
+            Ok(Imported::Done(report)) if report.total() > 0 => {
+                let n = report.total();
                 self.import.imported =
                     Some((format!("Imported {n} from {}", report.source), self.clock));
                 tx.wake_after(Duration::from_secs_f64(IMPORTED_FOR));
@@ -450,24 +450,21 @@ pub fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
 }
 
-/// "12 new logins · 3 cards", "1 new login", "2 new cards".
+/// "12 new logins · 3 cards · 2 secure notes", "1 new login", "2 new SSH keys".
 pub fn new_items(report: &ImportReport) -> String {
-    match (report.logins, report.cards) {
-        (0, cards) => format!(
-            "{} new {}",
-            cards,
-            if cards == 1 { "card" } else { "cards" }
-        ),
-        (logins, 0) => format!(
-            "{logins} new {}",
-            if logins == 1 { "login" } else { "logins" }
-        ),
-        (logins, cards) => format!(
-            "{logins} new {} · {}",
-            if logins == 1 { "login" } else { "logins" },
-            plural(cards, "card", "cards")
-        ),
+    let counts = report.counts();
+    if counts.is_empty() {
+        return "0 new items".to_owned();
     }
+    counts
+        .iter()
+        .enumerate()
+        .map(|(i, &(kind, n))| {
+            let new = if i == 0 { "new " } else { "" };
+            format!("{n} {new}{}", noun(kind, n))
+        })
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 /// What won't come across, quieter under the counts.
@@ -523,11 +520,10 @@ mod tests {
 
     use super::*;
 
-    fn report(logins: usize, cards: usize) -> ImportReport {
+    fn report(counts: &[(&str, usize)]) -> ImportReport {
         ImportReport {
             source: ImportSource::OnePassword,
-            logins,
-            cards,
+            new: counts.iter().map(|&(k, n)| (k.to_owned(), n)).collect(),
             duplicates: 0,
             skipped: Vec::new(),
             warnings: Vec::new(),
@@ -537,10 +533,16 @@ mod tests {
 
     #[test]
     fn counts_read_naturally() {
-        assert_eq!(new_items(&report(12, 3)), "12 new logins · 3 cards");
-        assert_eq!(new_items(&report(1, 1)), "1 new login · 1 card");
-        assert_eq!(new_items(&report(1, 0)), "1 new login");
-        assert_eq!(new_items(&report(0, 2)), "2 new cards");
+        let r = |counts: &[(&str, usize)]| new_items(&report(counts));
+        assert_eq!(r(&[("login", 12), ("card", 3)]), "12 new logins · 3 cards");
+        assert_eq!(r(&[("login", 1), ("card", 1)]), "1 new login · 1 card");
+        assert_eq!(r(&[("login", 1), ("card", 0)]), "1 new login");
+        assert_eq!(r(&[("card", 2)]), "2 new cards");
+        assert_eq!(
+            r(&[("note", 3), ("login", 2), ("identity", 1), ("ssh", 2)]),
+            "2 new logins · 3 secure notes · 2 SSH keys · 1 identity"
+        );
+        assert_eq!(r(&[("ssh", 1)]), "1 new SSH key");
         assert_eq!(import_label(1), "Import 1 item");
         assert_eq!(import_label(15), "Import 15 items");
     }

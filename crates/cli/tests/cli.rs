@@ -452,7 +452,7 @@ fn replaces_an_agent_of_an_older_protocol() {
 #[test]
 fn leaves_an_agent_of_a_newer_protocol_running() {
     let a = Device::new();
-    let newer = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "4"));
+    let newer = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_PROTOCOL", "5"));
     assert!(newer.status.success());
     let pid = a.agent_pid().unwrap();
 
@@ -658,6 +658,7 @@ fn items() {
     // Schema rejection.
     for (args, error) in [
         (&["new", "wifi", "password=x"][..], "unknown item type"),
+        (&["new", "note"], "needs a name or a field"),
         (&["new", "card", "cvv=123"], "missing required field number"),
         (
             &["new", "card", "number=12ab34567890"],
@@ -707,9 +708,11 @@ fn items() {
             .contains("no field username")
     );
     assert!(
-        a.fail(&["unset", "gitlab", "-f", "password"])
+        a.fail(&["unset", "4242", "-f", "number"])
             .contains("required")
     );
+    // A login needs no password.
+    a.run(&["unset", "gitlab", "-f", "password"]);
     assert_eq!(a.run(&["rm", "gitlab"]).trim(), github);
     assert!(a.fail(&["get", "gitlab"]).contains("no item matches"));
     assert_eq!(a.run(&["ls", "--type", "login"]).lines().count(), 4);
@@ -831,16 +834,14 @@ fn import() {
         }
     };
 
-    let summary = "1 from Bitwarden (logins 1, cards 1)\n\
-        skipped 1 login without password\n\
-        skipped 1 secure note\n\
+    let summary = "4 from Bitwarden (logins 2, cards 1, secure notes 1)\n\
         dropped: 1 favorite, 1 folder, 1 item's password history\n";
     let output = a.try_run(&["import", "--dry-run", file.to_str().unwrap()]);
     assert!(output.status.success());
     no_secrets(&output);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("dry run: would import 2{}", &summary[1..])
+        format!("dry run: would import {summary}")
     );
     assert_eq!(a.run(&["ls"]), "");
 
@@ -849,13 +850,17 @@ fn import() {
     no_secrets(&output);
     assert_eq!(
         String::from_utf8(output.stdout).unwrap(),
-        format!("imported 2{}", &summary[1..])
+        format!("imported {summary}")
     );
 
     let ls = a.run(&["ls"]);
     let lines: Vec<&str> = ls.lines().map(|l| l.split_once('\t').unwrap().1).collect();
-    assert_eq!(lines, ["GitHub\tdax", "Visa •••• 4242\t04/27"]);
+    assert_eq!(
+        lines,
+        ["GitHub\tdax", "Nopass\tx", "Visa •••• 4242\t04/27", "Wifi"]
+    );
     assert_eq!(a.run(&["get", "github"]), "github-secret-444\n");
+    assert_eq!(a.run(&["get", "wifi"]), "wifi-secret-666\n");
     assert_eq!(
         a.run(&["get", "github", "-f", "recovery-code"]),
         "recovery-secret-333\n"
@@ -881,18 +886,18 @@ fn import() {
     assert!(output.status.success());
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(
-        stdout.starts_with("imported 0 from Bitwarden (logins 0, cards 0)\nskipped 2 duplicates\n"),
+        stdout.starts_with("imported 0 from Bitwarden (logins 0, cards 0)\nskipped 4 duplicates\n"),
         "{stdout}"
     );
-    assert_eq!(a.run(&["ls"]).lines().count(), 2);
+    assert_eq!(a.run(&["ls"]).lines().count(), 4);
 
     // From stdin, into another vault.
     a.run(&["init", "work"]);
     let output = a.try_run_stdin(&["-v", "work", "import", "-"], BITWARDEN_EXPORT);
     assert!(output.status.success());
     no_secrets(&output);
-    assert_eq!(a.run(&["-v", "work", "ls"]).lines().count(), 2);
-    assert_eq!(a.run(&["ls"]).lines().count(), 2);
+    assert_eq!(a.run(&["-v", "work", "ls"]).lines().count(), 4);
+    assert_eq!(a.run(&["ls"]).lines().count(), 4);
 
     let encrypted = a.path("encrypted.json");
     std::fs::write(

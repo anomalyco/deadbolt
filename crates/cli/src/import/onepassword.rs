@@ -9,30 +9,16 @@ use deadbolt_core::FieldType;
 use serde_json::Value;
 
 use super::{
-    ARCHIVED, ATTACHMENT, BAD_CVV, BAD_EXPIRY, BANK_ACCOUNT, Builder, DRIVERS_LICENSE, FAVORITE,
-    IDENTITY, Imported, LINKED_FIELD, NO_NUMBER, NO_PASSWORD, PASSPORT, PASSWORD_HISTORY, Reason,
-    SECURE_NOTE, SSH_KEY, Summary, TAG, UNKNOWN_TYPE, array, field_name, item_name, month, number,
-    scalar, text,
+    ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, Builder, FAVORITE,
+    Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSWORD_HISTORY, Reason, Summary, TAG,
+    UNKNOWN_TYPE, address, array, field_name, item_name, join, month, number, scalar, text,
 };
 use crate::protocol::ImportSource;
 
 /// Item categories that are skipped, by `categoryUuid`.
 fn skipped(category: &str) -> Reason {
     match category {
-        "003" => SECURE_NOTE,
-        "004" => IDENTITY,
         "006" => ("document", "documents"),
-        "100" => ("software license", "software licenses"),
-        "101" => BANK_ACCOUNT,
-        "103" => DRIVERS_LICENSE,
-        "104" => ("outdoor license", "outdoor licenses"),
-        "105" => ("membership", "memberships"),
-        "106" => PASSPORT,
-        "107" => ("reward program", "reward programs"),
-        "108" => ("social security number", "social security numbers"),
-        "111" => ("email account", "email accounts"),
-        "113" => ("medical record", "medical records"),
-        "114" => SSH_KEY,
         _ => UNKNOWN_TYPE,
     }
 }
@@ -59,6 +45,8 @@ impl Entry {
             "url" => FieldType::Url,
             "email" => FieldType::Email,
             "monthYear" => FieldType::Month,
+            "date" => FieldType::Date,
+            "address" => FieldType::Note,
             _ => FieldType::Text,
         }
     }
@@ -157,19 +145,23 @@ fn section_value(key: &str, value: &Value) -> Option<String> {
     match key {
         "file" | "reference" => None,
         "email" if value.is_object() => text(value, "email_address"),
-        "sshKey" if value.is_object() => text(value, "privateKey"),
+        // The top-level key's format varies; the metadata's is PKCS#8 PEM.
+        "sshKey" if value.is_object() => value
+            .get("metadata")
+            .and_then(|m| text(m, "privateKey"))
+            .or_else(|| text(value, "privateKey")),
         "date" => value.as_i64().map(date),
         "monthYear" => match value {
             Value::Number(n) => n.as_i64().map(month_year),
             _ => scalar(value),
         },
-        "address" => {
-            let parts: Vec<String> = ["street", "city", "state", "zip", "country"]
-                .iter()
-                .filter_map(|k| text(value, k))
-                .collect();
-            (!parts.is_empty()).then(|| parts.join(", "))
-        }
+        "address" => address(
+            [text(value, "street")],
+            text(value, "city"),
+            text(value, "state"),
+            text(value, "zip"),
+            text(value, "country"),
+        ),
         _ => scalar(value),
     }
 }
@@ -182,10 +174,12 @@ fn month_year(n: i64) -> String {
         .unwrap_or_else(|| n.to_string())
 }
 
-/// Unix seconds as a UTC date, `YYYY-MM-DD`.
+/// A 1Password date, Unix seconds, as `YYYY-MM-DD`: the nearest day, so a
+/// day's local midnight from UTC+11 to UTC-12, or its noon UTC, lands on it
+/// rather than the day before.
 fn date(secs: i64) -> String {
     // Howard Hinnant's days-to-civil.
-    let z = secs.div_euclid(86_400) + 719_468;
+    let z = (secs + 43_199).div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z.rem_euclid(146_097);
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
@@ -235,10 +229,6 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
         .or_else(|| entries.take(|e| e.designation.is_none() && e.is("password")))
         .or_else(|| entries.take(|e| e.designation.is_none() && e.is("credential")))
         .or_else(|| entries.take(|e| e.designation.is_none() && e.is("wireless_password")));
-    if password.is_none() {
-        summary.skip(NO_PASSWORD);
-        return None;
-    }
     let mut b = Builder::new("login");
     b.known("password", password);
     let username = entries
@@ -288,6 +278,97 @@ fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
     b.finish("card", item_name(text(overview, "title")), summary)
 }
 
+/// A secure note, and every category with no closer type here (software
+/// licenses, bank accounts, passports, memberships, ...): the notes are the
+/// body and every field is kept, secret where 1Password conceals it.
+fn note(item: &Value, category: &str, summary: &mut Summary) -> Option<Imported> {
+    let details = item.get("details").unwrap_or(&Value::Null);
+    let overview = item.get("overview").unwrap_or(&Value::Null);
+    let mut b = Builder::new("note");
+    b.known("notes", text(details, "notesPlain"));
+    b.urls(urls(overview), summary);
+    let mut entries = Entries::new(details);
+    // ID and account numbers 1Password leaves in plain text are secret here.
+    let secret: &[&str] = match category {
+        "101" => &["accountNo", "iban"],
+        "103" | "106" | "108" => &["number"],
+        _ => &[],
+    };
+    for entry in &mut entries.entries {
+        if secret.contains(&entry.id.as_str()) {
+            entry.key = "concealed".into();
+        }
+    }
+    entries.extras(&mut b, summary);
+    b.finish("note", item_name(text(overview, "title")), summary)
+}
+
+/// The `sshKey` value's metadata: the public key and fingerprint.
+fn ssh_metadata(details: &Value) -> &Value {
+    array(details, "sections")
+        .iter()
+        .flat_map(|section| array(section, "fields"))
+        .find_map(|field| field.get("value")?.get("sshKey")?.get("metadata"))
+        .unwrap_or(&Value::Null)
+}
+
+fn ssh(item: &Value, summary: &mut Summary) -> Option<Imported> {
+    let details = item.get("details").unwrap_or(&Value::Null);
+    let overview = item.get("overview").unwrap_or(&Value::Null);
+    let mut entries = Entries::new(details);
+    let Some(private) = entries.take(|e| e.key == "sshKey") else {
+        summary.skip(NO_PRIVATE_KEY);
+        return None;
+    };
+    let mut b = Builder::new("ssh");
+    b.known("private-key", Some(private));
+    // 1Password 8 keeps these in the item's fields; older exports only in
+    // the key's metadata.
+    let metadata = ssh_metadata(details);
+    let mut field = |names: [&str; 2]| entries.take(|e| names.iter().any(|n| e.is(n)));
+    let public = field(["public_key", "public key"]).or_else(|| text(metadata, "publicKey"));
+    let fingerprint =
+        field(["fingerprint", "fingerprint"]).or_else(|| text(metadata, "fingerprint"));
+    let passphrase = field(["passphrase", "password"]);
+    let comment = field(["comment", "comment"]);
+    b.known("public-key", public);
+    b.known("fingerprint", fingerprint);
+    b.known("passphrase", passphrase);
+    b.known("comment", comment);
+    b.known("notes", text(details, "notesPlain"));
+    b.urls(urls(overview), summary);
+    entries.extras(&mut b, summary);
+    b.finish("ssh", item_name(text(overview, "title")), summary)
+}
+
+fn identity(item: &Value, summary: &mut Summary) -> Option<Imported> {
+    let details = item.get("details").unwrap_or(&Value::Null);
+    let overview = item.get("overview").unwrap_or(&Value::Null);
+    let mut entries = Entries::new(details);
+    let mut b = Builder::new("identity");
+    let mut by_id = |id: &str| entries.take(|e| e.id == id);
+    let name = join(
+        [by_id("firstname"), by_id("initial"), by_id("lastname")],
+        " ",
+    );
+    b.known("name", name);
+    let birthday = by_id("birthdate");
+    let phone = by_id("defphone")
+        .or_else(|| by_id("cellphone"))
+        .or_else(|| by_id("homephone"))
+        .or_else(|| by_id("busphone"));
+    let email = by_id("email");
+    let address = by_id("address");
+    b.known_or_extra("birthday", birthday, BAD_BIRTHDAY, summary);
+    b.known("phone", phone);
+    b.known_or_extra("email", email, BAD_EMAIL, summary);
+    b.known("address", address);
+    b.known("notes", text(details, "notesPlain"));
+    b.urls(urls(overview), summary);
+    entries.extras(&mut b, summary);
+    b.finish("identity", item_name(text(overview, "title")), summary)
+}
+
 /// Maps a 1PUX `export.data`.
 pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
     let Some(accounts) = export.get("accounts").and_then(Value::as_array) else {
@@ -309,6 +390,10 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
         let mapped = match category.as_str() {
             "001" | "005" | "102" | "109" | "110" | "112" => login(item, &mut summary),
             "002" => card(item, &mut summary),
+            "004" => identity(item, &mut summary),
+            "114" => ssh(item, &mut summary),
+            "003" | "100" | "101" | "103" | "104" | "105" | "106" | "107" | "108" | "111"
+            | "113" => note(item, &category, &mut summary),
             other => {
                 summary.skip(skipped(other));
                 continue;
@@ -493,8 +578,114 @@ mod tests {
               "details": { "loginFields": [ { "value": "nobody", "name": "username", "fieldType": "T", "designation": "username" } ] },
               "overview": { "title": "No password" }
             },
-            { "uuid": "item8", "state": "active", "categoryUuid": "004", "details": {}, "overview": { "title": "Me" } },
+            {
+              "uuid": "item8",
+              "state": "active",
+              "categoryUuid": "004",
+              "details": {
+                "notesPlain": "",
+                "sections": [
+                  { "title": "Identification", "name": "name", "fields": [
+                    { "title": "first name", "id": "firstname", "value": { "string": "Dax" } },
+                    { "title": "initial", "id": "initial", "value": { "string": "" } },
+                    { "title": "last name", "id": "lastname", "value": { "string": "Raad" } },
+                    { "title": "birth date", "id": "birthdate", "value": { "date": 636246000 } },
+                    { "title": "company", "id": "company", "value": { "string": "Anomaly" } }
+                  ] },
+                  { "title": "Address", "name": "address", "fields": [
+                    { "title": "address", "id": "address", "value": { "address": { "street": "1 Main St", "city": "Springfield", "state": "IL", "zip": "12345", "country": "us" } } },
+                    { "title": "default phone", "id": "defphone", "value": { "phone": "+1 555 0100" } }
+                  ] },
+                  { "title": "Internet Details", "name": "internet", "fields": [
+                    { "title": "email", "id": "email", "value": { "email": { "email_address": "not an email", "provider": null } } }
+                  ] }
+                ]
+              },
+              "overview": { "title": "Me" }
+            },
+            {
+              "uuid": "itemC",
+              "state": "active",
+              "categoryUuid": "114",
+              "details": {
+                "notesPlain": "for CI",
+                "sections": [ { "title": "", "name": "", "fields": [
+                  { "title": "private key", "id": "private_key", "value": { "sshKey": {
+                    "privateKey": "-----BEGIN PRIVATE KEY-----\npkcs8\n-----END PRIVATE KEY-----",
+                    "metadata": {
+                      "privateKey": "-----BEGIN PRIVATE KEY-----\npkcs8\n-----END PRIVATE KEY-----",
+                      "publicKey": "ssh-ed25519 AAAAC3Nz deploy@ci",
+                      "fingerprint": "SHA256:abc",
+                      "keyType": "ed25519"
+                    }
+                  } } },
+                  { "title": "public key", "id": "public_key", "value": { "string": "ssh-ed25519 AAAAC3Nz deploy@ci" } },
+                  { "title": "fingerprint", "id": "fingerprint", "value": { "string": "SHA256:abc" } },
+                  { "title": "key type", "id": "key_type", "value": { "string": "ed25519" } }
+                ] },
+                { "title": "More", "name": "more", "fields": [
+                  { "title": "passphrase", "id": "f1", "value": { "concealed": "op-ssh-pass" } },
+                  { "title": "comment", "id": "f2", "value": { "string": "deploy@ci" } }
+                ] } ]
+              },
+              "overview": { "title": "CI key" }
+            },
+            {
+              "uuid": "itemE",
+              "state": "active",
+              "categoryUuid": "114",
+              "details": {
+                "sections": [ { "title": "", "name": "", "fields": [
+                  { "title": "private key", "id": "private_key", "value": { "sshKey": {
+                    "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nopenssh\n-----END OPENSSH PRIVATE KEY-----",
+                    "metadata": {
+                      "privateKey": "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----",
+                      "publicKey": "ssh-rsa AAAAB3 old",
+                      "fingerprint": "SHA256:old",
+                      "keyType": "rsa"
+                    }
+                  } } }
+                ] } ]
+              },
+              "overview": { "title": "Old key" }
+            },
             { "uuid": "item9", "state": "active", "categoryUuid": "114", "details": {}, "overview": { "title": "Deploy key" } },
+            {
+              "uuid": "itemD",
+              "state": "active",
+              "categoryUuid": "100",
+              "details": {
+                "notesPlain": "bought 2024",
+                "sections": [ { "title": "", "name": "", "fields": [
+                  { "title": "license key", "id": "reg_code", "value": { "string": "ABCD-1234" } },
+                  { "title": "version", "id": "product_version", "value": { "string": "5" } },
+                  { "title": "password", "id": "retail_password", "value": { "concealed": "op-license-pw" } }
+                ] } ]
+              },
+              "overview": { "title": "Editor" }
+            },
+            {
+              "uuid": "itemF",
+              "state": "active",
+              "categoryUuid": "101",
+              "details": { "sections": [ { "title": "", "name": "", "fields": [
+                { "title": "bank name", "id": "bankName", "value": { "string": "Example Bank" } },
+                { "title": "account number", "id": "accountNo", "value": { "string": "op-account-12345678" } },
+                { "title": "IBAN", "id": "iban", "value": { "string": "op-iban-DE00" } },
+                { "title": "PIN", "id": "telephonePin", "value": { "concealed": "op-phone-pin" } }
+              ] } ] },
+              "overview": { "title": "Checking" }
+            },
+            {
+              "uuid": "itemG",
+              "state": "active",
+              "categoryUuid": "106",
+              "details": { "sections": [ { "title": "", "name": "", "fields": [
+                { "title": "full name", "id": "fullname", "value": { "string": "Dax Raad" } },
+                { "title": "number", "id": "number", "value": { "string": "op-passport-X123" } }
+              ] } ] },
+              "overview": { "title": "Passport" }
+            },
             { "uuid": "itemA", "state": "active", "categoryUuid": "006", "details": { "documentAttributes": { "fileName": "passport.pdf" } }, "overview": { "title": "Scan" } },
             { "uuid": "itemB", "state": "active", "categoryUuid": "999", "details": {}, "overview": { "title": "Future" } }
           ]
@@ -508,17 +699,33 @@ mod tests {
     fn maps_a_1pux_export() {
         let (items, report) = parse(EXPORT).unwrap();
         assert_eq!(report.source, ImportSource::OnePassword);
-        assert_eq!(items.len(), 4);
-        let github = &items[0];
+        let kinds: Vec<_> = items
+            .iter()
+            .map(|i| (i.kind, i.name.as_deref().unwrap_or_default()))
+            .collect();
         assert_eq!(
-            (github.kind, github.name.as_deref()),
-            ("login", Some("GitHub"))
+            kinds,
+            [
+                ("login", "GitHub"),
+                ("login", "Garage door"),
+                ("note", "A note"),
+                ("card", "Visa"),
+                ("login", "Deploy API"),
+                ("login", "No password"),
+                ("identity", "Me"),
+                ("ssh", "CI key"),
+                ("ssh", "Old key"),
+                ("note", "Editor"),
+                ("note", "Checking"),
+                ("note", "Passport"),
+            ]
         );
+        let github = &items[0];
         assert_eq!(
             fields(github),
             [
                 ("backup-email", "email", "backup@example.com"),
-                ("member-since", "text", "2024-01-01"),
+                ("member-since", "date", "2024-01-01"),
                 ("notes", "note", "work account\nsecond line"),
                 (
                     "otp",
@@ -537,13 +744,12 @@ mod tests {
             ]
         );
         assert_eq!(fields(&items[1]), [("password", "secret", "op-wifi-pw")]);
-        assert_eq!(items[1].name.as_deref(), Some("Garage door"));
-        let visa = &items[2];
-        assert_eq!((visa.kind, visa.name.as_deref()), ("card", Some("Visa")));
+        // A secure note's body is secret.
+        assert_eq!(fields(&items[2]), [("notes", "secret", "op-note-secret")]);
         assert_eq!(
-            fields(visa),
+            fields(&items[3]),
             [
-                ("address", "text", "1 Main St, Springfield, 12345, us"),
+                ("address", "note", "1 Main St\nSpringfield, 12345\nus"),
                 ("brand", "text", "Visa"),
                 ("cardholder", "text", "Dax Raad"),
                 ("cvv", "secret", "321"),
@@ -558,24 +764,93 @@ mod tests {
             ]
         );
         assert_eq!(
-            fields(&items[3]),
+            fields(&items[4]),
             [
                 ("hostname", "text", "api.example.com"),
                 ("password", "secret", "op-api-key"),
                 ("username", "text", "deploy-bot"),
             ]
         );
+        // A login needs no password.
+        assert_eq!(fields(&items[5]), [("username", "text", "nobody")]);
+        assert_eq!(
+            fields(&items[6]),
+            [
+                ("address", "note", "1 Main St\nSpringfield, IL 12345\nus"),
+                ("birthday", "date", "1990-03-01"),
+                ("company", "text", "Anomaly"),
+                ("email-2", "text", "not an email"),
+                ("name", "text", "Dax Raad"),
+                ("phone", "text", "+1 555 0100"),
+            ]
+        );
+        // A 1Password 8 key: its values from the item's fields, each once.
+        assert_eq!(
+            fields(&items[7]),
+            [
+                ("comment", "text", "deploy@ci"),
+                ("fingerprint", "text", "SHA256:abc"),
+                ("key-type", "text", "ed25519"),
+                ("notes", "note", "for CI"),
+                ("passphrase", "secret", "op-ssh-pass"),
+                (
+                    "private-key",
+                    "secret",
+                    "-----BEGIN PRIVATE KEY-----\npkcs8\n-----END PRIVATE KEY-----"
+                ),
+                ("public-key", "text", "ssh-ed25519 AAAAC3Nz deploy@ci"),
+            ]
+        );
+        // An older one: the PKCS#8 key and the rest from its metadata.
+        assert_eq!(
+            fields(&items[8]),
+            [
+                ("fingerprint", "text", "SHA256:old"),
+                (
+                    "private-key",
+                    "secret",
+                    "-----BEGIN PRIVATE KEY-----\nold\n-----END PRIVATE KEY-----"
+                ),
+                ("public-key", "text", "ssh-rsa AAAAB3 old"),
+            ]
+        );
+        // Other categories are notes that keep every field.
+        assert_eq!(
+            fields(&items[9]),
+            [
+                ("license-key", "text", "ABCD-1234"),
+                ("notes", "secret", "bought 2024"),
+                ("password", "secret", "op-license-pw"),
+                ("version", "text", "5"),
+            ]
+        );
+        // ID and account numbers are secret, though 1Password exports them
+        // as plain strings.
+        assert_eq!(
+            fields(&items[10]),
+            [
+                ("account-number", "secret", "op-account-12345678"),
+                ("bank-name", "text", "Example Bank"),
+                ("iban", "secret", "op-iban-DE00"),
+                ("pin", "secret", "op-phone-pin"),
+            ]
+        );
+        assert_eq!(
+            fields(&items[11]),
+            [
+                ("full-name", "text", "Dax Raad"),
+                ("number", "secret", "op-passport-X123"),
+            ]
+        );
         assert_eq!(
             lines(&report),
             [
-                "imported 4 from 1Password (logins 3, cards 1)",
+                "imported 12 from 1Password (logins 4, cards 1, secure notes 4, SSH keys 2, identities 1)",
+                "skipped 1 SSH key without a private key",
                 "skipped 1 archived item",
                 "skipped 1 document",
-                "skipped 1 identity",
                 "skipped 1 item of unknown type",
-                "skipped 1 login without password",
-                "skipped 1 secure note",
-                "skipped 1 ssh key",
+                "warning: 1 invalid email address kept as text",
                 "dropped: 1 attachment, 2 favorites, 1 item's password history, 1 linked field, 3 tags",
             ]
         );
@@ -587,6 +862,18 @@ mod tests {
         assert_eq!(date(1_704_067_200), "2024-01-01");
         assert_eq!(date(951_782_400), "2000-02-29");
         assert_eq!(date(-86_400), "1969-12-31");
+        // 1990-03-01 at midnight in UTC, CET, PST, UTC+11 and UTC-12, and at
+        // noon UTC.
+        for secs in [
+            636_249_600,
+            636_249_600 - 3_600,
+            636_249_600 + 8 * 3_600,
+            636_249_600 - 11 * 3_600,
+            636_249_600 + 12 * 3_600,
+        ] {
+            assert_eq!(date(secs), "1990-03-01", "{secs}");
+        }
+        assert_eq!(date(636_249_600 + 12 * 3_600 + 1), "1990-03-02");
         assert_eq!(month_year(202_704), "2027-04");
         assert_eq!(month_year(202_713), "202713");
         assert_eq!(month_year(7), "7");

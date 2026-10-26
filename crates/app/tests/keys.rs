@@ -123,6 +123,74 @@ fn vault_keys_work_with_nothing_focused() {
     assert!(!rt.state.search.focused, "nothing took focus");
 }
 
+/// ⏎ copies the field each kind is for, and a secure note lists and shows
+/// nothing of its body until it's revealed.
+#[test]
+fn enter_copies_what_each_kind_is_for() {
+    for (kind, field) in [
+        ("note", "notes"),
+        ("ssh", "private-key"),
+        ("identity", "email"),
+    ] {
+        let mut rt = scene(kind);
+        tap(&mut rt, Key::Enter);
+        assert_eq!(copied(&rt), Some(field), "{kind}");
+    }
+    let shows = |rt: &Runtime<App>, value: &str| {
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref().is_some_and(|t| t.contains(value)))
+    };
+    // Each kind's secrets are masked until Show.
+    for (kind, field, value) in [
+        ("note", "notes", "4417"),
+        ("ssh", "private-key", "MC4CAQAw"),
+        ("identity", "passport", "X1234567"),
+    ] {
+        let mut rt = scene(kind);
+        assert!(!shows(&rt, value), "{kind} {field} is masked");
+        rt.update(|s, _| s.toggle_reveal(field));
+        settle(&mut rt, 0.1);
+        assert!(shows(&rt, value), "Show reveals {kind} {field}");
+    }
+    let mut rt = scene("note");
+    // Search finds the kinds by name and by what they're called.
+    tap(&mut rt, Key::Text("ssh key".into()));
+    assert_eq!(rt.state.visible().len(), 1);
+    assert_eq!(rt.state.visible()[0].kind, "ssh");
+}
+
+/// The hints say only what ⏎ and ⇧⏎ can do for the item selected.
+#[test]
+fn key_hints_follow_the_item() {
+    let mut rt = scene("identity");
+    assert!(rt.find("h-copy").is_some());
+    assert!(rt.find("h-user").is_none(), "an identity has no username");
+    // Its values are in and it has no email: ⏎ has nothing to copy.
+    rt.update(|s, _| {
+        if let Some(d) = &mut s.detail {
+            d.fields.retain(|f| f.name != "email");
+        }
+    });
+    settle(&mut rt, 0.1);
+    assert!(rt.find("h-copy").is_none());
+
+    let mut rt = scene("vault");
+    assert!(rt.find("h-user").is_some());
+    // A login whose row has no username.
+    rt.update(|s, _| {
+        let id = s.selected.clone();
+        for item in &mut s.items {
+            if Some(&item.id) == id.as_ref() {
+                item.detail = None;
+            }
+        }
+    });
+    settle(&mut rt, 0.1);
+    assert!(rt.find("h-copy").is_some());
+    assert!(rt.find("h-user").is_none(), "no username to copy");
+}
+
 #[test]
 fn command_f_and_k_focus_the_search_with_its_text_selected() {
     for c in ['f', 'k'] {

@@ -3,7 +3,7 @@
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status};
+use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo, Status, noun, primary_field};
 use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -498,7 +498,8 @@ impl App {
     // The list
 
     /// The items matching the search: every word must appear in the label,
-    /// the username or expiry, the type or the short id.
+    /// the detail (username, expiry, SSH key comment, identity email), the
+    /// type ("ssh", "SSH key") or the short id.
     pub fn visible(&self) -> Vec<&ItemInfo> {
         let words: Vec<String> = self
             .search
@@ -513,6 +514,7 @@ impl App {
                     Some(item.label.as_str()),
                     item.detail.as_deref(),
                     Some(item.kind.as_str()),
+                    Some(noun(&item.kind, 1)),
                     Some(item.short.as_str()),
                 ];
                 words.iter().all(|w| {
@@ -656,11 +658,29 @@ impl App {
         self.search.set_selection(0, self.search.text.len());
     }
 
+    /// What ⏎ copies, as a key hint: none once the item's values are in and
+    /// it has no such field.
+    pub fn enter_hint(&self) -> Option<&'static str> {
+        let item = self.selected_item()?;
+        let field = self.primary_field();
+        let lacks = self
+            .detail
+            .as_ref()
+            .is_some_and(|d| d.id == item.id && !d.fields.iter().any(|f| f.name == field));
+        (!lacks).then(|| copy_label(&item.kind))
+    }
+
+    /// Whether ⇧⏎ has a username to copy: a login's row carries it.
+    pub fn has_username(&self) -> bool {
+        self.selected_item()
+            .is_some_and(|i| i.kind == "login" && i.detail.is_some())
+    }
+
+    /// What ⏎ copies: the field the item is for (`protocol::primary_field`).
     fn primary_field(&self) -> &'static str {
-        match self.selected_item().map(|i| i.kind.as_str()) {
-            Some("card") => "number",
-            _ => "password",
-        }
+        self.selected_item()
+            .and_then(|i| primary_field(&i.kind))
+            .unwrap_or("password")
     }
 
     // ---------------------------------------------------------------------------------------
@@ -879,11 +899,25 @@ fn unlock_message(failure: &Failure) -> String {
     }
 }
 
+/// A field name as words, with initialisms in capitals: "url" is "URL",
+/// "private-key" is "private key", "national-id" is "national ID".
+pub fn field_words(name: &str) -> String {
+    name.split('-')
+        .map(|word| {
+            if matches!(word, "url" | "otp" | "cvv" | "pin" | "id" | "ssh") {
+                word.to_uppercase()
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// A field name as a label: "Private key", "National ID", "URL".
 pub fn title_case(name: &str) -> String {
-    if matches!(name, "url" | "otp" | "cvv" | "pin") {
-        return name.to_uppercase();
-    }
-    let mut chars = name.chars();
+    let words = field_words(name);
+    let mut chars = words.chars();
     match chars.next() {
         Some(c) => c.to_uppercase().chain(chars).collect(),
         None => String::new(),
@@ -896,6 +930,17 @@ pub fn take_secret(field: &mut TextEdit) -> Zeroizing<String> {
     let secret = Zeroizing::new(std::mem::take(&mut field.text));
     field.clear();
     secret
+}
+
+/// What ⏎ does for an item of `kind`, as a key hint.
+pub fn copy_label(kind: &str) -> &'static str {
+    match kind {
+        "card" => "Copy number",
+        "note" => "Copy note",
+        "ssh" => "Copy private key",
+        "identity" => "Copy email",
+        _ => "Copy password",
+    }
 }
 
 /// Is this field type secret (masked until revealed)?

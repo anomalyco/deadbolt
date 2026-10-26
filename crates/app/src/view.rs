@@ -7,7 +7,7 @@
 //! a click) replaces the item's title and fields at once. Nothing animates on
 //! first paint, and reduced motion keeps only fades (Rune's runtime does both).
 
-use deadbolt_client::protocol::{FieldInfo, ItemInfo};
+use deadbolt_client::protocol::{FieldInfo, ItemInfo, noun};
 use rune::{
     Chrome, Cx, Edge, El, Icon, KeyEvent, ScrollSpec, TextStyle, Transition, Tx, col, el, icon,
     row, spacer, text, text_input,
@@ -18,7 +18,7 @@ use rune_kit::{
     Popover, RollingText, TextInput,
 };
 
-use crate::model::{App, BAR_W, Copy, Screen, is_secret, title_case};
+use crate::model::{App, BAR_W, Copy, Screen, field_words, is_secret, title_case};
 
 /// The main window: content under a transparent title bar, with the traffic
 /// lights centred in the shell's 48 pt band.
@@ -395,9 +395,11 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
 fn list_row(s: &App, k: &Kit, visible: &[&ItemInfo], i: usize) -> El {
     let item = visible[i];
     let id = item.id.clone();
+    // A secure note has no detail: its body never shows in the list.
+    let kind = noun(&item.kind, 1);
     let sub = match &item.detail {
-        Some(d) => format!("{d} · {}", item.kind),
-        None => item.kind.clone(),
+        Some(d) => format!("{d} · {kind}"),
+        None => kind.to_owned(),
     };
     SidebarRow::new(item.label.clone())
         .subtitle(sub)
@@ -516,7 +518,7 @@ fn detail(s: &App, k: &Kit) -> El {
         }
         return pane;
     };
-    let kind = format!("{} · {}", item.kind, item.short);
+    let kind = format!("{} · {}", noun(&item.kind, 1), item.short);
     let head = col()
         .key("head")
         .w_full()
@@ -570,7 +572,8 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     } else {
         field.value.clone()
     };
-    let style = if secret {
+    // Secrets and key material read in mono, where 0/O and l/1 differ.
+    let style = if secret || matches!(field.name.as_str(), "public-key" | "fingerprint") {
         k.ty.mono.lh(20.0)
     } else {
         k.ty.text_small.lh(20.0)
@@ -581,11 +584,7 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         .is_some_and(|c| c.item == item && c.field == field.name && c.cleared_at.is_none());
     let name = field.name.clone();
     let named = title_case(&name);
-    let noun = if named == name.to_uppercase() {
-        named.clone()
-    } else {
-        name.clone()
-    };
+    let noun = field_words(&name);
     let mut actions = row().key("actions").gap(2.0).center_y();
     if secret {
         let n = name.clone();
@@ -627,14 +626,23 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
             .key(if copied { "copied" } else { "copy" })
             .transition(replace()),
     );
+    let lines = (!secret || revealed) && field.value.contains('\n');
     let value = text(value).key("value").font(style).color(k.c.text_base);
-    let value = if field.kind == "note" {
+    // Multi-line text wraps: notes, an address, a secure note's body or a
+    // private key once shown. A masked value is one line.
+    let value = if field.kind == "note" || lines {
         value.wrap().min_w(0.0)
     } else {
         value.truncate_fade()
     };
-    row()
-        .key(format!("field-{}", field.name))
+    let row = row();
+    // Lines read from the top, beside their name and buttons.
+    let row = if lines {
+        row.items_start().py(10.0)
+    } else {
+        row.center_y()
+    };
+    row.key(format!("field-{}", field.name))
         // A field a background refresh adds or removes fades; a new selection
         // replaces them at once (`Tx::instant`).
         .transition(Transition::opacity())
@@ -642,7 +650,6 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         .min_h(40.0)
         .px(10.0)
         .gap(12.0)
-        .center_y()
         .radius(k.radius.md)
         .hover(k.c.hover)
         .child(
@@ -800,11 +807,16 @@ fn hints(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
 fn key_hints(s: &App, k: &Kit) -> Vec<El> {
     let hint = |key: &str, keys: &[&str], label: &str| hint(k, key, keys, label);
     if !(s.import.showing() || s.drop_hovering()) {
-        return vec![
-            hint("h-copy", &["⏎"], "Copy password"),
-            hint("h-user", &["⇧", "⏎"], "Copy username"),
-            hint("h-move", &["↑", "↓"], "Select"),
-        ];
+        let mut hints: Vec<El> = s
+            .enter_hint()
+            .map(|label| hint("h-copy", &["⏎"], label))
+            .into_iter()
+            .collect();
+        if s.has_username() {
+            hints.push(hint("h-user", &["⇧", "⏎"], "Copy username"));
+        }
+        hints.push(hint("h-move", &["↑", "↓"], "Select"));
+        return hints;
     }
     let mut hints = Vec::new();
     match &s.import.phase {
