@@ -5,7 +5,7 @@
 ## Keys (two)
 1. **Device key** (Ed25519, one per device). Is the iroh EndpointId *and* signs everything the device writes. Stored encrypted under (2).
    - Why not separate transport/signing keys: neither can live in Secure Enclave/TPM (P-256 only), both must be in RAM while the app runs, so separating them adds a key without adding protection.
-2. **Local unlock key** (per device). Argon2id(passphrase); optionally also stored in the OS keychain behind biometrics (device-only item, never synced) for day-to-day unlock. Encrypts the device key and the local database.
+2. **Local unlock key** (per device). Argon2id(passphrase); optionally also wrapped by a hardware-bound Secure Enclave key behind Touch ID (`docs/touch-id.md`, device-only, never synced) for day-to-day unlock. Encrypts the device key and the local database.
 
 No shared vault key in v1. Data only ever moves over iroh connections (end-to-end encrypted, authenticated to device keys) between current members, and at rest it is under each device's local unlock key. Re-keying on removal would protect nothing extra: a removed device can only receive data from a member that hasn't learned of the removal, and that member would still be on the old key too.
 
