@@ -28,9 +28,12 @@ pub(crate) const META: TableDefinition<&[u8; 32], &[u8]> = TableDefinition::new(
 const H_FORMAT: &str = "format";
 const H_KDF: &str = "kdf";
 const H_KEYSET: &str = "keyset";
+pub(crate) const H_KEYSET_BIOMETRIC: &str = "keyset.biometric";
+pub(crate) const H_BIOMETRIC_TOKEN: &str = "biometric.token";
 const H_LOG_LEN: &str = "log_len";
 
 const AAD_KEYSET: &[u8] = b"deadbolt-store/v1/keyset";
+const AAD_KEYSET_BIOMETRIC: &[u8] = b"deadbolt-store/v1/keyset.biometric";
 const AAD_LOG: &[u8] = b"deadbolt-store/v1/log";
 const AAD_LOG_LEN: &[u8] = b"deadbolt-store/v1/log-len";
 const AAD_META: &[u8] = b"deadbolt-store/v1/meta";
@@ -120,12 +123,6 @@ pub fn init_with_params(
 /// Returns [`Error::WrongPassphrase`] if the AEAD check on the key set fails,
 /// [`Error::NotInitialized`] if there is no store, and [`Error::InUse`] if it
 /// is already open.
-//
-// OS keychain unlock (design.md, "Keys"): store a second copy of the key set
-// under a header slot such as "keyset.keychain", wrapped with a random 256-bit
-// key that lives in a device-only, biometry-gated keychain item, and add an
-// `unlock_with_keychain(dir, key)` that tries that slot. `change_passphrase`
-// would leave that slot untouched; removing the keychain item drops the slot.
 pub fn unlock(dir: &Path, passphrase: &[u8]) -> Result<Unlocked> {
     let db_path = dir.join(DB_FILE);
     if !db_path.is_file() {
@@ -143,6 +140,71 @@ pub fn unlock(dir: &Path, passphrase: &[u8]) -> Result<Unlocked> {
         dir: dir.to_path_buf(),
         keys: Keys::new(keyset),
     })
+}
+
+/// Generates a fresh 256-bit wrapping key for [`Unlocked::set_biometric`].
+pub fn generate_biometric_key() -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    crypto::random_key()
+}
+
+/// Reads the opaque biometric token enrolled in `dir` without unlocking the
+/// store. Returns `Ok(None)` if no biometric key set is enrolled.
+pub fn biometric_token(dir: &Path) -> Result<Option<Vec<u8>>> {
+    let db_path = dir.join(DB_FILE);
+    if !db_path.is_file() {
+        return Err(Error::NotInitialized(dir.to_path_buf()));
+    }
+    let db = open_db(&db_path)?;
+    let txn = db.begin_read()?;
+    let table = txn.open_table(HEADER)?;
+    let _header = Header::read(&table)?;
+    Ok(read_biometric(&table)?.map(|(token, _)| token))
+}
+
+/// Opens the store in `dir` and decrypts its biometric key set with `key`.
+///
+/// Returns [`Error::InvalidBiometric`] if no biometric key set is enrolled or
+/// `key` fails the AEAD check.
+pub fn unlock_biometric(dir: &Path, key: &[u8; KEY_LEN]) -> Result<Unlocked> {
+    let db_path = dir.join(DB_FILE);
+    if !db_path.is_file() {
+        return Err(Error::NotInitialized(dir.to_path_buf()));
+    }
+    let db = open_db(&db_path)?;
+    let (token, wrapped) = {
+        let txn = db.begin_read()?;
+        let table = txn.open_table(HEADER)?;
+        let _header = Header::read(&table)?;
+        read_biometric(&table)?.ok_or(Error::InvalidBiometric)?
+    };
+    let keyset = KeySet::unwrap_biometric(key, &token, &wrapped)?;
+    Ok(Unlocked {
+        db,
+        dir: dir.to_path_buf(),
+        keys: Keys::new(keyset),
+    })
+}
+
+/// Removes the enrolled biometric key set and token from `dir` while the store
+/// is locked. Returns whether a slot was present.
+pub fn clear_biometric(dir: &Path) -> Result<bool> {
+    let db_path = dir.join(DB_FILE);
+    if !db_path.is_file() {
+        return Err(Error::NotInitialized(dir.to_path_buf()));
+    }
+    let db = open_db(&db_path)?;
+    let txn = begin_write(&db)?;
+    let removed = {
+        let mut table = txn.open_table(HEADER)?;
+        let _header = Header::read(&table)?;
+        remove_biometric(&mut table)?
+    };
+    if removed {
+        txn.commit()?;
+    } else {
+        txn.abort()?;
+    }
+    Ok(removed)
 }
 
 /// An open, decrypted store. Holds the device secret and data keys in memory
@@ -281,9 +343,52 @@ impl Unlocked {
             let wrapped = current.wrap(&kdf, new)?;
             table.insert(H_KDF, kdf.encode().as_slice())?;
             table.insert(H_KEYSET, wrapped.as_slice())?;
+            if old != new {
+                let _removed: bool = remove_biometric(&mut table)?;
+            }
         }
         txn.commit()?;
         Ok(())
+    }
+
+    /// Stores a second copy of the key set wrapped under `key`, bound to the
+    /// opaque platform `token` (such as a Secure Enclave sealed key envelope).
+    pub fn set_biometric(&self, key: &[u8; KEY_LEN], token: &[u8]) -> Result<()> {
+        if token.is_empty() {
+            return Err(Error::InvalidBiometric);
+        }
+        let wrapped = self.keys.keyset.wrap_biometric(key, token)?;
+        let txn = begin_write(&self.db)?;
+        {
+            let mut table = txn.open_table(HEADER)?;
+            table.insert(H_BIOMETRIC_TOKEN, token)?;
+            table.insert(H_KEYSET_BIOMETRIC, wrapped.as_slice())?;
+        }
+        txn.commit()?;
+        Ok(())
+    }
+
+    /// The opaque biometric token currently enrolled on this store, if any.
+    pub fn biometric_token(&self) -> Result<Option<Vec<u8>>> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(HEADER)?;
+        Ok(read_biometric(&table)?.map(|(token, _)| token))
+    }
+
+    /// Removes the enrolled biometric key set and token. Returns whether a slot
+    /// was present.
+    pub fn clear_biometric(&self) -> Result<bool> {
+        let txn = begin_write(&self.db)?;
+        let removed = {
+            let mut table = txn.open_table(HEADER)?;
+            remove_biometric(&mut table)?
+        };
+        if removed {
+            txn.commit()?;
+        } else {
+            txn.abort()?;
+        }
+        Ok(removed)
     }
 }
 
@@ -353,6 +458,24 @@ impl KeySet {
         let unlock_key = kdf.derive(passphrase)?;
         let plain = crypto::open(&crypto::cipher(&unlock_key), &keyset_aad(kdf), wrapped)
             .ok_or(Error::WrongPassphrase)?;
+        Self::decode(&plain)
+    }
+
+    fn wrap_biometric(&self, key: &[u8; KEY_LEN], token: &[u8]) -> Result<Vec<u8>> {
+        crypto::seal(
+            &crypto::cipher(key),
+            &biometric_keyset_aad(token),
+            &[self.encode().as_slice()],
+        )
+    }
+
+    fn unwrap_biometric(key: &[u8; KEY_LEN], token: &[u8], wrapped: &[u8]) -> Result<Self> {
+        let plain = crypto::open(&crypto::cipher(key), &biometric_keyset_aad(token), wrapped)
+            .ok_or(Error::InvalidBiometric)?;
+        Self::decode(&plain).map_err(|_| Error::InvalidBiometric)
+    }
+
+    fn decode(plain: &[u8]) -> Result<Self> {
         if plain.len() != 64 {
             return Err(Error::corrupt("key set has the wrong length"));
         }
@@ -448,6 +571,34 @@ fn write_log_len(keys: &Keys, table: &mut Table<&str, &[u8]>, len: u64) -> Resul
 
 fn keyset_aad(kdf: &KdfHeader) -> Vec<u8> {
     [AAD_KEYSET, &FORMAT_VERSION.to_le_bytes(), &kdf.encode()].concat()
+}
+
+fn biometric_keyset_aad(token: &[u8]) -> Vec<u8> {
+    [
+        AAD_KEYSET_BIOMETRIC,
+        &FORMAT_VERSION.to_le_bytes(),
+        &(token.len() as u64).to_le_bytes(),
+        token,
+    ]
+    .concat()
+}
+
+fn read_biometric(
+    table: &impl ReadableTable<&'static str, &'static [u8]>,
+) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+    let token = table.get(H_BIOMETRIC_TOKEN)?.map(|v| v.value().to_vec());
+    let keyset = table.get(H_KEYSET_BIOMETRIC)?.map(|v| v.value().to_vec());
+    match (token, keyset) {
+        (None, None) => Ok(None),
+        (Some(token), Some(keyset)) => Ok(Some((token, keyset))),
+        _ => Err(Error::corrupt("incomplete biometric key set in header")),
+    }
+}
+
+fn remove_biometric(table: &mut Table<&str, &[u8]>) -> Result<bool> {
+    let token = table.remove(H_BIOMETRIC_TOKEN)?.is_some();
+    let keyset = table.remove(H_KEYSET_BIOMETRIC)?.is_some();
+    Ok(token || keyset)
 }
 
 fn log_aad(seq: u64) -> Vec<u8> {

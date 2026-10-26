@@ -309,6 +309,10 @@ fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
         vaults: Vec::new(),
         peers_online: 0,
         peers: 0,
+        touch_id_available: false,
+        touch_id_enabled: false,
+        touch_id_ready: false,
+        touch_id_reset: false,
     };
     for scene in ["creating", "ticket", "code", "joining"] {
         let mut rt = runtime(scene, false);

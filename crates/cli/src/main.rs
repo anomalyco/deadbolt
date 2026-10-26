@@ -103,6 +103,12 @@ enum Commands {
         #[command(subcommand)]
         command: Option<AgentCommand>,
     },
+    /// Enable, disable or check Touch ID unlock on macOS.
+    #[command(name = "touchid", visible_alias = "touch-id")]
+    TouchId {
+        #[command(subcommand)]
+        command: Option<TouchIdCommand>,
+    },
     #[command(flatten)]
     Item(items::ItemCommand),
     /// Import logins, cards, secure notes, SSH keys and identities from
@@ -166,6 +172,16 @@ enum AgentCommand {
     Status,
 }
 
+#[derive(Subcommand)]
+enum TouchIdCommand {
+    /// Enable Touch ID unlock (unlocks the store first if needed).
+    On,
+    /// Disable Touch ID unlock and remove the enrolled key slot.
+    Off,
+    /// Show whether Touch ID unlock is available, enabled and ready.
+    Status,
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let agent = matches!(cli.command, Commands::Agent { command: None });
@@ -216,6 +232,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Status
                 | Commands::Watch
                 | Commands::Agent { .. }
+                | Commands::TouchId { .. }
                 | Commands::Vault(_)
         )
     {
@@ -268,6 +285,42 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         },
+        Commands::TouchId { command } => {
+            let status = client::ensure_running(&paths).await?;
+            match command.unwrap_or(TouchIdCommand::Status) {
+                TouchIdCommand::On => {
+                    if !status.initialized {
+                        bail!("this device is not set up; run `deadbolt init` or `deadbolt join`");
+                    }
+                    let Reply::Done =
+                        request(&paths, Command::TouchIdSet { enabled: true }, from_stdin).await?
+                    else {
+                        bail!("unexpected reply");
+                    };
+                    println!("Touch ID unlock enabled");
+                }
+                TouchIdCommand::Off => {
+                    client::simple(&paths, Command::TouchIdSet { enabled: false }).await?;
+                    println!("Touch ID unlock disabled");
+                }
+                TouchIdCommand::Status => {
+                    let state = if !status.touch_id_available {
+                        "unavailable"
+                    } else if !status.touch_id_enabled {
+                        "disabled"
+                    } else if !status.initialized {
+                        "enabled (not set up)"
+                    } else if status.touch_id_ready {
+                        "enabled (enrolled)"
+                    } else if status.touch_id_reset {
+                        "enabled (reset; enter passphrase once)"
+                    } else {
+                        "enabled (enter passphrase once to finish turning on)"
+                    };
+                    println!("touchid\t{state}");
+                }
+            }
+        }
         Commands::Init { name, device_name } => {
             let status = client::ensure_running(&paths).await?;
             if !status.initialized {
@@ -444,6 +497,34 @@ async fn setup(paths: &Paths, device_name: Option<String>, from_stdin: bool) -> 
 }
 
 async fn unlock(paths: &Paths, timeout_secs: Option<u64>, from_stdin: bool) -> Result<()> {
+    if can_try_touch_id(from_stdin)
+        && let Some(status) = client::status(paths).await
+        && !status.unlocked
+    {
+        if status.touch_id_ready {
+            match client::simple(paths, Command::UnlockBiometric { timeout_secs }).await {
+                Ok(_) => return Ok(()),
+                Err(err) => {
+                    if std::io::stderr().is_terminal() {
+                        if let Some(after) = client::status(paths).await
+                            && after.touch_id_reset
+                        {
+                            eprintln!("Touch ID was reset; enter your passphrase.");
+                        } else {
+                            let msg = format!("{err:#}");
+                            if !msg.contains("cancelled") {
+                                eprintln!("{msg}");
+                            }
+                        }
+                    }
+                }
+            }
+        } else if status.touch_id_reset && std::io::stderr().is_terminal() {
+            eprintln!("Touch ID was reset; enter your passphrase.");
+        } else if status.touch_id_enabled && std::io::stderr().is_terminal() {
+            eprintln!("Enter your passphrase once to finish turning on Touch ID.");
+        }
+    }
     let passphrase = prompt::passphrase(from_stdin, false)?;
     client::simple(
         paths,
@@ -454,6 +535,15 @@ async fn unlock(paths: &Paths, timeout_secs: Option<u64>, from_stdin: bool) -> R
     )
     .await?;
     Ok(())
+}
+
+/// Touch ID is tried on interactive terminals when the user did not supply a
+/// passphrase via flags/env and is not connected over SSH.
+fn can_try_touch_id(from_stdin: bool) -> bool {
+    !from_stdin
+        && config::env("DEADBOLT_PASSPHRASE").is_err()
+        && config::env("SSH_CONNECTION").is_err()
+        && std::io::stdin().is_terminal()
 }
 
 /// Sends a request. If the store is locked, unlocks inline when it may

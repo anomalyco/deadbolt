@@ -172,9 +172,11 @@ fn locked(s: &App, k: &Kit) -> El {
         .as_ref()
         .and_then(|st| st.device.as_ref())
         .and_then(|d| d.name.clone());
-    let about = match device {
-        Some(name) => format!("Enter your passphrase to unlock {name}."),
-        None => "Enter your passphrase to unlock this device.".into(),
+    let about = match (device, s.touch_id_ready()) {
+        (Some(name), true) => format!("Use Touch ID or enter your passphrase to unlock {name}."),
+        (None, true) => "Use Touch ID or enter your passphrase to unlock this device.".into(),
+        (Some(name), false) => format!("Enter your passphrase to unlock {name}."),
+        (None, false) => "Enter your passphrase to unlock this device.".into(),
     };
     let mut body = col()
         .key("unlock")
@@ -182,6 +184,7 @@ fn locked(s: &App, k: &Kit) -> El {
         .px(18.0)
         .py(20.0)
         .gap(12.0)
+        .items_start()
         .child(
             text(about)
                 .key("about")
@@ -193,6 +196,23 @@ fn locked(s: &App, k: &Kit) -> El {
         .child(passphrase_field(s, k));
     if let Some(e) = unlock_error(s, k) {
         body = body.child(e);
+    }
+    if s.touch_id_ready() {
+        let touch_label = if s.touch_id_unlocking {
+            "Touch ID…"
+        } else {
+            "Use Touch ID"
+        };
+        body = body.child(
+            Button::new(touch_label)
+                .variant(ButtonVariant::Neutral)
+                .control_size(ControlSize::Large)
+                .disabled(s.busy_unlocking())
+                .on_press(|s: &mut App| s.unlock_touch_id())
+                .build(k)
+                .key("touch-id")
+                .mt(4.0),
+        );
     }
     body
 }
@@ -267,6 +287,7 @@ fn footer(s: &App, k: &Kit) -> El {
 fn enter_does(s: &App) -> &'static str {
     match &s.screen {
         Screen::Vault => s.enter_hint().unwrap_or_default(),
+        Screen::Locked if s.touch_id_ready() && s.passphrase.text.is_empty() => "Touch ID",
         Screen::Locked => "Unlock",
         Screen::Onboarding => "Open Deadbolt",
         Screen::Failed(_) => "Try again",

@@ -39,6 +39,9 @@ for theme in dark light; do
   "$bin" --scene settings-changed --theme "$theme" --snap "$out/settings-changed-$theme.png" "$@"
   "$bin" --scene shortcut-conflict --theme "$theme" --snap "$out/shortcut-conflict-$theme.png" "$@"
   "$bin" --scene settings-unavailable --theme "$theme" --snap "$out/settings-unavailable-$theme.png" "$@"
+  "$bin" --scene settings-touch-id --theme "$theme" --snap "$out/settings-touch-id-$theme.png" "$@"
+  "$bin" --scene locked-touch-id --theme "$theme" --snap "$out/locked-touch-id-$theme.png" "$@"
+  "$bin" --scene locked-touch-id-reset --theme "$theme" --snap "$out/locked-touch-id-reset-$theme.png" "$@"
 done
 # Importing, dark and light: the empty vault's drop zone, an export dragged
 # over it, a preview, one with nothing new, a file it can't read, and ⇧⌘I in
@@ -52,7 +55,7 @@ done
 # empty vault, locked, a wrong passphrase, not set up, failed, and 0.6 s after
 # a copy (the footer shows the countdown).
 for theme in dark light; do
-  for scene in empty filtering no-match empty-vault locked locked-error not-set-up failed; do
+  for scene in empty filtering no-match empty-vault locked locked-error locked-touch-id locked-touch-id-reset not-set-up failed; do
     "$bin" --window panel --scene "$scene" --theme "$theme" --snap "$out/panel-$scene-$theme.png" "$@"
   done
   "$bin" --window panel --scene copied --at 0.6 --theme "$theme" --snap "$out/panel-copied-$theme.png" "$@"

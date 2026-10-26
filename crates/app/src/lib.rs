@@ -104,6 +104,7 @@ pub fn run() {
                 app.reduced_motion = reduced_motion;
                 app
             })
+            .on_focus(|s, focused, tx| s.main_focus(focused, tx))
             .on_close(|s, tx| s.quit(tx));
         // Registers on the panel's App and sets its menu: Rune attaches every
         // window before any queued update runs.
@@ -302,6 +303,22 @@ const SCENES: &[Scene] = &[
         locked(s);
         s.unlock_error = Some("That passphrase didn't unlock this device.".into());
     }),
+    ("locked-touch-id", |s| {
+        locked(s);
+        if let Some(st) = &mut s.status {
+            st.touch_id_available = true;
+            st.touch_id_enabled = true;
+            st.touch_id_ready = true;
+        }
+    }),
+    ("locked-touch-id-reset", |s| {
+        locked(s);
+        if let Some(st) = &mut s.status {
+            st.touch_id_available = true;
+            st.touch_id_enabled = true;
+            st.touch_id_reset = true;
+        }
+    }),
     ("vault", vault),
     ("note", |s| kind_scene(s, "note")),
     ("note-revealed", |s| {
@@ -429,6 +446,20 @@ const SCENES: &[Scene] = &[
         s.start_shortcut(false);
         s.settings_open = true;
     }),
+    // Settings on a Mac with Touch ID enabled.
+    ("settings-touch-id", |s| {
+        vault(s);
+        if let Some(st) = &mut s.status {
+            st.touch_id_available = true;
+            st.touch_id_enabled = true;
+        }
+        let mut i = install::Installer::fixture();
+        i.offered = true;
+        s.installer = Some(i);
+        s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), Vec::new());
+        s.start_shortcut(false);
+        s.settings_open = true;
+    }),
 ];
 
 /// ⌥⌘Space, the scenes' other shortcut.
@@ -464,6 +495,22 @@ pub(crate) const PANEL_SCENES: &[Scene] = &[
     ("locked-error", |s| {
         locked(s);
         s.unlock_error = Some("That passphrase didn't unlock this device.".into());
+    }),
+    ("locked-touch-id", |s| {
+        locked(s);
+        if let Some(st) = &mut s.status {
+            st.touch_id_available = true;
+            st.touch_id_enabled = true;
+            st.touch_id_ready = true;
+        }
+    }),
+    ("locked-touch-id-reset", |s| {
+        locked(s);
+        if let Some(st) = &mut s.status {
+            st.touch_id_available = true;
+            st.touch_id_enabled = true;
+            st.touch_id_reset = true;
+        }
     }),
     ("not-set-up", |s| {
         s.status = Some(Status {
@@ -584,6 +631,10 @@ fn status(unlocked: bool) -> Status {
         }],
         peers_online: 1,
         peers: 1,
+        touch_id_available: false,
+        touch_id_enabled: false,
+        touch_id_ready: false,
+        touch_id_reset: false,
     }
 }
 
