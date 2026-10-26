@@ -212,7 +212,8 @@ fn a_press_anywhere_on_the_search_focuses_it() {
 }
 
 /// With the list hidden (⇧⌘B), ↑↓ and a search edit open it again, so the
-/// selection never moves out of sight.
+/// selection never moves out of sight. Hiding it leaves focus in the search,
+/// so typing goes on straight after.
 #[test]
 fn a_hidden_list_opens_when_the_selection_moves() {
     let toggle = Mods {
@@ -227,8 +228,7 @@ fn a_hidden_list_opens_when_the_selection_moves() {
         }
         press(&mut rt, Key::Command('b'), toggle);
         assert!(!rt.state.sidebar.is_open(), "⇧⌘B hides the list");
-        // Rune hands focus to the sidebar button as the list hides.
-        command(&mut rt, 'f');
+        assert!(rt.state.search.focused, "⇧⌘B keeps the search focused");
         tap(&mut rt, step.clone());
         assert!(rt.state.sidebar.is_open(), "{step:?} opens it");
     }
@@ -317,7 +317,6 @@ fn the_import_view_opens_a_hidden_list() {
         s.import.phase = Phase::Importing(preview);
     });
     press(&mut rt, Key::Command('b'), toggle);
-    command(&mut rt, 'f');
     tap(&mut rt, Key::Text("f".into()));
     assert!(rt.state.import.showing(), "the import runs on");
     assert!(rt.state.sidebar.is_open(), "a search edit");

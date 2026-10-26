@@ -196,8 +196,8 @@ fn the_page_is_centred_and_installs_in_place() {
     settle(&mut rt, 0.6);
     let (panel, _) = rt.presented("panel").unwrap();
     let middle = panel[1] + panel[3] / 2.0;
-    // Under the 48 pt title bar band: (48 + 540) / 2.
-    assert!((middle - 294.0).abs() < 2.0, "panel centred at {middle}");
+    // In the page under the 48 pt title bar, framed 8 pt from the bottom: (48 + 532) / 2.
+    assert!((middle - 290.0).abs() < 2.0, "panel centred at {middle}");
     press(&mut rt, "action");
     assert!(installer(&rt).installed());
     assert!(shows(&rt, "Command installed"));

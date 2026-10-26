@@ -1219,3 +1219,29 @@ fn the_rolled_label_is_as_wide_as_plain_text() {
         right - left
     );
 }
+
+/// A press on the search icon focuses the field, and on a focused field
+/// never blurs it, even when the pointer leaves before the release.
+#[test]
+fn a_press_on_the_search_icon_lands_in_the_field() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 2);
+    let r = find(&rt, "search-icon").unwrap().0;
+    let (x, y) = (r[0] + r[2] / 2.0, r[1] + r[3] / 2.0);
+    rt.update(|_, tx| tx.blur());
+    frames(&mut rt, 2);
+    assert!(!rt.state.search.focused);
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    frames(&mut rt, 2);
+    assert!(rt.state.search.focused, "the press focuses the field");
+
+    rt.pointer_down(x, y);
+    rt.frame(FRAME);
+    assert!(rt.state.search.focused, "kept on the way down");
+    rt.pointer_move(x + 200.0, y + 120.0);
+    rt.frame(FRAME);
+    rt.pointer_up(x + 200.0, y + 120.0);
+    frames(&mut rt, 2);
+    assert!(rt.state.search.focused, "kept after a release outside");
+}
