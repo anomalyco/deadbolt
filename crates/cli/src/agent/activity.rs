@@ -69,6 +69,10 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::SyncOnePassword { .. } => (T::Never, "sync-one-password"),
         C::SiteLogins { .. } => (T::Browser, "site-logins"),
         C::SiteFill { .. } => (T::Browser, "site-fill"),
+        C::SiteGenerateCheck { .. } => (T::Browser, "site-generate-check"),
+        C::SiteGenerate { .. } => (T::Browser, "site-generate"),
+        C::SiteGenerateKeep { .. } => (T::Browser, "site-generate-keep"),
+        C::SiteGenerateDrop { .. } => (T::Browser, "site-generate-drop"),
         C::SiteCheck { .. } => (T::Browser, "site-check"),
         C::SiteSave { .. } => (T::Browser, "site-save"),
         C::PasskeyList { .. } => (T::Browser, "passkey-list"),
@@ -124,7 +128,9 @@ fn fill_name(fill: &Fill) -> String {
 /// The draft of an entry for `command` from a `class` peer, or `None` when
 /// it isn't recorded: the app's own requests (it reports its reveals and
 /// copies), a caller's `status` and `watch` (every command starts with a
-/// status), and the browser host's look-ups, which come with every page.
+/// status), and the browser host's look-ups, which come with every page
+/// (and its generator checks and drops, asked before anyone chose a
+/// password).
 /// Reading Activity is never an entry, so a client that reads it on every
 /// change can't feed itself.
 pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
@@ -136,6 +142,8 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         CallerClass::BrowserHost => matches!(
             command,
             Command::SiteFill { .. }
+                | Command::SiteGenerate { .. }
+                | Command::SiteGenerateKeep { .. }
                 | Command::SiteSave { .. }
                 | Command::PasskeyCreate { .. }
                 | Command::PasskeyGet { .. }
@@ -204,6 +212,15 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::PasskeyCreate { origin, .. } => {
             (named(&None, std::slice::from_ref(origin)), Vec::new())
         }
+        // The page, and that a password was made for it: never the password
+        // or its id.
+        Command::SiteGenerate { origin, .. }
+        | Command::SiteGenerateKeep { origin, .. }
+        | Command::SiteGenerateCheck { origin, .. }
+        | Command::SiteGenerateDrop { origin, .. } => (
+            named(&None, std::slice::from_ref(origin)),
+            vec!["password".into()],
+        ),
         _ => (Vec::new(), Vec::new()),
     };
     Some(Draft {
@@ -474,7 +491,7 @@ mod tests {
 
     use super::super::tests::test_paths;
     use super::*;
-    use crate::protocol::{FieldInput, MAX_LINE, Message, PROTOCOL_VERSION, Request};
+    use crate::protocol::{FieldInput, MAX_LINE, Message, PROTOCOL_VERSION, Request, SiteField};
 
     const SECRET: &str = "correct-horse-battery-staple";
 
@@ -585,6 +602,82 @@ mod tests {
         assert_eq!(entries[1].fields, ["username", "password"]);
         assert!(entries.iter().all(|e| e.outcome == Outcome::Allowed));
         assert_eq!(entries[0].caller.class, CallerClass::Caller);
+    }
+
+    /// A generated password and its id never reach Activity, from the
+    /// browser host or anyone else; the host's checks and drops aren't
+    /// entries at all.
+    #[tokio::test]
+    async fn a_generated_password_never_reaches_activity() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = set_up(dir.path()).await;
+        let origin = "https://signup.example.com".to_string();
+        let generate = Command::SiteGenerate {
+            origin: origin.clone(),
+            field: SiteField::default(),
+        };
+        let made = ask(&agent, generate.clone()).await;
+        let Message::Ok {
+            reply: reply @ Reply::SiteGenerated { .. },
+        } = made
+        else {
+            panic!("expected a password, got {made:?}");
+        };
+        let Reply::SiteGenerated { password, id } = &reply else {
+            unreachable!()
+        };
+        let (password, id) = (password.expose().to_string(), id.clone());
+        let keep = Command::SiteGenerateKeep {
+            origin: origin.clone(),
+            id: id.clone(),
+        };
+        let kept = ask(&agent, keep.clone()).await;
+        assert!(matches!(kept, Message::Ok { .. }), "{kept:?}");
+
+        // As the browser host: the same commands, with the replies they got.
+        for (command, result) in [(&generate, Ok(reply)), (&keep, Ok(Reply::Done))] {
+            let draft = draft(command, CallerClass::BrowserHost).expect("recorded");
+            agent.record(draft.finish(caller::nobody(), session::now(), &result));
+        }
+        for command in [
+            Command::SiteGenerateCheck {
+                origin: origin.clone(),
+                field: SiteField::default(),
+            },
+            Command::SiteGenerateDrop {
+                origin: origin.clone(),
+                id: id.clone(),
+            },
+        ] {
+            assert!(draft(&command, CallerClass::BrowserHost).is_none());
+        }
+
+        let rows = agent
+            .with(|s| Ok(s.store.activity_list(0, None, 100)?))
+            .unwrap()
+            .rows;
+        for row in &rows {
+            let text = String::from_utf8_lossy(&row.bytes);
+            assert!(!text.contains(&password), "the password was stored: {text}");
+            assert!(!text.contains(&id), "its id was stored: {text}");
+        }
+        let entries = stored(&agent);
+        let commands: Vec<_> = entries.iter().take(4).map(|e| e.command.as_str()).collect();
+        assert_eq!(
+            commands,
+            [
+                "site-generate-keep",
+                "site-generate",
+                "site-generate-keep",
+                "site-generate"
+            ]
+        );
+        for entry in &entries[..4] {
+            assert_eq!(entry.items[0].title, origin);
+            assert_eq!(entry.fields, ["password"]);
+            assert_eq!(entry.outcome, Outcome::Allowed);
+        }
+        assert_eq!(entries[2].caller.class, CallerClass::Caller);
     }
 
     /// A request made while locked is listed after the next unlock, with

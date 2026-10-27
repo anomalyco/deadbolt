@@ -47,7 +47,7 @@ pub use caller::{
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
 
-pub const PROTOCOL_VERSION: u32 = 11;
+pub const PROTOCOL_VERSION: u32 = 12;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -210,25 +210,61 @@ pub enum Command {
         login: LoginRef,
         want: Vec<Fill>,
     },
-    /// Browser autofill: whether a login typed into the page at `origin` is
-    /// new, a changed password or already saved, revealing nothing; replies
-    /// `site-check`. Doesn't count as use for the idle lock.
+    /// Browser autofill: whether `site-generate` would make a password for
+    /// this field, without making one. Fails `weak` when the site's rules
+    /// and the field allow only weak passwords, `failed` when they allow
+    /// none. Doesn't count as use for the idle lock. Replies `done`.
+    SiteGenerateCheck {
+        origin: String,
+        #[serde(flatten)]
+        field: SiteField,
+    },
+    /// Browser autofill: a new password for a sign-up or change-password
+    /// form on the page at `origin`, within the site's rules (Apple's
+    /// password-manager-resources quirks, else the field's `passwordrules`)
+    /// and the field's own limits, with at least 60 bits of entropy (else it
+    /// fails `weak`). Nothing is saved: it's a candidate for `origin` until
+    /// `site-generate-keep` says it went into the page, then pending until a
+    /// `site-save` names it, it expires or the agent locks. Replies
+    /// `site-generated`.
+    SiteGenerate {
+        origin: String,
+        #[serde(flatten)]
+        field: SiteField,
+    },
+    /// Browser autofill: the candidate `id` went into the page at `origin`;
+    /// hold it as pending. Replies `done`.
+    SiteGenerateKeep {
+        origin: String,
+        id: String,
+    },
+    /// Browser autofill: the candidate `id` didn't go into the page at
+    /// `origin` (or no longer matters); forget it. Replies `done`.
+    SiteGenerateDrop {
+        origin: String,
+        id: String,
+    },
+    /// Browser autofill: whether a login submitted on the page at `origin`
+    /// is new, a changed password or already saved, revealing nothing;
+    /// replies `site-check`. Without a username, logins with any username
+    /// count, by password only. Doesn't count as use for the idle lock.
     SiteCheck {
         origin: String,
-        username: String,
-        password: Secret,
+        username: Option<String>,
+        password: PagePassword,
     },
-    /// Browser autofill: saves a login typed into the page at `origin`
+    /// Browser autofill: saves a login submitted on the page at `origin`
     /// (`url` must be on its site): a new one in the default vault, or with
     /// `login` that login's new password, refused unless one of its URLs is
-    /// on the site. Replies `site-saved`.
+    /// on the site. A generated password saved is no longer pending.
+    /// Replies `site-saved`.
     SiteSave {
         origin: String,
         login: Option<LoginRef>,
         title: String,
         url: String,
         username: String,
-        password: Secret,
+        password: PagePassword,
     },
     /// Passkeys: those in every vault for the relying party `rp_id` (the
     /// host of the page at `origin` when `None`), refused unless it is that
@@ -368,6 +404,27 @@ impl fmt::Debug for Secret {
     }
 }
 
+/// What a page asks of a new password: its `passwordrules`, the field's
+/// `minlength` and `maxlength` (with its `pattern`'s length) and the
+/// characters its `pattern` takes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SiteField {
+    pub rules: Option<String>,
+    pub min_length: Option<usize>,
+    pub max_length: Option<usize>,
+    pub allowed: Option<String>,
+}
+
+/// A password submitted on a web page: as the page had it, or the pending
+/// one `site-generate` made for the page's origin, by its id, which the agent
+/// fills in itself.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PagePassword {
+    Typed(Secret),
+    Generated(String),
+}
+
 /// One login, unambiguously: its vault's id and its item id.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LoginRef {
@@ -504,6 +561,8 @@ pub enum ErrorCode {
     Exists,
     /// The request's protocol version is not supported.
     Version,
+    /// A site's rules allow only weak generated passwords.
+    Weak,
     Failed,
 }
 
@@ -571,6 +630,11 @@ pub enum Reply {
     },
     SiteFill {
         values: SiteValues,
+    },
+    SiteGenerated {
+        password: Secret,
+        /// Names it in `site-check` and `site-save`.
+        id: String,
     },
     SiteCheck {
         status: SiteStatus,
