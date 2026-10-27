@@ -1710,7 +1710,9 @@ fn show_loads_a_kept_key_and_hide_keeps_an_edit() {
     let key = input(&r, "private-key");
     assert!(!key.edit.is_revealed());
     assert_eq!(r.value("private-key"), edited, "hidden, the edit stays");
-    // Hidden, typing adds to it as usual.
+    // Edited, it's not Rune's pristine value, so typing hidden adds to it
+    // rather than replacing it.
+    assert!(!key.edit.is_pristine());
     r.type_text("y");
     assert_eq!(r.value("private-key"), format!("{edited}y"));
     r.sent();
