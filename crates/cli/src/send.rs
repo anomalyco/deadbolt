@@ -575,10 +575,14 @@ fn until(unix: u64) -> String {
         return crate::ago(unix);
     }
     let secs = unix - now;
+    let minutes = secs.div_ceil(60);
     match secs {
         0..60 => format!("in {secs}s"),
-        60..3600 => format!("in {}m", secs.div_ceil(60)),
-        3600..86400 => format!("in {}h{:02}m", secs / 3600, secs % 3600 / 60),
+        _ if minutes < 60 => format!("in {minutes}m"),
+        _ if minutes < 24 * 60 => match minutes % 60 {
+            0 => format!("in {}h", minutes / 60),
+            m => format!("in {}h{m:02}m", minutes / 60),
+        },
         _ => format!("in {}d{}h", secs / 86400, secs % 86400 / 3600),
     }
 }

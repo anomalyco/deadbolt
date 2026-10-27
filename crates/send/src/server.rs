@@ -130,10 +130,18 @@ impl Server {
             warn!("no home relay yet; the link will only work outside browsers");
         }
         let addr = self.inner.endpoint.addr();
+        let relay_url = addr.relay_urls().next().map(|u| u.to_string());
+        // Browsers only use the relay. Direct addresses would only lengthen the link
+        // and tell its holder this computer's network addresses, so they go in only
+        // without a relay (local networks, tests).
+        let direct_addrs = match relay_url {
+            Some(_) => Vec::new(),
+            None => addr.ip_addrs().copied().collect(),
+        };
         SenderAddr {
             id: *addr.id.as_bytes(),
-            relay_url: addr.relay_urls().next().map(|u| u.to_string()),
-            direct_addrs: addr.ip_addrs().copied().collect(),
+            relay_url,
+            direct_addrs,
         }
     }
 
