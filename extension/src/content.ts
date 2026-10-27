@@ -4,7 +4,7 @@
 // submit tracking are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
-import { LOGIN_URL, scanPage, type Field } from "./content/detect"
+import { isVisible, scanPage, signingIn, type Field } from "./content/detect"
 import { initFrameChecks } from "./content/embed"
 import { ownValue, trackUserInput } from "./content/fill"
 import { initMenu, markSubmitted, refreshMenu, send, stepped } from "./content/inline"
@@ -15,11 +15,15 @@ import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 const isTop = window === window.top
 const SCAN_INTERVAL_MS = 750
 const QUIET_AFTER_MS = 2500
+/** A submitted form still showing this long after means the sign-in failed. */
+const FAILED_AFTER_MS = 5000
 
 /** Live fields of the current login form. Never sent anywhere. */
 let fields: Field[] = []
 let submitControl: Element | undefined
 let kind: SurfaceKind | null = null
+/** The page shows a sign-in-provider button. */
+let provider = false
 /** Bumped whenever the set of fields changes, so a fill can't land on a different form. */
 let formId = 0
 let lastSignature = ""
@@ -39,6 +43,7 @@ function refresh() {
   watchShadowRoots()
   const result = scanPage()
   kind = result.kind
+  provider = result.provider
   // A reset form's email box isn't something to fill.
   const next = kind && kind !== "reset" ? result.fields : []
   if (!sameFields(fields, next)) formId++
@@ -61,15 +66,16 @@ function scan() {
 
   // The top page showing no login form for a moment is how a finished sign-in
   // looks from here; the background then offers to save what was submitted.
+  // A page between sign-in steps says so, and is asked again when it changes.
   if (!isTop) return
   window.clearTimeout(quietTimer)
   if (!kind && quietSentFor !== location.href) {
     const url = location.href
     quietTimer = window.setTimeout(() => {
-      if (!kind && location.href === url) {
-        quietSentFor = url
-        send({ type: "db:quiet", loginish: LOGIN_URL.test(location.pathname) })
-      }
+      if (kind || location.href !== url) return
+      const loginish = signingIn(provider)
+      if (!loginish) quietSentFor = url
+      send({ type: "db:quiet", loginish })
     }, QUIET_AFTER_MS)
   }
 }
@@ -174,7 +180,25 @@ async function submitted() {
   // A username alone still counts: email-first sign-ins submit it a step
   // before the password, and no check runs without one.
   if (!username && !password && !newPassword) return
-  send({ type: "db:capture", username, password, newPassword, title: document.title })
+  const roles = [...new Set(fields.map((f) => f.role))]
+  send({ type: "db:capture", username, password, newPassword, title: document.title, kind, roles })
+  watchForFailure(kind, roles)
+}
+
+/**
+ * Five seconds after a submit, the same kind of form on the same page with a
+ * password or code box showing means the site turned it down (1Password's
+ * check): the background then offers nothing.
+ */
+function watchForFailure(submittedKind: SurfaceKind | null, roles: Field["role"][]) {
+  const secret: Field["role"][] = roles.filter((r) => r === "password" || r === "new-password" || r === "otp")
+  if (!submittedKind || !secret.length) return
+  const page = location.origin + location.pathname
+  window.setTimeout(() => {
+    if (location.origin + location.pathname !== page) return
+    refresh()
+    if (kind === submittedKind && fields.some((f) => secret.includes(f.role) && isVisible(f.el))) send({ type: "db:failed" })
+  }, FAILED_AFTER_MS)
 }
 
 const realTarget = (event: Event) => event.composedPath()[0] ?? event.target

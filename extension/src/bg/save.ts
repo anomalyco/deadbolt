@@ -5,7 +5,10 @@
 //
 // A sign-in counts as successful when the top page of the same site then
 // shows no login form for a moment (the content script's `db:quiet`) on a
-// page that doesn't look like a sign-in step.
+// page that doesn't look like a sign-in step. It has failed when the form
+// that was submitted still shows about five seconds later, in place or posted
+// back (1Password's check), and it's abandoned when the user goes elsewhere
+// by hand (a typed address or a bookmark): neither offers anything.
 //
 // The offer is browser UI, never page UI: the toolbar button gets a badge and
 // the popup shows the offer when opened. A page can see any element put into
@@ -15,7 +18,7 @@
 // popup opens by itself for at most one check per site every ten minutes,
 // across tabs, and every other offer only badges.
 
-import type { ChooseReply, OfferChoice, SaveOffer } from "../messages"
+import type { ChooseReply, FieldRole, OfferChoice, SaveOffer, SurfaceKind } from "../messages"
 import type { SaveReply } from "../protocol"
 import { newToken, targetFor } from "./frames"
 import { HostError, type Host } from "./host"
@@ -27,6 +30,12 @@ export const CAPTURE_TTL_MS = 3 * 60_000
 export const OFFER_TTL_MS = 5 * 60_000
 /** The popup opens by itself at most once per site in this long, across tabs. */
 export const AUTO_OPEN_EVERY_MS = 10 * 60_000
+/** How long after a submit to wait before offering: the content script reports a form still showing at five seconds. */
+export const SETTLE_MS = 5500
+/** Fields whose showing again means the submit didn't go through. */
+const SECRET_ROLES: FieldRole[] = ["password", "new-password", "otp"]
+/** Ways into a page that aren't the next step of a sign-in. */
+const BY_HAND = new Set(["typed", "auto_bookmark", "generated", "keyword", "keyword_generated"])
 const MAX_PASSWORD = 4096
 const MAX_USERNAME = 500
 const BADGE = "#f02e29"
@@ -45,6 +54,13 @@ interface Capture {
   /** When it's forgotten: set when a password is submitted, never pushed back by a username alone. */
   until: number
   timer: ReturnType<typeof setTimeout>
+  /** When it was submitted. */
+  at: number
+  /** The page, kind and secret fields of the form last submitted, to tell it showing again. */
+  form: string
+  document?: string
+  kind?: SurfaceKind
+  secrets: FieldRole[]
 }
 
 /**
@@ -92,7 +108,7 @@ export class Saver {
 
   constructor(
     private host: Host,
-    private ttl = { capture: CAPTURE_TTL_MS, offer: OFFER_TTL_MS },
+    private ttl: { capture: number; offer: number; settle?: number } = { capture: CAPTURE_TTL_MS, offer: OFFER_TTL_MS, settle: SETTLE_MS },
     private now: () => number = Date.now,
   ) {
     // Locked or gone: nothing waits to be saved, and nothing is kept.
@@ -120,7 +136,10 @@ export class Saver {
     return siteOfUrl(frame?.url) === site && this.fresh(tabId, t)
   }
 
-  async capture(sender: chrome.runtime.MessageSender, raw: { username?: unknown; password?: unknown; newPassword?: unknown; title?: unknown }) {
+  async capture(
+    sender: chrome.runtime.MessageSender,
+    raw: { username?: unknown; password?: unknown; newPassword?: unknown; title?: unknown; kind?: unknown; roles?: unknown },
+  ) {
     const tabId = sender.tab?.id
     if (tabId === undefined) return
     const ticket = this.ticket(tabId)
@@ -141,9 +160,28 @@ export class Saver {
     const base = same
       ? { ...same, username: username ?? same.username, password: password ?? same.password, newPassword: newPassword ?? same.newPassword }
       : { site, origin: target.origin, username, password, newPassword, title: saveTitle(raw.title, site), url: saveUrl(page) }
+    const kind = typeof raw.kind === "string" ? (raw.kind as SurfaceKind) : undefined
+    const secrets = Array.isArray(raw.roles) ? SECRET_ROLES.filter((r) => (raw.roles as unknown[]).includes(r)) : []
     this.dropCapture(tabId)
     const timer = setTimeout(() => this.dropCapture(tabId), Math.max(0, until - now))
-    this.captures.set(tabId, { ...base, until, timer })
+    this.captures.set(tabId, { ...base, until, timer, at: now, form: saveUrl(page), document: sender.documentId, kind, secrets })
+  }
+
+  /** The submitted form still shows in place, five seconds on: the sign-in failed. */
+  failed(sender: chrome.runtime.MessageSender) {
+    const tabId = sender.tab?.id
+    const page = senderOrigin(sender)
+    const c = tabId === undefined ? undefined : this.captures.get(tabId)
+    if (c && page && saveUrl(page) === c.form) this.dropCapture(tabId!)
+  }
+
+  /** A page reported its form. The one just submitted, posted back to the same page as a new document, means the sign-in failed. */
+  page(sender: chrome.runtime.MessageSender, kind: SurfaceKind | null, roles: FieldRole[]) {
+    const tabId = sender.tab?.id
+    const page = senderOrigin(sender)
+    const c = tabId === undefined ? undefined : this.captures.get(tabId)
+    if (!c || !page || !kind || kind !== c.kind || sender.documentId === c.document || saveUrl(page) !== c.form) return
+    if (c.secrets.some((r) => roles.includes(r))) this.dropCapture(tabId!)
   }
 
   private dropCapture(tabId: number) {
@@ -158,9 +196,13 @@ export class Saver {
     const tabId = sender.tab?.id
     if (tabId === undefined || sender.frameId !== 0 || loginish || !this.captures.has(tabId)) return
     const ticket = this.ticket(tabId)
+    // Give a failed submit its five seconds to show.
+    const held = this.captures.get(tabId)!
+    const wait = held.at + (this.ttl.settle ?? 0) - this.now()
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
     const target = await targetFor(sender)
     const c = this.captures.get(tabId)
-    if (!target || !c || !this.fresh(tabId, ticket) || siteOf(new URL(target.origin).hostname) !== c.site) return
+    if (!target || c !== held || !this.fresh(tabId, ticket) || siteOf(new URL(target.origin).hostname) !== c.site) return
     this.dropCapture(tabId)
     if (c.until <= this.now()) return
     const decided = await this.decide(c).catch((): { asked: boolean; pending?: Pending } => ({ asked: true }))
@@ -279,12 +321,15 @@ export class Saver {
     }
   }
 
-  /** The tab's top page committed a new document. Another site's page ends the sign-in and its offer. */
-  navigated(tabId: number, url: string) {
+  /**
+   * The tab's top page committed a new document. Another site's page ends the
+   * sign-in and its offer; going anywhere by hand ends the sign-in.
+   */
+  navigated(tabId: number, url: string, transition?: string) {
     const site = siteOfUrl(url)
     if (!this.sites.has(tabId) || this.sites.get(tabId) !== site) this.moveOn(tabId)
     this.sites.set(tabId, site)
-    if (this.captures.get(tabId)?.site !== site) this.dropCapture(tabId)
+    if (this.captures.get(tabId)?.site !== site || (transition && BY_HAND.has(transition))) this.dropCapture(tabId)
     if (this.offers.get(tabId)?.offer.site !== site) this.dropOffer(tabId)
   }
 

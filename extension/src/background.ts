@@ -40,11 +40,14 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
     case "db:query":
       return autofill.query(sender, message.roles, message.focused, message.form)
     case "db:page":
+      if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true)
     case "db:quiet":
       return saver.quiet(sender, message.loginish === true)
     case "db:capture":
       return saver.capture(sender, message)
+    case "db:failed":
+      return saver.failed(sender)
     case "db:menu-close":
       return autofill.menuClose(String(message.token), message.dismissed === true, sender)
     case "db:menu-load":
@@ -84,7 +87,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 })
 chrome.webNavigation.onCommitted.addListener((d) => {
   void autofill.navigated(d)
-  if (d.frameId === 0) saver.navigated(d.tabId, d.url)
+  if (d.frameId === 0) saver.navigated(d.tabId, d.url, d.transitionType)
 })
 
 void host.connect()

@@ -167,6 +167,142 @@ const PASSKEY_PAGE = `<h1>Sign in to Acme</h1>
     window.abort = (name) => calls[name].abort.abort()
   </script>`
 
+// When to show and when to stay quiet: one page per case, from Foyer's test
+// pages and detector bugs (Ryan Vogel's list). Each says what the content
+// script should make of it: the form's kind and roles, nothing at all, or,
+// on a page with no form, whether it still looks like a sign-in step (a
+// sign-in-provider button, an authenticator picker, a CAPTCHA).
+type Detect = {
+  body: string
+  title?: string
+  /** Served from this host instead of localhost (a *.localhost name). */
+  host?: string
+  expect:
+    | { kind: SurfaceKindE2E; has?: string[]; not?: string[] }
+    | { quiet: true; signingIn: boolean; not?: string[] }
+    /** Showing a field must open the menu, or must not. */
+    | { kind: SurfaceKindE2E; menu: { on: string; off: string } }
+    /** The frame `frame` loads never reports a form. */
+    | { frameQuiet: string }
+}
+type SurfaceKindE2E = "login" | "signup" | "change-password" | "reset" | "mfa"
+const pw = (id: string, ac = "", label = "Password", extra = "") =>
+  `<label for="${id}">${label}</label><input id="${id}" name="${id}" type="password"${ac ? ` autocomplete="${ac}"` : ""}${extra}>`
+const text = (id: string, label: string, extra = "") => `<label for="${id}">${label}</label><input id="${id}" name="${id}"${extra}>`
+const provider = (label: string, tag = "button") =>
+  `<h1>Welcome to Acme</h1><p>Pick how you'd like to continue.</p><${tag} ${tag === "a" ? 'href="#"' : 'type="button"'}>${label}</${tag}>`
+const DETECT: Record<string, Detect> = {
+  // Form kind.
+  "new-account": {
+    body: `<h1>Create your account</h1><form>${text("email", "Email", ` type="email"`)}${pw("password")}${pw("confirm", "", "Confirm password")}<button>Create account</button></form>`,
+    expect: { kind: "signup", has: ["new-password"], not: ["password"] },
+  },
+  "current-new-confirm": {
+    body: `<h1>Security</h1><form>${pw("current", "", "Current password")}${pw("new", "", "New password")}${pw("confirm", "", "Confirm new password")}<button>Update password</button></form>`,
+    expect: { kind: "change-password", has: ["password", "new-password"] },
+  },
+  "beside-signup": {
+    body: `<h1>Account</h1><form><h2>Login</h2>${text("email", "Email", ` type="email"`)}${pw("password")}<button>Sign in</button></form>
+      <form><h2>Create account</h2>${text("first", "First name")}${text("last", "Last name")}${text("email2", "Email", ` type="email"`)}${pw("password2")}<button>Create</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "password-and-pin": {
+    body: `<h1>Online banking</h1><form>${text("userid", "User ID")}${pw("password")}${pw("pin", "", "PIN", ` inputmode="numeric" maxlength="6"`)}<button>Log on</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "password-and-token": {
+    body: `<h1>VPN portal</h1><form>${text("username", "Username")}${pw("password")}<label for="otp">Token code</label><input id="otp" name="otp" type="password"><button>Log in</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "anti-autofill": {
+    body: `<h1>Acme</h1><form>${text("email", "Email", ` type="email"`)}${pw("password", "new-password")}<button>Sign in</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "email-first-create": {
+    body: `<h1>Acme</h1><form>${text("email", "Email address", ` type="email"`)}<button>Continue</button><button type="button">Create account</button></form>`,
+    expect: { kind: "login" },
+  },
+  french: {
+    body: `<h1>Bienvenue</h1><form>${text("email", "Adresse e-mail")}${pw("password", "", "Mot de passe")}<button>Se connecter</button></form>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  japanese: {
+    body: `<h1>ようこそ</h1><form>${text("email", "メールアドレス")}${pw("password", "", "パスワード")}<button>ログイン</button></form>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  "span-labels": {
+    body: `<h1>Acme</h1><div><span>Email</span><div><input id="email"></div></div><div><span>Password</span><div><input id="password" type="password"></div></div><div role="button">Continue</div>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  "shadow-root": {
+    body: `<h1>Acme</h1><acme-login></acme-login><script>
+      customElements.define("acme-login", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML =
+        '<form><label for="e">Email</label><input id="e" type="email"><label for="p">Password</label><input id="p" type="password"><button>Sign in</button></form>' } })</script>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  // Should stay quiet.
+  checkout: {
+    body: `<header><a href="/login">Sign in</a></header><h1>Checkout</h1><form>${text("name", "Full name")}${text("phone", "Phone", ` type="tel"`)}${text("street", "Street address")}${text("promo", "Promo code", ` maxlength="8"`)}<button>Pay now</button></form>`,
+    expect: { quiet: true, signingIn: false, not: ["otp"] },
+  },
+  blog: {
+    body: `<header><a href="/login">Log in</a></header><h1>Calendars, finally</h1><p>Sign in with Google to sync your calendar, then share it.</p>
+      <form><label for="news">Get the newsletter</label><input id="news" type="email" placeholder="you@example.com"><button>Subscribe</button></form><footer><a href="https://github.com/acme">GitHub</a></footer>`,
+    expect: { quiet: true, signingIn: false },
+  },
+  "with-newsletter": {
+    body: `<h1>Sign in to Acme</h1><form>${text("email", "Email", ` type="email" autocomplete="username"`)}${pw("password", "current-password")}<button>Sign in</button></form>
+      <footer><form><label for="news">Newsletter</label><input id="news" type="email" placeholder="you@example.com"><button>Subscribe</button></form></footer>`,
+    expect: { kind: "login", menu: { on: "#email", off: "#news" } },
+  },
+  "not-codes": {
+    body: `<h1>Your details</h1><form>${text("birthyear", "Birth year", ` type="number" maxlength="4"`)}${text("zipcode", "ZIP", ` maxlength="5"`)}${text("amount", "Amount", ` inputmode="numeric"`)}<button>Save</button></form>`,
+    expect: { quiet: true, signingIn: false, not: ["otp"] },
+  },
+  "checkout-amazon-pay": {
+    body: `<h1>Checkout</h1><form>${text("email", "Email", ` type="email"`)}${text("cvc", "Card security code", ` maxlength="4"`)}<button type="button">Amazon Pay</button><button type="button">Pay with Amazon</button><button>Place order</button></form>`,
+    expect: { quiet: true, signingIn: false, not: ["otp", "password"] },
+  },
+  puzzle: {
+    body: `<h1>Crossword</h1><div>${Array.from({ length: 12 }, (_, i) => `<input maxlength="1" name="c${i}" style="width:24px;display:inline-block">`).join("")}</div>`,
+    expect: { quiet: true, signingIn: false, not: ["otp"] },
+  },
+  "split-code": {
+    body: `<h1>Check your email</h1><p>We sent a code to k***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
+    expect: { kind: "mfa", has: ["otp"] },
+  },
+  // Sign-in buttons on a page with no form: it's still a sign-in page.
+  "provider-github": { body: provider("Continue with GitHub"), expect: { quiet: true, signingIn: true } },
+  "provider-linkedin": { body: provider(`<span class="signInWithLinkedIn">Sign in with LinkedIn</span>`), expect: { quiet: true, signingIn: true } },
+  "provider-google-ja": { body: provider("Googleでログイン"), expect: { quiet: true, signingIn: true } },
+  "provider-google-fr": { body: provider("Continuer avec Google"), expect: { quiet: true, signingIn: true } },
+  "provider-google-de": { body: provider("Mit Google anmelden"), expect: { quiet: true, signingIn: true } },
+  "provider-discord": { body: provider("Login via Discord", "a"), expect: { quiet: true, signingIn: true } },
+  "close-x": { body: `<h1>Welcome to Acme</h1><p>Here's what's new this week.</p><button type="button" aria-label="X">X</button>`, expect: { quiet: true, signingIn: false } },
+  // Sign-in state between steps.
+  "method-picker": {
+    title: "Acme",
+    body: `<h2>Verify with one of these methods</h2><p>Select an authenticator</p><ul><li>Okta Verify <a href="#">Select</a></li><li>Phone <a href="#">Select</a></li><li>Security Key or Biometric <a href="#">Select</a></li></ul>`,
+    expect: { quiet: true, signingIn: true },
+  },
+  captcha: {
+    title: "Acme",
+    body: `<h1>One more step</h1><p>Please complete the security check to continue.</p><div class="g-recaptcha" style="width:300px;height:74px;border:1px solid #ccc">I'm not a robot</div>`,
+    expect: { quiet: true, signingIn: true },
+  },
+  "really-you": {
+    title: "Acme",
+    body: `<h1>Verify it's you</h1><p>To help keep your account safe, Acme wants to make sure it's really you trying to sign in.</p><button type="button">Try another way</button>`,
+    expect: { quiet: true, signingIn: true },
+  },
+  spinner: { title: "Acme", body: `<div role="progressbar" aria-busy="true" style="width:32px;height:32px;border-radius:50%;border:3px solid #999"></div>`, expect: { quiet: true, signingIn: true } },
+  "company-dashboard": { host: "sso.localhost", title: "Dashboard", body: `<h1>Dashboard</h1><p>Welcome back, Kit. Three things need you today.</p>`, expect: { quiet: true, signingIn: false } },
+  "embedded-google-button": { body: `<h1>Acme blog</h1><p>Comments</p><iframe src="EMBED/detect-frame/google-button" style="width:300px;height:60px;border:0"></iframe>`, expect: { frameQuiet: "/detect-frame/google-button" } },
+}
+const DETECT_FRAMES: Record<string, string> = {
+  "google-button": `<div role="button" style="width:240px;height:40px;border:1px solid #ccc">Sign in with Google</div>`,
+}
+
 // novalidate: "admin" isn't an email, and the browser would block the submit.
 const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="post" action="${action}" novalidate>
   <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
@@ -176,7 +312,7 @@ const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="pos
 const server = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
-  async fetch(req) {
+  async fetch(req): Promise<Response> {
     const url = new URL(req.url)
     switch (url.pathname) {
       case "/login": {
@@ -285,7 +421,26 @@ const server = Bun.serve({
       // An occluder the sweep times around the press (see occlusionSweep).
       case "/sweep":
         return html("Sign in to Acme", loginForm("/home") + SWEEP)
+      // Sign-ins that fail and leave the form showing: in place, and posted back.
+      case "/fails/spa":
+        return html(
+          "Sign in to Acme",
+          `${loginForm("#")}<p id="error"></p><a id="home" href="/home">Home</a><script>
+            document.querySelector("form").addEventListener("submit", async (e) => {
+              e.preventDefault()
+              await fetch("/api/session", { method: "POST", body: new FormData(e.target) })
+              document.getElementById("error").textContent = "That password isn't right."
+            })
+          </script>`,
+        )
+      case "/fails/post":
+        return html("Sign in to Acme", `${loginForm("/fails/post")}${req.method === "POST" ? `<p>That password isn't right.</p>` : ""}<a id="home" href="/home">Home</a>`)
     }
+    if (url.pathname.startsWith("/detect/") && DETECT[url.pathname.slice(8)]) {
+      const d = DETECT[url.pathname.slice(8)]
+      return html(d.title ?? "Acme", d.body.replace("EMBED", `http://127.0.0.1:${server.port}`))
+    }
+    if (url.pathname.startsWith("/detect-frame/") && DETECT_FRAMES[url.pathname.slice(14)]) return html("Acme", DETECT_FRAMES[url.pathname.slice(14)])
     // The site's own login page in a frame, on pages with no form of their own.
     if (url.pathname.startsWith("/framed/") && FRAMED[url.pathname.slice(8)]) return html("Acme", `<h1>Acme</h1>${FRAMED[url.pathname.slice(8)]}`)
     if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) return html("Sign in to Acme", HIDDEN[url.pathname.slice(8)])
@@ -361,8 +516,13 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     // And the menu tokens it hands out, to play a page that stole one.
     const tokens: string[] = []
     ;(globalThis as unknown as { __tokens: string[] }).__tokens = tokens
-    chrome.runtime.onMessage.addListener((m: { type?: string; token?: string }, s) => {
+    // And what the content scripts said about each page (see detection).
+    const verdicts: unknown[] = []
+    ;(globalThis as unknown as { __verdicts: unknown[] }).__verdicts = verdicts
+    chrome.runtime.onMessage.addListener((m: { type?: string; token?: string; kind?: unknown; roles?: unknown; loginish?: unknown }, s) => {
       if (s.tab) seen.push(`${m?.type}@${s.frameId}:${s.url ? new URL(s.url).pathname : "?"}`)
+      if (s.tab && s.url && (m?.type === "db:page" || m?.type === "db:quiet"))
+        verdicts.push({ type: m.type, frame: s.frameId, url: s.url.split("?")[0], kind: m.kind, roles: m.roles, loginish: m.loginish })
       if (m?.type === "db:menu-load" && m.token) tokens.push(m.token)
     })
   })
@@ -1600,8 +1760,94 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
   if (v) check(v.verified && !v.authenticationInfo.userVerified, `@simplewebauthn/server verifies the ${how} assertion (no UV without Touch ID)`)
 }
 
+type Verdict = { type: string; frame: number; url: string; kind?: string | null; roles?: string[]; loginish?: boolean }
+const verdicts = (run: Run, url: string) =>
+  run.worker.evaluate((url) => ((globalThis as unknown as { __verdicts: Verdict[] }).__verdicts ?? []).filter((v) => v.url === url), url) as Promise<Verdict[]>
+
+/** What the content script makes of each page in DETECT; one check per page. */
+async function detection() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  let passed = 0
+  try {
+    for (const [name, d] of Object.entries(DETECT)) {
+      const url = `http://${d.host ?? "localhost"}:${server.port}/detect/${name}`
+      await page.goto(url)
+      const e = d.expect
+      let got = ""
+      let ok = false
+      if ("frameQuiet" in e) {
+        const frameUrl = `http://127.0.0.1:${server.port}${e.frameQuiet}`
+        await Bun.sleep(3500)
+        const v = await verdicts(run, frameUrl)
+        const forms = v.filter((x) => x.type === "db:page" && x.kind)
+        got = forms.length ? `the frame reports ${forms[0].kind}` : "the frame reports no form"
+        ok = !forms.length
+      } else if ("quiet" in e) {
+        const quiet = await until(`${name}: the page settles`, async () => (await verdicts(run, url)).find((x) => x.type === "db:quiet" && x.frame === 0), 8000)
+        const v = await verdicts(run, url)
+        const form = v.find((x) => x.type === "db:page" && x.frame === 0 && x.kind)
+        const roles = new Set(v.flatMap((x) => (x.type === "db:page" && x.frame === 0 && x.kind ? (x.roles ?? []) : [])))
+        got = form ? `a ${form.kind} form (${[...roles].join(", ")})` : quiet ? `no form, ${quiet.loginish ? "still signing in" : "not a sign-in step"}` : "no verdict"
+        ok = !form && !!quiet && quiet.loginish === e.signingIn && !(e.not ?? []).some((r) => roles.has(r))
+      } else {
+        const form = await until(`${name}: a form is found`, async () => (await verdicts(run, url)).findLast((x) => x.type === "db:page" && x.frame === 0 && x.kind), 8000)
+        await Bun.sleep(800)
+        const last = (await verdicts(run, url)).findLast((x) => x.type === "db:page" && x.frame === 0) ?? form
+        const roles = new Set(last?.roles ?? [])
+        got = last?.kind ? `${last.kind} (${[...roles].join(", ")})` : "no form"
+        ok = last?.kind === e.kind && ("has" in e ? (e.has ?? []).every((r) => roles.has(r)) && !(e.not ?? []).some((r) => roles.has(r)) : true)
+        if (ok && "menu" in e) {
+          await page.click(e.menu.off)
+          await Bun.sleep(1500)
+          const off = !extensionFrame(page, "menu.html")
+          await page.click(e.menu.on)
+          const on = !!(await until(`${name}: menu on ${e.menu.on}`, () => extensionFrame(page, "menu.html"), 8000))
+          got += `, menu on ${e.menu.off}: ${off ? "no" : "yes"}, on ${e.menu.on}: ${on ? "yes" : "no"}`
+          ok = off && on
+        }
+      }
+      const want = "frameQuiet" in e ? "no form in the frame" : "quiet" in e ? `no form, ${e.signingIn ? "still signing in" : "not a sign-in step"}` : e.kind
+      if (check(ok, `detect ${name}: want ${want}, got ${got}`)) passed++
+    }
+    passed += await failedSignIns(run, page)
+  } catch (err) {
+    check(false, `detection threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "detection")
+  } finally {
+    console.log(`  detection: ${passed} of ${Object.keys(DETECT).length + 3} pass`)
+    await close(run)
+  }
+}
+
+/**
+ * Sign-ins that didn't finish: the password field still showing five seconds
+ * after the submit (in place, or posted back), and a typed address before
+ * the sign-in finished. None of them offers a save. Returns how many pass,
+ * as part of the detection count.
+ */
+async function failedSignIns(run: Run, page: Page): Promise<number> {
+  let passed = 0
+  for (const path of ["/fails/spa", "/fails/post"]) {
+    await clearBadge(run)
+    await signIn(run, page, path, `failed${path.replace(/\W/g, "-")}@acme.test`, "a wrong password")
+    await Bun.sleep(6000)
+    await page.click("#home")
+    await page.waitForURL("**/home")
+    await Bun.sleep(5000)
+    if (check((await badge(run)) === "", `detect ${path}: a password field still showing after the submit offers nothing`)) passed++
+  }
+  await clearBadge(run)
+  await signIn(run, page, "/login", "typed@acme.test", "first step")
+  await page.waitForURL("**/mfa")
+  await page.goto(`${site}/home`)
+  await Bun.sleep(5000)
+  if (check((await badge(run)) === "", "detect typed address: going elsewhere by hand mid sign-in offers nothing")) passed++
+  return passed
+}
+
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
+const once: Record<string, () => Promise<void>> = { detection, coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 

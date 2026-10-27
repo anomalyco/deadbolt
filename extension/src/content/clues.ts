@@ -1,6 +1,6 @@
-// Weighted clues for classifying login fields and forms. Ported from Foyer
-// (github.com/R44VC0RP/foyer, src/clues.ts, by Ryan Vogel), without its
-// sign-in-provider button detection.
+// Weighted clues for classifying login fields and forms, and for telling
+// sign-in-provider buttons apart. Ported from Foyer
+// (github.com/R44VC0RP/foyer, src/clues.ts, by Ryan Vogel).
 //
 // Every signal adds or subtracts a small score instead of deciding on its own:
 // labels and placeholders (display text), id/name/class (code text), the
@@ -11,6 +11,10 @@
 // ever stored or sent anywhere.
 
 import type { FieldRole } from "../messages"
+
+export type Provider =
+  | "google" | "apple" | "microsoft" | "github" | "facebook" | "x" | "linkedin" | "gitlab" | "slack" | "discord"
+  | "amazon" | "okta" | "sso"
 
 export type Clue = readonly [phrase: string, score: number]
 export type FormKind = "login" | "signup" | "change-password" | "reset" | "mfa" | "newsletter"
@@ -214,7 +218,7 @@ export const FORM_CLUES: Record<FormKind, Clue[]> = {
     ["stay signed in", 2], ["don t have an account", 2], ["se connecter", 3], ["connexion", 3], ["anmelden", 3],
     ["einloggen", 3], ["iniciar sesion", 3], ["entrar", 2], ["accedi", 3], ["inloggen", 3], ["ログイン", 3],
     ["サインイン", 3], ["登录", 3], ["登入", 3], ["войти", 3], ["вход", 3], ["로그인", 3],
-    ["create account", -1], ["create an account", -1], ["create your account", -1], ["already have an account", -2],
+    ["already have an account", -2],
     ["confirm password", -4], ["repeat password", -4], ["i agree", -2], ["subscribe", -3], ["newsletter", -3],
     ["checkout", -3], ["shipping", -3], ["billing", -2], ["change password", -4], ["current password", -2],
     ["reset password", -2],
@@ -258,4 +262,69 @@ export function scoreFormText(text: string): Record<FormKind, number> {
   const score = Object.fromEntries(FORM_KINDS.map((k) => [k, 0])) as Record<FormKind, number>
   for (const kind of FORM_KINDS) for (const [phrase, value] of FORM_CLUES[kind]) if (hasPhrase(text, phrase)) score[kind] += value
   return score
+}
+
+// ---- Sign-in provider buttons ------------------------------------------------
+
+const PROVIDER_NAMES: Array<[Provider, string[]]> = [
+  ["google", ["google"]],
+  ["apple", ["apple", "apple id"]],
+  ["microsoft", ["microsoft", "microsoft account", "outlook", "office 365", "azure ad", "entra id"]],
+  ["github", ["github"]],
+  ["facebook", ["facebook"]],
+  ["x", ["twitter", "x"]],
+  ["linkedin", ["linkedin"]],
+  ["gitlab", ["gitlab"]],
+  ["slack", ["slack"]],
+  ["discord", ["discord"]],
+  ["amazon", ["amazon"]],
+  ["okta", ["okta"]],
+  ["sso", ["sso", "single sign on", "saml", "enterprise sso", "your company", "work account", "company account", "organization account"]],
+].map(([p, names]) => [p as Provider, (names as string[]).map((n) => words(n).trim()).sort((a, b) => b.length - a.length)])
+
+const CONNECTORS = [
+  "sign in with", "sign in using", "sign in via", "signin with", "log in with", "log in using", "log in via",
+  "login with", "login via", "continue with",
+  "connect with", "sign up with", "signup with", "register with", "sign on with", "authenticate with", "use", "with",
+  "via", "using", "se connecter avec", "connexion avec", "continuer avec", "s inscrire avec", "anmelden mit",
+  "weiter mit", "fortfahren mit", "mit", "iniciar sesion con", "continuar con", "con", "accedi con",
+  "continua con", "entrar com", "continuar com", "com", "inloggen met", "doorgaan met", "met", "でログイン",
+  "でサインイン", "で続ける", "で続行", "войти через", "продолжить с", "через", "로 로그인", "으로 로그인",
+  "로 계속하기",
+]
+  .map((c) => words(c).trim())
+  .sort((a, b) => b.length - a.length)
+
+const FILLER = ["your", "my", "an", "a", "the", "account", "id", "workspace", "entra", "anmelden", "einloggen"]
+const DENY = [
+  "share", "follow", "tweet", "like us", "post", "download", "app store", "play", "get it on", "watch",
+  "pay", "checkout", "buy",
+]
+
+function removeOnce(text: string, phrase: string): string {
+  if (NON_SPACED.test(phrase)) return text.replace(phrase, " ")
+  return text.replace(` ${phrase} `, " ")
+}
+
+/**
+ * A control is a provider button when its label is essentially just the
+ * provider name plus a connector ("Continue with Google", "Google",
+ * "Se connecter avec Apple"). Sentences that merely mention a provider
+ * ("Sign in with Google to sync your calendar") leave too much text behind.
+ */
+export function providerFromLabel(label: string): { provider: Provider; connector: boolean } | null {
+  const text = words(label)
+  if (squash(text).length > 48 || DENY.some((d) => hasPhrase(text, words(d).trim()))) return null
+  for (const [provider, names] of PROVIDER_NAMES) {
+    const name = names.find((n) => hasPhrase(text, n))
+    if (!name) continue
+    let rest = removeOnce(text, name)
+    const connector = CONNECTORS.find((c) => hasPhrase(rest, c))
+    if (connector) rest = removeOnce(rest, connector)
+    for (const filler of FILLER) while (hasPhrase(rest, filler)) rest = removeOnce(rest, filler)
+    // A bare "X" is a close button far more often than a Twitter button.
+    if (provider === "x" && name === "x" && !connector) continue
+    if (squash(rest).length <= 3) return { provider, connector: !!connector }
+  }
+  return null
 }
