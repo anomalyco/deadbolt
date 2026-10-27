@@ -208,24 +208,19 @@ touched, from a helper it hash-checks before running.
   directory, and the same program: the approved command's resolved
   executable and its team ID. It expires after 15 minutes without use, an
   hour at most. Use tier only.
-  - **Only for programs that can't be told to run other code.** Same program
-    doesn't mean same behaviour: `wrangler`, `vercel`, `npm`/`bun run`,
-    `vite`, `make` and `turbo` run whatever the project's files say, and an
-    AI can edit `wrangler.toml` or `package.json` between two runs to print
-    the token. So the rule is an allowlist, not a denylist: a 15-minute grant
-    is offered only for a native binary signed with a team ID (not ad-hoc,
-    not a script, not a shebang file) that isn't a known code runner.
-  - **Always Once:** scripts and shebang files (`node_modules/.bin/*`
-    resolves to a script, so most JS tooling lands here), unsigned and ad-hoc
-    binaries, shells and interpreters, and code runners even when signed:
-    `env`, `xargs`, `find`, `npx`, `bunx`, `uvx`, `deno`, `node`, `bun`,
-    `python`, `osascript`, `git` (aliases, hooks, `core.sshCommand`), `gh`
-    (extensions, shell aliases), `make`, and project-driven deploy and build
-    tools. The list ships with Deadbolt and only ever grows.
-  - **In practice** most dev commands get Once, so the panel offers 15 min
-    only when it means something. Binding to hashes of the project's config
-    files was considered and left out: each tool reads different files, and
-    missing one is silent.
+  - **Only for programs Kit has trusted by name.** Same program doesn't mean
+    same behaviour: `wrangler`, `npm run`, `make` run whatever the project's
+    files say, `docker run`, `terraform` (`local-exec`), `go run`,
+    `kubectl` plugins and `aws` (`credential_process`) run arbitrary code
+    while signed by real vendors, and an AI can edit the project between two
+    runs. No list of "code runners" is ever complete, so Deadbolt ships with
+    no trusted programs at all. An unknown program, signed or not, gets Once.
+  - **Trusting a program** is its own tap, from the panel ("Allow 15-minute
+    grants for `/opt/homebrew/bin/flyctl`, signed by …") or in Settings. It
+    pins the path and team ID; ad-hoc binaries, scripts and shebang files
+    can't be trusted. The panel says plainly that a trusted program can
+    leak the secret if it runs project code. Settings lists and removes
+    them, and Activity records each change. AIs can't add to the list.
 - Read and Write are always Once. Add needs no grant. Never has no scope.
 
 **What can't spoof a prompt:**
