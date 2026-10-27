@@ -59,12 +59,34 @@ const PROBE = () => {
   window.addEventListener("blur", () => probe.blurs++)
 }
 
-/** The page sees the menu's host element arrive; these pages misuse that. */
+/** The page sees the menu's host element arrive (a popover); these pages misuse that. */
 const onMenu = (js: string) => `<script>
   new MutationObserver((records) => {
-    for (const r of records) for (const host of r.addedNodes) if (host.nodeName === "DIV") { ${js} }
+    for (const r of records) for (const host of r.addedNodes) if (host.nodeType === 1 && host.hasAttribute("popover")) { ${js} }
   }).observe(document.documentElement, { childList: true })
 </script>`
+
+/**
+ * Restyles the menu's host from script, every frame while `when` holds. Its
+ * inline \`!important\` styles beat any stylesheet and Deadbolt sets them
+ * again each frame, so a page has to keep at it.
+ */
+const restyle = (prop: string, value: string, when = "true") =>
+  onMenu(`const loop = () => { if (!host.isConnected) return; if (${when}) host.style.setProperty("${prop}", "${value}", "important"); requestAnimationFrame(loop) }; loop()`)
+
+/** Where the menu is, for a sheet over just it (one over the field too would stop the fill anyway). */
+const overMenu = "const r = host.getBoundingClientRect(); const at = `left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px`"
+
+/** A sheet in the top layer over the menu, shown `after` ms past it: in the page, or in a shadow root Deadbolt can't watch. */
+const topCover = (where: "page" | "shadow", clicks: boolean, after = 50) =>
+  onMenu(`setTimeout(() => {
+    ${overMenu}
+    const c = document.createElement("div")
+    c.popover = "manual"
+    c.style.cssText = "position:fixed;inset:auto;margin:0;padding:0;border:0;background:rgb(255 255 255 / 92%);pointer-events:${clicks ? "auto" : "none"};" + at
+    if ("${where}" === "shadow") { const h = document.createElement("span"); document.body.append(h); h.attachShadow({ mode: "closed" }).append(c) } else document.body.append(c)
+    c.showPopover()
+  }, ${after})`)
 
 const emailField = `<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">`
 const passwordField = `<input id="password" name="password" type="password" autocomplete="current-password">`
@@ -84,23 +106,36 @@ const HIDDEN: Record<string, string> = {
 }
 
 // Ways a page can try to get a click into a menu the user can't see properly.
-// The menu's host is the <div> Deadbolt adds to <html>.
+// The menu's host is a popover Deadbolt adds to <html>.
 const OVERLAY: Record<string, string> = {
   none: "",
-  fade: `<style>html > div { opacity: 0.4 !important }</style>`,
-  clip: `<style>html > div { clip-path: inset(0 0 25% 0) !important }</style>`,
-  // A near-opaque sheet over everything that lets clicks through to the menu.
-  cover: onMenu(`const c = document.createElement("section"); c.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:rgb(255 255 255 / 92%)"; setTimeout(() => document.documentElement.append(c), 50)`),
+  fade: restyle("opacity", "0.4"),
+  clip: restyle("clip-path", "inset(0 0 25% 0)"),
+  // A near-opaque sheet over everything in the top layer, letting clicks
+  // through to the menu, in a shadow root: Deadbolt can't see it go up.
+  cover: topCover("shadow", false),
   // Fade it out the moment the click starts (focus moves into the menu), so a
   // visibility reading taken before the click is stale.
-  "on-press": `<script>addEventListener("blur", () => document.head.insertAdjacentHTML("beforeend", "<style>html > div { opacity: 0 !important }</style>"))</script>`,
+  "on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0", "window.pressed")}`,
   // The reverse: keep it all but see-through over a decoy (still taking
   // clicks, which a fully transparent frame doesn't) and show it the moment
   // the press lands, so a reading taken after the click finds it visible.
-  "reveal-on-press": `<style id="seethrough">html > div { opacity: 0.02 !important }</style><script>addEventListener("blur", () => document.getElementById("seethrough").remove())</script>`,
+  "reveal-on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0.02", "!window.pressed")}`,
   // Shown a moment before the press instead (as the pointer nears it), so
   // nothing changes after the press: the test calls reveal() 250 ms before.
-  "reveal-before-press": `<style id="seethrough">html > div { opacity: 0.02 !important }</style><script>window.reveal = () => document.getElementById("seethrough").remove()</script>`,
+  "reveal-before-press": `<script>window.reveal = () => (window.revealed = true)</script>${restyle("opacity", "0.02", "!window.revealed")}`,
+}
+
+// Ways that no longer work on a menu in the top layer: it still fills.
+const BEATEN: Record<string, string> = {
+  // Stylesheets lose to its inline !important styles, whatever they aim at.
+  css: `<style>[popover], :popover-open, html > :not(head, body) { opacity: 0.02 !important; clip-path: inset(50%) !important; transform: scale(0.5) !important }</style>`,
+  // The highest z-index is still under the top layer.
+  "z-index": onMenu(`setTimeout(() => { ${overMenu}; const c = document.createElement("section"); c.style.cssText = "position:fixed;z-index:2147483647;background:rgb(255 255 255 / 92%);" + at; document.documentElement.append(c) }, 50)`),
+  // A popover shown after the menu: Deadbolt raises the menu back over it.
+  "top-cover": topCover("page", true),
+  // One in a shadow root that takes clicks: the menu's hit checks find it.
+  "shadow-cover": topCover("shadow", true),
 }
 
 // Ways to show the site's login page in a frame. Hidden ones aren't fully
@@ -130,13 +165,18 @@ const FRAMED: Record<string, string> = {
 
 // Covers everything (letting clicks through) for `ms`, starting `after` ms
 // past the press into the menu (the page's blur), or right away with cover().
+// The cover is a popover in a shadow root, over the menu in the top layer.
 const SWEEP = `<script>
   const cover = (ms) => {
-    const c = document.createElement("section")
-    c.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:#fff"
-    document.documentElement.append(c)
+    const h = document.createElement("span")
+    const c = document.createElement("div")
+    c.popover = "manual"
+    c.style.cssText = "position:fixed;inset:0;margin:0;width:auto;height:auto;border:0;pointer-events:none;background:#fff"
+    document.body.append(h)
+    h.attachShadow({ mode: "closed" }).append(c)
+    c.showPopover()
     window.__shown = performance.now()
-    setTimeout(() => c.remove(), ms)
+    setTimeout(() => h.remove(), ms)
   }
   window.cover = cover
   window.coverAfterPress = (after, ms) => addEventListener("blur", () => (after ? setTimeout(() => cover(ms), after) : cover(ms)), { once: true })
@@ -167,16 +207,204 @@ const PASSKEY_PAGE = `<h1>Sign in to Acme</h1>
     window.abort = (name) => calls[name].abort.abort()
   </script>`
 
+// When to show and when to stay quiet: one page per case, from Foyer's test
+// pages and detector bugs (Ryan Vogel's list). Each says what the content
+// script should make of it: the form's kind and roles, nothing at all, or,
+// on a page with no form, whether it still looks like a sign-in step (a
+// sign-in-provider button, an authenticator picker, a CAPTCHA).
+type Detect = {
+  body: string
+  title?: string
+  /** Served from this host instead of localhost (a *.localhost name). */
+  host?: string
+  expect:
+    | { kind: SurfaceKindE2E; has?: string[]; not?: string[] }
+    | { quiet: true; signingIn: boolean; not?: string[] }
+    /** Showing a field must open the menu, or must not. */
+    | { kind: SurfaceKindE2E; menu: { on: string; off: string } }
+    /** The frame `frame` loads never reports a form. */
+    | { frameQuiet: string }
+}
+type SurfaceKindE2E = "login" | "signup" | "change-password" | "reset" | "mfa"
+const pw = (id: string, ac = "", label = "Password", extra = "") =>
+  `<label for="${id}">${label}</label><input id="${id}" name="${id}" type="password"${ac ? ` autocomplete="${ac}"` : ""}${extra}>`
+const text = (id: string, label: string, extra = "") => `<label for="${id}">${label}</label><input id="${id}" name="${id}"${extra}>`
+const provider = (label: string, tag = "button") =>
+  `<h1>Welcome to Acme</h1><p>Pick how you'd like to continue.</p><${tag} ${tag === "a" ? 'href="#"' : 'type="button"'}>${label}</${tag}>`
+const DETECT: Record<string, Detect> = {
+  // Form kind.
+  "new-account": {
+    body: `<h1>Create your account</h1><form>${text("email", "Email", ` type="email"`)}${pw("password")}${pw("confirm", "", "Confirm password")}<button>Create account</button></form>`,
+    expect: { kind: "signup", has: ["new-password"], not: ["password"] },
+  },
+  "current-new-confirm": {
+    body: `<h1>Security</h1><form>${pw("current", "", "Current password")}${pw("new", "", "New password")}${pw("confirm", "", "Confirm new password")}<button>Update password</button></form>`,
+    expect: { kind: "change-password", has: ["password", "new-password"] },
+  },
+  "beside-signup": {
+    body: `<h1>Account</h1><form><h2>Login</h2>${text("email", "Email", ` type="email"`)}${pw("password")}<button>Sign in</button></form>
+      <form><h2>Create account</h2>${text("first", "First name")}${text("last", "Last name")}${text("email2", "Email", ` type="email"`)}${pw("password2")}<button>Create</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "password-and-pin": {
+    body: `<h1>Online banking</h1><form>${text("userid", "User ID")}${pw("password")}${pw("pin", "", "PIN", ` inputmode="numeric" maxlength="6"`)}<button>Log on</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "password-and-token": {
+    body: `<h1>VPN portal</h1><form>${text("username", "Username")}${pw("password")}<label for="otp">Token code</label><input id="otp" name="otp" type="password"><button>Log in</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "anti-autofill": {
+    body: `<h1>Acme</h1><form>${text("email", "Email", ` type="email"`)}${pw("password", "new-password")}<button>Sign in</button></form>`,
+    expect: { kind: "login", has: ["password"], not: ["new-password"] },
+  },
+  "email-first-create": {
+    body: `<h1>Acme</h1><form>${text("email", "Email address", ` type="email"`)}<button>Continue</button><button type="button">Create account</button></form>`,
+    expect: { kind: "login" },
+  },
+  french: {
+    body: `<h1>Bienvenue</h1><form>${text("email", "Adresse e-mail")}${pw("password", "", "Mot de passe")}<button>Se connecter</button></form>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  japanese: {
+    body: `<h1>ようこそ</h1><form>${text("email", "メールアドレス")}${pw("password", "", "パスワード")}<button>ログイン</button></form>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  "span-labels": {
+    body: `<h1>Acme</h1><div><span>Email</span><div><input id="email"></div></div><div><span>Password</span><div><input id="password" type="password"></div></div><div role="button">Continue</div>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  "shadow-root": {
+    body: `<h1>Acme</h1><acme-login></acme-login><script>
+      customElements.define("acme-login", class extends HTMLElement { connectedCallback() { this.attachShadow({ mode: "open" }).innerHTML =
+        '<form><label for="e">Email</label><input id="e" type="email"><label for="p">Password</label><input id="p" type="password"><button>Sign in</button></form>' } })</script>`,
+    expect: { kind: "login", has: ["password"] },
+  },
+  // Should stay quiet.
+  checkout: {
+    body: `<header><a href="/login">Sign in</a></header><h1>Checkout</h1><form>${text("name", "Full name")}${text("phone", "Phone", ` type="tel"`)}${text("street", "Street address")}${text("promo", "Promo code", ` maxlength="8"`)}<button>Pay now</button></form>`,
+    expect: { quiet: true, signingIn: false, not: ["otp"] },
+  },
+  blog: {
+    body: `<header><a href="/login">Log in</a></header><h1>Calendars, finally</h1><p>Sign in with Google to sync your calendar, then share it.</p>
+      <form><label for="news">Get the newsletter</label><input id="news" type="email" placeholder="you@example.com"><button>Subscribe</button></form><footer><a href="https://github.com/acme">GitHub</a></footer>`,
+    expect: { quiet: true, signingIn: false },
+  },
+  "with-newsletter": {
+    body: `<h1>Sign in to Acme</h1><form>${text("email", "Email", ` type="email" autocomplete="username"`)}${pw("password", "current-password")}<button>Sign in</button></form>
+      <footer><form><label for="news">Newsletter</label><input id="news" type="email" placeholder="you@example.com"><button>Subscribe</button></form></footer>`,
+    expect: { kind: "login", menu: { on: "#email", off: "#news" } },
+  },
+  "not-codes": {
+    body: `<h1>Your details</h1><form>${text("birthyear", "Birth year", ` type="number" maxlength="4"`)}${text("zipcode", "ZIP", ` maxlength="5"`)}${text("amount", "Amount", ` inputmode="numeric"`)}<button>Save</button></form>`,
+    expect: { quiet: true, signingIn: false, not: ["otp"] },
+  },
+  "checkout-amazon-pay": {
+    body: `<h1>Checkout</h1><form>${text("email", "Email", ` type="email"`)}${text("cvc", "Card security code", ` maxlength="4"`)}<button type="button">Amazon Pay</button><button type="button">Pay with Amazon</button><button>Place order</button></form>`,
+    expect: { quiet: true, signingIn: false, not: ["otp", "password"] },
+  },
+  puzzle: {
+    body: `<h1>Crossword</h1><div>${Array.from({ length: 12 }, (_, i) => `<input maxlength="1" name="c${i}" style="width:24px;display:inline-block">`).join("")}</div>`,
+    expect: { quiet: true, signingIn: false, not: ["otp"] },
+  },
+  "split-code": {
+    body: `<h1>Check your email</h1><p>We sent a code to k***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
+    expect: { kind: "mfa", has: ["otp"] },
+  },
+  // Sign-in buttons on a page with no form: it's still a sign-in page.
+  "provider-github": { body: provider("Continue with GitHub"), expect: { quiet: true, signingIn: true } },
+  "provider-linkedin": { body: provider(`<span class="signInWithLinkedIn">Sign in with LinkedIn</span>`), expect: { quiet: true, signingIn: true } },
+  "provider-google-ja": { body: provider("Googleでログイン"), expect: { quiet: true, signingIn: true } },
+  "provider-google-fr": { body: provider("Continuer avec Google"), expect: { quiet: true, signingIn: true } },
+  "provider-google-de": { body: provider("Mit Google anmelden"), expect: { quiet: true, signingIn: true } },
+  "provider-discord": { body: provider("Login via Discord", "a"), expect: { quiet: true, signingIn: true } },
+  "close-x": { body: `<h1>Welcome to Acme</h1><p>Here's what's new this week.</p><button type="button" aria-label="X">X</button>`, expect: { quiet: true, signingIn: false } },
+  // Sign-in state between steps.
+  "method-picker": {
+    title: "Acme",
+    body: `<h2>Verify with one of these methods</h2><p>Select an authenticator</p><ul><li>Okta Verify <a href="#">Select</a></li><li>Phone <a href="#">Select</a></li><li>Security Key or Biometric <a href="#">Select</a></li></ul>`,
+    expect: { quiet: true, signingIn: true },
+  },
+  captcha: {
+    title: "Acme",
+    body: `<h1>One more step</h1><p>Please complete the security check to continue.</p><div class="g-recaptcha" style="width:300px;height:74px;border:1px solid #ccc">I'm not a robot</div>`,
+    expect: { quiet: true, signingIn: true },
+  },
+  "really-you": {
+    title: "Acme",
+    body: `<h1>Verify it's you</h1><p>To help keep your account safe, Acme wants to make sure it's really you trying to sign in.</p><button type="button">Try another way</button>`,
+    expect: { quiet: true, signingIn: true },
+  },
+  spinner: { title: "Acme", body: `<div role="progressbar" aria-busy="true" style="width:32px;height:32px;border-radius:50%;border:3px solid #999"></div>`, expect: { quiet: true, signingIn: true } },
+  "company-dashboard": { host: "sso.localhost", title: "Dashboard", body: `<h1>Dashboard</h1><p>Welcome back, Kit. Three things need you today.</p>`, expect: { quiet: true, signingIn: false } },
+  "embedded-google-button": { body: `<h1>Acme blog</h1><p>Comments</p><iframe src="EMBED/detect-frame/google-button" style="width:300px;height:60px;border:0"></iframe>`, expect: { frameQuiet: "/detect-frame/google-button" } },
+}
+const DETECT_FRAMES: Record<string, string> = {
+  "google-button": `<div role="button" style="width:240px;height:40px;border:1px solid #ccc">Sign in with Google</div>`,
+}
+
 // novalidate: "admin" isn't an email, and the browser would block the submit.
 const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="post" action="${action}" novalidate>
   <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
   <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
   <button type="submit">Sign in</button></form>`
 
+const NEW_RULES = `maxlength="16" passwordrules="minlength: 12; required: digit; required: upper;"`
+/** The new-password box's rules on sign-up variants: a six-digit PIN is weak, a lookahead is outside the pattern subset. */
+const SIGNUP_RULES: Record<string, string> = {
+  weak: `maxlength="6" pattern="\\d{6}"`,
+  lookahead: `pattern="(?=.*\\d).{8,}"`,
+  pattern: `pattern="[a-z0-9]{16,24}"`,
+}
+const signupForm = (action: string, rules = NEW_RULES) => `<h1>Create your Acme account</h1><form method="post" action="${action}" novalidate>
+  <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+  <label for="new">Password</label><input id="new" name="password" type="password" autocomplete="new-password" ${rules}>
+  <label for="confirm">Confirm password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password">
+  <button type="submit">Create account</button></form>`
+
+// Pages that use the top layer themselves.
+const TOP: Record<string, string> = {
+  // Re-shows its popover whenever the menu goes back on top.
+  "keeps-covering": loginForm("/home") + onMenu(`
+    const c = document.createElement("div")
+    c.popover = "manual"
+    c.style.cssText = "position:fixed;inset:0;margin:0;width:auto;height:auto;border:0;background:#fff"
+    document.body.append(c)
+    window.raised = 0
+    host.addEventListener("toggle", (e) => {
+      if (e.newState !== "open") return
+      window.raised++
+      if (c.matches(":popover-open")) c.hidePopover()
+      c.showPopover()
+    })`),
+  // A login modal: showModal() makes everything outside the dialog inert.
+  dialog: `<dialog id="modal" style="border:0;border-radius:14px;padding:28px;width:360px">${loginForm("/home")}</dialog><script>document.getElementById("modal").showModal()</script>`,
+  // A modal the login form isn't in, shown over the open menu.
+  "dialog-over": `${loginForm("/home")}<dialog id="banner"><p>We use cookies.</p></dialog>${onMenu(`setTimeout(() => document.getElementById("banner").showModal(), 300)`)}`,
+  // Full screen: F2 for the box the form is in, F4 for another.
+  fullscreen: `<div id="box" style="background:#f4f4f5">${loginForm("/home")}</div><div id="other" style="background:#000;color:#fff">Video</div><script>
+    addEventListener("keydown", (e) => {
+      if (e.key === "F2") document.getElementById("box").requestFullscreen()
+      if (e.key === "F4") document.getElementById("other").requestFullscreen()
+    }, true)
+  </script>`,
+  // Full screen on a web component, the form in its shadow root: F2.
+  "fullscreen-shadow": `<div id="widget"></div><script>
+    document.getElementById("widget").attachShadow({ mode: "open" }).innerHTML = ${JSON.stringify(`<div style="background:#f4f4f5">${loginForm("/home")}</div>`)}
+    addEventListener("keydown", (e) => e.key === "F2" && document.getElementById("widget").requestFullscreen(), true)
+  </script>`,
+}
+
+const changeForm = `<h1>Change your password</h1><form method="post" action="/home" novalidate>
+  <label for="current">Current password</label><input id="current" name="current" type="password" autocomplete="current-password">
+  <label for="new">New password</label><input id="new" name="new" type="password" autocomplete="new-password">
+  <label for="confirm">Confirm new password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password">
+  <button type="submit">Change password</button></form>`
+
 const server = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
-  async fetch(req) {
+  async fetch(req): Promise<Response> {
     const url = new URL(req.url)
     switch (url.pathname) {
       case "/login": {
@@ -285,11 +513,59 @@ const server = Bun.serve({
       // An occluder the sweep times around the press (see occlusionSweep).
       case "/sweep":
         return html("Sign in to Acme", loginForm("/home") + SWEEP)
+      // Sign-ins that fail and leave the form showing: in place, and posted back.
+      case "/fails/spa":
+        return html(
+          "Sign in to Acme",
+          `${loginForm("#")}<p id="error"></p><a id="home" href="/home">Home</a><script>
+            document.querySelector("form").addEventListener("submit", async (e) => {
+              e.preventDefault()
+              await fetch("/api/session", { method: "POST", body: new FormData(e.target) })
+              document.getElementById("error").textContent = "That password isn't right."
+            })
+          </script>`,
+        )
+      // Turns down a wrong password at once, and takes two and a half seconds to accept the right one.
+      case "/fails/retry":
+        return html(
+          "Sign in to Acme",
+          `${loginForm("#")}<p id="error"></p><script>
+            document.querySelector("form").addEventListener("submit", async (e) => {
+              e.preventDefault()
+              const data = new FormData(e.target)
+              await fetch("/api/session", { method: "POST", body: data })
+              if (data.get("password") !== "the right password") return void (document.getElementById("error").textContent = "That password isn't right.")
+              await new Promise((r) => setTimeout(r, 2500))
+              history.pushState(null, "", "/app/dashboard")
+              document.body.innerHTML = "<h1>Dashboard</h1><p>Signed in.</p>"
+            })
+          </script>`,
+        )
+      // Sign-up and change-password forms for the generator.
+      case "/signup":
+        return html("Create your Acme account", signupForm("/home"))
+      case "/signup/fails":
+        return html("Create your Acme account", `${signupForm("/signup/fails")}${req.method === "POST" ? `<p>That email is taken.</p>` : ""}<a id="home" href="/home">Home</a>`)
+      case "/account/password":
+        return html("Change password", changeForm)
+      case "/signup/weak":
+      case "/signup/lookahead":
+      case "/signup/pattern":
+        return html("Create your Acme account", signupForm("/home", SIGNUP_RULES[url.pathname.slice(8)]))
+      case "/fails/post":
+        return html("Sign in to Acme", `${loginForm("/fails/post")}${req.method === "POST" ? `<p>That password isn't right.</p>` : ""}<a id="home" href="/home">Home</a>`)
     }
+    if (url.pathname.startsWith("/detect/") && DETECT[url.pathname.slice(8)]) {
+      const d = DETECT[url.pathname.slice(8)]
+      return html(d.title ?? "Acme", d.body.replace("EMBED", `http://127.0.0.1:${server.port}`))
+    }
+    if (url.pathname.startsWith("/detect-frame/") && DETECT_FRAMES[url.pathname.slice(14)]) return html("Acme", DETECT_FRAMES[url.pathname.slice(14)])
     // The site's own login page in a frame, on pages with no form of their own.
     if (url.pathname.startsWith("/framed/") && FRAMED[url.pathname.slice(8)]) return html("Acme", `<h1>Acme</h1>${FRAMED[url.pathname.slice(8)]}`)
     if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) return html("Sign in to Acme", HIDDEN[url.pathname.slice(8)])
     if (url.pathname.startsWith("/overlay/") && url.pathname.slice(9) in OVERLAY) return html("Sign in to Acme", loginForm("/home") + OVERLAY[url.pathname.slice(9)])
+    if (url.pathname.startsWith("/beaten/") && url.pathname.slice(8) in BEATEN) return html("Sign in to Acme", loginForm("/home") + BEATEN[url.pathname.slice(8)])
+    if (url.pathname.startsWith("/top/") && url.pathname.slice(5) in TOP) return html("Sign in to Acme", TOP[url.pathname.slice(5)])
     return new Response("not found", { status: 404 })
   },
 })
@@ -361,8 +637,22 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     // And the menu tokens it hands out, to play a page that stole one.
     const tokens: string[] = []
     ;(globalThis as unknown as { __tokens: string[] }).__tokens = tokens
-    chrome.runtime.onMessage.addListener((m: { type?: string; token?: string }, s) => {
+    // And what the content scripts said about each page (see detection).
+    const verdicts: unknown[] = []
+    ;(globalThis as unknown as { __verdicts: unknown[] }).__verdicts = verdicts
+    // And which messages to pages were answered, by type.
+    const answered: string[] = []
+    ;(globalThis as unknown as { __answered: string[] }).__answered = answered
+    const send = chrome.tabs.sendMessage.bind(chrome.tabs) as (...args: unknown[]) => Promise<unknown>
+    ;(chrome.tabs as unknown as { sendMessage: unknown }).sendMessage = (...args: unknown[]) => {
+      const reply = send(...args)
+      reply.then(() => answered.push(String((args[1] as { type?: string })?.type)), () => {})
+      return reply
+    }
+    chrome.runtime.onMessage.addListener((m: { type?: string; token?: string; kind?: unknown; roles?: unknown; loginish?: unknown }, s) => {
       if (s.tab) seen.push(`${m?.type}@${s.frameId}:${s.url ? new URL(s.url).pathname : "?"}`)
+      if (s.tab && s.url && (m?.type === "db:page" || m?.type === "db:quiet"))
+        verdicts.push({ type: m.type, frame: s.frameId, url: s.url.split("?")[0], kind: m.kind, roles: m.roles, loginish: m.loginish })
       if (m?.type === "db:menu-load" && m.token) tokens.push(m.token)
     })
   })
@@ -586,6 +876,7 @@ async function savePrompt(scheme: Scheme) {
       check(!(await hostLog(run)).some((r) => r.type === "save"), "nothing saved before the click")
       const { p, title } = await offerIn(run, `offer-save-${scheme}`)
       check(title === "Save login for localhost?", `the popup asks to save (${title})`)
+      check((await p.locator(".account button.primary").count()) === 0, "with an offer showing, no Fill button is primary")
       await p.click(".offer button.primary")
       await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
       const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
@@ -621,6 +912,119 @@ async function savePrompt(scheme: Scheme) {
   } catch (err) {
     check(false, `save scenario threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "save")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Clicks a new-password box and picks the generated password from the menu. */
+async function generateIn(run: Run, page: Page, name?: string): Promise<string | null> {
+  await formFound(page)
+  await page.click("#new")
+  const menu = await until("the menu offers a generated password", async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator("button.row .title").textContent().catch(() => "")) === "Use a strong password" ? f : null
+  }, 15_000)
+  if (!menu) {
+    await diagnose(run, page, "no generator row")
+    return null
+  }
+  await settled(menu)
+  if (name) {
+    const box = await (await menu.frameElement()).boundingBox()
+    if (box) await shot(page, name, { x: box.x - 24, y: box.y - 64, width: box.width + 48, height: box.height + 88 })
+  }
+  await menu.locator("button.row").click()
+  return until("both new-password boxes fill", async () => {
+    const value = await page.inputValue("#new")
+    return value && value === (await page.inputValue("#confirm")) ? value : null
+  })
+}
+
+/** The generator: a sign-up fills every new-password box, nothing is saved before a successful submit, and the agent's id stands in for the password. */
+async function generator(scheme: Scheme) {
+  const run = await launch({ scheme })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/signup`)
+    await type(run, page, "#email", "fresh@acme.test")
+    const value = await generateIn(run, page, `generator-${scheme}`)
+    check(!!value && value.length >= 12 && value.length <= 16 && /\d/.test(value) && /[A-Z]/.test(value), `the generated password keeps the field's rules (${value?.length} characters)`)
+    const asked = (await hostLog(run)).find((r) => r.type === "generate")
+    check(asked?.origin === site && asked.maxLength === 16 && asked.rules === "minlength: 12; required: digit; required: upper;", "the host is asked with the field's rules")
+    check(!(await hostLog(run)).some((r) => r.type === "save" || r.type === "check"), "nothing is checked or saved before the submit")
+    check(!!(await until("the agent is told to keep it", async () => (await hostLog(run)).some((r) => r.type === "generate-keep" && r.origin === site))), "once it's in the page, the agent is told to keep it")
+    // The page names it by id once the keep's answer is back; a person takes longer than that to submit.
+    await until("the page is told the kept id", () => run.worker.evaluate(() => (globalThis as unknown as { __answered: string[] }).__answered.includes("db:generated")))
+    await page.click("button[type=submit]")
+    await page.waitForURL("**/home")
+    if (!(await offered(run, "a generated sign-up badges the toolbar button"))) await diagnose(run, page, "generated sign-up")
+    else {
+      const checked = (await hostLog(run)).find((r) => r.type === "check")
+      check(typeof checked?.generated === "string" && !("password" in (checked ?? {})), "the check names the generated password by id, not the password")
+      const { p, title } = await offerIn(run, `offer-generated-${scheme}`)
+      check(title === "Save login for localhost?", `the popup offers to save the new account (${title})`)
+      check((await p.locator("button.primary").count()) === 1 && (await p.locator(".offer button.primary").count()) === 1, "with an offer showing, its Save is the only primary button")
+      await p.click(".offer button.primary")
+      const save = (await until("save sent after the click", async () => (await hostLog(run)).find((r) => r.type === "save"))) as { entry?: Record<string, string> } | null
+      check(save?.entry?.username === "fresh@acme.test" && typeof save.entry.generated === "string" && !("password" in save.entry), "the save names the generated password by id")
+      await p.close()
+    }
+
+    // A sign-up whose form posts back offers nothing.
+    await clearBadge(run)
+    await page.goto(`${site}/signup/fails`)
+    await type(run, page, "#email", "taken@acme.test")
+    if (await generateIn(run, page)) {
+      await page.click("button[type=submit]")
+      await Bun.sleep(6000)
+      await page.click("#home")
+      await page.waitForURL("**/home")
+      await Bun.sleep(5000)
+      check((await badge(run)) === "", "a generated sign-up that posts back offers nothing")
+    }
+
+    // Changing a password with no username: the login whose password is the current one.
+    await clearBadge(run)
+    await page.goto(`${site}/account/password`)
+    await type(run, page, "#current", "hunter2")
+    if (await generateIn(run, page)) {
+      await page.click("button[type=submit]")
+      await page.waitForURL("**/home")
+      if (await offered(run, "a changed password badges the toolbar button")) {
+        const { p, title } = await offerIn(run)
+        check(title === "Update password for admin?", `the login with the current password is offered the update (${title})`)
+        await p.close()
+      } else await diagnose(run, page, "change password")
+    }
+
+    // A pattern the subset reads: its characters and lengths go to the host, and the password keeps to them.
+    await page.goto(`${site}/signup/pattern`)
+    const fitted = await generateIn(run, page)
+    const shaped = (await hostLog(run)).filter((r) => r.type === "generate").at(-1)
+    check(!!fitted && /^[a-z0-9]{16,24}$/.test(fitted), `a password for [a-z0-9]{16,24} fits it (${fitted})`)
+    check(shaped?.allowed === "0123456789abcdefghijklmnopqrstuvwxyz" && shaped.minLength === 16 && shaped.maxLength === 24, `the host is asked for the pattern's characters and lengths (${JSON.stringify(shaped)})`)
+
+    // No generator row for a field that allows only weak passwords, or a pattern outside the subset.
+    for (const [path, why] of [["weak", "a six-digit PIN is all the field takes"], ["lookahead", "the pattern has a lookahead"]]) {
+      const before = (await hostLog(run)).length
+      await page.goto(`${site}/signup/${path}`)
+      await formFound(page)
+      await page.click("#new")
+      await Bun.sleep(2000)
+      const asked = (await hostLog(run)).slice(before).map((r) => r.type)
+      check(!extensionFrame(page, "menu.html") && !asked.includes("generate"), `no generator row when ${why} (${asked.join(", ")})`)
+      if (path === "weak") check(asked.includes("generate-check"), "the agent is asked how strong a password the field allows")
+      else check(!asked.includes("generate-check"), "a pattern outside the subset isn't sent anywhere")
+    }
+
+    // A sign-in's password box offers no generator.
+    await page.goto(`${site}/login?next=home`)
+    await menuOn(page, "#password")
+    check((await extensionFrame(page, "menu.html")?.locator("button.row .title").first().textContent()) === "Acme", "a sign-in's password box lists logins, not a generated password")
+  } catch (err) {
+    check(false, `generator scenario threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "generator")
   } finally {
     await close(run)
   }
@@ -698,7 +1102,7 @@ async function coldSave() {
 }
 
 async function rateLimited() {
-  const run = await launch({ rateLimit: "fill" })
+  const run = await launch({ rateLimit: "fill,generate-keep" })
   const page = await run.context.newPage()
   try {
     await page.goto(`${site}/login`)
@@ -710,6 +1114,27 @@ async function rateLimited() {
     })
     check(!!message && message.includes("Filling too quickly"), "a rate-limited fill says to try again")
     check((await page.inputValue("#password")) === "", "and fills nothing")
+    await p.close()
+
+    // The agent doesn't keep a generated password: the page never names its
+    // id, and a sign-up that goes through is offered with it as typed.
+    await page.goto(`${site}/signup`)
+    await type(run, page, "#email", "unkept@acme.test")
+    const value = await generateIn(run, page)
+    if (value) {
+      await page.click("button[type=submit]")
+      await page.waitForURL("**/home")
+      if (await offered(run, "a sign-up with an unkept generated password badges the toolbar button")) {
+        const checked = (await hostLog(run)).find((r) => r.type === "check")
+        check(checked?.password === value && !("generated" in checked), "its check sends the password as typed, not an id the agent can't resolve")
+        const offer = await offerIn(run)
+        check(offer.title === "Save login for localhost?", `the popup offers to save it (${offer.title})`)
+        await offer.p.click(".offer button.primary")
+        const save = (await until("save sent after the click", async () => (await hostLog(run)).find((r) => r.type === "save"))) as { entry?: Record<string, string> } | null
+        check(save?.entry?.username === "unkept@acme.test" && save.entry.password === value, "and saves that password")
+        await offer.p.close()
+      } else await diagnose(run, page, "unkept generated sign-up")
+    }
   } catch (err) {
     check(false, `rate limit threw: ${(err as Error).message.split("\n")[0]}`)
   } finally {
@@ -1140,9 +1565,117 @@ async function coveredMenu() {
         )
       }
     }
+    for (const name of Object.keys(BEATEN)) {
+      await page.goto(`${site}/beaten/${name}`)
+      // From the last field, so a sheet over the menu covers no field.
+      const menu = await menuOn(page, "#password")
+      if (!menu) {
+        await diagnose(run, page, `beaten/${name}`)
+        continue
+      }
+      await Bun.sleep(300)
+      await settled(menu)
+      await menu.locator("button.row").first().click()
+      const filled = await until(`beaten/${name} fills`, async () => (await page.inputValue("#password")) === "correct horse", 4000)
+      check(!!filled, `a menu in the top layer beats ${name} and fills (${filled ? "" : await footText(menu)})`)
+      if (!filled) await diagnose(run, page, `beaten/${name}`)
+    }
   } catch (err) {
     check(false, `covered menu threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "covered menu")
+  } finally {
+    await close(run)
+  }
+}
+
+/** The menu's host: a popover with a random name, raised over what the page puts in the top layer, and inside a login modal. */
+async function topLayer() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  const hostOf = () => page.evaluate(() => {
+    const h = document.querySelector(":popover-open")
+    return h ? { tag: h.localName, parent: h.parentElement?.localName ?? "", in: h.parentElement?.id ?? "", important: (h as HTMLElement).style.getPropertyPriority("position") } : null
+  })
+  try {
+    const tags: string[] = []
+    for (let i = 0; i < 2; i++) {
+      await page.goto(`${site}/login?next=home`)
+      if (!(await menuOn(page))) await diagnose(run, page, "top layer")
+      const h = await hostOf()
+      if (h) tags.push(h.tag)
+      check(!!h && h.parent === "html" && h.important === "important", `the menu is an open popover on <html> with !important styles (${JSON.stringify(h)})`)
+    }
+    check(tags.length === 2 && tags.every((t) => t.includes("-") && t !== "div") && tags[0] !== tags[1], `its tag is random each time (${tags.join(", ")})`)
+
+    await page.goto(`${site}/top/keeps-covering`)
+    await formFound(page)
+    await page.click("#email")
+    const gone = await until("a page that keeps covering the menu gets it closed", async () => {
+      const raised = await page.evaluate(() => (window as unknown as { raised?: number }).raised ?? 0)
+      return raised > 0 && !extensionFrame(page, "menu.html") ? raised : null
+    })
+    check(!!gone && gone <= 5, `the menu goes back on top a few times, then closes (${gone} raises)`)
+    check(!(await hostLog(run)).some((r) => r.type === "fill"), "and nothing fills")
+
+    await page.goto(`${site}/top/dialog`)
+    const inDialog = await menuOn(page)
+    check((await hostOf())?.parent === "dialog", "in a login modal, the menu goes inside the dialog")
+    if (inDialog) {
+      await inDialog.locator("button.row").first().click()
+      check(!!(await until("the modal's menu fills", async () => (await page.inputValue("#password")) === "correct horse")), "and takes clicks there")
+    } else await diagnose(run, page, "dialog")
+
+    await page.goto(`${site}/top/dialog-over`)
+    if (await menuOn(page, "#email", 15_000)) {
+      check(!!(await until("a modal the form isn't in closes the menu", () => !extensionFrame(page, "menu.html"))), "a modal shown over the menu, without the form, closes it")
+    }
+
+    // Full screen draws only the full-screen element, and the top layer in it.
+    await page.goto(`${site}/top/fullscreen`)
+    if (await menuOn(page)) {
+      await page.keyboard.press("F2")
+      const entered = await until("the form's box goes full screen", () => page.evaluate(() => document.fullscreenElement?.id === "box"))
+      await page.click("#email")
+      const inside = await until("the menu opens inside the full-screen element", async () => (await hostOf())?.in === "box" && extensionFrame(page, "menu.html"))
+      check(!!entered && !!inside, `in full screen, the menu opens inside the full-screen element (${JSON.stringify(await hostOf())})`)
+      if (inside) {
+        await settled(inside)
+        await inside.locator("button.row").first().click()
+        check(!!(await until("the menu fills in full screen", async () => (await page.inputValue("#password")) === "correct horse")), "and takes clicks there")
+      }
+      await page.evaluate(() => document.exitFullscreen())
+    } else await diagnose(run, page, "fullscreen")
+    // On a shadow host with the form in its shadow root: in the shadow root, as the host's own children aren't drawn.
+    await page.goto(`${site}/top/fullscreen-shadow`)
+    if (await menuOn(page)) {
+      await page.keyboard.press("F2")
+      const entered = await until("the web component goes full screen", () => page.evaluate(() => document.fullscreenElement?.id === "widget"))
+      await page.click("#email")
+      const where = () => page.evaluate(() => {
+        const widget = document.getElementById("widget")!
+        const open = (n: ParentNode) => [...n.children].some((c) => c.matches("[popover]:popover-open"))
+        const popovers = [document, widget.shadowRoot!].flatMap((r) => [...r.querySelectorAll("[popover]")]).map((p) => `${p.parentNode === widget.shadowRoot ? "#shadow-root" : (p.parentNode as Element).localName}:${p.matches(":popover-open")}`)
+        return { shadow: open(widget.shadowRoot!), light: open(widget), full: document.fullscreenElement?.id ?? null, popovers }
+      })
+      const inside = await until("the menu opens in the web component's shadow root", async () => (await where()).shadow && extensionFrame(page, "menu.html"))
+      check(!!entered && !!inside, `in full screen on a shadow host, the menu opens in its shadow root (${JSON.stringify(await where())})`)
+      if (inside) {
+        await settled(inside)
+        await inside.locator("button.row").first().click()
+        check(!!(await until("the menu fills in full screen in a shadow root", async () => (await page.inputValue("#password")) === "correct horse")), "and takes clicks there")
+      }
+      await page.evaluate(() => document.exitFullscreen().catch(() => {}))
+    } else await diagnose(run, page, "fullscreen-shadow")
+    await page.goto(`${site}/top/fullscreen`)
+    if (await menuOn(page)) {
+      await page.keyboard.press("F4")
+      await until("another element goes full screen", () => page.evaluate(() => document.fullscreenElement?.id === "other"))
+      check(!!(await until("full screen elsewhere closes the menu", () => !extensionFrame(page, "menu.html"))), "full screen on another element closes the menu")
+      await page.evaluate(() => document.exitFullscreen().catch(() => {}))
+    }
+  } catch (err) {
+    check(false, `top layer threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "top layer")
   } finally {
     await close(run)
   }
@@ -1600,9 +2133,107 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
   if (v) check(v.verified && !v.authenticationInfo.userVerified, `@simplewebauthn/server verifies the ${how} assertion (no UV without Touch ID)`)
 }
 
-const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
-const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
+type Verdict = { type: string; frame: number; url: string; kind?: string | null; roles?: string[]; loginish?: boolean }
+const verdicts = (run: Run, url: string) =>
+  run.worker.evaluate((url) => ((globalThis as unknown as { __verdicts: Verdict[] }).__verdicts ?? []).filter((v) => v.url === url), url) as Promise<Verdict[]>
+
+/** What the content script makes of each page in DETECT; one check per page. */
+async function detection() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  let passed = 0
+  try {
+    for (const [name, d] of Object.entries(DETECT)) {
+      const url = `http://${d.host ?? "localhost"}:${server.port}/detect/${name}`
+      await page.goto(url)
+      const e = d.expect
+      let got = ""
+      let ok = false
+      if ("frameQuiet" in e) {
+        const frameUrl = `http://127.0.0.1:${server.port}${e.frameQuiet}`
+        await Bun.sleep(3500)
+        const v = await verdicts(run, frameUrl)
+        const forms = v.filter((x) => x.type === "db:page" && x.kind)
+        got = forms.length ? `the frame reports ${forms[0].kind}` : "the frame reports no form"
+        ok = !forms.length
+      } else if ("quiet" in e) {
+        const quiet = await until(`${name}: the page settles`, async () => (await verdicts(run, url)).find((x) => x.type === "db:quiet" && x.frame === 0), 8000)
+        const v = await verdicts(run, url)
+        const form = v.find((x) => x.type === "db:page" && x.frame === 0 && x.kind)
+        const roles = new Set(v.flatMap((x) => (x.type === "db:page" && x.frame === 0 && x.kind ? (x.roles ?? []) : [])))
+        got = form ? `a ${form.kind} form (${[...roles].join(", ")})` : quiet ? `no form, ${quiet.loginish ? "still signing in" : "not a sign-in step"}` : "no verdict"
+        ok = !form && !!quiet && quiet.loginish === e.signingIn && !(e.not ?? []).some((r) => roles.has(r))
+      } else {
+        const form = await until(`${name}: a form is found`, async () => (await verdicts(run, url)).findLast((x) => x.type === "db:page" && x.frame === 0 && x.kind), 8000)
+        await Bun.sleep(800)
+        const last = (await verdicts(run, url)).findLast((x) => x.type === "db:page" && x.frame === 0) ?? form
+        const roles = new Set(last?.roles ?? [])
+        got = last?.kind ? `${last.kind} (${[...roles].join(", ")})` : "no form"
+        ok = last?.kind === e.kind && ("has" in e ? (e.has ?? []).every((r) => roles.has(r)) && !(e.not ?? []).some((r) => roles.has(r)) : true)
+        if (ok && "menu" in e) {
+          await page.click(e.menu.off)
+          await Bun.sleep(1500)
+          const off = !extensionFrame(page, "menu.html")
+          await page.click(e.menu.on)
+          const on = !!(await until(`${name}: menu on ${e.menu.on}`, () => extensionFrame(page, "menu.html"), 8000))
+          got += `, menu on ${e.menu.off}: ${off ? "no" : "yes"}, on ${e.menu.on}: ${on ? "yes" : "no"}`
+          ok = off && on
+        }
+      }
+      const want = "frameQuiet" in e ? "no form in the frame" : "quiet" in e ? `no form, ${e.signingIn ? "still signing in" : "not a sign-in step"}` : e.kind
+      if (check(ok, `detect ${name}: want ${want}, got ${got}`)) passed++
+    }
+    passed += await failedSignIns(run, page)
+  } catch (err) {
+    check(false, `detection threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "detection")
+  } finally {
+    console.log(`  detection: ${passed} of ${Object.keys(DETECT).length + 4} pass`)
+    await close(run)
+  }
+}
+
+/**
+ * Sign-ins that didn't finish: the password field still showing five seconds
+ * after the submit (in place, or posted back), and a typed address before
+ * the sign-in finished. None of them offers a save. Returns how many pass,
+ * as part of the detection count.
+ */
+async function failedSignIns(run: Run, page: Page): Promise<number> {
+  let passed = 0
+  for (const path of ["/fails/spa", "/fails/post"]) {
+    await clearBadge(run)
+    await signIn(run, page, path, `failed${path.replace(/\W/g, "-")}@acme.test`, "a wrong password")
+    await Bun.sleep(6000)
+    await page.click("#home")
+    await page.waitForURL("**/home")
+    await Bun.sleep(5000)
+    if (check((await badge(run)) === "", `detect ${path}: a password field still showing after the submit offers nothing`)) passed++
+  }
+  // A retry four seconds after a wrong password, still on its way when the
+  // first submit's five seconds are up: that check is about the first submit.
+  await clearBadge(run)
+  await signIn(run, page, "/fails/retry", "retry@acme.test", "a wrong password")
+  await page.locator("#error").filter({ hasText: "isn't right" }).waitFor()
+  await Bun.sleep(4000)
+  await page.locator("#password").fill("")
+  await page.locator("#password").pressSequentially("the right password")
+  await page.click("button[type=submit]")
+  await page.waitForURL("**/app/dashboard")
+  if (check(!!(await offered(run)), "detect retry: the first submit's failure doesn't end the retry that went through")) passed++
+  else await diagnose(run, page, "retry")
+  await clearBadge(run)
+  await signIn(run, page, "/login", "typed@acme.test", "first step")
+  await page.waitForURL("**/mfa")
+  await page.goto(`${site}/home`)
+  await Bun.sleep(5000)
+  if (check((await badge(run)) === "", "detect typed address: going elsewhere by hand mid sign-in offers nothing")) passed++
+  return passed
+}
+
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, generator, locked, notInstalled }
+const once: Record<string, () => Promise<void>> = { detection, coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, topLayer, occlusionSweep, midFill, backForward, passkeys }
+const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "occlusionSweep", "midFill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 try {

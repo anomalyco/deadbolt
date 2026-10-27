@@ -48,6 +48,12 @@ describe("parseHostMessage", () => {
     expect(parseHostMessage({ id: 5, type: "save", ref: "x", created: true })).toBeNull()
   })
 
+  test("generate needs a password and its id", () => {
+    expect(parseHostMessage({ id: 6, type: "generate", password: "Xy3-pq", generated: "abc", extra: 1 })).toEqual({ kind: "reply", id: 6, reply: { type: "generate", password: "Xy3-pq", generated: "abc" } })
+    expect(parseHostMessage({ id: 6, type: "generate", password: "Xy3-pq" })).toBeNull()
+    expect(parseHostMessage({ id: 6, type: "generate", password: "Xy3-pq", generated: "x".repeat(65) })).toBeNull()
+  })
+
   test("errors, including unknown codes and a null id", () => {
     expect(parseHostMessage({ id: null, type: "error", code: "bad_request", message: "nope" })).toEqual({
       kind: "reply",

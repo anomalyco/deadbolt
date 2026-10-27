@@ -4,13 +4,15 @@
 // document and form the user chose to fill, and in a capture, sent by a
 // content script after the user submitted a login form.
 
-import type { Account, HostStatus } from "./protocol"
+import type { Account, FieldRules, HostStatus } from "./protocol"
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
 
-/** Roles the inline menu opens on. */
-export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password", "otp"]
+/** Roles the inline menu opens on; on a new-password box, only in sign-up and change-password forms. */
+export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password", "otp", "new-password"]
+/** Forms whose new-password boxes get a generated password. */
+export const GENERATE_KINDS: SurfaceKind[] = ["signup", "change-password"]
 export const IDENTIFIER_ROLES: FieldRole[] = ["username", "email", "phone"]
 /** Roles a fill can write. */
 export const FIELD_ROLES: FieldRole[] = ["username", "email", "phone", "password", "new-password", "otp"]
@@ -19,6 +21,8 @@ export interface FillValues {
   username?: string
   password?: string
   totp?: string
+  /** A generated password, for every new-password box. */
+  newPassword?: string
 }
 
 /** Where the extension stands with Deadbolt, as the popup and menus show it. */
@@ -31,16 +35,22 @@ export type Status =
 
 export type ToBackground =
   // content script
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number }
+  /** `rules`: on a new-password box, what the page asks of the password. */
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean }
   | { type: "db:quiet"; loginish: boolean }
-  | { type: "db:capture"; username?: string; password?: string; newPassword?: string; title: string }
+  /** `kind` and `roles`: the submitted form's, to tell it if it shows again. */
+  /** `generated`: the new password is the one generated under that id, so it isn't sent. `submission`: this document's count of submits. */
+  | { type: "db:capture"; username?: string; password?: string; newPassword?: string; generated?: string; title: string; kind: SurfaceKind | null; roles: FieldRole[]; submission: number }
+  /** The form submitted as `submission` still shows, five seconds on: the sign-in failed. */
+  | { type: "db:failed"; submission: number }
   | { type: "db:menu-close"; token: string; dismissed?: boolean }
   // inline menu
   /** `parent`: the origin of the parent window that handed the menu its token. */
   | { type: "db:menu-load"; token: string; parent: string }
   | { type: "db:menu-pick"; token: string; ref: string }
+  | { type: "db:menu-generate"; token: string }
   | { type: "db:menu-dismiss"; token: string }
   | { type: "db:menu-resize"; token: string; height: number }
   // popup
@@ -61,7 +71,9 @@ export type ToContent =
    * nothing. `approval` names the fields db:approve said may be filled: only
    * those are written.
    */
-  | { type: "db:fill"; values: FillValues; form: number; approval: string }
+  | { type: "db:fill"; values: FillValues; form: number; approval: string; generated?: string }
+  /** The agent kept the generated password filled under this id: a submit names it by id from now on. */
+  | { type: "db:generated"; generated: string }
   /**
    * Which of the form's fields may be filled now (see Approved). With
    * `measure`, for a frame: where they show, and only if they all do.
@@ -107,6 +119,8 @@ export interface Approved {
 /** A content script's answer to db:fill: the fields it actually wrote. */
 export interface FillAck {
   filled: FieldRole[]
+  /** A generated password a new-password box's `pattern` doesn't take: nothing was written. */
+  rejected?: boolean
 }
 
 /** Broadcast to open extension pages (popup, menus) when the host's state changes. */
@@ -124,6 +138,7 @@ export interface QueryReply {
 export type MenuLoadReply =
   /** `passkeys`: for a sign-in waiting on a passkey pick (conditional mediation). */
   | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[] }
+  | { kind: "generate"; site: string }
   | { kind: "status"; status: Status }
 
 export type PickReply = { ok: true } | { ok: false; message: string }

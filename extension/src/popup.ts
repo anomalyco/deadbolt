@@ -275,6 +275,7 @@ function passkeyCard(prompt: PasskeyPrompt): HTMLElement {
   return card
 }
 
+/** With an offer showing, its Save is the one primary button. */
 function siteBody(reply: PopupReply): HTMLElement {
   if (reply.unfillable === "scheme") return state(icon("keyhole"), "Nothing to fill here", para("Open a website to see its logins."))
   if (reply.unfillable === "insecure")
@@ -295,7 +296,7 @@ function siteBody(reply: PopupReply): HTMLElement {
     "section",
     { class: "site" },
     h("div", { class: "section-head" }, h("span", { class: "label" }, "Logins"), h("span", { class: "mono muted" }, site)),
-    h("div", { class: "list" }, ...reply.accounts.map((a, i) => accountRow(a, i === 0))),
+    h("div", { class: "list" }, ...reply.accounts.map((a, i) => accountRow(a, i === 0 && !reply.offer))),
     error,
     h("p", { class: "note" }, icon("lock"), h("span", {}, "Deadbolt never copies passwords: any app can read the clipboard. Fill puts them straight into the page.")),
   )

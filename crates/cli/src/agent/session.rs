@@ -21,6 +21,9 @@ use crate::protocol::{DeviceInfo, VaultInfo};
 const META_DEVICE_NAME: &str = "cli/device-name";
 const META_DEFAULT_VAULT: &str = "cli/default-vault";
 const META_PEERS: &str = "cli/peers";
+const META_FILLED: &str = "cli/autofill-filled";
+/// The most logins whose last fill is remembered; the longest unused go first.
+const MAX_FILLED: usize = 1000;
 
 /// A device counts as online if it synced this recently.
 pub const ONLINE_WINDOW_SECS: u64 = 90;
@@ -262,6 +265,8 @@ pub struct Session {
     state: Loaded,
     pub node: Node,
     pub(super) sync_task: Option<super::AbortOnDrop>,
+    /// Passwords made for web forms, until saved; locking drops them.
+    pub generated: super::generate::Pending,
 }
 
 impl std::ops::Deref for Session {
@@ -283,6 +288,7 @@ impl Session {
             state: loaded,
             node,
             sync_task: None,
+            generated: Default::default(),
         }
     }
 
@@ -301,6 +307,31 @@ impl Loaded {
 
     pub fn save_peers(&self) -> Result<()> {
         set_json(&self.store, META_PEERS, &self.meta.peers)
+    }
+
+    /// When each login was last filled into a web page, in Unix seconds, by
+    /// `vault:item`. Kept on this device only, to rank a site's logins.
+    pub fn filled(&self) -> BTreeMap<String, u64> {
+        get_json(&self.store, META_FILLED)
+            .ok()
+            .flatten()
+            .unwrap_or_default()
+    }
+
+    pub fn set_filled(&self, login: String, at: u64) -> Result<()> {
+        let mut filled = self.filled();
+        filled.insert(login, at);
+        while filled.len() > MAX_FILLED {
+            let Some(oldest) = filled
+                .iter()
+                .min_by_key(|(_, at)| **at)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            filled.remove(&oldest);
+        }
+        set_json(&self.store, META_FILLED, &filled)
     }
 
     /// Every other device that is a member of a vault this device holds.

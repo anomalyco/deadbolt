@@ -2,6 +2,9 @@
 //! page may have. The agent decides, not the browser host: every request
 //! names the page's origin, and a login is only listed, filled or updated
 //! for a page on the site of one of its URLs (see [`crate::site`]).
+//!
+//! A site's logins are listed closest first (see [`Closeness`]), then the
+//! most recently filled on this device, then by title.
 
 use std::time::Duration;
 
@@ -15,7 +18,7 @@ use super::items::{create, label};
 use super::session::{Loaded, hex, unhex};
 use super::{ErrorCode, fail};
 use crate::protocol::{FieldInput, Fill, LoginRef, Secret, SiteLogin, SiteStatus, SiteValues};
-use crate::site::{Site, page_url};
+use crate::site::{Closeness, Site, closeness, page_url};
 
 fn site(origin: &str) -> Result<Site> {
     Site::from_origin(origin).map_err(|reason| anyhow!("{origin}: {reason}"))
@@ -82,37 +85,54 @@ fn find(s: &Loaded, login: &LoginRef, site: &Site) -> Result<(VaultId, Item)> {
     Ok((vault, item))
 }
 
+fn filled_key(login: &LoginRef) -> String {
+    format!("{}:{}", login.vault, login.item)
+}
+
 pub fn list(s: &Loaded, origin: &str) -> Result<(String, Vec<SiteLogin>)> {
     let site = site(origin)?;
-    let mut found: Vec<SiteLogin> = logins(s, &site)
-        .map(|(vault, item)| SiteLogin {
-            login: login_ref(&vault, &item.id),
-            vault: s.vault(&vault).name().to_string(),
-            title: label(&item),
-            username: value(&item, "username").map(str::to_string),
-            has_password: value(&item, "password").is_some(),
-            has_otp: otp(&item).is_some_and(|f| !f.value.is_empty()),
-            urls: urls(&item)
-                .filter(|url| site.matches_url(url))
-                .map(str::to_string)
-                .collect(),
+    let filled = s.filled();
+    let mut found: Vec<(Closeness, u64, SiteLogin)> = logins(s, &site)
+        .map(|(vault, item)| {
+            let login = SiteLogin {
+                login: login_ref(&vault, &item.id),
+                vault: s.vault(&vault).name().to_string(),
+                title: label(&item),
+                username: value(&item, "username").map(str::to_string),
+                has_password: value(&item, "password").is_some(),
+                has_otp: otp(&item).is_some_and(|f| !f.value.is_empty()),
+                urls: urls(&item)
+                    .filter(|url| site.matches_url(url))
+                    .map(str::to_string)
+                    .collect(),
+            };
+            let close = login
+                .urls
+                .iter()
+                .filter_map(|url| closeness(origin, url))
+                .min()
+                .unwrap_or(Closeness::Site);
+            let used = filled.get(&filled_key(&login.login)).copied().unwrap_or(0);
+            (close, used, login)
         })
         .collect();
-    found.sort_by(|a, b| {
-        (
-            a.title.to_lowercase(),
-            &a.username,
-            &a.login.vault,
-            &a.login.item,
-        )
-            .cmp(&(
-                b.title.to_lowercase(),
-                &b.username,
-                &b.login.vault,
-                &b.login.item,
-            ))
+    found.sort_by(|(ca, ua, a), (cb, ub, b)| {
+        ca.cmp(cb).then(ub.cmp(ua)).then_with(|| {
+            (
+                a.title.to_lowercase(),
+                &a.username,
+                &a.login.vault,
+                &a.login.item,
+            )
+                .cmp(&(
+                    b.title.to_lowercase(),
+                    &b.username,
+                    &b.login.vault,
+                    &b.login.item,
+                ))
+        })
     });
-    Ok((site.domain, found))
+    Ok((site.domain, found.into_iter().map(|(_, _, l)| l).collect()))
 }
 
 /// The values `want` names that the login has, at `now` for a code.
@@ -141,6 +161,7 @@ pub fn fill(
             }
         }
     }
+    s.set_filled(filled_key(login), now.as_secs())?;
     Ok(values)
 }
 
@@ -154,17 +175,19 @@ fn same_password(saved: Option<&str>, typed: &str) -> bool {
     blake3::hash(saved.unwrap_or_default().as_bytes()) == blake3::hash(typed.as_bytes())
 }
 
+/// Without a username, a login with any username and the same password is
+/// `same`, and nothing is `update`.
 pub fn check(
     s: &Loaded,
     origin: &str,
-    username: &str,
+    username: Option<&str>,
     password: &Secret,
 ) -> Result<(SiteStatus, Vec<LoginRef>)> {
     let site = site(origin)?;
     let mut same = Vec::new();
     let mut other = Vec::new();
     for (vault, item) in logins(s, &site) {
-        if !same_username(value(&item, "username"), username) {
+        if !username.is_none_or(|u| same_username(value(&item, "username"), u)) {
             continue;
         }
         let login = login_ref(&vault, &item.id);
@@ -176,10 +199,10 @@ pub fn check(
     }
     Ok(if !same.is_empty() {
         (SiteStatus::Same, same)
-    } else if !other.is_empty() {
+    } else if !other.is_empty() && username.is_some() {
         (SiteStatus::Update, other)
     } else {
-        (SiteStatus::New, other)
+        (SiteStatus::New, Vec::new())
     })
 }
 
@@ -339,6 +362,151 @@ mod tests {
             );
             assert!(values.username.is_none() && values.password.is_none());
         }
+    }
+
+    fn titles(s: &Loaded, origin: &str) -> Vec<String> {
+        list(s, origin)
+            .unwrap()
+            .1
+            .into_iter()
+            .map(|l| l.title)
+            .collect()
+    }
+
+    #[test]
+    fn logins_rank_by_origin_host_parent_site_then_use_then_title() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        for (title, url) in [
+            ("a site", "https://www.example.com"),
+            ("b parent", "https://example.com"),
+            ("c host", "https://accounts.example.com:8443"),
+            ("d origin", "https://accounts.example.com/login"),
+            ("e shared parent", "https://billing.accounts.example.com"),
+            ("f elsewhere", "https://example.org"),
+        ] {
+            create(
+                &mut s,
+                None,
+                "login",
+                Some(title.into()),
+                vec![FieldInput {
+                    name: "url".into(),
+                    kind: None,
+                    value: url.into(),
+                }],
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            titles(&s, "https://accounts.example.com"),
+            [
+                "d origin",
+                "c host",
+                "b parent",
+                "e shared parent",
+                "a site"
+            ]
+        );
+        // From the apex, `www` and `accounts` are both its children.
+        assert_eq!(
+            titles(&s, "https://example.com"),
+            [
+                "b parent",
+                "a site",
+                "c host",
+                "d origin",
+                "e shared parent"
+            ]
+        );
+    }
+
+    #[test]
+    fn local_ports_are_different_origins_and_the_last_filled_comes_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let vite = login(
+            &mut s,
+            &[("url", "http://localhost:5173"), ("username", "vite")],
+        );
+        let next = login(
+            &mut s,
+            &[("url", "http://localhost:3000"), ("username", "next")],
+        );
+        let other = login(
+            &mut s,
+            &[
+                ("url", "http://localhost:3000/admin"),
+                ("username", "admin"),
+            ],
+        );
+        let usernames = |s: &Loaded, origin: &str| -> Vec<String> {
+            list(s, origin)
+                .unwrap()
+                .1
+                .into_iter()
+                .filter_map(|l| l.username)
+                .collect()
+        };
+        assert_eq!(
+            usernames(&s, "http://localhost:3000"),
+            ["admin", "next", "vite"]
+        );
+        assert_eq!(
+            usernames(&s, "http://localhost:5173"),
+            ["vite", "admin", "next"]
+        );
+
+        let origin = "http://localhost:3000";
+        fill(
+            &s,
+            origin,
+            &next,
+            &[Fill::Username],
+            Duration::from_secs(100),
+        )
+        .unwrap();
+        assert_eq!(usernames(&s, origin), ["next", "admin", "vite"]);
+        fill(
+            &s,
+            origin,
+            &other,
+            &[Fill::Username],
+            Duration::from_secs(200),
+        )
+        .unwrap();
+        assert_eq!(usernames(&s, origin), ["admin", "next", "vite"]);
+        // Use never lifts a login over a closer one.
+        fill(
+            &s,
+            "http://localhost:5173",
+            &vite,
+            &[Fill::Username],
+            Duration::from_secs(300),
+        )
+        .unwrap();
+        assert_eq!(usernames(&s, origin), ["admin", "next", "vite"]);
+    }
+
+    #[test]
+    fn a_check_without_a_username_matches_by_password_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let origin = "https://example.com";
+        let kit = login(
+            &mut s,
+            &[("url", origin), ("username", "kit"), ("password", "old")],
+        );
+        login(
+            &mut s,
+            &[("url", origin), ("username", "dax"), ("password", "other")],
+        );
+        let (status, matches) = check(&s, origin, None, &Secret::new("old")).unwrap();
+        assert_eq!((status, matches), (SiteStatus::Same, vec![kit]));
+        let (status, matches) = check(&s, origin, None, &Secret::new("nope")).unwrap();
+        assert_eq!((status, matches), (SiteStatus::New, vec![]));
+        let (status, _) = check(&s, origin, Some("kit"), &Secret::new("nope")).unwrap();
+        assert_eq!(status, SiteStatus::Update);
     }
 
     #[test]

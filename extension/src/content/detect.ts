@@ -1,7 +1,7 @@
 // Login-form detection. Ported from Foyer (github.com/R44VC0RP/foyer,
 // src/detect.ts, by Ryan Vogel). Deadbolt keeps the field and form scoring
-// and drops what served Foyer's sign-in recipes: selectors, provider buttons,
-// passkey and magic-link controls.
+// and the sign-in-provider buttons, and drops what served Foyer's sign-in
+// recipes: selectors, passkey and magic-link controls.
 //
 // Fields and forms are scored with weighted clues (see clues.ts): labels,
 // placeholders, ids, autocomplete, input type, neighbouring fields and the
@@ -9,7 +9,7 @@
 // matched in memory; nothing here leaves the page.
 
 import type { FieldRole, SurfaceKind } from "../messages"
-import { bestRole, FIELD_THRESHOLD, FORM_KINDS, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind } from "./clues"
+import { bestRole, FIELD_THRESHOLD, FORM_KINDS, hasPhrase, providerFromLabel, scoreField, scoreFormText, squash, words, type FieldFacts, type FormKind, type Provider } from "./clues"
 import { deepQueryAll, openRoots } from "./shadow"
 
 export const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|challenge|mfa|2fa|two-factor|verify|webauthn|passkey/i
@@ -17,8 +17,13 @@ const SIGNUP_URL = /sign-?up|sign_up|register|registration|join|create-account|o
 const RESET_URL = /forgot|reset|recover/i
 const CHANGE_PASSWORD_URL = /change-?password|password-?change|update-?password|settings\/security/i
 const SUBMIT_TEXT = /^\s*(sign ?in|log ?in|login|sign ?on|continue|next|submit|verify|confirm|go)\b/i
+const PROCEED_TEXT = /^\s*(continue|next)\b/i
+const AUTH_HREF = /oauth|auth|login|signin|sign_in|sso|saml|connect/i
+const PROVIDER_ATTR = /\b(google|apple|microsoft|github|facebook|twitter|linkedin|gitlab|slack|discord|amazon|okta)\b/i
+/** Embedded provider widgets: Google Identity Services and Sign in with Apple. */
+const PROVIDER_WIDGETS = ".g_id_signin, #g_id_onload, iframe[src*='accounts.google.com/gsi'], #appleid-signin, iframe[src*='appleid.apple.com']"
 
-const CLICKABLE = "button, [role=button], input[type=submit], input[type=button], input[type=image]"
+const CLICKABLE = "a[href], button, [role=button], input[type=submit], input[type=button], input[type=image]"
 const SKIP_INPUT_TYPES = new Set([
   "hidden", "submit", "button", "image", "reset", "checkbox", "radio", "file", "range", "color", "date",
   "datetime-local", "month", "week", "time", "search",
@@ -133,6 +138,8 @@ export interface ScanResult {
   kind: SurfaceKind | null
   fields: Field[]
   submit?: Element
+  /** The page shows a sign-in-provider button ("Continue with Google"). */
+  provider: boolean
 }
 
 function collectFields(roots: Array<Document | ShadowRoot>): { fields: ScannedField[]; otpBoxes: HTMLInputElement[] } {
@@ -184,8 +191,23 @@ function contextText(form: HTMLFormElement | null): string {
   return words(parts.join(" \n "))
 }
 
+/** The provider a button signs in with, if it's a sign-in-provider button. */
+export function providerForControl(el: Element, text: string): Provider | null {
+  // Some sites label provider buttons explicitly; trust that over the text.
+  const attr = el.getAttribute("data-provider") || el.getAttribute("data-social") || ""
+  const fromAttr = PROVIDER_ATTR.exec(attr)?.[1]?.toLowerCase()
+  if (fromAttr) return (fromAttr === "twitter" ? "x" : fromAttr) as Provider
+  const match = text ? providerFromLabel(text) : null
+  if (!match) return null
+  // A footer "GitHub" link is not a sign-in button; links need a connector
+  // ("Continue with GitHub") or an auth-looking destination.
+  if (el instanceof HTMLAnchorElement && !match.connector && !AUTH_HREF.test(el.getAttribute("href") || "")) return null
+  return match.provider
+}
+
 function collectControls(form: HTMLFormElement | null, roots: Array<Document | ShadowRoot>) {
   let submit: Element | undefined
+  let provider = false
   const buttonText: string[] = []
   // The login form's own buttons first, so a huge nav can't push them past the cap.
   const candidates = new Set<Element>(form ? Array.from(form.querySelectorAll(CLICKABLE)) : [])
@@ -196,16 +218,22 @@ function collectControls(form: HTMLFormElement | null, roots: Array<Document | S
   for (const el of candidates) {
     if (!isVisible(el)) continue
     const text = controlText(el)
-    if (!text || text.length > 40) continue
+    if (!provider && providerForControl(el, text)) {
+      provider = true
+      continue
+    }
+    if (!text || text.length > 40 || el instanceof HTMLAnchorElement) continue
     if (form && !form.contains(el)) continue
     buttonText.push(text)
     const isSubmitType = (el as HTMLButtonElement).type === "submit"
     if (!submit && (SUBMIT_TEXT.test(text) || (isSubmitType && form))) submit = el
   }
-  return { submit, buttonText }
+  if (!provider) provider = deepQueryAll(PROVIDER_WIDGETS, roots).length > 0
+  return { submit, buttonText, provider }
 }
 
-function decideKind(fields: ScannedField[], otpBoxes: number, text: string, buttonText: string[]): FormKind | null {
+function decideKind(fields: ScannedField[], otpBoxes: number, text: string, controls: ReturnType<typeof collectControls>): FormKind | null {
+  const { buttonText, provider } = controls
   const count = (...roles: FieldRole[]) => fields.filter((f) => f.role && roles.includes(f.role)).length
   const pw = count("password")
   const npw = count("new-password")
@@ -219,14 +247,17 @@ function decideKind(fields: ScannedField[], otpBoxes: number, text: string, butt
   if (pw === 1 && npw === 0) score.login += 5
   if (pw === 0 && npw === 0 && ident > 0) score.login += 1
   if (pw >= 2) score.login -= 3
-  if (npw > 0 && !ac.has("current-password")) score.login -= 3
+  // With a single password box, autocomplete=new-password is a weak hint
+  // (sites use it to block autofill on logins); wording has to confirm it.
+  const single = pw + npw === 1
+  if (npw > 0 && !single && !ac.has("current-password")) score.login -= 3
+  if (provider) score.login += 2
+  // An email-first step: an identifier and a Continue button.
+  if (pw + npw === 0 && ident > 0 && buttonText.some((t) => PROCEED_TEXT.test(t))) score.login += 2
   if (ac.has("webauthn")) score.login += 3
   if (ac.has("current-password")) score.login += 3
   if (ac.has("username") && pw === 0) score.login += 2
 
-  // With a single password box, autocomplete=new-password is a weak hint
-  // (sites use it to block autofill on logins); wording has to confirm it.
-  const single = pw + npw === 1
   if (npw > 0 && pw === 0) score.signup += single ? 1 : 3
   if (pw + npw >= 2) score.signup += 3
   if (ac.has("new-password")) score.signup += single ? 1 : 3
@@ -246,8 +277,9 @@ function decideKind(fields: ScannedField[], otpBoxes: number, text: string, butt
   if (otp > 0 && pw === 0) score.mfa += 6
   if (otp > 0 && pw > 0) score.mfa += 1
 
-  if (ident > 0 && pw + npw === 0) score.newsletter += 1
+  if (ident > 0 && pw + npw === 0 && !provider) score.newsletter += 1
   if (pw + npw > 0) score.newsletter -= 8
+  if (provider) score.newsletter -= 5
 
   // Where we are.
   if (LOGIN_URL.test(url)) {
@@ -290,11 +322,40 @@ export function scanPage(): ScanResult {
   const inScope = (el: Element) => !form || form.contains(el)
   const scanned = all.filter((f) => inScope(f.el))
   const controls = collectControls(form, roots)
-  const formKind = decideKind(scanned, otpBoxes.length, contextText(form), controls.buttonText)
+  const formKind = decideKind(scanned, otpBoxes.length, contextText(form), controls)
   if (formKind) adjustRoles(scanned, formKind)
 
   const fields: Field[] = scanned.filter((f) => f.role).map((f) => ({ el: f.el, role: f.role!, owner: ownerOf(f.el) }))
   if (otpBoxes.length && inScope(otpBoxes[0])) for (const el of otpBoxes) fields.push({ el, role: "otp", split: otpBoxes.length, owner: ownerOf(el) })
 
-  return { kind: formKind === "newsletter" ? null : formKind, fields, submit: controls.submit }
+  // Sign-in wording with no fields to fill isn't a form.
+  const kind = formKind === "newsletter" || !fields.length ? null : formKind
+  return { kind, fields, submit: controls.submit, provider: controls.provider }
+}
+
+// Pages between sign-in steps: an authenticator picker, a CAPTCHA, a
+// "verify it's you" check. They have no form to fill, but the sign-in hasn't
+// finished.
+const STEP_PHRASES = [
+  "select an authenticator", "choose an authenticator", "verify with", "verify it s you", "confirm it s you", "it s really you",
+  "choose a verification method", "choose how you want to sign in", "try another way", "2 step verification", "two step verification",
+  "security check", "i m not a robot", "verify you are human", "are you a robot", "checking your browser", "complete the captcha",
+  "signing you in", "redirecting",
+].map((p) => words(p).trim())
+const CAPTCHA = ".g-recaptcha, .h-captcha, .cf-turnstile, iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[src*='challenges.cloudflare.com']"
+const BUSY = "[role=progressbar], [aria-busy=true]"
+
+/**
+ * Whether a page with no login form still looks like part of a sign-in: its
+ * path says so (never its host, so sso.example.com/dashboard is done), it
+ * offers sign-in-provider buttons, it's a step between sign-in pages, or
+ * it's a spinner with next to nothing else on it.
+ */
+export function signingIn(provider: boolean): boolean {
+  if (LOGIN_URL.test(location.pathname) || provider) return true
+  const roots = openRoots()
+  if (deepQueryAll(CAPTCHA, roots).length) return true
+  const text = words(innerText(document.body).slice(0, 2000))
+  if (STEP_PHRASES.some((p) => hasPhrase(text, p))) return true
+  return squash(text).length < 40 && deepQueryAll(BUSY, roots).some(isVisible)
 }

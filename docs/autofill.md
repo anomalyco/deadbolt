@@ -18,10 +18,11 @@ web page ─ content script ─ extension ══ native messaging ══ deadbol
   itself, so nothing upstream can widen what a page gets.
 - **The host is a pipe.** `deadbolt browser-host` checks the shape of each
   message, turns it into one agent command (`site-logins`, `site-fill`,
-  `site-check`, `site-save`, `passkey-list`, `passkey-create`,
-  `passkey-get`) and passes the agent's watch stream back as `changed`
-  messages. It never prompts for a passphrase or Touch ID; the agent asks for
-  Touch ID itself before it signs with a passkey (see Passkeys).
+  `site-generate` and its check, keep and drop, `site-check`, `site-save`,
+  `passkey-list`, `passkey-create`, `passkey-get`) and passes the agent's
+  watch stream back as `changed` messages. It never prompts for a passphrase
+  or Touch ID; the agent asks for Touch ID itself before it signs with a
+  passkey (see Passkeys).
 - **The extension** finds login forms, asks the host, and fills. Saves need a
   click in the extension's own UI.
 
@@ -113,8 +114,20 @@ not running without sending hello, which would start the agent again.
   top page after a click or keypress opens a menu of that site's logins,
   title and username, under the field. ↓/↑ choose, ⏎ fills, esc closes, and
   ↓ reopens it. Fields in frames get no menu (see Frames). It's an extension
-  page in an iframe inside a closed shadow root on a plain element, so the
-  page can't read it or click it for you.
+  page in an iframe inside a closed shadow root, so the page can't read it
+  or click it for you.
+- **Menu in the top layer.** The menu's host element gets a fresh random
+  custom-element name and inline `!important` styles, so page stylesheets
+  can't aim at it or restyle it. It's a manual popover, shown in the top
+  layer above any `z-index`. When the field is in a modal dialog or the
+  full-screen element, the menu mounts inside it (in its shadow root when the
+  field is there), because content outside is inert or not drawn. If the page puts something in the top layer after the
+  menu (a popover, a modal dialog, full screen) or hides the menu's popover,
+  the menu goes back on top and waits its 500 ms again. It does this at most
+  three times, then closes. A modal dialog or full screen that the menu isn't
+  inside closes it. Each frame it hit-tests five points of its own box, and
+  anything else there (such as a popover in a shadow root the menu can't
+  watch) counts as covering it and is answered the same way.
 - **Menu visibility.** The menu samples its own visibility rather than
   watching it continuously: an `IntersectionObserver` with `trackVisibility`
   gives a reading at most every 100 ms, saying whether the menu is fully on
@@ -198,8 +211,23 @@ not running without sending hello, which would start the agent again.
   which keeps them in memory for up to three minutes from when the password
   was submitted (a username on its own joins it but doesn't extend that), and
   forgets them when Deadbolt locks or disconnects or the tab moves to another
-  site. When the
-  top page then shows no login form for a couple of seconds, it sends `check`.
+  site. When the top page then shows no login form, it waits until five
+  seconds after the submit and sends `check`, unless the submitted form's
+  password or code box showed again by then, in place or posted back to its
+  page: the sign-in failed. That's judged per submit and document, so a
+  retry starts over and an earlier submit's failure doesn't end it. Going
+  elsewhere by hand (a typed address or a bookmark), on the site or off it,
+  ends the sign-in too, with any check on its way or offer waiting. Neither
+  offers anything.
+  Passwords stay with the origin they were submitted on, and the check and
+  save go there. A password from another of the site's hosts replaces the
+  earlier ones and their username, and passwords never carry to another
+  username. A username carries to another host only as a sign-in's own
+  step: submitted alone in a login or sign-up form on the top page, before
+  any password, with the password then submitted on the top page (an email
+  step on one host, the password on another). A username submitted alone
+  after a password joins it only from the same origin and only if it has
+  none, and never takes over the check for the password's form failing.
   On `new` or `update` the offer goes to the toolbar popup, never the page:
   the toolbar button gets a badge, and the popup opens by itself where the
   browser allows it, at most once per site every ten minutes (see the threat
@@ -209,7 +237,7 @@ not running without sending hello, which would start the agent again.
   the offer the popup showed; if another took its place, the popup shows that
   one instead. A check that finishes after the tab left the site, closed, or
   Deadbolt locked offers nothing. Offers expire after five minutes. A new login is named after
-  the form's page title and saved with that page's URL, without its query or
+  the title of the page the password was submitted on and saved with that page's URL, without its query or
   fragment. A `rate_limited` check offers nothing; a `rate_limited` fill says
   to try again in a moment.
 - **Noise filters.** Only a real click, Enter or form submit (a trusted
@@ -218,9 +246,41 @@ not running without sending hello, which would start the agent again.
   only the content script holds, rather than the values. These keep script
   noise out of the popup; they don't prove where a password came from (see
   the threat model).
-- **No password generator.** The host's capabilities are
-  `list`, `fill`, `check`, `save` and `passkeys`; there's no `generate`
-  message yet, so sign-up forms get no suggested password.
+- **Generated passwords.** On a sign-up or change-password form, the menu
+  under a new-password box offers "Use a strong password". Picking it sends
+  `generate` with what the boxes ask for: `minlength`, `maxlength`,
+  `passwordrules`, and the characters and lengths their `pattern` takes. The
+  agent makes the password (Apple's quirks for the site win over
+  `passwordrules`, see generate) and it goes into every new-password box, the
+  new one and its confirmation. Nothing is saved then. The agent holds the
+  password for the page's origin under an id, and a submit names it by that
+  id, so the password doesn't travel back. It's offered under the rules above
+  only if the submit goes through.
+  - **Only strong ones.** Before the menu shows the row, `generate-check` asks
+    whether the field's rules allow at least 60 bits; if not (a six-digit PIN,
+    a two-letter alphabet), there's no row. Length can't make up for an
+    alphabet of under 10 characters.
+  - **Patterns aren't run.** A page's `pattern` is never compiled as a regular
+    expression, so it can't stall the page. The content script reads a small
+    subset itself: literal characters, `[…]` classes, `.`, `\d \w \s` and their
+    opposites, `* + ? {n} {n,} {n,m}` (lazy too) and `^`/`$` at the ends, in
+    at most 200 characters. It takes from it one set of characters and a
+    length range, intersected with `minlength` and `maxlength`. A pattern
+    outside the subset, one that needs a mix of character sets, or lengths
+    that don't meet means no row. One attempt is made: a password the page
+    still turns down isn't retried.
+  - **Held only once it's in the page.** A fresh password is a candidate. The
+    extension sends `generate-keep` once it's in the page's new-password box,
+    and `generate-drop` otherwise, such as when the page turned it down or the
+    user left. The page names it by id only once the agent has kept it; if
+    the keep fails (locked, disconnected), a submit sends it as typed, so a
+    sign-up that goes through still gets an offer. Kept passwords expire
+    after 15 minutes and locking wipes them; candidates go after two minutes,
+    and can't push out kept ones.
+- **Changing a password.** A change-password form with a username updates
+  the login whose password is the current one. Without a username, it's the
+  one login here whose password is the current one (a `check` with no
+  username), else the only login here, else nothing.
 - **Passkeys.** A script in the page's own world answers
   `navigator.credentials.create` and `get` from Deadbolt, through the
   toolbar popup or the inline menu, and hands anything Deadbolt can't do back
@@ -436,43 +496,12 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   before, and the cover has to land between readings. This is why frames,
   whose placement the page around them controls, get no menu and fill only
   from the popup after an explicit check.
-- **Passkeys: a page signs only for itself.** A page can call WebAuthn as
-  often as it likes, but every answer is bound to the origin the browser
-  reported for its frame, which the agent writes into the client data and
-  checks the relying party id against. A page can't name another site's
-  relying party, a public suffix, or reach Deadbolt from a sandboxed frame,
-  and a frame with any cross-origin ancestor, or a Permissions Policy that
-  turns WebAuthn off, never gets Deadbolt's passkeys. Both the
-  extension and the agent check, so a bug in either alone doesn't widen it.
-- **Passkeys: the user answers outside the page.** A registration or
-  sign-in needs a click in the toolbar popup, or a pick in the inline menu
-  under its visibility rules, never a page element. What the page learns
-  before that is whether Deadbolt took the call: a site with no passkey in
-  Deadbolt, or one Deadbolt can't serve, sees the browser's own dialog
-  instead. That reveals whether the vault holds a passkey for this site,
-  which the site's own `allowCredentials` already narrows to its accounts.
-- **Passkeys: what crosses the channel.** The page↔extension port carries
-  the page's own options and the credential it asked for, nothing else. The
-  hook runs in the page's world, so the page can see or replace it; that only
-  changes the page's own calls, which are bound to its origin all the same.
-  The port is taken before page scripts run and opened only by the hook's
-  ack, so a page can't pose as another frame or inject calls into one.
-- **Passkeys: the private key stays in the agent.** Replies carry the public
-  key, the credential id, authenticator data, client data and the signature.
-  A listing gives the extension the relying party id, credential id, vault,
-  username and date. The app shows a passkey's site, username and date and
-  never the key.
-- **Passkeys: UV means Touch ID.** UV is set only when the Secure Enclave
-  released this store's biometric key for the ceremony, so a site that
-  requires verification gets a real one or none. An unlocked vault without
-  Touch ID still signs with UV=0 where the site allows it: anyone at the
-  unlocked Mac, or a same-user process, can sign in with a saved passkey,
-  just as they can fill a saved password.
-- **The idle lock:** fill, save, and a passkey registration or sign-in count
-  as use. Hello, list, check and passkey-list don't, because a browser asks
-  for those on every page and would otherwise hold the vault open.
+- **The idle lock:** fill, generate, save, and a passkey registration or
+  sign-in count as use. Hello, list, check, `generate-check`,
+  `generate-drop` and passkey-list don't, because a browser asks for those on
+  every page and would otherwise hold the vault open.
 - **Locked means locked.** While the store is locked, every request but hello
-  gets `locked`. Hello starts the agent if it isn't running but never unlocks
+  and `generate-check` gets `locked`. Hello starts the agent if it isn't running but never unlocks
   it.
 
 ## Host messages
@@ -490,11 +519,11 @@ The host exits when the port closes.
   answered with `bad_request` and `"id": null`, and the connection stays open.
   Replies stay under the browser's 1 MB limit. A list too large to fit becomes
   a `failed` error.
-- **Rate limits:** per connection, `check` allows a burst of 20 then one a
-  second, `fill` a burst of 60 then four a second, and `passkey-create` and
-  `passkey-get` together a burst of 10 then one a second, with at most four
-  running at once. Past that a request gets `rate_limited`; nothing else is
-  limited.
+- **Rate limits:** per connection, `check` and `generate-check` share a
+  burst of 20 then one a second, `fill` and `generate` share a burst of 60
+  then four a second, and `passkey-create` and `passkey-get` together a burst
+  of 10 then one a second, with at most four running at once. Past that a
+  request gets `rate_limited`; nothing else is limited.
 - **Requests** carry an `id`, a string of up to 200 characters or a number. The
   reply echoes it. A message without a usable id, or one that isn't JSON, gets
   `bad_request` with `"id": null`.
@@ -506,8 +535,8 @@ The host exits when the port closes.
 
 ```json
 { "id": "1", "type": "hello" }
-{ "id": "1", "type": "hello", "protocol": 1, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save", "passkeys"] }
+{ "id": "1", "type": "hello", "protocol": 2, "version": "0.1.0+abc123",
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys"] }
 ```
 
 `status` is one of:
@@ -530,7 +559,11 @@ Hello starts the agent if needed. It's the only message that does.
 ```
 
 `username` is left out when the login has none. `title` is the login's name,
-else its URL's host. Accounts are sorted by title.
+else its URL's host. Accounts come closest first, by their closest URL: the
+page's origin (port included, so `localhost:3000` isn't `localhost:5173`),
+then its host on another scheme or port, then a parent or child host or one
+sharing a parent below the site, then the rest of the site. Ties go to the
+login last filled on this device, then to the title.
 
 ### fill: values of one login
 
@@ -544,6 +577,44 @@ else its URL's host. Accounts are sorted by title.
 only those the login has. `totp` is the current code, computed by the agent.
 A login that isn't on the page's site gets `domain_mismatch`, and an unknown
 `ref` gets `not_found`.
+
+### generate: a new password for a sign-up form
+
+```json
+{ "id": "6", "type": "generate", "origin": "https://github.com",
+  "rules": "minlength: 12; required: digit;", "minLength": 8, "maxLength": 64,
+  "allowed": "abc…789" }
+{ "id": "6", "type": "generate", "password": "…", "generated": "<id>" }
+```
+
+Every field but `origin` is optional: `rules` is the field's
+`passwordrules` (at most 1024 bytes), `minLength` and `maxLength` its
+limits (numbers), and `allowed` the only characters to use. A site in
+Apple's [password-manager-resources](https://github.com/apple/password-manager-resources)
+quirks (vendored in `crates/cli/data/password-rules`, MIT) gets those rules
+instead of `rules`, and the field's limits always apply. Without either, it's
+20 characters of letters, digits and symbols with one of each kind. Limits no
+password fits get `failed`, and ones that allow under 60 bits get `weak`.
+
+Nothing is saved. The password is a candidate for two minutes, until
+`generate-keep` or `generate-drop` names it; at most four are held. A kept
+one is held for `origin` until a `save` names it, 15 minutes pass, 16 newer
+kept ones push it out or it locks. `check` and `save` take
+`"generated": "<id>"` in place of `password`, for kept ones only; from
+another origin, or once it's gone, that's `not_found`.
+
+```json
+{ "id": "7", "type": "generate-check", "origin": "https://github.com", "maxLength": 6, "allowed": "0123456789" }
+{ "id": "7", "type": "error", "code": "weak", "message": "…" }
+{ "id": "8", "type": "generate-keep", "origin": "https://github.com", "generated": "<id>" }
+{ "id": "8", "type": "generate-keep" }
+```
+
+`generate-check` takes `generate`'s fields and makes nothing: it answers
+`generate-check`, or the error `generate` would get. It works while locked.
+`generate-keep` and `generate-drop` take the `generated` id (1 to 64 bytes)
+and answer with their own type; keeping one from another origin, or one
+that's gone, is `not_found`, and dropping it does nothing.
 
 ### check: was what was typed saved?
 
@@ -560,7 +631,10 @@ case-insensitively; a blank username matches logins that have none):
 - `update`: none do. `matches` lists those with that username.
 - `new`: no login has that username. `matches` is empty.
 
-The password is 1 to 4096 characters and the username at most 500.
+Without `username`, every login on the site counts, by password alone: `same`
+with those that have it, else `new`. A generated password goes as
+`"generated": "<id>"` instead of `password` (see generate). The password is 1
+to 4096 characters and the username at most 500.
 
 ### save
 
@@ -570,6 +644,9 @@ The password is 1 to 4096 characters and the username at most 500.
              "username": "octocat", "password": "…" } }
 { "id": "5", "type": "save", "ref": "<ref>", "created": true }
 ```
+
+`entry` takes `"generated": "<id>"` in place of `password`; saving it lets the
+agent forget it.
 
 - **Without `ref`:** creates a login in the default vault with `url`,
   `username` (when not blank) and `password`, named `title` unless that is
@@ -669,8 +746,9 @@ Pushes carry no id and no values. Refetch what's on screen.
 - `domain_mismatch`: the login or URL isn't on the page's site.
 - `bad_request`: a malformed message, a page that gets no logins, or a value
   out of range.
-- `rate_limited`: too many checks, fills or passkey requests; try again in a
-  moment.
+- `rate_limited`: too many checks, fills, generated passwords or passkey
+  requests; try again in a moment.
+- `weak`: the field's rules allow only passwords under 60 bits.
 - `cancelled`: a passkey request stopped by `passkey-cancel`.
 - `exists`: a passkey the registration excluded is already saved.
 - `failed`: anything else.
@@ -694,7 +772,6 @@ Pushes carry no id and no values. Refetch what's on screen.
 - **Opening the app from the browser:** Deadbolt registers no URL scheme and
   the host has no message for it, so the popup says where to find the app
   instead.
-- **Generating passwords** (see The extension).
 
 ## Prior art
 

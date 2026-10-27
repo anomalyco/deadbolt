@@ -51,7 +51,7 @@ pub fn generate(length: usize, symbols: bool) -> Result<Zeroizing<String>, Lengt
     clippy::expect_used,
     reason = "OS CSPRNG failure is unrecoverable; never substitute weak randomness"
 )]
-fn random_index(n: usize) -> usize {
+pub(crate) fn random_index(n: usize) -> usize {
     // Rejection sampling keeps every index equally likely.
     let limit = 256 - 256 % n;
     loop {

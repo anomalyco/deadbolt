@@ -157,6 +157,17 @@ describe("fillFields", () => {
     expect(p.value).toBe("")
   })
 
+  test("a generated password goes into every new-password box, or none", async () => {
+    document.body.innerHTML = `<form><input id="c" type="password"><input id="n1" type="password"><input id="n2" type="password"></form>`
+    const [c, n1, n2] = ["c", "n1", "n2"].map((id) => document.getElementById(id) as HTMLInputElement)
+    const fields = [field(c, "password"), field(n1, "new-password"), field(n2, "new-password")]
+    expect((await fillFields(fields, { newPassword: "Generated-1" }, () => true)).filled).toEqual(["new-password"])
+    expect([c.value, n1.value, n2.value]).toEqual(["", "Generated-1", "Generated-1"])
+    n1.value = n2.value = ""
+    expect((await fillFields(fields, { newPassword: "Generated-2" }, (el) => el !== n2)).filled).toEqual([])
+    expect([n1.value, n2.value]).toEqual(["", ""])
+  })
+
   test("a field moved to another form since the scan isn't written", async () => {
     document.body.innerHTML = `<form id="a"><input id="u"><input id="p" type="password"></form><form id="b" action="https://evil.test/"></form>`
     const u = document.getElementById("u") as HTMLInputElement

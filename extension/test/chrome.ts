@@ -1,7 +1,7 @@
 // A small stand-in for the chrome.* APIs the background uses, and a fake host,
 // for testing the background classes without a browser.
 
-import type { Host } from "../src/bg/host"
+import { HostError, type Host } from "../src/bg/host"
 import type { Status } from "../src/messages"
 import type { Account, RequestBody as Request } from "../src/protocol"
 
@@ -106,10 +106,23 @@ export function fakeHost(): FakeHost {
           await held
           return { type: "fill", username: "kit@example.com", password: "correct horse", totp: "492039" }
         case "check": {
+          // Without a username, by password alone: "same" or nothing.
+          if (req.username === undefined) return { type: "check", status: req.password === "hunter2" ? "same" : "new", matches: req.password === "hunter2" ? [ACCOUNTS[1].ref] : [] }
           const known = req.username === "admin" ? [ACCOUNTS[1].ref] : []
           const status = known.length ? (req.password === "hunter2" ? "same" : "update") : "new"
           return { type: "check", status, matches: known }
         }
+        case "generate": {
+          const n = requests.filter((r) => r.type === "generate").length
+          return { type: "generate", password: `generated ${n}`, generated: `g${n}` }
+        }
+        // Fewer than twelve characters is weak here.
+        case "generate-check":
+          if ((req.maxLength ?? 99) < 12) throw new HostError("weak", "Only weak passwords fit.")
+          return { type: "generate-check" }
+        case "generate-keep":
+        case "generate-drop":
+          return { type: req.type }
         case "save":
           return { type: "save", ref: req.ref ?? "b", created: !req.ref }
       }

@@ -5,7 +5,10 @@
 //
 // A sign-in counts as successful when the top page of the same site then
 // shows no login form for a moment (the content script's `db:quiet`) on a
-// page that doesn't look like a sign-in step.
+// page that doesn't look like a sign-in step. It has failed when the form
+// that was submitted still shows about five seconds later, in place or posted
+// back (1Password's check), and it's abandoned when the user goes elsewhere
+// by hand (a typed address or a bookmark): neither offers anything.
 //
 // The offer is browser UI, never page UI: the toolbar button gets a badge and
 // the popup shows the offer when opened. A page can see any element put into
@@ -15,8 +18,8 @@
 // popup opens by itself for at most one check per site every ten minutes,
 // across tabs, and every other offer only badges.
 
-import type { ChooseReply, OfferChoice, SaveOffer } from "../messages"
-import type { SaveReply } from "../protocol"
+import type { ChooseReply, FieldRole, OfferChoice, SaveOffer, SurfaceKind } from "../messages"
+import type { PasswordValue, SaveReply } from "../protocol"
 import { newToken, targetFor } from "./frames"
 import { HostError, type Host } from "./host"
 import { saveTitle, saveUrl, senderOrigin, siteOf } from "./site"
@@ -27,24 +30,56 @@ export const CAPTURE_TTL_MS = 3 * 60_000
 export const OFFER_TTL_MS = 5 * 60_000
 /** The popup opens by itself at most once per site in this long, across tabs. */
 export const AUTO_OPEN_EVERY_MS = 10 * 60_000
+/** How long after a submit to wait before offering: the content script reports a form still showing at five seconds. */
+export const SETTLE_MS = 5500
+/** Fields whose showing again means the submit didn't go through. */
+const SECRET_ROLES: FieldRole[] = ["password", "new-password", "otp"]
+/** Ways into a page that aren't the next step of a sign-in. */
+const BY_HAND = new Set(["typed", "auto_bookmark", "generated", "keyword", "keyword_generated"])
 const MAX_PASSWORD = 4096
 const MAX_USERNAME = 500
 const BADGE = "#f02e29"
 
 interface Capture {
   site: string
+  /**
+   * Where the passwords were submitted, which a check and save go to: a
+   * generated one is the agent's for this origin only. Until one is, where
+   * the username was.
+   */
   origin: string
   username?: string
+  /**
+   * Where the username was submitted, and whether as a sign-in's own step (a
+   * login or sign-up form on the top page). Only such a step, with no
+   * password yet, carries it to a password on another of the site's hosts.
+   */
+  usernameOrigin?: string
+  usernameStep?: boolean
   /** The current password (login forms, or the "current" box when changing it). */
   password?: string
   /** Sign-up and change-password forms. */
   newPassword?: string
-  /** What a new login is named and where it's saved: the form's page title and URL. */
+  /** Instead of `newPassword`: the id of the generated password the agent holds. */
+  generated?: string
+  /** What a new login is named and where it's saved: the title and URL of the page the passwords were submitted on. */
   title: string
   url: string
   /** When it's forgotten: set when a password is submitted, never pushed back by a username alone. */
   until: number
   timer: ReturnType<typeof setTimeout>
+  /** When it was submitted. */
+  at: number
+  /**
+   * The page, document, submit count (see content.ts), kind and secret fields
+   * of the form that submitted the passwords (until there are any, the
+   * username), to tell it showing again.
+   */
+  form: string
+  document?: string
+  submission?: number
+  kind?: SurfaceKind
+  secrets: FieldRole[]
 }
 
 /**
@@ -70,6 +105,12 @@ type Pending = { offer: Omit<SaveOffer, "id">; save: Offer["save"] }
 
 const clip = (value: unknown, max: number) => (typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined)
 
+/** The new password a capture names, typed or generated. */
+function newSecret(c: Capture): PasswordValue | undefined {
+  if (c.generated) return { generated: c.generated }
+  return c.newPassword ? { password: c.newPassword } : undefined
+}
+
 function siteOfUrl(url: string | undefined): string | null {
   try {
     return url ? siteOf(new URL(url).hostname) : null
@@ -92,7 +133,7 @@ export class Saver {
 
   constructor(
     private host: Host,
-    private ttl = { capture: CAPTURE_TTL_MS, offer: OFFER_TTL_MS },
+    private ttl: { capture: number; offer: number; settle?: number } = { capture: CAPTURE_TTL_MS, offer: OFFER_TTL_MS, settle: SETTLE_MS },
     private now: () => number = Date.now,
   ) {
     // Locked or gone: nothing waits to be saved, and nothing is kept.
@@ -120,7 +161,10 @@ export class Saver {
     return siteOfUrl(frame?.url) === site && this.fresh(tabId, t)
   }
 
-  async capture(sender: chrome.runtime.MessageSender, raw: { username?: unknown; password?: unknown; newPassword?: unknown; title?: unknown }) {
+  async capture(
+    sender: chrome.runtime.MessageSender,
+    raw: { username?: unknown; password?: unknown; newPassword?: unknown; generated?: unknown; title?: unknown; kind?: unknown; roles?: unknown; submission?: unknown },
+  ) {
     const tabId = sender.tab?.id
     if (tabId === undefined) return
     const ticket = this.ticket(tabId)
@@ -131,19 +175,84 @@ export class Saver {
     if (!site) return
     const username = typeof raw.username === "string" && raw.username.length <= MAX_USERNAME ? raw.username.trim() || undefined : undefined
     const password = clip(raw.password, MAX_PASSWORD)
-    const newPassword = clip(raw.newPassword, MAX_PASSWORD)
+    const generated = clip(raw.generated, 64)
+    const newPassword = generated ? undefined : clip(raw.newPassword, MAX_PASSWORD)
+    const fresh = newPassword || generated ? { newPassword, generated } : undefined
     const now = this.now()
     const prev = this.captures.get(tabId)
     const same = prev && prev.site === site && prev.until > now ? prev : undefined
-    // A username on its own (an email-first step) joins the password already
-    // held, and it goes when that password would have.
-    const until = password || newPassword || !same ? now + this.ttl.capture : same.until
-    const base = same
-      ? { ...same, username: username ?? same.username, password: password ?? same.password, newPassword: newPassword ?? same.newPassword }
-      : { site, origin: target.origin, username, password, newPassword, title: saveTitle(raw.title, site), url: saveUrl(page) }
+    const held = same && (same.password || newSecret(same)) ? same : undefined
+    const kind = typeof raw.kind === "string" ? (raw.kind as SurfaceKind) : undefined
+    const here = { origin: target.origin, title: saveTitle(raw.title, site), url: saveUrl(page) }
+    const submitted = {
+      at: now,
+      form: saveUrl(page),
+      document: sender.documentId,
+      submission: Number.isSafeInteger(raw.submission) ? (raw.submission as number) : undefined,
+      kind,
+      secrets: Array.isArray(raw.roles) ? SECRET_ROLES.filter((r) => (raw.roles as unknown[]).includes(r)) : [],
+    }
+    const usernameFrom = { usernameOrigin: target.origin, usernameStep: sender.frameId === 0 && (kind === "login" || kind === "signup") }
+    if (!password && !fresh) {
+      if (!username) return
+      // A username on its own. With a password held, it joins only one from
+      // its own origin that has none yet, and changes nothing else: once a
+      // username is paired with a password nothing replaces it, and another
+      // host's username never joins.
+      if (held) {
+        if (held.username || held.origin !== target.origin) return
+        this.captures.set(tabId, { ...held, username, ...usernameFrom })
+        return
+      }
+      // Else it waits for the password, as an email-first step's does.
+      this.keep(tabId, { site, ...here, username, ...usernameFrom, until: now + this.ttl.capture, ...submitted })
+      return
+    }
+    // Passwords stay with the origin they were submitted on: one from another
+    // of the site's hosts takes over, and the earlier ones and their username
+    // go, unless that username was a sign-in's own step with no password yet
+    // and this is the top page. Nor do passwords carry to another username.
+    const sameUser = (a?: string, b?: string) => !a || !b || a.toLowerCase() === b.toLowerCase()
+    const kept = held && held.origin === target.origin && sameUser(username, held.username) ? held : undefined
+    const step = !held && same?.username && (same.usernameOrigin === target.origin || (same.usernameStep && sender.frameId === 0)) ? same : undefined
+    const from = username ? { username, ...usernameFrom } : (kept ?? step)
+    this.keep(tabId, {
+      site,
+      ...here,
+      username: from?.username,
+      usernameOrigin: from?.usernameOrigin,
+      usernameStep: from?.usernameStep,
+      password: password ?? kept?.password,
+      newPassword: fresh ? newPassword : kept?.newPassword,
+      generated: fresh ? generated : kept?.generated,
+      until: now + this.ttl.capture,
+      ...submitted,
+    })
+  }
+
+  /** Holds `c` for the tab until it expires. */
+  private keep(tabId: number, c: Omit<Capture, "timer">) {
     this.dropCapture(tabId)
-    const timer = setTimeout(() => this.dropCapture(tabId), Math.max(0, until - now))
-    this.captures.set(tabId, { ...base, until, timer })
+    const timer = setTimeout(() => this.dropCapture(tabId), Math.max(0, c.until - this.now()))
+    this.captures.set(tabId, { ...c, timer })
+  }
+
+  /** The form submitted as `submission` still shows in place, five seconds on: the sign-in failed. A failure for an earlier submit, or from another document, says nothing. */
+  failed(sender: chrome.runtime.MessageSender, submission: unknown) {
+    const tabId = sender.tab?.id
+    const page = senderOrigin(sender)
+    const c = tabId === undefined ? undefined : this.captures.get(tabId)
+    if (!c || !page || saveUrl(page) !== c.form || !sender.documentId || sender.documentId !== c.document) return
+    if (Number.isSafeInteger(submission) && submission === c.submission) this.dropCapture(tabId!)
+  }
+
+  /** A page reported its form. The one just submitted, posted back to the same page as a new document, means the sign-in failed. */
+  page(sender: chrome.runtime.MessageSender, kind: SurfaceKind | null, roles: FieldRole[]) {
+    const tabId = sender.tab?.id
+    const page = senderOrigin(sender)
+    const c = tabId === undefined ? undefined : this.captures.get(tabId)
+    if (!c || !page || !kind || kind !== c.kind || sender.documentId === c.document || saveUrl(page) !== c.form) return
+    if (c.secrets.some((r) => roles.includes(r))) this.dropCapture(tabId!)
   }
 
   private dropCapture(tabId: number) {
@@ -158,9 +267,13 @@ export class Saver {
     const tabId = sender.tab?.id
     if (tabId === undefined || sender.frameId !== 0 || loginish || !this.captures.has(tabId)) return
     const ticket = this.ticket(tabId)
+    // Give a failed submit its five seconds to show.
+    const held = this.captures.get(tabId)!
+    const wait = held.at + (this.ttl.settle ?? 0) - this.now()
+    if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait))
     const target = await targetFor(sender)
     const c = this.captures.get(tabId)
-    if (!target || !c || !this.fresh(tabId, ticket) || siteOf(new URL(target.origin).hostname) !== c.site) return
+    if (!target || c !== held || !this.fresh(tabId, ticket) || siteOf(new URL(target.origin).hostname) !== c.site) return
     this.dropCapture(tabId)
     if (c.until <= this.now()) return
     const decided = await this.decide(c).catch((): { asked: boolean; pending?: Pending } => ({ asked: true }))
@@ -176,37 +289,38 @@ export class Saver {
    * limited or gone): offer nothing. `asked` says whether a check was sent.
    */
   private async decide(c: Capture): Promise<{ asked: boolean; pending?: Pending }> {
-    if (c.newPassword && c.password) return { asked: true, pending: await this.passwordChange(c) }
-    const password = c.newPassword ?? c.password
-    if (!password || !c.username) return { asked: false }
-    return { asked: true, pending: await this.saveOrUpdate({ ...c, password }) }
+    const next = newSecret(c)
+    if (next && c.password) return { asked: true, pending: await this.passwordChange(c, next, c.password) }
+    const secret = next ?? (c.password ? { password: c.password } : undefined)
+    if (!secret || !c.username) return { asked: false }
+    return { asked: true, pending: await this.saveOrUpdate(c, c.username, secret) }
   }
 
-  private async saveOrUpdate(c: Capture): Promise<Pending | undefined> {
-    if (!c.password || !c.username) return undefined
-    const check = await this.host.send({ type: "check", origin: c.origin, username: c.username, password: c.password })
+  private async saveOrUpdate(c: Capture, username: string, secret: PasswordValue): Promise<Pending | undefined> {
+    const check = await this.host.send({ type: "check", origin: c.origin, username, ...secret })
     if (check.status === "same") return undefined
     const ref = check.status === "update" ? check.matches[0] : undefined
-    const entry = { title: c.title, url: c.url, username: c.username, password: c.password }
-    return { offer: { site: c.site, username: c.username, update: !!ref }, save: () => this.host.send({ type: "save", origin: c.origin, ref, entry }) }
+    const entry = { title: c.title, url: c.url, username, ...secret }
+    return { offer: { site: c.site, username, update: !!ref }, save: () => this.host.send({ type: "save", origin: c.origin, ref, entry }) }
   }
 
   /** Changing a password: update the saved login that still has the old one. */
-  private async passwordChange(c: Capture): Promise<Pending | undefined> {
-    const newPassword = c.newPassword!
+  private async passwordChange(c: Capture, next: PasswordValue, current: string): Promise<Pending | undefined> {
     let target: { ref: string; username: string } | undefined
-    if (c.username && c.password) {
-      const check = await this.host.send({ type: "check", origin: c.origin, username: c.username, password: c.password })
+    if (c.username) {
+      const check = await this.host.send({ type: "check", origin: c.origin, username: c.username, password: current })
       if (check.status === "same" && check.matches[0]) target = { ref: check.matches[0], username: c.username }
     } else {
-      // No username on the form: only act when there's exactly one saved login here.
-      const list = await this.host.send({ type: "list", origin: c.origin })
-      const saved = list.accounts.filter((a) => a.hasPassword)
-      if (saved.length === 1) target = { ref: saved[0].ref, username: saved[0].username ?? "" }
+      // No username on the form: the one login here whose password is the
+      // current one, else the only login here.
+      const check = await this.host.send({ type: "check", origin: c.origin, password: current })
+      const saved = (await this.host.send({ type: "list", origin: c.origin })).accounts.filter((a) => a.hasPassword)
+      const match = check.status === "same" && check.matches.length === 1 ? saved.find((a) => a.ref === check.matches[0]) : saved.length === 1 ? saved[0] : undefined
+      if (match) target = { ref: match.ref, username: match.username ?? "" }
     }
-    if (!target) return c.username ? this.saveOrUpdate({ ...c, password: newPassword }) : undefined
+    if (!target) return c.username ? this.saveOrUpdate(c, c.username, next) : undefined
     const { ref, username } = target
-    const entry = { title: c.title, url: c.url, username, password: newPassword }
+    const entry = { title: c.title, url: c.url, username, ...next }
     return { offer: { site: c.site, username: username || c.site, update: true }, save: () => this.host.send({ type: "save", origin: c.origin, ref, entry }) }
   }
 
@@ -279,13 +393,18 @@ export class Saver {
     }
   }
 
-  /** The tab's top page committed a new document. Another site's page ends the sign-in and its offer. */
-  navigated(tabId: number, url: string) {
+  /**
+   * The tab's top page committed a new document. Another site's page ends the
+   * sign-in and its offer; going anywhere by hand ends the sign-in, its offer
+   * and any check still on its way, on the same site too.
+   */
+  navigated(tabId: number, url: string, transition?: string) {
     const site = siteOfUrl(url)
-    if (!this.sites.has(tabId) || this.sites.get(tabId) !== site) this.moveOn(tabId)
+    const byHand = !!transition && BY_HAND.has(transition)
+    if (!this.sites.has(tabId) || this.sites.get(tabId) !== site || byHand) this.moveOn(tabId)
     this.sites.set(tabId, site)
-    if (this.captures.get(tabId)?.site !== site) this.dropCapture(tabId)
-    if (this.offers.get(tabId)?.offer.site !== site) this.dropOffer(tabId)
+    if (this.captures.get(tabId)?.site !== site || byHand) this.dropCapture(tabId)
+    if (this.offers.get(tabId)?.offer.site !== site || byHand) this.dropOffer(tabId)
   }
 
   forgetTab(tabId: number) {
