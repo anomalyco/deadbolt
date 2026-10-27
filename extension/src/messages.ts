@@ -35,7 +35,10 @@ export type ToBackground =
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean }
   | { type: "db:quiet"; loginish: boolean }
-  | { type: "db:capture"; username?: string; password?: string; newPassword?: string; title: string }
+  /** `kind` and `roles`: the submitted form's, to tell it if it shows again. */
+  | { type: "db:capture"; username?: string; password?: string; newPassword?: string; title: string; kind: SurfaceKind | null; roles: FieldRole[] }
+  /** The form last submitted here still shows, five seconds on: the sign-in failed. */
+  | { type: "db:failed" }
   | { type: "db:menu-close"; token: string; dismissed?: boolean }
   // inline menu
   /** `parent`: the origin of the parent window that handed the menu its token. */

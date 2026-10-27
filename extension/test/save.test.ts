@@ -320,3 +320,56 @@ describe("plaintext lifetime", () => {
     expect(requests("check")).toHaveLength(1)
   })
 })
+
+describe("failed and abandoned sign-ins", () => {
+  const login = { username: "new@example.com", password: "wrong", title: "", kind: "login", roles: ["email", "password"] }
+
+  test("the form still showing in place offers nothing", async () => {
+    await saver.capture(pageSender(), login)
+    saver.failed(pageSender())
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toHaveLength(0)
+  })
+
+  test("the form posted back to its page offers nothing; the same document reporting it again doesn't count", async () => {
+    await saver.capture(pageSender(), login)
+    saver.page(pageSender(), "login", ["email", "password"])
+    saver.page(pageSender({ url: "https://www.example.com/login/next", documentId: "next" }), "login", ["password"])
+    saver.page(pageSender({ documentId: "mfa" }), "mfa", ["otp"])
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toHaveLength(1)
+
+    await saver.capture(pageSender(), login)
+    saver.page(pageSender({ documentId: "posted-back" }), "login", ["email", "password"])
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toHaveLength(1)
+  })
+
+  test("a typed address or a bookmark ends the sign-in; a link doesn't", async () => {
+    await saver.capture(pageSender(), login)
+    saver.navigated(1, "https://www.example.com/mfa", "form_submit")
+    saver.navigated(1, HOME.url, "link")
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toHaveLength(1)
+    for (const how of ["typed", "auto_bookmark"]) {
+      await saver.capture(pageSender(), login)
+      saver.navigated(1, HOME.url, how)
+      await saver.quiet(pageSender(HOME), false)
+    }
+    expect(requests("check")).toHaveLength(1)
+  })
+
+  test("an offer waits for the five seconds a failure takes to show", async () => {
+    saver = new Saver(host.host, { capture: 60_000, offer: 60_000, settle: 60 })
+    await saver.capture(pageSender(), login)
+    fake.frames["1:0"] = HOME
+    const quiet = saver.quiet(pageSender(HOME), false)
+    await Bun.sleep(20)
+    saver.failed(pageSender())
+    await quiet
+    expect(requests("check")).toHaveLength(0)
+  })
+})
