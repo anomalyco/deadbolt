@@ -46,17 +46,26 @@ The secret is proved, never sent, and the proof is bound to the connection, so i
 ## CLI
 
 ```text
-deadbolt send [PATH|ITEM]... [--item QUERY]... [--field NAME] [--title T] [--note N]
-              [--sensitive] [--opens N] [--ttl 1h] [--qr] [--json] [--wait]
+deadbolt send [PATH|-]... [--item NAME|ID [--field NAME]]... [--title T] [--note N]
+              [--sensitive] [--opens N] [--ttl 1h] [--qr] [--yes] [--json] [--wait]
 deadbolt sends [ls [--json] | show <id> [--json] | revoke <id>]
 ```
 
-- `deadbolt send ./file ./folder/` sends files (media type sniffed) and folders (as groups).
-- `deadbolt send` with no arguments asks for a secret with hidden input; with stdin piped and no terminal, it reads stdin.
+- `deadbolt send ./file ./folder/` sends files (media type sniffed) and folders (as groups). Arguments are always paths and must exist: `deadbolt send ./prod.env.typo` fails with "./prod.env.typo: no such file" and never looks in the vault.
+- `deadbolt send` with no arguments asks for a secret with hidden input.
 - `deadbolt send -` reads stdin. Short UTF-8 is a sensitive value named `secret`, without the trailing newline `echo` adds; anything else a file.
-- `deadbolt send "github work"` sends a vault item as a group of its fields, keeping secret and otp fields hidden; `--field password` sends only that field.
-- **Paths vs items:** an argument that names an existing file or folder is sent as one; anything else is a vault search (words ANDed, or an id prefix, like `get`). `--item QUERY` forces an item when a file of the same name exists. A search that matches nothing fails with "no file or vault item matches".
-- Inputs mix freely in one send. `--title` and `--note` are shown to the recipient (the note is never hidden). `--sensitive` hides files and stdin behind "reveal" too.
+- `deadbolt send --item "Stripe"` sends a vault item as a group of its fields, keeping secret and otp fields hidden. `--item` takes an item's exact name or ID (full or the short ID `ls` shows), nothing looser: with no exact match it fails with close names as suggestions (`no item named "stripe". Did you mean: "Stripe", "Stripe (test)"?`) but never picks one, and when several items share the name it lists them with their IDs. `--item` repeats.
+- `--field NAME` sends only that field of the nearest `--item` before it (`--item A --field x --item B` sends A's field x and all of B). A `--field` before any `--item`, or two for one `--item`, is an error; repeat `--item` to send two fields of one item.
+- Inputs mix freely and go into the bundle in command-line order. `--title` and `--note` are shown to the recipient (the note is never hidden). `--sensitive` hides files and stdin behind "reveal" too; key-like files (`*.pem`, `*.key`, `*.p12`, `*.pfx`, `.env`, `id_*` private keys, ...) always are.
+- **Preview and confirm.** Before anything is sealed or handed to the agent, `send` lists every entry (kind `file`/`folder`/`item`/`field`/`secret`/`stdin`, name, size, sensitive), the opens and the expiry, and asks `Create link? [y/N]` (default no; declining exits 1 with "not sent"):
+
+  ```text
+  About to send (single use, expires in 1h):
+    file  opencodejr.pem  1.7 KB  sensitive
+  Create link? [y/N]
+  ```
+
+  The answer is read from stdin, or from `/dev/tty` when stdin carries the payload (`cat key.pem | deadbolt send -`). `--yes` skips the preview for scripts and agents. Without `--yes`, `send` fails instead of waiting when stdout or stderr isn't a terminal or there's no terminal to read the answer from, and `--json` requires `--yes` ("--json needs --yes (no prompt possible)").
 - Prints the link on stdout (`--json`: `{"id", "link", "expires"}`), a summary on stderr, and with `--qr` a QR code on stderr.
 - `--wait` blocks until the link is picked up (exit 0), expires (exit 4) or is revoked (exit 5); other failures exit 1. Waiting doesn't hold the vault unlocked.
 - `DEADBOLT_SEND_URL` points links at another copy of the receive page (a local `bun run dev`, or a self-hosted site).

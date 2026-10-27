@@ -156,14 +156,16 @@ enum Commands {
     /// deadbolt agent on this computer serves the link live until it is
     /// opened, expires (default 1h) or is revoked, and only while it runs.
     ///
-    ///   deadbolt send ./report.pdf ./keys/     files and folders
-    ///   deadbolt send                          asks for a secret (hidden)
-    ///   echo $TOKEN | deadbolt send -          stdin
-    ///   deadbolt send "github work"            a vault item's fields
-    ///   deadbolt send github --field password  one field
+    ///   deadbolt send ./report.pdf ./keys/          files and folders
+    ///   deadbolt send                               asks for a secret (hidden)
+    ///   cat key.pem | deadbolt send -               stdin
+    ///   deadbolt send --item "Stripe"               a vault item's fields
+    ///   deadbolt send --item Stripe --field secret  one field
     ///
-    /// An argument that names an existing file or folder is sent as one;
-    /// anything else is a vault item search (use --item to force an item).
+    /// Arguments are files or folders and must exist; vault items are only
+    /// ever sent with --item, by exact name or ID. Each --field applies to
+    /// the nearest --item before it. Shows what will be sent and asks
+    /// first; scripts pass --yes (--json and no terminal require it).
     /// Prints the link; see `deadbolt sends` for what was sent.
     #[command(verbatim_doc_comment)]
     Send(send::SendArgs),

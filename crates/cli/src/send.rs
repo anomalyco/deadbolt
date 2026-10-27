@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use anyhow::{Context, Result, anyhow, bail};
-use clap::{Args, Subcommand};
+use clap::{ArgMatches, Args, FromArgMatches, Subcommand};
 use data_encoding::{BASE64, HEXLOWER};
 use deadbolt_net::{QrStyle, render_qr};
 use deadbolt_send::{
@@ -24,7 +24,7 @@ use crate::config;
 use crate::paths::Paths;
 use crate::prompt;
 use crate::protocol::{
-    Command, ErrorCode, FieldInfo, ItemInfo, Reply, Secret, SendInfo, SendState, SenderInfo,
+    Command, FieldInfo, ItemInfo, Reply, Secret, SendInfo, SendState, SenderInfo,
 };
 
 /// Exit code of `send --wait` when the link expired unopened.
@@ -32,29 +32,37 @@ pub const EXIT_EXPIRED: u8 = 4;
 /// Exit code of `send --wait` when the link was revoked.
 pub const EXIT_REVOKED: u8 = 5;
 
-#[derive(Args)]
+/// `deadbolt send`'s flags, plus where each input sat on the command line:
+/// inputs go into the bundle in that order, and each `--field` belongs to
+/// the nearest `--item` before it.
 pub struct SendArgs {
-    /// Files, folders, `-` for stdin, or vault items (search words or an id
-    /// prefix, quoted as one argument). An argument that names an existing
-    /// path is a file; anything else is looked up in the vault. Without any,
-    /// asks for a secret (hidden), or reads piped stdin.
-    #[arg(value_name = "PATH|ITEM")]
+    raw: Raw,
+    inputs_at: Vec<usize>,
+    items_at: Vec<usize>,
+    fields_at: Vec<usize>,
+}
+
+#[derive(Args)]
+struct Raw {
+    /// Files and folders to send, or `-` for stdin. Each must exist; a
+    /// name is never looked up in the vault (use --item). Without any
+    /// input, asks for a secret (hidden).
+    #[arg(value_name = "PATH")]
     inputs: Vec<String>,
-    /// Send this vault item even if a file of the same name exists; repeat
-    /// for more.
-    #[arg(long = "item", value_name = "QUERY")]
+    /// A vault item to send, by its exact name or ID; repeat for more.
+    #[arg(long = "item", value_name = "NAME|ID")]
     items: Vec<String>,
-    /// Send only this field of each item.
-    #[arg(short, long)]
-    field: Option<String>,
+    /// Send only this field of the nearest --item before it.
+    #[arg(short, long = "field", value_name = "NAME")]
+    fields: Vec<String>,
     /// A title the receiver sees.
     #[arg(long)]
     title: Option<String>,
     /// A note the receiver sees above everything (not hidden).
     #[arg(long)]
     note: Option<String>,
-    /// Hide files and stdin behind "reveal" too (secrets and secret item
-    /// fields always are).
+    /// Hide files and stdin behind "reveal" too (secrets, secret item
+    /// fields and key-like files such as *.pem, *.key and .env always are).
     #[arg(long)]
     sensitive: bool,
     /// How many times the link may be opened.
@@ -66,13 +74,49 @@ pub struct SendArgs {
     /// Also print the link as a QR code (to stderr).
     #[arg(long)]
     qr: bool,
-    /// Print `{"id", "link", "expires"}` instead of the link.
+    /// Print `{"id", "link", "expires"}` instead of the link (needs --yes).
     #[arg(long)]
     json: bool,
+    /// Create the link without showing what will be sent and asking first.
+    /// Needed by scripts: without a terminal, send fails rather than wait.
+    #[arg(short, long)]
+    yes: bool,
     /// Wait until the link is picked up (exit 0), expires (exit 4) or is
     /// revoked (exit 5).
     #[arg(long)]
     wait: bool,
+}
+
+impl FromArgMatches for SendArgs {
+    fn from_arg_matches(matches: &ArgMatches) -> Result<Self, clap::Error> {
+        let at = |id: &str| {
+            matches
+                .indices_of(id)
+                .map(Iterator::collect)
+                .unwrap_or_default()
+        };
+        Ok(Self {
+            raw: Raw::from_arg_matches(matches)?,
+            inputs_at: at("inputs"),
+            items_at: at("items"),
+            fields_at: at("fields"),
+        })
+    }
+
+    fn update_from_arg_matches(&mut self, matches: &ArgMatches) -> Result<(), clap::Error> {
+        *self = Self::from_arg_matches(matches)?;
+        Ok(())
+    }
+}
+
+impl Args for SendArgs {
+    fn augment_args(cmd: clap::Command) -> clap::Command {
+        Raw::augment_args(cmd)
+    }
+
+    fn augment_args_for_update(cmd: clap::Command) -> clap::Command {
+        Raw::augment_args_for_update(cmd)
+    }
 }
 
 #[derive(Args)]
@@ -98,12 +142,118 @@ enum SendsCommand {
     Revoke { id: String },
 }
 
+/// One thing to send, as given on the command line.
+#[derive(Debug, PartialEq)]
+enum Source {
+    Stdin,
+    Path(PathBuf),
+    Item {
+        query: String,
+        field: Option<String>,
+    },
+}
+
+impl SendArgs {
+    /// The inputs in command-line order, each `--field` bound to the
+    /// nearest `--item` before it. Paths must exist.
+    fn sources(&self) -> Result<Vec<Source>> {
+        let raw = &self.raw;
+        let mut sources: Vec<(usize, Source)> = Vec::new();
+        for (arg, &at) in raw.inputs.iter().zip(&self.inputs_at) {
+            let source = match arg.as_str() {
+                "-" => Source::Stdin,
+                path if Path::new(path).exists() => Source::Path(PathBuf::from(path)),
+                path => bail!("{path}: no such file"),
+            };
+            sources.push((at, source));
+        }
+        for (query, &at) in raw.items.iter().zip(&self.items_at) {
+            let query = query.clone();
+            sources.push((at, Source::Item { query, field: None }));
+        }
+        sources.sort_by_key(|(at, _)| *at);
+        for (name, &at) in raw.fields.iter().zip(&self.fields_at) {
+            let item = sources
+                .iter_mut()
+                .rev()
+                .find(|(item_at, s)| *item_at < at && matches!(s, Source::Item { .. }));
+            let Some((_, Source::Item { query, field })) = item else {
+                bail!("--field {name:?} must follow the --item it belongs to");
+            };
+            if let Some(first) = field {
+                bail!(
+                    "--item {query:?} has two fields ({first:?} and {name:?}); repeat --item for each"
+                );
+            }
+            *field = Some(name.clone());
+        }
+        Ok(sources.into_iter().map(|(_, s)| s).collect())
+    }
+}
+
+/// How `send` asks before creating the link.
+#[derive(Debug, PartialEq)]
+enum Ask {
+    /// `--yes`: don't.
+    Skip,
+    /// On stdin, a terminal.
+    Stdin,
+    /// On `/dev/tty`: stdin carries what is sent.
+    Tty,
+}
+
+/// Asking needs a terminal on stdout and stderr, and one to read the answer
+/// from: stdin, or `/dev/tty` when stdin is what's being sent.
+fn ask(yes: bool, json: bool, reads_stdin: bool, stdin_tty: bool, out_tty: bool) -> Result<Ask> {
+    if yes {
+        return Ok(Ask::Skip);
+    }
+    if json {
+        bail!("--json needs --yes (no prompt possible)");
+    }
+    if !out_tty || !(stdin_tty || reads_stdin) {
+        bail!("no terminal to confirm on: pass --yes to create the link without asking");
+    }
+    Ok(if reads_stdin { Ask::Tty } else { Ask::Stdin })
+}
+
+/// What a part of the bundle is, for the preview.
+#[derive(Clone, Copy)]
+enum Kind {
+    File,
+    Folder,
+    Item,
+    Field,
+    Secret,
+    Stdin,
+}
+
+impl Kind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Kind::File => "file",
+            Kind::Folder => "folder",
+            Kind::Item => "item",
+            Kind::Field => "field",
+            Kind::Secret => "secret",
+            Kind::Stdin => "stdin",
+        }
+    }
+}
+
+struct Part {
+    kind: Kind,
+    node: Node,
+}
+
 pub async fn send(
     paths: &Paths,
     args: SendArgs,
     vault: Option<String>,
     from_stdin: bool,
 ) -> Result<ExitCode> {
+    let sources = args.sources()?;
+    let args = args.raw;
     let ttl = match config::parse_timeout(&args.ttl)? {
         Some(ttl) if ttl.as_secs() > 0 => ttl,
         _ => bail!("--ttl must be a duration, such as 15m, 1h or 24h"),
@@ -111,62 +261,97 @@ pub async fn send(
     if args.opens == 0 {
         bail!("--opens must be at least 1");
     }
-    let stdin_used = args.inputs.iter().filter(|i| *i == "-").count();
+    let stdin_used = sources.iter().filter(|s| **s == Source::Stdin).count();
     if stdin_used > 1 {
         bail!("`-` (stdin) can only be sent once");
     }
     if stdin_used == 1 && from_stdin {
         bail!("--passphrase-stdin cannot be used when sending stdin");
     }
-    let mut inputs: Vec<Input> = args
-        .inputs
-        .iter()
-        .map(|arg| match arg.as_str() {
-            "-" => Input::Stdin,
-            path if Path::new(path).exists() => Input::Path(PathBuf::from(path)),
-            query => Input::Item(query.to_string()),
-        })
-        .chain(args.items.iter().cloned().map(Input::Item))
-        .collect();
-    if inputs.is_empty() {
-        if prompt::interactive() {
-            inputs.push(Input::Prompt);
-        } else if !std::io::stdin().is_terminal() && !from_stdin {
-            inputs.push(Input::Stdin);
-        } else {
-            bail!("nothing to send: pass files, `-` for stdin, or a vault item");
-        }
-    }
-    if args.field.is_some() && !inputs.iter().any(|i| matches!(i, Input::Item(_))) {
-        bail!("--field applies to vault items");
+    let ask = ask(
+        args.yes,
+        args.json,
+        stdin_used == 1,
+        std::io::stdin().is_terminal(),
+        std::io::stdout().is_terminal() && std::io::stderr().is_terminal(),
+    )?;
+    let mut tty =
+        match ask {
+            Ask::Tty => Some(prompt::tty().context(
+                "no terminal to confirm on: pass --yes to create the link without asking",
+            )?),
+            Ask::Skip | Ask::Stdin => None,
+        };
+    if sources.is_empty() && !prompt::interactive() {
+        bail!("nothing to send: pass files, `-` for stdin, or --item NAME");
     }
 
     client::ensure_running(paths).await?;
-    let mut entries = Vec::new();
-    let mut names = Vec::new();
-    for input in &inputs {
-        let node = match input {
-            Input::Prompt => {
-                let value = prompt::ask_value("secret to send", true)?;
-                if value.is_empty() {
-                    bail!("nothing to send");
-                }
-                Node::Entry(Entry::text("secret", value.as_str(), true))
+    let mut parts = Vec::new();
+    if sources.is_empty() {
+        let value = prompt::ask_value("secret to send", true)?;
+        if value.is_empty() {
+            bail!("nothing to send");
+        }
+        parts.push(Part {
+            kind: Kind::Secret,
+            node: Node::Entry(Entry::text("secret", value.as_str(), true)),
+        });
+    }
+    for source in &sources {
+        let part = match source {
+            Source::Stdin => Part {
+                kind: Kind::Stdin,
+                node: stdin_entry(args.sensitive)?,
+            },
+            Source::Path(path) => {
+                let node = path_node(path, args.sensitive)?;
+                let kind = match node {
+                    Node::Group(_) => Kind::Folder,
+                    Node::Entry(_) => Kind::File,
+                };
+                Part { kind, node }
             }
-            Input::Stdin => stdin_entry(args.sensitive)?,
-            Input::Path(path) => path_node(path, args.sensitive)?,
-            Input::Item(query) => {
-                if Path::new(query).exists() {
-                    // Only via --item: say why it isn't the file.
-                    eprintln!("note: sending vault item {query:?}, not the file of that name");
+            Source::Item { query, field } => {
+                let item = find_item(paths, query, vault.clone(), from_stdin).await?;
+                Part {
+                    kind: if field.is_some() {
+                        Kind::Field
+                    } else {
+                        Kind::Item
+                    },
+                    node: item_node(&item, field.as_deref())?,
                 }
-                let item = get_item(paths, query, vault.clone(), from_stdin).await?;
-                item_node(&item, args.field.as_deref())?
             }
         };
-        names.push(node_name(&node));
-        entries.push(node);
+        parts.push(part);
     }
+
+    if ask != Ask::Skip {
+        eprint!(
+            "{}",
+            preview(
+                &parts,
+                args.opens,
+                ttl.as_secs(),
+                args.title.as_deref(),
+                args.note.as_deref()
+            )
+        );
+        let question = "Create link?";
+        let confirmed = match tty.as_mut() {
+            Some(tty) => prompt::confirm_from(question, tty)?,
+            None => prompt::confirm(question)?,
+        };
+        if !confirmed {
+            eprintln!("not sent");
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+
+    let names: Vec<String> = parts.iter().map(|p| node_name(&p.node)).collect();
+    let entries: Vec<Node> = parts.into_iter().map(|p| p.node).collect();
+
     let bundle = Bundle {
         title: args.title.clone(),
         note: args.note.clone(),
@@ -317,13 +502,6 @@ pub async fn sends(paths: &Paths, args: SendsArgs) -> Result<()> {
     Ok(())
 }
 
-enum Input {
-    Prompt,
-    Stdin,
-    Path(PathBuf),
-    Item(String),
-}
-
 fn no_events(event: crate::protocol::Event) -> Result<Option<bool>> {
     Err(anyhow!("unexpected event {event:?}"))
 }
@@ -355,25 +533,239 @@ fn sender_addr(sender: &SenderInfo) -> Result<SenderAddr> {
     })
 }
 
-async fn get_item(
+/// The item whose ID (full or short) or name is exactly `query`. Close
+/// names are suggested, never picked.
+async fn find_item(
     paths: &Paths,
     query: &str,
     vault: Option<String>,
     from_stdin: bool,
 ) -> Result<ItemInfo> {
+    let command = Command::ItemList {
+        vault: vault.clone(),
+        query: Vec::new(),
+        kind: None,
+    };
+    let Reply::Items { items } = crate::request(paths, command, from_stdin).await? else {
+        bail!("unexpected reply");
+    };
+    let id = exact_item(&items, query)?;
     let command = Command::ItemGet {
         vault,
-        query: query.split_whitespace().map(String::from).collect(),
+        query: vec![id],
         otp: true,
     };
-    match crate::request(paths, command, from_stdin).await {
-        Ok(Reply::Item { item }) => Ok(item),
-        Ok(_) => bail!("unexpected reply"),
-        Err(error) if client::code(&error) == Some(ErrorCode::NotFound) => {
-            bail!("no file or vault item matches {query:?}")
-        }
-        Err(error) => Err(error),
+    let Reply::Item { item } = crate::request(paths, command, from_stdin).await? else {
+        bail!("unexpected reply");
+    };
+    Ok(item)
+}
+
+/// The ID of the one item with ID or name `query`.
+fn exact_item(items: &[ItemInfo], query: &str) -> Result<String> {
+    if let Some(item) = items.iter().find(|i| i.id == query || i.short == query) {
+        return Ok(item.id.clone());
     }
+    let named: Vec<&ItemInfo> = items.iter().filter(|i| i.label == query).collect();
+    match named.as_slice() {
+        [item] => Ok(item.id.clone()),
+        [] => {
+            let similar = similar_names(items, query);
+            if similar.is_empty() {
+                bail!("no item named {query:?}");
+            }
+            let similar: Vec<String> = similar.iter().map(|n| format!("{n:?}")).collect();
+            bail!(
+                "no item named {query:?}. Did you mean: {}?",
+                similar.join(", ")
+            )
+        }
+        many => {
+            let lines: Vec<String> = many.iter().map(|i| crate::items::line(i)).collect();
+            bail!(
+                "{} items are named {query:?}; pass the ID of one to --item:\n{}",
+                many.len(),
+                lines.join("\n")
+            )
+        }
+    }
+}
+
+/// Up to five item names close to `query`: the same ignoring case,
+/// containing it or contained in it, or a few typos away.
+fn similar_names(items: &[ItemInfo], query: &str) -> Vec<String> {
+    let query = query.to_lowercase();
+    let typos = (query.chars().count() / 3).max(1);
+    let mut scored: Vec<(usize, &str)> = items
+        .iter()
+        .filter_map(|item| {
+            let name = item.label.to_lowercase();
+            let contains = query.chars().count() >= 3
+                && name.chars().count() >= 3
+                && (name.contains(&query) || query.contains(&name));
+            let score = if contains {
+                name.chars().count().abs_diff(query.chars().count())
+            } else {
+                match edit_distance(&name, &query) {
+                    d if d <= typos => d,
+                    _ => return None,
+                }
+            };
+            Some((score, item.label.as_str()))
+        })
+        .collect();
+    scored.sort();
+    let mut names: Vec<String> = Vec::new();
+    for (_, name) in scored {
+        if !names.iter().any(|n| n == name) {
+            names.push(name.to_string());
+        }
+    }
+    names.truncate(5);
+    names
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.chars().enumerate() {
+        let mut diagonal = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let above = row[j + 1];
+            row[j + 1] = (above + 1)
+                .min(row[j] + 1)
+                .min(diagonal + usize::from(ca != *cb));
+            diagonal = above;
+        }
+    }
+    row[b.len()]
+}
+
+/// What `send` asks about before creating the link:
+///
+/// ```text
+/// About to send (single use, expires in 1h):
+///   file  opencodejr.pem  1.7 KB  sensitive
+/// ```
+fn preview(
+    parts: &[Part],
+    opens: u32,
+    ttl_secs: u64,
+    title: Option<&str>,
+    note: Option<&str>,
+) -> String {
+    let uses = match opens {
+        1 => "single use".to_string(),
+        n => format!("opens {n} times"),
+    };
+    let mut rows: Vec<[String; 4]> = Vec::new();
+    if let Some(title) = title {
+        rows.push(["title".into(), title.into(), String::new(), String::new()]);
+    }
+    if let Some(note) = note {
+        rows.push(["note".into(), note.into(), String::new(), String::new()]);
+    }
+    for part in parts {
+        let (count, bytes, sensitive) = leaves(&part.node);
+        let size = match part.kind {
+            Kind::Item => plural(count, "field"),
+            Kind::Folder => format!("{}, {}", plural(count, "file"), size(bytes)),
+            _ => size(bytes),
+        };
+        let sensitive = match sensitive {
+            0 => String::new(),
+            n if n == count => "sensitive".into(),
+            n => format!("{n} sensitive"),
+        };
+        rows.push([
+            part.kind.as_str().into(),
+            node_name(&part.node),
+            size,
+            sensitive,
+        ]);
+    }
+    let width = |col: usize| {
+        rows.iter()
+            .map(|r| r[col].chars().count())
+            .max()
+            .unwrap_or(0)
+    };
+    let widths = [width(0), width(1), width(2)];
+    let mut out = format!(
+        "About to send ({uses}, expires in {}):\n",
+        duration(ttl_secs)
+    );
+    for row in &rows {
+        let mut line = format!(
+            "  {:w0$}  {:w1$}  {:w2$}  {}",
+            row[0],
+            row[1],
+            row[2],
+            row[3],
+            w0 = widths[0],
+            w1 = widths[1],
+            w2 = widths[2]
+        );
+        line.truncate(line.trim_end().len());
+        out.push_str(&line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Entries under `node`: how many, their bytes, and how many are sensitive.
+fn leaves(node: &Node) -> (usize, usize, usize) {
+    match node {
+        Node::Entry(e) => (1, e.data.len(), usize::from(e.sensitive)),
+        Node::Group(g) => g
+            .entries
+            .iter()
+            .map(leaves)
+            .fold((0, 0, 0), |a, b| (a.0 + b.0, a.1 + b.1, a.2 + b.2)),
+    }
+}
+
+fn plural(n: usize, noun: &str) -> String {
+    match n {
+        1 => format!("1 {noun}"),
+        n => format!("{n} {noun}s"),
+    }
+}
+
+/// `512 B`, `1.7 KB`, `3.2 MB`.
+fn size(bytes: usize) -> String {
+    const KB: f64 = 1024.0;
+    let b = bytes as f64;
+    if bytes < 1024 {
+        format!("{bytes} B")
+    } else if b < KB * KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{:.1} MB", b / KB / KB)
+    }
+}
+
+/// `30s`, `15m`, `1h`, `7d`, in the largest unit that divides it.
+fn duration(secs: u64) -> String {
+    match secs {
+        s if s % 86400 == 0 => format!("{}d", s / 86400),
+        s if s % 3600 == 0 => format!("{}h", s / 3600),
+        s if s % 60 == 0 => format!("{}m", s / 60),
+        s => format!("{s}s"),
+    }
+}
+
+/// Key and secret files, sent hidden behind "reveal" like typed secrets.
+fn looks_secret(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let ext = name.rsplit_once('.').map(|(_, e)| e).unwrap_or_default();
+    matches!(
+        ext,
+        "pem" | "key" | "p12" | "pfx" | "jks" | "keystore" | "kdbx" | "env"
+    ) || name == ".env"
+        || name.starts_with(".env.")
+        || (name.starts_with("id_") && ext != "pub")
 }
 
 /// Fields of type secret and otp stay hidden; the others show.
@@ -490,6 +882,7 @@ fn path_node(path: &Path, sensitive: bool) -> Result<Node> {
     }
     let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     let mime = mime(&name, &data);
+    let sensitive = sensitive || looks_secret(&name);
     Ok(Node::Entry(Entry {
         name,
         data,
@@ -613,6 +1006,186 @@ fn opened_suffix(send: &SendInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[derive(clap::Parser)]
+    struct Cli {
+        #[command(flatten)]
+        send: SendArgs,
+    }
+
+    fn sources(args: &[&str]) -> Result<Vec<Source>> {
+        use clap::Parser;
+        let cli = Cli::try_parse_from(std::iter::once("send").chain(args.iter().copied()))?;
+        cli.send.sources()
+    }
+
+    fn item(query: &str, field: Option<&str>) -> Source {
+        Source::Item {
+            query: query.into(),
+            field: field.map(String::from),
+        }
+    }
+
+    #[test]
+    fn missing_paths_are_errors_not_searches() {
+        let err = sources(&["./prod.env.typo"]).unwrap_err();
+        assert_eq!(err.to_string(), "./prod.env.typo: no such file");
+    }
+
+    #[test]
+    fn fields_bind_to_the_item_before_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("key.pem");
+        std::fs::write(&key, "k").unwrap();
+        let key = key.to_str().unwrap();
+        assert_eq!(
+            sources(&[
+                "--item", "A", key, "--field", "x", "--item", "B", "-", "--item", "C", "-f", "y",
+            ])
+            .unwrap(),
+            [
+                item("A", Some("x")),
+                Source::Path(key.into()),
+                item("B", None),
+                Source::Stdin,
+                item("C", Some("y")),
+            ]
+        );
+        let err = sources(&["--field", "x", "--item", "A"]).unwrap_err();
+        assert!(err.to_string().contains("must follow the --item"), "{err}");
+        let err = sources(&["--item", "A", "--field", "x", "--field", "y"]).unwrap_err();
+        assert!(err.to_string().contains("has two fields"), "{err}");
+    }
+
+    #[test]
+    fn asking_needs_a_terminal_or_yes() {
+        // yes, json, reads_stdin, stdin_tty, out_tty
+        assert_eq!(ask(true, true, false, false, false).unwrap(), Ask::Skip);
+        assert_eq!(ask(false, false, false, true, true).unwrap(), Ask::Stdin);
+        // Stdin is the payload: the answer comes from /dev/tty.
+        assert_eq!(ask(false, false, true, false, true).unwrap(), Ask::Tty);
+        assert_eq!(ask(false, false, true, true, true).unwrap(), Ask::Tty);
+        let err = ask(false, true, false, true, true).unwrap_err();
+        assert_eq!(err.to_string(), "--json needs --yes (no prompt possible)");
+        for (reads_stdin, stdin_tty, out_tty) in [(false, false, true), (false, true, false)] {
+            let err = ask(false, false, reads_stdin, stdin_tty, out_tty).unwrap_err();
+            assert!(err.to_string().contains("pass --yes"), "{err}");
+        }
+    }
+
+    fn info(id: &str, label: &str) -> ItemInfo {
+        ItemInfo {
+            id: id.into(),
+            short: id[..4].into(),
+            kind: "login".into(),
+            label: label.into(),
+            detail: None,
+            fields: Vec::new(),
+            source: None,
+        }
+    }
+
+    #[test]
+    fn items_match_exactly_and_only_suggest() {
+        let items = [
+            info("aaaa1111", "Stripe"),
+            info("bbbb2222", "Stripe (test)"),
+            info("cccc3333", "GitHub"),
+            info("dddd4444", "Twin"),
+            info("eeee5555", "Twin"),
+        ];
+        assert_eq!(exact_item(&items, "Stripe").unwrap(), "aaaa1111");
+        assert_eq!(exact_item(&items, "cccc3333").unwrap(), "cccc3333");
+        assert_eq!(exact_item(&items, "bbbb").unwrap(), "bbbb2222");
+        let err = exact_item(&items, "stripe").unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            r#"no item named "stripe". Did you mean: "Stripe", "Stripe (test)"?"#
+        );
+        let err = exact_item(&items, "Githbu").unwrap_err();
+        assert!(
+            err.to_string().ends_with(r#"Did you mean: "GitHub"?"#),
+            "{err}"
+        );
+        let err = exact_item(&items, "zzz").unwrap_err();
+        assert_eq!(err.to_string(), r#"no item named "zzz""#);
+        let err = exact_item(&items, "Twin").unwrap_err().to_string();
+        assert!(err.starts_with(r#"2 items are named "Twin""#), "{err}");
+        assert!(
+            err.contains("dddd\tTwin") && err.contains("eeee\tTwin"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn preview_lists_every_part() {
+        let file = Entry {
+            name: "opencodejr.pem".into(),
+            data: vec![b'k'; 1741],
+            mime: None,
+            sensitive: looks_secret("opencodejr.pem"),
+        };
+        let folder = Group {
+            name: Some("certs".into()),
+            entries: vec![
+                Node::Entry(Entry::text("a.crt", "x".repeat(10), false)),
+                Node::Entry(Entry::text("b.crt", "y".repeat(20), false)),
+            ],
+        };
+        let stripe = Group {
+            name: Some("Stripe".into()),
+            entries: vec![
+                Node::Entry(Entry::text("username", "dax", false)),
+                Node::Entry(Entry::text("secret-key", "sk_live", true)),
+            ],
+        };
+        let part = |kind, node| Part { kind, node };
+        let parts = [
+            part(Kind::File, Node::Entry(file)),
+            part(Kind::Folder, Node::Group(folder)),
+            part(Kind::Item, Node::Group(stripe)),
+            part(
+                Kind::Field,
+                Node::Entry(Entry::text("Stripe secret-key", "sk_live", true)),
+            ),
+            part(Kind::Stdin, Node::Entry(Entry::text("secret", "tok", true))),
+        ];
+        assert_eq!(
+            preview(&parts, 1, 3600, None, Some("App ID 5497873")),
+            [
+                "About to send (single use, expires in 1h):",
+                "  note    App ID 5497873",
+                "  file    opencodejr.pem     1.7 KB         sensitive",
+                "  folder  certs              2 files, 30 B",
+                "  item    Stripe             2 fields       1 sensitive",
+                "  field   Stripe secret-key  7 B            sensitive",
+                "  stdin   secret             3 B            sensitive",
+                "",
+            ]
+            .join("\n")
+        );
+        assert!(
+            preview(&parts[..1], 3, 900, None, None)
+                .starts_with("About to send (opens 3 times, expires in 15m):\n")
+        );
+    }
+
+    #[test]
+    fn key_files_are_sensitive() {
+        for name in [
+            "a.pem",
+            "tls.KEY",
+            ".env",
+            ".env.local",
+            "prod.env",
+            "id_ed25519",
+        ] {
+            assert!(looks_secret(name), "{name}");
+        }
+        for name in ["id_ed25519.pub", "report.pdf", "envoy.yaml"] {
+            assert!(!looks_secret(name), "{name}");
+        }
+    }
 
     #[test]
     fn mime_sniffing() {

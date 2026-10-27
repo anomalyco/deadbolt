@@ -24,7 +24,7 @@ use zeroize::{Zeroize, Zeroizing};
 use super::session::Loaded;
 use crate::import::Imported;
 use crate::items::{format_month, line, with_scheme};
-use crate::protocol::{Code, ErrorCode, FieldInfo, FieldInput, ImportReport, ItemInfo};
+use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo};
 
 const MIN_SHORT: usize = 4;
 
@@ -219,10 +219,7 @@ impl Listing {
         let query = query.join(" ");
         match found.as_slice() {
             [item] => Ok(item),
-            [] => Err(super::fail(
-                ErrorCode::NotFound,
-                format!("no item matches {query:?}"),
-            )),
+            [] => bail!("no item matches {query:?}"),
             many => {
                 let mut lines: Vec<String> = many
                     .iter()

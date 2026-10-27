@@ -2187,11 +2187,13 @@ fn send_files_secrets_and_items() {
             report.to_str().unwrap(),
             keys.to_str().unwrap(),
             "-",
-            "github",
+            "--item",
+            "github.com",
             "--title",
             "for you",
             "--note",
             "rotate after",
+            "--yes",
             "--json",
         ],
         "tok_123\n",
@@ -2243,7 +2245,15 @@ fn send_files_secrets_and_items() {
     // One field; revoking ends a waiting send with exit code 5.
     let mut waiting = a
         .cmd(&[
-            "send", "--item", "github", "--field", "password", "--wait", "--ttl", "15m",
+            "send",
+            "--item",
+            "github.com",
+            "--field",
+            "password",
+            "--wait",
+            "--ttl",
+            "15m",
+            "--yes",
         ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -2265,10 +2275,65 @@ fn send_files_secrets_and_items() {
         Err(deadbolt_send::Error::Revoked)
     ));
 
-    // A path that doesn't exist is an item search.
-    let err = a.fail(&["send", "no-such-thing"]);
-    assert!(err.contains("no file or vault item matches"), "{err}");
     assert!(a.fail(&["sends", "show", "zzzz"]).contains("no send"));
+}
+
+#[test]
+fn send_resolves_inputs_strictly_and_asks_first() {
+    let a = Device::new();
+    let file = a.path("hello.txt");
+    std::fs::write(&file, "hi").unwrap();
+    let file = file.to_str().unwrap();
+
+    // A missing path is an error, never a vault search: this device has no vault.
+    let err = a.fail(&["send", "./prod.env.typo", "--yes"]);
+    assert!(err.contains("./prod.env.typo: no such file"), "{err}");
+
+    // Without --yes there's nothing to confirm on: fail rather than hang.
+    let err = a.fail(&["send", file, "--json"]);
+    assert!(
+        err.contains("--json needs --yes (no prompt possible)"),
+        "{err}"
+    );
+    let err = a.fail(&["send", file]);
+    assert!(err.contains("pass --yes"), "{err}");
+    let out = a.try_run_stdin(&["send", "-"], "tok_123\n");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("pass --yes"),
+        "{out:?}"
+    );
+    assert!(a.run(&["sends", "ls", "--json"]).trim() == "[]");
+
+    // Vault items: exact name or ID only, with suggestions.
+    a.run(&["init"]);
+    let stripe = new(&a, &["login", "password=sk_live", "--name", "Stripe"]);
+    new(
+        &a,
+        &["login", "password=sk_test", "--name", "Stripe (test)"],
+    );
+    new(&a, &["login", "password=one", "--name", "Twin"]);
+    new(&a, &["login", "password=two", "--name", "Twin"]);
+    let err = a.fail(&["send", "--item", "stripe", "--yes"]);
+    assert!(
+        err.contains(r#"no item named "stripe". Did you mean: "Stripe", "Stripe (test)"?"#),
+        "{err}"
+    );
+    let err = a.fail(&["send", "--item", "Twin", "--yes"]);
+    assert!(err.contains(r#"2 items are named "Twin""#), "{err}");
+    let err = a.fail(&["send", "--field", "password", "--item", "Stripe", "--yes"]);
+    assert!(err.contains("must follow the --item"), "{err}");
+
+    let link = |args: &[&str]| {
+        let out = a.run(&[&["send", "--yes"], args].concat());
+        receive(&out).unwrap()
+    };
+    let bundle = link(&["--item", "Stripe", "--field", "password", file]);
+    assert_eq!(entry(&bundle.entries[0]).name, "Stripe password");
+    assert_eq!(entry(&bundle.entries[0]).data, b"sk_live");
+    assert_eq!(entry(&bundle.entries[1]).data, b"hi");
+    let bundle = link(&["--item", &stripe, "--field", "password"]);
+    assert_eq!(entry(&bundle.entries[0]).data, b"sk_live");
 }
 
 #[test]
@@ -2278,7 +2343,14 @@ fn a_waiting_send_reports_the_pickup() {
     std::fs::write(&file, "hi").unwrap();
     // Sends need no vault: this device isn't even set up.
     let mut waiting = a
-        .cmd(&["send", file.to_str().unwrap(), "--wait", "--opens", "2"])
+        .cmd(&[
+            "send",
+            file.to_str().unwrap(),
+            "--wait",
+            "--opens",
+            "2",
+            "--yes",
+        ])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
