@@ -455,8 +455,35 @@ const SCENES: &[Scene] = &[
         typed(s, "email", "dax@anoma.ly");
         typed(s, "address", "1 Main St\nSpringfield, IL 12345");
     }),
-    // ⌘E on an SSH key: its private key shows but stays as it is.
+    // A new secure note, its body typed (hidden: one row of dots).
+    ("new-note", |s| {
+        vault(s);
+        s.new_item();
+        s.pick_kind("note");
+        if let Some(form) = &mut s.edit.form {
+            form.name.replace_text("Alarm codes");
+        }
+        typed(s, "notes", "Front door: 4417\nGarage: 0932\n");
+    }),
+    // A new SSH key, its private key pasted (hidden) and its public key
+    // wrapping.
+    ("new-ssh", |s| {
+        vault(s);
+        s.new_item();
+        s.pick_kind("ssh");
+        if let Some(form) = &mut s.edit.form {
+            form.name.replace_text("Deploy key");
+        }
+        typed(s, "private-key", FIXTURE_PRIVATE_KEY);
+        typed(s, "public-key", FIXTURE_PUBLIC_KEY);
+    }),
+    // ⌘E on an SSH key: its private key kept, empty under its placeholder.
     ("edit-ssh", |s| {
+        kind_scene(s, "ssh");
+        s.edit_selected();
+    }),
+    // The same, its private key shown and wrapping.
+    ("edit-ssh-revealed", |s| {
         kind_scene(s, "ssh");
         s.edit_selected();
         s.toggle_shown(0);
