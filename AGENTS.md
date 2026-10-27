@@ -36,8 +36,8 @@ working around it.
 
 ## Shipping
 
-Branch from `dev`, make focused commits, and open a PR against `dev`. Kit merges; do
-not enable auto-merge. Every push to `dev` publishes a dev build; `production` is
+Branch from `dev`, make focused commits, and open a PR against `dev`. Every push to
+`dev` publishes a dev build; `production` is
 fast-forwarded from `dev` to release stable (`docs/releasing.md`). `.github/release/`
 and `.github/workflows/release.yml` are the release security boundary. Coordinate
 shared-file changes with other active worktrees.
