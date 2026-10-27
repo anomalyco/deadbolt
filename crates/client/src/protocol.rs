@@ -39,7 +39,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 8;
+pub const PROTOCOL_VERSION: u32 = 9;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -219,6 +219,64 @@ pub enum Command {
         username: String,
         password: Secret,
     },
+    /// Passkeys: those in every vault for the relying party `rp_id` (the
+    /// host of the page at `origin` when `None`), refused unless it is that
+    /// host or a parent of it on the same site. Says whether a sign-in or
+    /// registration now can verify the user (Touch ID). Replies `passkeys`.
+    /// Doesn't count as use for the idle lock.
+    PasskeyList {
+        origin: String,
+        rp_id: Option<String>,
+    },
+    /// Passkeys: makes a passkey for `rp_id` in the default vault, replacing
+    /// one there for the same user, and returns the registration with
+    /// client data the agent builds from `origin`. Verifies the user with
+    /// Touch ID first unless `verify` is `discouraged`; `required` without
+    /// Touch ID fails before anything is stored. Binary values are
+    /// base64url. Replies `passkey-created`.
+    PasskeyCreate {
+        origin: String,
+        rp_id: Option<String>,
+        challenge: String,
+        user_id: String,
+        user_name: String,
+        /// Credential ids the site already has; one of them here fails it.
+        exclude: Vec<String>,
+        verify: Verify,
+    },
+    /// Passkeys: signs `challenge` with one passkey, refused
+    /// (`domain-mismatch`) unless its relying party is `rp_id`, with client
+    /// data the agent builds from `origin`. Verifies the user as
+    /// `PasskeyCreate` does. Replies `passkey-assertion`.
+    PasskeyGet {
+        origin: String,
+        rp_id: Option<String>,
+        passkey: LoginRef,
+        challenge: String,
+        verify: Verify,
+    },
+}
+
+/// What a site asks of user verification in a passkey ceremony.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Verify {
+    Required,
+    Preferred,
+    Discouraged,
+}
+
+/// A passkey saved for a relying party, without its key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SitePasskey {
+    pub passkey: LoginRef,
+    /// The name of its vault.
+    pub vault: String,
+    /// Base64url.
+    pub credential_id: String,
+    pub username: Option<String>,
+    /// `YYYY-MM-DD`.
+    pub created: Option<String>,
 }
 
 /// A secret on the wire: wiped on drop; Debug leaves it out.
@@ -372,6 +430,8 @@ pub enum ErrorCode {
     NotFound,
     /// The login a request names isn't saved for the site it names.
     DomainMismatch,
+    /// A passkey the registration excludes is already saved for the site.
+    Exists,
     /// The request's protocol version is not supported.
     Version,
     Failed,
@@ -451,6 +511,32 @@ pub enum Reply {
     SiteSaved {
         login: LoginRef,
         created: bool,
+    },
+    Passkeys {
+        rp_id: String,
+        passkeys: Vec<SitePasskey>,
+        /// Whether a ceremony now would verify the user (Touch ID is on).
+        can_verify: bool,
+    },
+    /// A new passkey's registration. Binary values are base64url.
+    PasskeyCreated {
+        passkey: LoginRef,
+        credential_id: String,
+        client_data_json: String,
+        attestation_object: String,
+        authenticator_data: String,
+        /// SubjectPublicKeyInfo DER.
+        public_key: String,
+        verified: bool,
+    },
+    /// A passkey sign-in. Binary values are base64url.
+    PasskeyAssertion {
+        credential_id: String,
+        client_data_json: String,
+        authenticator_data: String,
+        signature: String,
+        user_handle: String,
+        verified: bool,
     },
     Mirror {
         report: MirrorReport,
@@ -647,12 +733,13 @@ impl fmt::Display for ImportSource {
 
 /// The item types clients name, in the order they list them: the type, then
 /// what one and several are called.
-pub const KINDS: [(&str, &str, &str); 5] = [
+pub const KINDS: [(&str, &str, &str); 6] = [
     ("login", "login", "logins"),
     ("card", "card", "cards"),
     ("note", "secure note", "secure notes"),
     ("ssh", "SSH key", "SSH keys"),
     ("identity", "identity", "identities"),
+    ("passkey", "passkey", "passkeys"),
 ];
 
 /// What `count` items of type `kind` are called: "secure note", "SSH keys".
@@ -666,8 +753,8 @@ pub fn noun(kind: &str, count: usize) -> &str {
 
 /// The field an item is for, which clients copy or print by default: a
 /// login's password, a card's number, a secure note's body, an SSH key's
-/// private key, an identity's email. `None` for a type this version
-/// doesn't know.
+/// private key, an identity's email, a passkey's username. `None` for a
+/// type this version doesn't know.
 pub fn primary_field(kind: &str) -> Option<&'static str> {
     Some(match kind {
         "login" => "password",
@@ -675,6 +762,7 @@ pub fn primary_field(kind: &str) -> Option<&'static str> {
         "note" => "notes",
         "ssh" => "private-key",
         "identity" => "email",
+        "passkey" => "username",
         _ => return None,
     })
 }

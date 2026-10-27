@@ -851,6 +851,17 @@ fn schema_is_enforced_at_commit() {
             ItemError::MissingField("number"),
         ),
         (
+            create(
+                "passkey",
+                vec![
+                    ("rp-id", text("example.com")),
+                    ("credential-id", text("AAAA")),
+                    ("user-handle", text("a2l0")),
+                ],
+            ),
+            ItemError::MissingField("private-key"),
+        ),
+        (
             create("login", vec![("password", text("x"))]),
             ItemError::WrongFieldType {
                 field: "password".into(),

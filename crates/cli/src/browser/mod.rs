@@ -10,6 +10,7 @@
 //! script to keep in step with the binary.
 
 pub mod host;
+mod passkeys;
 
 use std::path::{Path, PathBuf};
 

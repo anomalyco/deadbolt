@@ -13,6 +13,7 @@ mod import;
 mod items;
 mod prompt;
 mod site;
+mod webauthn;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

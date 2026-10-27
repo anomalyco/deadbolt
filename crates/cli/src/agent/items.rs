@@ -2,10 +2,13 @@
 //!
 //! Lookup is search. Every query word must match (case-insensitively) part
 //! of the item's name, URL host, a login's username, a card's cardholder,
-//! brand field or last four digits, an SSH key's comment, or an identity's
-//! name or email; a word of 4+ hex digits also matches an id prefix. Secret
-//! values (a secure note's body among them) and the derived label are never
-//! searched.
+//! brand field or last four digits, an SSH key's comment, an identity's
+//! name or email, or a passkey's relying party or username; a word of 4+
+//! hex digits also matches an id prefix. Secret values (a secure note's body
+//! among them) and the derived label are never searched.
+//!
+//! A passkey's private key never leaves the agent: items come back without
+//! it (see `passkeys`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -69,13 +72,15 @@ pub fn label(item: &Item) -> String {
             .or_else(|| value(item, "email"))
             .unwrap_or("identity")
             .into(),
+        "passkey" => value(item, "rp-id").unwrap_or("passkey").into(),
         // A secure note's body is secret: never a label.
         kind => kind.into(),
     }
 }
 
 /// A login's username, a card's expiry (`MM/YY`), an SSH key's comment or
-/// fingerprint, an identity's email. A secure note has none.
+/// fingerprint, an identity's email, a passkey's username. A secure note
+/// has none.
 fn detail(item: &Item) -> Option<String> {
     let first = |fields: &[&str]| {
         fields
@@ -90,6 +95,7 @@ fn detail(item: &Item) -> Option<String> {
             .map(|(year, month)| format!("{month}/{}", &year[year.len().saturating_sub(2)..])),
         "ssh" => first(&["comment", "fingerprint"]),
         "identity" => first(&["email", "phone"]),
+        "passkey" => first(&["username"]),
         _ => None,
     }
 }
@@ -103,6 +109,7 @@ fn searchable(item: &Item) -> Vec<String> {
         "card" => &["cardholder", "brand"],
         "ssh" => &["comment", "fingerprint"],
         "identity" => &["name", "email", "phone"],
+        "passkey" => &["rp-id", "username"],
         _ => &[],
     };
     texts.extend(
@@ -152,13 +159,13 @@ fn short_id(ids: &[String], id: &str) -> String {
     id[..(shared + 1).clamp(MIN_SHORT, id.len())].to_string()
 }
 
-struct Listing {
-    items: Vec<Item>,
+pub(super) struct Listing {
+    pub(super) items: Vec<Item>,
     ids: Vec<String>,
 }
 
 impl Listing {
-    fn new(vault: &Vault) -> Self {
+    pub(super) fn new(vault: &Vault) -> Self {
         let items = vault.items();
         let mut ids: Vec<String> = items.iter().map(|i| i.id.to_string()).collect();
         ids.sort();
@@ -167,7 +174,7 @@ impl Listing {
 
     /// The item, without field values unless `with_fields`, and without
     /// one-time password secrets unless `with_otp` too.
-    fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
+    pub(super) fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
         let id = item.id.to_string();
         let mut fields = Vec::new();
         if with_fields {
@@ -183,7 +190,8 @@ impl Listing {
                         .keys()
                         .map(String::as_str)
                         .filter(|n| !known.contains(n)),
-                );
+                )
+                .filter(|name| !super::passkeys::private(item, name));
             fields = order
                 .map(|name| FieldInfo {
                     name: name.into(),

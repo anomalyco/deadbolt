@@ -196,7 +196,7 @@ const fn digits(name: &'static str, required: bool, min: usize, max: usize) -> S
     }
 }
 
-static SCHEMAS: [Schema; 5] = [
+static SCHEMAS: [Schema; 6] = [
     Schema {
         kind: "login",
         fields: &[
@@ -246,6 +246,21 @@ static SCHEMAS: [Schema; 5] = [
             known("national-id", FieldType::Secret, false),
             known("passport", FieldType::Secret, false),
             known("license", FieldType::Secret, false),
+            known("notes", FieldType::Note, false),
+        ],
+    },
+    // A WebAuthn passkey: an item of its own, found by relying party id
+    // rather than URL. Binary values are base64url; the private key is a
+    // PKCS#8 P-256 key that only the agent reads (see docs/autofill.md).
+    Schema {
+        kind: "passkey",
+        fields: &[
+            known("rp-id", FieldType::Text, true),
+            known("username", FieldType::Text, false),
+            known("credential-id", FieldType::Text, true),
+            known("user-handle", FieldType::Text, true),
+            known("private-key", FieldType::Secret, true),
+            known("created", FieldType::Date, false),
             known("notes", FieldType::Note, false),
         ],
     },

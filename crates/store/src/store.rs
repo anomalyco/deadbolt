@@ -375,6 +375,18 @@ impl Unlocked {
         Ok(read_biometric(&table)?.map(|(token, _)| token))
     }
 
+    /// Whether `key` opens the enrolled biometric key set, as
+    /// [`unlock_biometric`] would, while the store stays open: a key fresh
+    /// from Touch ID proves the user is here now.
+    pub fn check_biometric(&self, key: &[u8; KEY_LEN]) -> Result<bool> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(HEADER)?;
+        let Some((token, wrapped)) = read_biometric(&table)? else {
+            return Ok(false);
+        };
+        Ok(KeySet::unwrap_biometric(key, &token, &wrapped).is_ok())
+    }
+
     /// Removes the enrolled biometric key set and token. Returns whether a slot
     /// was present.
     pub fn clear_biometric(&self) -> Result<bool> {
