@@ -96,11 +96,31 @@ That sorts every connection into one of three:
 - **Deadbolt.app:** signed by the same identity as the agent's own bundle
   (the team ID for Developer ID builds; for ad-hoc builds, the cdhash of the
   `MacOS/Deadbolt` beside the agent's own helper). Everything, as today.
-- **The browser host:** the `deadbolt` binary whose parent is a browser
-  signed by its vendor (Google, Brave, Microsoft, The Browser Company). Site
-  commands only. Today any process can run `deadbolt browser-host
-  chrome-extension://…`, name any origin and get that site's password; this
-  closes it.
+- **The browser host:** the `deadbolt` binary launched by a browser Kit
+  paired, speaking for an extension install Kit paired. Site commands only.
+  Today any process can run `deadbolt browser-host chrome-extension://…`,
+  name any origin and get that site's password; this closes it.
+  - **Why not a vendor list or the extension id:** the id's manifest key is
+    public (`extension/manifest-key.txt`), so anyone can load an unpacked
+    copy with the same id into a real, vendor-signed browser (a throwaway
+    profile, or "Load unpacked" clicked through Accessibility) and send any
+    origin. And a fixed vendor list misses real browsers: Helium is signed by
+    Imput (`S4Q33XPHB4`), Chromium and Chrome for Testing are ad-hoc.
+  - **Pair once per install, with a tap.** On first connect the extension
+    makes a key pair (WebCrypto, non-extractable) and asks to pair; Deadbolt
+    shows the browser (its signing identity: team ID, or cdhash when
+    ad-hoc) and the profile, and Kit taps. The agent pins that browser
+    identity and the extension's public key together. Later connects answer
+    a challenge with the key and must come from the pinned browser. A new
+    browser, a new profile or a reinstalled extension pairs again; an
+    ad-hoc browser re-pairs when it updates.
+  - **What pairing doesn't stop:** a process running as Kit can read the
+    browser profile on disk, key included, and something that can drive Kit's
+    screen could approve a pairing it started. Pairing turns "anyone can
+    claim a site" into "steal a profile or win a tap Kit can see", and
+    Activity lists every pairing. A Chrome Web Store build, whose signing key
+    isn't public, makes the extension id itself mean something for
+    releases.
 - **A caller:** everything else, Kit's own terminal included. An AI's
   shell and Kit's look the same here: same binary, same user. Ancestry tells
   them apart only as a hint, since an AI can `open -a Terminal` its way out
@@ -184,8 +204,14 @@ touched, from a helper it hash-checks before running.
 
 - **Once:** one request, or one `deadbolt run` and its child for as long as
   the child runs.
-- **15 min:** the same anchor, items, fields and tier, any command. It
-  expires after 15 minutes without use, an hour at most. Use tier only.
+- **15 min:** the same anchor, items, fields and tier, and the same
+  program: the approved command's resolved executable and its code
+  signature (team ID, or cdhash when unsigned). A different program asks
+  again, so approving `wrangler deploy` doesn't cover
+  `sh -c 'echo $T | base64'`, which masking can't catch. Shells and
+  interpreters (`sh`, `bash`, `zsh`, `env`, `python`, `node`, `bun`,
+  `perl`, `ruby`, `osascript`) only ever get Once, since they run anything.
+  It expires after 15 minutes without use, an hour at most. Use tier only.
 - Read and Write are always Once. Add needs no grant. Never has no scope.
 
 **What can't spoof a prompt:**
@@ -293,8 +319,9 @@ deadbolt activity --since 1h
 2. **Approvals.** The agent's queue, the app's panel, `confirm`, the
    passphrase fallback, grants and anchors, lock dropping them, limits.
 3. **Enforce.** `policy::decide`. Read asks (`get`, `show --reveal`,
-   `code`), Never refuses AIs, site commands only from the browser host,
-   `ItemGet.fields`. Kit's terminal starts asking here (Decision 1).
+   `code`), Never refuses AIs, site commands only from a paired browser
+   and extension (pairing tap, challenge on connect; the extension side
+   ships in the same PR), `ItemGet.fields`. Kit's terminal starts asking here (Decision 1).
 4. **`deadbolt run`.** `resolve`, references, env files, masking.
 5. **`deadbolt inject` and `read`** on references.
 6. **Writes from callers.** Add without asking, with "added by" in the
