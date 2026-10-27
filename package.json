@@ -5,19 +5,10 @@
   "type": "module",
   "scripts": {
     "deadbolt": "cargo run -q -p deadbolt-cli --",
-    "changeset": "changeset",
-    "version": "changeset version && bun packages/cli/script/version.ts && bun install",
-    "release": "bun packages/cli/script/release.ts && changeset publish",
     "test": "cargo test --workspace",
     "check:extension": "cd extension && bun install --frozen-lockfile && bun run check && bun run build",
     "check:wasm": "cargo +stable clippy -p deadbolt-send -p deadbolt-send-web --target wasm32-unknown-unknown --locked -- -D warnings",
     "check": "bun run check:extension && cargo +stable fmt --all -- --check && cargo +stable clippy --workspace --all-targets --locked -j 2 -- -D warnings && bun run check:wasm && cargo +stable test --workspace --locked -j 2 && cargo +stable deny check"
-  },
-  "workspaces": [
-    "packages/*"
-  ],
-  "devDependencies": {
-    "@changesets/cli": "3.0.0"
   },
   "engines": {
     "bun": ">=1.4.0"
