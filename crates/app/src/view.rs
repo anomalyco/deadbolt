@@ -610,10 +610,13 @@ fn detail(s: &App, k: &Kit) -> El {
     if let Some(full) = s.detail.as_ref().filter(|d| d.id == item.id) {
         let code = code_field(&full.fields);
         for (i, field) in full.fields.iter().enumerate() {
+            if !shown(&full.kind, &field.name) {
+                continue;
+            }
             fields = fields.child(if code == Some(i) {
                 code_row(s, &full.id, field, k)
             } else {
-                field_row(s, &full.id, field, k)
+                field_row(s, &full.id, &full.kind, field, k)
             });
         }
     }
@@ -637,6 +640,13 @@ fn detail(s: &App, k: &Kit) -> El {
         );
     }
     pane
+}
+
+/// Whether the item pane shows this field. A passkey shows its site,
+/// username, date and notes; its credential id and user handle are the
+/// site's bookkeeping, and the agent never sends its private key.
+fn shown(kind: &str, field: &str) -> bool {
+    kind != "passkey" || matches!(field, "rp-id" | "username" | "created" | "notes")
 }
 
 /// Whether this field of this item is on the clipboard, counting down.
@@ -799,7 +809,7 @@ fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     )
 }
 
-fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
+fn field_row(s: &App, item: &str, kind: &str, field: &FieldInfo, k: &Kit) -> El {
     let secret = is_secret(&field.kind);
     // The agent leaves one-time password secrets out (only the code field
     // gives a code), so there's nothing here to show or copy.
@@ -838,7 +848,8 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
                 .key("reveal"),
         );
     }
-    if held {
+    // A passkey's date is for reading; nothing pastes it anywhere.
+    if held && !(kind == "passkey" && name == "created") {
         actions = actions.child(copy_button(k, &name, &noun, is_copied(s, item, &name)));
     }
     // Shown values wrap: notes, an address, a secure note's body or a

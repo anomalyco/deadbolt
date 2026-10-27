@@ -4,7 +4,7 @@
 // and turns `changed` pushes into a status that the popup and menus follow.
 
 import type { Status } from "../messages"
-import { NATIVE_HOST, parseHostMessage, PROTOCOL, type Change, type ErrorCode, type ErrorReply, type Reply, type ReplyFor, type RequestBody } from "../protocol"
+import { NATIVE_HOST, parseHostMessage, PROTOCOL, REPLY_TYPE, type Change, type ErrorCode, type ErrorReply, type Reply, type ReplyFor, type RequestBody } from "../protocol"
 
 const TIMEOUT_MS = 30_000
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
@@ -24,6 +24,14 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>
 }
 
+interface SendOptions {
+  timeout?: number
+  onId?: (id: number) => void
+  signal?: AbortSignal
+}
+
+const cancelled = () => new HostError("cancelled", "The request was cancelled.")
+
 /** The browser's message when no manifest for the host is installed. */
 const NOT_FOUND = /native messaging host not found/i
 
@@ -38,6 +46,8 @@ export class Host {
   private listeners = new Set<Listener>()
   private ready: Promise<void> | null = null
   status: Status = { state: "connecting" }
+  /** What the host said it can do in its last hello. */
+  capabilities: string[] = []
 
   constructor(private connectNative: (name: string) => chrome.runtime.Port = (name) => chrome.runtime.connectNative(name)) {}
 
@@ -80,6 +90,7 @@ export class Host {
     try {
       const reply = await this.send({ type: "hello" })
       this.attempt = 0
+      this.capabilities = reply.capabilities
       if (reply.protocol !== PROTOCOL) {
         const detail = `This extension speaks protocol ${PROTOCOL}, but Deadbolt speaks ${reply.protocol}. Update both.`
         this.setStatus({ state: "unavailable", detail }, change)
@@ -91,11 +102,20 @@ export class Host {
     }
   }
 
-  async send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, timeout = TIMEOUT_MS): Promise<ReplyFor[T]> {
+  /**
+   * `onId` hears the request's id, which `passkey-cancel` names. A request
+   * whose `signal` aborts before it's written, while the port reconnects
+   * say, is never written.
+   */
+  async send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, { timeout = TIMEOUT_MS, onId, signal }: SendOptions = {}): Promise<ReplyFor[T]> {
+    if (signal?.aborted) throw cancelled()
     if (!this.port) await this.connect()
     const port = this.port
     if (!port) throw new HostError("disconnected", disconnectedMessage(this.status))
+    // Nothing is awaited from here to postMessage.
+    if (signal?.aborted) throw cancelled()
     const id = this.nextId++
+    onId?.(id)
     const reply = await new Promise<Reply>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id)
@@ -116,7 +136,8 @@ export class Host {
       if (error.code === "locked" && this.status.state === "ready") void this.hello()
       throw new HostError(error.code, error.message)
     }
-    if (reply.type !== body.type) throw new HostError("failed", `Expected a ${body.type} reply, got ${reply.type}.`)
+    const expected = REPLY_TYPE[body.type as T]
+    if (reply.type !== expected) throw new HostError("failed", `Expected a ${expected} reply, got ${reply.type}.`)
     return reply as ReplyFor[T]
   }
 

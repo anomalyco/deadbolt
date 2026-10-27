@@ -1377,8 +1377,12 @@ fn biometric_unlock_message(failure: &Failure, reset: bool) -> Option<String> {
 }
 
 /// A field name as words, with initialisms in capitals: "url" is "URL",
-/// "private-key" is "private key", "national-id" is "national ID".
+/// "private-key" is "private key", "national-id" is "national ID", and a
+/// passkey's "rp-id" is "site".
 pub fn field_words(name: &str) -> String {
+    if name == "rp-id" {
+        return "site".into();
+    }
     name.split('-')
         .map(|word| {
             if matches!(word, "url" | "otp" | "cvv" | "pin" | "id" | "ssh") {
@@ -1416,6 +1420,7 @@ pub fn copy_label(kind: &str) -> &'static str {
         "note" => "Copy note",
         "ssh" => "Copy private key",
         "identity" => "Copy email",
+        "passkey" => "Copy username",
         _ => "Copy password",
     }
 }

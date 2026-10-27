@@ -180,7 +180,7 @@ fn month_year(n: i64) -> String {
 /// A 1Password date, Unix seconds, as `YYYY-MM-DD`: the nearest day, so a
 /// day's local midnight from UTC+11 to UTC-12, or its noon UTC, lands on it
 /// rather than the day before.
-fn date(secs: i64) -> String {
+pub(crate) fn date(secs: i64) -> String {
     // Howard Hinnant's days-to-civil.
     let z = (secs + 43_199).div_euclid(86_400) + 719_468;
     let era = z.div_euclid(146_097);

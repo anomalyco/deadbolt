@@ -1410,7 +1410,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     assert_eq!(hello["protocol"], 1);
     assert_eq!(
         hello["capabilities"],
-        serde_json::json!(["list", "fill", "check", "save"])
+        serde_json::json!(["list", "fill", "check", "save", "passkeys"])
     );
 
     // Only the github.com login, on github.com and its subdomains, and no
@@ -2023,4 +2023,119 @@ fn browser_install_registers_the_host() {
     }
     let output = run(&["browser", "uninstall"]);
     assert!(String::from_utf8_lossy(&output.stdout).contains("wasn't registered"));
+}
+
+fn unb64(text: &str) -> Vec<u8> {
+    data_encoding::BASE64URL_NOPAD
+        .decode(text.as_bytes())
+        .unwrap()
+}
+
+#[test]
+fn browser_host_registers_and_signs_in_with_passkeys() {
+    use p256::ecdsa::signature::Verifier;
+    use p256::pkcs8::DecodePublicKey;
+    use sha2::Digest;
+
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut host = Host::start(&a);
+    let challenge = "AAECAwQFBgcICQoLDA0ODw";
+    let origin = "https://login.example.com";
+    let passkeys = |host: &mut Host, origin: &str, rp: &str| {
+        let reply = host.ask(serde_json::json!({
+            "type": "passkey-list", "origin": origin, "rpId": rp,
+        }));
+        assert_eq!(reply["type"], "passkeys", "{reply}");
+        reply
+    };
+    let listed = passkeys(&mut host, origin, "example.com");
+    assert_eq!(listed["rpId"], "example.com");
+    assert_eq!(listed["canVerify"], false, "no Touch ID here");
+    assert_eq!(listed["passkeys"], serde_json::json!([]));
+
+    let create = |uv: &str| {
+        serde_json::json!({
+            "type": "passkey-create", "origin": origin, "rpId": "example.com",
+            "challenge": challenge, "user": {"id": "a2l0", "name": "kit"},
+            "exclude": [], "userVerification": uv,
+        })
+    };
+    // Verification required without Touch ID fails before storing anything.
+    assert_error(&host.ask(create("required")), "failed");
+    assert_eq!(
+        passkeys(&mut host, origin, "example.com")["passkeys"],
+        serde_json::json!([])
+    );
+
+    let made = host.ask(create("preferred"));
+    assert_eq!(made["type"], "passkey-created", "{made}");
+    assert_eq!(made["verified"], false);
+    let client: serde_json::Value =
+        serde_json::from_slice(&unb64(made["clientDataJSON"].as_str().unwrap())).unwrap();
+    assert_eq!(
+        client,
+        serde_json::json!({"type": "webauthn.create", "challenge": challenge,
+                           "origin": origin, "crossOrigin": false})
+    );
+    let data = unb64(made["authenticatorData"].as_str().unwrap());
+    assert_eq!(&data[..32], sha2::Sha256::digest(b"example.com").as_slice());
+    assert_eq!(data[32], 0x59, "UP, BE, BS and AT; no UV");
+    assert!(unb64(made["attestationObject"].as_str().unwrap()).starts_with(b"\xa3\x63fmt\x64none"));
+    let key =
+        p256::ecdsa::VerifyingKey::from_public_key_der(&unb64(made["publicKey"].as_str().unwrap()))
+            .unwrap();
+    let listed = passkeys(&mut host, "https://example.com", "example.com");
+    assert_eq!(listed["passkeys"][0]["ref"], made["ref"]);
+    assert_eq!(listed["passkeys"][0]["username"], "kit");
+    assert_eq!(listed["passkeys"][0]["credentialId"], made["credentialId"]);
+
+    let get = |origin: &str, rp: &str, uv: &str| {
+        serde_json::json!({
+            "type": "passkey-get", "origin": origin, "rpId": rp, "ref": made["ref"],
+            "challenge": challenge, "userVerification": uv,
+        })
+    };
+    let signed = host.ask(get("https://example.com", "example.com", "discouraged"));
+    assert_eq!(signed["type"], "passkey-assertion", "{signed}");
+    assert_eq!(signed["userHandle"], "a2l0");
+    assert_eq!(signed["credentialId"], made["credentialId"]);
+    let client = unb64(signed["clientDataJSON"].as_str().unwrap());
+    let mut message = unb64(signed["authenticatorData"].as_str().unwrap());
+    assert_eq!(message[32], 0x19);
+    message.extend_from_slice(&sha2::Sha256::digest(&client));
+    let signature =
+        p256::ecdsa::Signature::from_der(&unb64(signed["signature"].as_str().unwrap())).unwrap();
+    assert!(key.verify(&message, &signature).is_ok());
+
+    // Opaque frames, other sites and public suffixes get nothing.
+    for (origin, rp) in [
+        ("null", "example.com"),
+        ("https://evil.com", "example.com"),
+        ("https://example.com", "com"),
+        ("https://alice.github.io", "github.io"),
+    ] {
+        let reply = host.ask(serde_json::json!({
+            "type": "passkey-list", "origin": origin, "rpId": rp,
+        }));
+        assert_error(&reply, "domain_mismatch");
+        assert_error(&host.ask(get(origin, rp, "preferred")), "domain_mismatch");
+    }
+    assert_error(
+        &host.ask(get("https://evil.com", "evil.com", "preferred")),
+        "domain_mismatch",
+    );
+    host.close();
+
+    // The private key never leaves the agent.
+    let show = a.run(&["show", "--reveal", "example.com"]);
+    assert!(
+        show.contains("example.com") && !show.contains("private-key"),
+        "{show}"
+    );
+    assert!(
+        !a.try_run(&["get", "example.com", "-f", "private-key"])
+            .status
+            .success()
+    );
 }

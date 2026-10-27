@@ -6,6 +6,7 @@ pub mod biometric;
 mod items;
 mod mirror;
 mod pairing;
+mod passkeys;
 mod session;
 #[cfg(test)]
 mod sim;
@@ -105,6 +106,9 @@ pub struct Agent {
     /// Short cooldown after a user-cancelled Touch ID prompt so rapid window
     /// focus or summon events do not immediately re-prompt.
     biometric_cooldown_until: Mutex<Option<Instant>>,
+    /// The one Touch ID prompt verifying a passkey ceremony, cancelled with
+    /// the unlock prompt.
+    passkey_prompt: Mutex<Option<Arc<biometric::CancelHandle>>>,
     #[cfg(test)]
     touch_id_available_override: Mutex<Option<bool>>,
     #[cfg(test)]
@@ -137,6 +141,7 @@ impl Agent {
             biometric_slot: Mutex::new(initial_slot),
             biometric_flight: Mutex::default(),
             biometric_cooldown_until: Mutex::default(),
+            passkey_prompt: Mutex::default(),
             #[cfg(test)]
             touch_id_available_override: Mutex::default(),
             #[cfg(test)]
@@ -173,6 +178,14 @@ impl Agent {
             .as_ref()
         {
             flight.cancel.cancel();
+        }
+        if let Some(prompt) = self
+            .passkey_prompt
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
+            prompt.cancel();
         }
     }
 }
@@ -1187,7 +1200,10 @@ impl Agent {
         // Nor is a browser looking at a page: it asks for every page loaded.
         let used = !matches!(
             command,
-            Command::ItemCode { .. } | Command::SiteLogins { .. } | Command::SiteCheck { .. }
+            Command::ItemCode { .. }
+                | Command::SiteLogins { .. }
+                | Command::SiteCheck { .. }
+                | Command::PasskeyList { .. }
         );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
         // and a lock stops it before it writes anything.
@@ -1448,6 +1464,9 @@ impl Agent {
                 self.sync_now.notify_one();
                 Ok(Reply::SiteSaved { login, created })
             }
+            command @ (Command::PasskeyList { .. }
+            | Command::PasskeyCreate { .. }
+            | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,
         }
     }
 

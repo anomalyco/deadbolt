@@ -8,7 +8,7 @@ import { join } from "node:path"
 const root = join(import.meta.dir, "..")
 const outdir = join(root, "dist")
 
-const entries = ["background", "content", "popup", "menu"].map((name) => join(root, "src", `${name}.ts`))
+const entries = ["background", "content", "passkey-hook", "popup", "menu"].map((name) => join(root, "src", `${name}.ts`))
 
 async function build() {
   await rm(outdir, { recursive: true, force: true })

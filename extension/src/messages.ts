@@ -48,6 +48,12 @@ export type ToBackground =
   | { type: "db:popup-fill"; tabId: number; ref: string }
   /** `id`: the offer the popup showed; any other gets nothing. */
   | { type: "db:popup-offer"; tabId: number; id: string; choice: OfferChoice }
+  // passkeys (bg/passkeys.ts): the content script relays the page's hook
+  /** `request`: the hook's id for the call; `options`: the page's options, checked in the background. */
+  | { type: "pk:get" | "pk:create"; request: number; options: unknown; allowed: boolean }
+  | { type: "pk:cancel"; request: number }
+  /** The popup's answer to the passkey prompt `id`. */
+  | { type: "pk:popup-choose"; tabId: number; id: string; choice: PasskeyChoice }
 
 export type ToContent =
   /**
@@ -116,7 +122,8 @@ export interface QueryReply {
 }
 
 export type MenuLoadReply =
-  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole }
+  /** `passkeys`: for a sign-in waiting on a passkey pick (conditional mediation). */
+  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[] }
   | { kind: "status"; status: Status }
 
 export type PickReply = { ok: true } | { ok: false; message: string }
@@ -131,6 +138,8 @@ export interface PopupReply {
   error?: string
   /** A save or update waiting for the user's answer, for this tab. */
   offer?: SaveOffer
+  /** A passkey sign-in or registration waiting for the user, for this tab. */
+  passkey?: PasskeyPrompt
 }
 
 export type OfferChoice = "save" | "later"
@@ -145,3 +154,30 @@ export interface SaveOffer {
 
 /** `gone`: the offer answered isn't the one waiting anymore. */
 export type ChooseReply = { ok: true; message: string } | { ok: false; message: string; gone?: boolean }
+
+/** A passkey a waiting autofill sign-in can use, as the inline menu shows it. */
+export interface MenuPasskey {
+  ref: string
+  vault: string
+  username?: string
+}
+
+/** The background's answer to the page's hook. `credential` holds base64url fields. */
+export type HookReply = { credential: Record<string, string> } | { fallback: true } | { error: { name: string; message: string } }
+
+/**
+ * What the popup asks about a page's passkey call. `verify`: Deadbolt asks
+ * for Touch ID before it signs.
+ */
+export type PasskeyPrompt = {
+  id: string
+  rpId: string
+  verify: boolean
+} & (
+  | { kind: "get"; passkeys: Array<{ ref: string; vault: string; username?: string; created?: string }> }
+  /** `registered`: the site already has one of its excluded passkeys in Deadbolt. */
+  | { kind: "create"; username: string; registered: boolean }
+)
+
+/** `fallback`: the browser's own passkey flow, such as a phone or security key. */
+export type PasskeyChoice = { action: "use"; ref: string } | { action: "save" } | { action: "fallback" } | { action: "cancel" }

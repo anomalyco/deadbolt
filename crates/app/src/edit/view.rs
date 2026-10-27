@@ -13,7 +13,7 @@ use rune_kit::{
     State, Switch, TextArea, TextInput,
 };
 
-use super::{Conflict, Delete, Field, Form, Input, KINDS, LENGTHS};
+use super::{Conflict, Delete, Field, Form, Input, KINDS, LENGTHS, editable};
 use crate::import::view::swap;
 use crate::model::{App, title_case};
 use crate::onboarding::{Notice, Severity};
@@ -475,8 +475,8 @@ fn foot(k: &Kit, f: &Form) -> El {
         )
 }
 
-/// Edit and Delete beside the item's title. While its confirm shows, the
-/// delete button is the confirm.
+/// Edit and Delete beside the item's title (a passkey has only Delete).
+/// While its confirm shows, the delete button is the confirm.
 pub fn item_actions(s: &App, k: &Kit) -> El {
     let ready = s.detail.is_some();
     let mut actions = row().key("item-actions").gap(4.0).center_y();
@@ -493,6 +493,9 @@ pub fn item_actions(s: &App, k: &Kit) -> El {
                 .matched("delete")
                 .motion(GROW),
         );
+    }
+    if !s.selected_item().is_some_and(|i| editable(&i.kind)) {
+        return actions;
     }
     actions.child(
         Button::new("Edit")

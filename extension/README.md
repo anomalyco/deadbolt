@@ -1,9 +1,10 @@
 # Deadbolt for Chromium
 
 Deadbolt's browser extension for Chrome, Brave, Arc and Edge (Manifest V3). It
-fills and saves logins through `deadbolt browser-host`, the native messaging
-host, which passes each request to the Deadbolt agent. The agent decides which
-logins a page gets; the extension never holds the vault or asks for the
+fills and saves logins, and makes and signs in with passkeys, through
+`deadbolt browser-host`, the native messaging host, which passes each request
+to the Deadbolt agent. The agent decides which logins a page gets and signs
+with passkeys; the extension never holds the vault, a private key, or the
 passphrase.
 
 How it works, which pages get logins, and the host's messages are in
@@ -26,22 +27,25 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 
 ## Layout
 
-| Path                    | What                                                            |
-| ----------------------- | --------------------------------------------------------------- |
-| `src/background.ts`     | Service worker: routes messages                                 |
-| `src/bg/host.ts`        | The one native port: hello, ids, backoff, `changed`             |
-| `src/bg/frames.ts`      | Which frames get logins; delivery to one document               |
-| `src/bg/autofill.ts`    | Menu tokens, fills, email-first continuation, popup             |
-| `src/bg/save.ts`        | Captured submits, `check`, offers in the popup, `save`          |
-| `src/bg/site.ts`        | Fillable origins and same-site frames                           |
-| `src/content.ts`        | Content script: scans, submit capture, quiet-page signal        |
-| `src/content/`          | Detection, Shadow DOM, filling, the menu frame                  |
-| `src/menu.ts`           | Inline menu page                                                |
-| `src/popup.ts`          | Toolbar popup: status, logins, save offers                      |
-| `src/protocol.ts`       | Host message types and parsing                                  |
-| `src/messages.ts`       | Messages inside the extension                                   |
-| `static/`               | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons       |
-| `e2e/`                  | Headless Chromium runs against a fake host                      |
+| Path                     | What                                                            |
+| ------------------------ | --------------------------------------------------------------- |
+| `src/background.ts`      | Service worker: routes messages                                 |
+| `src/bg/host.ts`         | The one native port: hello, ids, backoff, `changed`             |
+| `src/bg/frames.ts`       | Which frames get logins; delivery to one document               |
+| `src/bg/autofill.ts`     | Menu tokens, fills, email-first continuation, popup             |
+| `src/bg/save.ts`         | Captured submits, `check`, offers in the popup, `save`          |
+| `src/bg/site.ts`         | Fillable origins and same-site frames                           |
+| `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback        |
+| `src/passkey-hook.ts`    | Page-world `navigator.credentials` hook                         |
+| `src/passkey-options.ts` | The hook's options, serialized whole for the extension          |
+| `src/content.ts`         | Content script: scans, submit capture, quiet-page signal        |
+| `src/content/`           | Detection, Shadow DOM, filling, the menu frame, passkey channel |
+| `src/menu.ts`            | Inline menu page                                                |
+| `src/popup.ts`           | Toolbar popup: status, logins, save offers, passkey prompts     |
+| `src/protocol.ts`        | Host message types and parsing                                  |
+| `src/messages.ts`        | Messages inside the extension                                   |
+| `static/`                | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons       |
+| `e2e/`                   | Headless Chromium runs against a fake host                      |
 
 Tests in `test/` run under `bun test` with happy-dom: form detection on
 fixtures (including Shadow DOM and frames), origin and same-site rules, frame
@@ -51,15 +55,17 @@ timers, host message parsing, and the host client against a fake port.
 `bun run e2e` loads the built extension in headless Chromium with fresh
 profiles and `e2e/fake-host.py` as the host. `--only security` runs the
 hidden, covered, swapped and navigated cases that CI runs; `--stills <dir>`
-saves screenshots.
+saves screenshots. `--only passkeys --deadbolt <path to deadbolt>` runs the
+passkey cases against the real `deadbolt browser-host` and a throwaway store,
+and checks every registration and assertion with `@simplewebauthn/server`.
 
 ## Not here
 
-- **Password generation.** The host offers `list`, `fill`, `check` and `save`
-  and no `generate`, so sign-up forms get no suggestion.
+- **Password generation.** The host offers `list`, `fill`, `check`, `save`
+  and `passkeys` and no `generate`, so sign-up forms get no suggestion.
 - **Opening the app.** Deadbolt has no URL scheme and the host no message for
   it, so "Open Deadbolt" in the popup says where to find the app.
-- Passkeys, "Sign in with…" memory, Firefox and Safari.
+- "Sign in with…" memory, Firefox and Safari.
 
 ## Credit
 
@@ -75,13 +81,18 @@ inline menu as an extension frame in a closed shadow root
 (`content/inline.ts`, `menu.ts`), the visibility guard (`ui/dom.ts`),
 token-bound frame targeting and the email-first continuation (`bg/frames.ts`,
 `bg/autofill.ts`), the capture-check-save flow (`bg/save.ts`), sender origin
-rules (`bg/site.ts`) and the build script.
+rules (`bg/site.ts`), the passkey hook (`passkey-hook.ts`,
+`passkey-options.ts`), its channel
+(`content/passkeys.ts`), the passkey frame and relying party checks and the
+autofill sign-in (`bg/passkeys.ts`), and the build script.
 
 Left out: Foyer's provider abstraction and Bun bridge (Deadbolt has one host),
-passkeys, SSO memory, the external-extension allowlist, sign-in recipe learning
+its passkey store and signing in the extension (the agent holds and signs),
+its call reporting and FedCM hooks, SSO memory, the external-extension allowlist, sign-in recipe learning
 and its dataset, and the dashboard.
 
 New for Deadbolt: the host client and protocol types, the popup and its save
 offers, the same-site frame check, the quiet-page sign-in signal, the
-postMessage token handoff, form-bound fills and fill acks, the OpenCode theme
-and the icons.
+postMessage token handoff, form-bound fills and fill acks, the single acked
+passkey port (Foyer accepted whichever port acked first), passkey prompts in
+the popup, the OpenCode theme and the icons.

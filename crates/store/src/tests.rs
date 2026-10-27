@@ -695,6 +695,9 @@ fn biometric_roundtrip_and_invalidation() {
     ));
     let bio = crate::unlock_biometric(dir, &key2).unwrap();
     assert_eq!(all(&bio), vec![body(0), body(1)]);
+    // An open store checks a key the same way.
+    assert!(bio.check_biometric(&key2).unwrap());
+    assert!(!bio.check_biometric(&key).unwrap());
 
     // Changing the passphrase wipes the biometric slot atomically.
     bio.change_passphrase_with_params(PASS, b"new passphrase", FAST)

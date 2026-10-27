@@ -122,6 +122,34 @@ fn valid_domain(domain: &str) -> bool {
     registrable_domain(&probe) != probe
 }
 
+/// The relying party id a page at `origin` may use for a passkey: `rp_id`
+/// if it is the page's host or a parent of it on the same site, else the
+/// host when the page names none. Never a public suffix (`github.io`,
+/// `co.uk`), an IP address, or another site, as WebAuthn requires.
+pub fn rp_id(origin: &str, rp_id: Option<&str>) -> Result<String, &'static str> {
+    let host = fillable_host(origin).ok_or("not a secure web page")?;
+    let host = host.strip_suffix('.').unwrap_or(&host);
+    if is_dotted_quad(host) || host.contains(':') {
+        return Err("an IP address has no relying party id");
+    }
+    let site = registrable_domain(host);
+    if !valid_domain(&site) {
+        return Err("the page is not on a site of its own");
+    }
+    let Some(rp_id) = rp_id else {
+        return Ok(host.to_string());
+    };
+    let rp_id = rp_id.to_ascii_lowercase();
+    let within = rp_id == host
+        || host
+            .strip_suffix(rp_id.as_str())
+            .is_some_and(|rest| rest.ends_with('.'));
+    if !valid_domain(&rp_id) || !within || registrable_domain(&rp_id) != site {
+        return Err("the relying party id isn't this page's host or its site");
+    }
+    Ok(rp_id)
+}
+
 /// A URL a page offers to save, trimmed: whole (with a scheme) and on a
 /// page Deadbolt fills, by the rule for origins.
 pub fn page_url(url: &str) -> Result<&str, &'static str> {
@@ -381,6 +409,72 @@ mod tests {
             assert!(
                 Site::from_origin(origin).is_err(),
                 "{origin:?} must not get logins"
+            );
+        }
+    }
+
+    #[test]
+    fn a_relying_party_id_is_the_host_or_a_parent_on_its_site() {
+        let ok = |origin: &str, rp: Option<&str>, want: &str| {
+            assert_eq!(rp_id(origin, rp).as_deref(), Ok(want), "{origin} {rp:?}");
+        };
+        ok("https://github.com", None, "github.com");
+        ok("https://GitHub.com:8443", None, "github.com");
+        ok("https://github.com", Some("github.com"), "github.com");
+        ok("https://gist.github.com", Some("GitHub.com"), "github.com");
+        ok(
+            "https://a.b.github.com",
+            Some("b.github.com"),
+            "b.github.com",
+        );
+        ok(
+            "https://alice.github.io",
+            Some("alice.github.io"),
+            "alice.github.io",
+        );
+        ok(
+            "https://login.example.co.uk",
+            Some("example.co.uk"),
+            "example.co.uk",
+        );
+        ok("http://localhost:3000", None, "localhost");
+        ok("http://localhost:3000", Some("localhost"), "localhost");
+        ok(
+            "http://app.localhost",
+            Some("app.localhost"),
+            "app.localhost",
+        );
+
+        for (origin, rp) in [
+            // A public suffix, from the ICANN and the private section.
+            ("https://alice.github.io", Some("github.io")),
+            ("https://example.co.uk", Some("co.uk")),
+            ("https://github.com", Some("com")),
+            ("https://github.io", None),
+            // Another site, a lookalike, a child, a sibling.
+            ("https://github.com", Some("gitlab.com")),
+            ("https://github.com", Some("hub.com")),
+            ("https://github.com", Some("evil.github.com")),
+            ("https://gist.github.com", Some("api.github.com")),
+            ("https://alice.github.io", Some("bob.github.io")),
+            ("https://github.com.evil.com", Some("github.com")),
+            // Not a domain.
+            ("https://github.com", Some("github.com.")),
+            ("https://github.com", Some("")),
+            ("https://github.com", Some("github.com:443")),
+            ("https://github.com", Some("https://github.com")),
+            ("https://xn--gthub-zsa.com", Some("github.com")),
+            // Pages that get no passkeys.
+            ("http://github.com", None),
+            ("https://127.0.0.1", None),
+            ("http://127.0.0.1", Some("127.0.0.1")),
+            ("https://[::1]", None),
+            ("null", None),
+            ("chrome-extension://abcdefghijklmnopabcdefghijklmnop", None),
+        ] {
+            assert!(
+                rp_id(origin, rp).is_err(),
+                "{origin} {rp:?} must be refused"
             );
         }
     }

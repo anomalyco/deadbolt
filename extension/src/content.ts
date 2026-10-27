@@ -8,6 +8,7 @@ import { LOGIN_URL, scanPage, type Field } from "./content/detect"
 import { initFrameChecks } from "./content/embed"
 import { ownValue, trackUserInput } from "./content/fill"
 import { initMenu, markSubmitted, refreshMenu, send, stepped } from "./content/inline"
+import { initPasskeyChannel } from "./content/passkeys"
 import { deepActiveElement, openRoots } from "./content/shadow"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 
@@ -207,6 +208,8 @@ function onKeydown(event: KeyboardEvent) {
   if (fields.some((f) => f.el === target)) userSubmitted()
 }
 
+// First, while it's still document_start: the hook is waiting for its port.
+initPasskeyChannel(send)
 const state = { targets: () => fields, form: () => formId, rescan: refresh }
 initMenu(state)
 initFrameChecks(state)

@@ -332,3 +332,18 @@ main {
   width: 14px;
   height: 14px;
 }
+
+/* A page's passkey call: when one is waiting, the popup shows only this. */
+.passkey-prompt {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+.passkey-prompt .note {
+  margin-top: 0;
+}
+
+.passkey-prompt .buttons .btn:first-child {
+  margin-right: auto;
+}

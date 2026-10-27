@@ -9,8 +9,14 @@
 // swaps, opaque origins, value swaps, navigation during a fill and the
 // back/forward cache.
 //
+// `--deadbolt <path to the deadbolt binary>` adds the passkey run, which
+// needs a real agent to sign: it makes a throwaway store (fast KDF, local
+// network only) in the run's temporary directory, runs that binary as the
+// host, and checks each credential with @simplewebauthn/server.
+//
 // Needs Playwright's Chromium (`bunx playwright-core install chromium`).
 
+import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
@@ -25,6 +31,7 @@ const arg = (name: string) => {
 }
 const stills = arg("--stills")
 const only = arg("--only")
+const deadbolt = arg("--deadbolt")
 if (stills) await mkdir(stills, { recursive: true })
 
 // ---- Test pages ---------------------------------------------------------------
@@ -136,6 +143,30 @@ const SWEEP = `<script>
   addEventListener("blur", () => (window.__press = performance.now()))
 </script>`
 
+const PASSKEY_PAGE = `<h1>Sign in to Acme</h1>
+  <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username webauthn">
+  <script>
+    const calls = {}
+    window.start = (name, kind, json, extra = {}) => {
+      const publicKey = kind === "create" ? PublicKeyCredential.parseCreationOptionsFromJSON(json) : PublicKeyCredential.parseRequestOptionsFromJSON(json)
+      // generator: each list as a page's generator, which reads only once.
+      const { generator, ...rest } = extra
+      if (generator) for (const key of ["allowCredentials", "excludeCredentials", "pubKeyCredParams"]) {
+        const list = publicKey[key]
+        if (list) publicKey[key] = (function* () { yield* list })()
+      }
+      const abort = new AbortController()
+      const call = (calls[name] = { abort })
+      navigator.credentials[kind]({ publicKey, signal: abort.signal, ...rest }).then(
+        (c) => (call.done = { ok: true, value: c.toJSON() }),
+        (e) => (call.done = { ok: false, value: e.name + ": " + e.message }),
+      )
+    }
+    window.result = (name) => calls[name]?.done ?? null
+    window.results = (prefix) => Object.keys(calls).filter((n) => n.startsWith(prefix)).map((n) => calls[n].done ?? null)
+    window.abort = (name) => calls[name].abort.abort()
+  </script>`
+
 // novalidate: "admin" isn't an email, and the browser would block the submit.
 const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="post" action="${action}" novalidate>
   <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
@@ -228,6 +259,29 @@ const server = Bun.serve({
           "Sign in to Acme",
           `${loginForm("/home")}<script>window.swap = () => { document.title = "Acme"; document.body.innerHTML = \`<h1>Acme</h1>${loginFrame()}\` }</script>`,
         )
+      // A WebAuthn test page: the test drives navigator.credentials through
+      // start() and reads each call's outcome with result().
+      case "/passkey":
+        return html("Sign in to Acme", PASSKEY_PAGE)
+      case "/passkey/framed":
+        return html("Acme", `<h1>Acme</h1><iframe sandbox="allow-scripts" src="/passkey" style="width:600px;height:420px;border:0"></iframe>`)
+      case "/passkey/sandboxed":
+        return html("Sign in to Acme", PASSKEY_PAGE, { "content-security-policy": "sandbox allow-scripts" })
+      // Same-origin frames: one the page lets call WebAuthn (as it may by
+      // default), one it doesn't.
+      case "/passkey/same":
+        return html("Acme", `<h1>Acme</h1><iframe src="/passkey" style="width:600px;height:420px;border:0"></iframe>`)
+      case "/passkey/same-denied":
+        return html("Acme", `<h1>Acme</h1><iframe allow="publickey-credentials-get 'none'; publickey-credentials-create 'none'" src="/passkey" style="width:600px;height:420px;border:0"></iframe>`)
+      // A page whose Permissions Policy turns WebAuthn off.
+      case "/passkey/denied":
+        return html("Sign in to Acme", PASSKEY_PAGE, { "permissions-policy": "publickey-credentials-get=(), publickey-credentials-create=()" })
+      // The site inside another origin inside the site: the top page
+      // matches, but WebAuthn calls the innermost frame cross-origin.
+      case "/passkey/nested":
+        return html("Acme", `<h1>Acme</h1><iframe allow="publickey-credentials-get; publickey-credentials-create" src="http://127.0.0.1:${url.port}/passkey/relay" style="width:640px;height:480px;border:0"></iframe>`)
+      case "/passkey/relay":
+        return html("Other", `<iframe allow="publickey-credentials-get; publickey-credentials-create" src="http://localhost:${url.port}/passkey" style="width:600px;height:420px;border:0"></iframe>`)
       // An occluder the sweep times around the press (see occlusionSweep).
       case "/sweep":
         return html("Sign in to Acme", loginForm("/home") + SWEEP)
@@ -259,6 +313,8 @@ interface LaunchOptions {
   fillDelay?: number
   /** Playwright turns the back/forward cache off; keep it on. */
   bfcache?: boolean
+  /** Runs the deadbolt binary as the host, with this environment. */
+  realHost?: Record<string, string>
 }
 
 async function launch(options: LaunchOptions = {}): Promise<Run> {
@@ -268,7 +324,13 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     await mkdir(join(dir, "NativeMessagingHosts"))
     await writeFile(
       join(dir, "NativeMessagingHosts", "pw.deadbolt.browser.json"),
-      JSON.stringify({ name: "pw.deadbolt.browser", description: "fake", path: join(import.meta.dir, "fake-host.py"), type: "stdio", allowed_origins: [`chrome-extension://${ID}/`] }),
+      JSON.stringify({
+        name: "pw.deadbolt.browser",
+        description: options.realHost ? "deadbolt" : "fake",
+        path: options.realHost ? deadbolt : join(import.meta.dir, "fake-host.py"),
+        type: "stdio",
+        allowed_origins: [`chrome-extension://${ID}/`],
+      }),
     )
   }
   const context = await chromium.launchPersistentContext(dir, {
@@ -285,6 +347,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_LOG: log,
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
+      ...options.realHost,
     },
   })
   await context.addInitScript(PROBE)
@@ -1169,8 +1232,376 @@ async function backForward() {
   }
 }
 
+// ---- Passkeys (a real agent signs) ------------------------------------------------
+
+/** The agent's AAGUID (crates/cli/src/webauthn.rs): a credential with it is Deadbolt's. */
+const DEADBOLT_AAGUID = "3a31ecda-fefc-f251-1f3e-a11bfdc1de5f"
+
+type Outcome = { ok: boolean; value: any }
+const startCall = (target: Page | Frame, name: string, kind: "create" | "get", json: unknown, extra: Record<string, unknown> = {}) =>
+  target.evaluate(([n, k, j, e]) => (window as any).start(n, k, j, e), [name, kind, json, extra] as const)
+const outcome = (target: Page | Frame, name: string, what: string, timeout = 15_000) =>
+  until<Outcome>(what, () => target.evaluate((n) => (window as any).result(n), name), timeout)
+/** The client data in a credential's JSON. */
+const clientData = (credential: any) => JSON.parse(Buffer.from(credential.response.clientDataJSON, "base64url").toString())
+/** Deadbolt's credentials are for the page's own origin, never cross-origin. */
+const ownOrigin = (credential: any, how: string) => {
+  const data = clientData(credential)
+  check(data.origin === site && data.crossOrigin === false && !("topOrigin" in data), `${how}: crossOrigin is false (${JSON.stringify({ crossOrigin: data.crossOrigin, topOrigin: data.topOrigin })})`)
+}
+/** A frame of `page` showing the passkey test page, once its script runs. */
+const passkeyFrame = (page: Page, what: string, match: (f: Frame) => boolean) =>
+  until(what, async () => {
+    const f = page.frames().find((f) => f !== page.mainFrame() && f.url().endsWith("/passkey") && match(f))
+    return f && (await f.evaluate(() => typeof (window as any).start === "function").catch(() => false)) ? f : null
+  })
+
+/** A throwaway Deadbolt store and the environment that points the binary at it. */
+async function deadboltStore() {
+  // Short: the agent's socket path must fit in a sockaddr (104 bytes on macOS).
+  const dir = await mkdtemp(process.platform === "darwin" ? "/tmp/dbpk-" : join(tmpdir(), "dbpk-"))
+  const env = {
+    DEADBOLT_HOME: join(dir, "home"),
+    XDG_RUNTIME_DIR: join(dir, "run"),
+    XDG_STATE_HOME: join(dir, "state"),
+    XDG_CONFIG_HOME: join(dir, "config"),
+    DEADBOLT_NET: "local",
+    DEADBOLT_KDF: "fast",
+    DEADBOLT_PASSPHRASE: "correct horse battery",
+  }
+  const cli = (...args: string[]) => {
+    const r = Bun.spawnSync([deadbolt!, ...args], { env: { ...process.env, ...env }, stdin: "ignore" })
+    return { ok: r.exitCode === 0, out: `${r.stdout}${r.stderr}` }
+  }
+  return { dir, env, cli }
+}
+
+async function passkeys() {
+  if (!deadbolt) return void console.log("skip: passkeys need --deadbolt <path to the deadbolt binary>")
+  const store = await deadboltStore()
+  const init = store.cli("init", "--device-name", "e2e")
+  if (!check(init.ok, "a throwaway store is set up")) return void console.log(init.out)
+  const run = await launch({ realHost: store.env })
+  const page = await run.context.newPage()
+  const rpID = "localhost"
+  // The browser's own WebAuthn, for the calls Deadbolt hands back to it.
+  const cdp = await run.context.newCDPSession(page)
+  await cdp.send("WebAuthn.enable", { enableUI: false })
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  })
+  const prompt = async (name: string) => {
+    if (!(await offered(run, `${name}: the passkey prompt badges the toolbar button`))) return null
+    return popup(run, site, name)
+  }
+  const press = async (p: Page, label: string) => {
+    await p.locator(".passkey-prompt button", { hasText: label }).first().click()
+    await p.close().catch(() => {})
+  }
+  try {
+    await page.goto(`${site}/passkey`)
+    await formFound(page)
+
+    // Registration, asked in the popup and signed by the agent.
+    const reg = await generateRegistrationOptions({
+      rpName: "Acme",
+      rpID,
+      userName: "kit@acme.test",
+      attestationType: "none",
+      authenticatorSelection: { residentKey: "required", userVerification: "preferred" },
+      supportedAlgorithmIDs: [-7, -257],
+    })
+    await startCall(page, "register", "create", reg)
+    const save = await prompt("passkey-save")
+    let credential: WebAuthnCredential | null = null
+    if (save) {
+      check((await save.locator(".passkey-prompt h2").textContent()) === "Save a passkey for localhost?", "the popup asks to save a passkey for the site")
+      await press(save, "Save")
+      const made = await outcome(page, "register", "registration settles")
+      if (check(!!made?.ok, `the page gets a credential (${made?.value && !made.ok ? made.value : "ok"})`)) {
+        const v = await verifyRegistrationResponse({ response: made!.value, expectedChallenge: reg.challenge, expectedOrigin: site, expectedRPID: rpID, requireUserVerification: false }).catch((e) => {
+          check(false, `registration verifies: ${e.message}`)
+          return null
+        })
+        if (v && check(v.verified, "@simplewebauthn/server verifies the registration")) {
+          const info = v.registrationInfo!
+          check(info.aaguid === DEADBOLT_AAGUID, `the agent made it (AAGUID ${info.aaguid})`)
+          check(info.fmt === "none" && info.credentialType === "public-key", "with none attestation")
+          check(info.credentialDeviceType === "multiDevice" && info.credentialBackedUp, "flagged as a synced (backed-up) passkey")
+          check(!info.userVerified, "and not user-verified: no Touch ID here")
+          check(info.credential.counter === 0, "with a zero sign counter")
+          ownOrigin(made!.value, "registration")
+          credential = info.credential
+        }
+      }
+      const shown = store.cli("show", "--reveal", rpID)
+      check(shown.ok && shown.out.includes("kit@acme.test") && !shown.out.includes("private-key"), "the vault has the passkey, and never shows its private key")
+    }
+
+    // The same account again: the site excluded it, so it's already saved.
+    if (credential) {
+      await startCall(page, "again", "create", { ...reg, excludeCredentials: [{ id: credential.id, type: "public-key" }] })
+      const again = await prompt("passkey-registered")
+      if (again) {
+        check((await again.locator(".passkey-prompt h2").textContent()) === "This passkey is already saved", "an excluded passkey shows as already saved")
+        await press(again, "OK")
+        const r = await outcome(page, "again", "excluded registration settles")
+        check(!!r && !r.ok && String(r.value).startsWith("InvalidStateError"), `and the page gets InvalidStateError (${r?.value})`)
+      }
+    }
+
+    // Modal sign-in: the popup lists the site's passkeys.
+    if (credential) {
+      const auth = await generateAuthenticationOptions({ rpID, userVerification: "preferred" })
+      await startCall(page, "modal", "get", auth)
+      const signIn = await prompt("passkey-sign-in")
+      if (signIn) {
+        check((await signIn.locator(".passkey-prompt .account-title").allTextContents()).join(",") === "kit@acme.test", "the popup lists the passkey by username")
+        await press(signIn, "Sign in")
+        const r = await outcome(page, "modal", "modal sign-in settles")
+        if (check(!!r?.ok, `modal sign-in returns an assertion (${r && !r.ok ? r.value : "ok"})`)) {
+          await verifyAssertion(r!.value, auth.challenge, credential, "modal")
+          ownOrigin(r!.value, "modal sign-in")
+        }
+      }
+    }
+
+    // Autofill sign-in: the passkey waits in the inline menu.
+    if (credential) {
+      await page.reload()
+      await formFound(page)
+      const auth = await generateAuthenticationOptions({ rpID, userVerification: "preferred" })
+      await startCall(page, "auto", "get", auth, { mediation: "conditional" })
+      await Bun.sleep(500)
+      check((await badge(run)) === "", "an autofill sign-in opens no prompt by itself")
+      const menu = await menuOn(page, "#email")
+      if (menu) {
+        check((await menu.locator(".row .title").allTextContents()).join(",") === "kit@acme.test", "the inline menu offers the passkey")
+        const sub = (await menu.locator(".row .sub").first().textContent()) ?? ""
+        check(/^Passkey · \S/.test(sub), `as a passkey, with its vault (${sub})`)
+        await shot(page, "passkey-menu", { x: 250, y: 80, width: 420, height: 240 })
+        await menu.locator("button.row").first().click()
+        const r = await outcome(page, "auto", "autofill sign-in settles")
+        if (check(!!r?.ok, `picking it signs in (${r && !r.ok ? r.value : "ok"})`)) {
+          await verifyAssertion(r!.value, auth.challenge, credential, "autofill")
+          ownOrigin(r!.value, "autofill sign-in")
+        }
+      } else await diagnose(run, page, "passkey menu")
+    }
+
+    // The page's AbortSignal ends the prompt.
+    await startCall(page, "aborted", "get", await generateAuthenticationOptions({ rpID }))
+    if (await offered(run, "a modal sign-in badges the toolbar button")) {
+      await page.evaluate(() => (window as any).abort("aborted"))
+      const r = await outcome(page, "aborted", "aborted sign-in settles")
+      check(!!r && !r.ok && String(r.value).startsWith("AbortError"), `an aborted sign-in rejects with AbortError (${r?.value})`)
+      check(!!(await until("abort clears the badge", async () => (await badge(run)) === "")), "and the prompt goes away")
+    }
+
+    // Leaving the page ends its prompt.
+    await startCall(page, "left", "get", await generateAuthenticationOptions({ rpID }))
+    if (await offered(run, "another sign-in badges the toolbar button")) {
+      await page.goto(`${site}/home`)
+      check(!!(await until("navigation clears the badge", async () => (await badge(run)) === "")), "navigating away ends the passkey prompt")
+      const p = await popup(run, site)
+      check((await p.locator(".passkey-prompt").count()) === 0, "and the popup no longer shows it")
+      await p.close()
+    }
+
+    // A page flooding calls takes its own tab's few slots; another tab's
+    // abort still lands at once, and its next sign-in still works.
+    if (credential) {
+      await page.goto(`${site}/passkey?b`)
+      await formFound(page)
+      const b = `${site}/passkey?b`
+      await startCall(page, "waiting", "get", await generateAuthenticationOptions({ rpID }))
+      if (await until("the other tab's sign-in badges its button", async () => (await badge(run, b)) === "1", 20_000)) {
+        const flood = await run.context.newPage()
+        await flood.goto(`${site}/passkey?flood`)
+        await flood.bringToFront()
+        const auth = await generateAuthenticationOptions({ rpID })
+        const reg = await generateRegistrationOptions({ rpName: "Acme", rpID, userName: "flood@acme.test", attestationType: "none", supportedAlgorithmIDs: [-7] })
+        await flood.evaluate(
+          ([a, r]) => {
+            for (let i = 0; i < 40; i++) (window as any).start(`flood${i}`, i % 2 ? "create" : "get", i % 2 ? r : a)
+          },
+          [auth, reg] as const,
+        )
+        const refused = await until("the flood past the tab's slots is refused", async () => {
+          const done = (await flood.evaluate(() => (window as any).results("flood"))) as (Outcome | null)[]
+          return done.filter((r) => r && !r.ok && String(r.value).startsWith("NotAllowedError")).length >= 32 && done
+        })
+        check(!!refused, `a flooding page gets NotAllowedError past its tab's slots (${refused ? refused.filter(Boolean).length : 0} of 40 settled)`)
+        const started = Date.now()
+        await page.evaluate(() => (window as any).abort("waiting"))
+        const r = await outcome(page, "waiting", "the other tab's abort settles", 3000)
+        check(!!r && !r.ok && String(r.value).startsWith("AbortError") && Date.now() - started < 3000, `another tab's abort lands during the flood (${r?.value}, ${Date.now() - started}ms)`)
+        await flood.close()
+        await page.bringToFront()
+        const auth2 = await generateAuthenticationOptions({ rpID, userVerification: "preferred" })
+        await startCall(page, "after-flood", "get", auth2)
+        if (await until("a sign-in after the flood badges its button", async () => (await badge(run, b)) === "1", 20_000)) {
+          await press(await popup(run, b), "Sign in")
+          const after = await outcome(page, "after-flood", "the sign-in after the flood settles")
+          if (check(!!after?.ok, `and its next sign-in works (${after && !after.ok ? after.value : "ok"})`)) await verifyAssertion(after!.value, auth2.challenge, credential, "after the flood")
+        }
+      }
+    }
+
+    // Use another device: the browser's own WebAuthn takes over.
+    let nativeId: string | null = null
+    await page.goto(`${site}/passkey`)
+    await formFound(page)
+    const other = await generateRegistrationOptions({ rpName: "Acme", rpID, userName: "other@acme.test", attestationType: "none", supportedAlgorithmIDs: [-7] })
+    await startCall(page, "native", "create", other)
+    const choose = await prompt("passkey-other-device")
+    if (choose) {
+      await press(choose, "Use another device")
+      const r = await outcome(page, "native", "fallback registration settles")
+      const v = r?.ok ? await verifyRegistrationResponse({ response: r.value, expectedChallenge: other.challenge, expectedOrigin: site, expectedRPID: rpID }).catch(() => null) : null
+      check(!!v?.verified && v.registrationInfo!.aaguid !== DEADBOLT_AAGUID, `"Use another device" hands the call to the browser (${r?.ok ? v?.registrationInfo?.aaguid : r?.value})`)
+      if (v?.verified) nativeId = v.registrationInfo!.credential.id
+    }
+
+    // Credential lists Deadbolt can't take whole go to the browser whole,
+    // even with Deadbolt's own passkey on them: one past 64 entries (which
+    // the browser refuses too), or one with an entry that isn't a public-key id.
+    if (credential && nativeId) {
+      const filler = () => Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url")
+      const lists = {
+        long: [credential.id, ...Array.from({ length: 63 }, filler), nativeId].map((id) => ({ id, type: "public-key" })),
+        odd: [{ id: credential.id, type: "public-key" }, { id: filler(), type: "future-type" }, { id: nativeId, type: "public-key" }],
+      }
+      for (const [name, allowCredentials] of Object.entries(lists)) {
+        await startCall(page, `list-${name}`, "get", { ...(await generateAuthenticationOptions({ rpID })), allowCredentials })
+        const r = await outcome(page, `list-${name}`, `the ${name} allow list settles`)
+        if (name === "long") check(!!r && !r.ok && /^RangeError: .*allowCredentials.*\(64\)/.test(r.value), `a 65-entry allow list goes whole to the browser, which refuses it (${r?.ok ? r.value.id : r?.value})`)
+        else check(!!r?.ok && r.value.id === nativeId, `a mixed-type allow list goes whole to the browser (${r?.ok ? (r.value.id === nativeId ? "the browser's passkey" : r.value.id) : r?.value})`)
+        check((await badge(run)) === "", "with no Deadbolt prompt")
+      }
+    }
+
+    // A same-origin frame is Deadbolt's.
+    if (credential) {
+      await page.goto(`${site}/passkey/same`)
+      const frame = await passkeyFrame(page, "the same-origin frame loads", () => true)
+      if (frame) {
+        const auth = await generateAuthenticationOptions({ rpID })
+        await startCall(frame, "same", "get", auth)
+        const signIn = await prompt("passkey-same-frame")
+        if (signIn) {
+          await press(signIn, "Sign in")
+          const r = await outcome(frame, "same", "same-origin frame sign-in settles")
+          if (check(!!r?.ok, `a same-origin frame signs in with Deadbolt (${r && !r.ok ? r.value : "ok"})`)) ownOrigin(r!.value, "same-origin frame")
+        }
+      }
+    }
+
+    // The site inside another origin inside the site: the browser's, which
+    // marks it cross-origin.
+    if (nativeId) {
+      await page.goto(`${site}/passkey/nested`)
+      const inner = await passkeyFrame(page, "the nested frame loads", (f) => !!f.parentFrame()?.url().startsWith("http://127.0.0.1"))
+      if (inner) {
+        await startCall(inner, "nested", "get", await generateAuthenticationOptions({ rpID }))
+        const r = await outcome(inner, "nested", "nested-frame sign-in settles")
+        const data = r?.ok ? clientData(r.value) : null
+        check(!!data && data.crossOrigin === true && r!.value.id === nativeId, `a frame under another origin gets the browser's flow (${data ? `crossOrigin ${data.crossOrigin}` : r?.value})`)
+        check((await badge(run, `${site}/passkey/nested`)) === "", "with no Deadbolt prompt")
+      }
+    }
+
+    // Where Permissions Policy turns WebAuthn off, the browser refuses it.
+    await page.goto(`${site}/passkey/denied`)
+    for (const kind of ["get", "create"] as const) {
+      await startCall(page, `denied-${kind}`, kind, kind === "get" ? await generateAuthenticationOptions({ rpID }) : reg)
+      const r = await outcome(page, `denied-${kind}`, `policy-denied ${kind} settles`)
+      check(!!r && !r.ok && String(r.value).startsWith("NotAllowedError") && !String(r.value).includes("Deadbolt"), `a page whose policy denies ${kind} gets the browser's refusal (${r?.value})`)
+    }
+    check((await badge(run, `${site}/passkey/denied`)) === "", "with no Deadbolt prompt")
+    await page.goto(`${site}/passkey/same-denied`)
+    const denied = await passkeyFrame(page, "the denied frame loads", () => true)
+    if (denied) {
+      await startCall(denied, "frame-denied", "get", await generateAuthenticationOptions({ rpID }))
+      const r = await outcome(denied, "frame-denied", "policy-denied frame settles")
+      check(!!r && !r.ok && String(r.value).startsWith("NotAllowedError") && !String(r.value).includes("Deadbolt"), `so does a frame its page denies (${r?.value})`)
+      check((await badge(run, `${site}/passkey/same-denied`)) === "", "with no Deadbolt prompt")
+    }
+    await page.goto(`${site}/passkey`)
+    await formFound(page)
+
+    // Lists the page passes as generators reach the browser whole, after
+    // Deadbolt has read them: a restricted sign-in never turns into discovery,
+    // an exclusion never vanishes, and RS256-only stays RS256-only.
+    if (credential && nativeId) {
+      const filler = () => Buffer.from(crypto.getRandomValues(new Uint8Array(16))).toString("base64url")
+      const allowCredentials = [credential.id, ...Array.from({ length: 63 }, filler), nativeId].map((id) => ({ id, type: "public-key" }))
+      await startCall(page, "gen-allow", "get", { ...(await generateAuthenticationOptions({ rpID })), allowCredentials }, { generator: true })
+      const allowed = await outcome(page, "gen-allow", "the generated allow list settles")
+      check(!!allowed && !allowed.ok && /^RangeError: .*allowCredentials.*\(64\)/.test(allowed.value), `a generated 65-entry allow list reaches the browser whole (${allowed?.ok ? `signed with ${allowed.value.id === nativeId ? "the browser's passkey" : allowed.value.id}` : allowed?.value})`)
+      const excluded = await generateRegistrationOptions({ rpName: "Acme", rpID, userName: "gen@acme.test", attestationType: "none", supportedAlgorithmIDs: [-7] })
+      const excludeCredentials = [{ id: nativeId, type: "public-key" }, { id: filler(), type: "future-type" }]
+      await startCall(page, "gen-exclude", "create", { ...excluded, excludeCredentials }, { generator: true })
+      const ex = await outcome(page, "gen-exclude", "the generated exclude list settles")
+      check(!!ex && !ex.ok && String(ex.value).startsWith("InvalidStateError"), `a generated exclude list still excludes in the browser (${ex?.ok ? "made a passkey" : ex?.value})`)
+      const rs = await generateRegistrationOptions({ rpName: "Acme", rpID, userName: "gen-rsa@acme.test", attestationType: "none", supportedAlgorithmIDs: [-257] })
+      await startCall(page, "gen-rsa", "create", rs, { generator: true })
+      const made = await outcome(page, "gen-rsa", "the generated RS256-only registration settles")
+      check(!!made?.ok && made.value.response.publicKeyAlgorithm === -257, `generated RS256-only params go to the browser (${made?.ok ? made.value.response.publicKeyAlgorithm : made?.value})`)
+      check((await badge(run)) === "", "none of them asks Deadbolt's user")
+    }
+
+    // A site that doesn't take ES256 gets the browser's flow without asking.
+    const rsa = await generateRegistrationOptions({ rpName: "Acme", rpID, userName: "rsa@acme.test", attestationType: "none", supportedAlgorithmIDs: [-257] })
+    await startCall(page, "rsa", "create", rsa)
+    const rsaDone = await outcome(page, "rsa", "RS256-only registration settles")
+    check((await badge(run)) === "", "an RS256-only site gets no Deadbolt prompt")
+    check(!!rsaDone && (rsaDone.ok ? rsaDone.value.response.publicKeyAlgorithm !== -7 : !String(rsaDone.value).includes("Deadbolt")), `and goes to the browser (${rsaDone?.ok ? "made by the browser" : rsaDone?.value})`)
+
+    // Another site's rpId: refused before anyone is asked.
+    await startCall(page, "wrong", "create", { ...(await generateRegistrationOptions({ rpName: "Evil", rpID: "example.com", userName: "kit" })) })
+    const wrong = await outcome(page, "wrong", "wrong-rpId registration settles")
+    check(!!wrong && !wrong.ok && wrong.value === "SecurityError: This relying party ID isn't this site's.", `a wrong rpId is Deadbolt's SecurityError (${wrong?.value})`)
+    await startCall(page, "wrong-get", "get", await generateAuthenticationOptions({ rpID: "com" }))
+    const wrongGet = await outcome(page, "wrong-get", "public-suffix sign-in settles")
+    check(!!wrongGet && !wrongGet.ok && wrongGet.value === "SecurityError: This relying party ID isn't this site's.", `a public suffix rpId is too (${wrongGet?.value})`)
+    check((await badge(run)) === "", "and neither asks the user")
+
+    // Sandboxed frames and pages: opaque origins get nothing.
+    await page.goto(`${site}/passkey/framed`)
+    const frame = await passkeyFrame(page, "the sandboxed frame loads", () => true)
+    if (frame) {
+      await startCall(frame, "sandboxed", "get", await generateAuthenticationOptions({ rpID }))
+      const r = await outcome(frame, "sandboxed", "sandboxed-frame sign-in settles")
+      check(!!r && !r.ok && r.value === "NotAllowedError: Deadbolt offers no passkeys to sandboxed frames.", `a sandboxed frame is refused by Deadbolt (${r?.value})`)
+    }
+    await page.goto(`${site}/passkey/sandboxed`)
+    await startCall(page, "csp", "create", reg)
+    const csp = await outcome(page, "csp", "sandboxed-page registration settles")
+    check(!!csp && !csp.ok && csp.value === "NotAllowedError: Deadbolt offers no passkeys to sandboxed frames.", `so is a page sandboxed by its CSP (${csp?.value})`)
+    check((await badge(run, `${site}/passkey/sandboxed`)) === "", "with no prompt")
+    const after = store.cli("show", rpID)
+    check(after.ok && !after.out.includes("other@acme.test") && !after.out.includes("rsa@acme.test"), "only the passkey saved through Deadbolt is in the vault")
+  } catch (err) {
+    check(false, `passkeys threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "passkeys")
+  } finally {
+    await close(run)
+    store.cli("agent", "stop")
+    await rm(store.dir, { recursive: true, force: true })
+  }
+}
+
+async function verifyAssertion(response: any, expectedChallenge: string, credential: WebAuthnCredential, how: string) {
+  const v = await verifyAuthenticationResponse({ response, expectedChallenge, expectedOrigin: site, expectedRPID: "localhost", credential, requireUserVerification: false }).catch((e) => {
+    check(false, `${how} assertion verifies: ${e.message}`)
+    return null
+  })
+  if (v) check(v.verified && !v.authenticationInfo.userVerified, `@simplewebauthn/server verifies the ${how} assertion (no UV without Touch ID)`)
+}
+
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward }
+const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 

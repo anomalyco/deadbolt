@@ -9,7 +9,8 @@ export type Want = "username" | "password" | "totp"
 export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
 export type CheckStatus = "new" | "update" | "same"
 export type Change = "locked" | "unlocked" | "items" | "stopped" | "started"
-export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "failed"
+export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "exists" | "cancelled" | "failed"
+export type UserVerification = "required" | "preferred" | "discouraged"
 
 export type Request =
   | { id: number; type: "hello" }
@@ -23,6 +24,19 @@ export type Request =
       ref?: string
       entry: { title: string; url: string; username: string; password: string }
     }
+  | { id: number; type: "passkey-list"; origin: string; rpId?: string }
+  | {
+      id: number
+      type: "passkey-create"
+      origin: string
+      rpId?: string
+      challenge: string
+      user: { id: string; name: string }
+      exclude: string[]
+      userVerification: UserVerification
+    }
+  | { id: number; type: "passkey-get"; origin: string; rpId?: string; ref: string; challenge: string; userVerification: UserVerification }
+  | { id: number; type: "passkey-cancel"; request: number }
 
 export type RequestBody = Request extends infer R ? (R extends { id: number } ? Omit<R, "id"> : never) : never
 
@@ -65,13 +79,61 @@ export interface SaveReply {
   ref: string
   created: boolean
 }
+/** A passkey saved for the relying party; never its private key. */
+export interface Passkey {
+  ref: string
+  vault: string
+  credentialId: string
+  username?: string
+  created?: string
+}
+export interface PasskeysReply {
+  type: "passkeys"
+  rpId: string
+  canVerify: boolean
+  passkeys: Passkey[]
+}
+/** Binary fields are base64url, as the page gets them. */
+export interface PasskeyCreatedReply {
+  type: "passkey-created"
+  ref: string
+  credentialId: string
+  clientDataJSON: string
+  attestationObject: string
+  authenticatorData: string
+  publicKey: string
+  verified: boolean
+}
+export interface PasskeyAssertionReply {
+  type: "passkey-assertion"
+  credentialId: string
+  clientDataJSON: string
+  authenticatorData: string
+  signature: string
+  userHandle: string
+  verified: boolean
+}
+export interface PasskeyCancelledReply {
+  type: "passkey-cancelled"
+  found: boolean
+}
 export interface ErrorReply {
   type: "error"
   code: ErrorCode
   message: string
 }
 
-export type Reply = HelloReply | ListReply | FillReply | CheckReply | SaveReply | ErrorReply
+export type Reply =
+  | HelloReply
+  | ListReply
+  | FillReply
+  | CheckReply
+  | SaveReply
+  | PasskeysReply
+  | PasskeyCreatedReply
+  | PasskeyAssertionReply
+  | PasskeyCancelledReply
+  | ErrorReply
 
 /** What a request of each type is answered with, besides an error. */
 export interface ReplyFor {
@@ -80,6 +142,23 @@ export interface ReplyFor {
   fill: FillReply
   check: CheckReply
   save: SaveReply
+  "passkey-list": PasskeysReply
+  "passkey-create": PasskeyCreatedReply
+  "passkey-get": PasskeyAssertionReply
+  "passkey-cancel": PasskeyCancelledReply
+}
+
+/** The reply type each request expects. */
+export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
+  hello: "hello",
+  list: "list",
+  fill: "fill",
+  check: "check",
+  save: "save",
+  "passkey-list": "passkeys",
+  "passkey-create": "passkey-created",
+  "passkey-get": "passkey-assertion",
+  "passkey-cancel": "passkey-cancelled",
 }
 
 export type HostMessage =
@@ -89,14 +168,33 @@ export type HostMessage =
 const STATUSES: HostStatus[] = ["ready", "locked", "not-set-up", "unavailable"]
 const CHECKS: CheckStatus[] = ["new", "update", "same"]
 const CHANGES: Change[] = ["locked", "unlocked", "items", "stopped", "started"]
-const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "failed"]
+const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "exists", "cancelled", "failed"]
 const REF = /^[0-9a-f]{64}:[0-9a-f]{32}$/
+const B64URL = /^[A-Za-z0-9_-]*$/
 
 const isObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v)
 const str = (v: unknown, max = 4096): string | undefined => (typeof v === "string" && v.length <= max ? v : undefined)
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((s): s is string => typeof s === "string") : [])
 
 export const isRef = (v: unknown): v is string => typeof v === "string" && REF.test(v)
+/** Base64url without padding, non-empty. */
+export const isB64url = (v: unknown, max = 1 << 16): v is string => typeof v === "string" && v.length > 0 && v.length <= max && B64URL.test(v)
+
+function passkey(v: unknown): Passkey | null {
+  if (!isObject(v) || !isRef(v.ref) || !isB64url(v.credentialId, 1364)) return null
+  return { ref: v.ref, vault: str(v.vault, 500) ?? "", credentialId: v.credentialId, username: str(v.username, 1024), created: str(v.created, 64) }
+}
+
+/** The named fields, if every one is base64url. */
+function b64Fields<K extends string>(raw: Record<string, unknown>, keys: readonly K[]): Record<K, string> | null {
+  const out = {} as Record<K, string>
+  for (const k of keys) {
+    const v = raw[k]
+    if (!isB64url(v)) return null
+    out[k] = v
+  }
+  return out
+}
 
 function account(v: unknown): Account | null {
   if (!isObject(v) || !isRef(v.ref)) return null
@@ -158,6 +256,21 @@ function parseReply(raw: Record<string, unknown>): Reply | null {
     }
     case "save":
       return isRef(raw.ref) ? { type: "save", ref: raw.ref, created: raw.created === true } : null
+    case "passkeys": {
+      if (!Array.isArray(raw.passkeys) || typeof raw.rpId !== "string") return null
+      const passkeys = raw.passkeys.map(passkey).filter((p): p is Passkey => p !== null)
+      return { type: "passkeys", rpId: raw.rpId, canVerify: raw.canVerify === true, passkeys }
+    }
+    case "passkey-created": {
+      const f = b64Fields(raw, ["credentialId", "clientDataJSON", "attestationObject", "authenticatorData", "publicKey"] as const)
+      return f && isRef(raw.ref) ? { type: "passkey-created", ref: raw.ref, ...f, verified: raw.verified === true } : null
+    }
+    case "passkey-assertion": {
+      const f = b64Fields(raw, ["credentialId", "clientDataJSON", "authenticatorData", "signature", "userHandle"] as const)
+      return f ? { type: "passkey-assertion", ...f, verified: raw.verified === true } : null
+    }
+    case "passkey-cancelled":
+      return { type: "passkey-cancelled", found: raw.found === true }
     case "error": {
       const code = CODES.includes(raw.code as ErrorCode) ? (raw.code as ErrorCode) : "failed"
       return { type: "error", code, message: str(raw.message, 1000) ?? "" }

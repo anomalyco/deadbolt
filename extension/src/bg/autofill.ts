@@ -4,7 +4,7 @@
 // email-first continuation are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/autofill/service.ts, by Ryan Vogel).
 
-import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, ListReply, Want } from "../protocol"
 import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
@@ -72,6 +72,13 @@ export function nextStep(filled: FieldRole[], account: Pick<Account, "hasPasswor
   return undefined
 }
 
+/** Passkeys a waiting autofill sign-in offers in the inline menu (see bg/passkeys.ts). */
+export interface MenuPasskeys {
+  menuPasskeys(target: FrameTarget, focused: FieldRole): MenuPasskey[]
+  /** Null when `ref` isn't one of them. */
+  menuPick(target: FrameTarget, ref: string): Promise<PickReply | null>
+}
+
 export class Autofill {
   private tokens = new Map<string, MenuToken>()
   private lists = new Map<string, { at: number; reply: ListReply }>()
@@ -82,7 +89,10 @@ export class Autofill {
   /** Bumped when a tab's email-first sign-in is cancelled; work started before then arms nothing. */
   private cancels = new Map<number, number>()
 
-  constructor(private host: Host) {
+  constructor(
+    private host: Host,
+    private passkeys?: MenuPasskeys,
+  ) {
     host.onChange(() => this.lists.clear())
   }
 
@@ -125,6 +135,7 @@ export class Autofill {
     else if (this.host.status.state === "ready") {
       const reply = await this.list(target.origin).catch(() => null)
       rows = reply ? menuAccounts(reply.accounts, focused as FieldRole).length : 0
+      rows += this.passkeys?.menuPasskeys(target, focused as FieldRole).length ?? 0
     }
     if (!rows) return { rows: 0 }
     this.sweep()
@@ -139,7 +150,8 @@ export class Autofill {
     if (this.host.status.state !== "ready") return { kind: "status", status: this.host.status }
     try {
       const reply = await this.list(t.origin)
-      return { kind: "accounts", site: reply.site, accounts: menuAccounts(reply.accounts, t.focused), focused: t.focused }
+      const passkeys = this.passkeys?.menuPasskeys(t, t.focused)
+      return { kind: "accounts", site: reply.site, accounts: menuAccounts(reply.accounts, t.focused), focused: t.focused, ...(passkeys?.length ? { passkeys } : {}) }
     } catch {
       return { kind: "status", status: this.host.status }
     }
@@ -148,6 +160,12 @@ export class Autofill {
   async menuPick(token: string, ref: string, sender: chrome.runtime.MessageSender): Promise<PickReply> {
     const t = await this.token(token, sender)
     if (!t) return { ok: false, message: "This menu has expired." }
+    const signedIn = await this.passkeys?.menuPick(t, ref)
+    if (signedIn) {
+      this.tokens.delete(token)
+      if (signedIn.ok) await sendToFrame(t, { type: "db:close-menu", token })
+      return signedIn
+    }
     const reply = await this.list(t.origin).catch(() => null)
     const account = reply?.accounts.find((a) => a.ref === ref)
     if (!account) return { ok: false, message: "That login isn't here anymore." }

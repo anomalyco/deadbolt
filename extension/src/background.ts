@@ -5,12 +5,15 @@
 import { Autofill } from "./bg/autofill"
 import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
+import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import type { PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
 const host = new Host()
-const autofill = new Autofill(host)
 const saver = new Saver(host)
+const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
+const autofill = new Autofill(host, passkeys)
+passkeys.listen()
 
 function title(status: Status): string {
   switch (status.state) {
@@ -56,7 +59,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       if (!fromExtensionPage(sender, "popup.html")) return null
       const reply: PopupReply = await autofill.popupLoad(message.tabId)
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
-      return offer ? { ...reply, offer } : reply
+      const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
+      return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}) }
     }
     case "db:popup-fill":
       return fromExtensionPage(sender, "popup.html") ? autofill.popupFill(message.tabId, String(message.ref)) : { ok: false, message: "" }

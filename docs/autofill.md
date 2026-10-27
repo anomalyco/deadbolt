@@ -1,7 +1,8 @@
 # Browser autofill
 
-Deadbolt fills and saves passwords in Chromium browsers (Chrome, Brave, Arc,
-Edge, Chromium) through its own extension, in `extension/`. This doc covers
+Deadbolt fills and saves passwords, and makes and signs in with passkeys, in
+Chromium browsers (Chrome, Brave, Arc, Edge, Chromium) through its own
+extension, in `extension/`. This doc covers
 the agent's side, the native messaging host, the extension, and the messages
 between them.
 
@@ -17,8 +18,10 @@ web page ─ content script ─ extension ══ native messaging ══ deadbol
   itself, so nothing upstream can widen what a page gets.
 - **The host is a pipe.** `deadbolt browser-host` checks the shape of each
   message, turns it into one agent command (`site-logins`, `site-fill`,
-  `site-check`, `site-save`) and passes the agent's watch stream back as
-  `changed` messages. It never prompts for a passphrase or Touch ID.
+  `site-check`, `site-save`, `passkey-list`, `passkey-create`,
+  `passkey-get`) and passes the agent's watch stream back as `changed`
+  messages. It never prompts for a passphrase or Touch ID; the agent asks for
+  Touch ID itself before it signs with a passkey (see Passkeys).
 - **The extension** finds login forms, asks the host, and fills. Saves need a
   click in the extension's own UI.
 
@@ -216,8 +219,12 @@ not running without sending hello, which would start the agent again.
   noise out of the popup; they don't prove where a password came from (see
   the threat model).
 - **No password generator.** The host's capabilities are
-  `list`, `fill`, `check` and `save`; there's no `generate` message yet, so
-  sign-up forms get no suggested password.
+  `list`, `fill`, `check`, `save` and `passkeys`; there's no `generate`
+  message yet, so sign-up forms get no suggested password.
+- **Passkeys.** A script in the page's own world answers
+  `navigator.credentials.create` and `get` from Deadbolt, through the
+  toolbar popup or the inline menu, and hands anything Deadbolt can't do back
+  to the browser (see Passkeys).
 
 ## Which logins a page gets
 
@@ -247,6 +254,132 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
 - **Every vault** is searched. A `ref` is `<vault id>:<item id>` (64 and 32
   lowercase hex digits), so it names one login without ambiguity. New logins
   go to the default vault.
+
+## Passkeys
+
+Deadbolt keeps passkeys in the vault and signs with them in the agent, so a
+passkey made on one device signs in on every device the vault syncs to. The
+private key never leaves the agent: not to the host, the extension or the
+app.
+
+```text
+page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ content script ── service worker ── host ── agent
+        navigator.credentials        (page options only)                         sender.origin       Touch ID, signs
+```
+
+- **In the vault** a passkey is an item of kind `passkey`: `rp-id`,
+  `username`, `credential-id`, `user-handle` (both base64url), `private-key`
+  (a base64url PKCS#8 P-256 key, a secret field), `created` and `notes`. Its
+  own kind, rather than fields on a login, because a passkey belongs to a
+  relying party id, not to URLs, and because a login and its passkey change
+  and go away independently. An item kind gets core's rules for free:
+  required fields, and a secret field that listings, search and the app
+  never show. The agent alone reads the private key, to sign. Registering again for
+  the same user on the same relying party replaces the item, unless the site
+  excluded it: the agent checks `excludeCredentials` again just before it
+  saves, so one that appeared while the user was asked is never replaced.
+- **Algorithm:** ES256 (COSE -7) only. A registration whose
+  `pubKeyCredParams` lacks it goes to the browser.
+- **Attestation:** `none`, with a fixed AAGUID
+  (`3a31ecda-fefc-f251-1f3e-a11bfdc1de5f`) and canonical CBOR (RFC 8949
+  core deterministic encoding). Credential ids are 16 random bytes.
+- **Sign counter: always 0.** The vault syncs, so the same passkey signs on
+  several devices with no shared counter; any count would go backwards
+  sometimes and look like a cloned key. WebAuthn lets an authenticator that
+  can't keep a counter send 0, and relying parties then skip the check. The
+  flags say so too: BE (backup eligible) and BS (backed up) are set, as for
+  any synced passkey.
+- **Flags:** UP (the user clicked Sign in or Save in Deadbolt's own UI), BE
+  and BS always, AT on registration, and UV only after Touch ID.
+- **User verification (UV)** means the agent asked Touch ID and the Secure
+  Enclave released this store's biometric key, the same check unlock makes,
+  and the key opened the store. It asks once per registration or sign-in,
+  one prompt at a time, and closes the prompt if the request is cancelled.
+  - `discouraged`: no prompt, UV=0.
+  - `preferred` (the default): Touch ID when it's on and set up for this
+    store, else UV=0.
+  - `required`: Touch ID, or the request fails before anything is stored or
+    signed ("this site requires user verification, and Touch ID is off or not
+    set up"). The extension, which learns from `passkey-list` whether the
+    agent can verify, hands such a request to the browser instead, and the
+    popup says when Touch ID will be asked.
+  Clicking Deadbolt's prompt is presence, not verification, so it never sets
+  UV on its own.
+- **Client data** is built by the agent from the origin the browser reported
+  for the frame (`sender.origin`): `type`, the challenge, that origin, and
+  `crossOrigin: false`. Nothing the page says goes into it except the
+  challenge.
+- **Relying party id:** the page's host when the page names none, or one it
+  names that is the host or a parent of it on the same site, by the Public
+  Suffix List with its private section (`site::rp_id`). Never a public
+  suffix (`github.io`, `co.uk`), an IP address or another site. The
+  extension checks first (`SecurityError`, "This relying party ID isn't this
+  site's.") and the agent checks again (`domain_mismatch`).
+- **Frames:** a sandboxed or opaque frame (origin `"null"`) gets
+  `NotAllowedError`, "Deadbolt offers no passkeys to sandboxed frames."
+  Deadbolt takes a call only from a frame whose every ancestor, up to the top
+  page, is on its origin, by the browser's own frame records (`frameChain`,
+  the walk autofill uses): `crossOrigin` in the client data is then always
+  false, as the extension checks before the page gets it. A frame inside
+  another origin, even one inside a page of its own origin, or one whose
+  chain the browser can't account for, goes to the browser, which knows the
+  rules for delegating WebAuthn to cross-origin frames. So does a frame whose
+  Permissions Policy doesn't allow `publickey-credentials-get` (or `-create`),
+  which the content script reads from `document.permissionsPolicy` in its
+  isolated world, and an autofill request in any frame. Incognito tabs go to
+  the browser.
+- **Credential lists** go whole or not at all. `allowCredentials`,
+  `excludeCredentials` and `pubKeyCredParams` reach the extension entry by
+  entry; past 64 entries, or with any entry that isn't a `public-key`
+  credential id (or algorithm) Deadbolt can read, the whole call goes to the
+  browser. Deadbolt never cuts a list short or drops entries, so a nonempty
+  allow list never becomes "any passkey" and an unreadable algorithm list
+  never becomes "any algorithm". A page may pass any iterable, a generator
+  say, which reads only once, so the hook reads each list into an array
+  first and hands the browser's own flow that same copy of the options.
+- **Registration** (`create`) puts "Save a passkey for <rp id>?" in the
+  toolbar popup with Save, Cancel and Use another device. The popup opens by
+  itself where the browser allows it, and the toolbar button gets a badge.
+  If one of the site's `excludeCredentials` is already in the vault, the
+  popup says so and the page gets `InvalidStateError`, as it does when one
+  is saved while the user is asked (the agent's `exists`).
+- **Sign-in** (`get`) without `mediation` asks "Sign in to <rp id> with a
+  passkey?" in the popup, with the site's passkeys (those in
+  `allowCredentials`, or all for the relying party), Sign in, Use another
+  device and Cancel. With `mediation: "conditional"` they
+  join the inline menu's rows on the top page's username and password fields,
+  under the menu's visibility and keyboard rules, and wait there until the
+  user picks one, the page aborts or the document goes away. One request per
+  document waits there; a newer one replaces it.
+- **Back to the browser:** Deadbolt hands the call to the browser's own
+  WebAuthn, unchanged, when the site wants another algorithm or a
+  `cross-platform` authenticator, asks `silent`, has no passkey Deadbolt
+  holds, needs `required` verification Deadbolt can't give, Deadbolt isn't
+  ready (locked, not running, or a host without `passkeys`), or the user
+  chooses Use another device.
+- **Ending:** the page's `AbortSignal`, the timeout (clamped to 1 to 10
+  minutes, 5 by default), closing the tab, and a navigation of the frame, or
+  of the top page for every frame in the tab, end the request: the signal
+  with `AbortError`, the rest with `NotAllowedError`. The request counts from
+  the moment it arrives, so these end it at any step, even before the prompt.
+  Before the prompt, before the agent is asked, and before the page gets a
+  credential, the extension checks again that the call is live and its
+  frame's document and ancestors are unchanged. A ceremony waiting for the
+  host to reconnect is never sent once its request has ended. One already at
+  the agent gets `passkey-cancel`, which closes the Touch ID prompt.
+- **Limits:** a tab holds 8 requests at once, counted as each arrives; more
+  get `NotAllowedError` before anything is asked. A document lists the
+  site's passkeys 4 times at once, then once a second, and requests for the
+  same relying party id while one lists share it. The host allows 20 lists
+  a quarter-second, 10 ceremonies a second and 4 at once, and answers
+  `rate_limited` past them, which the page sees as `NotAllowedError`.
+- **The page↔extension channel:** the content script offers the hook one
+  `MessagePort` at `document_start` and nothing more. The hook is the first
+  content script in the manifest and runs in the page's world before any page
+  script; its capturing listener takes that one offer and stops it reaching
+  the page. The content script accepts requests only after the hook's ack on
+  that port. (Foyer, which this ports, offered a port whenever asked and took
+  whichever acked first, so a page could take it over.)
 
 ## Threat model
 
@@ -303,9 +436,41 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
   before, and the cover has to land between readings. This is why frames,
   whose placement the page around them controls, get no menu and fill only
   from the popup after an explicit check.
-- **The idle lock:** fill and save count as use. Hello, list and check don't,
-  because a browser asks for those on every page and would otherwise hold the
-  vault open.
+- **Passkeys: a page signs only for itself.** A page can call WebAuthn as
+  often as it likes, but every answer is bound to the origin the browser
+  reported for its frame, which the agent writes into the client data and
+  checks the relying party id against. A page can't name another site's
+  relying party, a public suffix, or reach Deadbolt from a sandboxed frame,
+  and a frame with any cross-origin ancestor, or a Permissions Policy that
+  turns WebAuthn off, never gets Deadbolt's passkeys. Both the
+  extension and the agent check, so a bug in either alone doesn't widen it.
+- **Passkeys: the user answers outside the page.** A registration or
+  sign-in needs a click in the toolbar popup, or a pick in the inline menu
+  under its visibility rules, never a page element. What the page learns
+  before that is whether Deadbolt took the call: a site with no passkey in
+  Deadbolt, or one Deadbolt can't serve, sees the browser's own dialog
+  instead. That reveals whether the vault holds a passkey for this site,
+  which the site's own `allowCredentials` already narrows to its accounts.
+- **Passkeys: what crosses the channel.** The page↔extension port carries
+  the page's own options and the credential it asked for, nothing else. The
+  hook runs in the page's world, so the page can see or replace it; that only
+  changes the page's own calls, which are bound to its origin all the same.
+  The port is taken before page scripts run and opened only by the hook's
+  ack, so a page can't pose as another frame or inject calls into one.
+- **Passkeys: the private key stays in the agent.** Replies carry the public
+  key, the credential id, authenticator data, client data and the signature.
+  A listing gives the extension the relying party id, credential id, vault,
+  username and date. The app shows a passkey's site, username and date and
+  never the key.
+- **Passkeys: UV means Touch ID.** UV is set only when the Secure Enclave
+  released this store's biometric key for the ceremony, so a site that
+  requires verification gets a real one or none. An unlocked vault without
+  Touch ID still signs with UV=0 where the site allows it: anyone at the
+  unlocked Mac, or a same-user process, can sign in with a saved passkey,
+  just as they can fill a saved password.
+- **The idle lock:** fill, save, and a passkey registration or sign-in count
+  as use. Hello, list, check and passkey-list don't, because a browser asks
+  for those on every page and would otherwise hold the vault open.
 - **Locked means locked.** While the store is locked, every request but hello
   gets `locked`. Hello starts the agent if it isn't running but never unlocks
   it.
@@ -315,7 +480,10 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
 Every message is a frame: a 32-bit length in native byte order, then that
 many bytes of UTF-8 JSON. The extension connects with
 `chrome.runtime.connectNative("pw.deadbolt.browser")` and keeps the port open.
-Requests are answered in order. `changed` messages can arrive between replies.
+Requests are answered in order, except passkey registrations and sign-ins,
+which wait on the user and answer when done, and `passkey-cancel`, which is
+answered at once, even while a request ahead of it waits on the agent.
+`changed` messages can arrive between replies.
 The host exits when the port closes.
 
 - **Limits:** requests are capped at 64 KiB. A bigger one is skipped whole and
@@ -323,8 +491,10 @@ The host exits when the port closes.
   Replies stay under the browser's 1 MB limit. A list too large to fit becomes
   a `failed` error.
 - **Rate limits:** per connection, `check` allows a burst of 20 then one a
-  second, and `fill` a burst of 60 then four a second. Past that a request
-  gets `rate_limited`; nothing else is limited.
+  second, `fill` a burst of 60 then four a second, and `passkey-create` and
+  `passkey-get` together a burst of 10 then one a second, with at most four
+  running at once. Past that a request gets `rate_limited`; nothing else is
+  limited.
 - **Requests** carry an `id`, a string of up to 200 characters or a number. The
   reply echoes it. A message without a usable id, or one that isn't JSON, gets
   `bad_request` with `"id": null`.
@@ -337,7 +507,7 @@ The host exits when the port closes.
 ```json
 { "id": "1", "type": "hello" }
 { "id": "1", "type": "hello", "protocol": 1, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save"] }
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "passkeys"] }
 ```
 
 `status` is one of:
@@ -412,6 +582,63 @@ The password is 1 to 4096 characters and the username at most 500.
   no spaces, at most 2048 bytes (`bad_request`), and on the page's site
   (`domain_mismatch`). `title` is 1 to 128 characters.
 
+### passkey-list: the passkeys for a page
+
+```json
+{ "id": "6", "type": "passkey-list", "origin": "https://github.com", "rpId": "github.com" }
+{ "id": "6", "type": "passkeys", "rpId": "github.com", "canVerify": true, "passkeys": [
+  { "ref": "<64 hex>:<32 hex>", "vault": "personal", "credentialId": "<base64url>",
+    "username": "octocat", "created": "2026-10-27" } ] }
+```
+
+Every vault's passkeys for the relying party id, which is `rpId` if it's
+allowed for the page (see Passkeys), else `domain_mismatch`, and the page's
+host when left out. `canVerify` says whether Touch ID can verify the user
+now. `username` and `created` are left out when the passkey has none.
+
+### passkey-create: register a passkey
+
+```json
+{ "id": "7", "type": "passkey-create", "origin": "https://github.com", "rpId": "github.com",
+  "challenge": "<base64url>", "user": { "id": "<base64url>", "name": "octocat" },
+  "exclude": ["<base64url>"], "userVerification": "preferred" }
+{ "id": "7", "type": "passkey-created", "ref": "<ref>", "credentialId": "<base64url>",
+  "clientDataJSON": "<base64url>", "attestationObject": "<base64url>",
+  "authenticatorData": "<base64url>", "publicKey": "<base64url SPKI>", "verified": true }
+```
+
+Makes an ES256 passkey in the default vault, replacing one there for the same
+`user.id` on that relying party, and fails if one of `exclude` is already
+saved for it (`exists`), checked again just before saving. `userVerification` is `required`, `preferred` or
+`discouraged`; `verified` says whether Touch ID verified the user (the UV
+flag). Binary values are base64url without padding: the challenge up to 1024
+bytes, `user.id` up to 64, each `exclude` id up to 1023, and at most 64 of
+them. `user.name` is kept to 256 characters.
+
+### passkey-get: sign in with a passkey
+
+```json
+{ "id": "8", "type": "passkey-get", "origin": "https://github.com", "rpId": "github.com",
+  "ref": "<ref>", "challenge": "<base64url>", "userVerification": "preferred" }
+{ "id": "8", "type": "passkey-assertion", "credentialId": "<base64url>",
+  "clientDataJSON": "<base64url>", "authenticatorData": "<base64url>",
+  "signature": "<base64url DER>", "userHandle": "<base64url>", "verified": false }
+```
+
+Signs with the passkey `ref`, which must be for that relying party
+(`domain_mismatch`, or `not_found`).
+
+### passkey-cancel
+
+```json
+{ "id": 9, "type": "passkey-cancel", "request": "8" }
+{ "id": 9, "type": "passkey-cancelled", "found": true }
+```
+
+Stops the `passkey-create` or `passkey-get` whose id is `request` and closes
+its Touch ID prompt. That request is answered first, with a `cancelled`
+error. `found` is false when it had already finished.
+
 ### changed (pushed)
 
 ```json
@@ -442,20 +669,25 @@ Pushes carry no id and no values. Refetch what's on screen.
 - `domain_mismatch`: the login or URL isn't on the page's site.
 - `bad_request`: a malformed message, a page that gets no logins, or a value
   out of range.
-- `rate_limited`: too many checks or fills; try again in a moment.
+- `rate_limited`: too many checks, fills or passkey requests; try again in a
+  moment.
+- `cancelled`: a passkey request stopped by `passkey-cancel`.
+- `exists`: a passkey the registration excluded is already saved.
 - `failed`: anything else.
 
 `message` is for people and never holds a secret.
 
 ## Not supported yet
 
-- **Passkeys:** no storage or WebAuthn yet. They'd be matched by relying party
-  id rather than URL.
+- **Passkeys:** ES256 only, no attestation other than `none`, no
+  extensions (`prf`, `largeBlob`, `credProps`), no editing a passkey, and no
+  import or export. A passkey from another manager can't be brought over.
 - **"Sign in with…" (SSO):** remembering which identity provider a site uses
   isn't supported.
 - **Firefox and Safari:** Firefox passes different host arguments and uses a
   different manifest. Safari needs an app extension.
 - **Touch ID on fill:** an unlocked vault fills without asking again.
+  Passkeys ask (see Passkeys).
 - **Unlocking from the browser:** the extension can say Deadbolt is locked but
   can't unlock it. Use the app or `deadbolt unlock`.
 - **Choosing the vault for a new login:** new logins go to the default vault.
@@ -473,5 +705,7 @@ this design: an extension-only native host, matching by host or registrable
 domain with the private suffixes, https-only filling, secret-free lists, and
 check-then-save. The host is Deadbolt's own. The extension adapts parts of
 Foyer's: form detection, Shadow DOM traversal, filling, the inline menu and
-save prompt frames, frame targeting and the save flow. Each adapted file says
+save prompt frames, frame targeting, the save flow, and the passkey hook,
+channel and frame and relying party checks (Foyer kept passkeys in the
+extension; here the agent holds and signs with them). Each adapted file says
 so in its header, and `extension/README.md` lists what was kept and dropped.
