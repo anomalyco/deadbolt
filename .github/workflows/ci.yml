@@ -36,6 +36,17 @@ jobs:
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +stable test --workspace --locked
 
+  # Deadbolt Send's receiver as the receive page builds it (site/scripts/wasm.sh).
+  wasm:
+    name: Send receiver (wasm32)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add wasm32-unknown-unknown --toolchain stable
+      - run: cargo +stable clippy -p deadbolt-send -p deadbolt-send-web --target wasm32-unknown-unknown --locked -- -D warnings
+
   extension:
     name: Browser extension
     if: github.event_name != 'schedule'
