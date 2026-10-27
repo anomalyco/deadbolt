@@ -9,8 +9,7 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field, noun};
 use rune::{
-    Chrome, Cx, Edge, El, Icon, ScrollSpec, TextEdit, TextStyle, Transition, col, el, icon, row,
-    spacer, text,
+    Chrome, Cx, Edge, El, Icon, ScrollSpec, TextStyle, Transition, col, el, icon, row, spacer, text,
 };
 use rune_kit::shell::{Page, SidebarRow, SplitView, Toolbar};
 use rune_kit::{
@@ -806,14 +805,9 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     // gives a code), so there's nothing here to show or copy.
     let held = field.kind != "otp";
     let revealed = held && s.revealed.iter().any(|f| f == &field.name);
-    let masked = secret && !revealed;
     // A key file's final line break would draw an empty last line; Copy
     // still copies it.
-    let value = if masked {
-        "••••••••••••".to_owned()
-    } else {
-        field.value.trim_end_matches(['\r', '\n']).to_owned()
-    };
+    let value = field.value.trim_end_matches(['\r', '\n']).to_owned();
     // Secrets and key material read in mono, where 0/O and l/1 differ.
     let style = if secret || matches!(field.name.as_str(), "public-key" | "fingerprint") {
         k.ty.mono.lh(VALUE_LINE)
@@ -850,20 +844,19 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     // Shown values wrap: notes, an address, a secure note's body or a
     // private key over their lines, and a long public key, URL or base64
     // run inside itself rather than being cut off. A masked value is one line.
-    let value = if masked {
-        text(value).truncate_fade()
+    let value = if secret && (!held || value.is_empty()) {
+        // Nothing held to show (an otp secret the agent left out): just the mask.
+        text("••••••••••••").truncate_fade()
     } else if secret {
-        // A shown secret is drawn through Rune's secure path, never as
-        // text: kept out of the element tree, `Debug` and the shared layout
-        // cache, zeroized, and masked again as it leaves (a lock's fade).
-        // Read-only: it takes no presses, focus or keys.
-        let mut edit = TextEdit::new(value);
-        edit.set_secure(true);
-        edit.set_revealed(true);
-        rune::text_input(&edit, style)
+        // A secret, hidden or shown, is a secure label: twelve dots
+        // whatever its length until Show, never selectable or copyable,
+        // kept out of the element tree, `Debug` and the shared caches,
+        // zeroized, and masked again as it leaves (a lock's fade).
+        text(value)
+            .secure()
+            .revealed(revealed)
             .wrap_anywhere()
             .min_w(0.0)
-            .inert()
     } else {
         text(value).wrap_anywhere().min_w(0.0)
     };
