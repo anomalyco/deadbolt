@@ -12,6 +12,10 @@
 //!   without a scheme is read as https. The port and path don't matter.
 //! - Logins are offered only to https pages, or http ones on local
 //!   development hosts.
+//! - Among a site's logins, those saved for the page's own origin come first
+//!   (port included, so `localhost:3000` isn't `localhost:5173`), then its
+//!   host, then a parent or child of it or a host sharing a parent below the
+//!   site, then the rest of the site; see [`Closeness`].
 
 use url::Url;
 
@@ -47,19 +51,74 @@ impl Site {
 /// punycode, no port), without IPv6 brackets. A URL without `://` is read
 /// as https.
 pub fn url_host(url: &str) -> Option<String> {
+    host_of(&parse_url(url)?)
+}
+
+/// A saved URL as WHATWG URL parsing gives it, read as https without `://`.
+fn parse_url(url: &str) -> Option<Url> {
     let raw = url.trim();
     if raw.is_empty() {
         return None;
     }
-    let parsed = if raw.contains("://") {
-        Url::parse(raw)
+    if raw.contains("://") {
+        Url::parse(raw).ok()
     } else {
-        Url::parse(&format!("https://{raw}"))
-    };
-    let host = parsed.ok()?.host_str()?.to_lowercase();
+        Url::parse(&format!("https://{raw}")).ok()
+    }
+}
+
+fn host_of(parsed: &Url) -> Option<String> {
+    let host = parsed.host_str()?.to_lowercase();
     let host = host.strip_prefix('[').unwrap_or(&host);
     let host = host.strip_suffix(']').unwrap_or(host);
     (!host.is_empty()).then(|| host.to_string())
+}
+
+/// How closely a saved URL on a page's site matches the page, closest first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Closeness {
+    /// The page's origin: scheme, host and port.
+    Origin,
+    /// The page's host, on another scheme or port.
+    Host,
+    /// A parent or child of the page's host, or a host sharing a parent
+    /// with it below the site (`a.eu.example.com`, `b.eu.example.com`).
+    Parent,
+    /// Elsewhere on the page's site.
+    Site,
+}
+
+/// How closely `url` matches the page at `origin`, if it's on its site.
+pub fn closeness(origin: &str, url: &str) -> Option<Closeness> {
+    let page = Url::parse(origin).ok()?;
+    let page_host = host_of(&page)?;
+    let saved = parse_url(url)?;
+    let host = host_of(&saved)?;
+    let site = registrable_domain(&page_host);
+    if !host_matches(&host, &site) {
+        return None;
+    }
+    let trim = |h: &str| h.strip_suffix('.').unwrap_or(h).to_string();
+    let (page_host, host) = (trim(&page_host), trim(&host));
+    if host == page_host {
+        return Some(if saved.origin() == page.origin() {
+            Closeness::Origin
+        } else {
+            Closeness::Host
+        });
+    }
+    let shared = page_host
+        .rsplit('.')
+        .zip(host.rsplit('.'))
+        .take_while(|(a, b)| a == b)
+        .count();
+    let site_labels = site.split('.').count();
+    let nested = host_within(&host, &page_host) || host_within(&page_host, &host);
+    Some(if nested || shared > site_labels {
+        Closeness::Parent
+    } else {
+        Closeness::Site
+    })
 }
 
 /// `host` is `domain` or under it, ignoring case and a trailing dot.
@@ -220,6 +279,45 @@ mod tests {
         assert_eq!(url_host("https://exa mple.com"), None);
         assert_eq!(url_host("not a url"), None);
         assert_eq!(url_host("file:///etc/passwd"), None);
+    }
+
+    #[test]
+    fn closeness_ranks_origin_host_parent_then_site() {
+        use Closeness::*;
+        let page = "https://accounts.eu.example.com";
+        for (url, want) in [
+            ("https://accounts.eu.example.com/login", Some(Origin)),
+            ("accounts.eu.example.com", Some(Origin)),
+            ("https://accounts.eu.example.com:443/", Some(Origin)),
+            ("https://accounts.eu.example.com:8443/", Some(Host)),
+            ("http://accounts.eu.example.com", Some(Host)),
+            ("https://eu.example.com", Some(Parent)),
+            ("https://example.com", Some(Parent)),
+            ("https://x.accounts.eu.example.com", Some(Parent)),
+            ("https://billing.eu.example.com", Some(Parent)),
+            ("https://www.example.com", Some(Site)),
+            ("https://us.example.com", Some(Site)),
+            ("https://example.org", None),
+        ] {
+            assert_eq!(closeness(page, url), want, "{url}");
+        }
+        assert_eq!(
+            closeness("http://localhost:3000", "http://localhost:3000/login"),
+            Some(Origin)
+        );
+        assert_eq!(
+            closeness("http://localhost:3000", "http://localhost:5173"),
+            Some(Host)
+        );
+        assert_eq!(closeness("https://github.com", "github.com"), Some(Origin));
+        assert_eq!(
+            closeness("https://gist.github.com", "github.com"),
+            Some(Parent)
+        );
+        assert_eq!(
+            closeness("https://alice.github.io", "https://bob.github.io"),
+            None
+        );
     }
 
     #[test]
