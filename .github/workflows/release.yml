@@ -1,0 +1,564 @@
+name: Release
+
+# Builds, signs, and publishes Deadbolt (the CLI, Deadbolt.app, and the browser
+# extension) from one exact commit to the Anomaly release service
+# (docs/releasing.md), split the way Hex's and OpenCode's releases are:
+#
+# - build jobs run repository code (cargo, build.rs, swiftc, bun, brew). They
+#   have no environment, no secrets, and no id-token, and they produce
+#   unsigned files.
+# - sign and publish jobs run in the release environment. They check out only
+#   .github/release/ and run only those scripts and SHA-pinned actions, on
+#   artifacts they treat as data: they never build, install dependencies, or
+#   execute repository code or the artifacts.
+# - every artifact carries a SHA256SUMS whose digest the job that made it
+#   reports as an output; every job that downloads it checks that digest
+#   (.github/release/verify-artifacts.sh), so nothing swapped in between jobs
+#   is signed or published.
+#
+# The Touch ID helper is signed before `deadbolt` is built, because `deadbolt`
+# pins the helper's exact signed bytes (docs/touch-id.md): build-enclave →
+# sign-enclave → build-macos → sign-macos → verify-macos.
+#
+# This file and .github/release/ are the security boundary for releases.
+#
+# Channels (.github/release/plan.sh):
+# - dev: every push to dev (except docs/site/Markdown-only) publishes
+#   0.0.0-dev-<run number> on the dev channel; a newer push cancels a dev run
+#   in progress. Without the Apple values it publishes the CLI unsigned and no
+#   app.
+# - check: a dispatch from dev or production builds, signs, and verifies, and
+#   publishes nothing.
+# - stable: a push to production or of tag v<version>, or a dispatch from
+#   production, publishes the workspace version with macOS signed, then the
+#   GitHub release and Homebrew.
+on:
+  workflow_dispatch:
+    inputs:
+      channel:
+        description: check (build, sign, and verify; publish nothing), dev (run from dev), or stable (run from production)
+        type: choice
+        options: [check, dev, stable]
+        default: check
+  push:
+    branches: [dev, production]
+    tags: ["v*"]
+    # Docs and the site alone cut no build (tag pushes ignore paths).
+    paths-ignore: ["docs/**", "site/**", "**/*.md"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || (github.ref_type == 'tag' || github.ref_name == 'production') && 'stable' || 'dev' }}
+  # Only the dev channel: a newer push supersedes a dev build in progress.
+  cancel-in-progress: ${{ (github.event_name == 'workflow_dispatch' && inputs.channel || (github.ref_type == 'tag' || github.ref_name == 'production') && 'stable' || 'dev') == 'dev' }}
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  DEADBOLT_TEAM_ID: 5NZ4Q7NXJ4
+
+jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      sha: ${{ steps.plan.outputs.sha }}
+      channel: ${{ steps.plan.outputs.channel }}
+      service: ${{ steps.plan.outputs.service }}
+      tag: ${{ steps.plan.outputs.tag }}
+      notes-url: ${{ steps.plan.outputs.notes-url }}
+      release-channel: ${{ steps.plan.outputs.release-channel }}
+      release-version: ${{ steps.plan.outputs.release-version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          sparse-checkout: |
+            /.github/release/
+            /Cargo.toml
+            /docs/releases/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: plan
+        run: SHA=$(git rev-parse HEAD) bash .github/release/plan.sh
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          CHANNEL: ${{ github.event_name == 'workflow_dispatch' && inputs.channel || (github.ref_type == 'tag' || github.ref_name == 'production') && 'stable' || 'dev' }}
+
+  # ---- Build: repository code; no environment, secrets, or id-token ----------
+
+  # Static (musl) CLI tarballs.
+  build-linux-x64:
+    name: Build Linux x64
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+      TARGET: x86_64-unknown-linux-musl
+      PLATFORM: linux-x64
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps: &linux-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: ${{ env.TARGET }}
+      - run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - name: Build
+        run: |
+          # C code (ring, blake3) for the musl target goes through musl-gcc.
+          export "CC_${TARGET//-/_}=musl-gcc"
+          scripts/set-crate-version.sh "$PWD" "$DEADBOLT_VERSION"
+          cargo build --release --locked -p deadbolt-cli --target "$TARGET"
+          scripts/package-cli.sh "$DEADBOLT_VERSION" "$PLATFORM" "target/$TARGET/release" "$RUNNER_TEMP/dist"
+          check=$(mktemp -d)
+          tar -xzf "$RUNNER_TEMP/dist/deadbolt-$DEADBOLT_VERSION-$PLATFORM.tar.gz" -C "$check"
+          file "$check/deadbolt" | grep -q 'statically linked' || { echo "::error::deadbolt is not static."; exit 1; }
+          "$check/deadbolt" --version | grep -qF "deadbolt $DEADBOLT_VERSION"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-cli-${{ env.PLATFORM }}
+          path: ${{ runner.temp }}/dist
+
+  build-linux-arm64:
+    name: Build Linux arm64
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 60
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+      TARGET: aarch64-unknown-linux-musl
+      PLATFORM: linux-arm64
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps: *linux-steps
+
+  # The Chromium extension, stamped with the release version.
+  build-extension:
+    name: Build extension
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Build
+        working-directory: extension
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+          mkdir -p "$RUNNER_TEMP/dist"
+          (cd dist && zip -X -r -q "$RUNNER_TEMP/dist/deadbolt-extension-$DEADBOLT_VERSION.zip" .)
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-extension
+          path: ${{ runner.temp }}/dist
+
+  # The Touch ID helper for both architectures, signed ad hoc.
+  build-enclave:
+    name: Build Touch ID helper
+    needs: plan
+    runs-on: macos-26
+    timeout-minutes: 15
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - run: crates/cli/scripts/build-enclave.sh "$RUNNER_TEMP/enclave"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-enclave
+          path: ${{ runner.temp }}/enclave
+
+  # ---- Sign: release environment; only .github/release/ is checked out -------
+
+  # Signs the two thin Touch ID helpers with the Developer ID, and decides
+  # whether this run signs macOS at all: without the Apple values, dev and
+  # check go on with the CLI unsigned and no app; stable fails.
+  sign-enclave:
+    name: Sign Touch ID helper
+    needs: [plan, build-enclave]
+    if: ${{ !cancelled() && needs.build-enclave.result == 'success' }}
+    runs-on: macos-26
+    timeout-minutes: 20
+    environment: release
+    env:
+      CHANNEL: ${{ needs.plan.outputs.channel }}
+      RELEASE_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+    outputs:
+      signed: ${{ steps.credentials.outputs.available }}
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - &checkout-release
+        name: Check out the release scripts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          sparse-checkout: /.github/release/
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+      - id: credentials
+        name: Require the Apple values
+        env:
+          CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          missing=
+          [ -n "$CERTIFICATE" ] || missing="$missing APPLE_SIGNING_CERTIFICATE"
+          [ -n "$KEY" ] || missing="$missing APPLE_NOTARY_KEY"
+          [ -n "$KEY_ID" ] || missing="$missing APPLE_NOTARY_KEY_ID"
+          [ -n "$ISSUER" ] || missing="$missing APPLE_NOTARY_ISSUER_ID"
+          if [ -z "$missing" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "$RELEASE_CHANNEL" = stable ]; then
+            echo "::error::Stable releases need signed macOS builds, and the release environment lacks:$missing."
+            exit 1
+          else
+            echo "available=false" >> "$GITHUB_OUTPUT"
+            echo "macOS is unsigned (CLI only, no app): the release environment lacks$missing." >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Download
+        if: steps.credentials.outputs.available == 'true'
+        uses: ./.github/release/download
+        with:
+          pattern: build-enclave
+          digests: build-enclave=${{ needs.build-enclave.outputs.digest }}
+      - &import-credentials
+        name: Import the certificate and notary key
+        if: steps.credentials.outputs.available == 'true'
+        run: bash .github/release/macos-credentials.sh "$RUNNER_TEMP/credentials"
+        env:
+          APPLE_SIGNING_CERTIFICATE: ${{ secrets.APPLE_SIGNING_CERTIFICATE }}
+          APPLE_SIGNING_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_SIGNING_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+      - name: Sign
+        if: steps.credentials.outputs.available == 'true'
+        run: bash .github/release/sign-enclave.sh "$RUNNER_TEMP/in/build-enclave" "$RUNNER_TEMP/out"
+      - &remove-credentials
+        name: Remove the credentials
+        if: always() && steps.credentials.outputs.available == 'true'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/credentials/signing.keychain-db" 2>/dev/null || true
+          rm -rf "$RUNNER_TEMP/credentials"
+      - id: upload
+        if: steps.credentials.outputs.available == 'true'
+        uses: ./.github/release/upload
+        with:
+          name: sign-enclave
+          path: ${{ runner.temp }}/out
+
+  # ---- Build: repository code; no environment, secrets, or id-token ----------
+
+  # Universal Deadbolt.app (signed ad hoc around the helper) and the macOS CLI
+  # tarballs, compiled against the signed helper when there is one.
+  build-macos:
+    name: Build macOS
+    needs: [plan, build-enclave, sign-enclave]
+    if: ${{ !cancelled() && needs.sign-enclave.result == 'success' }}
+    runs-on: macos-26
+    timeout-minutes: 120
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+      ENCLAVE: ${{ needs.sign-enclave.outputs.signed == 'true' && 'sign-enclave' || 'build-enclave' }}
+    outputs:
+      app-digest: ${{ steps.upload-app.outputs.digest }}
+      cli-digest: ${{ steps.upload-cli.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+      - uses: ./.github/release/download
+        with:
+          pattern: ${{ env.ENCLAVE }}
+          digests: ${{ needs.sign-enclave.outputs.signed == 'true' && format('sign-enclave={0}', needs.sign-enclave.outputs.digest) || format('build-enclave={0}', needs.build-enclave.outputs.digest) }}
+      - name: Build
+        run: |
+          scripts/set-crate-version.sh "$PWD" "$DEADBOLT_VERSION"
+          export DEADBOLT_ENCLAVE_PREBUILT="$RUNNER_TEMP/in/$ENCLAVE"
+          bash crates/app/scripts/bundle.sh --universal "$RUNNER_TEMP/app/Deadbolt.app"
+          mkdir -p "$RUNNER_TEMP/dist-app"
+          /usr/bin/ditto -c -k --sequesterRsrc --keepParent "$RUNNER_TEMP/app/Deadbolt.app" "$RUNNER_TEMP/dist-app/Deadbolt.app.zip"
+          for pair in darwin-arm64=aarch64 darwin-x64=x86_64; do
+            scripts/package-cli.sh "$DEADBOLT_VERSION" "${pair%%=*}" "target/${pair#*=}-apple-darwin/release" "$RUNNER_TEMP/dist-cli"
+            # The pinned helper is the one this job downloaded, byte for byte.
+            cmp "target/${pair#*=}-apple-darwin/release/deadbolt-enclave" "$DEADBOLT_ENCLAVE_PREBUILT/${pair#*=}/deadbolt-enclave"
+          done
+      - id: upload-app
+        uses: ./.github/release/upload
+        with:
+          name: build-macos-app
+          path: ${{ runner.temp }}/dist-app
+      - id: upload-cli
+        uses: ./.github/release/upload
+        with:
+          name: build-macos-cli
+          path: ${{ runner.temp }}/dist-cli
+
+  # ---- Sign: release environment; only .github/release/ is checked out -------
+
+  # Signs `deadbolt` and Deadbolt.app around the already-signed helper,
+  # notarizes the CLI, the app, and the DMG, and staples the app and DMG.
+  sign-macos:
+    name: Sign macOS
+    needs: [plan, sign-enclave, build-macos]
+    if: ${{ !cancelled() && needs.build-macos.result == 'success' && needs.sign-enclave.outputs.signed == 'true' }}
+    runs-on: macos-26
+    timeout-minutes: 90
+    environment: release
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - *checkout-release
+      # sign-enclave found the Apple values; the shared steps below check this.
+      - id: credentials
+        name: The Apple values are present
+        run: echo "available=true" >> "$GITHUB_OUTPUT"
+      - name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: build-macos-*
+          digests: build-macos-app=${{ needs.build-macos.outputs.app-digest }} build-macos-cli=${{ needs.build-macos.outputs.cli-digest }}
+      - *import-credentials
+      - name: Sign, notarize, and staple
+        run: bash .github/release/sign-macos.sh "$RUNNER_TEMP/in/build-macos-app/Deadbolt.app.zip" "$RUNNER_TEMP/in/build-macos-cli" "$RUNNER_TEMP/out"
+        env:
+          DEADBOLT_NOTARY_KEY_ID: ${{ vars.APPLE_NOTARY_KEY_ID }}
+          DEADBOLT_NOTARY_ISSUER: ${{ vars.APPLE_NOTARY_ISSUER_ID }}
+      - *remove-credentials
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: sign-macos
+          path: ${{ runner.temp }}/out
+
+  # ---- Verify: repository code on the signed files; no secrets ----------------
+
+  # What a user's Mac checks, the Touch ID pin, and a launch.
+  verify-macos:
+    name: Verify macOS
+    needs: [plan, sign-macos]
+    if: ${{ !cancelled() && needs.sign-macos.result == 'success' }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: ./.github/release/download
+        with:
+          pattern: sign-macos
+          digests: sign-macos=${{ needs.sign-macos.outputs.digest }}
+      - run: scripts/verify-macos-release.sh "$RUNNER_TEMP/in/sign-macos" "$DEADBOLT_VERSION"
+
+  # ---- Publish: release environment; only .github/release/ is checked out ----
+
+  # The only job that publishes to the release service; its OIDC token is the
+  # credential. Publishes the cli, desktop (signed builds only), and extension
+  # artifacts.
+  publish:
+    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-macos, sign-enclave, sign-macos, verify-macos]
+    if: >-
+      ${{ !cancelled() && needs.plan.outputs.channel != 'check'
+      && needs.build-linux-x64.result == 'success' && needs.build-linux-arm64.result == 'success'
+      && needs.build-extension.result == 'success' && needs.build-macos.result == 'success'
+      && (needs.sign-enclave.outputs.signed != 'true' || needs.verify-macos.result == 'success') }}
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env: &publish-env
+      RELEASE: ${{ needs.plan.outputs.service }}
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_RELEASE_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+    steps:
+      - *checkout-release
+      - &download-release
+        name: Download
+        uses: ./.github/release/download
+        with:
+          pattern: ${{ needs.sign-enclave.outputs.signed == 'true' && '{build-cli-linux-*,build-extension,sign-macos}' || '{build-cli-linux-*,build-extension,build-macos-cli}' }}
+          digests: >-
+            build-cli-linux-x64=${{ needs.build-linux-x64.outputs.digest }}
+            build-cli-linux-arm64=${{ needs.build-linux-arm64.outputs.digest }}
+            build-extension=${{ needs.build-extension.outputs.digest }}
+            ${{ needs.sign-enclave.outputs.signed == 'true' && format('sign-macos={0}', needs.sign-macos.outputs.digest) || format('build-macos-cli={0}', needs.build-macos.outputs.cli-digest) }}
+      - &assemble
+        name: Gather the release files
+        run: bash .github/release/assemble.sh "$RUNNER_TEMP/in" "$RUNNER_TEMP/dist"
+      - name: Attest provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/dist/*.tar.gz
+            ${{ runner.temp }}/dist/*.zip
+            ${{ runner.temp }}/dist/*.dmg
+      - name: Publish
+        env:
+          NOTES_URL: ${{ needs.plan.outputs.notes-url }}
+        run: |
+          for artifact in cli desktop extension; do
+            bash .github/release/release-service.sh publish "$artifact" "$RUNNER_TEMP/dist" "$NOTES_URL"
+          done
+          for manifest in "$RUNNER_TEMP"/dist/manifest-*.json; do
+            { echo "### $(basename "$manifest")"; echo '```json'; cat "$manifest"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+  github:
+    name: GitHub release
+    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-macos, sign-enclave, sign-macos, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.release-channel == 'stable' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_RELEASE_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+      DEADBOLT_RELEASE_COMMIT: ${{ needs.plan.outputs.sha }}
+      DEADBOLT_RELEASE_TAG: ${{ needs.plan.outputs.tag }}
+      DEADBOLT_RELEASE_SOURCE: ${{ github.workspace }}
+    steps:
+      # Credentials stay so the job can push the tag; nothing here runs
+      # repository code beyond .github/release/.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          sparse-checkout: |
+            /.github/release/
+            /docs/releases/
+          sparse-checkout-cone-mode: false
+      - *download-release
+      - *assemble
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash .github/release/publish-github-release.sh "$RUNNER_TEMP/dist"
+
+  # Renders the formula and cask from the published stable manifests and
+  # checks them with brew (style, audit, install, test), without secrets.
+  homebrew-stage:
+    name: Homebrew formula and cask
+    needs: [plan, publish]
+    if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.release-channel == 'stable' }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      RELEASE: ${{ needs.plan.outputs.service }}
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      HOMEBREW_NO_AUTO_UPDATE: "1"
+      HOMEBREW_NO_INSTALL_FROM_API: "1"
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Render
+        run: |
+          curl -fsS "$RELEASE/deadbolt/cli/stable.json" -o "$RUNNER_TEMP/cli.json"
+          curl -fsS "$RELEASE/deadbolt/desktop/stable.json" -o "$RUNNER_TEMP/desktop.json"
+          scripts/release-homebrew.sh render "$DEADBOLT_VERSION" "$RUNNER_TEMP/cli.json" "$RUNNER_TEMP/desktop.json" "$RUNNER_TEMP/homebrew"
+          for file in deadbolt.rb deadbolt-cask.rb; do
+            { echo "### $file"; echo '```ruby'; cat "$RUNNER_TEMP/homebrew/$file"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          done
+      - name: Check with brew
+        run: |
+          brew tap anomalyco/tap
+          tap=$(brew --repo anomalyco/tap)
+          mkdir -p "$tap/Casks"
+          cp "$RUNNER_TEMP/homebrew/deadbolt.rb" "$tap/deadbolt.rb"
+          cp "$RUNNER_TEMP/homebrew/deadbolt-cask.rb" "$tap/Casks/deadbolt.rb"
+          brew style --formula anomalyco/tap/deadbolt
+          brew style --cask anomalyco/tap/deadbolt
+          brew audit --formula --strict --online anomalyco/tap/deadbolt
+          brew audit --cask --strict --online anomalyco/tap/deadbolt
+          test "$(brew info --json=v2 --formula anomalyco/tap/deadbolt | jq -r '.formulae[0].versions.stable')" = "$DEADBOLT_VERSION"
+          brew install --formula anomalyco/tap/deadbolt
+          brew test anomalyco/tap/deadbolt
+          test -x "$(brew --prefix)/bin/deadbolt-enclave"
+          brew uninstall --formula anomalyco/tap/deadbolt
+          brew install --cask anomalyco/tap/deadbolt
+          "$(brew --prefix)/bin/deadbolt" --version | grep -qF "deadbolt $DEADBOLT_VERSION"
+          brew uninstall --cask anomalyco/tap/deadbolt
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-homebrew
+          path: ${{ runner.temp }}/homebrew
+
+  homebrew:
+    name: Homebrew
+    needs: [plan, homebrew-stage]
+    if: ${{ !cancelled() && needs.homebrew-stage.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment: release
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+    steps:
+      - *checkout-release
+      - uses: ./.github/release/download
+        with:
+          pattern: build-homebrew
+          digests: build-homebrew=${{ needs.homebrew-stage.outputs.digest }}
+      - name: Push to anomalyco/homebrew-tap
+        env:
+          HOMEBREW_TAP_KEY: ${{ secrets.HOMEBREW_TAP_KEY }}
+        run: bash .github/release/push-homebrew.sh "$RUNNER_TEMP/in/build-homebrew" "$DEADBOLT_VERSION"
+
+  # Tells Homebrew installs about the version only once the tap serves it.
+  record-brew:
+    needs: [plan, homebrew]
+    if: ${{ !cancelled() && needs.homebrew.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+    env: *publish-env
+    steps:
+      - *checkout-release
+      - run: |
+          bash .github/release/release-service.sh distribution cli brew "$DEADBOLT_VERSION"
+          bash .github/release/release-service.sh distribution desktop brew "$DEADBOLT_VERSION"

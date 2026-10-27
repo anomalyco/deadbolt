@@ -32,6 +32,7 @@ use crate::protocol::{Command, DeviceInfo, ErrorCode, Event, Reply, Status, Vaul
 #[command(
     name = "deadbolt",
     version,
+    long_version = env!("DEADBOLT_LONG_VERSION"),
     about = "A decentralized password manager",
     long_about = "A decentralized password manager.\n\nEverything can be driven with \
 flags, env and stdin. The passphrase comes from DEADBOLT_PASSPHRASE or \

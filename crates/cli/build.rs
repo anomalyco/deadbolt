@@ -1,6 +1,9 @@
 //! Stamps a build id into the binary so the CLI can tell when a running
 //! agent comes from a different build, even if the crate version is the same,
-//! and compiles the macOS Secure Enclave helper (`deadbolt-enclave`).
+//! stamps the release channel it was built for (`DEADBOLT_BUILD_CHANNEL`), and
+//! compiles the macOS Secure Enclave helper (`deadbolt-enclave`), or takes a
+//! prebuilt, already-signed one from `DEADBOLT_ENCLAVE_PREBUILT` (release
+//! builds, docs/releasing.md).
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -13,7 +16,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src");
+    println!("cargo:rerun-if-changed=src/agent/enclave-Info.plist");
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_SIGNING_IDENTITY");
+    println!("cargo:rerun-if-env-changed=DEADBOLT_ENCLAVE_PREBUILT");
+    println!("cargo:rerun-if-env-changed=DEADBOLT_BUILD_CHANNEL");
 
     let commit = Command::new("git")
         .args(["rev-parse", "--short=12", "HEAD"])
@@ -28,8 +34,32 @@ fn main() {
         .unwrap_or(0);
     println!("cargo:rustc-env=DEADBOLT_BUILD={commit}.{built}");
 
+    // The release channel this build is published on (docs/releasing.md);
+    // empty for local builds.
+    let channel = std::env::var("DEADBOLT_BUILD_CHANNEL").unwrap_or_default();
+    assert!(
+        matches!(channel.as_str(), "" | "dev" | "beta" | "stable"),
+        "DEADBOLT_BUILD_CHANNEL must be dev, beta or stable, not {channel:?}"
+    );
+    let version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let long_version = if channel.is_empty() {
+        version
+    } else {
+        format!("{version} ({channel})")
+    };
+    println!("cargo:rustc-env=DEADBOLT_BUILD_CHANNEL={channel}");
+    println!("cargo:rustc-env=DEADBOLT_LONG_VERSION={long_version}");
+
+    let prebuilt = std::env::var_os("DEADBOLT_ENCLAVE_PREBUILT")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from);
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
-        if let Err(reason) = build_macos_enclave_helpers() {
+        if let Err(reason) = build_macos_enclave_helpers(prebuilt.as_deref()) {
+            // A release build must never quietly ship without Touch ID.
+            assert!(
+                prebuilt.is_none(),
+                "DEADBOLT_ENCLAVE_PREBUILT is set, but: {reason}"
+            );
             println!("cargo:warning=building without Touch ID helper: {reason}");
             emit_empty_enclave_env();
         }
@@ -49,30 +79,15 @@ fn emit_empty_enclave_env() {
     clippy::disallowed_methods,
     reason = "build script reads Cargo TARGET env to compile the macOS Secure Enclave helper"
 )]
-fn build_macos_enclave_helpers() -> Result<(), String> {
+fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
     let swift_src = PathBuf::from("src/agent/enclave.swift");
     let build_rs = PathBuf::from("build.rs");
+    let plist_path = PathBuf::from("src/agent/enclave-Info.plist");
     let out_dir =
         PathBuf::from(std::env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR is not set".to_string())?);
 
-    let plist_path = out_dir.join("deadbolt-enclave-Info.plist");
     let prod_bin = out_dir.join("deadbolt-enclave");
     let test_bin = out_dir.join("deadbolt-enclave-test");
-
-    let plist = r#"<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleIdentifier</key>
-    <string>pw.deadbolt.app.enclave</string>
-    <key>CFBundleName</key>
-    <string>Deadbolt</string>
-    <key>CFBundleDisplayName</key>
-    <string>Deadbolt</string>
-</dict>
-</plist>
-"#;
-    std::fs::write(&plist_path, plist).map_err(|e| format!("write Info.plist: {e}"))?;
 
     let target_triple = std::env::var("TARGET").ok().and_then(|target| {
         if target.starts_with("aarch64-") {
@@ -88,21 +103,29 @@ fn build_macos_enclave_helpers() -> Result<(), String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "-");
+    // Where the production helper came from: a prebuilt directory or the
+    // signing identity. A change rebuilds both helpers.
+    let source = match prebuilt {
+        Some(dir) => format!("prebuilt:{}", dir.display()),
+        None => signing_identity.clone().unwrap_or_else(|| "-".into()),
+    };
     let id_stamp = out_dir.join("deadbolt-enclave.signing-identity");
     let prev_identity = std::fs::read_to_string(&id_stamp).ok();
-    let identity_changed =
-        prev_identity.as_deref() != Some(signing_identity.as_deref().unwrap_or("-"));
+    let identity_changed = prev_identity.as_deref() != Some(source.as_str());
 
-    compile_one(
-        &swift_src,
-        &build_rs,
-        &plist_path,
-        target_triple,
-        signing_identity.as_deref(),
-        identity_changed,
-        false,
-        &prod_bin,
-    )?;
+    match prebuilt {
+        Some(dir) => copy_prebuilt(dir, &prod_bin)?,
+        None => compile_one(
+            &swift_src,
+            &build_rs,
+            &plist_path,
+            target_triple,
+            signing_identity.as_deref(),
+            identity_changed,
+            false,
+            &prod_bin,
+        )?,
+    }
     compile_one(
         &swift_src,
         &build_rs,
@@ -113,8 +136,7 @@ fn build_macos_enclave_helpers() -> Result<(), String> {
         true,
         &test_bin,
     )?;
-    std::fs::write(&id_stamp, signing_identity.as_deref().unwrap_or("-"))
-        .map_err(|e| format!("write {}: {e}", id_stamp.display()))?;
+    std::fs::write(&id_stamp, &source).map_err(|e| format!("write {}: {e}", id_stamp.display()))?;
 
     let prod_bytes =
         std::fs::read(&prod_bin).map_err(|e| format!("read {}: {e}", prod_bin.display()))?;
@@ -126,7 +148,8 @@ fn build_macos_enclave_helpers() -> Result<(), String> {
 
     // Copy the production helper next to the compiled `deadbolt` binary in the
     // Cargo profile directory (`target/<triple?>/<profile>/deadbolt-enclave`)
-    // so `bundle.sh` reuses the exact signed binary that `build.rs` hashed.
+    // so `bundle.sh` and release packaging reuse the exact signed binary that
+    // `build.rs` hashed.
     let profile_dir = out_dir
         .ancestors()
         .nth(3)
@@ -146,6 +169,33 @@ fn build_macos_enclave_helpers() -> Result<(), String> {
     );
     println!("cargo:rustc-env=DEADBOLT_ENCLAVE_TEST_SHA256={test_sha}");
     Ok(())
+}
+
+/// Takes the production helper from `<dir>/<target arch>/deadbolt-enclave`
+/// (`crates/cli/scripts/build-enclave.sh`, then signed by the release
+/// workflow): it must be a thin Mach-O for the target architecture, and its
+/// bytes are pinned exactly as they are, signature included.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "build script reads Cargo's target architecture"
+)]
+fn copy_prebuilt(dir: &Path, out_bin: &Path) -> Result<(), String> {
+    let arch = std::env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
+    let cpu: u32 = match arch.as_str() {
+        "aarch64" => 0x0100_000c,
+        "x86_64" => 0x0100_0007,
+        other => return Err(format!("no prebuilt Touch ID helper for {other:?}")),
+    };
+    let src = dir.join(&arch).join("deadbolt-enclave");
+    println!("cargo:rerun-if-changed={}", src.display());
+    let bytes = std::fs::read(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    let thin = bytes.len() >= 8
+        && bytes[..4] == [0xcf, 0xfa, 0xed, 0xfe]
+        && u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) == cpu;
+    if !thin {
+        return Err(format!("{} is not a thin {arch} Mach-O", src.display()));
+    }
+    std::fs::write(out_bin, &bytes).map_err(|e| format!("write {}: {e}", out_bin.display()))
 }
 
 #[expect(
@@ -179,6 +229,8 @@ fn compile_one(
         return Ok(());
     }
 
+    // crates/cli/scripts/build-enclave.sh compiles the release helper the same
+    // way; keep the two in step.
     let mut cmd = Command::new("swiftc");
     cmd.args(["-O", "-parse-as-library"]);
     if let Some(triple) = target_triple {

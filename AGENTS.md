@@ -36,7 +36,10 @@ working around it.
 
 ## Shipping
 
-Branch from `main`, make focused commits, and open a PR. Kit merges; do not enable
-auto-merge. Coordinate shared-file changes with other active worktrees.
+Branch from `dev`, make focused commits, and open a PR against `dev`. Kit merges; do
+not enable auto-merge. Every push to `dev` publishes a dev build; `production` is
+fast-forwarded from `dev` to release stable (`docs/releasing.md`). `.github/release/`
+and `.github/workflows/release.yml` are the release security boundary. Coordinate
+shared-file changes with other active worktrees.
 Site deployment is `cd site && bun run deploy`. **Ask first:** it replaces Dax's
 live page. Rust changes do not require a site deploy.
