@@ -308,7 +308,7 @@ export class Saver {
  * do this without a click). It fails when the window isn't focused; the badge
  * is there for that.
  */
-async function openPopupFor(tabId: number, current: () => boolean) {
+export async function openPopupFor(tabId: number, current: () => boolean) {
   const action = chrome.action as typeof chrome.action & { openPopup?: (options?: { windowId?: number }) => Promise<void> }
   if (typeof action.openPopup !== "function") return
   const tab = await chrome.tabs.get(tabId).catch(() => null)

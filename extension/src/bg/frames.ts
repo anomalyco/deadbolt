@@ -147,23 +147,12 @@ export function cleanApproved(reply: unknown): Approved | null {
  * ancestor without the content script, means no.
  */
 async function throughParents(target: FrameTarget, first: Box[]): Promise<boolean> {
-  const frames = await chrome.webNavigation.getAllFrames({ tabId: target.tabId }).catch(() => null)
-  if (!frames) return false
-  const byId = new Map(frames.map((f) => [f.frameId, f]))
+  const chain = await frameChain(target)
+  if (!chain) return false
   let boxes: Box[] | undefined = first
   let child = target
-  for (let depth = 0; child.frameId !== 0; depth++) {
-    if (!isBoxes(boxes) || depth >= MAX_DEPTH) return false
-    const parentId = byId.get(child.frameId)?.parentFrameId
-    const info = parentId === undefined ? undefined : byId.get(parentId)
-    if (parentId === undefined || !info?.documentId) return false
-    let origin: string
-    try {
-      origin = new URL(info.url).origin
-    } catch {
-      return false
-    }
-    const parent: FrameTarget = { tabId: target.tabId, frameId: parentId, documentId: info.documentId, origin }
+  for (const parent of chain.slice(1)) {
+    if (!isBoxes(boxes)) return false
     const nonce = newToken()
     // Ask the parent first, so it's listening when the child speaks up.
     const answer: Promise<FrameBoxes | null> = sendToFrame<FrameBoxes>(parent, { type: "db:frame-child", nonce, boxes })
@@ -172,6 +161,32 @@ async function throughParents(target: FrameTarget, first: Box[]): Promise<boolea
     child = parent
   }
   return isBoxes(boxes)
+}
+
+/**
+ * Frame `target` and every frame above it up to the top page, by the
+ * browser's record, each with the origin of its URL. Null unless `target` is
+ * still its frame's document and every parent is named, with a document, at
+ * most MAX_DEPTH of them.
+ */
+export async function frameChain(target: FrameTarget): Promise<FrameTarget[] | null> {
+  const frames = await chrome.webNavigation.getAllFrames({ tabId: target.tabId }).catch(() => null)
+  if (!frames) return null
+  const byId = new Map(frames.map((f) => [f.frameId, f]))
+  const chain: FrameTarget[] = []
+  for (let id: number | undefined = target.frameId; ; id = byId.get(id)?.parentFrameId) {
+    const info = id === undefined ? undefined : byId.get(id)
+    if (id === undefined || !info?.documentId || chain.length > MAX_DEPTH) return null
+    if (chain.length === 0 && info.documentId !== target.documentId) return null
+    let origin: string
+    try {
+      origin = new URL(info.url).origin
+    } catch {
+      return null
+    }
+    chain.push({ tabId: target.tabId, frameId: id, documentId: info.documentId, origin })
+    if (id === 0) return chain
+  }
 }
 
 export function newToken(): string {

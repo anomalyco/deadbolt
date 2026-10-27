@@ -2,16 +2,19 @@
 // iframe on the login page, so the page can neither read nor click it. Ported
 // from Foyer (github.com/R44VC0RP/foyer, src/menu.ts, by Ryan Vogel).
 
-import type { FieldRole, MenuLoadReply, PickReply, Status, StatusChanged, ToBackground } from "./messages"
+import type { FieldRole, MenuLoadReply, MenuPasskey, PickReply, Status, StatusChanged, ToBackground } from "./messages"
 import type { Account } from "./protocol"
 import { confirmPick, Dwell, Entry, h, icon, monogram, reportHeight, watchVisibility } from "./ui/dom"
+
+/** A row: a login to fill, or a passkey the page's sign-in is waiting for. */
+type Row = { passkey: MenuPasskey } | { account: Account }
 
 // Set once the background accepts a token from the parent window.
 let token = ""
 let parentOrigin = ""
 const list = document.getElementById("list")!
 const foot = document.getElementById("foot")!
-let accounts: Account[] = []
+let accounts: Row[] = []
 let focused: FieldRole = "username"
 let active = 0
 let busy = false
@@ -27,13 +30,16 @@ function send<T>(message: ToBackground): Promise<T | null> {
   return chrome.runtime.sendMessage(message).catch(() => null) as Promise<T | null>
 }
 
-function row(a: Account, i: number): HTMLElement {
-  const sub = focused === "otp" ? "Fill the current code" : a.username || "No username"
+function row(item: Row, i: number): HTMLElement {
+  const [tile, title, sub] =
+    "passkey" in item
+      ? [h("span", { class: "tile passkey", "aria-hidden": "true" }, icon("passkey")), item.passkey.username || "Passkey", `Passkey · ${item.passkey.vault}`]
+      : [monogram(item.account.title), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
   const r = h(
     "button",
     { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", "aria-selected": String(i === active) },
-    monogram(a.title),
-    h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, sub)),
+    tile,
+    h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)),
     h("kbd", { class: "enter", "aria-hidden": "true" }, "⏎"),
   )
   // A pointer's click only: Enter or Space on a focused row clicks it too (detail 0).
@@ -88,8 +94,8 @@ async function pick(i: number) {
     busy = false
     return footer("", COVERED)
   }
-  footer("", "Filling…")
-  const reply = await send<PickReply>({ type: "db:menu-pick", token, ref: a.ref })
+  footer("", "passkey" in a ? "Signing in…" : "Filling…")
+  const reply = await send<PickReply>({ type: "db:menu-pick", token, ref: "passkey" in a ? a.passkey.ref : a.account.ref })
   busy = false
   if (!reply?.ok) footer("", reply?.message || "Couldn't fill. Try again.")
 }
@@ -119,7 +125,7 @@ document.addEventListener("keydown", (e) => {
 
 function show(reply: MenuLoadReply) {
   if (reply.kind === "status") return showStatus(reply.status)
-  accounts = reply.accounts
+  accounts = [...(reply.passkeys ?? []).map((passkey) => ({ passkey })), ...reply.accounts.map((account) => ({ account }))]
   focused = reply.focused
   active = Math.min(active, Math.max(accounts.length - 1, 0))
   if (!accounts.length) {

@@ -106,6 +106,23 @@ describe("Host", () => {
     expect((await b).site).toBe("gitlab.com")
   })
 
+  test("a passkey ceremony names its id for a cancel and takes its own reply type", async () => {
+    const ready = host.connect()
+    ports[0].push(hello(1))
+    await ready
+    let named = 0
+    const get = host.send({ type: "passkey-get", origin: "https://example.com", ref: "r", challenge: "AA", userVerification: "preferred" }, { timeout: 1000, onId: (id) => (named = id) })
+    expect(named).toBe(2)
+    const cancel = host.send({ type: "passkey-cancel", request: named })
+    ports[0].push({ id: 3, type: "passkey-cancelled", found: true })
+    ports[0].push({ id: 2, type: "error", code: "cancelled", message: "the passkey request was cancelled" })
+    expect(await cancel).toEqual({ type: "passkey-cancelled", found: true })
+    expect(await get.catch((e: HostError) => e.code)).toBe("cancelled")
+    const list = host.send({ type: "passkey-list", origin: "https://example.com" })
+    ports[0].push({ id: 4, type: "list", site: "example.com", accounts: [] })
+    expect(await list.catch((e: HostError) => e.message)).toBe("Expected a passkeys reply, got list.")
+  })
+
   test("error replies reject with the host's code", async () => {
     const ready = host.connect()
     ports[0].push(hello(1))
@@ -143,11 +160,31 @@ describe("Host", () => {
     expect(host.status.state).toBe("locked")
   })
 
+  test("a request aborted while the port reconnects is never written", async () => {
+    const ready = host.connect()
+    ports[0].push(hello(1))
+    await ready
+    ports[0].exit("gone")
+    const stop = new AbortController()
+    let named: number | undefined
+    const get = host.send({ type: "passkey-get", origin: "https://example.com", ref: "r", challenge: "AA", userVerification: "preferred" }, { onId: (id) => (named = id), signal: stop.signal })
+    expect(ports).toHaveLength(2)
+    expect(ports[1].sent.map((m) => m.type)).toEqual(["hello"])
+    stop.abort()
+    ports[1].push(hello(ports[1].sent[0].id))
+    expect(await get.catch((e: HostError) => e.code)).toBe("cancelled")
+    expect(ports[1].sent.map((m) => m.type)).toEqual(["hello"])
+    expect(named).toBeUndefined()
+    // Already aborted: not even a connect.
+    expect(await host.send({ type: "passkey-cancel", request: 1 }, { signal: stop.signal }).catch((e: HostError) => e.code)).toBe("cancelled")
+    expect(ports[1].sent.map((m) => m.type)).toEqual(["hello"])
+  })
+
   test("requests time out", async () => {
     const ready = host.connect()
     ports[0].push(hello(1))
     await ready
-    const err = await host.send({ type: "list", origin: "https://github.com" }, 5).catch((e) => e)
+    const err = await host.send({ type: "list", origin: "https://github.com" }, { timeout: 5 }).catch((e) => e)
     expect(err.code).toBe("timeout")
   })
 
