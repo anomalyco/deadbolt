@@ -76,7 +76,7 @@ Adapted from Foyer: form and field detection with weighted clues
 (`content/clues.ts`, `content/detect.ts`), Shadow DOM traversal
 (`content/shadow.ts`), filling that frameworks notice (`content/fill.ts`), the
 inline menu as an extension frame in a closed shadow root
-(`content/inline.ts`, `menu.ts`), the visibility guard (`ui/dom.ts`),
+(`content/inline.ts`, `menu.ts`; the top-layer popover host is Deadbolt's), the visibility guard (`ui/dom.ts`),
 token-bound frame targeting and the email-first continuation (`bg/frames.ts`,
 `bg/autofill.ts`), the capture-check-save flow (`bg/save.ts`), sender origin
 rules (`bg/site.ts`), the passkey hook (`passkey-hook.ts`,
