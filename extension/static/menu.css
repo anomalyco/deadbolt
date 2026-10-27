@@ -1,46 +1,89 @@
-/* The inline menu: rows are 52px and the list plus footer adds 38px, which
-   the content script uses to size the frame before this page loads. */
+/* Deadbolt's surface in the page: the account list, the pill and the save
+   offer. One object with a 14px radius; the content script springs the frame
+   to each mode's size and draws the hairline and the soft layered shadow
+   outside it. Account rows are 44px, and 6px of padding sits around them
+   (plus a caption over two or more), which the content script uses to size
+   the frame before this page loads. */
 
 html,
 body {
-  height: 100%;
   overflow: hidden;
   background: transparent;
 }
 
 body {
-  display: flex;
-  flex-direction: column;
-  border-radius: 12px;
-  background: var(--bg);
-  box-shadow: inset 0 0 0 1px var(--border);
   user-select: none;
+  font-variant-numeric: tabular-nums;
 }
 
+.surface {
+  position: relative;
+  border-radius: 14px;
+  background: var(--bg);
+  overflow: hidden;
+  transition: border-radius 380ms var(--settle);
+}
+
+/* Folded into a pill: the surface fills whatever the frame is, as it springs smaller. */
+.surface.folded {
+  position: fixed;
+  inset: 0;
+  border-radius: 16px;
+}
+
+/* ---- The account list ---- */
+
 .list {
-  flex: 1;
-  min-height: 0;
+  position: relative;
+  max-height: 248px;
   overflow-y: auto;
-  padding: 4px;
+  padding: 6px;
   scrollbar-width: none;
+}
+
+.caption {
+  height: 22px;
+  padding: 2px 8px 0;
+  font-size: 11px;
+  line-height: 20px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.caption[hidden] {
+  display: none;
+}
+
+.rows {
+  position: relative;
+}
+
+/* The one highlight: it slides between rows instead of each row lighting up. */
+.highlight {
+  position: absolute;
+  left: 6px;
+  right: 6px;
+  top: 0;
+  height: 44px;
+  border-radius: 10px;
+  background: var(--hover);
+  pointer-events: none;
 }
 
 .row {
   all: unset;
+  position: relative;
   box-sizing: border-box;
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  height: 52px;
-  padding: 0 10px;
-  border-radius: 8px;
+  height: 44px;
+  padding: 0 8px;
+  border-radius: 10px;
   cursor: pointer;
-  transition: background-color 90ms ease-out;
-}
-
-.row.active {
-  background: var(--hover);
 }
 
 .row.notice {
@@ -50,6 +93,7 @@ body {
 .text {
   display: flex;
   flex-direction: column;
+  gap: 1px;
   min-width: 0;
   flex: 1;
 }
@@ -62,63 +106,269 @@ body {
 }
 
 .title {
+  font-size: 13px;
+  line-height: 16px;
   font-weight: 500;
+  color: var(--text);
 }
 
 .sub {
   font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
   color: var(--muted);
 }
 
 .enter {
   font-size: 11px;
-  color: var(--faint);
+  color: var(--muted);
   opacity: 0;
   transform: translateX(-3px);
   transition:
-    opacity 120ms ease-out,
+    opacity 100ms ease-out,
     transform 180ms var(--settle);
 }
 
 .row.active .enter {
   opacity: 1;
   transform: none;
+  transition: none;
 }
 
+/* Only when there's something to say. */
 .foot {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  height: 30px;
-  flex-shrink: 0;
-  padding: 0 12px;
-  border-top: 1px solid var(--border-muted);
-  font-size: 11px;
-  color: var(--faint);
+  margin: -2px 14px 10px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--muted);
 }
 
-.foot-site {
+.foot[hidden] {
+  display: none;
+}
+
+/* ---- The pill ---- */
+
+/* The whole pill, 32px tall: the frame contracts onto it and, at rest, is
+   exactly its size. It keeps its place on the page while the frame moves
+   (menu.ts sets right and top from the host's springs). */
+.pill {
+  position: fixed;
+  right: 0;
+  top: 50%;
+  translate: 0 -50%;
   display: flex;
   align-items: center;
-  gap: 5px;
+  gap: 8px;
+  height: 32px;
+  width: max-content;
+  padding: 0 12px 0 5px;
+  white-space: nowrap;
+  font-size: 13px;
+  line-height: 16px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.pill.waiting {
+  opacity: 0;
+}
+
+.pill .avatar {
+  width: 22px;
+  height: 22px;
+  border-radius: 999px;
+  font-size: 11px;
+}
+
+.pill .avatar svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* The offer's Deadbolt mark, carried into the saved pill. */
+.pill .offer-mark {
+  width: 22px;
+  height: 22px;
+}
+
+.pill-label {
+  display: inline-flex;
+  overflow: hidden;
+  white-space: nowrap;
+  line-height: 16px;
+}
+
+/* The check takes no room until it comes in, then opens with the label's width. */
+.pill-mark {
+  display: grid;
+  place-items: center;
+  width: 0;
+  height: 14px;
+  margin-left: -8px;
+  overflow: hidden;
+  opacity: 0;
+  color: var(--success);
+  transition:
+    width 370ms var(--settle),
+    margin-left 370ms var(--settle),
+    opacity 200ms ease-out 120ms;
+}
+
+.pill-mark svg {
+  flex-shrink: 0;
+  width: 14px;
+  height: 14px;
+}
+
+.pill.ok .pill-mark {
+  width: 14px;
+  margin-left: -2px;
+  opacity: 1;
+}
+
+.pill.failed .pill-label {
+  color: var(--danger);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pill-mark {
+    transition: opacity 180ms ease-out;
+  }
+}
+
+/* ---- The save offer ---- */
+
+.offer {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  padding: 14px 16px 16px;
+}
+
+.offer-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
 }
 
-.foot-site svg {
-  width: 12px;
-  height: 12px;
+.offer-mark {
   flex-shrink: 0;
-  color: var(--brand);
+  width: 18px;
+  height: 18px;
 }
 
-.foot-site .mono {
-  font-size: 11px;
+.offer-mark svg {
+  width: 100%;
+  height: 100%;
+}
+
+.offer-title {
+  margin: 0;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 20px;
+  font-weight: 600;
+  color: var(--text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.foot-hint {
+.offer-user {
+  margin: 2px 0 0 26px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.offer-status {
+  margin: 8px 0 0 26px;
+  font-size: 12px;
+  line-height: 16px;
+  color: var(--danger);
+  display: inline-flex;
+  overflow: hidden;
+}
+
+.offer-status[hidden] {
+  display: none;
+}
+
+.offer-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.offer-actions .btn {
+  position: relative;
+  height: 32px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-size: 13px;
+}
+
+/* 44px targets around 32px controls. */
+.offer-actions .btn::before,
+.never::before {
+  content: "";
+  position: absolute;
+  inset: -6px -2px;
+}
+
+.offer-actions .btn.primary {
+  min-width: 72px;
+}
+
+.never {
+  position: relative;
+  margin-right: auto;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.roll-label {
+  display: inline-flex;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Time left: a 2px line along the bottom edge, inside the radius. It empties
+   over the offer's stay, paused while the offer has the pointer or focus. */
+.bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 2px;
+  background: color-mix(in srgb, var(--text) 18%, transparent);
+  transform-origin: left;
+  animation: empty linear forwards;
+}
+
+.offer:hover .bar,
+.offer:focus-within .bar,
+body.busy .bar {
+  animation-play-state: paused;
+}
+
+@keyframes empty {
+  from {
+    transform: scaleX(1);
+  }
+  to {
+    transform: scaleX(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .surface {
+    transition: none;
+  }
 }

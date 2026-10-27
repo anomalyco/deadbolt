@@ -8,13 +8,22 @@
 // root, but not a div's). The page can't read the account list (cross-origin
 // frame) and can't click it for the user (synthetic events don't cross into
 // the frame). It can see that a menu appeared, which says only that the site
-// has logins or Deadbolt is locked, and the values written into its own fields
-// after the user picks an account.
+// has logins or Deadbolt is locked, the values written into its own fields
+// after the user picks an account, and that a save offer appeared (see the
+// threat model in docs/autofill.md).
+//
+// The same frame is Deadbolt's one surface in the page, in three modes it
+// morphs between: the account list under a field, a pill on the field while
+// it fills, and, after a confirmed sign-in, the save offer at the top right
+// (see bg/save.ts). This script owns the frame's place and size: the frame
+// says what size its mode needs (db:menu-resize) and the host springs there,
+// so no transparent area is left over the page to swallow its clicks.
 
-import { MENU_ROLES, type FillAck, type QueryReply, type ToBackground, type ToContent } from "../messages"
+import { MENU_ROLES, type FillAck, type QueryReply, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
+import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import type { Field } from "./detect"
-import { fillFields } from "./fill"
+import { fillable, fillFields } from "./fill"
 import { deepActiveElement } from "./shadow"
 
 export interface PageState {
@@ -25,11 +34,22 @@ export interface PageState {
   rescan(): void
 }
 
-export const MENU_ROW = 52
-const MENU_CHROME = 38
+export const MENU_ROW = 44
+/** The list's 6px padding, top and bottom. */
+const MENU_CHROME = 12
+/** The site's caption, over two or more rows. */
+const MENU_CAPTION = 22
 const MENU_WIDTH = 300
-const SHADOW =
-  "0 16px 48px -6px rgb(0 0 0 / 14%), 0 6px 12px -2px rgb(0 0 0 / 6%), 0 0 0 1px rgb(0 0 0 / 10%)"
+/** The save offer's place: the top right, near the toolbar button. */
+const SAVE_INSET = 12
+const SAVE_WIDTH = 320
+const RADIUS = 14
+const light = () => !matchMedia("(prefers-color-scheme: dark)").matches
+/** A hairline, then soft layers: close and crisp, wide and faint. */
+const SHADOW = () =>
+  light()
+    ? "0 0 0 0.5px rgb(0 0 0 / 12%), 0 1px 2px rgb(0 0 0 / 5%), 0 6px 14px -4px rgb(0 0 0 / 8%), 0 22px 44px -14px rgb(0 0 0 / 16%)"
+    : "0 0 0 0.5px rgb(255 255 255 / 14%), 0 1px 2px rgb(0 0 0 / 40%), 0 6px 14px -4px rgb(0 0 0 / 45%), 0 22px 44px -14px rgb(0 0 0 / 60%)"
 
 let state: PageState
 let host: HTMLElement | null = null
@@ -40,6 +60,21 @@ let token: string | null = null
 let port: MessagePort | null = null
 let raf = 0
 let menuHeight = 0
+/** Which mode the surface is in, and the size the frame asked for in it. */
+let mode: SurfaceMode = "accounts"
+let wanted = { width: 0, height: 0 }
+/** The host's place is its mode's target plus these, which spring to 0 when the mode or size changes. */
+const offset = { left: new Spring(0), top: new Spring(0), width: new Spring(0), height: new Spring(0) }
+let lastTarget: Rect | null = null
+/** Where this script last put the host: what it must still be for the host to be taken as Deadbolt's own (see ownPill). */
+let written: Rect | null = null
+let closing = false
+/** The save offer's fallbacks: it goes if its frame never loads, and in any case after a while. */
+let saveTimers: ReturnType<typeof setTimeout>[] = []
+const SAVE_LOAD_MS = 3000
+const SAVE_CAP_MS = 30_000
+/** The largest a pill can be. */
+const PILL_MAX = { width: 260, height: 32 }
 let dismissedFor: HTMLInputElement | null = null
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
@@ -63,7 +98,6 @@ const recentGesture = () => Date.now() - lastGestureAt < GESTURE_WINDOW_MS
  * fill from the toolbar popup instead (see Autofill.popupFill).
  */
 const isTop = window === window.top
-const reducedMotion = () => matchMedia("(prefers-reduced-motion: reduce)").matches
 
 export function send<T>(message: ToBackground): Promise<T | null> {
   try {
@@ -78,16 +112,64 @@ function targetFor(el: Element): Field | undefined {
   return state.targets().find((t) => t.el === el)
 }
 
-function position() {
-  if (!host || !anchor) return
-  if (!anchor.isConnected) return closeMenu()
+interface Rect {
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+/** Where the surface goes in its mode, in the viewport. */
+function targetRect(): Rect | null {
+  if (mode === "save") {
+    const width = wanted.width || SAVE_WIDTH
+    return { left: Math.max(4, innerWidth - width - SAVE_INSET), top: SAVE_INSET, width, height: wanted.height || 140 }
+  }
+  // The saved pill stays where the offer was.
+  if (mode === "pill" && !anchor) {
+    const width = Math.min(wanted.width || 180, 320)
+    return { left: Math.max(4, innerWidth - width - SAVE_INSET), top: SAVE_INSET, width, height: 32 }
+  }
+  if (!anchor) return null
   const r = anchor.getBoundingClientRect()
+  if (mode === "pill") {
+    // On the field, at its end: beside the text the user sees being filled, not over the next field.
+    const height = 32
+    const width = Math.min(wanted.width || 140, 260)
+    const inside = r.width >= width + 48
+    const left = inside ? r.right - width - (r.height - height) / 2 : Math.min(r.right + 6, innerWidth - width - 4)
+    return { left, top: r.top + (r.height - height) / 2, width, height }
+  }
   const width = Math.max(MENU_WIDTH, Math.min(r.width, 420))
   const below = r.bottom + 6
   const fitsBelow = below + menuHeight < innerHeight
   const top = fitsBelow ? below : Math.max(4, r.top - menuHeight - 6)
   const left = Math.min(Math.max(4, r.left), innerWidth - width - 4)
-  host.style.cssText = `all:initial;position:fixed;top:${top}px;left:${left}px;width:${width}px;height:${menuHeight}px;z-index:2147483647;display:block;`
+  return { left, top, width, height: menuHeight }
+}
+
+/**
+ * The mode or the asked-for size changed: from where the host is now, spring
+ * to the new place (`duration` seconds). Following the field as the page
+ * scrolls isn't animated: the target moves and the host with it, 1:1.
+ */
+function retarget(duration: number) {
+  const from = lastTarget
+  const to = targetRect()
+  if (!from || !to) return
+  for (const k of ["left", "top", "width", "height"] as const) offset[k].shift(from[k] - to[k], duration)
+  lastTarget = to
+}
+
+function position() {
+  if (!host) return
+  if (anchor && !anchor.isConnected) return closeMenu()
+  const to = targetRect()
+  if (!to) return closeMenu()
+  lastTarget = to
+  const at = { left: to.left + offset.left.value, top: to.top + offset.top.value, width: Math.max(1, to.width + offset.width.value), height: Math.max(1, to.height + offset.height.value) }
+  written = at
+  host.style.cssText = `all:initial;position:fixed;top:${at.top}px;left:${at.left}px;width:${at.width}px;height:${at.height}px;z-index:2147483647;display:block;${closing ? "pointer-events:none;" : ""}`
   // The menu only takes a pick once it has sat still for a moment (see
   // Dwell). From inside its frame it can't tell it was moved, so say so: the
   // page can restyle the host, and the field it follows can move.
@@ -100,32 +182,129 @@ function position() {
   raf = requestAnimationFrame(position)
 }
 
-function openMenu(el: HTMLInputElement, t: string, rows: number) {
+function frameStyle(radius: number) {
+  return `all:initial;width:100%;height:100%;border:0;border-radius:${radius}px;box-shadow:${SHADOW()};background:transparent;color-scheme:normal;`
+}
+
+/** Opens the surface: under `el` with the account list, or with no field, the save offer. */
+function openMenu(el: HTMLInputElement | null, t: string, rows: number, as: SurfaceMode = "accounts") {
   closeMenu()
   anchor = el
   token = t
-  menuHeight = Math.min(Math.max(rows, 1), 5) * MENU_ROW + MENU_CHROME
+  mode = as
+  closing = false
+  wanted = { width: 0, height: 0 }
+  for (const s of Object.values(offset)) s.jump(0)
+  lastTarget = null
+  const shown = Math.min(Math.max(rows, 1), 5)
+  menuHeight = shown * MENU_ROW + MENU_CHROME + (rows >= 2 ? MENU_CAPTION : 0)
   host = document.createElement("div")
   const root = host.attachShadow({ mode: "closed" })
   frame = document.createElement("iframe")
   // No token in the URL: the menu asks for it (see onMenuReady).
   frame.src = chrome.runtime.getURL("menu.html")
   frame.setAttribute("allow", "")
-  frame.style.cssText = `all:initial;width:100%;height:100%;border:0;border-radius:12px;box-shadow:${SHADOW};background:transparent;color-scheme:normal;`
+  frame.style.cssText = frameStyle(RADIUS)
   root.append(frame)
   document.documentElement.append(host)
   position()
-  // Settles in from just under the field. Only a translation and a fade: the
-  // menu's visibility guard refuses picks while it's scaled or see-through.
+  if (as === "save") {
+    // From the top right, where the toolbar button is: 24 px of travel and a fade.
+    frame.animate(
+      reducedMotion()
+        ? [{ opacity: 0 }, { opacity: 1 }]
+        : [
+            { opacity: 0, transform: "translate(17px, -17px)" },
+            { opacity: 1, transform: "none" },
+          ],
+      timing(0.4),
+    )
+    return
+  }
+  // Grows from the field: scale .96 → 1 from the edge that faces it. Only
+  // while it opens: the menu's visibility guard refuses picks while it's
+  // scaled or see-through, so they wait until it's at rest.
+  const r = el!.getBoundingClientRect()
+  const below = ((lastTarget as Rect | null)?.top ?? r.bottom) >= r.bottom
+  frame.style.transformOrigin = below ? "top left" : "bottom left"
   frame.animate(
     reducedMotion()
       ? [{ opacity: 0 }, { opacity: 1 }]
       : [
-          { opacity: 0, transform: "translateY(-4px)" },
-          { opacity: 1, transform: "translateY(0)" },
+          { opacity: 0, transform: "scale(0.96)" },
+          { opacity: 1, transform: "none" },
         ],
-    { duration: 140, easing: "cubic-bezier(0.2, 0.9, 0.3, 1)" },
+    timing(0.25),
   )
+}
+
+/**
+ * The frame asked for a size, and maybe a new mode. It can only fold either
+ * surface into a pill: the account list and the save offer are different
+ * surfaces with different tokens, and neither turns into the other.
+ */
+function resize(height: number, width: number | undefined, next: SurfaceMode | undefined) {
+  if (next !== undefined && next !== mode && next !== "pill") return
+  const changed = next !== undefined && next !== mode
+  const first = wanted.height === 0
+  if (changed) mode = next!
+  if (mode === "accounts") menuHeight = height
+  const same = !changed && wanted.width === (width ?? wanted.width) && wanted.height === height
+  wanted = { width: width ?? wanted.width, height }
+  if (same || !lastTarget) return
+  // The offer's first size isn't a change anyone made: it lands there.
+  if (first && mode === "save") return void (lastTarget = targetRect())
+  retarget(changed ? 0.38 : 0.37)
+  // The pill inside keeps its place on the page while the frame moves around
+  // it: hand the frame the springs, which it steps on its own clock.
+  if (mode === "pill" && lastTarget)
+    port?.postMessage({
+      type: "db:fold",
+      width: lastTarget.width,
+      at: epochNow(),
+      springs: { left: offset.left.snapshot(), top: offset.top.snapshot(), width: offset.width.snapshot(), height: offset.height.snapshot() },
+    })
+  if (changed && frame) {
+    const radius = (targetRect()?.height ?? 2 * RADIUS) / 2
+    const anim = frame.animate([{ borderRadius: getComputedStyle(frame).borderRadius }, { borderRadius: `${radius}px` }], { ...timing(0.38), fill: "forwards" })
+    anim.finished.then(
+      () => {
+        if (frame) frame.style.borderRadius = `${radius}px`
+        anim.cancel()
+      },
+      () => {},
+    )
+  }
+}
+
+/**
+ * Fades the surface out, then removes it. `travel`: a saved login leaves
+ * toward the toolbar button at the top right, where it now lives.
+ */
+function leave(travel = false) {
+  if (!host || !frame || closing) return closeMenu()
+  closing = true
+  const f = frame
+  const done = () => {
+    if (frame === f) closeMenu()
+  }
+  if (typeof f.animate !== "function") return done()
+  const keyframes = reducedMotion()
+    ? [{ opacity: 1 }, { opacity: 0 }]
+    : travel
+      ? [
+          { opacity: 1, transform: "none" },
+          { opacity: 0, transform: `translate(${Math.min(40, innerWidth - (lastTarget?.left ?? 0) - (lastTarget?.width ?? 0))}px, -36px) scale(0.6)` },
+        ]
+      : [
+          { opacity: 1, transform: "none" },
+          { opacity: 0, transform: "scale(0.96)" },
+        ]
+  f.style.transformOrigin = travel ? "top right" : "center"
+  const anim = f.animate(keyframes, { ...timing(travel ? 0.5 : 0.25), fill: "forwards" })
+  anim.finished.then(done, done)
+  // In case the page stops the animation from finishing (a hidden tab).
+  setTimeout(done, 900)
 }
 
 /** The element the open menu hangs from, if one is open. */
@@ -140,8 +319,56 @@ export function closeMenu(refocus = false, dismissed = false) {
   host?.remove()
   host = frame = anchor = null
   token = null
+  mode = "accounts"
+  closing = false
+  lastTarget = null
+  written = null
+  for (const t of saveTimers) clearTimeout(t)
+  saveTimers = []
   menuOrigin = lastRect = ""
   if (refocus) field?.focus({ preventScroll: true })
+}
+
+/** The save offer, opened by the background after a confirmed sign-in. Top page only. */
+export function openSaveSurface(t: string) {
+  if (!isTop || document.hidden) return false
+  openMenu(null, t, 0, "save")
+  // A frame that never says its size never loaded the offer (it expired, or
+  // the page got in the way): it doesn't stay. Nor does any offer for long,
+  // even one whose bar is paused under the pointer.
+  saveTimers = [
+    setTimeout(() => token === t && wanted.height === 0 && leave(), SAVE_LOAD_MS),
+    setTimeout(() => token === t && leave(), SAVE_CAP_MS),
+  ]
+  return true
+}
+
+/**
+ * The pill's host, if it's still exactly where and as big as this script put
+ * it, and no bigger than a pill: then it's Deadbolt's own and doesn't count
+ * as covering a field. The host is an element of the page, which can restyle
+ * it (a stylesheet with !important, say) to cover a field; then it counts as
+ * a cover like anything else, and the fill writes nothing there.
+ */
+export function ownPill(): Element | null {
+  if (!host || mode !== "pill" || !written || closing) return null
+  const r = host.getBoundingClientRect()
+  const near = (a: number, b: number) => Math.abs(a - b) <= 1
+  const placed = near(r.left, written.left) && near(r.top, written.top) && near(r.width, written.width) && near(r.height, written.height)
+  return placed && r.width <= PILL_MAX.width + 1 && r.height <= PILL_MAX.height + 1 ? host : null
+}
+
+/** Resolves once the surface has folded into its pill (or after `ms`, whatever happens). */
+function pillSettled(ms: number): Promise<void> {
+  const until = performance.now() + ms
+  return new Promise((resolve) => {
+    const check = () => {
+      const still = mode === "pill" && Object.values(offset).every((s) => s.done)
+      if (still || !host || performance.now() > until) return resolve()
+      requestAnimationFrame(check)
+    }
+    check()
+  })
 }
 
 let querying: Promise<void> | null = null
@@ -154,6 +381,8 @@ const emptyUntil = new WeakMap<Element, number>()
  */
 async function maybeOpen(el: HTMLInputElement, explicit = false) {
   if (!isTop || querying || dismissedFor === el || !recentGesture()) return
+  // The save offer stays until it's answered or its time runs out.
+  if (host && mode === "save") return
   if (!explicit && (emptyUntil.get(el) ?? 0) > Date.now()) return
   const t = targetFor(el)
   if (!t || !MENU_ROLES.includes(t.role)) return
@@ -184,9 +413,10 @@ function onPointerDown(event: PointerEvent) {
     if (dismissedFor === target) dismissedFor = null
     void maybeOpen(target, true)
   }
-  if (!host) return
+  if (!host || mode === "save") return
   const path = event.composedPath()
   if (path.includes(host) || path.includes(anchor as EventTarget)) return
+  if (mode === "pill") return leave()
   closeMenu()
 }
 
@@ -204,7 +434,7 @@ function onKeyDown(event: KeyboardEvent) {
     }
     return
   }
-  if (target !== anchor) return
+  if (target !== anchor || mode !== "accounts") return
   if (event.key === "Escape") {
     dismissedFor = anchor
     closeMenu(false, true)
@@ -222,7 +452,10 @@ function onKeyDown(event: KeyboardEvent) {
  * background's db:approve fixed for this fill. Answers with what was written.
  */
 async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Promise<FillAck> {
-  closeMenu()
+  // A pick from the menu folded it into a pill on the field, which stays to
+  // say how the fill went and goes by itself. Any other fill (the popup's,
+  // an email-first step) closes what's open.
+  if (mode !== "pill") closeMenu()
   // Filling focuses each field. Without this, the keypress that chose the
   // login would reopen the menu on the first field, covering the next one.
   lastGestureAt = 0
@@ -231,7 +464,12 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
   // Only the fields approved for this fill, never one that became fillable since.
   const targets = approvals.take(String(message.approval), message.form, state.targets())
   if (!targets?.length) return { filled: [] }
-  const { filled, last } = await fillFields(targets, message.values)
+  // Nothing is written while the surface is still folding over the form:
+  // only the settled pill, where this script put it, isn't taken for a cover
+  // (see ownPill). Each write checks again.
+  if (mode === "pill") await pillSettled(700)
+  if (state.form() !== message.form) return { filled: [] }
+  const { filled, last } = await fillFields(targets, message.values, (el) => fillable(el, ownPill()))
   if (filled.length) {
     lastFilled = targets.filter((t) => filled.includes(t.role)).map((t) => t.el)
     submittedSinceFill = false
@@ -272,6 +510,10 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   menuOrigin = event.origin
   const channel = new MessageChannel()
   port = channel.port1
+  // The frame's own word that its pill or offer is done, over the channel only it and this script hold.
+  port.onmessage = (e: MessageEvent<{ type?: unknown; travel?: unknown }>) => {
+    if (e.data?.type === "db:surface-done") leave(e.data.travel === true)
+  }
   win.postMessage({ type: "db:menu-token", token }, event.origin, [channel.port2])
 }
 
@@ -299,13 +541,17 @@ export function initMenu(page: PageState) {
         return true
       case "db:close-menu":
         if (message.token === token) {
-          dismissedFor = anchor
-          closeMenu(true)
+          if (mode === "accounts") {
+            dismissedFor = anchor
+            closeMenu(true)
+          } else leave()
         }
         return void respond(true)
       case "db:resize-menu":
-        if (message.token === token) menuHeight = message.height
+        if (message.token === token) resize(message.height, message.width, message.mode)
         return void respond(true)
+      case "db:surface":
+        return void respond(openSaveSurface(String(message.token)))
     }
   })
 }

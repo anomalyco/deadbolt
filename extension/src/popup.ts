@@ -6,8 +6,10 @@
 import type { ChooseReply, OfferChoice, PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, SaveOffer, Status, StatusChanged, ToBackground } from "./messages"
 import type { Account } from "./protocol"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
+import { animateTo, reducedMotion, rollLabel, ROLL_CSS, timing } from "./ui/motion"
 
 const root = document.getElementById("app")!
+document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
 let rendered = ""
 
@@ -183,9 +185,11 @@ function offerCard(offer: SaveOffer): HTMLElement {
     if (tabId === undefined) return
     card.classList.add("busy")
     button.setAttribute("disabled", "")
+    if (choice === "save") rollLabel(saveLabel, "Saving…")
     const reply = await send<ChooseReply>({ type: "db:popup-offer", tabId, id: offer.id, choice })
     card.classList.remove("busy")
     button.removeAttribute("disabled")
+    if (choice === "save" && !reply?.ok) rollLabel(saveLabel, "Save")
     // Another offer took this one's place: show that one instead.
     if (reply && !reply.ok && reply.gone) return void render(true)
     if (!reply?.ok) {
@@ -194,12 +198,16 @@ function offerCard(offer: SaveOffer): HTMLElement {
       return
     }
     if (choice !== "save") return void render(true)
-    card.replaceChildren(h("div", { class: "done" }, h("span", { class: "done-mark" }, icon("check")), h("span", {}, reply.message)))
+    const doneEl = h("div", { class: "done" }, h("span", { class: "done-mark" }, icon("check")), h("span", {}, reply.message))
+    card.replaceChildren(doneEl)
+    doneEl.animate(reducedMotion() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(4px)", transform: "scale(0.96)" }, { opacity: 1, filter: "none", transform: "none" }], timing(0.3))
     setTimeout(() => void render(true), 1200)
   }
   const never = h("button", { class: "link", type: "button" }, "Never for this site")
   const later = h("button", { class: "btn", type: "button" }, "Not now")
-  const save = h("button", { class: "btn primary", type: "button" }, "Save")
+  const saveLabel = h("span", { class: "roll-label" }, "Save")
+  saveLabel.dataset.text = "Save"
+  const save = h("button", { class: "btn primary", type: "button" }, saveLabel)
   never.addEventListener("click", () => void choose("never", never))
   later.addEventListener("click", () => void choose("later", later))
   save.addEventListener("click", () => void choose("save", save))
@@ -332,14 +340,31 @@ async function render(changed = false) {
   const hasOpen = status.state === "locked" || status.state === "not-set-up"
   const open = hasOpen ? null : h("button", { class: "link", type: "button" }, "Open Deadbolt", icon("arrow"))
   open?.addEventListener("click", openApp)
+  const oldBody = root.querySelector<HTMLElement>(".body")
+  const oldTop = oldBody?.offsetTop ?? 0
+  const body2 = h(
+      "div",
+      { class: "body" },
+      ...(reply?.passkey ? [passkeyCard(reply.passkey)] : [reply?.offer ? offerCard(reply.offer) : null, body, reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff) : null]),
+  )
   root.replaceChildren(
     h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill(status)),
-    h(
-      "div",
-      { class: `body${first ? "" : " changed"}` },
-      ...(reply?.passkey ? [passkeyCard(reply.passkey)] : [reply?.offer ? offerCard(reply.offer) : null, body, reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff) : null]),
-    ),
+    body2,
     h("footer", { class: "bottom" }, open ?? h("span"), status.state === "ready" ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : null),
+  )
+  // The first paint is at rest. After that, a whole new state is softened:
+  // the old one blurs, shrinks and fades out over the new one as it comes in,
+  // on the same frame, never waiting for the exit.
+  if (first || !oldBody) return
+  oldBody.classList.add("leaving")
+  oldBody.style.top = `${oldTop}px`
+  root.append(oldBody)
+  const out = animateTo(oldBody, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(4px)", transform: "scale(0.96)" }, 0.25, { fill: false })
+  if (out) out.finished.then(() => oldBody.remove(), () => oldBody.remove())
+  else oldBody.remove()
+  body2.animate(
+    reducedMotion() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(4px)", transform: "scale(0.96)" }, { opacity: 1, filter: "blur(0px)", transform: "none" }],
+    timing(0.3),
   )
 }
 

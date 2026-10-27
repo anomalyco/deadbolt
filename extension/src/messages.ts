@@ -8,6 +8,9 @@ import type { Account, HostStatus } from "./protocol"
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
+/** What Deadbolt's in-page surface shows: the account list, a pill on a field or at the top right, or the save offer. */
+export type SurfaceMode = "accounts" | "pill" | "save"
+export const SURFACE_MODES: SurfaceMode[] = ["accounts", "pill", "save"]
 
 /** Roles the inline menu opens on. */
 export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password", "otp"]
@@ -44,7 +47,10 @@ export type ToBackground =
   | { type: "db:menu-load"; token: string; parent: string }
   | { type: "db:menu-pick"; token: string; ref: string }
   | { type: "db:menu-dismiss"; token: string }
-  | { type: "db:menu-resize"; token: string; height: number }
+  /** The size the surface needs; with `mode`, the mode it's folding into (only ever "pill"). */
+  | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
+  /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
+  | { type: "db:surface-choose"; token: string; choice: OfferChoice }
   // popup
   | { type: "db:popup-load"; tabId: number }
   | { type: "db:popup-fill"; tabId: number; ref: string }
@@ -81,7 +87,9 @@ export type ToContent =
   /** Report the login form now, or that there's none. Answers once the background has it. */
   | { type: "db:report" }
   | { type: "db:close-menu"; token: string }
-  | { type: "db:resize-menu"; token: string; height: number }
+  | { type: "db:resize-menu"; token: string; height: number; width?: number; mode?: SurfaceMode }
+  /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
+  | { type: "db:surface"; token: string }
   // Can the user see a frame's form? (see shownInPage)
   /** To the frame above: where those boxes show in it, through the element `nonce` names. */
   | { type: "db:frame-child"; nonce: string; boxes: Box[] }
@@ -157,6 +165,8 @@ export type MenuLoadReply =
   /** `passkeys`: for a sign-in waiting on a passkey pick (conditional mediation). */
   | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[] }
   | { kind: "status"; status: Status }
+  /** The save offer's surface: what it may show. Never the password. */
+  | { kind: "offer"; site: string; username: string; update: boolean }
 
 export type PickReply = { ok: true } | { ok: false; message: string }
 

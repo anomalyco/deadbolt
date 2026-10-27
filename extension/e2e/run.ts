@@ -3,7 +3,10 @@
 // real browser profile or vault: each run uses a fresh profile directory with
 // the fake host's manifest in it.
 //
-//   bun run e2e [--stills <dir>] [--only <scenario>,<scenario>]
+//   bun run e2e [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>]
+//
+// `--video <dir>` records the `film` run (the menu, a fill, a sign-in and
+// the save offer in the page) to <dir>/deadbolt-surface.webm.
 //
 // `--only security` is the subset CI runs: hidden and covered fields, form
 // swaps, opaque origins, value swaps, navigation during a fill and the
@@ -18,7 +21,7 @@
 
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 
@@ -30,9 +33,11 @@ const arg = (name: string) => {
   return i > 0 ? process.argv[i + 1] : undefined
 }
 const stills = arg("--stills")
+const video = arg("--video")
 const only = arg("--only")
 const deadbolt = arg("--deadbolt")
 if (stills) await mkdir(stills, { recursive: true })
+if (video) await mkdir(video, { recursive: true })
 
 // ---- Test pages ---------------------------------------------------------------
 
@@ -53,9 +58,11 @@ const html = (title: string, body: string, headers: Record<string, string> = {})
 const PROBE = () => {
   const probe = { added: [] as string[], blurs: 0 }
   ;(window as unknown as { __probe: typeof probe }).__probe = probe
+  // Init scripts can run before <html> exists: watch the document, and keep what lands on <html> itself.
   new MutationObserver((records) => {
-    for (const r of records) for (const n of Array.from(r.addedNodes)) if (n.nodeName !== "HEAD" && n.nodeName !== "BODY") probe.added.push(n.nodeName)
-  }).observe(document.documentElement, { childList: true })
+    for (const r of records)
+      if (r.target === document.documentElement) for (const n of Array.from(r.addedNodes)) if (n.nodeName !== "HEAD" && n.nodeName !== "BODY" && n.nodeType === 1) probe.added.push(n.nodeName)
+  }).observe(document, { childList: true, subtree: true })
   window.addEventListener("blur", () => probe.blurs++)
 }
 
@@ -335,6 +342,10 @@ interface LaunchOptions {
   bfcache?: boolean
   /** Runs the deadbolt binary as the host, with this environment. */
   realHost?: Record<string, string>
+  /** Records every page to this directory. */
+  record?: string
+  /** Device pixels per CSS pixel (2 unless set). */
+  scale?: number
 }
 
 async function launch(options: LaunchOptions = {}): Promise<Run> {
@@ -358,9 +369,10 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     headless: true,
     colorScheme: options.scheme ?? "light",
     viewport: { width: 900, height: 640 },
-    deviceScaleFactor: 2,
+    deviceScaleFactor: options.scale ?? 2,
     args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
+    ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
       ...process.env,
       DEADBOLT_FAKE_STATUS: options.status ?? "ready",
@@ -444,6 +456,20 @@ async function shot(page: Page, name: string, clip?: { x: number; y: number; wid
   await page.screenshot({ path: join(stills, `${name}.png`), clip })
 }
 
+/** A still of the surface in `frame`, with room for its shadow, and (`include`) the field it belongs to. */
+async function shotAround(page: Page, name: string, frame: Frame, include?: string) {
+  if (!stills) return
+  const box = await (await frame.frameElement().catch(() => null))?.boundingBox()
+  if (!box) return
+  let [x0, y0, x1, y1] = [box.x, box.y, box.x + box.width, box.y + box.height]
+  const extra = include ? await page.locator(include).boundingBox().catch(() => null) : null
+  if (extra) [x0, y0, x1, y1] = [Math.min(x0, extra.x), Math.min(y0, extra.y), Math.max(x1, extra.x + extra.width), Math.max(y1, extra.y + extra.height)]
+  const view = page.viewportSize() ?? { width: 900, height: 640 }
+  // The shadow reaches about 30px down and 20px to the sides.
+  const clip = { x: Math.max(0, x0 - 40), y: Math.max(0, y0 - 32), right: Math.min(view.width, x1 + 40), bottom: Math.min(view.height, y1 + 56) }
+  await page.screenshot({ path: join(stills, `${name}.png`), clip: { x: clip.x, y: clip.y, width: clip.right - clip.x, height: clip.bottom - clip.y } })
+}
+
 /** The popup page, pointed at a tab: tabs.query would otherwise find the popup's own tab. */
 async function popup(run: Run, tabPrefix: string, name?: string): Promise<Page> {
   const page = await run.context.newPage()
@@ -516,7 +542,11 @@ async function fillAndTotp(scheme: Scheme) {
       })
       check(!fonts.includes("error") && fonts.includes("loaded"), `Geist fonts load in the menu (${fonts})`)
       await Bun.sleep(500)
-      await shot(page, `menu-${scheme}`, { x: 250, y: 80, width: 420, height: 300 })
+      await shotAround(page, `menu-${scheme}`, menu, "#email")
+      // The frame is exactly the surface: no transparent strip of it over the page.
+      const frameBox = await (await menu.frameElement()).boundingBox()
+      const surfaceBox = await menu.evaluate(() => document.getElementById("surface")!.getBoundingClientRect().toJSON() as DOMRect)
+      check(!!frameBox && Math.abs(frameBox.height - surfaceBox.height) < 1 && Math.abs(frameBox.width - surfaceBox.width) < 1, `the menu's frame is exactly its surface (${frameBox?.height} vs ${surfaceBox.height})`)
       await settled(menu)
       // Keyboard: ↓ moves into the menu, ↓↑ choose, ⏎ fills.
       await page.keyboard.press("ArrowDown")
@@ -527,7 +557,12 @@ async function fillAndTotp(scheme: Scheme) {
       await until("username and password fill", async () => (await page.inputValue("#password")) === "correct horse")
       check((await page.inputValue("#email")) === "kit@acme.test", "username filled")
       check((await page.inputValue("#password")) === "correct horse", "password filled")
-      check(!extensionFrame(page, "menu.html"), "menu closes after filling")
+      // The menu folded into a pill on the field, which says Filled and goes by itself.
+      const filled = await until("the pill says Filled", async () => (await menu.locator(".pill.ok .pill-label[aria-label='Filled']").count().catch(() => 0)) > 0)
+      check(!!filled, "the menu folds into a pill that says Filled")
+      await Bun.sleep(350)
+      await shotAround(page, `surface-filled-${scheme}`, menu, "#email")
+      check(!!(await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)), "and goes by itself")
       await page.click("button[type=submit]")
       await page.waitForURL("**/mfa")
       const code = await until("one-time code fills on the next page", async () => (await page.inputValue("#code")) === "492039")
@@ -596,13 +631,29 @@ async function savePrompt(scheme: Scheme) {
   const run = await launch({ scheme })
   const page = await run.context.newPage()
   try {
-    // A form that posts and navigates, submitted with a click.
-    await signIn(run, page, "/login?next=home", "new@acme.test", "a new password")
-    await page.waitForURL("**/home")
+    // A form that posts and navigates, submitted with a click, to a page that shows the account.
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "new@acme.test", "a new password")
+    await page.waitForURL("**/auth/complete")
     if (!(await offered(run))) await diagnose(run, page, "new login, click + navigation")
     else {
-      // The offer is browser UI: nothing was added to the page, which can't tell what the check said.
-      check((await probe(page)).added.length === 0, "nothing is added to the page for an offer")
+      // A confirmed sign-in shows the offer in the page too, as Deadbolt's
+      // surface: one element in a closed shadow root holding an extension
+      // frame, which the page can't look into.
+      const surface = await until("the save offer shows in the page", () => extensionFrame(page, "menu.html"))
+      check(JSON.stringify((await probe(page)).added) === '["DIV"]', `only one element is added to the page for an offer (${JSON.stringify((await probe(page)).added)})`)
+      const sees = await page.evaluate(() => {
+        const host = [...document.documentElement.children].find((el) => el.nodeName === "DIV")
+        const frames: string[] = []
+        for (let i = 0; i < window.frames.length; i++)
+          try {
+            frames.push(window.frames[i].document.body.innerText)
+          } catch {
+            frames.push("blocked")
+          }
+        return { shadow: host?.shadowRoot === null, inside: host?.innerHTML ?? null, frames }
+      })
+      check(!!surface && sees.shadow && sees.inside === "" && sees.frames.every((f) => f === "blocked"), `the page can't read the offer (${JSON.stringify(sees)})`)
+      check(!((await surface?.content()) ?? "").includes("a new password"), "the surface never holds the password")
       check(!(await hostLog(run)).some((r) => r.type === "save"), "nothing saved before the click")
       const { p, title } = await offerIn(run, `offer-save-${scheme}`)
       check(title === "Save login for localhost?", `the popup asks to save (${title})`)
@@ -610,9 +661,10 @@ async function savePrompt(scheme: Scheme) {
       await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
       const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
       check(save?.origin === site && save.entry?.username === "new@acme.test", "save carries the submitted login")
-      check(save?.entry?.title === "Sign in to Acme" && save.entry?.url === `${site}/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
+      check(save?.entry?.title === "Sign in to Acme" && save.entry?.url === `${site}/outcome/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
       check(!!(await until("popup confirms", async () => ((await p.locator(".done").textContent().catch(() => "")) ?? "").includes("Saved"))), "the popup confirms the save")
       check(!!(await until("badge clears", async () => (await badge(run)) === "")), "and the badge clears")
+      check(!!(await until("the surface closes", () => !extensionFrame(page, "menu.html"))), "and answering in the popup closes the offer in the page")
       await p.close()
     }
 
@@ -717,6 +769,151 @@ async function coldSave() {
   }
 }
 
+/** The save offer's surface in `page`, once it shows its offer. */
+const saveSurface = (page: Page, what = "the save offer shows in the page", timeout = 20_000) =>
+  until(what, async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator(".offer").count().catch(() => 0)) > 0 ? f : null
+  }, timeout)
+
+/** A new turn for the site, so the next confirmed sign-in may show its offer again. */
+const newTurn = (run: Run) => run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+
+
+/** The save offer in the page after a confirmed sign-in: Save, Not now, its time running out, and none for a likely one. */
+async function savedInPage(scheme: Scheme) {
+  const run = await launch({ scheme })
+  const page = await run.context.newPage()
+  try {
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "surface@acme.test", "surface password")
+    let surface = await saveSurface(page)
+    if (!surface) return void (await diagnose(run, page, "surface"))
+    check(((await surface.locator(".offer-title").textContent()) ?? "") === "Save login for localhost?", "the surface asks to save")
+    check(((await surface.locator(".offer-user").textContent()) ?? "") === "surface@acme.test", "with the username under it")
+    await Bun.sleep(500)
+    await shotAround(page, `surface-save-${scheme}`, surface)
+    await settled(surface)
+    await surface.locator(".offer-actions .btn.primary").click()
+    await until("Save in the page saves", async () => (await hostLog(run)).some((r) => r.type === "save" && (r.entry as { username?: string })?.username === "surface@acme.test"))
+    check(!!(await until("the surface folds into a Saved pill", async () => (await surface!.locator(".pill.ok").count().catch(() => 0)) > 0)), "the surface folds into a Saved pill")
+    await Bun.sleep(300)
+    await shotAround(page, `surface-saved-${scheme}`, surface)
+    check(!!(await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)), "and goes toward the toolbar button")
+    check(!!(await until("badge clears", async () => (await badge(run)) === "")), "and the badge clears")
+
+    // Not now puts the surface away; the toolbar keeps the offer.
+    await newTurn(run)
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "later@acme.test", "later password")
+    surface = await saveSurface(page)
+    if (surface) {
+      await settled(surface)
+      await surface.locator(".offer-actions .btn:not(.primary)").click()
+      check(!!(await until("Not now puts the surface away", () => !extensionFrame(page, "menu.html"), 5000)), "Not now puts the surface away")
+      check((await badge(run)) === "1", "and the toolbar keeps the offer")
+      const { p, title } = await offerIn(run)
+      check(title === "Save login for localhost?", `which the popup still shows (${title})`)
+      await p.close()
+    }
+
+    // An update, left alone: its time runs out and the offer waits in the toolbar.
+    await newTurn(run)
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "admin", "changed again")
+    surface = await saveSurface(page)
+    if (surface) {
+      check(((await surface.locator(".offer-title").textContent()) ?? "") === "Update password?" && ((await surface.locator(".offer-user").textContent()) ?? "").startsWith("admin"), "a changed password asks to update, for its username")
+      await Bun.sleep(500)
+      await shotAround(page, `surface-update-${scheme}`, surface)
+      check(!!(await until("the offer leaves when its time runs out", () => !extensionFrame(page, "menu.html"), 16_000)), "the offer leaves the page when its time runs out")
+      check((await badge(run)) === "1", "and waits in the toolbar")
+    }
+
+    // A likely sign-in only badges: nothing in the page.
+    await newTurn(run)
+    await clearBadge(run)
+    await signIn(run, page, "/login?next=home", "likely@acme.test", "likely password")
+    await page.waitForURL("**/home")
+    check(!!(await offered(run)), "a likely sign-in badges")
+    await Bun.sleep(1000)
+    check(!extensionFrame(page, "menu.html"), "and shows nothing in the page")
+  } catch (err) {
+    check(false, `save in page threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "save in page")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * A short recording for `--video` at one device pixel per CSS pixel: the
+ * menu, a fill, a sign-in and the save offer in the page. Also writes 30 fps
+ * frame strips of the pick folding into the pill and of Save folding into
+ * the saved pill (strip-fill.png, strip-save.png).
+ */
+async function film() {
+  if (!video) return void console.log("  (needs --video <dir>)")
+  const run = await launch({ record: video, scale: 1 })
+  const page = await run.context.newPage()
+  const t0 = Date.now()
+  const marks: Record<string, { at: number; clip: { x: number; y: number; width: number; height: number } }> = {}
+  const around = (b: { x: number; y: number; width: number; height: number }, w: number, hgt: number) => ({
+    x: Math.max(0, Math.round(b.x + b.width / 2 - w / 2)),
+    y: Math.max(0, Math.round(b.y + b.height / 2 - hgt / 2)),
+    width: w,
+    height: hgt,
+  })
+  try {
+    await page.goto(`${site}/outcome/login?to=/auth/complete`)
+    await Bun.sleep(600)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "film menu"))
+    for (const key of ["ArrowDown", "ArrowDown", "ArrowUp"]) {
+      await page.keyboard.press(key)
+      await Bun.sleep(450)
+    }
+    const field = await page.locator("#email").boundingBox()
+    marks.fill = { at: (Date.now() - t0) / 1000, clip: around(field ?? { x: 270, y: 150, width: 360, height: 38 }, 420, 240) }
+    await page.keyboard.press("Enter")
+    await until("the pill says Filled", async () => (await menu.locator(".pill.ok").count().catch(() => 0)) > 0)
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+    await Bun.sleep(400)
+    await page.click("#password")
+    await until("menu on the password", () => extensionFrame(page, "menu.html"))
+    await page.keyboard.press("Escape")
+    await page.keyboard.press("ControlOrMeta+a")
+    await page.locator("#password").pressSequentially("a fresh horse", { delay: 45 })
+    await Bun.sleep(300)
+    await page.click("button[type=submit]")
+    const surface = await saveSurface(page)
+    if (!surface) return void (await diagnose(run, page, "film surface"))
+    await settled(surface)
+    await Bun.sleep(600)
+    marks.save = { at: (Date.now() - t0) / 1000, clip: { x: 900 - 400, y: 0, width: 400, height: 200 } }
+    await surface.locator(".offer-actions .btn.primary").click()
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    await Bun.sleep(800)
+    check(true, "recorded the surface")
+  } catch (err) {
+    check(false, `film threw: ${(err as Error).message.split("\n")[0]}`)
+  } finally {
+    const recording = await page.video()?.path().catch(() => null)
+    const blank = await Promise.all(run.context.pages().filter((p) => p !== page).map((p) => p.video()?.path().catch(() => null)))
+    await close(run)
+    const out = join(video, "deadbolt-surface.webm")
+    if (recording) await rename(recording, out).catch((err) => check(false, `couldn't keep the recording: ${err}`))
+    for (const path of blank) if (path) await rm(path, { force: true })
+    console.log(`  video: ${out}`)
+    // The fold starts once the pick passes its checks, about 0.4 s after the press.
+    for (const [name, mark] of Object.entries(marks)) {
+      const { x, y, width, height } = mark.clip
+      const strip = join(video, `strip-${name}.png`)
+      // The pick's fold takes 0.8 s; Save holds "Saving…" in the button first, so its strip runs 1.8 s.
+      const [length, tile] = name === "save" ? ["1.8", "9x6"] : ["0.8", "6x4"]
+      const ffmpeg = Bun.spawnSync(["ffmpeg", "-v", "error", "-y", "-ss", String(mark.at + 0.3), "-t", length, "-i", out, "-vf", `fps=30,crop=${width}:${height}:${x}:${y},tile=${tile}`, "-frames:v", "1", strip])
+      check(ffmpeg.exitCode === 0, `wrote ${strip}${ffmpeg.exitCode ? `: ${ffmpeg.stderr.toString().trim()}` : ""}`)
+    }
+  }
+}
+
 /** Counts the popup opening by itself, without opening it. */
 const countOpens = (run: Run) =>
   run.worker.evaluate(() => {
@@ -745,7 +942,7 @@ async function signInOutcomes() {
     await signIn(run, page, "/login?next=home", "likely@acme.test", "likely password")
     await page.waitForURL("**/home")
     if (!check(!!(await offered(run)), "a sign-in without evidence still badges")) await diagnose(run, page, "likely")
-    check((await opens(run)) === 0, "but doesn't open the popup")
+    check((await opens(run)) === 0 && !extensionFrame(page, "menu.html"), "but neither opens the popup nor shows anything in the page")
     await clearBadge(run)
 
     // A bot check after the submit, then the signed-in page. Long enough on
@@ -757,7 +954,8 @@ async function signInOutcomes() {
     await page.waitForURL("**/outcome/welcome**", { timeout: 15_000 })
     if (!check(!!(await offered(run)), "the page after the challenge offers a save")) await diagnose(run, page, "challenge")
     check((await checksFor(run, "captcha@acme.test")) === 1, "with one check")
-    check((await opens(run)) === 1, "and, showing the account, opens the popup")
+    check(!!(await saveSurface(page, "the offer shows in the page")), "and, showing the account, shows the offer in the page")
+    check((await opens(run)) === 0, "instead of opening the popup")
     await clearBadge(run)
 
     // Signed in on a sign-in looking URL that shows the account. A fresh turn for the popup.
@@ -765,7 +963,7 @@ async function signInOutcomes() {
     await signIn(run, page, "/outcome/login?to=/auth/complete", "complete@acme.test", "complete password")
     await page.waitForURL("**/auth/complete")
     if (!check(!!(await offered(run)), "a sign-in landing on /auth/complete with the account shown offers a save")) await diagnose(run, page, "auth/complete")
-    check((await opens(run)) === 2, "and opens the popup")
+    check(!!(await saveSurface(page, "the offer shows in the page")), "and shows the offer in the page")
     const { p, title } = await offerIn(run)
     check(title === "Save login for localhost?", `the popup asks to save (${title})`)
     await p.close()
@@ -810,7 +1008,7 @@ async function locked(scheme: Scheme) {
     if (menu) {
       check(((await menu.locator(".title").textContent()) ?? "").includes("locked"), "menu says Deadbolt is locked")
       await Bun.sleep(400)
-      await shot(page, `menu-locked-${scheme}`, { x: 250, y: 80, width: 420, height: 200 })
+      await shotAround(page, `menu-locked-${scheme}`, menu, "#email")
     }
     const p = await popup(run, site, `popup-locked-${scheme}`)
     check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
@@ -1228,6 +1426,33 @@ async function coveredMenu() {
   }
 }
 
+/**
+ * The pill is an element of the page: a page that restyles it (with
+ * !important) to cover the form while a fill is on its way gets nothing
+ * written; the pill counts as Deadbolt's own only where Deadbolt put it.
+ */
+async function coveredPill() {
+  const run = await launch({ fillDelay: 1 })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    const menu = await menuOn(page)
+    if (menu) {
+      await menu.locator("button.row").first().click()
+      await until("the menu folds into a pill", async () => (await menu.locator(".pill").count().catch(() => 0)) > 0)
+      await page.addStyleTag({ content: "html > div { inset: 0 !important; width: 100vw !important; height: 100vh !important; top: 0 !important; left: 0 !important }" })
+      await until("the delayed fill reaches the host", async () => (await fillCount(run)) > 0)
+      await Bun.sleep(2500)
+      check((await page.inputValue("#email")) === "" && (await page.inputValue("#password")) === "", "a pill the page stretched over the form isn't Deadbolt's own: nothing is written under it")
+    }
+  } catch (err) {
+    check(false, `covered pill threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "covered pill")
+  } finally {
+    await close(run)
+  }
+}
+
 /** Navigating away while the host is still answering: the new page gets nothing. */
 async function midFill() {
   const run = await launch({ fillDelay: 2 })
@@ -1237,7 +1462,7 @@ async function midFill() {
     const menu = await menuOn(page)
     if (menu) {
       await menu.locator("button.row").first().click()
-      await until("the menu is filling", async () => (await footText(menu)).includes("Filling"))
+      await until("the menu folds into a Filling pill", async () => ((await menu.locator(".pill .pill-label").textContent().catch(() => "")) ?? "").includes("Filling"))
       await page.goto(`${site}/login?next=home`)
       await until("the delayed fill reaches the host", async () => (await fillCount(run)) > 0)
       await Bun.sleep(3000)
@@ -1680,9 +1905,9 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
   if (v) check(v.verified && !v.authenticationInfo.userVerified, `@simplewebauthn/server verifies the ${how} assertion (no UV without Touch ID)`)
 }
 
-const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, signInOutcomes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
-const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, locked, notInstalled }
+const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
+const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 try {
@@ -1695,6 +1920,8 @@ try {
   }
   for (const [name, run] of Object.entries(once)) {
     if (picked && !picked.includes(name)) continue
+    // The recording runs only when asked for.
+    if (name === "film" && !video) continue
     console.log(`\n# ${name}`)
     await run()
   }

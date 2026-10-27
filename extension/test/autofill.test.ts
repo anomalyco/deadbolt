@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { Autofill, nextStep } from "../src/bg/autofill"
+import { Autofill, nextStep, resizeMessage } from "../src/bg/autofill"
 import { ACCOUNTS, fakeHost, installChrome, menuSender, pageSender, POPUP_URL, SITE, type FakeChrome, type FakeHost } from "./chrome"
 
 let fake: FakeChrome
@@ -521,5 +521,13 @@ describe("while Deadbolt is locked", () => {
     host.setStatus({ state: "locked" })
     fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc", parentFrameId: -1 }
     expect((await ask()).rows).toBe(1)
+  })
+})
+
+describe("surface sizes", () => {
+  test("a frame's asked-for size is kept within bounds, and it may only fold into a pill", () => {
+    expect(resizeMessage("t", 2000, 9000, "save")).toEqual({ type: "db:resize-menu", token: "t", height: 400, width: 420 })
+    expect(resizeMessage("t", 1, 1, "pill")).toEqual({ type: "db:resize-menu", token: "t", height: 28, width: 100, mode: "pill" })
+    expect(resizeMessage("t", Number.NaN, "wide")).toEqual({ type: "db:resize-menu", token: "t", height: 40 })
   })
 })

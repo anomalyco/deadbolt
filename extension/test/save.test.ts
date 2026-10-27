@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, test } from "bun:test"
 import { HostError } from "../src/bg/host"
 import { cleanFacts, judge, NEVER_KEY, NOT_NOW_MS, Saver } from "../src/bg/save"
 import type { RequestBody } from "../src/protocol"
-import { fakeHost, installChrome, NO_FACTS, pageSender, type FakeChrome, type FakeHost } from "./chrome"
+import { fakeHost, installChrome, menuSender, NO_FACTS, pageSender, SITE, type FakeChrome, type FakeHost } from "./chrome"
 
 let fake: FakeChrome
 let host: FakeHost
@@ -24,6 +24,9 @@ const signIn = async (username: string, password: string) => {
 
 const requests = (type: string) => host.requests.filter((r) => r.type === type)
 
+/** Where offers showed by themselves: the save surface in a tab's page, or the popup over a window. */
+const shown = () => [...fake.delivered.filter((d) => d.message.type === "db:surface").map((d) => `page:${d.tabId}`), ...fake.popups.map((w) => `popup:${w}`)]
+
 /** Holds the host's replies to `type` until released, in order. */
 function hold(type: RequestBody["type"]) {
   const held: Array<() => void> = []
@@ -41,21 +44,30 @@ async function waitFor(ok: () => boolean) {
 }
 
 describe("offers", () => {
-  test("a new login is offered in the toolbar, never in the page", async () => {
+  test("a new login is offered in the toolbar, and in the page as Deadbolt's own surface", async () => {
     await signIn("new@example.com", "a new password")
     expect(saver.pending(1)).toMatchObject({ site: "example.com", username: "new@example.com", update: false })
     expect(saver.pending(1)?.id).toBeString()
     expect(fake.badges[1]).toBe("1")
-    expect(fake.popups).toEqual([7])
-    // Nothing went to the page but the question of what it shows, and nothing was saved yet.
-    expect(fake.delivered.map((d) => d.message)).toEqual([{ type: "db:probe", username: "new@example.com" }])
-    expect(fake.delivered[0].options).toEqual({ documentId: "home-doc" })
+    expect(shown()).toEqual(["page:1"])
+    // The page's document got the question of what it shows and a token for the surface, nothing more;
+    // the surface frame asks for the rest. Nothing was saved yet.
+    expect(fake.delivered.map((d) => d.message.type)).toEqual(["db:probe", "db:surface"])
+    expect(Object.keys(fake.delivered[1].message)).toEqual(["type", "token"])
+    expect(fake.delivered.every((d) => (d.options as { documentId: string }).documentId === "home-doc")).toBe(true)
+    expect(JSON.stringify(fake.delivered)).not.toContain("a new password")
     expect(host.requests.map((r) => r.type)).toEqual(["check"])
   })
 
-  test("the popup isn't opened over another tab", async () => {
-    fake.tabs[1].active = false
+  test("where the page doesn't take the surface, the popup opens, but never over another tab", async () => {
+    fake.answer = (message) => (message.type === "db:probe" ? { ...NO_FACTS, account: true } : false)
     await signIn("new@example.com", "a new password")
+    expect(fake.popups).toEqual([7])
+    fake.popups = []
+    fake.session = {}
+    fake.tabs[1].active = false
+    await signIn("other@example.com", "pw")
+    expect(saver.pending(1)?.username).toBe("other@example.com")
     expect(fake.popups).toEqual([])
     expect(fake.badges[1]).toBe("1")
   })
@@ -144,7 +156,7 @@ describe("a check that finishes late", () => {
     await quiet
     expect(saver.pending(1)).toBeUndefined()
     expect(fake.badges[1]).toBeUndefined()
-    expect(fake.popups).toEqual([])
+    expect(shown()).toEqual([])
   }
 
   test("offers nothing once the tab is on another site", () =>
@@ -199,23 +211,23 @@ describe("opening the popup by itself", () => {
     }
 
     await signInOn(1, "https://www.example.com/login")
-    expect(fake.popups).toHaveLength(1)
+    expect(shown()).toHaveLength(1)
     // Another tab on the same site (another subdomain too) a few minutes later: badge only.
     now += 4 * 60_000
     await signInOn(2, "https://app.example.com/login")
-    expect(fake.popups).toHaveLength(1)
+    expect(shown()).toHaveLength(1)
     expect(fake.badges[2]).toBe("1")
     // Another site has its own turn.
     await signInOn(3, "https://other.test/login")
-    expect(fake.popups).toHaveLength(2)
+    expect(shown()).toHaveLength(2)
     // Just under ten minutes after the first: still badge only.
     now += 6 * 60_000 - 1
     await signInOn(1, "https://www.example.com/login")
-    expect(fake.popups).toHaveLength(2)
+    expect(shown()).toHaveLength(2)
     // Ten minutes on, example.com gets its next turn.
     now += 1
     await signInOn(2, "https://app.example.com/login")
-    expect(fake.popups).toHaveLength(3)
+    expect(shown()).toHaveLength(3)
   })
 
   test("two tabs offering at once share one turn", async () => {
@@ -229,7 +241,7 @@ describe("opening the popup by itself", () => {
     fake.frames["2:0"] = { url: "https://www.example.com/home", documentId: "other-home" }
     await Promise.all([saver.settled(pageSender(HOME)), saver.settled(pageSender({ tab: tab2, url: "https://www.example.com/home", documentId: "other-home" }))])
     expect([saver.pending(1), saver.pending(2)].every(Boolean)).toBe(true)
-    expect(fake.popups).toHaveLength(1)
+    expect(shown()).toHaveLength(1)
   })
 
   // Otherwise a page could submit guesses until the popup opens: every
@@ -240,7 +252,7 @@ describe("opening the popup by itself", () => {
     await signIn("new@example.com", "a new password")
     expect(saver.pending(1)).toBeDefined()
     expect(fake.badges[1]).toBe("1")
-    expect(fake.popups).toEqual([])
+    expect(shown()).toEqual([])
   })
 
   test("so does a rate-limited check", async () => {
@@ -257,7 +269,7 @@ describe("opening the popup by itself", () => {
     expect(saver.pending(1)).toBeUndefined()
     await signIn("new@example.com", "second")
     expect(saver.pending(1)).toBeDefined()
-    expect(fake.popups).toEqual([])
+    expect(shown()).toEqual([])
   })
 })
 
@@ -430,7 +442,7 @@ describe("did the sign-in work", () => {
     await settleOn("https://www.example.com/home", "home-doc")
     expect(requests("check")).toHaveLength(1)
     expect(saver.pending(1)).toBeDefined()
-    expect(fake.popups).toEqual([7])
+    expect(shown()).toEqual(["page:1"])
   })
 
   test("a code step waits for the page after it", async () => {
@@ -449,13 +461,13 @@ describe("did the sign-in work", () => {
     expect(fake.delivered.filter((d) => d.message.type === "db:probe")).toHaveLength(2)
     expect(saver.pending(1)).toBeDefined()
     expect(fake.badges[1]).toBe("1")
-    expect(fake.popups).toEqual([])
+    expect(shown()).toEqual([])
     // The site's turn is still there for a confirmed sign-in.
     await saver.choose(1, saver.pending(1)!.id, "save")
     fake.facts = { account: true }
     await submit("other@example.com", "pw")
     await settleOn("https://www.example.com/home", "home-doc")
-    expect(fake.popups).toEqual([7])
+    expect(shown()).toEqual(["page:1"])
   })
 
   test("a sign-in URL without evidence offers nothing; with the account showing it's confirmed", async () => {
@@ -466,7 +478,7 @@ describe("did the sign-in work", () => {
     fake.facts = { loginish: true, account: true }
     await settleOn("https://www.example.com/auth/complete", "complete-doc")
     expect(saver.pending(1)).toBeDefined()
-    expect(fake.popups).toEqual([7])
+    expect(shown()).toEqual(["page:1"])
   })
 
   test("a page that goes away before the second look offers nothing", async () => {
@@ -511,5 +523,118 @@ describe("quieter offers", () => {
     now += NOT_NOW_MS
     await signIn("new@example.com", "a new password")
     expect(saver.pending(1)?.username).toBe("new@example.com")
+  })
+})
+
+describe("the save offer in the page", () => {
+  const surfaceToken = () => fake.delivered.find((d) => d.message.type === "db:surface")?.message.token as string
+  const closes = (token: string) => fake.delivered.filter((d) => d.message.type === "db:close-menu" && d.message.token === token)
+
+  test("only the surface frame handed the token loads it, and it gets the site and username, never the password", async () => {
+    await signIn("new@example.com", "a new password")
+    const token = surfaceToken()
+    expect(saver.ownsSurface(token)).toBe(true)
+    // Not from another tab, an extension page that isn't the surface, a content script, or for another parent origin.
+    expect(await saver.surfaceLoad(token, menuSender({ tab: { id: 2 } as chrome.tabs.Tab }), SITE)).toBeNull()
+    expect(await saver.surfaceLoad(token, pageSender(HOME), SITE)).toBeNull()
+    expect(await saver.surfaceLoad(token, menuSender(), "https://evil.test")).toBeNull()
+    const reply = await saver.surfaceLoad(token, menuSender(), SITE)
+    expect(reply).toEqual({ kind: "offer", site: "example.com", username: "new@example.com", update: false })
+    // Bound to that frame's document from then on.
+    expect(await saver.surfaceChoose(token, menuSender({ documentId: "other-menu" }), "save")).toMatchObject({ ok: false, gone: true })
+    expect(requests("save")).toEqual([])
+  })
+
+  test("Save in the page saves once; the token answers once", async () => {
+    await signIn("new@example.com", "a new password")
+    const token = surfaceToken()
+    await saver.surfaceLoad(token, menuSender(), SITE)
+    expect(await saver.surfaceChoose(token, menuSender(), "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
+    expect(requests("save")).toHaveLength(1)
+    expect(saver.pending(1)).toBeUndefined()
+    // The surface shows its own answer: nothing closes it from here.
+    expect(closes(token)).toEqual([])
+    expect(await saver.surfaceChoose(token, menuSender(), "save")).toMatchObject({ ok: false, gone: true })
+    expect(requests("save")).toHaveLength(1)
+  })
+
+  test("a save the host turns down for now may be pressed again", async () => {
+    await signIn("new@example.com", "a new password")
+    const token = surfaceToken()
+    await saver.surfaceLoad(token, menuSender(), SITE)
+    const send = host.host.send.bind(host.host)
+    let locked = true
+    host.host.send = (async (req: RequestBody) => {
+      if (req.type === "save" && locked) {
+        locked = false
+        throw new HostError("locked", "locked")
+      }
+      return send(req)
+    }) as typeof host.host.send
+    expect(await saver.surfaceChoose(token, menuSender(), "save")).toEqual({ ok: false, message: "Deadbolt is locked. Unlock it, then save again." })
+    expect(await saver.surfaceChoose(token, menuSender(), "save")).toMatchObject({ ok: true })
+  })
+
+  test("Not now in the page leaves the offer in the toolbar", async () => {
+    await signIn("new@example.com", "a new password")
+    const token = surfaceToken()
+    await saver.surfaceLoad(token, menuSender(), SITE)
+    expect(await saver.surfaceChoose(token, menuSender(), "later")).toEqual({ ok: true, message: "" })
+    expect(saver.pending(1)).toBeDefined()
+    expect(fake.badges[1]).toBe("1")
+    expect(saver.ownsSurface(token)).toBe(false)
+    // The popup still answers it.
+    expect(await saver.choose(1, saver.pending(1)!.id, "save")).toMatchObject({ ok: true })
+  })
+
+  test("answering in the popup, locking or the offer expiring closes the surface", async () => {
+    await signIn("new@example.com", "a new password")
+    let token = surfaceToken()
+    await saver.choose(1, saver.pending(1)!.id, "later")
+    await waitFor(() => closes(token).length === 1)
+    expect(saver.ownsSurface(token)).toBe(false)
+
+    fake.session = {}
+    fake.delivered = []
+    await signIn("other@example.com", "pw")
+    token = surfaceToken()
+    host.setStatus({ state: "locked" })
+    await waitFor(() => closes(token).length === 1)
+    host.setStatus({ state: "ready", version: "0" })
+
+    saver = new Saver(host.host, { capture: 60_000, offer: 20, reprobe: 5 })
+    fake.session = {}
+    fake.delivered = []
+    await signIn("third@example.com", "pw")
+    token = surfaceToken()
+    await Bun.sleep(40)
+    await waitFor(() => closes(token).length === 1)
+  })
+
+  test("a surface that opens after its offer went is closed again", async () => {
+    // The offer goes (here, Deadbolt locks) while the page is opening the surface: a close sent
+    // before the page had it would be lost, so one follows the open.
+    fake.answer = (message) => {
+      if (message.type === "db:probe") return { ...NO_FACTS, account: true }
+      if (message.type === "db:surface") {
+        host.setStatus({ state: "locked" })
+        host.setStatus({ state: "ready", version: "0" })
+      }
+      return true
+    }
+    await signIn("new@example.com", "a new password")
+    const token = surfaceToken()
+    // One close when the offer went, which can reach the page before the surface is open there,
+    // and one once the page said it had opened it.
+    await waitFor(() => closes(token).length === 2)
+    expect(saver.ownsSurface(token)).toBe(false)
+  })
+
+  test("leaving the page forgets the surface", async () => {
+    await signIn("new@example.com", "a new password")
+    const token = surfaceToken()
+    saver.navigated(1, "https://www.example.com/next")
+    expect(saver.ownsSurface(token)).toBe(false)
+    expect(saver.pending(1)).toBeDefined()
   })
 })

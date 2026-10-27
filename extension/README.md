@@ -41,8 +41,9 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/content.ts`         | Content script: scans, submit capture, settled-page signal      |
 | `src/content/outcome.ts` | What a settled page shows, as yes-or-no facts for `bg/save.ts`  |
 | `src/content/`           | Detection, Shadow DOM, filling, the menu frame, passkey channel |
-| `src/menu.ts`            | Inline menu page                                                |
+| `src/menu.ts`            | The in-page surface: account list, fill pill, save offer        |
 | `src/popup.ts`           | Toolbar popup: status, logins, save offers, passkey prompts     |
+| `src/ui/motion.ts`       | Springs (CSS `linear()` and retargeting), rolled labels         |
 | `src/protocol.ts`        | Host message types and parsing                                  |
 | `src/messages.ts`        | Messages inside the extension                                   |
 | `static/`                | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons       |
@@ -56,7 +57,8 @@ timers, host message parsing, and the host client against a fake port.
 `bun run e2e` loads the built extension in headless Chromium with fresh
 profiles and `e2e/fake-host.py` as the host. `--only security` runs the
 hidden, covered, swapped and navigated cases that CI runs; `--stills <dir>`
-saves screenshots. `--only passkeys --deadbolt <path to deadbolt>` runs the
+saves screenshots, and `--video <dir>` records the `film` run (menu, fill,
+sign-in, save offer in the page). `--only passkeys --deadbolt <path to deadbolt>` runs the
 passkey cases against the real `deadbolt browser-host` and a throwaway store,
 and checks every registration and assertion with `@simplewebauthn/server`.
 
@@ -93,7 +95,7 @@ its call reporting and FedCM hooks, SSO memory, the external-extension allowlist
 and its dataset, and the dashboard.
 
 New for Deadbolt: the host client and protocol types, the popup and its save
-offers, the same-site frame check, the sign-in outcome probe, the
+offers, the one in-page surface and its motion, the same-site frame check, the sign-in outcome probe, the
 postMessage token handoff, form-bound fills and fill acks, the single acked
 passkey port (Foyer accepted whichever port acked first), passkey prompts in
 the popup, the OpenCode theme and the icons.

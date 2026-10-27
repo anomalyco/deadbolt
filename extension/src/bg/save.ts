@@ -10,19 +10,24 @@
 // account or a Sign out control confirms it; a page with neither, a moment
 // later, is only likely, and gets a badge but never opens the popup.
 //
-// The offer is browser UI, never page UI: the toolbar button gets a badge and
-// the popup shows the offer when opened. A page can see any element put into
-// it, so an in-page prompt would tell it what the check said. Opening the
-// popup by itself does move focus away from the page, which a page can see.
-// So every check that finishes uses up the site's turn, whatever it said: the
-// popup opens by itself for at most one check per site every ten minutes,
-// across tabs, and every other offer only badges. Only a confirmed sign-in
-// may open it, and only its check uses the turn: a likely one never opens
-// the popup, so its check tells the page nothing.
+// Where the offer shows: the toolbar button always gets a badge, and the
+// popup shows the offer when opened. After a confirmed sign-in that took the
+// site's turn, it also shows in the page, as Deadbolt's surface at the top
+// right (an extension frame in a closed shadow root, see content/inline.ts),
+// and the popup is the fallback. A page can see that the surface appeared,
+// so it learns that the check found a new or changed login: every check that
+// finishes uses up the site's turn, whatever it said, and the surface (or,
+// where it can't open, the popup) shows for at most one check per site every
+// ten minutes, across tabs. Every other offer only badges. Only a confirmed
+// sign-in may show it, and only its check uses the turn: a likely one never
+// shows anything a page can see, so its check tells the page nothing. The
+// surface gets the site and username to show, never the password, and
+// answers through the same offer id the popup does.
 
-import type { ChooseReply, OfferChoice, PageFacts, SaveOffer } from "../messages"
+import type { ChooseReply, MenuLoadReply, OfferChoice, PageFacts, SaveOffer } from "../messages"
 import type { SaveReply } from "../protocol"
-import { newToken, sendToFrame, targetFor, type FrameTarget } from "./frames"
+import { resizeMessage } from "./autofill"
+import { menuFrameOf, newToken, sendToFrame, targetFor, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
 import { saveTitle, saveUrl, senderOrigin, siteOf } from "./site"
 
@@ -88,6 +93,18 @@ interface Offer {
 }
 
 type Pending = { offer: Omit<SaveOffer, "id">; save: Offer["save"] }
+
+/** The save offer shown in a page: the document it's for, and the offer it answers. */
+interface Surface {
+  target: FrameTarget
+  offer: string
+  /** The surface frame that first loaded the token; only it may use it after. */
+  menuDocumentId?: string
+  /** The surface itself is answering: it shows the result and leaves on its own. */
+  answering: boolean
+  /** Answered: it may still resize as it folds away, but answers nothing more. */
+  answered?: boolean
+}
 
 /**
  * What a settled page says about the sign-in:
@@ -170,6 +187,8 @@ export class Saver {
   /** The site each tab's top page was last on, to tell when a tab leaves it. */
   private sites = new Map<number, string | null>()
 
+  /** Save offers open in pages, by their surface token. */
+  private surfaces = new Map<string, Surface>()
   /** Bumped by each settled page in a tab; a second look for an older one is dropped. */
   private rounds = new Map<number, number>()
 
@@ -298,7 +317,7 @@ export class Saver {
     const turn = decided.asked && outcome === "confirmed" ? await this.openTurn(c.site).catch(() => false) : false
     if (!decided.pending || !(await this.still(tabId, ticket, c.site))) return
     if (await this.heldBack(c.site, decided.pending.offer.username)) return
-    await this.publish(tabId, ticket, decided.pending, turn)
+    await this.publish(tabId, ticket, decided.pending, turn, target)
   }
 
   /** What the top page shows now, from the document that settled. */
@@ -363,13 +382,120 @@ export class Saver {
   }
 
   /** Hold the offer for the tab under a new id, badge the toolbar button, and open the popup if the site had its turn. */
-  private async publish(tabId: number, ticket: Ticket, pending: Pending, turn: boolean) {
+  /**
+   * Hold the offer for the tab under a new id and badge the toolbar button.
+   * If the site had its turn, show it in the page that settled (`target`),
+   * or where that can't be, open the popup.
+   */
+  private async publish(tabId: number, ticket: Ticket, pending: Pending, turn: boolean, target?: FrameTarget) {
     this.dropOffer(tabId)
     const id = newToken()
     const timer = setTimeout(() => this.dropOffer(tabId, id), this.ttl.offer)
     this.offers.set(tabId, { offer: { ...pending.offer, id }, ticket, save: pending.save, timer, saving: false })
     void Promise.all([chrome.action.setBadgeBackgroundColor({ tabId, color: BADGE }), chrome.action.setBadgeText({ tabId, text: "1" })]).catch(() => {})
-    if (turn) await openPopupFor(tabId, () => this.offers.get(tabId)?.offer.id === id)
+    if (!turn) return
+    const current = () => this.offers.get(tabId)?.offer.id === id
+    if (target && target.frameId === 0 && (await this.showInPage(target, id))) return
+    await openPopupFor(tabId, current)
+  }
+
+  /** Opens the offer's surface in the top page's document `target`. False if it didn't take it. */
+  private async showInPage(target: FrameTarget, offer: string): Promise<boolean> {
+    const token = newToken()
+    this.surfaces.set(token, { target, offer, answering: false })
+    const shown = (await sendToFrame(target, { type: "db:surface", token })) === true
+    if (!shown || this.offers.get(target.tabId)?.offer.id !== offer) {
+      this.surfaces.delete(token)
+      // It opened, but the offer went (answered, expired, Deadbolt locked) on the way: close it.
+      if (shown) void sendToFrame(target, { type: "db:close-menu", token })
+      return shown
+    }
+    return true
+  }
+
+  ownsSurface(token: unknown): boolean {
+    return typeof token === "string" && this.surfaces.has(token)
+  }
+
+  /**
+   * The surface frame claiming `token`: on its first load (with `parent`, see
+   * menuFrameOf) it binds the token to that frame's document, and after that
+   * only that document may use it.
+   */
+  private async surface(token: string, sender: chrome.runtime.MessageSender, parent?: string): Promise<Surface | undefined> {
+    const s = this.surfaces.get(token)
+    if (!s || !sender.documentId || sender.tab?.id !== s.target.tabId) return undefined
+    if (s.menuDocumentId === undefined) {
+      if (parent === undefined || !(await menuFrameOf(sender, s.target, parent)) || this.surfaces.get(token) !== s) return undefined
+      s.menuDocumentId = sender.documentId
+    }
+    return s.menuDocumentId === sender.documentId ? s : undefined
+  }
+
+  /** What the surface may show: the site, the username and whether it's an update. */
+  async surfaceLoad(token: string, sender: chrome.runtime.MessageSender, parent: string): Promise<MenuLoadReply | null> {
+    const s = await this.surface(token, sender, parent)
+    const o = s && this.offers.get(s.target.tabId)
+    if (!s || !o || o.offer.id !== s.offer || this.host.status.state !== "ready") return null
+    return { kind: "offer", site: o.offer.site, username: o.offer.username, update: o.offer.update }
+  }
+
+  /**
+   * The surface was answered. Save and Never answer the offer as the popup
+   * does; Not now only puts the surface away, and the toolbar keeps the offer.
+   * Each token answers once, except a save the host turned down for now
+   * (locked, busy), which may be tried again.
+   */
+  async surfaceChoose(token: string, sender: chrome.runtime.MessageSender, choice: OfferChoice): Promise<ChooseReply> {
+    const s = await this.surface(token, sender)
+    if (!s) return { ok: false, message: "This offer has expired.", gone: true }
+    if (choice === "later") {
+      this.surfaces.delete(token)
+      return { ok: true, message: "" }
+    }
+    if (s.answered) return { ok: false, message: "This offer has expired.", gone: true }
+    if (s.answering) return { ok: false, message: "Saving…" }
+    s.answering = true
+    const reply = await this.choose(s.target.tabId, s.offer, choice)
+    if (reply.ok || ("gone" in reply && reply.gone)) s.answered = true
+    else s.answering = false
+    return reply
+  }
+
+  async surfaceResize(token: string, sender: chrome.runtime.MessageSender, height: number, width?: unknown, mode?: unknown) {
+    const s = await this.surface(token, sender)
+    if (s) await sendToFrame(s.target, resizeMessage(token, height, width, mode))
+  }
+
+  /** Escape in the surface: put it away, as Not now does. */
+  async surfaceDismiss(token: string, sender: chrome.runtime.MessageSender) {
+    const s = await this.surface(token, sender)
+    if (!s) return
+    this.surfaces.delete(token)
+    await sendToFrame(s.target, { type: "db:close-menu", token })
+  }
+
+  /** The page's content script closed the surface (its time ran out, or it left). */
+  surfaceClosed(token: string, sender: chrome.runtime.MessageSender) {
+    const s = this.surfaces.get(token)
+    if (s && sender.tab?.id === s.target.tabId && sender.documentId === s.target.documentId) this.surfaces.delete(token)
+  }
+
+  /**
+   * The offer `id` was answered or went away: its surfaces close, except one
+   * showing its own answer, which folds away by itself (and is forgotten
+   * when its page closes it or leaves).
+   */
+  private dropSurfaces(id: string) {
+    for (const [token, s] of this.surfaces) {
+      if (s.offer !== id || s.answering) continue
+      this.surfaces.delete(token)
+      void sendToFrame(s.target, { type: "db:close-menu", token })
+    }
+  }
+
+  private dropTabSurfaces(tabId: number) {
+    for (const [token, s] of this.surfaces) if (s.target.tabId === tabId) this.surfaces.delete(token)
   }
 
   /**
@@ -395,6 +521,7 @@ export class Saver {
     if (!o || (id !== undefined && o.offer.id !== id)) return
     clearTimeout(o.timer)
     this.offers.delete(tabId)
+    this.dropSurfaces(o.offer.id)
     void chrome.action.setBadgeText({ tabId, text: "" }).catch(() => {})
   }
 
@@ -462,6 +589,8 @@ export class Saver {
 
   /** The tab's top page committed a new document. Another site's page ends the sign-in and its offer. */
   navigated(tabId: number, url: string) {
+    // The page the surface was in is gone, and the surface with it.
+    this.dropTabSurfaces(tabId)
     const site = siteOfUrl(url)
     if (!this.sites.has(tabId) || this.sites.get(tabId) !== site) this.moveOn(tabId)
     this.sites.set(tabId, site)
@@ -473,6 +602,7 @@ export class Saver {
     this.moveOn(tabId)
     this.sites.delete(tabId)
     this.rounds.delete(tabId)
+    this.dropTabSurfaces(tabId)
     this.dropCapture(tabId)
     this.dropOffer(tabId)
   }

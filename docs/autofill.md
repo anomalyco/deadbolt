@@ -117,6 +117,17 @@ not running without sending hello, which would start the agent again.
   takes a click into the field or ↓. Fields in frames get no menu (see Frames). It's an extension
   page in an iframe inside a closed shadow root on a plain element, so the
   page can't read it or click it for you.
+- **One surface.** That frame is Deadbolt's only UI in the page, and it
+  morphs between modes rather than swapping for another: the account list
+  grows from the field; a pick folds it into a pill at the end of the field
+  that says "Filling…", then "Filled" once the content script says it wrote
+  something (or "Couldn't fill"), and goes by itself; after a confirmed
+  sign-in it shows the save offer at the top right (see Saving). The frame
+  says what size each mode needs and the content script springs the frame
+  there, so no transparent part of it is left over the page. Motion follows
+  springs with no bounce, retargets from where it is, and is a short fade
+  when the system asks for reduced motion (`ui/motion.ts`). The frame only
+  moves after a pick passed its checks, so moving it can't help a page.
 - **Menu visibility.** The menu samples its own visibility rather than
   watching it continuously: an `IntersectionObserver` with `trackVisibility`
   gives a reading at most every 100 ms, saying whether the menu is fully on
@@ -155,8 +166,13 @@ not running without sending hello, which would start the agent again.
   fields changed, nothing is filled. When the user picks or clicks Fill, the
   content script fixes which of the form's fields may be filled right then;
   the host is asked only for their values and only those fields are written
-  (the open menu itself doesn't count as covering a field then; it closes
-  before anything is written).
+  (when the user picks, Deadbolt's own open menu doesn't count as covering a
+  field; anything of the page's still does). A pick from the menu folds it
+  into a pill at the end of the field, and nothing is written until the pill
+  has settled there. The pill is an element of the page, which can restyle
+  it, so it's exempt from the cover check only while it's exactly where and
+  as big as the content script put it, and no bigger than a pill; stretched
+  over a field, it's a cover like any other and the field gets nothing.
   A field the page enables or shows later, such as a disabled password it
   turns on when the username is focused for the fill, gets nothing. If the
   sign-in was cancelled (Esc, or a
@@ -205,12 +221,32 @@ not running without sending hello, which would start the agent again.
   for a couple of seconds, a code step, or a couple of seconds after a
   submit. The service worker then asks that document what it shows (see
   Sign-in outcomes) and judges it. Only a sign-in that worked gets a `check`.
-  On `new` or `update` the offer goes to the toolbar popup, never the page:
-  the toolbar button gets a badge, and for a confirmed sign-in the popup
-  opens by itself where the browser allows it, at most once per site every
-  ten minutes (see the threat model). The popup asks "Save login for <site>?"
-  or "Update password for <username>?" with Save, Not now and Never for this
-  site, and sends `save` only on Save. Not now also holds back the same
+  On `new` or `update` the toolbar button gets a badge and the popup holds
+  the offer. After a confirmed sign-in, at most once per site every ten
+  minutes (see the threat model), the offer also shows in the page: the
+  service worker hands the settled document's content script a one-time
+  token, and it opens the surface at the top right, near the toolbar
+  button. The surface frame gets the site, the username and whether it's an
+  update, never the password. It asks "Save login?" or "Update password for
+  <username>?" with Save, Not now and Never for this site, under a bar that
+  empties over twelve seconds (paused while the pointer or focus is on it).
+  Save rolls to "Saving…", folds into a "Saved" pill (the same for a new
+  login and an update) and leaves toward the toolbar button; a locked or
+  busy Deadbolt says so in place, and a save that fails after the bar ran
+  out gets six more seconds. Not now, Never for this site and the time
+  running out leave the same way, toward the toolbar button; Not now and the
+  time running out only put the surface away, and the offer stays in the
+  toolbar. Its buttons take only real presses that pass the menu's
+  visibility and dwell checks. The surface closes when the page navigates,
+  when Deadbolt locks, and when the offer expires or is answered in the
+  popup (if the offer went while the page was still opening it, a close
+  follows the open). The content script closes it too if its frame hasn't
+  loaded the offer within three seconds, and after thirty seconds in any
+  case. Where the page can't take it (a hidden tab, say), the popup
+  opens by itself instead. A likely sign-in only badges. The popup asks
+  "Save login for <site>?" or "Update password for <username>?" with Save,
+  Not now and Never for this site, and sends `save` only on Save; the page's
+  surface and the popup answer the same offer id. Not now also holds back the same
   username on the site for a day (the service worker keeps a SHA-256 of the
   site and username, salted once per browser session, in session storage,
   not the username). Never for this
@@ -446,25 +482,37 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
 - **Secrets in transit** go only over stdin/stdout and the agent socket, never
   argv. They are held in `Zeroizing` buffers, and Debug output prints
   `<redacted>` in their place. Neither the host nor the agent logs them.
-- **Check results stay in the extension.** A check is a password oracle
-  for the page's site, so nothing the page can see depends on it: the offer
-  is shown only in the toolbar popup, and the page gets no prompt, message or
-  element from it. A page can still choose a password and submit it in a way
-  that passes the noise filters; the result is an offer the user sees and can
-  decline, and no value reaches the page. One bit can: when the extension
-  opens the popup by itself, the page's window loses focus, so a page
-  watching for `blur` learns that an offer appeared, and so whether the
-  password it chose matched. So every check that finishes uses up the site's
-  (registrable domain's) ten-minute turn, across tabs, whatever it said:
-  `same`, `new`, `update`, or `rate_limited`. The popup opens by itself only
-  when that check offered something and took the turn; every other offer only
-  badges the toolbar button. A page therefore learns at most one bit per site
-  per ten minutes, and each time the user sees a popup they can decline.
-  Only a confirmed sign-in (see Sign-in outcomes) can open the popup, so only
-  its check takes the turn; a page decides what it shows, so it can choose
-  which checks those are, but a check that can't open the popup tells it
-  nothing. Not now and Never for this site stop checks, so a page that sees
-  no popup where one would have opened may learn the user said one of them.
+- **What a check tells the page.** A check is a password oracle for the
+  page's site, so what a page can see of it is kept to one bit per site per
+  ten minutes. A page can still choose a password and submit it in a way that
+  passes the noise filters; the result is an offer the user sees and can
+  decline, and no value reaches the page. The offer's surface is an element
+  the page can see appear and change shape (it can't read or click into
+  it), and the popup, where it opens instead, takes focus from the page,
+  which a page can see too. Exactly what the page can infer from the
+  surface:
+  - That an offer appeared: a confirmed check found a new or changed login,
+    so the password it chose isn't the one saved, and Deadbolt is installed
+    (which any menu already shows). Not which: a new login and an update
+    have the same size, and both fold into the same "Saved" pill.
+  - That the user pressed Save: the surface folds into the pill before it
+    leaves. Not now, Never for this site and the time running out all leave
+    the same way, so they look alike.
+  - That Deadbolt is locked or busy, if a save fails: the status line makes
+    the surface taller.
+  - Roughly how long the user took, from when the surface leaves. So every check that
+  finishes uses up the site's (registrable domain's) ten-minute turn, across
+  tabs, whatever it said: `same`, `new`, `update`, or `rate_limited`. The
+  offer shows by itself only when that check offered something and took the
+  turn; every other offer only badges the toolbar button. Only a confirmed
+  sign-in (see Sign-in outcomes) can show it, so only its check takes the
+  turn; a page decides what it shows, so it can choose which checks those
+  are, but a check that can't show anything tells it nothing. That's the
+  same one bit the popup opening by itself always gave away, and in return
+  the offer appears where the user is looking; the badge and popup remain
+  for every other offer. Not now and Never for this site stop checks, so a
+  page that sees nothing where an offer would have shown may learn the user
+  said one of them.
   The probe itself puts nothing in the page. A fill's values reach only the content script's isolated world
   and the fields it writes. The host rate-limits checks and fills as well, so
   a runaway or compromised caller can't guess quickly.

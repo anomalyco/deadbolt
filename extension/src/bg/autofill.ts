@@ -4,7 +4,7 @@
 // email-first continuation are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/autofill/service.ts, by Ryan Vogel).
 
-import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, ListReply, Want } from "../protocol"
 import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
@@ -197,9 +197,9 @@ export class Autofill {
     await sendToFrame(t, { type: "db:close-menu", token })
   }
 
-  async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender) {
+  async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender, width?: unknown, mode?: unknown) {
     const t = await this.token(token, sender)
-    if (t && Number.isFinite(height)) await sendToFrame(t, { type: "db:resize-menu", token, height: Math.min(Math.max(height, 40), 400) })
+    if (t) await sendToFrame(t, resizeMessage(token, height, width, mode))
   }
 
   /** The page closed its menu; with `dismissed`, the user said no (esc). */
@@ -420,6 +420,16 @@ export class Autofill {
     if (!account) return { ok: false, message: "That login isn't here anymore." }
     return this.fillAndArm(page, account, page.roles, page.form, framed)
   }
+}
+
+/**
+ * What a surface frame asked for, within bounds: a height of 28 to 400 px,
+ * a width of 100 to 420, and the one mode a surface may fold into (a pill).
+ */
+export function resizeMessage(token: string, height: number, width?: unknown, mode?: unknown): ToContent {
+  const h = Number.isFinite(height) ? Math.min(Math.max(height, 28), 400) : 40
+  const w = typeof width === "number" && Number.isFinite(width) ? Math.min(Math.max(width, 100), 420) : undefined
+  return { type: "db:resize-menu", token, height: h, ...(w !== undefined ? { width: w } : {}), ...(mode === "pill" ? { mode: "pill" as const } : {}) }
 }
 
 /** Rate limiting is the host pacing fills, not a fault: say so calmly. */

@@ -45,16 +45,25 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return saver.settled(sender)
     case "db:capture":
       return saver.capture(sender, message)
+    // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
+      if (saver.ownsSurface(message.token)) return saver.surfaceClosed(String(message.token), sender)
       return autofill.menuClose(String(message.token), message.dismissed === true, sender)
     case "db:menu-load":
+      if (saver.ownsSurface(message.token)) return saver.surfaceLoad(message.token, sender, String(message.parent))
       return autofill.menuLoad(message.token, sender, String(message.parent))
     case "db:menu-pick":
       return autofill.menuPick(message.token, String(message.ref), sender)
     case "db:menu-dismiss":
+      if (saver.ownsSurface(message.token)) return saver.surfaceDismiss(message.token, sender)
       return autofill.menuDismiss(message.token, sender)
     case "db:menu-resize":
-      return autofill.menuResize(message.token, Number(message.height), sender)
+      if (saver.ownsSurface(message.token)) return saver.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
+      return autofill.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
+    case "db:surface-choose":
+      return ["save", "later", "never"].includes(message.choice) && saver.ownsSurface(message.token)
+        ? saver.surfaceChoose(message.token, sender, message.choice)
+        : { ok: false, message: "This offer has expired.", gone: true }
     case "db:popup-load": {
       if (!fromExtensionPage(sender, "popup.html")) return null
       const reply: PopupReply = await autofill.popupLoad(message.tabId)

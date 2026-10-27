@@ -37,11 +37,25 @@ export const ICONS = {
 
 export const icon = (name: keyof typeof ICONS) => svg(ICONS[name])
 
-/** The letter tile for a login: the first letter of its title. */
-export function monogram(title: string): HTMLElement {
-  const letter = [...(title.trim() || "?")][0].toUpperCase()
-  return h("span", { class: "tile", "aria-hidden": "true" }, letter)
+/** A hue for `text`, the same every time, so a login keeps its colour. */
+export function hueOf(text: string): number {
+  let hash = 0
+  for (const c of text.toLowerCase()) hash = (hash * 31 + c.codePointAt(0)!) >>> 0
+  return hash % 360
 }
+
+/**
+ * A login's avatar: the first letter of its title on a soft tint of its own
+ * hue. With `glyph` (a passkey, a lock), the glyph on a neutral tint.
+ */
+export function avatar(title: string, glyph?: Element): HTMLElement {
+  if (glyph) return h("span", { class: "avatar neutral", "aria-hidden": "true" }, glyph)
+  const letter = [...(title.trim() || "?")][0].toUpperCase()
+  return h("span", { class: "avatar", style: `--hue:${hueOf(title.trim() || "?")}`, "aria-hidden": "true" }, letter)
+}
+
+/** The letter avatar for a login (see avatar). */
+export const monogram = (title: string) => avatar(title)
 
 /**
  * Whether the menu had been fully visible, and still, for long enough before
