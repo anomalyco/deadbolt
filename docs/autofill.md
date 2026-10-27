@@ -547,7 +547,11 @@ Hello starts the agent if needed. It's the only message that does.
 ```
 
 `username` is left out when the login has none. `title` is the login's name,
-else its URL's host. Accounts are sorted by title.
+else its URL's host. Accounts come closest first, by their closest URL: the
+page's origin (port included, so `localhost:3000` isn't `localhost:5173`),
+then its host on another scheme or port, then a parent or child host or one
+sharing a parent below the site, then the rest of the site. Ties go to the
+login last filled on this device, then to the title.
 
 ### fill: values of one login
 
