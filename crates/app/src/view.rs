@@ -9,7 +9,8 @@
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field, noun};
 use rune::{
-    Chrome, Cx, Edge, El, Icon, ScrollSpec, TextStyle, Transition, col, el, icon, row, spacer, text,
+    Chrome, Cx, Edge, El, Icon, ScrollSpec, TextEdit, TextStyle, Transition, col, el, icon, row,
+    spacer, text,
 };
 use rune_kit::shell::{Page, SidebarRow, SplitView, Toolbar};
 use rune_kit::{
@@ -34,6 +35,9 @@ const SEARCH_W: f32 = 260.0;
 const ROW_H: f32 = 46.0;
 /// How far a list's edges fade over hidden rows, and how far a row brought into view stops from them.
 pub(crate) const LIST_EDGE: f32 = 24.0;
+/// An item's field row, one line high, and its value's line.
+const FIELD_H: f32 = 40.0;
+const VALUE_LINE: f32 = 20.0;
 pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
 
 pub(crate) fn replace() -> Transition {
@@ -672,31 +676,44 @@ fn copy_button(k: &Kit, name: &str, noun: &str, copied: bool) -> El {
 }
 
 /// A field row's frame: its name, then the value and the actions.
-fn field_frame(k: &Kit, name: &str, label: String, value: El, actions: El, lines: bool) -> El {
-    let row = row();
-    // Lines read from the top, beside their name and buttons.
-    let row = if lines {
-        row.items_start().py(10.0)
-    } else {
-        row.center_y()
+/// How a field's value sits in its row.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Frame {
+    /// One line, centred.
+    Line,
+    /// A value that may wrap or span lines (a public key, a URL, a note):
+    /// its name and buttons stay level with the first line, so a value
+    /// shown or hidden doesn't move them.
+    Wraps,
+}
+
+fn field_frame(k: &Kit, name: &str, label: String, value: El, actions: El, frame: Frame) -> El {
+    let label = text(label)
+        .key("name")
+        .w(104.0)
+        .font(k.ty.text_small)
+        .color(k.c.text_muted);
+    let (row, label, value, actions) = match frame {
+        Frame::Line => (row().center_y(), label, value, actions),
+        // Laid out as `Line` while it fits on one line.
+        Frame::Wraps => (
+            row().items_start(),
+            label.mt((FIELD_H - k.ty.text_small.line_px()) / 2.0),
+            value.py((FIELD_H - VALUE_LINE) / 2.0),
+            actions.h(FIELD_H),
+        ),
     };
     row.key(format!("field-{name}"))
         // A field a background refresh adds or removes fades; a new selection
         // replaces them at once (`Tx::instant`).
         .transition(Transition::opacity())
         .w_full()
-        .min_h(40.0)
+        .min_h(FIELD_H)
         .px(10.0)
         .gap(12.0)
         .radius(k.radius.md)
         .hover(k.c.hover)
-        .child(
-            text(label)
-                .key("name")
-                .w(104.0)
-                .font(k.ty.text_small)
-                .color(k.c.text_muted),
-        )
+        .child(label)
         .child(value.grow(1.0).shrink())
         .child(actions)
 }
@@ -776,7 +793,7 @@ fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
         "One-time code".into(),
         value,
         actions,
-        false,
+        Frame::Line,
     )
 }
 
@@ -786,16 +803,19 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     // gives a code), so there's nothing here to show or copy.
     let held = field.kind != "otp";
     let revealed = held && s.revealed.iter().any(|f| f == &field.name);
-    let value = if secret && !revealed {
+    let masked = secret && !revealed;
+    // A key file's final line break would draw an empty last line; Copy
+    // still copies it.
+    let value = if masked {
         "••••••••••••".to_owned()
     } else {
-        field.value.clone()
+        field.value.trim_end_matches(['\r', '\n']).to_owned()
     };
     // Secrets and key material read in mono, where 0/O and l/1 differ.
     let style = if secret || matches!(field.name.as_str(), "public-key" | "fingerprint") {
-        k.ty.mono.lh(20.0)
+        k.ty.mono.lh(VALUE_LINE)
     } else {
-        k.ty.text_small.lh(20.0)
+        k.ty.text_small.lh(VALUE_LINE)
     };
     let name = field.name.clone();
     let named = title_case(&name);
@@ -824,16 +844,28 @@ fn field_row(s: &App, item: &str, field: &FieldInfo, k: &Kit) -> El {
     if held {
         actions = actions.child(copy_button(k, &name, &noun, is_copied(s, item, &name)));
     }
-    let lines = (!secret || revealed) && field.value.contains('\n');
-    let value = text(value).key("value").font(style).color(k.c.text_base);
-    // Multi-line text wraps: notes, an address, a secure note's body or a
-    // private key once shown. A masked value is one line.
-    let value = if field.kind == "note" || lines {
-        value.wrap().min_w(0.0)
+    // Shown values wrap: notes, an address, a secure note's body or a
+    // private key over their lines, and a long public key, URL or base64
+    // run inside itself rather than being cut off. A masked value is one line.
+    let value = if masked {
+        text(value).truncate_fade()
+    } else if secret {
+        // A shown secret is drawn through Rune's secure path, never as
+        // text: kept out of the element tree, `Debug` and the shared layout
+        // cache, zeroized, and masked again as it leaves (a lock's fade).
+        // Read-only: it takes no presses, focus or keys.
+        let mut edit = TextEdit::new(value);
+        edit.set_secure(true);
+        edit.set_revealed(true);
+        rune::text_input(&edit, style)
+            .wrap_anywhere()
+            .min_w(0.0)
+            .inert()
     } else {
-        value.truncate_fade()
+        text(value).wrap_anywhere().min_w(0.0)
     };
-    field_frame(k, &name, named, value, actions, lines)
+    let value = value.key("value").font(style).color(k.c.text_base);
+    field_frame(k, &name, named, value, actions, Frame::Wraps)
 }
 
 /// "Copied, clears in 0:28", with a bar that empties; then "Clipboard

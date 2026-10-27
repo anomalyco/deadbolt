@@ -333,6 +333,10 @@ const SCENES: &[Scene] = &[
         s.toggle_reveal("notes");
     }),
     ("ssh", |s| kind_scene(s, "ssh")),
+    ("ssh-revealed", |s| {
+        kind_scene(s, "ssh");
+        s.toggle_reveal("private-key");
+    }),
     ("identity", |s| kind_scene(s, "identity")),
     ("search", |s| {
         vault(s);
@@ -451,8 +455,35 @@ const SCENES: &[Scene] = &[
         typed(s, "email", "dax@anoma.ly");
         typed(s, "address", "1 Main St\nSpringfield, IL 12345");
     }),
-    // ⌘E on an SSH key: its private key shows but stays as it is.
+    // A new secure note, its body typed (hidden: one row of dots).
+    ("new-note", |s| {
+        vault(s);
+        s.new_item();
+        s.pick_kind("note");
+        if let Some(form) = &mut s.edit.form {
+            form.name.replace_text("Alarm codes");
+        }
+        typed(s, "notes", "Front door: 4417\nGarage: 0932\n");
+    }),
+    // A new SSH key, its private key pasted (hidden) and its public key
+    // wrapping.
+    ("new-ssh", |s| {
+        vault(s);
+        s.new_item();
+        s.pick_kind("ssh");
+        if let Some(form) = &mut s.edit.form {
+            form.name.replace_text("Deploy key");
+        }
+        typed(s, "private-key", FIXTURE_PRIVATE_KEY);
+        typed(s, "public-key", FIXTURE_PUBLIC_KEY);
+    }),
+    // ⌘E on an SSH key: its private key kept, empty under its placeholder.
     ("edit-ssh", |s| {
+        kind_scene(s, "ssh");
+        s.edit_selected();
+    }),
+    // The same, its private key shown and wrapping.
+    ("edit-ssh-revealed", |s| {
         kind_scene(s, "ssh");
         s.edit_selected();
         s.toggle_shown(0);
@@ -826,6 +857,12 @@ fn kind_scene(s: &mut App, kind: &str) {
     detail_for_selection(s);
 }
 
+/// The scenes' SSH key, as a key file has it: one long base64 line, and a
+/// final line break.
+const FIXTURE_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFixtureFixtureFixtureFixtureFixtureFixtureFixtureFixture00\n-----END PRIVATE KEY-----\n";
+const FIXTURE_PUBLIC_KEY: &str =
+    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureFixtureFixtureFixtureFixture deploy@anoma.ly";
+
 /// The open form's field `name`, typed into.
 fn typed(s: &mut App, name: &str, value: &str) {
     if let Some(input) = s
@@ -873,16 +910,8 @@ fn detail_for_selection(s: &mut App) {
             "Front door: 4417\nGarage: 0932\nThe panel is behind the coats.",
         )],
         "ssh" => vec![
-            field(
-                "private-key",
-                "secret",
-                "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFixtureFixtureFixtureFixtureFixture00\n-----END PRIVATE KEY-----",
-            ),
-            field(
-                "public-key",
-                "text",
-                "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureFixtureFixtureFixtureFixture deploy@anoma.ly",
-            ),
+            field("private-key", "secret", FIXTURE_PRIVATE_KEY),
+            field("public-key", "text", FIXTURE_PUBLIC_KEY),
             field(
                 "fingerprint",
                 "text",

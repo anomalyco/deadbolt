@@ -13,7 +13,7 @@ use rune_kit::{
     State, Switch, TextArea, TextInput,
 };
 
-use super::{Conflict, Delete, Form, Input, KINDS, LENGTHS};
+use super::{Conflict, Delete, Field, Form, Input, KINDS, LENGTHS};
 use crate::import::view::swap;
 use crate::model::{App, title_case};
 use crate::onboarding::{Notice, Severity};
@@ -38,6 +38,9 @@ pub static REGENERATE: Icon = Icon {
 
 /// The field names' column, as the item's.
 const LABEL_W: f32 = 84.0;
+/// A shown secret's text area grows to this, then scrolls inside.
+const SECRET_LINES: usize = 12;
+const SECRET_MAX_H: f32 = 200.0;
 const LABEL_GAP: f32 = 12.0;
 /// The delete button's growth into its confirm, and back.
 const GROW: Spring = Spring::new(0.3, 0.0);
@@ -94,7 +97,7 @@ fn head(k: &Kit, f: &Form) -> El {
         .width(None)
         .invalid(f.problem_for("name").is_some())
         .on_edit(|s: &mut App| s.name_mut())
-        .on_key(|s: &mut App, ev, _| s.form_key(ev, true))
+        .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line))
         .on_change(|s: &mut App, _| s.form_changed())
         .on_submit(|s: &mut App, _| s.save())
         .build(k)
@@ -102,7 +105,10 @@ fn head(k: &Kit, f: &Form) -> El {
         .label("Name");
     let mut head = col().key("head").w_full().gap(8.0);
     if f.is_new() {
-        let labels: Vec<String> = KINDS.iter().map(|kind| title_case(kind)).collect();
+        let labels: Vec<String> = KINDS
+            .iter()
+            .map(|kind| title_case(deadbolt_client::protocol::noun(kind, 1)))
+            .collect();
         let at = KINDS.iter().position(|kind| *kind == f.kind);
         let kinds = SegmentedControl::new(&labels, at)
             .fit()
@@ -165,6 +171,9 @@ fn placeholder(input: &Input) -> &'static str {
     if input.held {
         return "Kept · type to replace";
     }
+    if input.keeps() {
+        return "Kept · type or paste to replace";
+    }
     match input.name.as_str() {
         "url" => "example.com",
         "expiry" => "MM/YY",
@@ -173,6 +182,8 @@ fn placeholder(input: &Input) -> &'static str {
         "otp" => "otpauth:// link or secret",
         "email" => "name@example.com",
         "birthday" => "YYYY-MM-DD",
+        "public-key" => "ssh-ed25519 AAAA…",
+        "fingerprint" => "SHA256:…",
         _ if input.required => "Required",
         _ => "",
     }
@@ -184,36 +195,57 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
     let problem_text = f.problem_for(&input.name);
     let invalid = problem_text.is_some();
     let generates = f.generates() == Some(i);
-    let control = if input.locked() {
-        // A secret over several lines, read only: one masked row, or the
-        // whole value revealed in place.
-        let rows = if input.edit.is_revealed() { 12 } else { 1 };
+    let control = if input.lines && input.secret() {
+        // A secret over several lines: hidden, one fixed row of dots, or
+        // empty for a value kept (`Input::kept`); shown, the whole value,
+        // wrapping and editable anywhere. Still secure either way.
+        let shown = input.edit.is_revealed();
         row()
-            .key("locked")
+            .key("secret-lines")
             .w_full()
             .gap(4.0)
             .items_start()
             .child(
                 el().grow(1.0).shrink().min_w(0.0).child(
                     TextArea::new(&input.edit)
+                        .secure()
+                        .revealed(shown)
+                        .wrap_anywhere()
                         .width(None)
-                        .auto_grow(1, rows)
-                        .disabled(true)
+                        .auto_grow(1, SECRET_LINES)
+                        .max_height(SECRET_MAX_H)
+                        .placeholder(placeholder(input))
+                        .invalid(invalid)
+                        .on_edit(move |s: &mut App| s.input_mut(i))
+                        .on_key(move |s: &mut App, ev, tx| {
+                            s.form_key(ev, Field::SecretLines) || s.copy_secret_input(i, ev, tx)
+                        })
+                        .on_change(|s: &mut App, _| s.form_changed())
+                        .on_submit(|s: &mut App, _| s.save())
                         .build(k)
                         .label(named.clone()),
                 ),
             )
             .child(secret_actions(k, input, i, false, f.saving).mt(6.0))
-    } else if input.lines && !input.secret() {
-        TextArea::new(&input.edit)
+    } else if input.lines || input.wraps() {
+        let area = TextArea::new(&input.edit)
+            .wrap_anywhere()
             .width(None)
-            .auto_grow(2, 6)
+            .placeholder(placeholder(input))
             .invalid(invalid)
-            .on_edit(move |s: &mut App| s.input_mut(i))
-            .on_key(|s: &mut App, ev, _| s.form_key(ev, false))
-            .on_change(|s: &mut App, _| s.form_changed())
-            .build(k)
-            .label(named.clone())
+            .on_edit(move |s: &mut App| s.input_mut(i));
+        let area = if input.lines {
+            // Rune submits a plain ⏎ in a text area; here it breaks the line.
+            area.auto_grow(2, 6)
+                .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Lines))
+                .on_change(|s: &mut App, _| s.form_changed())
+                .on_submit(move |s: &mut App, _| s.break_line(i))
+        } else {
+            area.auto_grow(1, 4)
+                .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Wrapped))
+                .on_change(move |s: &mut App, _| s.wrapped_changed(i))
+        };
+        area.build(k).label(named.clone())
     } else {
         let mut t = TextInput::new(&input.edit)
             .width(None)
@@ -225,12 +257,12 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         if input.secret() {
             t = t
                 .on_key(move |s: &mut App, ev, tx| {
-                    s.form_key(ev, true) || s.copy_secret_input(i, ev, tx)
+                    s.form_key(ev, Field::Line) || s.copy_secret_input(i, ev, tx)
                 })
                 .text_style(k.ty.mono)
                 .trailing(secret_actions(k, input, i, generates, f.saving));
         } else {
-            t = t.on_key(|s: &mut App, ev, _| s.form_key(ev, true));
+            t = t.on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line));
         }
         let built = t.build(k).label(named.clone());
         if generates {
@@ -305,6 +337,7 @@ fn secret_actions(k: &Kit, input: &Input, i: usize, generates: bool, saving: boo
             } else {
                 format!("Show {noun}")
             })
+            .disabled(saving)
             .on_press(move |s: &mut App| s.toggle_shown(i))
             .build(k)
             .key("reveal"),
