@@ -59,12 +59,34 @@ const PROBE = () => {
   window.addEventListener("blur", () => probe.blurs++)
 }
 
-/** The page sees the menu's host element arrive; these pages misuse that. */
+/** The page sees the menu's host element arrive (a popover); these pages misuse that. */
 const onMenu = (js: string) => `<script>
   new MutationObserver((records) => {
-    for (const r of records) for (const host of r.addedNodes) if (host.nodeName === "DIV") { ${js} }
+    for (const r of records) for (const host of r.addedNodes) if (host.nodeType === 1 && host.hasAttribute("popover")) { ${js} }
   }).observe(document.documentElement, { childList: true })
 </script>`
+
+/**
+ * Restyles the menu's host from script, every frame while `when` holds. Its
+ * inline \`!important\` styles beat any stylesheet and Deadbolt sets them
+ * again each frame, so a page has to keep at it.
+ */
+const restyle = (prop: string, value: string, when = "true") =>
+  onMenu(`const loop = () => { if (!host.isConnected) return; if (${when}) host.style.setProperty("${prop}", "${value}", "important"); requestAnimationFrame(loop) }; loop()`)
+
+/** Where the menu is, for a sheet over just it (one over the field too would stop the fill anyway). */
+const overMenu = "const r = host.getBoundingClientRect(); const at = `left:${r.left}px;top:${r.top}px;width:${r.width}px;height:${r.height}px`"
+
+/** A sheet in the top layer over the menu, shown `after` ms past it: in the page, or in a shadow root Deadbolt can't watch. */
+const topCover = (where: "page" | "shadow", clicks: boolean, after = 50) =>
+  onMenu(`setTimeout(() => {
+    ${overMenu}
+    const c = document.createElement("div")
+    c.popover = "manual"
+    c.style.cssText = "position:fixed;inset:auto;margin:0;padding:0;border:0;background:rgb(255 255 255 / 92%);pointer-events:${clicks ? "auto" : "none"};" + at
+    if ("${where}" === "shadow") { const h = document.createElement("span"); document.body.append(h); h.attachShadow({ mode: "closed" }).append(c) } else document.body.append(c)
+    c.showPopover()
+  }, ${after})`)
 
 const emailField = `<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">`
 const passwordField = `<input id="password" name="password" type="password" autocomplete="current-password">`
@@ -84,23 +106,36 @@ const HIDDEN: Record<string, string> = {
 }
 
 // Ways a page can try to get a click into a menu the user can't see properly.
-// The menu's host is the <div> Deadbolt adds to <html>.
+// The menu's host is a popover Deadbolt adds to <html>.
 const OVERLAY: Record<string, string> = {
   none: "",
-  fade: `<style>html > div { opacity: 0.4 !important }</style>`,
-  clip: `<style>html > div { clip-path: inset(0 0 25% 0) !important }</style>`,
-  // A near-opaque sheet over everything that lets clicks through to the menu.
-  cover: onMenu(`const c = document.createElement("section"); c.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:rgb(255 255 255 / 92%)"; setTimeout(() => document.documentElement.append(c), 50)`),
+  fade: restyle("opacity", "0.4"),
+  clip: restyle("clip-path", "inset(0 0 25% 0)"),
+  // A near-opaque sheet over everything in the top layer, letting clicks
+  // through to the menu, in a shadow root: Deadbolt can't see it go up.
+  cover: topCover("shadow", false),
   // Fade it out the moment the click starts (focus moves into the menu), so a
   // visibility reading taken before the click is stale.
-  "on-press": `<script>addEventListener("blur", () => document.head.insertAdjacentHTML("beforeend", "<style>html > div { opacity: 0 !important }</style>"))</script>`,
+  "on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0", "window.pressed")}`,
   // The reverse: keep it all but see-through over a decoy (still taking
   // clicks, which a fully transparent frame doesn't) and show it the moment
   // the press lands, so a reading taken after the click finds it visible.
-  "reveal-on-press": `<style id="seethrough">html > div { opacity: 0.02 !important }</style><script>addEventListener("blur", () => document.getElementById("seethrough").remove())</script>`,
+  "reveal-on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0.02", "!window.pressed")}`,
   // Shown a moment before the press instead (as the pointer nears it), so
   // nothing changes after the press: the test calls reveal() 250 ms before.
-  "reveal-before-press": `<style id="seethrough">html > div { opacity: 0.02 !important }</style><script>window.reveal = () => document.getElementById("seethrough").remove()</script>`,
+  "reveal-before-press": `<script>window.reveal = () => (window.revealed = true)</script>${restyle("opacity", "0.02", "!window.revealed")}`,
+}
+
+// Ways that no longer work on a menu in the top layer: it still fills.
+const BEATEN: Record<string, string> = {
+  // Stylesheets lose to its inline !important styles, whatever they aim at.
+  css: `<style>[popover], :popover-open, html > :not(head, body) { opacity: 0.02 !important; clip-path: inset(50%) !important; transform: scale(0.5) !important }</style>`,
+  // The highest z-index is still under the top layer.
+  "z-index": onMenu(`setTimeout(() => { ${overMenu}; const c = document.createElement("section"); c.style.cssText = "position:fixed;z-index:2147483647;background:rgb(255 255 255 / 92%);" + at; document.documentElement.append(c) }, 50)`),
+  // A popover shown after the menu: Deadbolt raises the menu back over it.
+  "top-cover": topCover("page", true),
+  // One in a shadow root that takes clicks: the menu's hit checks find it.
+  "shadow-cover": topCover("shadow", true),
 }
 
 // Ways to show the site's login page in a frame. Hidden ones aren't fully
@@ -130,13 +165,18 @@ const FRAMED: Record<string, string> = {
 
 // Covers everything (letting clicks through) for `ms`, starting `after` ms
 // past the press into the menu (the page's blur), or right away with cover().
+// The cover is a popover in a shadow root, over the menu in the top layer.
 const SWEEP = `<script>
   const cover = (ms) => {
-    const c = document.createElement("section")
-    c.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:#fff"
-    document.documentElement.append(c)
+    const h = document.createElement("span")
+    const c = document.createElement("div")
+    c.popover = "manual"
+    c.style.cssText = "position:fixed;inset:0;margin:0;width:auto;height:auto;border:0;pointer-events:none;background:#fff"
+    document.body.append(h)
+    h.attachShadow({ mode: "closed" }).append(c)
+    c.showPopover()
     window.__shown = performance.now()
-    setTimeout(() => c.remove(), ms)
+    setTimeout(() => h.remove(), ms)
   }
   window.cover = cover
   window.coverAfterPress = (after, ms) => addEventListener("blur", () => (after ? setTimeout(() => cover(ms), after) : cover(ms)), { once: true })
@@ -322,6 +362,39 @@ const signupForm = (action: string, rules = NEW_RULES) => `<h1>Create your Acme 
   <label for="confirm">Confirm password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password">
   <button type="submit">Create account</button></form>`
 
+// Pages that use the top layer themselves.
+const TOP: Record<string, string> = {
+  // Re-shows its popover whenever the menu goes back on top.
+  "keeps-covering": loginForm("/home") + onMenu(`
+    const c = document.createElement("div")
+    c.popover = "manual"
+    c.style.cssText = "position:fixed;inset:0;margin:0;width:auto;height:auto;border:0;background:#fff"
+    document.body.append(c)
+    window.raised = 0
+    host.addEventListener("toggle", (e) => {
+      if (e.newState !== "open") return
+      window.raised++
+      if (c.matches(":popover-open")) c.hidePopover()
+      c.showPopover()
+    })`),
+  // A login modal: showModal() makes everything outside the dialog inert.
+  dialog: `<dialog id="modal" style="border:0;border-radius:14px;padding:28px;width:360px">${loginForm("/home")}</dialog><script>document.getElementById("modal").showModal()</script>`,
+  // A modal the login form isn't in, shown over the open menu.
+  "dialog-over": `${loginForm("/home")}<dialog id="banner"><p>We use cookies.</p></dialog>${onMenu(`setTimeout(() => document.getElementById("banner").showModal(), 300)`)}`,
+  // Full screen: F2 for the box the form is in, F4 for another.
+  fullscreen: `<div id="box" style="background:#f4f4f5">${loginForm("/home")}</div><div id="other" style="background:#000;color:#fff">Video</div><script>
+    addEventListener("keydown", (e) => {
+      if (e.key === "F2") document.getElementById("box").requestFullscreen()
+      if (e.key === "F4") document.getElementById("other").requestFullscreen()
+    }, true)
+  </script>`,
+  // Full screen on a web component, the form in its shadow root: F2.
+  "fullscreen-shadow": `<div id="widget"></div><script>
+    document.getElementById("widget").attachShadow({ mode: "open" }).innerHTML = ${JSON.stringify(`<div style="background:#f4f4f5">${loginForm("/home")}</div>`)}
+    addEventListener("keydown", (e) => e.key === "F2" && document.getElementById("widget").requestFullscreen(), true)
+  </script>`,
+}
+
 const changeForm = `<h1>Change your password</h1><form method="post" action="/home" novalidate>
   <label for="current">Current password</label><input id="current" name="current" type="password" autocomplete="current-password">
   <label for="new">New password</label><input id="new" name="new" type="password" autocomplete="new-password">
@@ -491,6 +564,8 @@ const server = Bun.serve({
     if (url.pathname.startsWith("/framed/") && FRAMED[url.pathname.slice(8)]) return html("Acme", `<h1>Acme</h1>${FRAMED[url.pathname.slice(8)]}`)
     if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) return html("Sign in to Acme", HIDDEN[url.pathname.slice(8)])
     if (url.pathname.startsWith("/overlay/") && url.pathname.slice(9) in OVERLAY) return html("Sign in to Acme", loginForm("/home") + OVERLAY[url.pathname.slice(9)])
+    if (url.pathname.startsWith("/beaten/") && url.pathname.slice(8) in BEATEN) return html("Sign in to Acme", loginForm("/home") + BEATEN[url.pathname.slice(8)])
+    if (url.pathname.startsWith("/top/") && url.pathname.slice(5) in TOP) return html("Sign in to Acme", TOP[url.pathname.slice(5)])
     return new Response("not found", { status: 404 })
   },
 })
@@ -1490,9 +1565,117 @@ async function coveredMenu() {
         )
       }
     }
+    for (const name of Object.keys(BEATEN)) {
+      await page.goto(`${site}/beaten/${name}`)
+      // From the last field, so a sheet over the menu covers no field.
+      const menu = await menuOn(page, "#password")
+      if (!menu) {
+        await diagnose(run, page, `beaten/${name}`)
+        continue
+      }
+      await Bun.sleep(300)
+      await settled(menu)
+      await menu.locator("button.row").first().click()
+      const filled = await until(`beaten/${name} fills`, async () => (await page.inputValue("#password")) === "correct horse", 4000)
+      check(!!filled, `a menu in the top layer beats ${name} and fills (${filled ? "" : await footText(menu)})`)
+      if (!filled) await diagnose(run, page, `beaten/${name}`)
+    }
   } catch (err) {
     check(false, `covered menu threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "covered menu")
+  } finally {
+    await close(run)
+  }
+}
+
+/** The menu's host: a popover with a random name, raised over what the page puts in the top layer, and inside a login modal. */
+async function topLayer() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  const hostOf = () => page.evaluate(() => {
+    const h = document.querySelector(":popover-open")
+    return h ? { tag: h.localName, parent: h.parentElement?.localName ?? "", in: h.parentElement?.id ?? "", important: (h as HTMLElement).style.getPropertyPriority("position") } : null
+  })
+  try {
+    const tags: string[] = []
+    for (let i = 0; i < 2; i++) {
+      await page.goto(`${site}/login?next=home`)
+      if (!(await menuOn(page))) await diagnose(run, page, "top layer")
+      const h = await hostOf()
+      if (h) tags.push(h.tag)
+      check(!!h && h.parent === "html" && h.important === "important", `the menu is an open popover on <html> with !important styles (${JSON.stringify(h)})`)
+    }
+    check(tags.length === 2 && tags.every((t) => t.includes("-") && t !== "div") && tags[0] !== tags[1], `its tag is random each time (${tags.join(", ")})`)
+
+    await page.goto(`${site}/top/keeps-covering`)
+    await formFound(page)
+    await page.click("#email")
+    const gone = await until("a page that keeps covering the menu gets it closed", async () => {
+      const raised = await page.evaluate(() => (window as unknown as { raised?: number }).raised ?? 0)
+      return raised > 0 && !extensionFrame(page, "menu.html") ? raised : null
+    })
+    check(!!gone && gone <= 5, `the menu goes back on top a few times, then closes (${gone} raises)`)
+    check(!(await hostLog(run)).some((r) => r.type === "fill"), "and nothing fills")
+
+    await page.goto(`${site}/top/dialog`)
+    const inDialog = await menuOn(page)
+    check((await hostOf())?.parent === "dialog", "in a login modal, the menu goes inside the dialog")
+    if (inDialog) {
+      await inDialog.locator("button.row").first().click()
+      check(!!(await until("the modal's menu fills", async () => (await page.inputValue("#password")) === "correct horse")), "and takes clicks there")
+    } else await diagnose(run, page, "dialog")
+
+    await page.goto(`${site}/top/dialog-over`)
+    if (await menuOn(page, "#email", 15_000)) {
+      check(!!(await until("a modal the form isn't in closes the menu", () => !extensionFrame(page, "menu.html"))), "a modal shown over the menu, without the form, closes it")
+    }
+
+    // Full screen draws only the full-screen element, and the top layer in it.
+    await page.goto(`${site}/top/fullscreen`)
+    if (await menuOn(page)) {
+      await page.keyboard.press("F2")
+      const entered = await until("the form's box goes full screen", () => page.evaluate(() => document.fullscreenElement?.id === "box"))
+      await page.click("#email")
+      const inside = await until("the menu opens inside the full-screen element", async () => (await hostOf())?.in === "box" && extensionFrame(page, "menu.html"))
+      check(!!entered && !!inside, `in full screen, the menu opens inside the full-screen element (${JSON.stringify(await hostOf())})`)
+      if (inside) {
+        await settled(inside)
+        await inside.locator("button.row").first().click()
+        check(!!(await until("the menu fills in full screen", async () => (await page.inputValue("#password")) === "correct horse")), "and takes clicks there")
+      }
+      await page.evaluate(() => document.exitFullscreen())
+    } else await diagnose(run, page, "fullscreen")
+    // On a shadow host with the form in its shadow root: in the shadow root, as the host's own children aren't drawn.
+    await page.goto(`${site}/top/fullscreen-shadow`)
+    if (await menuOn(page)) {
+      await page.keyboard.press("F2")
+      const entered = await until("the web component goes full screen", () => page.evaluate(() => document.fullscreenElement?.id === "widget"))
+      await page.click("#email")
+      const where = () => page.evaluate(() => {
+        const widget = document.getElementById("widget")!
+        const open = (n: ParentNode) => [...n.children].some((c) => c.matches("[popover]:popover-open"))
+        const popovers = [document, widget.shadowRoot!].flatMap((r) => [...r.querySelectorAll("[popover]")]).map((p) => `${p.parentNode === widget.shadowRoot ? "#shadow-root" : (p.parentNode as Element).localName}:${p.matches(":popover-open")}`)
+        return { shadow: open(widget.shadowRoot!), light: open(widget), full: document.fullscreenElement?.id ?? null, popovers }
+      })
+      const inside = await until("the menu opens in the web component's shadow root", async () => (await where()).shadow && extensionFrame(page, "menu.html"))
+      check(!!entered && !!inside, `in full screen on a shadow host, the menu opens in its shadow root (${JSON.stringify(await where())})`)
+      if (inside) {
+        await settled(inside)
+        await inside.locator("button.row").first().click()
+        check(!!(await until("the menu fills in full screen in a shadow root", async () => (await page.inputValue("#password")) === "correct horse")), "and takes clicks there")
+      }
+      await page.evaluate(() => document.exitFullscreen().catch(() => {}))
+    } else await diagnose(run, page, "fullscreen-shadow")
+    await page.goto(`${site}/top/fullscreen`)
+    if (await menuOn(page)) {
+      await page.keyboard.press("F4")
+      await until("another element goes full screen", () => page.evaluate(() => document.fullscreenElement?.id === "other"))
+      check(!!(await until("full screen elsewhere closes the menu", () => !extensionFrame(page, "menu.html"))), "full screen on another element closes the menu")
+      await page.evaluate(() => document.exitFullscreen().catch(() => {}))
+    }
+  } catch (err) {
+    check(false, `top layer threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "top layer")
   } finally {
     await close(run)
   }
@@ -2049,8 +2232,8 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
 }
 
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, generator, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { detection, coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
-const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
+const once: Record<string, () => Promise<void>> = { detection, coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, topLayer, occlusionSweep, midFill, backForward, passkeys }
+const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "occlusionSweep", "midFill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 try {

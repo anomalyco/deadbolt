@@ -3,13 +3,22 @@
 // Foyer (github.com/R44VC0RP/foyer, src/autofill/inline.ts, by Ryan Vogel),
 // without SSO buttons, auto-submit and the fill shortcut.
 //
-// The menu is an extension page in an iframe inside a closed shadow root on a
-// plain div (a page can define a custom element's class and reach its shadow
-// root, but not a div's). The page can't read the account list (cross-origin
-// frame) and can't click it for the user (synthetic events don't cross into
-// the frame). It can see that a menu appeared, which says only that the site
-// has logins or Deadbolt is locked, and the values written into its own fields
-// after the user picks an account.
+// The menu is an extension page in an iframe inside a closed shadow root. The
+// page can't read the account list (cross-origin frame) and can't click it for
+// the user (synthetic events don't cross into the frame). It can see that a
+// menu appeared, which says only that the site has logins or Deadbolt is
+// locked, and the values written into its own fields after the user picks an
+// account.
+//
+// The host element has a fresh random custom-element name each time, so page
+// CSS can't aim at it, and inline `!important` styles, which beat any page
+// rule. A page that defines that name afterwards upgrades the element but
+// can't reach a shadow root attached before. The host is a manual popover,
+// shown in the top layer above everything the page has, and inside the
+// field's modal dialog or full-screen element when there is one.
+// Whatever the page puts in the top layer after it (a popover, a modal
+// dialog, full screen) is answered by raising the menu back on top, a few
+// times; a page that keeps at it gets the menu closed.
 
 import { GENERATE_KINDS, MENU_ROLES, type FillAck, type QueryReply, type SurfaceKind, type ToBackground, type ToContent } from "../messages"
 import { approvals } from "./approvals"
@@ -32,6 +41,16 @@ const MENU_CHROME = 38
 const MENU_WIDTH = 300
 const SHADOW =
   "0 16px 48px -6px rgb(0 0 0 / 14%), 0 6px 12px -2px rgb(0 0 0 / 6%), 0 0 0 1px rgb(0 0 0 / 10%)"
+/** How many times one menu goes back on top of the top layer before it gives up and closes. */
+export const MAX_RAISES = 3
+/** Where the menu checks that a click there would land on it, as fractions of its box. */
+const SAMPLES = [
+  [0.5, 0.5],
+  [0.08, 0.12],
+  [0.92, 0.12],
+  [0.08, 0.88],
+  [0.92, 0.88],
+]
 
 let state: PageState
 let host: HTMLElement | null = null
@@ -42,6 +61,9 @@ let token: string | null = null
 let port: MessagePort | null = null
 let raf = 0
 let menuHeight = 0
+let raises = 0
+/** Set while Deadbolt itself hides and shows the host. */
+let raising = false
 let dismissedFor: HTMLInputElement | null = null
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
@@ -78,26 +100,116 @@ function targetFor(el: Element): Field | undefined {
   return state.targets().find((t) => t.el === el)
 }
 
+/** A random valid custom-element name, such as `kqzvt-hmwbe`. */
+function hostTag(): string {
+  const letters = () => Array.from(crypto.getRandomValues(new Uint8Array(5)), (b) => String.fromCharCode(97 + (b % 26))).join("")
+  return `${letters()}-${letters()}`
+}
+
+/** Inline declarations a page's stylesheets can't override. */
+const important = (css: Record<string, string>) =>
+  Object.entries(css)
+    .map(([k, v]) => `${k}:${v} !important`)
+    .join(";")
+
+/** `node` is `ancestor` or inside it, across shadow roots. */
+function within(node: Node | null, ancestor: Node): boolean {
+  for (let n = node; n; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) if (n === ancestor) return true
+  return false
+}
+
+/**
+ * Where the menu mounts when the field is in a modal dialog or the
+ * full-screen element: inside the innermost one, as outside a modal dialog
+ * it's inert and outside the full-screen element it isn't drawn. When that
+ * element is a shadow host and the field is in its shadow tree, the menu
+ * goes in that shadow root: a host's own children aren't drawn unless a slot
+ * takes them.
+ */
+function modalAround(el: Element): Element | ShadowRoot | null {
+  let from: Node | null = null
+  for (let n: Node | null = el; n; from = n, n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null))
+    if (n instanceof Element && n.matches(":modal, :fullscreen")) return from instanceof ShadowRoot ? from : n
+  return null
+}
+
+/** The menu said it moved: it waits its half second again before it takes a pick (see Dwell). */
+function tellMoved() {
+  if (frame && menuOrigin) frame.contentWindow?.postMessage({ type: "db:menu-moved" }, menuOrigin)
+}
+
+/** Puts the host at the top of the top layer. */
+function show(el: HTMLElement) {
+  raising = true
+  try {
+    if (el.matches(":popover-open")) el.hidePopover()
+    el.showPopover()
+  } catch {
+    // Not connected, or the page broke the popover: position() will find it.
+  } finally {
+    raising = false
+  }
+}
+
+/**
+ * Something went into the top layer after the menu, or covers it: raise the
+ * menu over it again, and the menu waits again before it takes a pick. Past
+ * MAX_RAISES the page is fighting for the top, and the menu closes.
+ */
+function raise() {
+  if (!host) return
+  if (++raises > MAX_RAISES) return closeMenu()
+  show(host)
+  if (!host.matches(":popover-open")) return closeMenu()
+  tellMoved()
+}
+
+/**
+ * Whether something other than the menu would take a click on it. Only
+ * things in the top layer can be over it; ones that let clicks through don't
+ * show here, but the menu's own visibility readings see them.
+ */
+function covered(el: HTMLElement): boolean {
+  const root = el.getRootNode() as Document | ShadowRoot
+  const r = el.getBoundingClientRect()
+  return SAMPLES.some(([fx, fy]) => {
+    const hit = root.elementFromPoint?.(r.left + r.width * fx, r.top + r.height * fy)
+    return !!hit && hit !== el
+  })
+}
+
 function position() {
   if (!host || !anchor) return
-  if (!anchor.isConnected) return closeMenu()
+  if (!anchor.isConnected || !host.isConnected) return closeMenu()
   const r = anchor.getBoundingClientRect()
   const width = Math.max(MENU_WIDTH, Math.min(r.width, 420))
   const below = r.bottom + 6
   const fitsBelow = below + menuHeight < innerHeight
   const top = fitsBelow ? below : Math.max(4, r.top - menuHeight - 6)
   const left = Math.min(Math.max(4, r.left), innerWidth - width - 4)
-  host.style.cssText = `all:initial;position:fixed;top:${top}px;left:${left}px;width:${width}px;height:${menuHeight}px;z-index:2147483647;display:block;`
+  host.style.cssText = important({
+    all: "initial",
+    position: "fixed",
+    inset: "auto",
+    top: `${top}px`,
+    left: `${left}px`,
+    width: `${width}px`,
+    height: `${menuHeight}px`,
+    margin: "0",
+    display: "block",
+    "z-index": "2147483647",
+  })
   // The menu only takes a pick once it has sat still for a moment (see
   // Dwell). From inside its frame it can't tell it was moved, so say so: the
   // page can restyle the host, and the field it follows can move.
   if (frame) {
     const f = frame.getBoundingClientRect()
     const rect = [f.left, f.top, f.width, f.height].map(Math.round).join()
-    if (rect !== lastRect && menuOrigin) frame.contentWindow?.postMessage({ type: "db:menu-moved" }, menuOrigin)
+    if (rect !== lastRect) tellMoved()
     lastRect = rect
   }
-  raf = requestAnimationFrame(position)
+  if (covered(host)) raise()
+  if (host) raf = requestAnimationFrame(position)
 }
 
 function openMenu(el: HTMLInputElement, t: string, rows: number) {
@@ -105,15 +217,23 @@ function openMenu(el: HTMLInputElement, t: string, rows: number) {
   anchor = el
   token = t
   menuHeight = Math.min(Math.max(rows, 1), 5) * MENU_ROW + MENU_CHROME
-  host = document.createElement("div")
-  const root = host.attachShadow({ mode: "closed" })
+  raises = 0
+  const box = (host = document.createElement(hostTag()))
+  box.setAttribute("popover", "manual")
+  // Hidden by the page, or by the browser for a modal dialog or full screen:
+  // that counts as a raise like any other.
+  box.addEventListener("beforetoggle", (e) => {
+    if (e.isTrusted && (e as ToggleEvent).newState === "closed" && !raising) queueMicrotask(() => host === box && raise())
+  })
+  const root = box.attachShadow({ mode: "closed" })
   frame = document.createElement("iframe")
   // No token in the URL: the menu asks for it (see onMenuReady).
   frame.src = chrome.runtime.getURL("menu.html")
   frame.setAttribute("allow", "")
   frame.style.cssText = `all:initial;width:100%;height:100%;border:0;border-radius:12px;box-shadow:${SHADOW};background:transparent;color-scheme:normal;`
   root.append(frame)
-  document.documentElement.append(host)
+  ;(modalAround(el) ?? document.documentElement).append(box)
+  show(box)
   position()
   // Settles in from just under the field. Only a translation and a fade: the
   // menu's visibility guard refuses picks while it's scaled or see-through.
@@ -137,8 +257,9 @@ export function closeMenu(refocus = false, dismissed = false) {
   port?.close()
   port = null
   const field = anchor
-  host?.remove()
+  const el = host
   host = frame = anchor = null
+  el?.remove()
   token = null
   menuOrigin = lastRect = ""
   if (refocus) field?.focus({ preventScroll: true })
@@ -277,8 +398,42 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   win.postMessage({ type: "db:menu-token", token }, event.origin, [channel.port2])
 }
 
+/** The page showed a popover, or a dialog through `beforetoggle`: once it's in the top layer, go back over it. */
+function onBeforeToggle(event: Event) {
+  if (host && event.isTrusted && event.target !== host && (event as ToggleEvent).newState === "open") queueMicrotask(raise)
+}
+
+/**
+ * A dialog opened. A modal one makes everything outside it inert, so a menu
+ * outside it closes; one the menu is in gets raised over again.
+ */
+function onDialogs(records: MutationRecord[]) {
+  for (const r of records) {
+    const dialog = r.target
+    if (!host || !(dialog instanceof HTMLDialogElement) || !dialog.matches(":modal")) continue
+    if (!within(host, dialog)) return closeMenu()
+    raise()
+  }
+}
+
+/**
+ * Full screen draws only the full-screen element. A menu outside it closes
+ * (the next focus opens one inside it); one inside it goes back on top.
+ */
+function onFullscreen() {
+  const full = document.fullscreenElement
+  if (!host || !full) return
+  if (!within(host, full)) return closeMenu()
+  raise()
+}
+
 export function initMenu(page: PageState) {
   state = page
+  if (isTop) {
+    document.addEventListener("beforetoggle", onBeforeToggle, true)
+    document.addEventListener("fullscreenchange", onFullscreen)
+    new MutationObserver(onDialogs).observe(document, { subtree: true, attributes: true, attributeFilter: ["open"] })
+  }
   window.addEventListener("message", onMenuReady, true)
   document.addEventListener("focusin", onFocusIn, true)
   document.addEventListener("pointerdown", onPointerDown, true)

@@ -114,8 +114,20 @@ not running without sending hello, which would start the agent again.
   top page after a click or keypress opens a menu of that site's logins,
   title and username, under the field. ↓/↑ choose, ⏎ fills, esc closes, and
   ↓ reopens it. Fields in frames get no menu (see Frames). It's an extension
-  page in an iframe inside a closed shadow root on a plain element, so the
-  page can't read it or click it for you.
+  page in an iframe inside a closed shadow root, so the page can't read it
+  or click it for you.
+- **Menu in the top layer.** The menu's host element gets a fresh random
+  custom-element name and inline `!important` styles, so page stylesheets
+  can't aim at it or restyle it. It's a manual popover, shown in the top
+  layer above any `z-index`. When the field is in a modal dialog or the
+  full-screen element, the menu mounts inside it (in its shadow root when the
+  field is there), because content outside is inert or not drawn. If the page puts something in the top layer after the
+  menu (a popover, a modal dialog, full screen) or hides the menu's popover,
+  the menu goes back on top and waits its 500 ms again. It does this at most
+  three times, then closes. A modal dialog or full screen that the menu isn't
+  inside closes it. Each frame it hit-tests five points of its own box, and
+  anything else there (such as a popover in a shadow root the menu can't
+  watch) counts as covering it and is answered the same way.
 - **Menu visibility.** The menu samples its own visibility rather than
   watching it continuously: an `IntersectionObserver` with `trackVisibility`
   gives a reading at most every 100 ms, saying whether the menu is fully on
