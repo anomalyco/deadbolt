@@ -606,7 +606,14 @@ fn a_deleted_selection_goes_at_once() {
     for _ in 0..30 {
         rt.frame(1.0 / 60.0);
     }
-    assert!(shows(&rt, "flyfly"), "the password shows");
+    // Shown through Rune's secure path, so never as text.
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.path.ends_with("field-password/value") && e.role == "textbox"),
+        "the password shows"
+    );
+    assert!(!shows(&rt, "flyfly"));
 
     device.run(&["rm", "fly.io"]);
     let start = Instant::now();

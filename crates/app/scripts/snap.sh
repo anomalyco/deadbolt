@@ -22,9 +22,9 @@ done
 "$bin" --scene copied --at 2.4 --theme light --snap "$out/copied-light.png" "$@"
 "$bin" --scene locked --theme light --snap "$out/locked-light.png" "$@"
 # Item kinds, dark and light: a secure note (masked, then shown), an SSH
-# key and an identity.
+# key (its public key wrapping, then its private key shown) and an identity.
 for theme in dark light; do
-  for scene in note note-revealed ssh identity; do
+  for scene in note note-revealed ssh ssh-revealed identity; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done

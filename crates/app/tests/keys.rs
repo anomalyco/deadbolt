@@ -4,8 +4,9 @@
 
 #![cfg(test)]
 
+use deadbolt_app::agent::Done;
 use deadbolt_app::import::Phase;
-use deadbolt_app::model::App;
+use deadbolt_app::model::{App, Screen};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 const FRAME: f64 = 1.0 / 60.0;
@@ -141,7 +142,15 @@ fn enter_copies_what_each_kind_is_for() {
             .iter()
             .any(|e| e.text.as_deref().is_some_and(|t| t.contains(value)))
     };
-    // Each kind's secrets are masked until Show.
+    let role = |rt: &Runtime<App>, field: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.path.ends_with(&format!("field-{field}/value")))
+            .map(|e| (e.role, e.text))
+            .unwrap()
+    };
+    // Each kind's secrets are masked until Show, which draws them through
+    // Rune's secure path (never as text).
     for (kind, field, value) in [
         ("note", "notes", "4417"),
         ("ssh", "private-key", "MC4CAQAw"),
@@ -149,15 +158,111 @@ fn enter_copies_what_each_kind_is_for() {
     ] {
         let mut rt = scene(kind);
         assert!(!shows(&rt, value), "{kind} {field} is masked");
+        assert_eq!(role(&rt, field), ("text", Some("••••••••••••".into())));
         rt.update(|s, _| s.toggle_reveal(field));
         settle(&mut rt, 0.1);
-        assert!(shows(&rt, value), "Show reveals {kind} {field}");
+        assert_eq!(
+            role(&rt, field),
+            ("textbox", None),
+            "Show reveals {kind} {field}"
+        );
+        assert!(!shows(&rt, value), "{kind} {field}");
     }
     let mut rt = scene("note");
     // Search finds the kinds by name and by what they're called.
     tap(&mut rt, Key::Text("ssh key".into()));
     assert_eq!(rt.state.visible().len(), 1);
     assert_eq!(rt.state.visible()[0].kind, "ssh");
+}
+
+/// Long values wrap in the item's pane instead of being cut off: a public
+/// key and a fingerprint inside their unbroken runs, a shown private key's
+/// base64 line too (without the empty line its final newline would draw).
+/// A short value keeps its one-line row.
+#[test]
+fn long_values_wrap_in_the_detail() {
+    let mut rt = scene("ssh");
+    let find = |rt: &Runtime<App>, path: &str| {
+        rt.elements()
+            .into_iter()
+            .find(|e| e.path.ends_with(path))
+            .unwrap_or_else(|| panic!("{path}"))
+    };
+    for field in ["public-key", "fingerprint"] {
+        let row = find(&rt, &format!("field-{field}")).rect;
+        let value = find(&rt, &format!("field-{field}/value")).rect;
+        assert!(value[3] >= 40.0, "{field} wraps: {value:?}");
+        assert!(value[0] + value[2] <= row[0] + row[2], "{field} in its row");
+    }
+    assert_eq!(find(&rt, "field-comment").rect[3], 40.0);
+
+    // Show moves neither the name nor the buttons.
+    let still = |rt: &Runtime<App>| {
+        let at = |path: &str| find(rt, path).rect[1];
+        (
+            at("field-private-key/name"),
+            at("field-private-key/actions/reveal"),
+        )
+    };
+    let hidden = still(&rt);
+    rt.update(|s, _| s.toggle_reveal("private-key"));
+    settle(&mut rt, 0.5);
+    assert_eq!(still(&rt), hidden);
+    // Three lines (20 pt each, inside 10 pt above and below), its base64
+    // one wrapping.
+    let value = find(&rt, "field-private-key/value").rect;
+    assert!(
+        value[3] >= 4.0 * 20.0 + 20.0,
+        "its base64 line wraps: {value:?}"
+    );
+    // The key file's final line break draws no empty line: without it, the
+    // same height.
+    rt.update(|s, _| {
+        let detail = s.detail.as_mut().unwrap();
+        let key = detail
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "private-key")
+            .unwrap();
+        assert_eq!(key.value.pop(), Some('\n'));
+    });
+    settle(&mut rt, 0.5);
+    assert_eq!(find(&rt, "field-private-key/value").rect[3], value[3]);
+}
+
+/// A secret shown in the item's pane is drawn through Rune's secure path,
+/// never as text: not while shown, nor while the pane fades out on a lock.
+#[test]
+fn a_shown_secret_never_lingers_in_plain_text() {
+    let plaintext = |rt: &Runtime<App>, secret: &str| {
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref().is_some_and(|t| t.contains(secret)))
+    };
+    for (kind, field, secret) in [
+        ("ssh", "private-key", "MC4CAQAw"),
+        ("note", "notes", "4417"),
+        ("vault", "password", "battery"),
+    ] {
+        let mut rt = scene(kind);
+        let value = rt
+            .state
+            .detail
+            .as_ref()
+            .and_then(|d| d.fields.iter().find(|f| f.name == field))
+            .map(|f| f.value.clone())
+            .unwrap_or_else(|| panic!("{kind} has a {field}"));
+        assert!(value.contains(secret), "{kind}: {value:?}");
+        rt.update(move |s, _| s.toggle_reveal(field));
+        settle(&mut rt, 0.3);
+        assert!(!plaintext(&rt, secret), "{kind}: shown");
+        rt.update(|s, tx| s.apply(Done::Locked(Ok(())), tx));
+        for _ in 0..30 {
+            rt.frame(FRAME);
+            assert!(!plaintext(&rt, secret), "{kind}: fading out");
+        }
+        assert_eq!(rt.state.screen, Screen::Locked);
+    }
 }
 
 /// The hints say only what ⏎ and ⇧⏎ can do for the item selected.
