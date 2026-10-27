@@ -142,15 +142,16 @@ fn enter_copies_what_each_kind_is_for() {
             .iter()
             .any(|e| e.text.as_deref().is_some_and(|t| t.contains(value)))
     };
-    let role = |rt: &Runtime<App>, field: &str| {
-        rt.elements()
+    let label = |rt: &Runtime<App>, field: &str| {
+        let e = rt
+            .elements()
             .into_iter()
             .find(|e| e.path.ends_with(&format!("field-{field}/value")))
-            .map(|e| (e.role, e.text))
-            .unwrap()
+            .unwrap();
+        (e.role, e.text, rt.element_is_secure(&e.path))
     };
-    // Each kind's secrets are masked until Show, which draws them through
-    // Rune's secure path (never as text).
+    // Each kind's secrets are a secure label, masked until Show and never
+    // in the element tree as text.
     for (kind, field, value) in [
         ("note", "notes", "4417"),
         ("ssh", "private-key", "MC4CAQAw"),
@@ -158,12 +159,12 @@ fn enter_copies_what_each_kind_is_for() {
     ] {
         let mut rt = scene(kind);
         assert!(!shows(&rt, value), "{kind} {field} is masked");
-        assert_eq!(role(&rt, field), ("text", Some("••••••••••••".into())));
+        assert_eq!(label(&rt, field), ("text", None, true), "{kind} {field}");
         rt.update(|s, _| s.toggle_reveal(field));
         settle(&mut rt, 0.1);
         assert_eq!(
-            role(&rt, field),
-            ("textbox", None),
+            label(&rt, field),
+            ("text", None, true),
             "Show reveals {kind} {field}"
         );
         assert!(!shows(&rt, value), "{kind} {field}");
@@ -210,7 +211,10 @@ fn long_values_wrap_in_the_detail() {
     assert_eq!(still(&rt), hidden);
     // Three lines (20 pt each, inside 10 pt above and below), its base64
     // one wrapping.
-    let value = find(&rt, "field-private-key/value").rect;
+    let shown = find(&rt, "field-private-key/value");
+    assert!(rt.element_is_secure(&shown.path), "a secure label");
+    assert_eq!((shown.role, shown.text), ("text", None));
+    let value = shown.rect;
     assert!(
         value[3] >= 4.0 * 20.0 + 20.0,
         "its base64 line wraps: {value:?}"
