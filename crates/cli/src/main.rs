@@ -12,6 +12,7 @@ mod config;
 mod import;
 mod items;
 mod prompt;
+mod send;
 mod site;
 mod webauthn;
 
@@ -147,6 +148,27 @@ enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Send files, a secret or vault items through a one-time link that
+    /// opens in any browser (deadbolt.pw/r, no Deadbolt needed).
+    ///
+    /// The link is the key: whoever opens it first gets the contents,
+    /// decrypted in their browser. Nothing is uploaded anywhere; the
+    /// deadbolt agent on this computer serves the link live until it is
+    /// opened, expires (default 1h) or is revoked, and only while it runs.
+    ///
+    ///   deadbolt send ./report.pdf ./keys/     files and folders
+    ///   deadbolt send                          asks for a secret (hidden)
+    ///   echo $TOKEN | deadbolt send -          stdin
+    ///   deadbolt send "github work"            a vault item's fields
+    ///   deadbolt send github --field password  one field
+    ///
+    /// An argument that names an existing file or folder is sent as one;
+    /// anything else is a vault item search (use --item to force an item).
+    /// Prints the link; see `deadbolt sends` for what was sent.
+    #[command(verbatim_doc_comment)]
+    Send(send::SendArgs),
+    /// List, show or revoke sends.
+    Sends(send::SendsArgs),
     /// Connect Deadbolt's browser extension to this computer's Deadbolt.
     #[command(subcommand)]
     Browser(BrowserCommand),
@@ -306,11 +328,14 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Vault(_)
                 | Commands::Browser(_)
                 | Commands::BrowserHost { .. }
+                | Commands::Sends(_)
         )
     {
         bail!("--vault does not apply to this command");
     }
     match cli.command {
+        Commands::Send(args) => return send::send(&paths, args, vault, from_stdin).await,
+        Commands::Sends(args) => send::sends(&paths, args).await?,
         Commands::Item(command) => {
             client::ensure_running(&paths).await?;
             items::run(&paths, command, vault, from_stdin).await?;
