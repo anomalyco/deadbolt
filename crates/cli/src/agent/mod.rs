@@ -7,6 +7,7 @@ mod items;
 mod mirror;
 mod pairing;
 mod passkeys;
+mod send;
 mod session;
 #[cfg(test)]
 mod sim;
@@ -118,6 +119,10 @@ pub struct Agent {
     busy: AtomicUsize,
     shutdown: Notify,
     watchers: Watchers,
+    /// Deadbolt Send's endpoint, started by the first send.
+    send_server: tokio::sync::Mutex<Option<deadbolt_send::Server>>,
+    /// Set as the agent stops, ending sends and anyone waiting on one.
+    stopping: watch::Sender<bool>,
 }
 
 impl Agent {
@@ -150,6 +155,8 @@ impl Agent {
             busy: AtomicUsize::new(0),
             shutdown: Notify::new(),
             watchers: Watchers::default(),
+            send_server: tokio::sync::Mutex::default(),
+            stopping: watch::channel(false).0,
         })
     }
 
@@ -969,6 +976,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     agent.cancel_biometric_prompt();
     agent.interrupt_op();
     agent.watchers.stopping();
+    agent.stop_sends().await;
     drain_connections(&mut connections).await;
     agent.lock().await;
     remove_socket(&socket)?;
@@ -1198,16 +1206,30 @@ impl Agent {
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.
-        let used = !matches!(
+        // Nor are sends, which never touch the vault.
+        let send = matches!(
             command,
-            Command::ItemCode { .. }
-                | Command::SiteLogins { .. }
-                | Command::SiteCheck { .. }
-                | Command::PasskeyList { .. }
+            Command::SendCreate { .. }
+                | Command::SendList
+                | Command::SendShow { .. }
+                | Command::SendRevoke { .. }
+                | Command::SendWait { .. }
         );
+        let used = !send
+            && !matches!(
+                command,
+                Command::ItemCode { .. }
+                    | Command::SiteLogins { .. }
+                    | Command::SiteCheck { .. }
+                    | Command::PasskeyList { .. }
+            );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
-        // and a lock stops it before it writes anything.
-        let busy = !matches!(command, Command::SyncOnePassword { .. });
+        // and a lock stops it before it writes anything. Nor does waiting
+        // for a send to be picked up.
+        let busy = !matches!(
+            command,
+            Command::SyncOnePassword { .. } | Command::SendWait { .. }
+        );
         if busy {
             self.busy.fetch_add(1, Ordering::SeqCst);
         }
@@ -1415,6 +1437,20 @@ impl Agent {
                 }
                 Ok(Reply::Mirror { report })
             }
+            Command::SendCreate {
+                secret,
+                sealed,
+                opens,
+                ttl_secs,
+                label,
+            } => {
+                self.send_create(secret, sealed, opens, ttl_secs, label)
+                    .await
+            }
+            Command::SendList => Ok(self.send_list().await),
+            Command::SendShow { id } => self.send_show(&id).await,
+            Command::SendRevoke { id } => self.send_revoke(&id).await,
+            Command::SendWait { id } => self.send_wait(&id, conv).await,
             Command::Generate { length, symbols } => Ok(Reply::Password {
                 password: deadbolt_core::password::generate(length, symbols)?,
             }),

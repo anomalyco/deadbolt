@@ -112,10 +112,26 @@ fn read_line(prompt: &str) -> Result<Option<String>> {
 /// Asks a yes/no question on the terminal; anything but y/yes is no.
 pub fn confirm(question: &str) -> Result<bool> {
     let answer = read_line(&format!("{question} [y/N] "))?.unwrap_or_default();
-    Ok(matches!(
-        answer.trim().to_ascii_lowercase().as_str(),
-        "y" | "yes"
-    ))
+    Ok(yes(&answer))
+}
+
+/// The terminal itself, for questions while stdin carries data.
+pub fn tty() -> Result<std::io::BufReader<std::fs::File>> {
+    let tty = std::fs::File::open("/dev/tty").context("opening /dev/tty")?;
+    Ok(std::io::BufReader::new(tty))
+}
+
+/// [`confirm`], reading the answer from `input` (such as [`tty`]).
+pub fn confirm_from(question: &str, input: &mut impl BufRead) -> Result<bool> {
+    eprint!("{question} [y/N] ");
+    std::io::stderr().flush()?;
+    let mut answer = String::new();
+    input.read_line(&mut answer).context("reading the answer")?;
+    Ok(yes(&answer))
+}
+
+fn yes(answer: &str) -> bool {
+    matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes")
 }
 
 /// The device name: the flag, else the hostname.

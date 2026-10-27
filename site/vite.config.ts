@@ -2,7 +2,8 @@ import { resolve } from "node:path"
 import react from "@vitejs/plugin-react"
 import { defineConfig } from "vite"
 
-// Three pages: the landing page, the architecture walkthrough, and the original static mock.
+// Four pages: the landing page, the architecture walkthrough, the original static mock, and
+// the Deadbolt Send receive page (/r).
 export default defineConfig({
   plugins: [react()],
   // Tailscale Serve proxies https://<machine>.<tailnet>.ts.net:5197 here (tailnet only).
@@ -15,6 +16,7 @@ export default defineConfig({
         index: resolve(import.meta.dirname, "index.html"),
         architecture: resolve(import.meta.dirname, "architecture/index.html"),
         mock: resolve(import.meta.dirname, "mock.html"),
+        r: resolve(import.meta.dirname, "r.html"),
       },
     },
   },

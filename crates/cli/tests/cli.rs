@@ -2139,3 +2139,240 @@ fn browser_host_registers_and_signs_in_with_passkeys() {
             .success()
     );
 }
+
+/// Fetches a send link like the receive page does, over localhost.
+fn receive(link: &str) -> Result<deadbolt_send::Bundle, deadbolt_send::Error> {
+    let ticket: deadbolt_send::SendTicket = link.trim().parse().unwrap();
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let endpoint = deadbolt_send::receiver_endpoint(deadbolt_send::Network::Local)
+            .await
+            .unwrap();
+        let bundle = deadbolt_send::receive(&endpoint, &ticket, |_| {}).await;
+        endpoint.close().await;
+        bundle
+    })
+}
+
+fn entry(node: &deadbolt_send::Node) -> &deadbolt_send::Entry {
+    match node {
+        deadbolt_send::Node::Entry(entry) => entry,
+        deadbolt_send::Node::Group(group) => panic!("expected an entry, got {group:?}"),
+    }
+}
+
+#[test]
+fn send_files_secrets_and_items() {
+    use deadbolt_send::Node;
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "username=dax",
+            "password=hunter22",
+            "url=github.com",
+        ],
+    );
+
+    // A file, a folder, stdin and an item in one send.
+    std::fs::write(a.path("report.txt"), "quarterly").unwrap();
+    std::fs::create_dir(a.path("keys")).unwrap();
+    std::fs::write(a.path("keys/id.pub"), "ssh-ed25519 AAAA").unwrap();
+    let report = a.path("report.txt");
+    let keys = a.path("keys");
+    let out = a.try_run_stdin(
+        &[
+            "send",
+            report.to_str().unwrap(),
+            keys.to_str().unwrap(),
+            "-",
+            "--item",
+            "github.com",
+            "--title",
+            "for you",
+            "--note",
+            "rotate after",
+            "--yes",
+            "--json",
+        ],
+        "tok_123\n",
+    );
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let link = json["link"].as_str().unwrap();
+    let id = json["id"].as_str().unwrap();
+    assert!(link.starts_with("https://deadbolt.pw/r#"), "{link}");
+    assert!(json["expires"].as_u64().unwrap() > 0);
+
+    let bundle = receive(link).unwrap();
+    assert_eq!(bundle.title.as_deref(), Some("for you"));
+    assert_eq!(bundle.note.as_deref(), Some("rotate after"));
+    let [file, Node::Group(folder), stdin, Node::Group(item)] = &bundle.entries[..] else {
+        panic!("unexpected bundle {bundle:?}");
+    };
+    let file = entry(file);
+    assert_eq!(
+        (file.name.as_str(), file.data.as_slice(), file.sensitive),
+        ("report.txt", &b"quarterly"[..], false)
+    );
+    assert_eq!(folder.name.as_deref(), Some("keys"));
+    assert_eq!(entry(&folder.entries[0]).name, "id.pub");
+    let stdin = entry(stdin);
+    assert_eq!(
+        (stdin.data.as_slice(), stdin.sensitive),
+        (&b"tok_123"[..], true)
+    );
+    assert_eq!(item.name.as_deref(), Some("github.com"));
+    let password = item
+        .entries
+        .iter()
+        .map(entry)
+        .find(|e| e.name == "password")
+        .unwrap();
+    assert_eq!(
+        (password.data.as_slice(), password.sensitive),
+        (&b"hunter22"[..], true)
+    );
+
+    // Single use: the second open is refused, and the sender sees it picked up.
+    assert!(matches!(receive(link), Err(deadbolt_send::Error::Used)));
+    let shown = a.run(&["sends", "show", id]);
+    assert!(shown.contains("state\tpicked up"), "{shown}");
+    assert!(shown.contains("opens\t1 of 1"), "{shown}");
+    assert!(a.run(&["sends"]).contains(&format!("{id}\tpicked up")));
+
+    // One field; revoking ends a waiting send with exit code 5.
+    let mut waiting = a
+        .cmd(&[
+            "send",
+            "--item",
+            "github.com",
+            "--field",
+            "password",
+            "--wait",
+            "--ttl",
+            "15m",
+            "--yes",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut first = String::new();
+    BufReader::new(waiting.stdout.take().unwrap())
+        .read_line(&mut first)
+        .unwrap();
+    let pending = a.run(&["sends", "ls", "--json"]);
+    let pending: Vec<serde_json::Value> = serde_json::from_str(&pending).unwrap();
+    let open = pending.iter().find(|s| s["state"] == "open").unwrap();
+    let open_id = open["id"].as_str().unwrap();
+    assert_eq!(open["label"], "github.com password");
+    assert!(a.run(&["sends", "revoke", open_id]).starts_with("revoked"));
+    assert_eq!(wait(&mut waiting, Duration::from_secs(30)).code(), Some(5));
+    assert!(matches!(
+        receive(&first),
+        Err(deadbolt_send::Error::Revoked)
+    ));
+
+    assert!(a.fail(&["sends", "show", "zzzz"]).contains("no send"));
+}
+
+#[test]
+fn send_resolves_inputs_strictly_and_asks_first() {
+    let a = Device::new();
+    let file = a.path("hello.txt");
+    std::fs::write(&file, "hi").unwrap();
+    let file = file.to_str().unwrap();
+
+    // A missing path is an error, never a vault search: this device has no vault.
+    let err = a.fail(&["send", "./prod.env.typo", "--yes"]);
+    assert!(err.contains("./prod.env.typo: no such file"), "{err}");
+
+    // Without --yes there's nothing to confirm on: fail rather than hang.
+    let err = a.fail(&["send", file, "--json"]);
+    assert!(
+        err.contains("--json needs --yes (no prompt possible)"),
+        "{err}"
+    );
+    let err = a.fail(&["send", file]);
+    assert!(err.contains("pass --yes"), "{err}");
+    let out = a.try_run_stdin(&["send", "-"], "tok_123\n");
+    assert!(!out.status.success());
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("pass --yes"),
+        "{out:?}"
+    );
+    assert!(a.run(&["sends", "ls", "--json"]).trim() == "[]");
+
+    // Vault items: exact name or ID only, with suggestions.
+    a.run(&["init"]);
+    let stripe = new(&a, &["login", "password=sk_live", "--name", "Stripe"]);
+    new(
+        &a,
+        &["login", "password=sk_test", "--name", "Stripe (test)"],
+    );
+    new(&a, &["login", "password=one", "--name", "Twin"]);
+    new(&a, &["login", "password=two", "--name", "Twin"]);
+    let err = a.fail(&["send", "--item", "stripe", "--yes"]);
+    assert!(
+        err.contains(r#"no item named "stripe". Did you mean: "Stripe", "Stripe (test)"?"#),
+        "{err}"
+    );
+    let err = a.fail(&["send", "--item", "Twin", "--yes"]);
+    assert!(err.contains(r#"2 items are named "Twin""#), "{err}");
+    let err = a.fail(&["send", "--field", "password", "--item", "Stripe", "--yes"]);
+    assert!(err.contains("must follow the --item"), "{err}");
+
+    let link = |args: &[&str]| {
+        let out = a.run(&[&["send", "--yes"], args].concat());
+        receive(&out).unwrap()
+    };
+    let bundle = link(&["--item", "Stripe", "--field", "password", file]);
+    assert_eq!(entry(&bundle.entries[0]).name, "Stripe password");
+    assert_eq!(entry(&bundle.entries[0]).data, b"sk_live");
+    assert_eq!(entry(&bundle.entries[1]).data, b"hi");
+    let bundle = link(&["--item", &stripe, "--field", "password"]);
+    assert_eq!(entry(&bundle.entries[0]).data, b"sk_live");
+}
+
+#[test]
+fn a_waiting_send_reports_the_pickup() {
+    let a = Device::new();
+    let file = a.path("hello.txt");
+    std::fs::write(&file, "hi").unwrap();
+    // Sends need no vault: this device isn't even set up.
+    let mut waiting = a
+        .cmd(&[
+            "send",
+            file.to_str().unwrap(),
+            "--wait",
+            "--opens",
+            "2",
+            "--yes",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut link = String::new();
+    BufReader::new(waiting.stdout.take().unwrap())
+        .read_line(&mut link)
+        .unwrap();
+    receive(&link).unwrap();
+    assert!(
+        waiting.try_wait().unwrap().is_none(),
+        "one of two opens left"
+    );
+    let bundle = receive(&link).unwrap();
+    assert_eq!(entry(&bundle.entries[0]).data, b"hi");
+    assert_eq!(wait(&mut waiting, Duration::from_secs(30)).code(), Some(0));
+    let mut err = String::new();
+    waiting
+        .stderr
+        .take()
+        .unwrap()
+        .read_to_string(&mut err)
+        .unwrap();
+    assert!(err.contains("picked up"), "{err}");
+}

@@ -23,6 +23,7 @@ indexmap = "2.14"
 deadbolt-client = { path = "../client" }
 deadbolt-core = { path = "../core" }
 deadbolt-net = { path = "../net" }
+deadbolt-send = { path = "../send" }
 deadbolt-store = { path = "../store" }
 rpassword = "7.5.4"
 rustix = { version = "1.1.5", default-features = false, features = ["process", "system"] }

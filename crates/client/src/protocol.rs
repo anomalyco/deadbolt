@@ -39,7 +39,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 9;
+pub const PROTOCOL_VERSION: u32 = 10;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -254,6 +254,35 @@ pub enum Command {
         passkey: LoginRef,
         challenge: String,
         verify: Verify,
+    },
+    /// Deadbolt Send: serves `sealed`, a bundle the client sealed with a
+    /// content key the agent never sees, to receivers that prove `secret`
+    /// (64 hex digits), `opens` times (at least 1) for `ttl_secs`. Shares
+    /// live in the agent's memory and end when it stops; they need no
+    /// unlock. Replies `send-created`.
+    SendCreate {
+        secret: Secret,
+        /// Base64 (standard, padded).
+        sealed: String,
+        opens: u32,
+        ttl_secs: u64,
+        /// What the sender sees in `send-list`.
+        label: String,
+    },
+    /// Every share this agent serves or served; replies `sends`.
+    SendList,
+    /// One share, by id or unique id prefix; replies `send`.
+    SendShow {
+        id: String,
+    },
+    /// Stops a share being opened; replies `send`.
+    SendRevoke {
+        id: String,
+    },
+    /// Waits until a share is picked up, expires or is revoked; replies
+    /// `send`. Doesn't hold the store unlocked.
+    SendWait {
+        id: String,
     },
 }
 
@@ -541,6 +570,64 @@ pub enum Reply {
     Mirror {
         report: MirrorReport,
     },
+    SendCreated {
+        send: SendInfo,
+        /// How receivers reach the agent's send endpoint.
+        sender: SenderInfo,
+    },
+    Sends {
+        sends: Vec<SendInfo>,
+    },
+    Send {
+        send: SendInfo,
+    },
+}
+
+/// A Deadbolt Send share, as its sender sees it. Never its secrets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SendInfo {
+    pub id: String,
+    pub label: String,
+    /// Sealed bytes.
+    pub size: u64,
+    /// Unix seconds.
+    pub created: u64,
+    pub expires: u64,
+    /// How many times it may be opened.
+    pub opens: u32,
+    /// When each open happened, Unix seconds.
+    pub opened: Vec<u64>,
+    pub revoked: Option<u64>,
+    pub state: SendState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SendState {
+    Open,
+    PickedUp,
+    Expired,
+    Revoked,
+}
+
+impl fmt::Display for SendState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Open => "open",
+            Self::PickedUp => "picked up",
+            Self::Expired => "expired",
+            Self::Revoked => "revoked",
+        })
+    }
+}
+
+/// The address of the agent's send endpoint.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SenderInfo {
+    /// The endpoint id, 64 hex digits: a key of its own, not the device's.
+    pub id: String,
+    pub relay_url: Option<String>,
+    pub direct_addrs: Vec<String>,
 }
 
 /// What a sync from 1Password did, or would do. Titles only, never values.
