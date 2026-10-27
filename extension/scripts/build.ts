@@ -32,8 +32,21 @@ async function build() {
   // allows (docs/autofill.md), so the native host accepts it.
   const manifest = JSON.parse(await readFile(join(root, "static", "manifest.json"), "utf8"))
   manifest.key = (await readFile(join(root, "manifest-key.txt"), "utf8")).trim()
+  const release = process.env.DEADBOLT_VERSION
+  if (release) Object.assign(manifest, releaseVersion(release))
   await writeFile(join(outdir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n")
   console.log(`built ${entries.length} entries -> dist/`)
+}
+
+// Release builds (docs/releasing.md) stamp the release version. Chrome wants
+// one to four dot-separated integers, so a dev build's 0.0.0-dev-<run> is
+// version 0.0.0.<run> and X.Y.Z-beta.N is X.Y.Z.N, each shown as its release
+// version.
+function releaseVersion(release: string) {
+  if (/^\d+\.\d+\.\d+$/.test(release)) return { version: release }
+  const pre = /^(\d+\.\d+\.\d+)-(?:dev-|beta\.)(\d+)(?:\.\d+)?$/.exec(release)
+  if (pre && Number(pre[2]) <= 65535) return { version: `${pre[1]}.${pre[2]}`, version_name: release }
+  throw new Error(`DEADBOLT_VERSION ${release} has no extension version`)
 }
 
 await build()

@@ -15,6 +15,11 @@ scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 export MACOSX_DEPLOYMENT_TARGET=12.0
 version=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "deadbolt-app"))')
+# CFBundleVersion must be numeric: a dev build's run number, or X.Y.Z as XXYYZZ.
+case "$version" in
+  0.0.0-dev-*) build=${version#0.0.0-dev-}; build=${build%%.*} ;;
+  *) build=$(printf '%s\n' "${version%%-*}" | awk -F. '{ print ($1 * 10000) + ($2 * 100) + $3 }') ;;
+esac
 target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 if $universal; then
   for arch in aarch64 x86_64; do
@@ -43,7 +48,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
 <key>CFBundleExecutable</key><string>Deadbolt</string>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>$version</string>
-<key>CFBundleVersion</key><string>$version</string>
+<key>CFBundleVersion</key><string>$build</string>
 <key>CFBundleIconFile</key><string>Deadbolt</string>
 <key>LSMinimumSystemVersion</key><string>12.0</string>
 <key>NSHighResolutionCapable</key><true/>
@@ -60,7 +65,8 @@ done
 iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbolt.icns"
 # Nested executable first, outer seal last.
 # Do NOT re-sign `Contents/Helpers/deadbolt-enclave` here: `crates/cli/build.rs`
-# already signed it (using `DEADBOLT_APPLE_SIGNING_IDENTITY` with `--options runtime
+# already signed it (or took the release workflow's Developer ID-signed helper
+# from `DEADBOLT_ENCLAVE_PREBUILT`; docs/releasing.md) (using `DEADBOLT_APPLE_SIGNING_IDENTITY` with `--options runtime
 # --timestamp` when set, or ad-hoc `-` otherwise) before embedding its whole-file
 # SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt`. Re-signing `deadbolt-enclave`
 # after `deadbolt` is compiled would alter its `__LINKEDIT` signature bytes and

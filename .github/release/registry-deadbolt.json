@@ -1,0 +1,70 @@
+{
+  "app": "deadbolt",
+  "description": "Deadbolt, the local-first password manager (anomalyco/deadbolt): its CLI, macOS app and browser extension. Its Release workflow runs in one environment, release (no approval): the dev channel from every push to dev, and stable from production or v* tags.",
+  "stages": [
+    "production"
+  ],
+  "artifacts": {
+    "cli": {
+      "channels": [
+        "stable",
+        "beta",
+        "dev"
+      ]
+    },
+    "desktop": {
+      "channels": [
+        "stable",
+        "beta",
+        "dev"
+      ]
+    },
+    "extension": {
+      "channels": [
+        "stable",
+        "beta",
+        "dev"
+      ]
+    }
+  },
+  "publishers": [
+    {
+      "repository": "anomalyco/deadbolt",
+      "repository_id": "1421127274",
+      "repository_owner_id": "66570915",
+      "workflow": ".github/workflows/release.yml",
+      "refs": [
+        "refs/heads/production",
+        "refs/tags/v*"
+      ],
+      "environment": "release",
+      "artifacts": [
+        "cli",
+        "desktop",
+        "extension"
+      ],
+      "channels": [
+        "stable",
+        "beta"
+      ]
+    },
+    {
+      "repository": "anomalyco/deadbolt",
+      "repository_id": "1421127274",
+      "repository_owner_id": "66570915",
+      "workflow": ".github/workflows/release.yml",
+      "refs": [
+        "refs/heads/dev"
+      ],
+      "environment": "release",
+      "artifacts": [
+        "cli",
+        "desktop",
+        "extension"
+      ],
+      "channels": [
+        "dev"
+      ]
+    }
+  ]
+}
