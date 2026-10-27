@@ -132,6 +132,7 @@ fn enter_copies_what_each_kind_is_for() {
         ("note", "notes"),
         ("ssh", "private-key"),
         ("identity", "email"),
+        ("passkey", "username"),
     ] {
         let mut rt = scene(kind);
         tap(&mut rt, Key::Enter);

@@ -954,6 +954,55 @@ fn delete_asks_in_place_and_the_next_item_takes_its_place() {
     assert_eq!(r.rt.state.selected.as_deref(), Some(next.as_str()));
 }
 
+/// A passkey shows its site, username and date, and can only be deleted.
+#[test]
+fn a_passkey_shows_its_site_and_is_only_deleted() {
+    let mut r = rig("passkey");
+    let item = r.rt.state.detail.clone().unwrap();
+    assert_eq!(item.kind, "passkey");
+    for (label, value) in [
+        ("Site", "github.com"),
+        ("Username", "thdxr"),
+        ("Created", "2026-10-27"),
+    ] {
+        assert!(r.shows(label) && r.shows(value), "{label}");
+    }
+    for hidden in [
+        "field-credential-id",
+        "field-user-handle",
+        "field-private-key",
+    ] {
+        assert!(r.rt.find(hidden).is_none(), "{hidden}");
+    }
+    let labelled = |label: &str| {
+        r.rt.elements()
+            .iter()
+            .any(|e| !e.exiting && e.label.as_deref() == Some(label))
+    };
+    assert!(labelled("Copy username"), "the username copies");
+    assert!(!labelled("Copy created"), "the date doesn't");
+    assert!(r.rt.find("edit").is_none(), "no Edit button");
+    assert!(
+        r.shows("Copy username") && !r.shows("Copy code"),
+        "the hints are a passkey's"
+    );
+    r.command('e');
+    r.rt.update(|s, _| s.from_menu(App::edit_selected));
+    r.settle(0.1);
+    assert!(
+        r.rt.state.edit.form.is_none(),
+        "⌘E and Edit Item do nothing"
+    );
+
+    r.press(Key::Backspace, cmd());
+    assert!(r.shows("Delete “github.com”?"));
+    r.tap(Key::Enter);
+    match r.sent().pop() {
+        Some(Job::Remove { id, .. }) => assert_eq!(id, item.id),
+        _ => panic!("expected a remove"),
+    }
+}
+
 /// ⌘N, ⌘E and ⌘⌫, or their menu items, act only on the vault's list and
 /// item: not over Settings (its Touch ID switch too), the import view or the
 /// lock screen waiting on Touch ID.

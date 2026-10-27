@@ -340,6 +340,11 @@ const SCENES: &[Scene] = &[
         s.toggle_reveal("private-key");
     }),
     ("identity", |s| kind_scene(s, "identity")),
+    ("passkey", |s| kind_scene(s, "passkey")),
+    ("passkey-delete", |s| {
+        kind_scene(s, "passkey");
+        s.ask_delete();
+    }),
     ("search", |s| {
         vault(s);
         s.search = rune::TextEdit::new("git");
@@ -894,13 +899,14 @@ fn vault(s: &mut App) {
     detail_for_selection(s);
 }
 
-/// The vault with a secure note, an SSH key and an identity, one selected.
+/// The vault with a secure note, an SSH key, an identity and a passkey, one selected.
 fn kind_scene(s: &mut App, kind: &str) {
     vault(s);
     for (id, kind, label, detail) in [
         ("b7c1e2", "note", "Alarm codes", None),
         ("d2a9f0", "ssh", "Deploy key", Some("deploy@anoma.ly")),
         ("5e8b31", "identity", "Dax Raad", Some("dax@anoma.ly")),
+        ("9c4f7a", "passkey", "github.com", Some("thdxr")),
     ] {
         s.items.push(ItemInfo {
             id: format!("{id}0000000000000000000000000000000000000000000000000000000000"),
@@ -983,6 +989,14 @@ fn detail_for_selection(s: &mut App) {
             ),
             field("comment", "text", "deploy@anoma.ly"),
         ],
+        // As the agent sends it: everything but the private key.
+        "passkey" => vec![
+            field("rp-id", "text", &item.label),
+            field("username", "text", item.detail.as_deref().unwrap_or("")),
+            field("credential-id", "text", "q5Zt0bJ8xW1cR4mN7pLs2A"),
+            field("user-handle", "text", "MTIzNDU2Nzg"),
+            field("created", "date", "2026-10-27"),
+        ],
         "identity" => vec![
             field("name", "text", "Dax Raad"),
             field("email", "email", "dax@anoma.ly"),
@@ -1006,7 +1020,7 @@ fn detail_for_selection(s: &mut App) {
             field("notes", "note", "Recovery codes are in the safe."),
         ],
     };
-    let otp = matches!(item.label.as_str(), "github.com" | "Cloudflare");
+    let otp = item.kind == "login" && matches!(item.label.as_str(), "github.com" | "Cloudflare");
     if otp {
         // The app never holds the secret: the agent leaves it out.
         fields.insert(3, field("otp", "otp", ""));

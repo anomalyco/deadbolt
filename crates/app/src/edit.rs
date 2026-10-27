@@ -27,6 +27,13 @@ pub const DELETE: &str = "Delete Item…";
 /// What ⌘N can add, in the order its picker shows them.
 pub const KINDS: [&str; 5] = ["login", "card", "note", "ssh", "identity"];
 
+/// Whether the app edits items of this type. A passkey is made by a site
+/// through the browser, and its private key never reaches the app: it can
+/// only be deleted here.
+pub fn editable(kind: &str) -> bool {
+    kind != "passkey"
+}
+
 /// A built-in item type's fields: name, field type, required, spans lines.
 /// The agent's schema (`deadbolt_core::item`) is the authority; this is the
 /// form's layout.
@@ -558,7 +565,7 @@ impl App {
         let Some(item) = self
             .detail
             .as_ref()
-            .filter(|d| self.selected.as_deref() == Some(d.id.as_str()))
+            .filter(|d| self.selected.as_deref() == Some(d.id.as_str()) && editable(&d.kind))
         else {
             return;
         };
