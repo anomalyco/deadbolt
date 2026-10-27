@@ -69,7 +69,7 @@ deadbolt sends [ls [--json] | show <id> [--json] | revoke <id>]
 - Prints the link on stdout (`--json`: `{"id", "link", "expires"}`), a summary on stderr, and with `--qr` a QR code on stderr.
 - `--wait` blocks until the link is picked up (exit 0), expires (exit 4) or is revoked (exit 5); other failures exit 1. Waiting doesn't hold the vault unlocked.
 - `DEADBOLT_SEND_URL` points links at another copy of the receive page (a local `bun run dev`, or a self-hosted site).
-- Control protocol 9: `send-create`, `send-list`, `send-show`, `send-revoke`, `send-wait` (`crates/client/src/protocol.rs`).
+- Control protocol 10: `send-create`, `send-list`, `send-show`, `send-revoke`, `send-wait` (`crates/client/src/protocol.rs`).
 
 ## Receive page
 
