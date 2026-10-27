@@ -1,0 +1,147 @@
+// Messages inside the extension: content scripts, the inline menu and the
+// popup all talk to the background worker, which alone talks to the native
+// host. Secrets appear only in FillValues, sent by the background to the one
+// document and form the user chose to fill, and in a capture, sent by a
+// content script after the user submitted a login form.
+
+import type { Account, HostStatus } from "./protocol"
+
+export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
+export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
+
+/** Roles the inline menu opens on. */
+export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password", "otp"]
+export const IDENTIFIER_ROLES: FieldRole[] = ["username", "email", "phone"]
+/** Roles a fill can write. */
+export const FIELD_ROLES: FieldRole[] = ["username", "email", "phone", "password", "new-password", "otp"]
+
+export interface FillValues {
+  username?: string
+  password?: string
+  totp?: string
+}
+
+/** Where the extension stands with Deadbolt, as the popup and menus show it. */
+export type Status =
+  | { state: "connecting" }
+  | { state: "not-installed" }
+  | { state: "disconnected"; message: string }
+  | { state: Exclude<HostStatus, "ready">; detail?: string }
+  | { state: "ready"; version: string }
+
+export type ToBackground =
+  // content script
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number }
+  /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
+  | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean }
+  | { type: "db:quiet"; loginish: boolean }
+  | { type: "db:capture"; username?: string; password?: string; newPassword?: string; title: string }
+  | { type: "db:menu-close"; token: string; dismissed?: boolean }
+  // inline menu
+  /** `parent`: the origin of the parent window that handed the menu its token. */
+  | { type: "db:menu-load"; token: string; parent: string }
+  | { type: "db:menu-pick"; token: string; ref: string }
+  | { type: "db:menu-dismiss"; token: string }
+  | { type: "db:menu-resize"; token: string; height: number }
+  // popup
+  | { type: "db:popup-load"; tabId: number }
+  | { type: "db:popup-fill"; tabId: number; ref: string }
+  /** `id`: the offer the popup showed; any other gets nothing. */
+  | { type: "db:popup-offer"; tabId: number; id: string; choice: OfferChoice }
+
+export type ToContent =
+  /**
+   * `form` is the form snapshot the fill was chosen for; a changed form gets
+   * nothing. `approval` names the fields db:approve said may be filled: only
+   * those are written.
+   */
+  | { type: "db:fill"; values: FillValues; form: number; approval: string }
+  /**
+   * Which of the form's fields may be filled now (see Approved). With
+   * `measure`, for a frame: where they show, and only if they all do.
+   */
+  | { type: "db:approve"; form: number; measure: boolean }
+  /** Where the fields of `approval` show now, if every one of them still does. */
+  | { type: "db:approved"; approval: string }
+  /** Report the login form now, or that there's none. Answers once the background has it. */
+  | { type: "db:report" }
+  | { type: "db:close-menu"; token: string }
+  | { type: "db:resize-menu"; token: string; height: number }
+  // Can the user see a frame's form? (see shownInPage)
+  /** To the frame above: where those boxes show in it, through the element `nonce` names. */
+  | { type: "db:frame-child"; nonce: string; boxes: Box[] }
+  /** To the frame below: tell the frame above which element you're in. */
+  | { type: "db:frame-announce"; nonce: string }
+
+/** A rectangle in a frame's viewport, in CSS pixels. */
+export interface Box {
+  left: number
+  top: number
+  right: number
+  bottom: number
+}
+
+/** An answer to db:approved or db:frame-child; null when anything doesn't show. */
+export interface FrameBoxes {
+  boxes: Box[]
+}
+
+/**
+ * A content script's answer to db:approve: the fields that may be filled,
+ * fixed when it answered. A fill asks the host only for their `roles` and
+ * writes only into them, never a field that became fillable after.
+ */
+export interface Approved {
+  approval: string
+  roles: FieldRole[]
+  /** With `measure`: where each field shows in the frame's viewport. */
+  boxes?: Box[]
+}
+
+/** A content script's answer to db:fill: the fields it actually wrote. */
+export interface FillAck {
+  filled: FieldRole[]
+}
+
+/** Broadcast to open extension pages (popup, menus) when the host's state changes. */
+export interface StatusChanged {
+  type: "db:status"
+  status: Status
+}
+
+export interface QueryReply {
+  token?: string
+  /** Rows the menu will show, so the frame can be sized before it loads. */
+  rows: number
+}
+
+export type MenuLoadReply =
+  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole }
+  | { kind: "status"; status: Status }
+
+export type PickReply = { ok: true } | { ok: false; message: string }
+
+export interface PopupReply {
+  status: Status
+  /** The tab's site, from the host; or why the tab gets no logins. */
+  site?: string
+  unfillable?: "scheme" | "insecure"
+  host?: string
+  accounts: Account[]
+  error?: string
+  /** A save or update waiting for the user's answer, for this tab. */
+  offer?: SaveOffer
+}
+
+export type OfferChoice = "save" | "later"
+
+export interface SaveOffer {
+  /** Made for each offer; the popup answers by it. */
+  id: string
+  site: string
+  username: string
+  update: boolean
+}
+
+/** `gone`: the offer answered isn't the one waiting anymore. */
+export type ChooseReply = { ok: true; message: string } | { ok: false; message: string; gone?: boolean }

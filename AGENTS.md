@@ -7,13 +7,15 @@ internal APIs directly and update their callers.
 - `crates/store`: encrypted redb persistence and passphrase derivation.
 - `crates/net`: iroh transport, membership gates, sync and pairing.
 - `crates/cli`: commands, background agent, control socket and deterministic simulator.
+- `extension/`: the Chromium MV3 extension (TypeScript, `bun build`), talking to `deadbolt browser-host`.
 - `docs/`: design and simulation reference. `site/`: project site.
 
 ## Commands
 
-`bun run check` runs formatting, Clippy (warnings are errors), workspace tests and
-`cargo deny check`. Install stable Rust with rustfmt/Clippy and cargo-deny first.
-CI runs the same steps, with cargo-deny in its own job and Rust on Linux and macOS.
+`bun run check` runs the extension's typecheck, tests and build, then formatting,
+Clippy (warnings are errors), workspace tests and `cargo deny check`. Install
+stable Rust with rustfmt/Clippy and cargo-deny first. CI runs the same steps, with
+cargo-deny and the extension in their own jobs and Rust on Linux and macOS.
 
 See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 `DEADBOLT_SIM_SEED`, `DEADBOLT_SIM_SEEDS`, `DEADBOLT_SIM_TRACE`,
