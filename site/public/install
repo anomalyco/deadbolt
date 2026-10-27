@@ -3,56 +3,113 @@
 #
 #   curl -fsSL https://deadbolt.pw/install | sh
 #
-# DEADBOLT_VERSION   version to install (default: latest)
+# DEADBOLT_CHANNEL   release channel to install: stable (default) or dev
+# DEADBOLT_VERSION   a stable version to install instead, from its GitHub release
 # DEADBOLT_INSTALL   install directory (default: ~/.local/bin)
+#
+# The channel's current release comes from the Anomaly release service
+# (https://anoma.ly/release/deadbolt/cli/<channel>.json); the download must
+# have the size and SHA-256 the manifest names. On macOS the tarball also holds
+# deadbolt-enclave, the Touch ID helper, installed beside deadbolt.
 set -eu
 
+release="${DEADBOLT_RELEASE_URL:-https://anoma.ly/release}"
 repo="anomalyco/deadbolt"
 
+fail() {
+  echo "deadbolt: $*" >&2
+  exit 1
+}
+
 case "$(uname -s)" in
-  Linux) os="linux" ;;
-  Darwin) os="darwin" ;;
-  *) echo "deadbolt: unsupported operating system $(uname -s)" >&2; exit 1 ;;
+  Linux) os="linux" target_os="linux" ;;
+  Darwin) os="darwin" target_os="macos" ;;
+  *) fail "unsupported operating system $(uname -s)" ;;
 esac
 
 case "$(uname -m)" in
   x86_64 | amd64) arch="x64" ;;
   arm64 | aarch64) arch="arm64" ;;
-  *) echo "deadbolt: unsupported architecture $(uname -m)" >&2; exit 1 ;;
+  *) fail "unsupported architecture $(uname -m)" ;;
 esac
-
-if [ -n "${DEADBOLT_VERSION:-}" ]; then
-  base="https://github.com/$repo/releases/download/v${DEADBOLT_VERSION#v}"
-else
-  base="https://github.com/$repo/releases/latest/download"
-fi
-file="deadbolt-$os-$arch.tar.gz"
 
 if command -v sha256sum >/dev/null 2>&1; then
   sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
 elif command -v shasum >/dev/null 2>&1; then
   sha256() { shasum -a 256 "$1" | cut -d ' ' -f 1; }
 else
-  echo "deadbolt: sha256sum or shasum is required to verify the download" >&2; exit 1
+  fail "sha256sum or shasum is required to verify the download"
 fi
 
 dir="${DEADBOLT_INSTALL:-$HOME/.local/bin}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "Downloading deadbolt for $os-$arch..."
-curl -fsSL -o "$tmp/$file" "$base/$file"
-curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
-expected="$(awk -v f="$file" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
-actual="$(sha256 "$tmp/$file")"
-if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
-  echo "deadbolt: checksum mismatch for $file (expected ${expected:-none}, got $actual)" >&2; exit 1
+if [ -n "${DEADBOLT_VERSION:-}" ]; then
+  # A pinned version: stable releases keep their files and SHA256SUMS on GitHub.
+  version="${DEADBOLT_VERSION#v}"
+  file="deadbolt-$version-$os-$arch.tar.gz"
+  base="https://github.com/$repo/releases/download/v$version"
+  echo "Downloading deadbolt $version for $os-$arch..."
+  curl -fsSL -o "$tmp/$file" "$base/$file"
+  curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
+  expected="$(awk -v f="$file" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
+  size=""
+else
+  channel="${DEADBOLT_CHANNEL:-stable}"
+  case "$channel" in
+    *[!a-z0-9-]* | "") fail "invalid channel $channel" ;;
+  esac
+  curl -fsSL -o "$tmp/manifest.json" "$release/deadbolt/cli/$channel.json" ||
+    fail "no $channel release at $release/deadbolt/cli/$channel.json"
+  # The manifest is JSON; without whitespace, every field this needs is a
+  # plain "key":value pair (URLs, hashes, and versions have no spaces).
+  manifest="$(tr -d ' \t\r\n' < "$tmp/manifest.json")"
+  # field <key> <json>: the first value of <key> in <json>.
+  field() {
+    case "$2" in
+      *"\"$1\":"*) printf '%s' "${2#*\""$1"\":}" | sed -e 's/^"//' -e 's/[",}].*//' ;;
+    esac
+  }
+  if [ "$(field app "$manifest")" != deadbolt ] || [ "$(field artifact "$manifest")" != cli ] ||
+    [ "$(field channel "$manifest")" != "$channel" ]; then
+    fail "$release/deadbolt/cli/$channel.json is not deadbolt's $channel CLI manifest"
+  fi
+  release_json="${manifest#*\"release\":}"
+  version="$(field version "$release_json")"
+  target="${release_json#*\"targets\":}"
+  target="${target#*\""$target_os-$arch"\":\{}"
+  [ "$target" != "${release_json#*\"targets\":}" ] || fail "the $channel release has no $target_os-$arch build"
+  target="${target%%\}*}"
+  url="$(field url "$target")"
+  expected="$(field sha256 "$target")"
+  size="$(field size "$target")"
+  case "$url" in
+    /*) url="${release%/release}$url" ;;
+    *) fail "unexpected download URL $url" ;;
+  esac
+  file="${url##*/}"
+  echo "Downloading deadbolt $version ($channel) for $os-$arch..."
+  curl -fsSL -o "$tmp/$file" "$url"
 fi
 
-tar -xzf "$tmp/$file" -C "$tmp"
+actual="$(sha256 "$tmp/$file")"
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+  fail "checksum mismatch for $file (expected ${expected:-none}, got $actual)"
+fi
+if [ -n "$size" ] && [ "$size" != "$(wc -c < "$tmp/$file" | tr -d ' ')" ]; then
+  fail "size mismatch for $file"
+fi
+
+mkdir "$tmp/unpacked"
+tar -xzf "$tmp/$file" -C "$tmp/unpacked"
 mkdir -p "$dir"
-mv "$tmp/deadbolt" "$dir/deadbolt"
+mv "$tmp/unpacked/deadbolt" "$dir/deadbolt"
 chmod 755 "$dir/deadbolt"
+if [ -f "$tmp/unpacked/deadbolt-enclave" ]; then
+  mv "$tmp/unpacked/deadbolt-enclave" "$dir/deadbolt-enclave"
+  chmod 755 "$dir/deadbolt-enclave"
+fi
 
 echo "Installed $("$dir/deadbolt" --version) to $dir/deadbolt"
 case ":$PATH:" in
