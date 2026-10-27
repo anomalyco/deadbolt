@@ -868,10 +868,14 @@ mod tests {
             let cancelled = Arc::new(AtomicUsize::new(0));
             let seen = cancelled.clone();
             *f.agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |cancel| {
-                while !cancel.is_cancelled() {
+                // A prompt nobody cancels gives up, so the test fails rather than hangs.
+                for _ in 0..400 {
+                    if cancel.is_cancelled() {
+                        seen.fetch_add(1, Ordering::SeqCst);
+                        break;
+                    }
                     std::thread::sleep(Duration::from_millis(5));
                 }
-                seen.fetch_add(1, Ordering::SeqCst);
                 Err(biometric::UnlockError::Cancelled)
             }));
             let agent = f.agent.clone();
