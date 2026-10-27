@@ -226,14 +226,10 @@ hivemind run --kind cargo --fetch .lab-output -- bash crates/app/scripts/bundle.
 
 The script builds both release binaries with `--locked`, assembles into a temporary directory, generates the icon, signs ad hoc and checks the plist, signature, bundled CLI's `--version` and app's headless `--list-scenes` before moving the bundle into `.lab-output/Deadbolt.app`. An optional final argument selects a fresh output path; an existing output is refused. Native is the default to reuse the build cache; universal builds both Rust targets and combines each executable with `lipo`. These bundles aren't distribution releases.
 
-Dax's `publish.yml` currently builds four CLI targets, then `packages/cli/script/release.ts` publishes tarballs, checksums and a Homebrew **formula**. `site/public/install` consumes those CLI tarballs. To add the app, introduce a macOS bundle job in the same publish mode, call this script, sign and notarize, then pass its app archive/DMG to the publish job. Keep the CLI artifacts and installer contract. The release script must upload the app even when the `v<version>` release already exists; its current existence check skips all uploads on reruns.
+Releases are built by the Release workflow ([releasing.md](releasing.md)), which runs this script with `--universal` against a Developer ID-signed Touch ID helper (`DEADBOLT_ENCLAVE_PREBUILT`), then signs `Contents/Helpers/deadbolt` and the bundle inside-out with the Developer ID and hardened runtime, notarizes and staples the app, and publishes `Deadbolt-<version>-macos-universal.zip` (for an updater) and `.dmg` to the release service's `desktop` artifact, the GitHub release, and the Homebrew cask (`brew install --cask anomalyco/tap/deadbolt`). `CFBundleVersion` is numeric: a dev build's run number, or `X.Y.Z` as `XXYYZZ`.
 
-Remaining release work, with Anomaly's identities and Dax's pipeline:
+Remaining work:
 
-- Developer ID signing with hardened runtime on `fleet role releaseHost`, replacing the development signatures inside-out; verify the signing identity and entitlements there.
-- Notarize and staple every app and DMG, then assess both with Gatekeeper before publishing.
-- Add a Sparkle-style signed update feed and updater integration. Upload and verify artifacts before publishing the feed.
-- Add the Homebrew **cask** (`brew install --cask anomalyco/tap/deadbolt`, or `brew install --cask deadbolt` after tapping), alongside the existing CLI formula.
-- Add a Mac download button to deadbolt.pw. Site publishing needs Dax's approval.
-
-Signing identities, notarization, updater integration and publishing are deliberately left to that release work.
+- An in-app updater reading `https://anoma.ly/release/deadbolt/desktop/<channel>.json` (Hex's protocol), requiring `crates/app/update-requirement.txt` of the new bundle.
+- After installing or updating, point the browser's native messaging host (`deadbolt browser install`) at `/Applications/Deadbolt.app/Contents/Helpers/deadbolt`.
+- A Mac download button on deadbolt.pw, from the `desktop` manifest. Site publishing needs Dax's approval.

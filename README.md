@@ -11,10 +11,11 @@ curl -fsSL https://deadbolt.pw/install | sh
 ```
 
 ```sh
-brew install anomalyco/tap/deadbolt
+brew install anomalyco/tap/deadbolt          # the CLI
+brew install --cask anomalyco/tap/deadbolt   # Deadbolt.app for macOS, with its CLI
 ```
 
-Or download a tarball from [GitHub releases](https://github.com/anomalyco/deadbolt/releases) (macOS and Linux, x64 and arm64). The install script verifies the tarball against the release's `SHA256SUMS`; set `DEADBOLT_VERSION` to pin a version and `DEADBOLT_INSTALL` to change the directory (default `~/.local/bin`).
+Or download from [GitHub releases](https://github.com/anomalyco/deadbolt/releases) (CLI tarballs for macOS and Linux, x64 and arm64; the macOS app; the browser extension). The install script installs the current release from the Anomaly release service and verifies its SHA-256; set `DEADBOLT_CHANNEL=dev` for the latest build of `dev`, `DEADBOLT_VERSION` to pin a stable version, and `DEADBOLT_INSTALL` to change the directory (default `~/.local/bin`). Releases: [`docs/releasing.md`](docs/releasing.md).
 
 ## Docs
 
