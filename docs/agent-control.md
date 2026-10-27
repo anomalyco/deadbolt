@@ -353,7 +353,22 @@ deadbolt activity --since 1h
 ## Later
 
 - AI-driven browser fills: `site-fill` for a page an AI's browser has
-  open, approved per login, as in 1Password for Agents.
+  open, approved per login, as in 1Password for Agents. Shape (from Ryan's
+  Foyer, which already fills this way):
+  - **By reference.** The AI sees metadata and an opaque ref, picks the ref
+    and the step, and gets back only "submitted" or "failed". Values go
+    agent → extension → field, never to the AI.
+  - **Approval bound to the browser's facts.** The tap shows and checks the
+    frame origin the browser reports and delivers to that exact
+    `documentId`, so a page that navigates during the wait gets nothing.
+  - **Fill and submit in one step.** An AI driving the tab over CDP can read
+    `input.value` right after a fill, so pass-through only holds if the
+    submit happens before control returns, and only for tools that can't
+    read the field. Say so in the prompt; it is a narrower promise than
+    `deadbolt run`.
+  - **Passkeys fit best**: the AI never sees anything usable, and the tap is
+    honest user verification.
+  - Approving from the phone is a second way to give the tap.
 - An SSH agent that confirms each use of a key.
 - Approving from the iPhone.
 - Standing grants for scripts, by code signature and item list, set in the
