@@ -3,6 +3,7 @@
 
 mod autofill;
 pub mod biometric;
+mod generate;
 mod items;
 mod mirror;
 mod pairing;
@@ -1222,6 +1223,8 @@ impl Agent {
                     | Command::SiteLogins { .. }
                     | Command::SiteCheck { .. }
                     | Command::PasskeyList { .. }
+                    | Command::SiteGenerateCheck { .. }
+                    | Command::SiteGenerateDrop { .. }
             );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
         // and a lock stops it before it writes anything. Nor does waiting
@@ -1467,13 +1470,42 @@ impl Agent {
                     autofill::fill(s, &origin, &login, &want, crate::config::wall_clock())
                 })?,
             }),
+            Command::SiteGenerateCheck { origin, field } => {
+                generate::check(&origin, &generate::FieldRules::of(&field))?;
+                Ok(Reply::Done)
+            }
+            Command::SiteGenerate { origin, field } => {
+                let password = crate::protocol::Secret::new(
+                    generate::generate(&origin, &generate::FieldRules::of(&field))?.as_str(),
+                );
+                let id = self.with(|s| {
+                    s.generated
+                        .offer(&origin, password.clone(), std::time::Instant::now())
+                })?;
+                Ok(Reply::SiteGenerated { password, id })
+            }
+            Command::SiteGenerateKeep { origin, id } => {
+                self.with(|s| s.generated.keep(&origin, &id, std::time::Instant::now()))?;
+                Ok(Reply::Done)
+            }
+            Command::SiteGenerateDrop { origin, id } => {
+                self.with(|s| {
+                    s.generated.drop_candidate(&origin, &id);
+                    Ok(())
+                })?;
+                Ok(Reply::Done)
+            }
             Command::SiteCheck {
                 origin,
                 username,
                 password,
             } => {
-                let (status, matches) =
-                    self.with(|s| autofill::check(s, &origin, &username, &password))?;
+                let (status, matches) = self.with(|s| {
+                    let password =
+                        s.generated
+                            .resolve(&origin, &password, std::time::Instant::now())?;
+                    autofill::check(s, &origin, username.as_deref(), &password)
+                })?;
                 Ok(Reply::SiteCheck { status, matches })
             }
             Command::SiteSave {
@@ -1485,7 +1517,10 @@ impl Agent {
                 password,
             } => {
                 let (login, created) = self.with(|s| {
-                    autofill::save(
+                    let secret =
+                        s.generated
+                            .resolve(&origin, &password, std::time::Instant::now())?;
+                    let saved = autofill::save(
                         s,
                         autofill::Save {
                             origin: &origin,
@@ -1493,9 +1528,11 @@ impl Agent {
                             title: &title,
                             url: &url,
                             username: &username,
-                            password: &password,
+                            password: &secret,
                         },
-                    )
+                    )?;
+                    s.generated.saved(&password);
+                    Ok(saved)
                 })?;
                 self.sync_now.notify_one();
                 Ok(Reply::SiteSaved { login, created })

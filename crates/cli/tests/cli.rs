@@ -1407,10 +1407,10 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     let hello = host.ask(serde_json::json!({"type": "hello"}));
     assert_eq!(hello["type"], "hello", "{hello}");
     assert_eq!(hello["status"], "ready");
-    assert_eq!(hello["protocol"], 1);
+    assert_eq!(hello["protocol"], 2);
     assert_eq!(
         hello["capabilities"],
-        serde_json::json!(["list", "fill", "check", "save", "passkeys"])
+        serde_json::json!(["list", "fill", "check", "save", "generate", "passkeys"])
     );
 
     // Only the github.com login, on github.com and its subdomains, and no
@@ -1664,6 +1664,107 @@ fn browser_host_checks_and_saves_logins() {
         list(&mut host, "https://trim.example.io")["accounts"][0]["urls"],
         serde_json::json!(["https://trim.example.io/login"])
     );
+    host.close();
+}
+
+/// A generated password waits in the agent, for its page's origin only:
+/// as a candidate until the extension says it went into the page, then
+/// until it's saved. Nothing is saved before, locking forgets it, and rules
+/// that allow only weak passwords get none.
+#[test]
+fn browser_host_generates_passwords_and_holds_them_until_saved() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut host = Host::start(&a);
+    let origin = "https://shop.example.com";
+    let generate = |host: &mut Host, extra: serde_json::Value| {
+        let mut request = serde_json::json!({"type": "generate", "origin": origin});
+        request
+            .as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        host.ask(request)
+    };
+    let field = serde_json::json!({"maxLength": 16, "rules": "required: digit; required: [!]; allowed: lower"});
+    let checked =
+        host.ask(serde_json::json!({"type": "generate-check", "origin": origin, "maxLength": 16}));
+    assert_eq!(checked["type"], "generate-check", "{checked}");
+    let pin = serde_json::json!({"type": "generate-check", "origin": origin, "maxLength": 6, "allowed": "0123456789"});
+    assert_error(&host.ask(pin), "weak");
+    assert_error(
+        &generate(
+            &mut host,
+            serde_json::json!({"maxLength": 4, "allowed": "0123456789"}),
+        ),
+        "weak",
+    );
+    let made = generate(&mut host, field);
+    assert_eq!(made["type"], "generate", "{made}");
+    let password = made["password"].as_str().unwrap().to_string();
+    let id = made["generated"].as_str().unwrap().to_string();
+    assert_eq!(password.len(), 16);
+    assert!(
+        password
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'!')
+    );
+    assert!(password.contains('!') && password.bytes().any(|b| b.is_ascii_digit()));
+    assert_eq!(a.run(&["ls"]), "", "nothing saved");
+    let impossible = generate(
+        &mut host,
+        serde_json::json!({"minLength": 30, "maxLength": 8}),
+    );
+    assert_error(&impossible, "failed");
+
+    // A candidate names nothing until it's in the page.
+    let check = serde_json::json!({
+        "type": "check", "origin": origin, "username": "kit", "generated": id,
+    });
+    assert_error(&host.ask(check.clone()), "not_found");
+    let keep = |host: &mut Host, origin: &str, id: &serde_json::Value| {
+        host.ask(serde_json::json!({"type": "generate-keep", "origin": origin, "generated": id}))
+    };
+    assert_error(
+        &keep(&mut host, "https://www.example.com", &made["generated"]),
+        "not_found",
+    );
+    assert_eq!(
+        keep(&mut host, origin, &made["generated"])["type"],
+        "generate-keep"
+    );
+    let reply = host.ask(check);
+    assert_eq!(reply["status"], "new", "{reply}");
+    // A dropped candidate is gone.
+    let dropped = generate(&mut host, serde_json::json!({}));
+    let reply = host.ask(serde_json::json!({"type": "generate-drop", "origin": origin, "generated": dropped["generated"]}));
+    assert_eq!(reply["type"], "generate-drop", "{reply}");
+    assert_error(&keep(&mut host, origin, &dropped["generated"]), "not_found");
+    let reply = host.ask(serde_json::json!({
+        "type": "check", "origin": origin, "username": "kit", "generated": id, "password": "x",
+    }));
+    assert_error(&reply, "bad_request");
+    // Another origin, even on the same site, can't use it.
+    let entry = serde_json::json!({"title": "Shop", "url": "https://shop.example.com/join",
+                                   "username": "kit", "generated": id});
+    let reply = host.ask(serde_json::json!({
+        "type": "save", "origin": "https://www.example.com", "entry": entry,
+    }));
+    assert_error(&reply, "not_found");
+    let saved = host.ask(serde_json::json!({"type": "save", "origin": origin, "entry": entry}));
+    assert_eq!(saved["created"], true, "{saved}");
+    assert_eq!(a.run(&["get", "shop"]), format!("{password}\n"));
+    let reply = host.ask(serde_json::json!({"type": "save", "origin": origin, "entry": entry}));
+    assert_error(&reply, "not_found");
+
+    let made = generate(&mut host, serde_json::json!({}));
+    assert_eq!(made["password"].as_str().unwrap().len(), 20);
+    keep(&mut host, origin, &made["generated"]);
+    a.run(&["lock"]);
+    a.run(&["unlock"]);
+    let reply = host.ask(serde_json::json!({
+        "type": "check", "origin": origin, "username": "kit", "generated": made["generated"],
+    }));
+    assert_error(&reply, "not_found");
     host.close();
 }
 

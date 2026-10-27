@@ -28,12 +28,13 @@ use super::{EXTENSION_ID, extension_origin};
 use crate::client;
 use crate::paths::Paths;
 use crate::protocol::{
-    Change, Command, ErrorCode, Fill, LoginRef, Reply, Secret, SiteStatus, SiteValues,
+    Change, Command, ErrorCode, Fill, LoginRef, PagePassword, Reply, Secret, SiteField, SiteStatus,
+    SiteValues,
 };
 use crate::site::Site;
 
 /// The version of this message set, in `hello`.
-pub const PROTOCOL: u32 = 1;
+pub const PROTOCOL: u32 = 2;
 /// The largest request read; anything bigger is skipped and refused.
 pub const MAX_REQUEST: usize = 64 * 1024;
 /// The browser's limit on a message from the host.
@@ -46,6 +47,8 @@ const MAX_TITLE: usize = 128;
 const MAX_USERNAME: usize = 500;
 const MAX_PASSWORD: usize = 4096;
 const MAX_URL: usize = 2048;
+/// The longest `passwordrules` or `pattern` character set a page sends.
+const MAX_RULES: usize = 1024;
 
 /// Checks are a password oracle and fills hand out secrets, so a runaway
 /// or hostile caller gets them slowly: a burst, then one per interval.
@@ -108,10 +111,29 @@ enum Request {
         login: String,
         want: Vec<Fill>,
     },
+    Generate {
+        origin: String,
+        #[serde(flatten)]
+        field: Field,
+    },
+    GenerateCheck {
+        origin: String,
+        #[serde(flatten)]
+        field: Field,
+    },
+    GenerateKeep {
+        origin: String,
+        generated: String,
+    },
+    GenerateDrop {
+        origin: String,
+        generated: String,
+    },
     Check {
         origin: String,
-        username: String,
-        password: Secret,
+        username: Option<String>,
+        password: Option<Secret>,
+        generated: Option<String>,
     },
     Save {
         origin: String,
@@ -125,12 +147,49 @@ enum Request {
     PasskeyCancel(passkeys::Cancel),
 }
 
+/// A new-password field's rules, as the extension words them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Field {
+    rules: Option<String>,
+    min_length: Option<usize>,
+    max_length: Option<usize>,
+    allowed: Option<String>,
+}
+
+impl Field {
+    fn check(self) -> Result<SiteField, Refusal> {
+        if self.rules.as_ref().is_some_and(|r| r.len() > MAX_RULES)
+            || self.allowed.as_ref().is_some_and(|a| a.len() > MAX_RULES)
+        {
+            return Err(Refusal::bad(format!(
+                "rules and allowed are at most {MAX_RULES} bytes"
+            )));
+        }
+        Ok(SiteField {
+            rules: self.rules,
+            min_length: self.min_length,
+            max_length: self.max_length,
+            allowed: self.allowed,
+        })
+    }
+}
+
+/// A generated password's id, as `generate` gave it.
+fn generated_id(id: &str) -> Result<String, Refusal> {
+    if id.is_empty() || id.len() > 64 {
+        return Err(Refusal::bad("generated is 1 to 64 bytes"));
+    }
+    Ok(id.to_string())
+}
+
 #[derive(Deserialize)]
 struct Entry {
     title: String,
     url: String,
     username: String,
-    password: Secret,
+    password: Option<Secret>,
+    generated: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -151,7 +210,7 @@ pub(super) enum Body {
         status: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        capabilities: [&'static str; 5],
+        capabilities: [&'static str; 6],
     },
     List {
         site: String,
@@ -161,6 +220,13 @@ pub(super) enum Body {
         #[serde(flatten)]
         values: SiteValues,
     },
+    Generate {
+        password: Secret,
+        generated: String,
+    },
+    GenerateCheck,
+    GenerateKeep,
+    GenerateDrop,
     Check {
         status: SiteStatus,
         matches: Vec<String>,
@@ -211,6 +277,8 @@ pub(super) enum Code {
     Exists,
     /// A passkey ceremony stopped by `passkey-cancel`.
     Cancelled,
+    /// A site's rules allow only weak generated passwords.
+    Weak,
     Failed,
 }
 
@@ -249,6 +317,7 @@ impl From<anyhow::Error> for Refusal {
             Some(ErrorCode::NotFound) => Code::NotFound,
             Some(ErrorCode::DomainMismatch) => Code::DomainMismatch,
             Some(ErrorCode::Exists) => Code::Exists,
+            Some(ErrorCode::Weak) => Code::Weak,
             Some(ErrorCode::Version | ErrorCode::Failed) => Code::Failed,
             None if matches!(
                 error.downcast_ref::<deadbolt_client::Error>(),
@@ -352,25 +421,44 @@ pub(super) fn format_ref(login: &LoginRef) -> String {
     format!("{}:{}", login.vault, login.item)
 }
 
-fn check_login(username: &str, password: &Secret) -> Result<(), Refusal> {
+/// The username, and the password as typed or the generated one by its id:
+/// one or the other.
+fn check_login(
+    username: &str,
+    password: Option<Secret>,
+    generated: Option<String>,
+) -> Result<PagePassword, Refusal> {
     if username.chars().count() > MAX_USERNAME {
         return Err(Refusal::bad(format!(
             "a username is at most {MAX_USERNAME} characters"
         )));
     }
-    let len = password.expose().chars().count();
-    if len == 0 || len > MAX_PASSWORD {
-        return Err(Refusal::bad(format!(
-            "a password is 1 to {MAX_PASSWORD} characters"
-        )));
+    match (password, generated) {
+        (Some(password), None) => {
+            let len = password.expose().chars().count();
+            if len == 0 || len > MAX_PASSWORD {
+                return Err(Refusal::bad(format!(
+                    "a password is 1 to {MAX_PASSWORD} characters"
+                )));
+            }
+            Ok(PagePassword::Typed(password))
+        }
+        (None, Some(id)) if !id.is_empty() && id.len() <= 64 => Ok(PagePassword::Generated(id)),
+        _ => Err(Refusal::bad("a password or a generated one's id, not both")),
     }
-    Ok(())
 }
 
 pub(super) async fn call(paths: &Paths, command: Command) -> Result<Reply, Refusal> {
     Ok(client::simple(paths, command)
         .await
         .map_err(anyhow::Error::from)?)
+}
+
+fn done(reply: Reply) -> Result<(), Refusal> {
+    match reply {
+        Reply::Done => Ok(()),
+        _ => Err(unexpected()),
+    }
 }
 
 pub(super) fn unexpected() -> Refusal {
@@ -620,13 +708,53 @@ impl Serial {
                 };
                 Ok(Body::Fill { values })
             }
+            Request::Generate { origin, field } => {
+                site(&origin)?;
+                let field = field.check()?;
+                if !self.fills.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                let Reply::SiteGenerated { password, id } =
+                    call(&self.paths, Command::SiteGenerate { origin, field }).await?
+                else {
+                    return Err(unexpected());
+                };
+                Ok(Body::Generate {
+                    password,
+                    generated: id,
+                })
+            }
+            Request::GenerateCheck { origin, field } => {
+                site(&origin)?;
+                let field = field.check()?;
+                if !self.checks.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                done(call(&self.paths, Command::SiteGenerateCheck { origin, field }).await?)?;
+                Ok(Body::GenerateCheck)
+            }
+            Request::GenerateKeep { origin, generated } => {
+                site(&origin)?;
+                let id = generated_id(&generated)?;
+                done(call(&self.paths, Command::SiteGenerateKeep { origin, id }).await?)?;
+                Ok(Body::GenerateKeep)
+            }
+            Request::GenerateDrop { origin, generated } => {
+                site(&origin)?;
+                let id = generated_id(&generated)?;
+                done(call(&self.paths, Command::SiteGenerateDrop { origin, id }).await?)?;
+                Ok(Body::GenerateDrop)
+            }
             Request::Check {
                 origin,
                 username,
                 password,
+                generated,
             } => {
                 site(&origin)?;
-                check_login(&username, &password)?;
+                let password =
+                    check_login(username.as_deref().unwrap_or_default(), password, generated)?;
+                let username = username.filter(|u| !u.trim().is_empty());
                 if !self.checks.take(Instant::now()) {
                     return Err(Refusal::slow_down());
                 }
@@ -654,7 +782,7 @@ impl Serial {
             } => {
                 site(&origin)?;
                 let login = login.as_deref().map(parse_ref).transpose()?;
-                check_login(&entry.username, &entry.password)?;
+                let password = check_login(&entry.username, entry.password, entry.generated)?;
                 let title = entry.title.trim();
                 if title.is_empty() || title.chars().count() > MAX_TITLE {
                     return Err(Refusal::bad(format!(
@@ -676,7 +804,7 @@ impl Serial {
                         title: title.into(),
                         url: url.into(),
                         username: entry.username,
-                        password: entry.password,
+                        password,
                     },
                 )
                 .await?
@@ -721,7 +849,7 @@ async fn hello(paths: &Paths) -> (Body, bool) {
         version: client::version(),
         status,
         detail,
-        capabilities: ["list", "fill", "check", "save", "passkeys"],
+        capabilities: ["list", "fill", "check", "save", "generate", "passkeys"],
     };
     (body, status != "unavailable")
 }
@@ -905,6 +1033,17 @@ mod tests {
         assert_eq!(
             json(&check),
             serde_json::json!({"id": "4", "type": "check", "status": "update", "matches": ["a:b"]})
+        );
+        let generate = Envelope {
+            id: Some("5".into()),
+            body: Body::Generate {
+                password: Secret::new("Xk3!"),
+                generated: "abc".into(),
+            },
+        };
+        assert_eq!(
+            json(&generate),
+            serde_json::json!({"id": "5", "type": "generate", "password": "Xk3!", "generated": "abc"})
         );
     }
 

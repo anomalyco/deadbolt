@@ -154,17 +154,19 @@ fn same_password(saved: Option<&str>, typed: &str) -> bool {
     blake3::hash(saved.unwrap_or_default().as_bytes()) == blake3::hash(typed.as_bytes())
 }
 
+/// Without a username, a login with any username and the same password is
+/// `same`, and nothing is `update`.
 pub fn check(
     s: &Loaded,
     origin: &str,
-    username: &str,
+    username: Option<&str>,
     password: &Secret,
 ) -> Result<(SiteStatus, Vec<LoginRef>)> {
     let site = site(origin)?;
     let mut same = Vec::new();
     let mut other = Vec::new();
     for (vault, item) in logins(s, &site) {
-        if !same_username(value(&item, "username"), username) {
+        if !username.is_none_or(|u| same_username(value(&item, "username"), u)) {
             continue;
         }
         let login = login_ref(&vault, &item.id);
@@ -176,10 +178,10 @@ pub fn check(
     }
     Ok(if !same.is_empty() {
         (SiteStatus::Same, same)
-    } else if !other.is_empty() {
+    } else if !other.is_empty() && username.is_some() {
         (SiteStatus::Update, other)
     } else {
-        (SiteStatus::New, other)
+        (SiteStatus::New, Vec::new())
     })
 }
 
@@ -339,6 +341,27 @@ mod tests {
             );
             assert!(values.username.is_none() && values.password.is_none());
         }
+    }
+
+    #[test]
+    fn a_check_without_a_username_matches_by_password_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let origin = "https://example.com";
+        let kit = login(
+            &mut s,
+            &[("url", origin), ("username", "kit"), ("password", "old")],
+        );
+        login(
+            &mut s,
+            &[("url", origin), ("username", "dax"), ("password", "other")],
+        );
+        let (status, matches) = check(&s, origin, None, &Secret::new("old")).unwrap();
+        assert_eq!((status, matches), (SiteStatus::Same, vec![kit]));
+        let (status, matches) = check(&s, origin, None, &Secret::new("nope")).unwrap();
+        assert_eq!((status, matches), (SiteStatus::New, vec![]));
+        let (status, _) = check(&s, origin, Some("kit"), &Secret::new("nope")).unwrap();
+        assert_eq!(status, SiteStatus::Update);
     }
 
     #[test]

@@ -262,6 +262,8 @@ pub struct Session {
     state: Loaded,
     pub node: Node,
     pub(super) sync_task: Option<super::AbortOnDrop>,
+    /// Passwords made for web forms, until saved; locking drops them.
+    pub generated: super::generate::Pending,
 }
 
 impl std::ops::Deref for Session {
@@ -283,6 +285,7 @@ impl Session {
             state: loaded,
             node,
             sync_task: None,
+            generated: Default::default(),
         }
     }
 
