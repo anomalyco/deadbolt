@@ -204,14 +204,28 @@ touched, from a helper it hash-checks before running.
 
 - **Once:** one request, or one `deadbolt run` and its child for as long as
   the child runs.
-- **15 min:** the same anchor, items, fields and tier, and the same
-  program: the approved command's resolved executable and its code
-  signature (team ID, or cdhash when unsigned). A different program asks
-  again, so approving `wrangler deploy` doesn't cover
-  `sh -c 'echo $T | base64'`, which masking can't catch. Shells and
-  interpreters (`sh`, `bash`, `zsh`, `env`, `python`, `node`, `bun`,
-  `perl`, `ruby`, `osascript`) only ever get Once, since they run anything.
-  It expires after 15 minutes without use, an hour at most. Use tier only.
+- **15 min:** the same anchor, items, fields and tier, the same working
+  directory, and the same program: the approved command's resolved
+  executable and its team ID. It expires after 15 minutes without use, an
+  hour at most. Use tier only.
+  - **Only for programs that can't be told to run other code.** Same program
+    doesn't mean same behaviour: `wrangler`, `vercel`, `npm`/`bun run`,
+    `vite`, `make` and `turbo` run whatever the project's files say, and an
+    AI can edit `wrangler.toml` or `package.json` between two runs to print
+    the token. So the rule is an allowlist, not a denylist: a 15-minute grant
+    is offered only for a native binary signed with a team ID (not ad-hoc,
+    not a script, not a shebang file) that isn't a known code runner.
+  - **Always Once:** scripts and shebang files (`node_modules/.bin/*`
+    resolves to a script, so most JS tooling lands here), unsigned and ad-hoc
+    binaries, shells and interpreters, and code runners even when signed:
+    `env`, `xargs`, `find`, `npx`, `bunx`, `uvx`, `deno`, `node`, `bun`,
+    `python`, `osascript`, `git` (aliases, hooks, `core.sshCommand`), `gh`
+    (extensions, shell aliases), `make`, and project-driven deploy and build
+    tools. The list ships with Deadbolt and only ever grows.
+  - **In practice** most dev commands get Once, so the panel offers 15 min
+    only when it means something. Binding to hashes of the project's config
+    files was considered and left out: each tool reads different files, and
+    missing one is silent.
 - Read and Write are always Once. Add needs no grant. Never has no scope.
 
 **What can't spoof a prompt:**
