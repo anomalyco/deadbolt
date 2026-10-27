@@ -1,9 +1,9 @@
 # Browser autofill
 
 Deadbolt fills and saves passwords in Chromium browsers (Chrome, Brave, Arc,
-Edge, Chromium) through its own extension. The extension isn't written yet;
-this doc covers the parts that are, the agent's side and the native messaging
-host, and specifies the messages the extension will use.
+Edge, Chromium) through its own extension, in `extension/`. This doc covers
+the agent's side, the native messaging host, the extension, and the messages
+between them.
 
 ```text
 web page ─ content script ─ extension ══ native messaging ══ deadbolt browser-host ── agent socket ── agent
@@ -76,6 +76,149 @@ The host refuses to start for any origin other than the extension's, and
 `allowed_origins` already stops the browser from connecting any other
 extension.
 
+## Load the extension unpacked (Brave, Chrome, Arc, Edge)
+
+There's no store listing yet. Build it and load it from disk:
+
+```sh
+cd extension
+bun install
+bun run build                  # writes extension/dist
+deadbolt browser install       # lets the browser start deadbolt browser-host
+```
+
+1. Open `brave://extensions` (`chrome://extensions` in Chrome and Arc,
+   `edge://extensions` in Edge).
+2. Turn on **Developer mode**.
+3. Click **Load unpacked** and choose `extension/dist`.
+
+The manifest's `key` gives it the id `jhocodkhpifjndffenppfmdkmiolngal`, the
+one `install` allows. After rebuilding, click the reload arrow on its card.
+If the toolbar popup says the helper isn't installed, run
+`deadbolt browser install` and open the popup again.
+
+## The extension
+
+One service worker owns the extension's only port to the host
+(`chrome.runtime.connectNative("pw.deadbolt.browser")`). It sends hello on
+connect, reconnects with backoff (1s up to 60s) when the host goes away, and
+follows `changed`. It never asks for the passphrase: a locked vault shows
+"Unlock Deadbolt" and waits for `unlocked`. A `stopped` push shows Deadbolt as
+not running without sending hello, which would start the agent again.
+
+- **Inline menu.** Focusing a username, email, password or code field in the
+  top page after a click or keypress opens a menu of that site's logins,
+  title and username, under the field. ↓/↑ choose, ⏎ fills, esc closes, and
+  ↓ reopens it. Fields in frames get no menu (see Frames). It's an extension
+  page in an iframe inside a closed shadow root on a plain element, so the
+  page can't read it or click it for you.
+- **Menu visibility.** The menu samples its own visibility rather than
+  watching it continuously: an `IntersectionObserver` with `trackVisibility`
+  gives a reading at most every 100 ms, saying whether the menu is fully on
+  screen, unscaled, opaque and uncovered. A pick, by mouse or keyboard,
+  counts only if every reading for at least 500 ms before the key or button
+  went down said so and the menu hadn't moved or changed size, and nothing
+  changes until a fresh reading taken 400 ms after the press confirms it. A
+  frame hears about changes the page makes to it only after a short delay,
+  so a reading right at the press can predate them. Every change starts the
+  500 ms again. If it's covered, faded, clipped, shown only at the press or
+  can't be measured, it fills nothing and says so. A page that covers the
+  menu briefly between two readings can go unseen (see the threat model).
+- **Keyboard picks.** ⏎ picks only after the user's own ↓ in the field
+  moved focus into the menu, or a real press inside the menu put it there
+  and passed the same visibility checks as a pick. A press the menu refused
+  lets no later ⏎ pick either. Focus that got into the menu any other way, such as by Tab from a field
+  the page made last in the tab order or by a script, doesn't count, and
+  leaving the menu ends it even if focus comes back. Such a menu says "Press
+  ↓ in the field to choose."
+- **Menu tokens.** The menu page's URL carries nothing. When it loads it asks
+  its parent with `postMessage`; the content script answers only that frame's
+  window, at the extension's origin, with a token bound to the tab, frame,
+  document and origin that opened the menu. The first extension page to
+  present the token, with that origin as its parent, owns it; any other page,
+  or the same token after the page navigated or the menu closed, gets nothing.
+- **Filling.** The service worker fills only a document that just asked: the
+  content script must have reported the focused form for this frame, the
+  frame's origin (as the browser reports it, never `null`) must be fillable,
+  and the reply goes to that exact `documentId`, so a frame that navigated
+  away gets nothing. The popup's Fill works the same way, into the top page's
+  form, or into a frame's when the top page has none (see Frames). Before it
+  chooses, the popup asks the top page for a fresh report, and a page whose
+  form went away without a navigation, such as an app that swapped it for a
+  frame, reports that it has none. Values go
+  only to the form they were asked for: if the form was replaced or its
+  fields changed, nothing is filled. When the user picks or clicks Fill, the
+  content script fixes which of the form's fields may be filled right then;
+  the host is asked only for their values and only those fields are written
+  (the open menu itself doesn't count as covering a field then; it closes
+  before anything is written).
+  A field the page enables or shows later, such as a disabled password it
+  turns on when the username is focused for the fill, gets nothing. If the
+  sign-in was cancelled (Esc, or a
+  navigation the page didn't make) while the host was answering, the values
+  are dropped instead of delivered.
+  Each field is checked again right before its value is written, and before
+  each digit of a split code: it must still be in the form and under the
+  parent it was found in, enabled, editable, and visible through every
+  ancestor up to the top of the page, across shadow roots (display,
+  visibility, opacity, clip, size, on screen, not covered). Split one-time
+  code boxes fill only as one whole group within one form.
+- **Email-first sign-ins.** When the content script reports that it filled a
+  username into the top page, the next step (a password or code field) on
+  the same origin fills from the same login once, within two minutes. The
+  page has to have moved on first: a new document, or in the same one, the
+  user submitting or the filled fields going away. A matching field showing
+  up next to the one just filled isn't enough. Frames never continue. Esc,
+  closing the menu, another origin, or a navigation the page didn't make (a
+  typed address, a bookmark, a reload, back or forward) cancels it, including
+  for fills still on their way.
+- **Frames.** Every frame runs the content script, but only frames on the same
+  site as the top page get logins, and sandboxed frames get none. A frame
+  gets no inline menu: where it sits, how big it is and what covers it are
+  up to the page around it, and a menu inside can't watch that. A frame's
+  form fills only from the popup, and only if the user can see it through
+  every frame above it, checked when the user clicks Fill and again once the
+  values are in hand. Both checks cover exactly the fields that will be
+  written. The frame checks its fields (style up the tree, size,
+  clipping, on screen, nothing over them, and a fresh `trackVisibility`
+  reading, which also sees covers that let clicks through). Then each frame
+  above, up to the top page, checks the element the frame below sits in the
+  same way, unscaled, and that the fields' middles land on it. Any frame on
+  the way that can't answer, such as one without the content script, means
+  no fill. If more than one frame's form shows, nothing is filled.
+- **Popup.** Shows whether Deadbolt is ready, locked, not set up, or the host
+  isn't installed (with the `deadbolt browser install` command), and the
+  current site's logins with Fill and Copy username. Passwords are never
+  copied: every app can read the clipboard and clipboard managers keep it.
+- **Saving.** When you submit a login, sign-up or change-password form, the
+  content script hands the username and password to the service worker,
+  which keeps them in memory for up to three minutes from when the password
+  was submitted (a username on its own joins it but doesn't extend that), and
+  forgets them when Deadbolt locks or disconnects or the tab moves to another
+  site. When the
+  top page then shows no login form for a couple of seconds, it sends `check`.
+  On `new` or `update` the offer goes to the toolbar popup, never the page:
+  the toolbar button gets a badge, and the popup opens by itself where the
+  browser allows it, at most once per site every ten minutes (see the threat
+  model). The popup asks "Save login for <site>?" or
+  "Update password for <username>?" with Save and Not now, and sends `save`
+  only on Save. Each offer has its own id, and Save or Not now answers only
+  the offer the popup showed; if another took its place, the popup shows that
+  one instead. A check that finishes after the tab left the site, closed, or
+  Deadbolt locked offers nothing. Offers expire after five minutes. A new login is named after
+  the form's page title and saved with that page's URL, without its query or
+  fragment. A `rate_limited` check offers nothing; a `rate_limited` fill says
+  to try again in a moment.
+- **Noise filters.** Only a real click, Enter or form submit (a trusted
+  event) captures, and only a password typed in the field or filled by
+  Deadbolt counts. The extension keeps an HMAC of those values, under a key
+  only the content script holds, rather than the values. These keep script
+  noise out of the popup; they don't prove where a password came from (see
+  the threat model).
+- **No password generator.** The host's capabilities are
+  `list`, `fill`, `check` and `save`; there's no `generate` message yet, so
+  sign-up forms get no suggested password.
+
 ## Which logins a page gets
 
 These rules follow Foyer's (see Prior art), so the two behave alike:
@@ -128,10 +271,38 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
   argv. They are held in `Zeroizing` buffers, and Debug output prints
   `<redacted>` in their place. Neither the host nor the agent logs them.
 - **Check results stay in the extension.** A check is a password oracle
-  for the page's site. The extension must never hand its result (or a
-  fill's values before filling) to page scripts, nor run a check a page
-  asked for. The host rate-limits checks and fills as well, so a runaway or
-  compromised caller can't guess quickly.
+  for the page's site, so nothing the page can see depends on it: the offer
+  is shown only in the toolbar popup, and the page gets no prompt, message or
+  element from it. A page can still choose a password and submit it in a way
+  that passes the noise filters; the result is an offer the user sees and can
+  decline, and no value reaches the page. One bit can: when the extension
+  opens the popup by itself, the page's window loses focus, so a page
+  watching for `blur` learns that an offer appeared, and so whether the
+  password it chose matched. So every check that finishes uses up the site's
+  (registrable domain's) ten-minute turn, across tabs, whatever it said:
+  `same`, `new`, `update`, or `rate_limited`. The popup opens by itself only
+  when that check offered something and took the turn; every other offer only
+  badges the toolbar button. A page therefore learns at most one bit per site
+  per ten minutes, and each time the user sees a popup they can decline. A fill's values reach only the content script's isolated world
+  and the fields it writes. The host rate-limits checks and fills as well, so
+  a runaway or compromised caller can't guess quickly.
+- **Pages can't steer fills.** A fill needs the user's pick in a menu the
+  page can't script or see into, or a click in the popup. It goes only to the
+  document and form that asked, only into fields the user can see that were
+  fillable when the user chose (a field the page turns on mid-fill gets
+  nothing), and is
+  refused unless the menu's visibility readings said it was visible and still
+  from 500 ms before the press until 400 ms after it. Focus a page puts in the
+  menu never lets ⏎ pick. A page that can see the fields it asked to fill can
+  still read the values once they're written; that is the point of autofill,
+  and why only same-site frames get logins.
+- **The menu's visibility is sampled.** Readings come at most every 100 ms,
+  so a page that covers or fades the menu for less than that, timed around
+  the press, may not show up in any reading, and the press counts. The user
+  still has to press on a menu that was shown and still for the half second
+  before, and the cover has to land between readings. This is why frames,
+  whose placement the page around them controls, get no menu and fill only
+  from the popup after an explicit check.
 - **The idle lock:** fill and save count as use. Hello, list and check don't,
   because a browser asks for those on every page and would otherwise hold the
   vault open.
@@ -288,6 +459,10 @@ Pushes carry no id and no values. Refetch what's on screen.
 - **Unlocking from the browser:** the extension can say Deadbolt is locked but
   can't unlock it. Use the app or `deadbolt unlock`.
 - **Choosing the vault for a new login:** new logins go to the default vault.
+- **Opening the app from the browser:** Deadbolt registers no URL scheme and
+  the host has no message for it, so the popup says where to find the app
+  instead.
+- **Generating passwords** (see The extension).
 
 ## Prior art
 
@@ -296,5 +471,7 @@ extension that learns sign-in flows and asks pluggable password managers for
 credentials through its own native host. Its protocol and safety rules shaped
 this design: an extension-only native host, matching by host or registrable
 domain with the private suffixes, https-only filling, secret-free lists, and
-check-then-save. Deadbolt's extension and host are written from scratch, and
-no Foyer code is copied (Foyer has no license).
+check-then-save. The host is Deadbolt's own. The extension adapts parts of
+Foyer's: form detection, Shadow DOM traversal, filling, the inline menu and
+save prompt frames, frame targeting and the save flow. Each adapted file says
+so in its header, and `extension/README.md` lists what was kept and dropped.
