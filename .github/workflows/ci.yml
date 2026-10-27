@@ -52,6 +52,26 @@ jobs:
       - run: bun run check
       - run: bun run build
 
+  # Hidden and covered fields, form swaps, opaque origins, value swaps,
+  # navigating mid-fill and the back/forward cache, in headless Chromium with
+  # the fake host (extension/e2e). The full e2e run, with stills, stays local.
+  extension-security:
+    name: Browser extension security e2e
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bunx playwright-core install --with-deps chromium
+      - run: bun run e2e --only security
+
   deny:
     name: cargo-deny
     if: github.event_name != 'schedule'

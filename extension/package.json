@@ -9,13 +9,15 @@
     "watch": "bun scripts/build.ts --watch",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
-    "check": "tsc --noEmit && bun test"
+    "check": "tsc --noEmit && bun test",
+    "e2e": "bun scripts/build.ts && bun e2e/run.ts"
   },
   "devDependencies": {
     "@happy-dom/global-registrator": "21.0.4",
     "@types/bun": "1.4.3",
     "@types/chrome": "0.3.5",
     "happy-dom": "21.0.4",
+    "playwright-core": "1.64.1",
     "typescript": "7.0.2"
   },
   "dependencies": {

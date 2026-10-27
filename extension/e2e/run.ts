@@ -1,0 +1,1194 @@
+// End-to-end run of the built extension in headless Chromium against a fake
+// native host (e2e/fake-host.py) and local test pages. Nothing here touches a
+// real browser profile or vault: each run uses a fresh profile directory with
+// the fake host's manifest in it.
+//
+//   bun run e2e [--stills <dir>] [--only <scenario>,<scenario>]
+//
+// `--only security` is the subset CI runs: hidden and covered fields, form
+// swaps, opaque origins, value swaps, navigation during a fill and the
+// back/forward cache.
+//
+// Needs Playwright's Chromium (`bunx playwright-core install chromium`).
+
+import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
+
+const ID = "jhocodkhpifjndffenppfmdkmiolngal"
+const root = join(import.meta.dir, "..")
+const dist = join(root, "dist")
+const arg = (name: string) => {
+  const i = process.argv.indexOf(name)
+  return i > 0 ? process.argv[i + 1] : undefined
+}
+const stills = arg("--stills")
+const only = arg("--only")
+if (stills) await mkdir(stills, { recursive: true })
+
+// ---- Test pages ---------------------------------------------------------------
+
+const html = (title: string, body: string, headers: Record<string, string> = {}) =>
+  new Response(
+    `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
+      body{font:15px/1.5 -apple-system,system-ui,sans-serif;margin:0;background:#f4f4f5;color:#18181b}
+      @media (prefers-color-scheme:dark){body{background:#0f0f10;color:#e4e4e7}input{background:#1c1c1f;color:#e4e4e7;border-color:#3f3f46}}
+      main{max-width:360px;margin:72px auto;padding:28px;border-radius:14px;background:color-mix(in srgb,currentColor 4%,transparent)}
+      h1{font-size:22px;margin:0 0 18px}label{display:block;font-size:13px;margin:12px 0 4px}
+      input{width:100%;box-sizing:border-box;height:38px;padding:0 10px;border:1px solid #d4d4d8;border-radius:8px;font:inherit}
+      button{margin-top:18px;width:100%;height:38px;border:0;border-radius:8px;background:#18181b;color:#fff;font:inherit}
+    </style></head><body><main>${body}</main></body></html>`,
+    { headers: { "content-type": "text/html; charset=utf-8", ...headers } },
+  )
+
+// What a page could watch for: elements added outside <body>, and focus leaving it.
+const PROBE = () => {
+  const probe = { added: [] as string[], blurs: 0 }
+  ;(window as unknown as { __probe: typeof probe }).__probe = probe
+  new MutationObserver((records) => {
+    for (const r of records) for (const n of Array.from(r.addedNodes)) if (n.nodeName !== "HEAD" && n.nodeName !== "BODY") probe.added.push(n.nodeName)
+  }).observe(document.documentElement, { childList: true })
+  window.addEventListener("blur", () => probe.blurs++)
+}
+
+/** The page sees the menu's host element arrive; these pages misuse that. */
+const onMenu = (js: string) => `<script>
+  new MutationObserver((records) => {
+    for (const r of records) for (const host of r.addedNodes) if (host.nodeName === "DIV") { ${js} }
+  }).observe(document.documentElement, { childList: true })
+</script>`
+
+const emailField = `<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">`
+const passwordField = `<input id="password" name="password" type="password" autocomplete="current-password">`
+const hiddenForm = (wrapped: string, extra = "") => `<h1>Sign in to Acme</h1><form method="post" action="/home" novalidate>
+  ${emailField}<label>Password</label>${wrapped}<button type="submit">Sign in</button></form>${extra}`
+
+// Ways a page can make a password field the user can't see.
+const HIDDEN: Record<string, string> = {
+  visible: hiddenForm(passwordField),
+  "shadow-host": hiddenForm(`<div id="h" style="opacity:0"></div>`, `<script>document.getElementById("h").attachShadow({ mode: "open" }).innerHTML = '${passwordField}'</script>`),
+  "closed-slot": hiddenForm(`<div id="h">${passwordField}</div>`, `<script>document.getElementById("h").attachShadow({ mode: "closed" }).innerHTML = '<div style="opacity:0.02"><slot></slot></div>'</script>`),
+  clipped: hiddenForm(`<div style="clip-path:inset(50%)">${passwordField}</div>`),
+  "zero-height": hiddenForm(`<div style="height:0;overflow:hidden">${passwordField}</div>`),
+  offscreen: hiddenForm(`<div style="position:absolute;left:-2000px;width:300px">${passwordField}</div>`),
+  // Visible until Deadbolt focuses it to write.
+  "hide-on-focus": hiddenForm(`<div id="w">${passwordField}</div>`, `<script>document.getElementById("password").addEventListener("focus", () => document.getElementById("w").style.opacity = "0")</script>`),
+}
+
+// Ways a page can try to get a click into a menu the user can't see properly.
+// The menu's host is the <div> Deadbolt adds to <html>.
+const OVERLAY: Record<string, string> = {
+  none: "",
+  fade: `<style>html > div { opacity: 0.4 !important }</style>`,
+  clip: `<style>html > div { clip-path: inset(0 0 25% 0) !important }</style>`,
+  // A near-opaque sheet over everything that lets clicks through to the menu.
+  cover: onMenu(`const c = document.createElement("section"); c.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:rgb(255 255 255 / 92%)"; setTimeout(() => document.documentElement.append(c), 50)`),
+  // Fade it out the moment the click starts (focus moves into the menu), so a
+  // visibility reading taken before the click is stale.
+  "on-press": `<script>addEventListener("blur", () => document.head.insertAdjacentHTML("beforeend", "<style>html > div { opacity: 0 !important }</style>"))</script>`,
+  // The reverse: keep it all but see-through over a decoy (still taking
+  // clicks, which a fully transparent frame doesn't) and show it the moment
+  // the press lands, so a reading taken after the click finds it visible.
+  "reveal-on-press": `<style id="seethrough">html > div { opacity: 0.02 !important }</style><script>addEventListener("blur", () => document.getElementById("seethrough").remove())</script>`,
+  // Shown a moment before the press instead (as the pointer nears it), so
+  // nothing changes after the press: the test calls reveal() 250 ms before.
+  "reveal-before-press": `<style id="seethrough">html > div { opacity: 0.02 !important }</style><script>window.reveal = () => document.getElementById("seethrough").remove()</script>`,
+}
+
+// Ways to show the site's login page in a frame. Hidden ones aren't fully
+// transparent: such a frame takes no clicks, so it would prove nothing.
+const loginFrame = (style = "", query = "") => `<iframe src="/login?next=home${query}" style="width:600px;height:460px;border:0;${style}"></iframe>`
+const FRAMED: Record<string, string> = {
+  visible: loginFrame(),
+  hidden: loginFrame("opacity:0.02"),
+  clipped: `<div style="height:40px;overflow:hidden">${loginFrame()}</div>`,
+  offscreen: loginFrame("position:absolute;left:-2000px"),
+  // A sheet over the frame that lets clicks through: no hit test sees it.
+  covered: `${loginFrame()}<section style="position:fixed;inset:0;z-index:9;pointer-events:none;background:rgb(244 244 245 / 97%)"></section>`,
+  // A frame inside a frame: visible all the way up, or hidden by the middle page.
+  nested: `<iframe src="/framed/visible" style="width:700px;height:640px;border:0"></iframe>`,
+  "nested-hidden": `<iframe src="/framed/hidden" style="width:700px;height:640px;border:0"></iframe>`,
+  // A sheet over just the password box, which is disabled when the fill is
+  // checked and enabled by the page as the email box is focused to fill it.
+  "enabled-on-focus": `${loginFrame("", "&lock=password")}<section id="sheet" style="position:absolute;z-index:9;pointer-events:none;background:rgb(244 244 245 / 97%)"></section><script>
+    const frame = document.querySelector("iframe")
+    frame.addEventListener("load", () => {
+      const f = frame.getBoundingClientRect()
+      const p = frame.contentDocument.getElementById("password").getBoundingClientRect()
+      Object.assign(document.getElementById("sheet").style, { left: \`\${scrollX + f.left + p.left - 6}px\`, top: \`\${scrollY + f.top + p.top - 6}px\`, width: \`\${p.width + 12}px\`, height: \`\${p.height + 12}px\` })
+    })
+  </script>`,
+}
+
+// Covers everything (letting clicks through) for `ms`, starting `after` ms
+// past the press into the menu (the page's blur), or right away with cover().
+const SWEEP = `<script>
+  const cover = (ms) => {
+    const c = document.createElement("section")
+    c.style.cssText = "position:fixed;inset:0;z-index:2147483647;pointer-events:none;background:#fff"
+    document.documentElement.append(c)
+    window.__shown = performance.now()
+    setTimeout(() => c.remove(), ms)
+  }
+  window.cover = cover
+  window.coverAfterPress = (after, ms) => addEventListener("blur", () => (after ? setTimeout(() => cover(ms), after) : cover(ms)), { once: true })
+  addEventListener("blur", () => (window.__press = performance.now()))
+</script>`
+
+// novalidate: "admin" isn't an email, and the browser would block the submit.
+const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="post" action="${action}" novalidate>
+  <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+  <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+  <button type="submit">Sign in</button></form>`
+
+const server = Bun.serve({
+  port: 0,
+  hostname: "127.0.0.1",
+  async fetch(req) {
+    const url = new URL(req.url)
+    switch (url.pathname) {
+      case "/login": {
+        const form = loginForm(url.searchParams.get("next") === "home" ? "/home" : "/mfa")
+        // A password the page enables only once the email box is focused.
+        if (url.searchParams.get("lock") !== "password") return html("Sign in to Acme", form)
+        return html(
+          "Sign in to Acme",
+          form.replace(`autocomplete="current-password"`, `autocomplete="current-password" disabled`) +
+            `<script>document.getElementById("email").addEventListener("focus", () => (document.getElementById("password").disabled = false))</script>`,
+        )
+      }
+      case "/mfa":
+        return html(
+          "Two-factor authentication",
+          `<h1>Two-factor authentication</h1><form method="post" action="/home">
+            <label for="code">Authentication code</label><input id="code" name="code" autocomplete="one-time-code" inputmode="numeric">
+            <button type="submit">Verify</button></form>`,
+        )
+      case "/home":
+        return html("Acme", `<h1>Welcome back</h1><p>You're signed in.</p>`)
+      // A single-page app: the button posts with fetch and the app changes route.
+      case "/app/login":
+        return html(
+          "Acme app",
+          `<div id="view">${loginForm("#").replace('<button type="submit">', '<button type="submit" id="go">')}</div><script>
+            document.querySelector("form").addEventListener("submit", async (e) => {
+              e.preventDefault()
+              await fetch("/api/session", { method: "POST", body: new FormData(e.target) })
+              history.pushState(null, "", "/app/dashboard")
+              document.getElementById("view").innerHTML = "<h1>Dashboard</h1><p>Signed in.</p>"
+            })
+          </script>`,
+        )
+      case "/api/session":
+        return Response.json({ ok: true })
+      // Email first, then the password on its own page.
+      case "/signin":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form method="post" action="/signin/password">
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+            <button type="submit">Continue</button></form>`,
+        )
+      case "/signin/password":
+        return html(
+          "Enter your password",
+          `<h1>Enter your password</h1><form method="post" action="/home">
+            <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+            <button type="submit">Sign in</button></form>`,
+        )
+      // A page that fills in a password itself and submits: the extension must not check it.
+      case "/sneaky":
+        return html(
+          "Sign in to Acme",
+          `${loginForm("/home")}<script>
+            window.guess = () => {
+              document.getElementById("email").value = "admin"
+              document.getElementById("password").value = "hunter2"
+              document.querySelector("form").requestSubmit()
+            }
+          </script>`,
+        )
+      // A page with an opaque origin (CSP sandbox): it gets no logins.
+      case "/sandboxed":
+        return html("Sign in to Acme", loginForm("/home"), { "content-security-policy": "sandbox allow-scripts allow-forms" })
+      // A page script that swaps the password at the window, before anyone else sees the input.
+      case "/swap":
+        return html(
+          "Sign in to Acme",
+          `<script>addEventListener("input", (e) => { if (e.target.id === "password") e.target.value = "page-chosen" }, true)</script>${loginForm("/home")}`,
+        )
+      // Swaps the password field for a copy while the menu is open.
+      case "/replace":
+        return html("Sign in to Acme", loginForm("/home") + onMenu(`setTimeout(() => { const p = document.getElementById("password"); p.replaceWith(p.cloneNode()) }, 100)`))
+      // A single-page app that swaps its own login form for the site's login
+      // page in a frame, without navigating, and so has no form of its own.
+      case "/spa":
+        return html(
+          "Sign in to Acme",
+          `${loginForm("/home")}<script>window.swap = () => { document.title = "Acme"; document.body.innerHTML = \`<h1>Acme</h1>${loginFrame()}\` }</script>`,
+        )
+      // An occluder the sweep times around the press (see occlusionSweep).
+      case "/sweep":
+        return html("Sign in to Acme", loginForm("/home") + SWEEP)
+    }
+    // The site's own login page in a frame, on pages with no form of their own.
+    if (url.pathname.startsWith("/framed/") && FRAMED[url.pathname.slice(8)]) return html("Acme", `<h1>Acme</h1>${FRAMED[url.pathname.slice(8)]}`)
+    if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) return html("Sign in to Acme", HIDDEN[url.pathname.slice(8)])
+    if (url.pathname.startsWith("/overlay/") && url.pathname.slice(9) in OVERLAY) return html("Sign in to Acme", loginForm("/home") + OVERLAY[url.pathname.slice(9)])
+    return new Response("not found", { status: 404 })
+  },
+})
+// Plain http is fillable only on local development hosts such as localhost.
+const site = `http://localhost:${server.port}`
+
+// ---- Browser --------------------------------------------------------------------
+
+interface Run {
+  context: BrowserContext
+  worker: Worker
+  log: string
+  dir: string
+}
+
+interface LaunchOptions {
+  status?: string
+  host?: boolean
+  scheme?: "light" | "dark"
+  rateLimit?: string
+  fillDelay?: number
+  /** Playwright turns the back/forward cache off; keep it on. */
+  bfcache?: boolean
+}
+
+async function launch(options: LaunchOptions = {}): Promise<Run> {
+  const dir = await mkdtemp(join(tmpdir(), "deadbolt-e2e-"))
+  const log = join(dir, "host.log")
+  if (options.host !== false) {
+    await mkdir(join(dir, "NativeMessagingHosts"))
+    await writeFile(
+      join(dir, "NativeMessagingHosts", "pw.deadbolt.browser.json"),
+      JSON.stringify({ name: "pw.deadbolt.browser", description: "fake", path: join(import.meta.dir, "fake-host.py"), type: "stdio", allowed_origins: [`chrome-extension://${ID}/`] }),
+    )
+  }
+  const context = await chromium.launchPersistentContext(dir, {
+    channel: "chromium",
+    headless: true,
+    colorScheme: options.scheme ?? "light",
+    viewport: { width: 900, height: 640 },
+    deviceScaleFactor: 2,
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`],
+    ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
+    env: {
+      ...process.env,
+      DEADBOLT_FAKE_STATUS: options.status ?? "ready",
+      DEADBOLT_FAKE_LOG: log,
+      DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
+      DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
+    },
+  })
+  await context.addInitScript(PROBE)
+  context.setDefaultTimeout(10_000)
+  const worker = context.serviceWorkers()[0] ?? (await context.waitForEvent("serviceworker"))
+  check(worker.url().startsWith(`chrome-extension://${ID}/`), `extension id is ${ID}`)
+  // A probe: every content-script message the worker receives, for diagnosis.
+  await worker.evaluate(() => {
+    const seen: string[] = []
+    ;(globalThis as unknown as { __seen: string[] }).__seen = seen
+    // And the menu tokens it hands out, to play a page that stole one.
+    const tokens: string[] = []
+    ;(globalThis as unknown as { __tokens: string[] }).__tokens = tokens
+    chrome.runtime.onMessage.addListener((m: { type?: string; token?: string }, s) => {
+      if (s.tab) seen.push(`${m?.type}@${s.frameId}:${s.url ? new URL(s.url).pathname : "?"}`)
+      if (m?.type === "db:menu-load" && m.token) tokens.push(m.token)
+    })
+  })
+  const run = { context, worker, log, dir }
+  runs.set(context, run)
+  return run
+}
+
+const runs = new Map<BrowserContext, Run>()
+
+async function close(run: Run) {
+  await run.context.close()
+  await rm(run.dir, { recursive: true, force: true })
+}
+
+async function hostLog(run: Run): Promise<Array<Record<string, unknown>>> {
+  const text = await readFile(run.log, "utf8").catch(() => "")
+  return text
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => JSON.parse(l))
+}
+
+async function diagnose(run: Run, page: Page, what: string) {
+  const seen = await run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen.splice(0)).catch(() => [])
+  const host = (await hostLog(run)).map((r) => r.type).join(", ")
+  const menu = extensionFrame(page, "menu.html")
+  const foot = menu ? await footText(menu) : ""
+  console.log(`  ${what}: at ${new URL(page.url()).pathname}, menu frame: ${menu ? `yes (${foot || "no footer"})` : "no"}\n    worker saw: ${seen.join(" ")}\n    host saw: ${host}`)
+}
+
+let failures = 0
+function check(ok: boolean, what: string) {
+  console.log(`${ok ? "ok  " : "FAIL"} ${what}`)
+  if (!ok) failures++
+  return ok
+}
+
+async function until<T>(what: string, fn: () => Promise<T | null | undefined | false> | T | null | undefined | false, timeout = 8000): Promise<T | null> {
+  const start = Date.now()
+  const end = start + timeout
+  while (Date.now() < end) {
+    const v = await fn()
+    if (v) {
+      // Cold starts on a loaded machine are slow; say so rather than hide it.
+      if (Date.now() - start > 3000) console.log(`  slow: ${what} took ${Date.now() - start}ms`)
+      return v
+    }
+    await Bun.sleep(100)
+  }
+  check(false, `timed out: ${what}`)
+  return null
+}
+
+const extensionFrame = (page: Page, file: string) => page.frames().find((f) => f.url().includes(`/${file}`)) ?? null
+
+async function shot(page: Page, name: string, clip?: { x: number; y: number; width: number; height: number }) {
+  if (!stills) return
+  await page.screenshot({ path: join(stills, `${name}.png`), clip })
+}
+
+/** The popup page, pointed at a tab: tabs.query would otherwise find the popup's own tab. */
+async function popup(run: Run, tabPrefix: string, name?: string): Promise<Page> {
+  const page = await run.context.newPage()
+  await page.setViewportSize({ width: 360, height: 420 })
+  await page.goto(`chrome-extension://${ID}/popup.html`)
+  await page.evaluate(async (prefix) => {
+    // Without the tabs permission tab.url is hidden; webNavigation has it, as the background uses.
+    let tab: chrome.tabs.Tab | undefined
+    for (const t of await chrome.tabs.query({})) {
+      const frame = t.id === undefined ? null : await chrome.webNavigation.getFrame({ tabId: t.id, frameId: 0 })
+      if (frame?.url.startsWith(prefix)) tab = t
+    }
+    chrome.tabs.query = (async () => [tab]) as typeof chrome.tabs.query
+    document.getElementById("app")!.replaceChildren()
+    const s = document.createElement("script")
+    s.src = "popup.js?again"
+    document.body.append(s)
+  }, tabPrefix)
+  await page.waitForSelector(".top")
+  await Bun.sleep(400)
+  if (name) {
+    const height = await page.evaluate(() => Math.ceil(document.body.getBoundingClientRect().height))
+    await shot(page, name, { x: 0, y: 0, width: 360, height })
+  }
+  return page
+}
+
+/** The toolbar badge for the tab showing `prefix`. */
+const badge = (run: Run, prefix = site) =>
+  run.worker.evaluate(async (prefix) => {
+    for (const t of await chrome.tabs.query({})) {
+      const frame = t.id === undefined ? null : await chrome.webNavigation.getFrame({ tabId: t.id, frameId: 0 }).catch(() => null)
+      if (frame?.url.startsWith(prefix)) return chrome.action.getBadgeText({ tabId: t.id })
+    }
+    return ""
+  }, prefix)
+
+/** Clears the badge, so the next offer is seen as new. The offer itself stays until replaced. */
+const clearBadge = (run: Run) =>
+  run.worker.evaluate(async () => {
+    for (const t of await chrome.tabs.query({})) if (t.id !== undefined) await chrome.action.setBadgeText({ tabId: t.id, text: "" })
+  })
+
+/** An offer is waiting: the toolbar button has its badge. */
+const offered = (run: Run, what = "an offer badges the toolbar button") => until(what, async () => (await badge(run)) === "1", 20_000)
+
+/** What the page could have noticed: elements outside <body>, and losing focus. */
+const probe = (page: Page) => page.evaluate(() => (window as unknown as { __probe: { added: string[]; blurs: number } }).__probe)
+
+// ---- Scenarios ------------------------------------------------------------------
+
+type Scheme = "light" | "dark"
+
+async function fillAndTotp(scheme: Scheme) {
+  const run = await launch({ scheme })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login`)
+    await page.click("#email")
+    const menu = await until("inline menu opens", async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && (await f.locator(".row").count()) > 0 ? f : null
+    })
+    if (menu) {
+      check((await menu.locator(".row .title").allTextContents()).join(",") === "Acme,Acme admin", "menu lists the site's logins by title")
+      check((await menu.locator(".row .sub").first().textContent()) === "kit@acme.test", "menu rows show the username")
+      const fonts = await menu.evaluate(async () => {
+        await Promise.all([document.fonts.load('13px "Geist"'), document.fonts.load('12px "Geist Mono"')]).catch(() => {})
+        return [...document.fonts].map((f) => `${f.family}:${f.status}`).join(" ")
+      })
+      check(!fonts.includes("error") && fonts.includes("loaded"), `Geist fonts load in the menu (${fonts})`)
+      await Bun.sleep(500)
+      await shot(page, `menu-${scheme}`, { x: 250, y: 80, width: 420, height: 300 })
+      await settled(menu)
+      // Keyboard: ↓ moves into the menu, ↓↑ choose, ⏎ fills.
+      await page.keyboard.press("ArrowDown")
+      await page.keyboard.press("ArrowDown")
+      await page.keyboard.press("ArrowUp")
+      await Bun.sleep(150)
+      await page.keyboard.press("Enter")
+      await until("username and password fill", async () => (await page.inputValue("#password")) === "correct horse")
+      check((await page.inputValue("#email")) === "kit@acme.test", "username filled")
+      check((await page.inputValue("#password")) === "correct horse", "password filled")
+      check(!extensionFrame(page, "menu.html"), "menu closes after filling")
+      await page.click("button[type=submit]")
+      await page.waitForURL("**/mfa")
+      const code = await until("one-time code fills on the next page", async () => (await page.inputValue("#code")) === "492039")
+      check(!!code, "TOTP filled on the code page")
+    }
+
+    // Escape dismisses for that field; ↓ reopens.
+    await page.goto(`${site}/login?next=home`)
+    await page.click("#email")
+    await until("menu reopens on a new page", () => extensionFrame(page, "menu.html"))
+    await page.keyboard.press("Escape")
+    await until("esc closes the menu", () => !extensionFrame(page, "menu.html"))
+    await page.keyboard.press("ArrowDown")
+    check(!!(await until("↓ reopens the menu", () => extensionFrame(page, "menu.html"))), "↓ reopens the menu")
+    await page.keyboard.press("Escape")
+
+    const requests = await hostLog(run)
+    check(
+      requests.every((r) => r.type === "hello" || r.origin === site),
+      "every host request names the page's origin",
+    )
+    const fills = requests.filter((r) => r.type === "fill")
+    check(JSON.stringify(fills.map((r) => r.want)) === JSON.stringify([["username", "password"], ["totp"]]), "fills ask only for the fields on each page")
+
+    const p = await popup(run, site, `popup-ready-${scheme}`)
+    check((await p.locator(".account-title").allTextContents()).join(",") === "Acme,Acme admin", "popup lists the site's logins")
+    check(!(await p.locator("button", { hasText: /copy password/i }).count()), "popup offers no password copy")
+  } catch (err) {
+    check(false, `fill scenario threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "fill")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Clicks a field, closes the menu it opens, and types into it as a person would. */
+async function type(run: Run, page: Page, selector: string, text: string) {
+  await formFound(page)
+  await page.click(selector)
+  // The test site always has logins, so the menu always comes; wait for it
+  // rather than click where it's about to appear.
+  if (await until(`menu opens on ${selector}`, () => extensionFrame(page, "menu.html"), 15_000)) {
+    await page.keyboard.press("Escape")
+    await until("esc closes the menu", () => !extensionFrame(page, "menu.html"))
+  } else await diagnose(run, page, `no menu on ${selector}`)
+  await page.locator(selector).pressSequentially(text)
+}
+
+/** Signs in with what the user typed. */
+async function signIn(run: Run, page: Page, path: string, username: string, password: string, how: "click" | "enter" = "click") {
+  await page.goto(`${site}${path}`)
+  await type(run, page, "#email", username)
+  await type(run, page, "#password", password)
+  if (how === "enter") await page.keyboard.press("Enter")
+  else await page.click("button[type=submit]")
+}
+
+/** The offer waiting in the popup for the tab showing `prefix`, if any. */
+async function offerIn(run: Run, name?: string) {
+  const p = await popup(run, site, name)
+  const title = p.locator(".offer h2")
+  return { p, title: (await title.count()) ? await title.textContent() : null }
+}
+
+async function savePrompt(scheme: Scheme) {
+  const run = await launch({ scheme })
+  const page = await run.context.newPage()
+  try {
+    // A form that posts and navigates, submitted with a click.
+    await signIn(run, page, "/login?next=home", "new@acme.test", "a new password")
+    await page.waitForURL("**/home")
+    if (!(await offered(run))) await diagnose(run, page, "new login, click + navigation")
+    else {
+      // The offer is browser UI: nothing was added to the page, which can't tell what the check said.
+      check((await probe(page)).added.length === 0, "nothing is added to the page for an offer")
+      check(!(await hostLog(run)).some((r) => r.type === "save"), "nothing saved before the click")
+      const { p, title } = await offerIn(run, `offer-save-${scheme}`)
+      check(title === "Save login for localhost?", `the popup asks to save (${title})`)
+      await p.click(".offer button.primary")
+      await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
+      const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
+      check(save?.origin === site && save.entry?.username === "new@acme.test", "save carries the submitted login")
+      check(save?.entry?.title === "Sign in to Acme" && save.entry?.url === `${site}/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
+      check(!!(await until("popup confirms", async () => ((await p.locator(".done").textContent().catch(() => "")) ?? "").includes("Saved"))), "the popup confirms the save")
+      check(!!(await until("badge clears", async () => (await badge(run)) === "")), "and the badge clears")
+      await p.close()
+    }
+
+    // An existing username with a different password offers an update; Enter in the password field.
+    await signIn(run, page, "/login?next=home", "admin", "changed it", "enter")
+    await page.waitForURL("**/home")
+    if (!(await offered(run, "an update badges the toolbar button"))) await diagnose(run, page, "update, Enter + navigation")
+    else {
+      const { p, title } = await offerIn(run, `offer-update-${scheme}`)
+      check(title === "Update password for admin?", `Enter in the password field offers an update (${title})`)
+      await p.click(".offer button:not(.primary)")
+      check(!!(await until("not now removes the offer", async () => (await p.locator(".offer").count()) === 0)), "Not now removes the offer")
+      check((await badge(run)) === "", "and the badge")
+      check(!(await hostLog(run)).some((r) => r.type === "save" && (r.entry as { username?: string })?.username === "admin"), "and saves nothing")
+      await p.close()
+    }
+
+    // A saved login signed in with the same password offers nothing.
+    await signIn(run, page, "/login?next=home", "admin", "hunter2")
+    await page.waitForURL("**/home")
+    await Bun.sleep(4000)
+    check((await badge(run)) === "", "no badge for an unchanged login")
+    const { p, title } = await offerIn(run)
+    check(title === null, "and no offer in the popup")
+    await p.close()
+  } catch (err) {
+    check(false, `save scenario threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "save")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Other sign-in shapes that must still count, and a page that must not. */
+async function signInShapes() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    // Button click, fetch, and a client-side route change: no navigation.
+    await signIn(run, page, "/app/login", "spa@acme.test", "spa password")
+    await page.waitForURL("**/app/dashboard")
+    if (!check(!!(await offered(run)), "SPA sign-in (fetch + route change) offers a save")) await diagnose(run, page, "SPA")
+    await clearBadge(run)
+
+    // Playwright's fill (focus plus inserted text, no clicks) still counts as typing.
+    const checksBefore = (await hostLog(run)).filter((r) => r.type === "check").length
+    await page.goto(`${site}/login?next=home`)
+    await page.fill("#email", "filled@acme.test")
+    await page.fill("#password", "filled in")
+    await page.click("button[type=submit]")
+    await page.waitForURL("**/home")
+    if (!check(!!(await offered(run)), "a form filled without clicks offers a save")) await diagnose(run, page, "page.fill")
+    await clearBadge(run)
+    check((await hostLog(run)).filter((r) => r.type === "check").length === checksBefore + 1, "with one check")
+
+    // Email first, password on the next page.
+    await page.goto(`${site}/signin`)
+    await type(run, page, "#email", "two@acme.test")
+    await page.click("button[type=submit]")
+    await page.waitForURL("**/signin/password")
+    await type(run, page, "#password", "two step")
+    await page.click("button[type=submit]")
+    await page.waitForURL("**/home")
+    if (!check(!!(await offered(run)), "email-first sign-in offers a save")) await diagnose(run, page, "email-first")
+    await clearBadge(run)
+    const checks = (await hostLog(run)).filter((r) => r.type === "check")
+    check(checks.some((r) => r.username === "two@acme.test" && r.password === "two step"), "email-first check pairs the username from step one")
+
+    // A page script that sets a password and submits gets no check.
+    const before = (await hostLog(run)).filter((r) => r.type === "check").length
+    await page.goto(`${site}/sneaky`)
+    await page.click("h1")
+    await page.evaluate(() => (window as unknown as { guess: () => void }).guess())
+    await page.waitForURL("**/home")
+    await Bun.sleep(4000)
+    check((await hostLog(run)).filter((r) => r.type === "check").length === before, "a page-set password is never checked")
+    check((await badge(run)) === "", "and offers nothing")
+  } catch (err) {
+    check(false, `sign-in shapes threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "shapes")
+  } finally {
+    await close(run)
+  }
+}
+
+/** The first thing in a fresh profile: a form filled without clicks, then submitted. */
+async function coldSave() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    await page.fill("#email", "cold@acme.test")
+    await page.fill("#password", "cold start")
+    await page.click("button[type=submit]")
+    await page.waitForURL("**/home")
+    if (!check(!!(await offered(run)), "a sign-in straight after the browser starts offers a save")) await diagnose(run, page, "cold")
+  } catch (err) {
+    check(false, `cold save threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "cold")
+  } finally {
+    await close(run)
+  }
+}
+
+async function rateLimited() {
+  const run = await launch({ rateLimit: "fill" })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login`)
+    const p = await popup(run, site)
+    await p.locator("button", { hasText: "Fill" }).first().click()
+    const message = await until("rate-limited fill says so", async () => {
+      const text = (await p.locator("body").textContent()) ?? ""
+      return text.includes("Try again in a moment") ? text : null
+    })
+    check(!!message && message.includes("Filling too quickly"), "a rate-limited fill says to try again")
+    check((await page.inputValue("#password")) === "", "and fills nothing")
+  } catch (err) {
+    check(false, `rate limit threw: ${(err as Error).message.split("\n")[0]}`)
+  } finally {
+    await close(run)
+  }
+}
+
+async function locked(scheme: Scheme) {
+  const run = await launch({ status: "locked", scheme })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login`)
+    await page.click("#email")
+    const menu = await until("locked menu", async () => {
+      const f: Frame | null = extensionFrame(page, "menu.html")
+      return f && (await f.locator(".notice").count()) > 0 ? f : null
+    })
+    if (menu) {
+      check(((await menu.locator(".title").textContent()) ?? "").includes("locked"), "menu says Deadbolt is locked")
+      await Bun.sleep(400)
+      await shot(page, `menu-locked-${scheme}`, { x: 250, y: 80, width: 420, height: 200 })
+    }
+    const p = await popup(run, site, `popup-locked-${scheme}`)
+    check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
+    check(!(await p.locator("input[type=password]").count()), "popup never asks for the passphrase")
+  } catch (err) {
+    check(false, `locked threw: ${(err as Error).message.split("\n")[0]}`)
+  } finally {
+    await close(run)
+  }
+}
+
+async function notInstalled(scheme: Scheme) {
+  const run = await launch({ host: false, scheme })
+  try {
+    const page = await run.context.newPage()
+    await page.goto(`${site}/login`)
+    const p = await popup(run, site, `popup-not-installed-${scheme}`)
+    check(((await p.locator(".command code").textContent()) ?? "") === "deadbolt browser install", "popup shows the install command")
+  } catch (err) {
+    check(false, `not installed threw: ${(err as Error).message.split("\n")[0]}`)
+  } finally {
+    await close(run)
+  }
+}
+
+/** Clicks a field and waits for the menu to list logins. */
+/**
+ * The menu opens only right after a click; on a loaded machine the click can
+ * beat the content script finding the form, so wait for it first.
+ */
+async function formFound(page: Page) {
+  const run = runs.get(page.context())
+  const path = new URL(page.url()).pathname
+  if (run) await until(`the form on ${path} is found`, () => run.worker.evaluate((p) => (globalThis as unknown as { __seen: string[] }).__seen.some((s) => s.startsWith("db:page@0:") && s.endsWith(p)), path), 15_000)
+}
+
+async function menuOn(page: Page, selector = "#email", timeout = 15_000) {
+  await formFound(page)
+  await page.click(selector)
+  const menu = await until(`menu lists logins on ${new URL(page.url()).pathname}`, async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator("button.row").count()) > 0 ? f : null
+  }, timeout)
+  if (menu) await settled(menu)
+  return menu
+}
+
+/**
+ * The menu takes a pick only once it has sat still and visible for half a
+ * second, and it grows when its fonts load: wait until its frame stops
+ * moving, then that half second and a little.
+ */
+async function settled(menu: Frame) {
+  const frame = await menu.frameElement().catch(() => null)
+  const start = Date.now()
+  let last = ""
+  let still = Date.now()
+  while (frame && Date.now() - start < 8000 && Date.now() - still < 300) {
+    const box = JSON.stringify(await frame.boundingBox().catch(() => null))
+    if (box !== last) [last, still] = [box, Date.now()]
+    await Bun.sleep(50)
+  }
+  await Bun.sleep(700)
+}
+
+const fillCount = async (run: Run) => (await hostLog(run)).filter((r) => r.type === "fill").length
+const footText = async (menu: Frame) => ((await menu.locator("#foot").textContent().catch(() => "")) ?? "").trim()
+
+/**
+ * What a hostile page can try against filling, in a real browser with real
+ * layout: hidden and covered fields, a hidden frame, an opaque origin, a stolen
+ * menu token, a swapped form, a swapped value, navigating mid-fill and the
+ * back/forward cache.
+ */
+async function securityPage() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    // Hidden fields never get a secret, however they're hidden, even when it
+    // happens only as Deadbolt focuses them.
+    for (const name of Object.keys(HIDDEN)) {
+      await page.goto(`${site}/hidden/${name}`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `hidden/${name}`)
+        continue
+      }
+      await menu.locator("button.row").first().click()
+      await Bun.sleep(1500)
+      const password = await page.inputValue("#password")
+      if (name === "visible") check(password === "correct horse", "a visible password field fills")
+      else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
+    }
+
+    // An opaque-origin page gets no menu and no fill from the popup.
+    await page.goto(`${site}/sandboxed`)
+    check(await page.evaluate(() => origin === "null"), "the sandboxed page has an opaque origin")
+    await page.click("#email")
+    await Bun.sleep(1500)
+    check(!extensionFrame(page, "menu.html"), "an opaque-origin page gets no menu")
+    {
+      const before = await fillCount(run)
+      const p = await popup(run, site)
+      const fill = p.locator("button", { hasText: "Fill" }).first()
+      if (await fill.count()) {
+        await fill.click()
+        await Bun.sleep(800)
+      }
+      check((await page.inputValue("#password")) === "" && (await fillCount(run)) === before, "nor a fill from the popup")
+      await p.close()
+    }
+
+    // A same-site login page in a frame: no menu inside it, and the popup
+    // fills it only if the user can see it through every frame above.
+    for (const how of Object.keys(FRAMED)) {
+      await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
+      await page.goto(`${site}/framed/${how}`)
+      const inner = await until(`the framed login page loads (${how})`, () => page.frames().find((f) => f.url().includes("/login?next=home")) ?? null)
+      if (!inner) {
+        await diagnose(run, page, `framed/${how}`)
+        continue
+      }
+      await until("the frame's form is found", () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen.some((s) => /^db:page@[1-9]/.test(s) && s.endsWith("/login"))), 15_000)
+      if (how === "visible") {
+        await inner.click("#email")
+        await Bun.sleep(1500)
+        check(!page.frames().some((f) => f.url().includes("/menu.html")), "a frame's field gets no menu")
+        await page.keyboard.press("ArrowDown")
+        await Bun.sleep(1000)
+        check(!page.frames().some((f) => f.url().includes("/menu.html")), "nor on ↓")
+      }
+      const before = await fillCount(run)
+      const p = await popup(run, `${site}/framed/${how}`)
+      const fill = p.locator("button", { hasText: "Fill" }).first()
+      let said = ""
+      if (await until("the popup lists logins", async () => (await fill.count()) > 0)) {
+        await fill.click()
+        await until("the popup answers", async () => p.isClosed() || (await p.locator("#error").isVisible().catch(() => false)))
+        said = p.isClosed() ? "" : ((await p.locator("#error").textContent().catch(() => "")) ?? "")
+      }
+      const password = await inner.inputValue("#password")
+      if (how === "enabled-on-focus") {
+        const last = (await hostLog(run)).filter((r) => r.type === "fill").at(-1)
+        check(
+          password === "" && (await inner.inputValue("#email")) === "kit@acme.test" && JSON.stringify(last?.want) === JSON.stringify(["username"]),
+          `the popup fills only the frame's fields that showed when checked, not a covered password the page enabled as it filled (${JSON.stringify(password)}, asked for ${JSON.stringify(last?.want)}${said ? `: ${said}` : ""})`,
+        )
+      } else if (how === "visible" || how === "nested") check(password === "correct horse", `the popup fills a same-site frame the user can see (${how}${said ? `: ${said}` : ""})`)
+      else check(password === "" && (await fillCount(run)) === before, `the popup doesn't fill a frame made ${how} (${said || "no message"})`)
+      if (!p.isClosed()) await p.close()
+    }
+
+    // The top page's form going away (here, swapped for a frame's without a
+    // navigation) leaves the popup free to fill the frame's.
+    {
+      const seen = () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)
+      await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
+      await page.goto(`${site}/spa`)
+      await until("the top form is found", async () => (await seen()).some((s) => s.startsWith("db:page@0")), 15_000)
+      await page.evaluate(() => (window as unknown as { swap: () => void }).swap())
+      const inner = await until("the swapped-in frame loads", () => page.frames().find((f) => f.url().includes("/login?next=home")) ?? null)
+      await until("the frame's form is found", async () => (await seen()).some((s) => /^db:page@[1-9]/.test(s) && s.endsWith("/login")), 15_000)
+      const p = await popup(run, `${site}/spa`)
+      const fill = p.locator("button", { hasText: "Fill" }).first()
+      let said = ""
+      if (await until("the popup lists logins", async () => (await fill.count()) > 0)) {
+        await fill.click()
+        await until("the popup answers", async () => p.isClosed() || (await p.locator("#error").isVisible().catch(() => false)))
+        said = p.isClosed() ? "" : ((await p.locator("#error").textContent().catch(() => "")) ?? "")
+      }
+      check((await inner?.inputValue("#password")) === "correct horse", `the popup fills a frame that replaced the top page's form (${said || "no message"})`)
+      if (!p.isClosed()) await p.close()
+    }
+
+    // A menu token used from anywhere but the menu Deadbolt opened gets nothing.
+    await page.goto(`${site}/login?next=home`)
+    const menu = await menuOn(page)
+    const token = await run.worker.evaluate(() => (globalThis as unknown as { __tokens: string[] }).__tokens.at(-1))
+    if (menu && token) {
+      // A same-site page in another tab with the stolen token, handing it to a menu frame of its own.
+      const menuUrl = await run.worker.evaluate(() => chrome.runtime.getURL("menu.html"))
+      const other = await run.context.newPage()
+      await other.goto(`${site}/home`)
+      await other.evaluate(
+        ([src, token]) =>
+          new Promise<void>((resolve) => {
+            const f = document.createElement("iframe")
+            f.src = src
+            f.style.cssText = "width:320px;height:200px"
+            f.onload = () => {
+              f.contentWindow!.postMessage({ type: "db:menu-token", token }, "*")
+              resolve()
+            }
+            document.body.append(f)
+          }),
+        [menuUrl, token],
+      )
+      // The menu is a web-accessible resource with use_dynamic_url, so a page may
+      // not be able to load it at all; if it can, the token gets it nothing.
+      await Bun.sleep(1500)
+      const stolen = other.frames().find((f) => f !== other.mainFrame())
+      const foot = stolen && (await stolen.locator("#foot").count()) ? await footText(stolen) : null
+      console.log(`  stolen token frame: ${foot === null ? "menu page didn't load" : JSON.stringify(foot)}`)
+      check(!stolen || ((await stolen.locator("button.row").count()) === 0 && (foot === null || foot === "This menu has expired.")), "a stolen token in another page's frame lists nothing")
+      // The same page handing it to the frame Deadbolt opened gets nothing new either: it's already bound.
+      // Opened as a page of its own: Chrome blocks it, or it has no parent to hand it a token.
+      const blocked = await other.goto(menuUrl).then(() => false, (err: Error) => err.message.includes("ERR_BLOCKED_BY_CLIENT"))
+      if (!blocked) await Bun.sleep(800)
+      check(blocked || (await other.locator("button.row").count()) === 0, `a menu page opened on its own gets nothing (${blocked ? "blocked" : "no token"})`)
+      await other.close()
+      // The real menu still works, once it's been back in view for a moment.
+      await Bun.sleep(900)
+      await menu.locator("button.row").first().click()
+      check(!!(await until("the real menu still fills", async () => (await page.inputValue("#password")) === "correct horse")), "the menu Deadbolt opened still fills")
+    }
+
+    // The form changes under an open menu: the pick fills nothing.
+    await page.goto(`${site}/replace`)
+    {
+      const menu = await menuOn(page)
+      if (menu) {
+        await menu.locator("button.row").first().click()
+        await Bun.sleep(1000)
+        check((await page.inputValue("#email")) === "" && (await page.inputValue("#password")) === "", "a form replaced after the menu opened isn't filled")
+      }
+    }
+
+    // A page that rewrites the password at the window before anyone else sees
+    // the keystroke doesn't get its own value checked.
+    {
+      const before = (await hostLog(run)).filter((r) => r.type === "check").length
+      await signIn(run, page, "/swap", "typed@acme.test", "typed password")
+      await page.waitForURL("**/home")
+      await Bun.sleep(4000)
+      const checks = (await hostLog(run)).filter((r) => r.type === "check")
+      check(!checks.some((r) => r.password === "page-chosen"), "a password the page swapped in is never checked")
+      check(checks.length === before && (await badge(run)) === "", "and nothing is offered")
+    }
+  } catch (err) {
+    check(false, `security threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "security")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * Focus can reach the menu without the user's ↓: the page can make the menu
+ * the next stop after the field, so the user's Tab lands in it, or a script
+ * holding the menu's window can focus it. Either way the user's next Enter (or
+ * Space) must not pick. Only the user's own ↓ from the field lets the keyboard
+ * pick, and only until focus leaves the menu.
+ */
+async function keyboardEntry() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    const menu = await menuOn(page)
+    if (!menu) return await diagnose(run, page, "keyboard entry")
+    // The menu's frame is in a closed shadow root: window.frames doesn't list it.
+    check((await page.evaluate(() => window.length)) === 0, "the page can't reach the menu's window through window.frames")
+    // Everything after the field leaves the tab order, so Tab goes to the menu.
+    await page.evaluate(() => document.querySelectorAll("input:not(#email), button").forEach((el) => el.setAttribute("tabindex", "-1")))
+    const inMenu = () => menu.evaluate(() => document.hasFocus())
+    const intoMenu: Record<string, () => Promise<void>> = {
+      "the user's Tab": async () => {
+        await page.focus("#email")
+        await page.keyboard.press("Tab")
+      },
+      "a script": async () => {
+        await page.focus("#email")
+        await menu.evaluate(() => window.focus())
+      },
+    }
+    const before = await fillCount(run)
+    for (const [how, focus] of Object.entries(intoMenu)) {
+      for (const key of ["Enter", " "]) {
+        await settled(menu)
+        await focus()
+        if (!(await inMenu())) {
+          check(false, `${how} puts focus in the menu`)
+          continue
+        }
+        await page.keyboard.press(key)
+        await Bun.sleep(1200)
+        const name = key === " " ? "Space" : key
+        check((await page.inputValue("#password")) === "" && (await fillCount(run)) === before, `focus from ${how} takes no ${name} (${await footText(menu)})`)
+      }
+    }
+    // The user's ↓ enters the menu; the page takes focus back, and the user tabs in again.
+    await page.focus("#email")
+    await page.keyboard.press("ArrowDown")
+    await Bun.sleep(200)
+    check(await inMenu(), "↓ puts focus in the menu")
+    await page.evaluate(() => document.getElementById("email")!.focus())
+    await page.keyboard.press("Tab")
+    check(await inMenu(), "Tab puts it back")
+    await page.keyboard.press("Enter")
+    await Bun.sleep(1200)
+    check((await page.inputValue("#password")) === "" && (await fillCount(run)) === before, "focus that left the menu and came back takes no Enter")
+    // The user's own ↓ from the field, then Enter, fills.
+    await page.focus("#email")
+    await page.keyboard.press("ArrowDown")
+    await Bun.sleep(150)
+    await page.keyboard.press("Enter")
+    check(!!(await until("↓ then Enter fills", async () => (await page.inputValue("#password")) === "correct horse")), "the user's ↓ then Enter fills")
+  } catch (err) {
+    check(false, `keyboard entry threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "keyboard entry")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * The menu's visibility guard samples (Intersection Observer v2 readings,
+ * at most every 100 ms): it can miss a page covering the menu for less
+ * than that. Covers the menu for a range of times around the press and says
+ * which picks went through. Covers of 250 ms or more must never fill.
+ */
+async function occlusionSweep() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  const results: string[] = []
+  try {
+    let menu: Frame | null = null
+    let at: { x: number; y: number } | null = null
+    for (const ms of [16, 50, 100, 250]) {
+      for (const offset of [-300, -120, -40, 0, 150]) {
+        if (!menu || menu.isDetached() || !(await menu.locator("button.row").count().catch(() => 0))) {
+          await page.goto(`${site}/sweep`)
+          menu = await menuOn(page)
+          const box = menu && (await menu.locator("button.row").first().boundingBox())
+          at = box && { x: box.x + box.width / 2, y: box.y + box.height / 2 }
+        } else await settled(menu)
+        if (!menu || !at) {
+          await diagnose(run, page, "sweep")
+          break
+        }
+        // Focus back in the page, so the press moves it into the menu and the page sees blur.
+        await page.focus("#email")
+        await page.evaluate(() => {
+          const w = window as unknown as { __shown?: number; __press?: number }
+          w.__shown = w.__press = undefined
+        })
+        const before = await fillCount(run)
+        if (offset < 0) {
+          await page.evaluate((ms) => (window as unknown as { cover: (ms: number) => void }).cover(ms), ms)
+          await Bun.sleep(-offset)
+        } else await page.evaluate(([after, ms]) => (window as unknown as { coverAfterPress: (a: number, ms: number) => void }).coverAfterPress(after, ms), [offset, ms])
+        await page.mouse.click(at.x, at.y)
+        await Bun.sleep(1500)
+        const real = await page.evaluate(() => {
+          const w = window as unknown as { __shown?: number; __press?: number }
+          return w.__shown !== undefined && w.__press !== undefined ? Math.round(w.__shown - w.__press) : null
+        })
+        const filled = (await fillCount(run)) > before
+        results.push(`${String(ms).padStart(4)} ms at ${real === null ? "  ?" : String(real).padStart(5)} ms: ${filled ? "FILLED" : "refused"}`)
+        check(real !== null, `the ${ms} ms cover at ${offset} ms was shown and the press seen`)
+        if (ms >= 250) check(!filled, `a ${ms} ms cover at ${real ?? offset} ms around the press fills nothing`)
+        if (filled) menu = null
+      }
+    }
+  } catch (err) {
+    check(false, `sweep threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "sweep")
+  } finally {
+    console.log("  cover length, start relative to the press: result\n    " + results.join("\n    "))
+    await close(run)
+  }
+}
+
+/** A menu the user can't see properly, or saw only as the press landed, takes no pick and asks for nothing. */
+async function coveredMenu() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    for (const name of Object.keys(OVERLAY)) {
+      await page.goto(`${site}/overlay/${name}`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `overlay/${name}`)
+        continue
+      }
+      const before = await fillCount(run)
+      if (name === "reveal-before-press") {
+        await page.evaluate(() => (window as unknown as { reveal: () => void }).reveal())
+        await Bun.sleep(250)
+      }
+      await menu.locator("button.row").first().click({ force: true })
+      await Bun.sleep(1500)
+      const password = await page.inputValue("#password")
+      if (name === "none") check(password === "correct horse", `an uncovered menu fills (${password ? "" : await footText(menu)})`)
+      else {
+        check(password === "" && (await fillCount(run)) === before, `a menu made ${name} fills nothing and asks the host for nothing`)
+        const foot = await footText(menu)
+        check(foot.includes("covered") || (name.startsWith("reveal") && foot.includes("in a moment")), `and says it's covered (${foot})`)
+        // The refused press put focus in the menu, which by now has been in
+        // plain view for a while: the user's next Enter there must not pick.
+        const focused = await menu.evaluate(() => document.hasFocus())
+        await page.keyboard.press("Enter")
+        await Bun.sleep(1500)
+        check(
+          focused && (await page.inputValue("#password")) === "" && (await fillCount(run)) === before,
+          `and a later Enter in the menu ${focused ? "" : "(not focused!) "}fills nothing either (${await footText(menu)})`,
+        )
+      }
+    }
+  } catch (err) {
+    check(false, `covered menu threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "covered menu")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Navigating away while the host is still answering: the new page gets nothing. */
+async function midFill() {
+  const run = await launch({ fillDelay: 2 })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    const menu = await menuOn(page)
+    if (menu) {
+      await menu.locator("button.row").first().click()
+      await until("the menu is filling", async () => (await footText(menu)).includes("Filling"))
+      await page.goto(`${site}/login?next=home`)
+      await until("the delayed fill reaches the host", async () => (await fillCount(run)) > 0)
+      await Bun.sleep(3000)
+      check((await page.inputValue("#email")) === "" && (await page.inputValue("#password")) === "", "a fill that lands after navigating fills nothing")
+    }
+  } catch (err) {
+    check(false, `navigation during fill threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "mid-fill")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Back to a page from the back/forward cache: no stale menu, and filling works again from a fresh report. */
+async function backForward() {
+  const run = await launch({ bfcache: true })
+  const page = await run.context.newPage()
+  // Chrome says whether a navigation came from the cache, and if not, why.
+  const cdp = await run.context.newCDPSession(page)
+  const navigations: string[] = []
+  const notUsed: string[] = []
+  cdp.on("Page.backForwardCacheNotUsed", (e: { notRestoredExplanations: Array<{ reason: string; type: string }> }) => {
+    for (const r of e.notRestoredExplanations) notUsed.push(`${r.type}:${r.reason}`)
+  })
+  cdp.on("Page.frameNavigated", (e: { type: string; frame: { parentId?: string } }) => void (!e.frame.parentId && navigations.push(e.type)))
+  await cdp.send("Page.enable")
+  try {
+    await page.goto(`${site}/login?next=home`)
+    const start = Date.now()
+    if (!(await menuOn(page, "#email", 30_000))) await diagnose(run, page, "bfcache first menu")
+    else console.log(`  first menu after ${Date.now() - start}ms`)
+    // A page holding an extension frame can't enter the cache (EmbedderExtensionFrame),
+    // so leave with the menu closed, as after any fill.
+    await page.keyboard.press("Escape")
+    await until("esc closes the menu", () => !extensionFrame(page, "menu.html"))
+    // Another site: same-site navigations may keep the browsing instance, which keeps the page out of the cache.
+    await page.goto(`http://127.0.0.1:${server.port}/home`)
+    // A page restored from the cache fires no load event.
+    await page.goBack({ waitUntil: "commit" })
+    await until("back on the login page", () => navigations.length === 3 || notUsed.length > 0)
+    await Bun.sleep(500)
+    const restored = navigations.at(-1) === "BackForwardCacheRestore"
+    if (check(restored, `the login page comes back from the back/forward cache${notUsed.length ? ` (not: ${notUsed.join(", ")})` : ""}`)) {
+      check(!extensionFrame(page, "menu.html"), "with no menu left open")
+      const p = await popup(run, site)
+      await p.locator("button", { hasText: "Fill" }).first().click()
+      check(!!(await until("popup fill after restore", async () => (await page.inputValue("#password")) === "correct horse")), "the popup fills the restored page")
+      await p.close()
+      await page.evaluate(() => {
+        for (const el of document.querySelectorAll("input")) el.value = ""
+      })
+      // Picked with the keyboard: headless Chromium on Linux sends a click on
+      // a frame added to a restored page to the page itself (the host element
+      // gets it, the menu never does) until the page is reloaded, a hit-test
+      // gap in the browser no script can fill. Keyboard input goes to the
+      // focused frame instead, so this still runs the whole pick.
+      if (await menuOn(page)) {
+        await page.focus("#email")
+        await page.keyboard.press("ArrowDown")
+        await Bun.sleep(300)
+        await page.keyboard.press("ArrowDown")
+        await Bun.sleep(300)
+        await page.keyboard.press("Enter")
+        check(!!(await until("menu fill after restore", async () => (await page.inputValue("#password")) === "hunter2")), "and so does a new menu")
+      }
+    }
+  } catch (err) {
+    check(false, `bfcache threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "bfcache")
+  } finally {
+    await close(run)
+  }
+}
+
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, locked, notInstalled }
+const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward }
+const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
+const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
+
+try {
+  for (const scheme of ["light", "dark"] as const) {
+    for (const [name, run] of Object.entries(scenarios)) {
+      if (picked && !picked.includes(name)) continue
+      console.log(`\n# ${name} (${scheme})`)
+      await run(scheme)
+    }
+  }
+  for (const [name, run] of Object.entries(once)) {
+    if (picked && !picked.includes(name)) continue
+    console.log(`\n# ${name}`)
+    await run()
+  }
+} finally {
+  server.stop(true)
+}
+console.log(failures ? `\n${failures} failed` : "\nall passed")
+process.exit(failures ? 1 : 0)
