@@ -5,11 +5,12 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc --noEmit && vite build",
+    "build": "sh scripts/wasm.sh && tsc --noEmit && vite build",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "sh scripts/wasm.sh && tsc --noEmit",
     "motion-sweep": "bun src/dev/motion-sweep.ts",
-    "deploy": "bun run build && bunx wrangler deploy"
+    "deploy": "bun run build && bunx wrangler deploy",
+    "wasm": "sh scripts/wasm.sh"
   },
   "dependencies": {
     "@kitlangton/justice": "0.3.0",

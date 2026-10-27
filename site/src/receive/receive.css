@@ -1,0 +1,19 @@
+/* The receive page: one column, plain rows, values in the site's mono type. */
+.receive { padding-top: var(--s4); }
+.receive .brand { margin-bottom: var(--s4); }
+.receive .brand a { color: var(--red); font-family: var(--font-wordmark); font-size: 28px; letter-spacing: .02em; }
+.receive section.state { margin-top: 0; }
+/* The 500 weight is subset to the landing page's headings; the page's own text stays at 400. */
+.receive .state h2 { margin-bottom: var(--s2); font-weight: 400; filter: none; }
+.receive .note { padding-left: var(--s2); border-left: 1px solid var(--red); white-space: pre-wrap; }
+.receive button { appearance: none; margin: 0; padding: 2px 8px; border: 1px solid #383838; background: none; color: #fff; font: inherit; font-size: .85em; cursor: pointer; }
+.receive button:hover { border-color: #8d8d8d; }
+.receive button.cta { padding: 10px 16px; font-size: 1em; }
+.receive progress { width: 100%; accent-color: var(--red); }
+.tree { margin: var(--s2) 0 0; padding: 0; list-style: none; display: grid; gap: var(--s2); }
+.tree .tree { padding-left: var(--s2); border-left: 1px dotted #383838; }
+.receive .row { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--s1); }
+.receive .name { color: var(--light); overflow-wrap: anywhere; }
+.receive .actions { display: flex; gap: var(--s1); margin-left: auto; }
+.receive .value { margin-top: var(--s1); padding: var(--s1) 12px; background: #0f0f0f; border: 1px solid #1f1f1f; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .9em; line-height: 1.6; max-height: 60vh; overflow-y: auto; }
+.receive .masked { letter-spacing: .2em; opacity: .55; }
