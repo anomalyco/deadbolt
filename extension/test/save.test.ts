@@ -72,7 +72,7 @@ describe("offers", () => {
     await signIn("new@example.com", "a new password")
     const { id } = saver.pending(1)!
     expect(await saver.choose(1, id, "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
-    const save = requests("save")[0] as { entry: Record<string, string> }
+    const save = requests("save")[0] as unknown as { entry: Record<string, string> }
     expect(save.entry).toEqual({ title: "Sign in to Example", url: "https://www.example.com/login", username: "new@example.com", password: "a new password" })
     expect(saver.pending(1)).toBeUndefined()
     expect(fake.badges[1]).toBe("")
@@ -321,15 +321,179 @@ describe("plaintext lifetime", () => {
   })
 })
 
+describe("new passwords", () => {
+  const submit = async (fields: Record<string, string>, kind: string) => {
+    await saver.capture(pageSender(), { ...fields, title: "Example", kind, roles: ["email", "password", "new-password"] })
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+  }
+  const on = (url: string, documentId: string) => pageSender({ url, origin: new URL(url).origin, documentId })
+
+  test("a password goes to the origin it was submitted on, and is saved with that page; an email step's username carries across", async () => {
+    // Email on one of the site's hosts, the generated password on another.
+    await saver.capture(on("https://id.example.com/start", "id-doc"), { username: "new@example.com", title: "Example ID", kind: "login", roles: ["email"], submission: 1 })
+    await saver.capture(on("https://accounts.example.com/signup", "accounts-doc"), { generated: "g4", title: "Create an account", kind: "signup", roles: ["new-password"], submission: 1 })
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toEqual([{ type: "check", origin: "https://accounts.example.com", username: "new@example.com", generated: "g4" }])
+    await saver.choose(1, saver.pending(1)!.id, "save")
+    expect(requests("save")[0]).toMatchObject({
+      origin: "https://accounts.example.com",
+      entry: { title: "Create an account", url: "https://accounts.example.com/signup", username: "new@example.com", generated: "g4" },
+    })
+  })
+
+  test("only a sign-in's own username step on the top page carries to another host", async () => {
+    const steps: Array<[chrome.runtime.MessageSender, Record<string, unknown>]> = [
+      // A form that isn't a sign-in, such as a newsletter box.
+      [on("https://news.example.com/", "n"), { username: "news@example.com", title: "News", kind: null, roles: ["email"], submission: 1 }],
+      // A sign-in step in a frame.
+      [pageSender({ url: "https://id.example.com/frame", origin: "https://id.example.com", documentId: "f", frameId: 2 }), { username: "framed@example.com", title: "", kind: "login", roles: ["email"], submission: 1 }],
+    ]
+    for (const [sender, step] of steps) {
+      host.requests.length = 0
+      fake.frames["1:0"] = { url: "https://www.example.com/", documentId: "top" }
+      await saver.capture(sender, step)
+      await saver.capture(on("https://accounts.example.com/signup", "a"), { generated: "g7", title: "Sign up", kind: "signup", roles: ["new-password"], submission: 1 })
+      fake.frames["1:0"] = HOME
+      await saver.quiet(pageSender(HOME), false)
+      expect(requests("check")).toEqual([])
+    }
+    // Nor to a password in a frame.
+    fake.frames["1:0"] = { url: "https://id.example.com/start", documentId: "id-doc" }
+    await saver.capture(on("https://id.example.com/start", "id-doc"), { username: "new@example.com", title: "", kind: "login", roles: ["email"], submission: 1 })
+    await saver.capture(pageSender({ url: "https://accounts.example.com/pw", origin: "https://accounts.example.com", documentId: "f2", frameId: 2 }), { password: "framed", title: "", kind: "login", roles: ["password"], submission: 1 })
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toEqual([])
+  })
+
+  test("a username joining a password from its own origin pairs with it, and the password's form still owns the failure check", async () => {
+    await saver.capture(on("https://accounts.example.com/signup", "a"), { generated: "g10", title: "Sign up", kind: "signup", roles: ["new-password"], submission: 1 })
+    await saver.capture(on("https://accounts.example.com/name", "a2"), { username: "new@example.com", title: "", kind: "signup", roles: ["email"], submission: 1 })
+    saver.failed(on("https://accounts.example.com/signup", "a"), 1)
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toEqual([])
+
+    await saver.capture(on("https://accounts.example.com/signup", "a"), { generated: "g11", title: "Sign up", kind: "signup", roles: ["new-password"], submission: 2 })
+    await saver.capture(on("https://accounts.example.com/name", "a2"), { username: "new@example.com", title: "", kind: "signup", roles: ["email"], submission: 1 })
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toEqual([{ type: "check", origin: "https://accounts.example.com", username: "new@example.com", generated: "g11" }])
+  })
+
+  test("passwords held for one username never go with another's", async () => {
+    // A sign-in as admin, then a sign-up as someone else on the same page.
+    await saver.capture(pageSender(), { username: "admin", password: "hunter2", title: "", kind: "login", roles: ["username", "password"], submission: 1 })
+    await saver.capture(pageSender(), { username: "new@example.com", generated: "g12", title: "", kind: "signup", roles: ["email", "new-password"], submission: 2 })
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toEqual([{ type: "check", origin: "https://www.example.com", username: "new@example.com", generated: "g12" }])
+  })
+
+  test("a password from another of the site's hosts replaces the earlier ones and their username, never mixes with them", async () => {
+    // A generated sign-up on one host, then a sign-in with a typed password on another.
+    await saver.capture(on("https://accounts.example.com/signup", "a"), { username: "new@example.com", generated: "g5", title: "Sign up", kind: "signup", roles: ["email", "new-password"], submission: 1 })
+    await saver.capture(on("https://login.example.com/", "b"), { password: "typed", title: "Sign in", kind: "login", roles: ["password"], submission: 1 })
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    // No username of its own: nothing to offer.
+    expect(requests("check")).toEqual([])
+    expect(JSON.stringify(host.requests)).not.toContain("g5")
+  })
+
+  test("a username from another host after the password never joins it, replaces its own, or takes over its failure check", async () => {
+    // Without a username: one from another host doesn't join it.
+    await saver.capture(on("https://accounts.example.com/signup", "a"), { generated: "g6", title: "Sign up", kind: "signup", roles: ["new-password"], submission: 1 })
+    await saver.capture(on("https://profile.example.com/name", "p"), { username: "someone@example.com", title: "Profile", kind: "login", roles: ["email"], submission: 1 })
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toEqual([])
+
+    // With one: it stays, whatever another host or its own sends on its own.
+    for (const later of ["https://profile.example.com/name", "https://accounts.example.com/invite"]) {
+      host.requests.length = 0
+      await saver.capture(on("https://accounts.example.com/signup", "a"), { username: "new@example.com", generated: "g8", title: "Sign up", kind: "signup", roles: ["email", "new-password"], submission: 2 })
+      await saver.capture(on(later, "p"), { username: "someone@example.com", title: "", kind: "login", roles: ["email"], submission: 1 })
+      await saver.quiet(pageSender(HOME), false)
+      expect(requests("check")).toEqual([{ type: "check", origin: "https://accounts.example.com", username: "new@example.com", generated: "g8" }])
+      await saver.choose(1, saver.pending(1)!.id, "later")
+    }
+
+    // And the sign-up failing is still seen: the username's page didn't take over the failure check.
+    host.requests.length = 0
+    await saver.capture(on("https://accounts.example.com/signup", "a"), { username: "new@example.com", generated: "g9", title: "Sign up", kind: "signup", roles: ["email", "new-password"], submission: 3 })
+    await saver.capture(on("https://profile.example.com/name", "p"), { username: "someone@example.com", title: "", kind: "login", roles: ["email"], submission: 1 })
+    saver.failed(on("https://accounts.example.com/signup", "a"), 3)
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toEqual([])
+  })
+  const entry = () => (requests("save")[0] as unknown as { ref?: string; entry: Record<string, string> })
+
+  test("a generated password is named by its id, never sent, and saved only when the user says so", async () => {
+    await submit({ username: "new@example.com", generated: "g1", newPassword: "ignored" }, "signup")
+    expect(requests("check")[0]).toMatchObject({ username: "new@example.com", generated: "g1" })
+    expect(requests("check")[0]).not.toHaveProperty("password")
+    expect(requests("save")).toEqual([])
+    await saver.choose(1, saver.pending(1)!.id, "save")
+    expect(entry().entry).toEqual({ title: "Example", url: "https://www.example.com/login", username: "new@example.com", generated: "g1" })
+  })
+
+  test("a change-password form with no username updates the login whose password is the current one", async () => {
+    await submit({ password: "hunter2", generated: "g2" }, "change-password")
+    expect(requests("check")[0]).not.toHaveProperty("username")
+    expect(saver.pending(1)).toMatchObject({ username: "admin", update: true })
+    await saver.choose(1, saver.pending(1)!.id, "save")
+    expect(entry()).toMatchObject({ ref: "a".repeat(64) + ":" + "2".repeat(32), entry: { username: "admin", generated: "g2" } })
+  })
+
+  test("or the only login here, and nothing when there are several", async () => {
+    await submit({ password: "forgotten", newPassword: "a new one" }, "change-password")
+    expect(saver.pending(1)).toBeUndefined()
+    expect(requests("save")).toEqual([])
+    const list = host.host.send.bind(host.host)
+    host.host.send = (async (req: RequestBody) =>
+      req.type === "list" ? { type: "list", site: "example.com", accounts: [{ ...(await list(req) as { accounts: object[] }).accounts[0] }] } : list(req)) as typeof host.host.send
+    await submit({ password: "forgotten", newPassword: "a new one" }, "change-password")
+    expect(saver.pending(1)).toMatchObject({ username: "kit@example.com", update: true })
+  })
+
+  test("a generated sign-up whose form still shows offers nothing", async () => {
+    await saver.capture(pageSender(), { username: "new@example.com", generated: "g3", title: "", kind: "signup", roles: ["email", "new-password"], submission: 1 })
+    saver.failed(pageSender(), 1)
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(host.requests).toEqual([])
+  })
+})
+
 describe("failed and abandoned sign-ins", () => {
-  const login = { username: "new@example.com", password: "wrong", title: "", kind: "login", roles: ["email", "password"] }
+  const login = { username: "new@example.com", password: "wrong", title: "", kind: "login", roles: ["email", "password"], submission: 1 }
 
   test("the form still showing in place offers nothing", async () => {
     await saver.capture(pageSender(), login)
-    saver.failed(pageSender())
+    saver.failed(pageSender(), 1)
     fake.frames["1:0"] = HOME
     await saver.quiet(pageSender(HOME), false)
     expect(requests("check")).toHaveLength(0)
+  })
+
+  test("a failure counts only for the submit and document it's about", async () => {
+    // A retry after a wrong password: the first submit's failure arrives after it.
+    await saver.capture(pageSender(), login)
+    await saver.capture(pageSender(), { ...login, password: "right", submission: 2 })
+    saver.failed(pageSender(), 1)
+    // Another document on the same page, such as a frame or a page posted back, can't fail it either.
+    saver.failed(pageSender({ documentId: "other-doc" }), 2)
+    saver.failed(pageSender(), "2")
+    fake.frames["1:0"] = HOME
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toMatchObject([{ username: "new@example.com", password: "right" }])
+    // The retry's own failure does.
+    await saver.capture(pageSender(), { ...login, submission: 3 })
+    saver.failed(pageSender(), 3)
+    await saver.quiet(pageSender(HOME), false)
+    expect(requests("check")).toHaveLength(1)
   })
 
   test("the form posted back to its page offers nothing; the same document reporting it again doesn't count", async () => {
@@ -362,13 +526,35 @@ describe("failed and abandoned sign-ins", () => {
     expect(requests("check")).toHaveLength(1)
   })
 
+  test("so does one on the same site while the check is on its way, and an offer waiting", async () => {
+    saver.navigated(1, "https://www.example.com/login", "link")
+    const held = hold("check")
+    await saver.capture(pageSender(), login)
+    fake.frames["1:0"] = HOME
+    const quiet = saver.quiet(pageSender(HOME), false)
+    await waitFor(() => held.length === 1)
+    saver.navigated(1, "https://www.example.com/settings", "typed")
+    held[0]()
+    await quiet
+    expect(saver.pending(1)).toBeUndefined()
+    expect(fake.badges[1] ?? "").toBe("")
+
+    const signedIn = signIn("new@example.com", "a new password")
+    await waitFor(() => held.length === 2)
+    held[1]()
+    await signedIn
+    expect(saver.pending(1)).toBeDefined()
+    saver.navigated(1, "https://www.example.com/settings", "auto_bookmark")
+    expect(saver.pending(1)).toBeUndefined()
+  })
+
   test("an offer waits for the five seconds a failure takes to show", async () => {
     saver = new Saver(host.host, { capture: 60_000, offer: 60_000, settle: 60 })
     await saver.capture(pageSender(), login)
     fake.frames["1:0"] = HOME
     const quiet = saver.quiet(pageSender(HOME), false)
     await Bun.sleep(20)
-    saver.failed(pageSender())
+    saver.failed(pageSender(), 1)
     await quiet
     expect(requests("check")).toHaveLength(0)
   })

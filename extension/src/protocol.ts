@@ -3,26 +3,41 @@
 // u32 length, then UTF-8 JSON); this file is the JSON.
 
 export const NATIVE_HOST = "pw.deadbolt.browser"
-export const PROTOCOL = 1
+export const PROTOCOL = 2
 
 export type Want = "username" | "password" | "totp"
 export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
 export type CheckStatus = "new" | "update" | "same"
 export type Change = "locked" | "unlocked" | "items" | "stopped" | "started"
-export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "exists" | "cancelled" | "failed"
+export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "failed"
 export type UserVerification = "required" | "preferred" | "discouraged"
+
+/** A submitted password: as typed, or the one `generate` made, by its id (the agent holds it). */
+export type PasswordValue = { password: string; generated?: never } | { generated: string; password?: never }
+
+/** What a page says about a new-password field: its `passwordrules`, length limits and the characters its `pattern` takes. */
+export interface FieldRules {
+  rules?: string
+  minLength?: number
+  maxLength?: number
+  allowed?: string
+}
 
 export type Request =
   | { id: number; type: "hello" }
   | { id: number; type: "list"; origin: string }
   | { id: number; type: "fill"; origin: string; ref: string; want: Want[] }
-  | { id: number; type: "check"; origin: string; username: string; password: string }
+  | ({ id: number; type: "generate"; origin: string } & FieldRules)
+  | ({ id: number; type: "generate-check"; origin: string } & FieldRules)
+  | { id: number; type: "generate-keep"; origin: string; generated: string }
+  | { id: number; type: "generate-drop"; origin: string; generated: string }
+  | ({ id: number; type: "check"; origin: string; username?: string } & PasswordValue)
   | {
       id: number
       type: "save"
       origin: string
       ref?: string
-      entry: { title: string; url: string; username: string; password: string }
+      entry: { title: string; url: string; username: string } & PasswordValue
     }
   | { id: number; type: "passkey-list"; origin: string; rpId?: string }
   | {
@@ -68,6 +83,16 @@ export interface FillReply {
   username?: string
   password?: string
   totp?: string
+}
+export interface GenerateReply {
+  type: "generate"
+  password: string
+  /** Names it in check and save. */
+  generated: string
+}
+/** `generate-check`, `generate-keep` and `generate-drop` say only that they went through. */
+export interface DoneReply<T extends "generate-check" | "generate-keep" | "generate-drop"> {
+  type: T
 }
 export interface CheckReply {
   type: "check"
@@ -127,6 +152,8 @@ export type Reply =
   | HelloReply
   | ListReply
   | FillReply
+  | GenerateReply
+  | DoneReply<"generate-check" | "generate-keep" | "generate-drop">
   | CheckReply
   | SaveReply
   | PasskeysReply
@@ -140,6 +167,10 @@ export interface ReplyFor {
   hello: HelloReply
   list: ListReply
   fill: FillReply
+  generate: GenerateReply
+  "generate-check": DoneReply<"generate-check">
+  "generate-keep": DoneReply<"generate-keep">
+  "generate-drop": DoneReply<"generate-drop">
   check: CheckReply
   save: SaveReply
   "passkey-list": PasskeysReply
@@ -153,6 +184,10 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   hello: "hello",
   list: "list",
   fill: "fill",
+  generate: "generate",
+  "generate-check": "generate-check",
+  "generate-keep": "generate-keep",
+  "generate-drop": "generate-drop",
   check: "check",
   save: "save",
   "passkey-list": "passkeys",
@@ -168,7 +203,7 @@ export type HostMessage =
 const STATUSES: HostStatus[] = ["ready", "locked", "not-set-up", "unavailable"]
 const CHECKS: CheckStatus[] = ["new", "update", "same"]
 const CHANGES: Change[] = ["locked", "unlocked", "items", "stopped", "started"]
-const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "exists", "cancelled", "failed"]
+const CODES: ErrorCode[] = ["locked", "not_found", "domain_mismatch", "bad_request", "rate_limited", "weak", "exists", "cancelled", "failed"]
 const REF = /^[0-9a-f]{64}:[0-9a-f]{32}$/
 const B64URL = /^[A-Za-z0-9_-]*$/
 
@@ -249,6 +284,15 @@ function parseReply(raw: Record<string, unknown>): Reply | null {
     }
     case "fill":
       return { type: "fill", username: str(raw.username), password: str(raw.password), totp: str(raw.totp, 16) }
+    case "generate": {
+      const password = str(raw.password)
+      const generated = str(raw.generated, 64)
+      return password && generated ? { type: "generate", password, generated } : null
+    }
+    case "generate-check":
+    case "generate-keep":
+    case "generate-drop":
+      return { type: raw.type }
     case "check": {
       const status = raw.status as CheckStatus
       if (!CHECKS.includes(status)) return null

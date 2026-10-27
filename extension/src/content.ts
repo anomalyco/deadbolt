@@ -7,6 +7,7 @@
 import { isVisible, scanPage, signingIn, type Field } from "./content/detect"
 import { initFrameChecks } from "./content/embed"
 import { ownValue, trackUserInput } from "./content/fill"
+import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, refreshMenu, send, stepped } from "./content/inline"
 import { initPasskeyChannel } from "./content/passkeys"
 import { deepActiveElement, openRoots } from "./content/shadow"
@@ -33,6 +34,9 @@ let lastUrl = location.href
 let quietTimer: number | undefined
 let quietSentFor = ""
 let lastSubmitAt = 0
+/** This document's submits so far: a failure names the one it's about. */
+let submission = 0
+let failureTimer: number | undefined
 
 const sameFields = (a: Field[], b: Field[]) =>
   a.length === b.length && a.every((f, i) => f.el === b[i].el && f.role === b[i].role && f.owner.form === b[i].owner.form && f.owner.parent === b[i].owner.parent)
@@ -181,23 +185,28 @@ async function submitted() {
   // before the password, and no check runs without one.
   if (!username && !password && !newPassword) return
   const roles = [...new Set(fields.map((f) => f.role))]
-  send({ type: "db:capture", username, password, newPassword, title: document.title, kind, roles })
-  watchForFailure(kind, roles)
+  // A generated password stays with the agent: name it instead.
+  const generated = generatedId(newPassword)
+  const attempt = ++submission
+  send({ type: "db:capture", username, password, newPassword: generated ? undefined : newPassword, generated, title: document.title, kind, roles, submission: attempt })
+  watchForFailure(kind, roles, attempt)
 }
 
 /**
  * Five seconds after a submit, the same kind of form on the same page with a
  * password or code box showing means the site turned it down (1Password's
- * check): the background then offers nothing.
+ * check): the background then offers nothing. A newer submit takes over: the
+ * form showing still after a retry says nothing about the retry.
  */
-function watchForFailure(submittedKind: SurfaceKind | null, roles: Field["role"][]) {
+function watchForFailure(submittedKind: SurfaceKind | null, roles: Field["role"][], attempt: number) {
+  window.clearTimeout(failureTimer)
   const secret: Field["role"][] = roles.filter((r) => r === "password" || r === "new-password" || r === "otp")
   if (!submittedKind || !secret.length) return
   const page = location.origin + location.pathname
-  window.setTimeout(() => {
-    if (location.origin + location.pathname !== page) return
+  failureTimer = window.setTimeout(() => {
+    if (location.origin + location.pathname !== page || attempt !== submission) return
     refresh()
-    if (kind === submittedKind && fields.some((f) => secret.includes(f.role) && isVisible(f.el))) send({ type: "db:failed" })
+    if (kind === submittedKind && fields.some((f) => secret.includes(f.role) && isVisible(f.el))) send({ type: "db:failed", submission: attempt })
   }, FAILED_AFTER_MS)
 }
 
@@ -234,7 +243,7 @@ function onKeydown(event: KeyboardEvent) {
 
 // First, while it's still document_start: the hook is waiting for its port.
 initPasskeyChannel(send)
-const state = { targets: () => fields, form: () => formId, rescan: refresh }
+const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh }
 initMenu(state)
 initFrameChecks(state)
 // On window, in the capture phase, from document_start: these run before any

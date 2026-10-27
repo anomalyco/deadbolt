@@ -309,6 +309,25 @@ const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="pos
   <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
   <button type="submit">Sign in</button></form>`
 
+const NEW_RULES = `maxlength="16" passwordrules="minlength: 12; required: digit; required: upper;"`
+/** The new-password box's rules on sign-up variants: a six-digit PIN is weak, a lookahead is outside the pattern subset. */
+const SIGNUP_RULES: Record<string, string> = {
+  weak: `maxlength="6" pattern="\\d{6}"`,
+  lookahead: `pattern="(?=.*\\d).{8,}"`,
+  pattern: `pattern="[a-z0-9]{16,24}"`,
+}
+const signupForm = (action: string, rules = NEW_RULES) => `<h1>Create your Acme account</h1><form method="post" action="${action}" novalidate>
+  <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+  <label for="new">Password</label><input id="new" name="password" type="password" autocomplete="new-password" ${rules}>
+  <label for="confirm">Confirm password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password">
+  <button type="submit">Create account</button></form>`
+
+const changeForm = `<h1>Change your password</h1><form method="post" action="/home" novalidate>
+  <label for="current">Current password</label><input id="current" name="current" type="password" autocomplete="current-password">
+  <label for="new">New password</label><input id="new" name="new" type="password" autocomplete="new-password">
+  <label for="confirm">Confirm new password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password">
+  <button type="submit">Change password</button></form>`
+
 const server = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
@@ -433,6 +452,33 @@ const server = Bun.serve({
             })
           </script>`,
         )
+      // Turns down a wrong password at once, and takes two and a half seconds to accept the right one.
+      case "/fails/retry":
+        return html(
+          "Sign in to Acme",
+          `${loginForm("#")}<p id="error"></p><script>
+            document.querySelector("form").addEventListener("submit", async (e) => {
+              e.preventDefault()
+              const data = new FormData(e.target)
+              await fetch("/api/session", { method: "POST", body: data })
+              if (data.get("password") !== "the right password") return void (document.getElementById("error").textContent = "That password isn't right.")
+              await new Promise((r) => setTimeout(r, 2500))
+              history.pushState(null, "", "/app/dashboard")
+              document.body.innerHTML = "<h1>Dashboard</h1><p>Signed in.</p>"
+            })
+          </script>`,
+        )
+      // Sign-up and change-password forms for the generator.
+      case "/signup":
+        return html("Create your Acme account", signupForm("/home"))
+      case "/signup/fails":
+        return html("Create your Acme account", `${signupForm("/signup/fails")}${req.method === "POST" ? `<p>That email is taken.</p>` : ""}<a id="home" href="/home">Home</a>`)
+      case "/account/password":
+        return html("Change password", changeForm)
+      case "/signup/weak":
+      case "/signup/lookahead":
+      case "/signup/pattern":
+        return html("Create your Acme account", signupForm("/home", SIGNUP_RULES[url.pathname.slice(8)]))
       case "/fails/post":
         return html("Sign in to Acme", `${loginForm("/fails/post")}${req.method === "POST" ? `<p>That password isn't right.</p>` : ""}<a id="home" href="/home">Home</a>`)
     }
@@ -519,6 +565,15 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     // And what the content scripts said about each page (see detection).
     const verdicts: unknown[] = []
     ;(globalThis as unknown as { __verdicts: unknown[] }).__verdicts = verdicts
+    // And which messages to pages were answered, by type.
+    const answered: string[] = []
+    ;(globalThis as unknown as { __answered: string[] }).__answered = answered
+    const send = chrome.tabs.sendMessage.bind(chrome.tabs) as (...args: unknown[]) => Promise<unknown>
+    ;(chrome.tabs as unknown as { sendMessage: unknown }).sendMessage = (...args: unknown[]) => {
+      const reply = send(...args)
+      reply.then(() => answered.push(String((args[1] as { type?: string })?.type)), () => {})
+      return reply
+    }
     chrome.runtime.onMessage.addListener((m: { type?: string; token?: string; kind?: unknown; roles?: unknown; loginish?: unknown }, s) => {
       if (s.tab) seen.push(`${m?.type}@${s.frameId}:${s.url ? new URL(s.url).pathname : "?"}`)
       if (s.tab && s.url && (m?.type === "db:page" || m?.type === "db:quiet"))
@@ -746,6 +801,7 @@ async function savePrompt(scheme: Scheme) {
       check(!(await hostLog(run)).some((r) => r.type === "save"), "nothing saved before the click")
       const { p, title } = await offerIn(run, `offer-save-${scheme}`)
       check(title === "Save login for localhost?", `the popup asks to save (${title})`)
+      check((await p.locator(".account button.primary").count()) === 0, "with an offer showing, no Fill button is primary")
       await p.click(".offer button.primary")
       await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
       const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
@@ -781,6 +837,119 @@ async function savePrompt(scheme: Scheme) {
   } catch (err) {
     check(false, `save scenario threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "save")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Clicks a new-password box and picks the generated password from the menu. */
+async function generateIn(run: Run, page: Page, name?: string): Promise<string | null> {
+  await formFound(page)
+  await page.click("#new")
+  const menu = await until("the menu offers a generated password", async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator("button.row .title").textContent().catch(() => "")) === "Use a strong password" ? f : null
+  }, 15_000)
+  if (!menu) {
+    await diagnose(run, page, "no generator row")
+    return null
+  }
+  await settled(menu)
+  if (name) {
+    const box = await (await menu.frameElement()).boundingBox()
+    if (box) await shot(page, name, { x: box.x - 24, y: box.y - 64, width: box.width + 48, height: box.height + 88 })
+  }
+  await menu.locator("button.row").click()
+  return until("both new-password boxes fill", async () => {
+    const value = await page.inputValue("#new")
+    return value && value === (await page.inputValue("#confirm")) ? value : null
+  })
+}
+
+/** The generator: a sign-up fills every new-password box, nothing is saved before a successful submit, and the agent's id stands in for the password. */
+async function generator(scheme: Scheme) {
+  const run = await launch({ scheme })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/signup`)
+    await type(run, page, "#email", "fresh@acme.test")
+    const value = await generateIn(run, page, `generator-${scheme}`)
+    check(!!value && value.length >= 12 && value.length <= 16 && /\d/.test(value) && /[A-Z]/.test(value), `the generated password keeps the field's rules (${value?.length} characters)`)
+    const asked = (await hostLog(run)).find((r) => r.type === "generate")
+    check(asked?.origin === site && asked.maxLength === 16 && asked.rules === "minlength: 12; required: digit; required: upper;", "the host is asked with the field's rules")
+    check(!(await hostLog(run)).some((r) => r.type === "save" || r.type === "check"), "nothing is checked or saved before the submit")
+    check(!!(await until("the agent is told to keep it", async () => (await hostLog(run)).some((r) => r.type === "generate-keep" && r.origin === site))), "once it's in the page, the agent is told to keep it")
+    // The page names it by id once the keep's answer is back; a person takes longer than that to submit.
+    await until("the page is told the kept id", () => run.worker.evaluate(() => (globalThis as unknown as { __answered: string[] }).__answered.includes("db:generated")))
+    await page.click("button[type=submit]")
+    await page.waitForURL("**/home")
+    if (!(await offered(run, "a generated sign-up badges the toolbar button"))) await diagnose(run, page, "generated sign-up")
+    else {
+      const checked = (await hostLog(run)).find((r) => r.type === "check")
+      check(typeof checked?.generated === "string" && !("password" in (checked ?? {})), "the check names the generated password by id, not the password")
+      const { p, title } = await offerIn(run, `offer-generated-${scheme}`)
+      check(title === "Save login for localhost?", `the popup offers to save the new account (${title})`)
+      check((await p.locator("button.primary").count()) === 1 && (await p.locator(".offer button.primary").count()) === 1, "with an offer showing, its Save is the only primary button")
+      await p.click(".offer button.primary")
+      const save = (await until("save sent after the click", async () => (await hostLog(run)).find((r) => r.type === "save"))) as { entry?: Record<string, string> } | null
+      check(save?.entry?.username === "fresh@acme.test" && typeof save.entry.generated === "string" && !("password" in save.entry), "the save names the generated password by id")
+      await p.close()
+    }
+
+    // A sign-up whose form posts back offers nothing.
+    await clearBadge(run)
+    await page.goto(`${site}/signup/fails`)
+    await type(run, page, "#email", "taken@acme.test")
+    if (await generateIn(run, page)) {
+      await page.click("button[type=submit]")
+      await Bun.sleep(6000)
+      await page.click("#home")
+      await page.waitForURL("**/home")
+      await Bun.sleep(5000)
+      check((await badge(run)) === "", "a generated sign-up that posts back offers nothing")
+    }
+
+    // Changing a password with no username: the login whose password is the current one.
+    await clearBadge(run)
+    await page.goto(`${site}/account/password`)
+    await type(run, page, "#current", "hunter2")
+    if (await generateIn(run, page)) {
+      await page.click("button[type=submit]")
+      await page.waitForURL("**/home")
+      if (await offered(run, "a changed password badges the toolbar button")) {
+        const { p, title } = await offerIn(run)
+        check(title === "Update password for admin?", `the login with the current password is offered the update (${title})`)
+        await p.close()
+      } else await diagnose(run, page, "change password")
+    }
+
+    // A pattern the subset reads: its characters and lengths go to the host, and the password keeps to them.
+    await page.goto(`${site}/signup/pattern`)
+    const fitted = await generateIn(run, page)
+    const shaped = (await hostLog(run)).filter((r) => r.type === "generate").at(-1)
+    check(!!fitted && /^[a-z0-9]{16,24}$/.test(fitted), `a password for [a-z0-9]{16,24} fits it (${fitted})`)
+    check(shaped?.allowed === "0123456789abcdefghijklmnopqrstuvwxyz" && shaped.minLength === 16 && shaped.maxLength === 24, `the host is asked for the pattern's characters and lengths (${JSON.stringify(shaped)})`)
+
+    // No generator row for a field that allows only weak passwords, or a pattern outside the subset.
+    for (const [path, why] of [["weak", "a six-digit PIN is all the field takes"], ["lookahead", "the pattern has a lookahead"]]) {
+      const before = (await hostLog(run)).length
+      await page.goto(`${site}/signup/${path}`)
+      await formFound(page)
+      await page.click("#new")
+      await Bun.sleep(2000)
+      const asked = (await hostLog(run)).slice(before).map((r) => r.type)
+      check(!extensionFrame(page, "menu.html") && !asked.includes("generate"), `no generator row when ${why} (${asked.join(", ")})`)
+      if (path === "weak") check(asked.includes("generate-check"), "the agent is asked how strong a password the field allows")
+      else check(!asked.includes("generate-check"), "a pattern outside the subset isn't sent anywhere")
+    }
+
+    // A sign-in's password box offers no generator.
+    await page.goto(`${site}/login?next=home`)
+    await menuOn(page, "#password")
+    check((await extensionFrame(page, "menu.html")?.locator("button.row .title").first().textContent()) === "Acme", "a sign-in's password box lists logins, not a generated password")
+  } catch (err) {
+    check(false, `generator scenario threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "generator")
   } finally {
     await close(run)
   }
@@ -858,7 +1027,7 @@ async function coldSave() {
 }
 
 async function rateLimited() {
-  const run = await launch({ rateLimit: "fill" })
+  const run = await launch({ rateLimit: "fill,generate-keep" })
   const page = await run.context.newPage()
   try {
     await page.goto(`${site}/login`)
@@ -870,6 +1039,27 @@ async function rateLimited() {
     })
     check(!!message && message.includes("Filling too quickly"), "a rate-limited fill says to try again")
     check((await page.inputValue("#password")) === "", "and fills nothing")
+    await p.close()
+
+    // The agent doesn't keep a generated password: the page never names its
+    // id, and a sign-up that goes through is offered with it as typed.
+    await page.goto(`${site}/signup`)
+    await type(run, page, "#email", "unkept@acme.test")
+    const value = await generateIn(run, page)
+    if (value) {
+      await page.click("button[type=submit]")
+      await page.waitForURL("**/home")
+      if (await offered(run, "a sign-up with an unkept generated password badges the toolbar button")) {
+        const checked = (await hostLog(run)).find((r) => r.type === "check")
+        check(checked?.password === value && !("generated" in checked), "its check sends the password as typed, not an id the agent can't resolve")
+        const offer = await offerIn(run)
+        check(offer.title === "Save login for localhost?", `the popup offers to save it (${offer.title})`)
+        await offer.p.click(".offer button.primary")
+        const save = (await until("save sent after the click", async () => (await hostLog(run)).find((r) => r.type === "save"))) as { entry?: Record<string, string> } | null
+        check(save?.entry?.username === "unkept@acme.test" && save.entry.password === value, "and saves that password")
+        await offer.p.close()
+      } else await diagnose(run, page, "unkept generated sign-up")
+    }
   } catch (err) {
     check(false, `rate limit threw: ${(err as Error).message.split("\n")[0]}`)
   } finally {
@@ -1815,7 +2005,7 @@ async function detection() {
     check(false, `detection threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "detection")
   } finally {
-    console.log(`  detection: ${passed} of ${Object.keys(DETECT).length + 3} pass`)
+    console.log(`  detection: ${passed} of ${Object.keys(DETECT).length + 4} pass`)
     await close(run)
   }
 }
@@ -1837,6 +2027,18 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
     await Bun.sleep(5000)
     if (check((await badge(run)) === "", `detect ${path}: a password field still showing after the submit offers nothing`)) passed++
   }
+  // A retry four seconds after a wrong password, still on its way when the
+  // first submit's five seconds are up: that check is about the first submit.
+  await clearBadge(run)
+  await signIn(run, page, "/fails/retry", "retry@acme.test", "a wrong password")
+  await page.locator("#error").filter({ hasText: "isn't right" }).waitFor()
+  await Bun.sleep(4000)
+  await page.locator("#password").fill("")
+  await page.locator("#password").pressSequentially("the right password")
+  await page.click("button[type=submit]")
+  await page.waitForURL("**/app/dashboard")
+  if (check(!!(await offered(run)), "detect retry: the first submit's failure doesn't end the retry that went through")) passed++
+  else await diagnose(run, page, "retry")
   await clearBadge(run)
   await signIn(run, page, "/login", "typed@acme.test", "first step")
   await page.waitForURL("**/mfa")
@@ -1846,7 +2048,7 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
   return passed
 }
 
-const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, locked, notInstalled }
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, generator, locked, notInstalled }
 const once: Record<string, () => Promise<void>> = { detection, coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])

@@ -27,25 +27,25 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 
 ## Layout
 
-| Path                     | What                                                            |
-| ------------------------ | --------------------------------------------------------------- |
-| `src/background.ts`      | Service worker: routes messages                                 |
-| `src/bg/host.ts`         | The one native port: hello, ids, backoff, `changed`             |
-| `src/bg/frames.ts`       | Which frames get logins; delivery to one document               |
-| `src/bg/autofill.ts`     | Menu tokens, fills, email-first continuation, popup             |
-| `src/bg/save.ts`         | Captured submits, `check`, offers in the popup, `save`          |
-| `src/bg/site.ts`         | Fillable origins and same-site frames                           |
-| `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback        |
-| `src/passkey-hook.ts`    | Page-world `navigator.credentials` hook                         |
-| `src/passkey-options.ts` | The hook's options, serialized whole for the extension          |
-| `src/content.ts`         | Content script: scans, submit capture, quiet-page signal        |
-| `src/content/`           | Detection, Shadow DOM, filling, the menu frame, passkey channel |
-| `src/menu.ts`            | Inline menu page                                                |
-| `src/popup.ts`           | Toolbar popup: status, logins, save offers, passkey prompts     |
-| `src/protocol.ts`        | Host message types and parsing                                  |
-| `src/messages.ts`        | Messages inside the extension                                   |
-| `static/`                | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons       |
-| `e2e/`                   | Headless Chromium runs against a fake host                      |
+| Path                     | What                                                                         |
+| ------------------------ | ---------------------------------------------------------------------------- |
+| `src/background.ts`      | Service worker: routes messages                                              |
+| `src/bg/host.ts`         | The one native port: hello, ids, backoff, `changed`                          |
+| `src/bg/frames.ts`       | Which frames get logins; delivery to one document                            |
+| `src/bg/autofill.ts`     | Menu tokens, fills, email-first continuation, popup                          |
+| `src/bg/save.ts`         | Captured submits, `check`, offers in the popup, `save`                       |
+| `src/bg/site.ts`         | Fillable origins and same-site frames                                        |
+| `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback                     |
+| `src/passkey-hook.ts`    | Page-world `navigator.credentials` hook                                      |
+| `src/passkey-options.ts` | The hook's options, serialized whole for the extension                       |
+| `src/content.ts`         | Content script: scans, submit capture, quiet-page signal                     |
+| `src/content/`           | Detection, Shadow DOM, filling, the menu frame, field rules, passkey channel |
+| `src/menu.ts`            | Inline menu page                                                             |
+| `src/popup.ts`           | Toolbar popup: status, logins, save offers, passkey prompts                  |
+| `src/protocol.ts`        | Host message types and parsing                                               |
+| `src/messages.ts`        | Messages inside the extension                                                |
+| `static/`                | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons                    |
+| `e2e/`                   | Headless Chromium runs against a fake host                                   |
 
 Tests in `test/` run under `bun test` with happy-dom: form detection on
 fixtures (including Shadow DOM and frames), origin and same-site rules, frame
@@ -61,8 +61,6 @@ and checks every registration and assertion with `@simplewebauthn/server`.
 
 ## Not here
 
-- **Password generation.** The host offers `list`, `fill`, `check`, `save`
-  and `passkeys` and no `generate`, so sign-up forms get no suggestion.
 - **Opening the app.** Deadbolt has no URL scheme and the host no message for
   it, so "Open Deadbolt" in the popup says where to find the app.
 - "Sign in with…" memory, Firefox and Safari.
@@ -95,4 +93,6 @@ New for Deadbolt: the host client and protocol types, the popup and its save
 offers, the same-site frame check, the quiet-page sign-in signal, the
 postMessage token handoff, form-bound fills and fill acks, the single acked
 passkey port (Foyer accepted whichever port acked first), passkey prompts in
-the popup, the OpenCode theme and the icons.
+the popup, generated passwords held by the agent until a sign-up goes through
+(only strong ones, with page patterns read by a small parser rather than run),
+the OpenCode theme and the icons.

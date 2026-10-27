@@ -11,16 +11,18 @@
 // has logins or Deadbolt is locked, and the values written into its own fields
 // after the user picks an account.
 
-import { MENU_ROLES, type FillAck, type QueryReply, type ToBackground, type ToContent } from "../messages"
+import { GENERATE_KINDS, MENU_ROLES, type FillAck, type QueryReply, type SurfaceKind, type ToBackground, type ToContent } from "../messages"
 import { approvals } from "./approvals"
 import type { Field } from "./detect"
 import { fillFields } from "./fill"
+import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { deepActiveElement } from "./shadow"
 
 export interface PageState {
   targets(): Field[]
   /** Which form snapshot `targets` is; it changes whenever the fields do. */
   form(): number
+  kind(): SurfaceKind | null
   /** Scan again now, so `targets` and `form` are current. */
   rescan(): void
 }
@@ -151,10 +153,15 @@ async function maybeOpen(el: HTMLInputElement) {
   if ((emptyUntil.get(el) ?? 0) > Date.now()) return
   const t = targetFor(el)
   if (!t || !MENU_ROLES.includes(t.role)) return
+  const kind = state.kind()
+  const generating = t.role === "new-password"
+  if (generating && !(kind && GENERATE_KINDS.includes(kind))) return
   if (anchor === el && host) return
   querying = (async () => {
     const roles = [...new Set(state.targets().map((x) => x.role))]
-    const reply = await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form() })
+    // A pattern outside what generate.ts reads, or lengths that can't meet: no generated password.
+    const rules = generating ? fieldRules(state.targets()) : undefined
+    const reply = rules === null ? null : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules })
     if (reply?.token && reply.rows > 0) {
       if (deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
     } else emptyUntil.set(el, Date.now() + 15_000)
@@ -218,10 +225,15 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
   lastGestureAt = 0
   state.rescan()
   if (state.form() !== message.form) return { filled: [] }
+  // A generated password the boxes' pattern won't take (the page changed it since the menu opened).
+  const approved = approvals.get(String(message.approval), message.form)
+  if (message.values.newPassword && approved && !fitsPattern(approved, message.values.newPassword)) return { filled: [], rejected: true }
   // Only the fields approved for this fill, never one that became fillable since.
   const targets = approvals.take(String(message.approval), message.form, state.targets())
   if (!targets?.length) return { filled: [] }
   const { filled, last } = await fillFields(targets, message.values)
+  if (filled.includes("new-password") && message.values.newPassword && typeof message.generated === "string")
+    rememberGenerated(message.generated, message.values.newPassword)
   if (filled.length) {
     lastFilled = targets.filter((t) => filled.includes(t.role)).map((t) => t.el)
     submittedSinceFill = false
@@ -286,6 +298,9 @@ export function initMenu(page: PageState) {
       case "db:fill":
         applyFill(message).then(respond, () => respond({ filled: [] }))
         return true
+      case "db:generated":
+        keptGenerated(String(message.generated))
+        return void respond(true)
       case "db:close-menu":
         if (message.token === token) {
           dismissedFor = anchor

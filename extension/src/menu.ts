@@ -15,6 +15,8 @@ let parentOrigin = ""
 const list = document.getElementById("list")!
 const foot = document.getElementById("foot")!
 let accounts: Row[] = []
+/** The menu offers a generated password (one row) instead of accounts. */
+let generating = false
 let focused: FieldRole = "username"
 let active = 0
 let busy = false
@@ -52,6 +54,18 @@ function row(item: Row, i: number): HTMLElement {
   return r
 }
 
+function generateRow(): HTMLElement {
+  const r = h(
+    "button",
+    { class: "row active", type: "button", role: "option", "aria-selected": "true" },
+    h("span", { class: "tile soft", "aria-hidden": "true" }, icon("key")),
+    h("span", { class: "text" }, h("span", { class: "title" }, "Use a strong password"), h("span", { class: "sub" }, "Saved only if you sign up with it")),
+    h("kbd", { class: "enter", "aria-hidden": "true" }, "⏎"),
+  )
+  r.addEventListener("click", (e) => e.isTrusted && e.detail > 0 && void pick(0))
+  return r
+}
+
 function notice(glyph: Element, title: string, sub: string): HTMLElement {
   return h("div", { class: "row notice" }, h("span", { class: "tile soft" }, glyph), h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)))
 }
@@ -70,6 +84,7 @@ function highlight() {
 
 function showStatus(status: Status) {
   accounts = []
+  generating = false
   if (status.state === "locked") {
     list.replaceChildren(notice(icon("lock"), "Deadbolt is locked", "Unlock it in the app, then come back"))
     footer("Deadbolt", "Locked")
@@ -87,15 +102,15 @@ function showStatus(status: Status) {
  */
 async function pick(i: number) {
   const a = accounts[i]
-  if (!a || busy) return
+  if ((!a && !generating) || busy) return
   if (!dwell.settled(pressedAt)) return footer("", dwell.visible ? "Pick again in a moment." : COVERED)
   busy = true
   if (!(await confirmPick(dwell, pressedAt))) {
     busy = false
     return footer("", COVERED)
   }
-  footer("", "passkey" in a ? "Signing in…" : "Filling…")
-  const reply = await send<PickReply>({ type: "db:menu-pick", token, ref: "passkey" in a ? a.passkey.ref : a.account.ref })
+  footer("", a && "passkey" in a ? "Signing in…" : "Filling…")
+  const reply = await send<PickReply>(!a ? { type: "db:menu-generate", token } : { type: "db:menu-pick", token, ref: "passkey" in a ? a.passkey.ref : a.account.ref })
   busy = false
   if (!reply?.ok) footer("", reply?.message || "Couldn't fill. Try again.")
 }
@@ -114,6 +129,7 @@ document.addEventListener("keydown", (e) => {
   if (e.isTrusted) pressedAt = e.timeStamp
   if (e.key === "Escape") return void send({ type: "db:menu-dismiss", token })
   if (e.key === "Enter" || e.key === " ") e.preventDefault()
+  if (generating) return void (e.key === "Enter" && (entry.entered ? pick(0) : footer("", "Press ↓ in the field to choose.")))
   if (!accounts.length) return
   if (e.key === "ArrowDown") active = Math.min(active + 1, accounts.length - 1)
   else if (e.key === "ArrowUp") active = Math.max(active - 1, 0)
@@ -125,6 +141,14 @@ document.addEventListener("keydown", (e) => {
 
 function show(reply: MenuLoadReply) {
   if (reply.kind === "status") return showStatus(reply.status)
+  if (reply.kind === "generate") {
+    accounts = []
+    generating = true
+    active = 0
+    list.replaceChildren(generateRow())
+    return footer(reply.site, "⏎ to fill")
+  }
+  generating = false
   accounts = [...(reply.passkeys ?? []).map((passkey) => ({ passkey })), ...reply.accounts.map((account) => ({ account }))]
   focused = reply.focused
   active = Math.min(active, Math.max(accounts.length - 1, 0))
