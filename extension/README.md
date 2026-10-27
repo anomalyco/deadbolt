@@ -33,12 +33,13 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/bg/host.ts`         | The one native port: hello, ids, backoff, `changed`             |
 | `src/bg/frames.ts`       | Which frames get logins; delivery to one document               |
 | `src/bg/autofill.ts`     | Menu tokens, fills, email-first continuation, popup             |
-| `src/bg/save.ts`         | Captured submits, `check`, offers in the popup, `save`          |
+| `src/bg/save.ts`         | Captured submits, sign-in outcomes, `check`, offers, `save`     |
 | `src/bg/site.ts`         | Fillable origins and same-site frames                           |
 | `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback        |
 | `src/passkey-hook.ts`    | Page-world `navigator.credentials` hook                         |
 | `src/passkey-options.ts` | The hook's options, serialized whole for the extension          |
-| `src/content.ts`         | Content script: scans, submit capture, quiet-page signal        |
+| `src/content.ts`         | Content script: scans, submit capture, settled-page signal      |
+| `src/content/outcome.ts` | What a settled page shows, as yes-or-no facts for `bg/save.ts`  |
 | `src/content/`           | Detection, Shadow DOM, filling, the menu frame, passkey channel |
 | `src/menu.ts`            | Inline menu page                                                |
 | `src/popup.ts`           | Toolbar popup: status, logins, save offers, passkey prompts     |
@@ -92,7 +93,7 @@ its call reporting and FedCM hooks, SSO memory, the external-extension allowlist
 and its dataset, and the dashboard.
 
 New for Deadbolt: the host client and protocol types, the popup and its save
-offers, the same-site frame check, the quiet-page sign-in signal, the
+offers, the same-site frame check, the sign-in outcome probe, the
 postMessage token handoff, form-bound fills and fill acks, the single acked
 passkey port (Foyer accepted whichever port acked first), passkey prompts in
 the popup, the OpenCode theme and the icons.

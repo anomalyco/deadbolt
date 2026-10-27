@@ -3,9 +3,12 @@
 // keep what was submitted in memory, ask the host whether it's new, changed
 // or already saved, and save only after the user says so.
 //
-// A sign-in counts as successful when the top page of the same site then
-// shows no login form for a moment (the content script's `db:quiet`) on a
-// page that doesn't look like a sign-in step.
+// Whether a sign-in worked is judged from what the top page shows once it
+// settles (the content script's `db:settled`): the background asks it for
+// PageFacts (`db:probe`, booleans only) and judges them (see judge). A failed
+// sign-in, a code step or a captcha offers nothing; a page that shows the
+// account or a Sign out control confirms it; a page with neither, a moment
+// later, is only likely, and gets a badge but never opens the popup.
 //
 // The offer is browser UI, never page UI: the toolbar button gets a badge and
 // the popup shows the offer when opened. A page can see any element put into
@@ -13,11 +16,13 @@
 // popup by itself does move focus away from the page, which a page can see.
 // So every check that finishes uses up the site's turn, whatever it said: the
 // popup opens by itself for at most one check per site every ten minutes,
-// across tabs, and every other offer only badges.
+// across tabs, and every other offer only badges. Only a confirmed sign-in
+// may open it, and only its check uses the turn: a likely one never opens
+// the popup, so its check tells the page nothing.
 
-import type { ChooseReply, OfferChoice, SaveOffer } from "../messages"
+import type { ChooseReply, OfferChoice, PageFacts, SaveOffer } from "../messages"
 import type { SaveReply } from "../protocol"
-import { newToken, targetFor } from "./frames"
+import { newToken, sendToFrame, targetFor, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
 import { saveTitle, saveUrl, senderOrigin, siteOf } from "./site"
 
@@ -25,8 +30,20 @@ import { saveTitle, saveUrl, senderOrigin, siteOf } from "./site"
 export const CAPTURE_TTL_MS = 3 * 60_000
 /** How long an offer (and the password in it) waits for an answer. */
 export const OFFER_TTL_MS = 5 * 60_000
+/** A capture waiting on a code step or a captcha is kept this long at most, from its password. */
+export const HELD_TTL_MS = 5 * 60_000
+/** A page that showed nothing either way is looked at again this much later. */
+export const REPROBE_MS = 4000
 /** The popup opens by itself at most once per site in this long, across tabs. */
 export const AUTO_OPEN_EVERY_MS = 10 * 60_000
+/** Not now holds back the same login on the same site this long. */
+export const NOT_NOW_MS = 24 * 60 * 60_000
+/** chrome.storage.local: sites the user said Never for. */
+export const NEVER_KEY = "neverSave"
+/** chrome.storage.session: SHA-256 of `site\nusername` → until when Not now holds it back. */
+const NOT_NOW_KEY = "notNow"
+/** chrome.storage.session: the salt for those hashes, made once per browser session. */
+const SALT_KEY = "notNowSalt"
 const MAX_PASSWORD = 4096
 const MAX_USERNAME = 500
 const BADGE = "#f02e29"
@@ -42,9 +59,13 @@ interface Capture {
   /** What a new login is named and where it's saved: the form's page title and URL. */
   title: string
   url: string
-  /** When it's forgotten: set when a password is submitted, never pushed back by a username alone. */
+  /** When the password was submitted. */
+  since: number
+  /** When it's forgotten: set when a password is submitted, never pushed back by a username alone; a code step or captcha may hold it longer. */
   until: number
   timer: ReturnType<typeof setTimeout>
+  /** A page said this sign-in failed: only a confirmed one may offer it now. */
+  failed: boolean
 }
 
 /**
@@ -68,6 +89,68 @@ interface Offer {
 
 type Pending = { offer: Omit<SaveOffer, "id">; save: Offer["save"] }
 
+/**
+ * What a settled page says about the sign-in:
+ * - failed: an error without the account or Sign out showing, or the form
+ *   back (with an error, or its password emptied). No offer, and from then on
+ *   only a confirmed sign-in offers this capture.
+ * - pending: a code step or a captcha. No offer yet; the capture is held.
+ * - undecided: nothing either way yet. Looked at again, then no offer.
+ * - confirmed: no form, error or challenge, and the account or Sign out shows. Offer; the popup may open.
+ * - likely: no form, error or challenge and nothing more, on the second look. Badge only.
+ */
+export type Outcome = "failed" | "pending" | "undecided" | "confirmed" | "likely"
+
+/**
+ * `second`: the page was looked at once already. `created`: a sign-up or
+ * new password, whose next page is often "verify your email" on a sign-in
+ * looking URL.
+ */
+export function judge(f: PageFacts, second: boolean, created: boolean): Outcome {
+  // An error on a page that signed in (a stale banner, a widget's notice) doesn't undo it.
+  if (f.error && (f.loginForm || !(f.account || f.signOut))) return "failed"
+  if (f.mfa || f.challenge) return "pending"
+  if (f.loginForm) return f.passwordEmpty ? "failed" : "undecided"
+  if (f.account || f.signOut) return "confirmed"
+  // A sign-in URL without evidence (/login?error=1, /session) isn't enough.
+  if (f.loginish && !created) return "undecided"
+  return second ? "likely" : "undecided"
+}
+
+const FACTS: Array<keyof PageFacts> = ["loginForm", "passwordEmpty", "mfa", "error", "challenge", "account", "signOut", "loginish"]
+
+/** A content script's PageFacts, if it answered with exactly those booleans. */
+export function cleanFacts(reply: unknown): PageFacts | null {
+  if (!reply || typeof reply !== "object") return null
+  const r = reply as Record<string, unknown>
+  return FACTS.every((k) => typeof r[k] === "boolean") ? (Object.fromEntries(FACTS.map((k) => [k, r[k]])) as unknown as PageFacts) : null
+}
+
+let salting: Promise<string> | undefined
+
+/** The session's salt, so a stored hash can't be checked against a guessed username without it. */
+function salt(): Promise<string> {
+  salting ??= (async () => {
+    const stored = (await chrome.storage.session.get(SALT_KEY))[SALT_KEY]
+    if (typeof stored === "string" && stored) return stored
+    const made = newToken()
+    await chrome.storage.session.set({ [SALT_KEY]: made })
+    return made
+  })()
+  salting.catch(() => (salting = undefined))
+  return salting
+}
+
+async function hashLogin(site: string, username: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${await salt()}\n${site}\n${username}`))
+  return Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, "0")).join("")
+}
+
+async function neverSites(): Promise<string[]> {
+  const list = (await chrome.storage.local.get(NEVER_KEY).catch(() => ({})) as Record<string, unknown>)[NEVER_KEY]
+  return Array.isArray(list) ? list.filter((s): s is string => typeof s === "string") : []
+}
+
 const clip = (value: unknown, max: number) => (typeof value === "string" && value.length > 0 && value.length <= max ? value : undefined)
 
 function siteOfUrl(url: string | undefined): string | null {
@@ -87,14 +170,19 @@ export class Saver {
   /** The site each tab's top page was last on, to tell when a tab leaves it. */
   private sites = new Map<number, string | null>()
 
+  /** Bumped by each settled page in a tab; a second look for an older one is dropped. */
+  private rounds = new Map<number, number>()
+
   /** Serializes the once-per-site check, so two tabs can't both take the turn. */
   private opening: Promise<unknown> = Promise.resolve()
+  private ttl: { capture: number; offer: number; held: number; reprobe: number }
 
   constructor(
     private host: Host,
-    private ttl = { capture: CAPTURE_TTL_MS, offer: OFFER_TTL_MS },
+    ttl: { capture?: number; offer?: number; held?: number; reprobe?: number } = {},
     private now: () => number = Date.now,
   ) {
+    this.ttl = { capture: CAPTURE_TTL_MS, offer: OFFER_TTL_MS, held: HELD_TTL_MS, reprobe: REPROBE_MS, ...ttl }
     // Locked or gone: nothing waits to be saved, and nothing is kept.
     host.onChange((status) => {
       if (status.state !== "ready") this.forgetAll()
@@ -129,6 +217,8 @@ export class Saver {
     if (!target || !page || !this.fresh(tabId, ticket)) return
     const site = siteOf(new URL(target.origin).hostname)
     if (!site) return
+    // Never for this site: what was typed isn't even kept.
+    if ((await neverSites()).includes(site) || !this.fresh(tabId, ticket)) return
     const username = typeof raw.username === "string" && raw.username.length <= MAX_USERNAME ? raw.username.trim() || undefined : undefined
     const password = clip(raw.password, MAX_PASSWORD)
     const newPassword = clip(raw.newPassword, MAX_PASSWORD)
@@ -137,13 +227,27 @@ export class Saver {
     const same = prev && prev.site === site && prev.until > now ? prev : undefined
     // A username on its own (an email-first step) joins the password already
     // held, and it goes when that password would have.
-    const until = password || newPassword || !same ? now + this.ttl.capture : same.until
+    const restart = password || newPassword || !same
+    const until = restart ? now + this.ttl.capture : same.until
+    const since = restart ? now : same.since
     const base = same
       ? { ...same, username: username ?? same.username, password: password ?? same.password, newPassword: newPassword ?? same.newPassword }
       : { site, origin: target.origin, username, password, newPassword, title: saveTitle(raw.title, site), url: saveUrl(page) }
     this.dropCapture(tabId)
     const timer = setTimeout(() => this.dropCapture(tabId), Math.max(0, until - now))
-    this.captures.set(tabId, { ...base, until, timer })
+    // A new password is a new attempt; a username joining it keeps what was said about it.
+    const failed = restart ? false : same.failed
+    this.captures.set(tabId, { ...base, since, until, timer, failed })
+  }
+
+  /** A code step or captcha: keep the capture a while longer, up to the held cap. */
+  private hold(tabId: number, c: Capture) {
+    const now = this.now()
+    const until = Math.min(Math.max(c.until, now + this.ttl.capture), c.since + this.ttl.held)
+    if (until <= c.until) return
+    clearTimeout(c.timer)
+    c.until = until
+    c.timer = setTimeout(() => this.dropCapture(tabId), Math.max(0, until - now))
   }
 
   private dropCapture(tabId: number) {
@@ -153,22 +257,70 @@ export class Saver {
     this.captures.delete(tabId)
   }
 
-  /** The top page of a tab shows no login form: the sign-in may have gone through. */
-  async quiet(sender: chrome.runtime.MessageSender, loginish: boolean) {
+  /**
+   * The top page of a tab settled after a submit: it shows no login form, or
+   * a code step, or the submit is a moment old. Look at it, and offer if the
+   * sign-in worked (see judge).
+   */
+  async settled(sender: chrome.runtime.MessageSender) {
     const tabId = sender.tab?.id
-    if (tabId === undefined || sender.frameId !== 0 || loginish || !this.captures.has(tabId)) return
+    if (tabId === undefined || sender.frameId !== 0 || !this.captures.has(tabId)) return
     const ticket = this.ticket(tabId)
+    const round = (this.rounds.get(tabId) ?? 0) + 1
+    this.rounds.set(tabId, round)
     const target = await targetFor(sender)
     const c = this.captures.get(tabId)
     if (!target || !c || !this.fresh(tabId, ticket) || siteOf(new URL(target.origin).hostname) !== c.site) return
+    const current = () => this.captures.get(tabId) === c && this.rounds.get(tabId) === round && this.fresh(tabId, ticket)
+    const created = !!c.newPassword
+    let facts = await this.probe(target, c)
+    let outcome = facts ? judge(facts, false, created) : "undecided"
+    if (outcome === "undecided" && facts) {
+      await new Promise((resolve) => setTimeout(resolve, this.ttl.reprobe))
+      if (!current()) return
+      facts = await this.probe(target, c)
+      outcome = facts ? judge(facts, true, created) : "undecided"
+    }
+    if (!current()) return
+    if (outcome === "pending") this.hold(tabId, c)
+    if (outcome === "failed") c.failed = true
+    // Failed or not sure: keep it. A retry replaces it; a later page may settle it,
+    // but after a failure only by showing the account or Sign out.
+    if (outcome !== "confirmed" && (outcome !== "likely" || c.failed)) return
     this.dropCapture(tabId)
     if (c.until <= this.now()) return
+    if ((await neverSites()).includes(c.site)) return
+    if (c.username && !c.newPassword && (await this.heldBack(c.site, c.username))) return
     const decided = await this.decide(c).catch((): { asked: boolean; pending?: Pending } => ({ asked: true }))
     // The page may be watching for the popup: a finished check uses up the
-    // site's turn whether or not there's anything to offer.
-    const turn = decided.asked ? await this.openTurn(c.site).catch(() => false) : false
+    // site's turn whether or not there's anything to offer. Only a confirmed
+    // sign-in may open the popup, so only its check takes the turn.
+    const turn = decided.asked && outcome === "confirmed" ? await this.openTurn(c.site).catch(() => false) : false
     if (!decided.pending || !(await this.still(tabId, ticket, c.site))) return
+    if (await this.heldBack(c.site, decided.pending.offer.username)) return
     await this.publish(tabId, ticket, decided.pending, turn)
+  }
+
+  /** What the top page shows now, from the document that settled. */
+  private async probe(target: FrameTarget, c: Capture): Promise<PageFacts | null> {
+    return cleanFacts(await sendToFrame(target, { type: "db:probe", ...(c.username ? { username: c.username } : {}) }))
+  }
+
+  /** Not now was said to this login on this site in the last day. */
+  private async heldBack(site: string, username: string): Promise<boolean> {
+    const held = (await chrome.storage.session.get(NOT_NOW_KEY).catch(() => ({})) as Record<string, unknown>)[NOT_NOW_KEY]
+    if (!held || typeof held !== "object") return false
+    const until = (held as Record<string, unknown>)[await hashLogin(site, username)]
+    return typeof until === "number" && until > this.now()
+  }
+
+  private async holdBack(site: string, username: string) {
+    const stored = (await chrome.storage.session.get(NOT_NOW_KEY).catch(() => ({})) as Record<string, unknown>)[NOT_NOW_KEY]
+    const now = this.now()
+    const held: Record<string, number> = {}
+    if (stored && typeof stored === "object") for (const [k, v] of Object.entries(stored)) if (typeof v === "number" && v > now) held[k] = v
+    held[await hashLogin(site, username)] = now + NOT_NOW_MS
+    await chrome.storage.session.set({ [NOT_NOW_KEY]: held }).catch(() => {})
   }
 
   /**
@@ -260,6 +412,10 @@ export class Saver {
     if (choice !== "save") {
       this.moveOn(tabId)
       this.dropOffer(tabId, id)
+      if (choice === "never") {
+        this.dropCapture(tabId)
+        await this.setNever(o.offer.site, true)
+      } else await this.holdBack(o.offer.site, o.offer.username)
       return { ok: true, message: "" }
     }
     o.saving = true
@@ -279,6 +435,31 @@ export class Saver {
     }
   }
 
+  private async setNever(site: string, never: boolean) {
+    const list = (await neverSites()).filter((s) => s !== site)
+    if (never) list.push(site)
+    await chrome.storage.local.set({ [NEVER_KEY]: list }).catch(() => {})
+  }
+
+  private async topSite(tabId: number): Promise<string | null> {
+    const frame = await chrome.webNavigation.getFrame({ tabId, frameId: 0 }).catch(() => null)
+    return siteOfUrl(frame?.url)
+  }
+
+  /** The tab's site, if the user said Never for it. */
+  async savingOff(tabId: number): Promise<string | undefined> {
+    const site = await this.topSite(tabId)
+    return site && (await neverSites()).includes(site) ? site : undefined
+  }
+
+  /** Offer to save on the tab's site again. */
+  async savingOn(tabId: number): Promise<boolean> {
+    const site = await this.topSite(tabId)
+    if (!site) return false
+    await this.setNever(site, false)
+    return true
+  }
+
   /** The tab's top page committed a new document. Another site's page ends the sign-in and its offer. */
   navigated(tabId: number, url: string) {
     const site = siteOfUrl(url)
@@ -291,6 +472,7 @@ export class Saver {
   forgetTab(tabId: number) {
     this.moveOn(tabId)
     this.sites.delete(tabId)
+    this.rounds.delete(tabId)
     this.dropCapture(tabId)
     this.dropOffer(tabId)
   }

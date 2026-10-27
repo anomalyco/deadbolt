@@ -31,10 +31,12 @@ export type Status =
 
 export type ToBackground =
   // content script
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number }
+  /** `explicit`: the user clicked into the field or pressed ↓ in it, rather than just focusing it. */
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; explicit?: boolean }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean }
-  | { type: "db:quiet"; loginish: boolean }
+  /** The top page may have finished a sign-in step: it showed no login form for a moment, or moved on to a code step. */
+  | { type: "db:settled" }
   | { type: "db:capture"; username?: string; password?: string; newPassword?: string; title: string }
   | { type: "db:menu-close"; token: string; dismissed?: boolean }
   // inline menu
@@ -48,6 +50,8 @@ export type ToBackground =
   | { type: "db:popup-fill"; tabId: number; ref: string }
   /** `id`: the offer the popup showed; any other gets nothing. */
   | { type: "db:popup-offer"; tabId: number; id: string; choice: OfferChoice }
+  /** Turn saving back on for the tab's site after "Never for this site". */
+  | { type: "db:popup-saving-on"; tabId: number }
   // passkeys (bg/passkeys.ts): the content script relays the page's hook
   /** `request`: the hook's id for the call; `options`: the page's options, checked in the background. */
   | { type: "pk:get" | "pk:create"; request: number; options: unknown; allowed: boolean }
@@ -69,6 +73,11 @@ export type ToContent =
   | { type: "db:approve"; form: number; measure: boolean }
   /** Where the fields of `approval` show now, if every one of them still does. */
   | { type: "db:approved"; approval: string }
+  /**
+   * What the top page shows now, to tell whether a sign-in worked (see
+   * PageFacts). `username`: the one just submitted, to look for on the page.
+   */
+  | { type: "db:probe"; username?: string }
   /** Report the login form now, or that there's none. Answers once the background has it. */
   | { type: "db:report" }
   | { type: "db:close-menu"; token: string }
@@ -78,6 +87,29 @@ export type ToContent =
   | { type: "db:frame-child"; nonce: string; boxes: Box[] }
   /** To the frame below: tell the frame above which element you're in. */
   | { type: "db:frame-announce"; nonce: string }
+
+/**
+ * What the top page shows after a sign-in was submitted, as the content
+ * script's answer to db:probe. Only booleans: no page text or values.
+ */
+export interface PageFacts {
+  /** A login, sign-up or change-password form still shows. */
+  loginForm: boolean
+  /** That form's password box is empty. */
+  passwordEmpty: boolean
+  /** A code step: the password went through, the sign-in isn't finished. */
+  mfa: boolean
+  /** A visible error, such as "Incorrect password" or "Too many attempts". */
+  error: boolean
+  /** A captcha or bot challenge. */
+  challenge: boolean
+  /** The submitted username shows on the page. */
+  account: boolean
+  /** A visible Sign out or Log out control. */
+  signOut: boolean
+  /** The URL looks like a sign-in step (see LOGIN_URL). */
+  loginish: boolean
+}
 
 /** A rectangle in a frame's viewport, in CSS pixels. */
 export interface Box {
@@ -140,9 +172,12 @@ export interface PopupReply {
   offer?: SaveOffer
   /** A passkey sign-in or registration waiting for the user, for this tab. */
   passkey?: PasskeyPrompt
+  /** The tab's site, when the user said "Never for this site". */
+  savingOff?: string
 }
 
-export type OfferChoice = "save" | "later"
+/** "later" (Not now) also holds back the same login on this site for a day; "never" stops offers for the site. */
+export type OfferChoice = "save" | "later" | "never"
 
 export interface SaveOffer {
   /** Made for each offer; the popup answers by it. */

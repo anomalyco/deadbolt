@@ -24,6 +24,26 @@ const SKIP_INPUT_TYPES = new Set([
   "datetime-local", "month", "week", "time", "search",
 ])
 
+/**
+ * Marks sites put on fields, forms or <body> to keep password managers away:
+ * 1Password's, LastPass's, Bitwarden's, Dashlane's and Deadbolt's own.
+ */
+function optedOut(el: Element | null | undefined): boolean {
+  if (!el) return false
+  const on = (name: string) => el.hasAttribute(name) && el.getAttribute(name)?.toLowerCase() !== "false"
+  return (
+    on("data-1p-ignore") ||
+    on("data-op-ignore") ||
+    on("data-bwignore") ||
+    on("data-deadbolt-ignore") ||
+    el.getAttribute("data-lpignore")?.toLowerCase() === "true" ||
+    el.getAttribute("data-form-type")?.toLowerCase() === "other"
+  )
+}
+
+/** The site asked password managers to leave this field alone, on it, its form or the page. */
+export const ignored = (el: HTMLInputElement) => optedOut(el) || optedOut(el.form ?? el.closest("form")) || optedOut(document.body)
+
 /** Minimum score for the page to count as a given kind of form. */
 const FORM_THRESHOLD = 3
 
@@ -139,7 +159,7 @@ function collectFields(roots: Array<Document | ShadowRoot>): { fields: ScannedFi
   const fields: ScannedField[] = []
   const otpBoxes: HTMLInputElement[] = []
   for (const el of deepQueryAll<HTMLInputElement>("input", roots).slice(0, 200)) {
-    if (!eligible(el) || !isVisible(el)) continue
+    if (!eligible(el) || !isVisible(el) || ignored(el)) continue
     // One-character boxes for codes are grouped into a single split OTP field.
     if (el.maxLength === 1) {
       otpBoxes.push(el)

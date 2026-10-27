@@ -112,7 +112,9 @@ not running without sending hello, which would start the agent again.
 - **Inline menu.** Focusing a username, email, password or code field in the
   top page after a click or keypress opens a menu of that site's logins,
   title and username, under the field. ↓/↑ choose, ⏎ fills, esc closes, and
-  ↓ reopens it. Fields in frames get no menu (see Frames). It's an extension
+  ↓ reopens it. While Deadbolt is locked, the menu's "locked" row opens on
+  focus once per site until Deadbolt locks or unlocks again; after that it
+  takes a click into the field or ↓. Fields in frames get no menu (see Frames). It's an extension
   page in an iframe inside a closed shadow root on a plain element, so the
   page can't read it or click it for you.
 - **Menu visibility.** The menu samples its own visibility rather than
@@ -198,20 +200,61 @@ not running without sending hello, which would start the agent again.
   which keeps them in memory for up to three minutes from when the password
   was submitted (a username on its own joins it but doesn't extend that), and
   forgets them when Deadbolt locks or disconnects or the tab moves to another
-  site. When the
-  top page then shows no login form for a couple of seconds, it sends `check`.
+  site.
+- **Did the sign-in work?** The top page says when it settles: no login form
+  for a couple of seconds, a code step, or a couple of seconds after a
+  submit. The service worker then asks that document what it shows (see
+  Sign-in outcomes) and judges it. Only a sign-in that worked gets a `check`.
   On `new` or `update` the offer goes to the toolbar popup, never the page:
-  the toolbar button gets a badge, and the popup opens by itself where the
-  browser allows it, at most once per site every ten minutes (see the threat
-  model). The popup asks "Save login for <site>?" or
-  "Update password for <username>?" with Save and Not now, and sends `save`
-  only on Save. Each offer has its own id, and Save or Not now answers only
+  the toolbar button gets a badge, and for a confirmed sign-in the popup
+  opens by itself where the browser allows it, at most once per site every
+  ten minutes (see the threat model). The popup asks "Save login for <site>?"
+  or "Update password for <username>?" with Save, Not now and Never for this
+  site, and sends `save` only on Save. Not now also holds back the same
+  username on the site for a day (the service worker keeps a SHA-256 of the
+  site and username, salted once per browser session, in session storage,
+  not the username). Never for this
+  site keeps the site in the extension's local storage, and from then on
+  nothing typed there is kept or checked; the popup says "Saving is off for
+  <site>" with Turn on. Each offer has its own id, and Save or Not now answers only
   the offer the popup showed; if another took its place, the popup shows that
   one instead. A check that finishes after the tab left the site, closed, or
   Deadbolt locked offers nothing. Offers expire after five minutes. A new login is named after
   the form's page title and saved with that page's URL, without its query or
   fragment. A `rate_limited` check offers nothing; a `rate_limited` fill says
   to try again in a moment.
+- **Sign-in outcomes.** The content script answers with yes-or-no facts
+  only, never page text or values (`content/outcome.ts`): a login form still
+  shows, and its password box is empty; a code step; an error (a field
+  marked `aria-invalid`, or an alert or error box in view whose text says
+  incorrect, invalid, too many attempts and the like, in English, French,
+  German or Spanish; vaguer words such as expired, locked or try again, and
+  polite live regions and `alert` boxes, count only by a login form); a
+  captcha or bot check (a "Just a moment" page, a visible reCAPTCHA,
+  hCaptcha, Turnstile or Arkose frame or widget, or a captcha box on a login
+  form); the submitted username, or an email's part before the @, as a whole
+  word of four characters or more; a Sign out control; a sign-in looking
+  URL. Each walk is bounded: 400 elements, error boxes with more than 400
+  characters or a dozen elements skipped, 200 characters read from each, and
+  30 ms in all. The judgment, in order:
+  - An error with no account or Sign out showing, or with the form back, or
+    the form back with an empty password: failed. No offer, and from then on
+    that password is offered only by a confirmed sign-in.
+  - A code step or a captcha: pending. No offer yet, and the password is
+    kept up to five minutes from the submit, for the page after it.
+  - The form still there: not yet.
+  - The account or Sign out shows: confirmed. Offered, and the popup may
+    open.
+  - Nothing either way: looked at again four seconds later. Still nothing is
+    likely, and offered with the badge only. On a sign-in looking URL
+    (`/login?error=1`, `/session`) nothing is offered, except after a sign-up
+    or new password, whose next page is often "verify your email".
+  Failed and pending keep what was typed until it expires: a retry with the
+  right password replaces it and starts over.
+- **Sites that opt out.** A field is left alone, with no menu, fill or save,
+  when it, its form or the page's `<body>` has `data-1p-ignore`,
+  `data-op-ignore`, `data-lpignore="true"`, `data-bwignore`,
+  `data-form-type="other"` or `data-deadbolt-ignore`.
 - **Noise filters.** Only a real click, Enter or form submit (a trusted
   event) captures, and only a password typed in the field or filled by
   Deadbolt counts. The extension keeps an HMAC of those values, under a key
@@ -416,7 +459,13 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   `same`, `new`, `update`, or `rate_limited`. The popup opens by itself only
   when that check offered something and took the turn; every other offer only
   badges the toolbar button. A page therefore learns at most one bit per site
-  per ten minutes, and each time the user sees a popup they can decline. A fill's values reach only the content script's isolated world
+  per ten minutes, and each time the user sees a popup they can decline.
+  Only a confirmed sign-in (see Sign-in outcomes) can open the popup, so only
+  its check takes the turn; a page decides what it shows, so it can choose
+  which checks those are, but a check that can't open the popup tells it
+  nothing. Not now and Never for this site stop checks, so a page that sees
+  no popup where one would have opened may learn the user said one of them.
+  The probe itself puts nothing in the page. A fill's values reach only the content script's isolated world
   and the fields it writes. The host rate-limits checks and fills as well, so
   a runaway or compromised caller can't guess quickly.
 - **Pages can't steer fills.** A fill needs the user's pick in a menu the

@@ -4,10 +4,11 @@
 // submit tracking are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
-import { LOGIN_URL, scanPage, type Field } from "./content/detect"
+import { scanPage, type Field } from "./content/detect"
 import { initFrameChecks } from "./content/embed"
 import { ownValue, trackUserInput } from "./content/fill"
 import { initMenu, markSubmitted, refreshMenu, send, stepped } from "./content/inline"
+import { pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { deepActiveElement, openRoots } from "./content/shadow"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
@@ -27,7 +28,9 @@ let lastSignature = ""
 let reported = false
 let lastUrl = location.href
 let quietTimer: number | undefined
-let quietSentFor = ""
+/** The URL (and step) the background was last told settled for, so it's told once. */
+let settledFor = ""
+let afterSubmitTimer: number | undefined
 let lastSubmitAt = 0
 
 const sameFields = (a: Field[], b: Field[]) =>
@@ -59,19 +62,37 @@ function scan() {
   const active = deepActiveElement()
   if (active instanceof HTMLInputElement && fields.some((f) => f.el === active)) refreshMenu(active)
 
-  // The top page showing no login form for a moment is how a finished sign-in
-  // looks from here; the background then offers to save what was submitted.
+  // The top page showing no login form for a moment, or a code step, is
+  // where a sign-in may have finished or moved on. The background then asks
+  // what the page shows (db:probe) and decides whether to offer a save.
   if (!isTop) return
   window.clearTimeout(quietTimer)
-  if (!kind && quietSentFor !== location.href) {
+  if (kind === "mfa" && settledFor !== `mfa ${location.href}`) {
+    settledFor = `mfa ${location.href}`
+    send({ type: "db:settled" })
+  } else if (!kind && settledFor !== location.href) {
     const url = location.href
     quietTimer = window.setTimeout(() => {
       if (!kind && location.href === url) {
-        quietSentFor = url
-        send({ type: "db:quiet", loginish: LOGIN_URL.test(location.pathname) })
+        settledFor = url
+        send({ type: "db:settled" })
       }
     }, QUIET_AFTER_MS)
   }
+}
+
+/**
+ * A moment after a submit in the top page, whatever it shows: an error or
+ * the form back with its password emptied tells the background the sign-in
+ * failed, and a page that kept its form settles a retry.
+ */
+function settleAfterSubmit() {
+  if (!isTop) return
+  window.clearTimeout(afterSubmitTimer)
+  const url = location.href
+  afterSubmitTimer = window.setTimeout(() => {
+    if (location.href === url && kind) send({ type: "db:settled" })
+  }, QUIET_AFTER_MS)
 }
 
 /**
@@ -90,6 +111,16 @@ async function report(always: boolean) {
 }
 
 chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
+  if (message?.type === "db:probe") {
+    if (!isTop) return void respond(null)
+    try {
+      refresh()
+      respond(pageFacts(kind, fields, typeof message.username === "string" ? message.username : undefined))
+    } catch {
+      respond(null)
+    }
+    return
+  }
   if (message?.type !== "db:report") return
   refresh()
   report(true).then(() => respond(true), () => respond(false))
@@ -187,6 +218,7 @@ function userSubmitted() {
   markSubmitted()
   scheduleScan()
   void submitted()
+  settleAfterSubmit()
 }
 
 function onClick(event: MouseEvent) {

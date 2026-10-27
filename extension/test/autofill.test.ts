@@ -504,3 +504,22 @@ describe("email-first continuation", () => {
     expect(fake.session).toEqual({})
   })
 })
+
+describe("while Deadbolt is locked", () => {
+  test("a focused field shows the locked row once per site; a click or ↓ always does; locking again starts over", async () => {
+    host.setStatus({ state: "locked" })
+    const ask = (explicit = false, sender = pageSender()) => autofill.query(sender, ["email", "password"], "email", 1, explicit)
+    expect((await ask()).rows).toBe(1)
+    expect(await ask()).toEqual({ rows: 0 })
+    expect((await ask(true)).rows).toBe(1)
+    // Another site has its own once; another page of this site doesn't.
+    fake.frames["1:0"] = { url: "https://other.test/login", documentId: "other", parentFrameId: -1 }
+    expect((await ask(false, pageSender({ url: "https://other.test/login", origin: "https://other.test", documentId: "other" }))).rows).toBe(1)
+    fake.frames["1:0"] = { url: "https://app.example.com/login", documentId: "app", parentFrameId: -1 }
+    expect(await ask(false, pageSender({ url: "https://app.example.com/login", origin: "https://app.example.com", documentId: "app" }))).toEqual({ rows: 0 })
+    host.setStatus({ state: "ready", version: "0" })
+    host.setStatus({ state: "locked" })
+    fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc", parentFrameId: -1 }
+    expect((await ask()).rows).toBe(1)
+  })
+})

@@ -53,6 +53,8 @@ let submittedSinceFill = false
  * user's next click; it can't fake the user's own input event.
  */
 let lastGestureAt = 0
+/** What the user's last pointerdown landed on: a click into a field asks for the menu outright. */
+let lastPointer: EventTarget | null = null
 const GESTURE_WINDOW_MS = 1000
 const recentGesture = () => Date.now() - lastGestureAt < GESTURE_WINDOW_MS
 /**
@@ -146,15 +148,19 @@ let querying: Promise<void> | null = null
 /** Fields recently found to have no accounts, so rescans don't re-ask. */
 const emptyUntil = new WeakMap<Element, number>()
 
-async function maybeOpen(el: HTMLInputElement) {
+/**
+ * `explicit`: the user clicked into the field or pressed ↓ in it, rather than
+ * just focusing it (see Autofill.query on the locked row).
+ */
+async function maybeOpen(el: HTMLInputElement, explicit = false) {
   if (!isTop || querying || dismissedFor === el || !recentGesture()) return
-  if ((emptyUntil.get(el) ?? 0) > Date.now()) return
+  if (!explicit && (emptyUntil.get(el) ?? 0) > Date.now()) return
   const t = targetFor(el)
   if (!t || !MENU_ROLES.includes(t.role)) return
   if (anchor === el && host) return
   querying = (async () => {
     const roles = [...new Set(state.targets().map((x) => x.role))]
-    const reply = await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form() })
+    const reply = await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), explicit })
     if (reply?.token && reply.rows > 0) {
       if (deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
     } else emptyUntil.set(el, Date.now() + 15_000)
@@ -163,17 +169,20 @@ async function maybeOpen(el: HTMLInputElement) {
 
 function onFocusIn(event: FocusEvent) {
   const el = event.composedPath()[0]
-  if (el instanceof HTMLInputElement) void maybeOpen(el)
+  if (!(el instanceof HTMLInputElement)) return
+  const clicked = recentGesture() && (lastPointer === el || (lastPointer instanceof HTMLLabelElement && lastPointer.control === el))
+  void maybeOpen(el, clicked)
 }
 
 function onPointerDown(event: PointerEvent) {
   if (!event.isTrusted) return
   lastGestureAt = Date.now()
   const target = event.composedPath()[0]
+  lastPointer = target ?? null
   // Clicking a field that already has focus (e.g. autofocus) opens the menu too.
   if (target instanceof HTMLInputElement && target === deepActiveElement() && !host) {
     if (dismissedFor === target) dismissedFor = null
-    void maybeOpen(target)
+    void maybeOpen(target, true)
   }
   if (!host) return
   const path = event.composedPath()
@@ -184,13 +193,14 @@ function onPointerDown(event: PointerEvent) {
 function onKeyDown(event: KeyboardEvent) {
   if (!event.isTrusted) return
   lastGestureAt = Date.now()
+  lastPointer = null
   const target = event.composedPath()[0]
   if (!host) {
     // ↓ in a field that has no menu (dismissed, or focused from script) asks for one.
     if (event.key === "ArrowDown" && target instanceof HTMLInputElement && targetFor(target)) {
       dismissedFor = null
       emptyUntil.delete(target)
-      void maybeOpen(target)
+      void maybeOpen(target, true)
     }
     return
   }
@@ -277,6 +287,7 @@ export function initMenu(page: PageState) {
     closeMenu()
     dismissedFor = null
     lastGestureAt = 0
+    lastPointer = null
     lastFilled = []
     submittedSinceFill = false
   })

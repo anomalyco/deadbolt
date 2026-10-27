@@ -306,7 +306,24 @@ main {
 .offer .buttons {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 6px;
+}
+
+/* Never for this site: a quiet way out, away from Save. */
+.offer .buttons .link {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.saving-off {
+  align-items: center;
+  margin-top: 12px;
+}
+
+.saving-off .link {
+  font-size: 11px;
 }
 
 .done {

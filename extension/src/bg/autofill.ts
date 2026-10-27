@@ -8,6 +8,7 @@ import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type Approved, type FieldRol
 import type { Account, ListReply, Want } from "../protocol"
 import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
+import { siteOf } from "./site"
 
 const TOKEN_TTL_MS = 2 * 60_000
 const LIST_TTL_MS = 30_000
@@ -88,12 +89,20 @@ export class Autofill {
   private queues = new Map<number, Promise<unknown>>()
   /** Bumped when a tab's email-first sign-in is cancelled; work started before then arms nothing. */
   private cancels = new Map<number, number>()
+  /** Sites whose fields already showed the locked row on focus since Deadbolt last locked or unlocked. */
+  private lockedShown = new Set<string>()
+  private lastState: string
 
   constructor(
     private host: Host,
     private passkeys?: MenuPasskeys,
   ) {
-    host.onChange(() => this.lists.clear())
+    this.lastState = host.status.state
+    host.onChange((status) => {
+      this.lists.clear()
+      if (status.state !== this.lastState) this.lockedShown.clear()
+      this.lastState = status.state
+    })
   }
 
   private async list(origin: string, fresh = false): Promise<ListReply> {
@@ -124,15 +133,23 @@ export class Autofill {
     for (const [t, v] of this.tokens) if (now - v.createdAt > TOKEN_TTL_MS) this.tokens.delete(t)
   }
 
-  async query(sender: chrome.runtime.MessageSender, roles: unknown, focused: unknown, form: unknown): Promise<QueryReply> {
+  /**
+   * The menu for a focused field. `explicit`: the user clicked into it or
+   * pressed ↓. While Deadbolt is locked, a field that was only focused shows
+   * the locked row once per site until Deadbolt locks or unlocks again.
+   */
+  async query(sender: chrome.runtime.MessageSender, roles: unknown, focused: unknown, form: unknown, explicit = false): Promise<QueryReply> {
     const target = await targetFor(sender)
     const clean = sanitizeRoles(roles)
     // The menu opens only in the top page (see inline.ts).
     if (!target || target.frameId !== 0 || !Number.isSafeInteger(form) || !MENU_ROLES.includes(focused as FieldRole) || !clean.includes(focused as FieldRole)) return { rows: 0 }
     await this.host.connect()
     let rows = 0
-    if (this.host.status.state === "locked") rows = 1
-    else if (this.host.status.state === "ready") {
+    if (this.host.status.state === "locked") {
+      const site = siteOf(new URL(target.origin).hostname) ?? target.origin
+      if (explicit || !this.lockedShown.has(site)) rows = 1
+      this.lockedShown.add(site)
+    } else if (this.host.status.state === "ready") {
       const reply = await this.list(target.origin).catch(() => null)
       rows = reply ? menuAccounts(reply.accounts, focused as FieldRole).length : 0
       rows += this.passkeys?.menuPasskeys(target, focused as FieldRole).length ?? 0

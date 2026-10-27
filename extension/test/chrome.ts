@@ -2,7 +2,7 @@
 // for testing the background classes without a browser.
 
 import type { Host } from "../src/bg/host"
-import type { Status } from "../src/messages"
+import type { PageFacts, Status } from "../src/messages"
 import type { Account, RequestBody as Request } from "../src/protocol"
 
 export const ID = "jhocodkhpifjndffenppfmdkmiolngal"
@@ -24,9 +24,12 @@ export interface FakeChrome {
   fillAck: (message: unknown) => unknown
   /** What the content script in `documentId` answers to anything else; throwing is no content script there. */
   answer: (message: { type: string; [k: string]: unknown }, documentId: string) => unknown
+  /** What the top page's content script answers to db:probe: by default, a signed-in page that shows the account. */
+  facts: Partial<PageFacts> | ((documentId: string) => Partial<PageFacts> | null)
   badges: Record<number, string>
   popups: number[]
   session: Record<string, unknown>
+  local: Record<string, unknown>
   tabs: Record<number, { active: boolean; windowId: number }>
 }
 
@@ -36,10 +39,19 @@ export function installChrome(): FakeChrome {
     delivered: [],
     fillAck: () => ({ filled: ["email", "password"] }),
     // Every field may be filled.
-    answer: (message) => (message.type === "db:approve" ? { approval: `ok-${message.form}`, roles: ["username", "email", "phone", "password", "otp"] } : true),
+    answer: (message, documentId) => {
+      if (message.type === "db:approve") return { approval: `ok-${message.form}`, roles: ["username", "email", "phone", "password", "otp"] }
+      if (message.type === "db:probe") {
+        const facts = typeof fake.facts === "function" ? fake.facts(documentId) : fake.facts
+        return facts && { ...NO_FACTS, ...facts }
+      }
+      return true
+    },
+    facts: { account: true },
     badges: {},
     popups: [],
     session: {},
+    local: {},
     tabs: { 1: { active: true, windowId: 7 } },
   }
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
@@ -64,6 +76,10 @@ export function installChrome(): FakeChrome {
         set: async (items: Record<string, unknown>) => void Object.assign(fake.session, items),
         remove: async (key: string) => void delete fake.session[key],
       },
+      local: {
+        get: async (key: string) => (key in fake.local ? { [key]: fake.local[key] } : {}),
+        set: async (items: Record<string, unknown>) => void Object.assign(fake.local, structuredClone(items)),
+      },
     },
     action: {
       setBadgeText: async ({ tabId, text }: { tabId: number; text: string }) => void (fake.badges[tabId] = text),
@@ -73,6 +89,9 @@ export function installChrome(): FakeChrome {
   }
   return fake
 }
+
+/** A page that shows nothing either way. */
+export const NO_FACTS: PageFacts = { loginForm: false, passwordEmpty: false, mfa: false, error: false, challenge: false, account: false, signOut: false, loginish: false }
 
 export const ACCOUNTS: Account[] = [
   { ref: `${"a".repeat(64)}:${"1".repeat(32)}`, vault: "Personal", title: "Example", username: "kit@example.com", hasPassword: true, hasTotp: true, urls: [] },

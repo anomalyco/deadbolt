@@ -197,11 +197,13 @@ function offerCard(offer: SaveOffer): HTMLElement {
     card.replaceChildren(h("div", { class: "done" }, h("span", { class: "done-mark" }, icon("check")), h("span", {}, reply.message)))
     setTimeout(() => void render(true), 1200)
   }
+  const never = h("button", { class: "link", type: "button" }, "Never for this site")
   const later = h("button", { class: "btn", type: "button" }, "Not now")
   const save = h("button", { class: "btn primary", type: "button" }, "Save")
+  never.addEventListener("click", () => void choose("never", never))
   later.addEventListener("click", () => void choose("later", later))
   save.addEventListener("click", () => void choose("save", save))
-  card.append(h("div", { class: "buttons" }, later, save))
+  card.append(h("div", { class: "buttons" }, never, later, save))
   return card
 }
 
@@ -275,6 +277,18 @@ function passkeyCard(prompt: PasskeyPrompt): HTMLElement {
   return card
 }
 
+/** "Saving is off for acme.com. Turn on": undoes Never for this site. */
+function savingOffLine(site: string): HTMLElement {
+  const on = h("button", { class: "link", type: "button" }, "Turn on")
+  on.addEventListener("click", async () => {
+    if (tabId === undefined) return
+    on.setAttribute("disabled", "")
+    await send<boolean>({ type: "db:popup-saving-on", tabId })
+    void render(true)
+  })
+  return h("p", { class: "note saving-off" }, h("span", {}, `Saving is off for ${site}.`), on)
+}
+
 function siteBody(reply: PopupReply): HTMLElement {
   if (reply.unfillable === "scheme") return state(icon("keyhole"), "Nothing to fill here", para("Open a website to see its logins."))
   if (reply.unfillable === "insecure")
@@ -309,7 +323,7 @@ async function render(changed = false) {
   const body = statusBody(status) ?? (reply ? siteBody(reply) : null)
 
   // Status pushes re-render; skip it when nothing visible changed.
-  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey])
+  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff])
   if (key === rendered && !changed) return
   const first = rendered === ""
   rendered = key
@@ -320,7 +334,11 @@ async function render(changed = false) {
   open?.addEventListener("click", openApp)
   root.replaceChildren(
     h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill(status)),
-    h("div", { class: `body${first ? "" : " changed"}` }, ...(reply?.passkey ? [passkeyCard(reply.passkey)] : [reply?.offer ? offerCard(reply.offer) : null, body])),
+    h(
+      "div",
+      { class: `body${first ? "" : " changed"}` },
+      ...(reply?.passkey ? [passkeyCard(reply.passkey)] : [reply?.offer ? offerCard(reply.offer) : null, body, reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff) : null]),
+    ),
     h("footer", { class: "bottom" }, open ?? h("span"), status.state === "ready" ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : null),
   )
 }

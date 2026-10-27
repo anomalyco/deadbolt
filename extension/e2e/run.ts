@@ -178,7 +178,27 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   async fetch(req) {
     const url = new URL(req.url)
+    // Where the sign-in outcome forms post (see signInOutcomes). The email
+    // posted is shown back where a real site would show the account.
+    if (req.method === "POST") {
+      const email = String((await req.formData().catch(() => null))?.get("email") ?? "").replace(/[<>&"]/g, "")
+      switch (url.pathname) {
+        case "/":
+          return html("Acme", `<h1>Acme</h1><div role="alert" class="notice">Incorrect password. Try again.</div><p><a href="/outcome/login?to=/">Back</a></p>`)
+        case "/outcome/wait":
+          return html(
+            "Just a moment...",
+            `<h1>Checking your browser</h1><p>This takes a few seconds.</p><script>setTimeout(() => location.assign("/outcome/welcome?u=" + encodeURIComponent(${JSON.stringify(email)})), 9000)</script>`,
+          )
+        case "/auth/complete":
+          return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p>`)
+      }
+    }
     switch (url.pathname) {
+      case "/outcome/login":
+        return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
+      case "/outcome/welcome":
+        return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
       case "/login": {
         const form = loginForm(url.searchParams.get("next") === "home" ? "/home" : "/mfa")
         // A password the page enables only once the email box is focused.
@@ -692,6 +712,66 @@ async function coldSave() {
   } catch (err) {
     check(false, `cold save threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "cold")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Counts the popup opening by itself, without opening it. */
+const countOpens = (run: Run) =>
+  run.worker.evaluate(() => {
+    const g = globalThis as unknown as { __opens: number }
+    g.__opens = 0
+    ;(chrome.action as unknown as { openPopup: () => Promise<void> }).openPopup = async () => void g.__opens++
+  })
+const opens = (run: Run) => run.worker.evaluate(() => (globalThis as unknown as { __opens: number }).__opens)
+const checksFor = async (run: Run, username: string) => (await hostLog(run)).filter((r) => r.type === "check" && r.username === username).length
+
+/** Whether a sign-in worked, judged from the page it lands on. */
+async function signInOutcomes() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await countOpens(run)
+
+    // A wrong password: the site answers with an error and no form, on a page that isn't a sign-in URL.
+    await signIn(run, page, "/outcome/login?to=/", "wrong@acme.test", "a wrong guess")
+    await page.waitForSelector("[role=alert]")
+    await Bun.sleep(9000)
+    check((await checksFor(run, "wrong@acme.test")) === 0, "a failed sign-in is never checked")
+    check((await badge(run)) === "", "and offers nothing")
+
+    // Signed in, but the page shows neither the account nor Sign out: badge only.
+    await signIn(run, page, "/login?next=home", "likely@acme.test", "likely password")
+    await page.waitForURL("**/home")
+    if (!check(!!(await offered(run)), "a sign-in without evidence still badges")) await diagnose(run, page, "likely")
+    check((await opens(run)) === 0, "but doesn't open the popup")
+    await clearBadge(run)
+
+    // A bot check after the submit, then the signed-in page. Long enough on
+    // the check for a page without evidence to have been offered by now.
+    await signIn(run, page, "/outcome/login?to=/outcome/wait", "captcha@acme.test", "captcha password")
+    await page.waitForURL("**/outcome/wait")
+    await Bun.sleep(8000)
+    check((await checksFor(run, "captcha@acme.test")) === 0 && (await badge(run)) === "", "a challenge page offers nothing yet")
+    await page.waitForURL("**/outcome/welcome**", { timeout: 15_000 })
+    if (!check(!!(await offered(run)), "the page after the challenge offers a save")) await diagnose(run, page, "challenge")
+    check((await checksFor(run, "captcha@acme.test")) === 1, "with one check")
+    check((await opens(run)) === 1, "and, showing the account, opens the popup")
+    await clearBadge(run)
+
+    // Signed in on a sign-in looking URL that shows the account. A fresh turn for the popup.
+    await run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "complete@acme.test", "complete password")
+    await page.waitForURL("**/auth/complete")
+    if (!check(!!(await offered(run)), "a sign-in landing on /auth/complete with the account shown offers a save")) await diagnose(run, page, "auth/complete")
+    check((await opens(run)) === 2, "and opens the popup")
+    const { p, title } = await offerIn(run)
+    check(title === "Save login for localhost?", `the popup asks to save (${title})`)
+    await p.close()
+  } catch (err) {
+    check(false, `sign-in outcomes threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "outcomes")
   } finally {
     await close(run)
   }
@@ -1601,7 +1681,7 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
 }
 
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
+const once: Record<string, () => Promise<void>> = { coldSave, signInShapes, signInOutcomes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 

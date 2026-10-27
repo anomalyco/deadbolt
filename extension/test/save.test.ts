@@ -1,8 +1,8 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { HostError } from "../src/bg/host"
-import { Saver } from "../src/bg/save"
+import { cleanFacts, judge, NEVER_KEY, NOT_NOW_MS, Saver } from "../src/bg/save"
 import type { RequestBody } from "../src/protocol"
-import { fakeHost, installChrome, pageSender, type FakeChrome, type FakeHost } from "./chrome"
+import { fakeHost, installChrome, NO_FACTS, pageSender, type FakeChrome, type FakeHost } from "./chrome"
 
 let fake: FakeChrome
 let host: FakeHost
@@ -11,7 +11,7 @@ let saver: Saver
 beforeEach(() => {
   fake = installChrome()
   host = fakeHost()
-  saver = new Saver(host.host, { capture: 60_000, offer: 60_000 })
+  saver = new Saver(host.host, { capture: 60_000, offer: 60_000, reprobe: 5 })
 })
 
 const HOME = { url: "https://www.example.com/home", documentId: "home-doc" }
@@ -19,7 +19,7 @@ const HOME = { url: "https://www.example.com/home", documentId: "home-doc" }
 const signIn = async (username: string, password: string) => {
   await saver.capture(pageSender(), { username, password, title: "Sign in to Example" })
   fake.frames["1:0"] = HOME
-  await saver.quiet(pageSender(HOME), false)
+  await saver.settled(pageSender(HOME))
 }
 
 const requests = (type: string) => host.requests.filter((r) => r.type === type)
@@ -47,8 +47,9 @@ describe("offers", () => {
     expect(saver.pending(1)?.id).toBeString()
     expect(fake.badges[1]).toBe("1")
     expect(fake.popups).toEqual([7])
-    // Nothing went to the page, and nothing was saved yet.
-    expect(fake.delivered).toEqual([])
+    // Nothing went to the page but the question of what it shows, and nothing was saved yet.
+    expect(fake.delivered.map((d) => d.message)).toEqual([{ type: "db:probe", username: "new@example.com" }])
+    expect(fake.delivered[0].options).toEqual({ documentId: "home-doc" })
     expect(host.requests.map((r) => r.type)).toEqual(["check"])
   })
 
@@ -136,7 +137,7 @@ describe("a check that finishes late", () => {
     const checks = hold("check")
     await saver.capture(pageSender(), { username: "new@example.com", password: "pw", title: "" })
     fake.frames["1:0"] = HOME
-    const quiet = saver.quiet(pageSender(HOME), false)
+    const quiet = saver.settled(pageSender(HOME))
     await waitFor(() => checks.length === 1)
     meanwhile()
     checks[0]()
@@ -175,7 +176,7 @@ describe("a check that finishes late", () => {
     await capture
     saver.navigated(1, "https://www.example.com/home")
     fake.frames["1:0"] = HOME
-    await saver.quiet(pageSender(HOME), false)
+    await saver.settled(pageSender(HOME))
     expect(requests("check")).toEqual([])
   })
 })
@@ -193,7 +194,7 @@ describe("opening the popup by itself", () => {
       fake.frames[`${tabId}:0`] = { url, documentId: `login-${tabId}`, parentFrameId: -1 }
       await saver.capture(pageSender({ tab, url, origin, documentId: `login-${tabId}` }), { username: "new@example.com", password: "pw", title: "" })
       fake.frames[`${tabId}:0`] = { url: `${origin}/home`, documentId: `home-${tabId}`, parentFrameId: -1 }
-      await saver.quiet(pageSender({ tab, url: `${origin}/home`, origin, documentId: `home-${tabId}` }), false)
+      await saver.settled(pageSender({ tab, url: `${origin}/home`, origin, documentId: `home-${tabId}` }))
       expect(saver.pending(tabId)).toBeDefined()
     }
 
@@ -226,7 +227,7 @@ describe("opening the popup by itself", () => {
     await saver.capture(pageSender({ tab: tab2, documentId: "other-login" }), { username: "b@example.com", password: "y", title: "" })
     fake.frames["1:0"] = HOME
     fake.frames["2:0"] = { url: "https://www.example.com/home", documentId: "other-home" }
-    await Promise.all([saver.quiet(pageSender(HOME), false), saver.quiet(pageSender({ tab: tab2, url: "https://www.example.com/home", documentId: "other-home" }), false)])
+    await Promise.all([saver.settled(pageSender(HOME)), saver.settled(pageSender({ tab: tab2, url: "https://www.example.com/home", documentId: "other-home" }))])
     expect([saver.pending(1), saver.pending(2)].every(Boolean)).toBe(true)
     expect(fake.popups).toHaveLength(1)
   })
@@ -266,7 +267,7 @@ describe("plaintext lifetime", () => {
     await saver.capture(pageSender(), { username: "new@example.com", password: "x", title: "" })
     await Bun.sleep(40)
     fake.frames["1:0"] = HOME
-    await saver.quiet(pageSender(HOME), false)
+    await saver.settled(pageSender(HOME))
     expect(host.requests).toEqual([])
   })
 
@@ -278,14 +279,14 @@ describe("plaintext lifetime", () => {
     await saver.capture(pageSender(), { username: "new@example.com", title: "" })
     now += 90_000
     fake.frames["1:0"] = HOME
-    await saver.quiet(pageSender(HOME), false)
+    await saver.settled(pageSender(HOME))
     expect(requests("check")).toEqual([])
 
     await saver.capture(pageSender(), { username: "new@example.com", password: "old", title: "" })
     now += 2 * 60_000
     await saver.capture(pageSender(), { password: "fresh", title: "" })
     now += 90_000
-    await saver.quiet(pageSender(HOME), false)
+    await saver.settled(pageSender(HOME))
     expect(requests("check")).toMatchObject([{ username: "new@example.com", password: "fresh" }])
   })
 
@@ -304,7 +305,7 @@ describe("plaintext lifetime", () => {
     host.setStatus({ state: "locked" })
     expect(saver.pending(1)).toBeUndefined()
     host.setStatus({ state: "ready", version: "0" })
-    await saver.quiet(pageSender(HOME), false)
+    await saver.settled(pageSender(HOME))
     expect(requests("check")).toHaveLength(1)
   })
 
@@ -316,7 +317,199 @@ describe("plaintext lifetime", () => {
     expect(saver.pending(1)).toBeUndefined()
     await saver.capture(pageSender(), { username: "b@example.com", password: "y", title: "" })
     saver.navigated(1, "https://elsewhere.net/")
-    await saver.quiet(pageSender(HOME), false)
+    await saver.settled(pageSender(HOME))
     expect(requests("check")).toHaveLength(1)
+  })
+})
+
+describe("did the sign-in work", () => {
+  const settleOn = async (url: string, documentId: string) => {
+    fake.frames["1:0"] = { url, documentId }
+    await saver.settled(pageSender({ url, documentId }))
+  }
+  const submit = (username: string, password: string) => saver.capture(pageSender(), { username, password, title: "Sign in to Example" })
+
+  test("judge", () => {
+    const f = (over: Partial<typeof NO_FACTS>) => ({ ...NO_FACTS, ...over })
+    expect(judge(f({ error: true }), true, false)).toBe("failed")
+    // A signed-in page with a stray error box is still signed in; the form back with an error isn't.
+    expect(judge(f({ error: true, account: true }), false, false)).toBe("confirmed")
+    expect(judge(f({ error: true, signOut: true }), false, false)).toBe("confirmed")
+    expect(judge(f({ error: true, account: true, loginForm: true }), true, false)).toBe("failed")
+    expect(judge(f({ loginForm: true, passwordEmpty: true }), false, false)).toBe("failed")
+    expect(judge(f({ loginForm: true }), true, false)).toBe("undecided")
+    expect(judge(f({ mfa: true }), true, false)).toBe("pending")
+    expect(judge(f({ challenge: true, signOut: true }), true, false)).toBe("pending")
+    expect(judge(f({ signOut: true, loginish: true }), false, false)).toBe("confirmed")
+    expect(judge(f({}), false, false)).toBe("undecided")
+    expect(judge(f({}), true, false)).toBe("likely")
+    expect(judge(f({ loginish: true }), true, false)).toBe("undecided")
+    // A sign-up's "verify your email" page.
+    expect(judge(f({ loginish: true }), true, true)).toBe("likely")
+  })
+
+  test("a page with an error offers nothing and keeps the capture; the retry is offered", async () => {
+    fake.facts = { error: true }
+    await submit("new@example.com", "wrong")
+    await settleOn("https://www.example.com/", "error-doc")
+    expect(requests("check")).toEqual([])
+    expect(saver.pending(1)).toBeUndefined()
+    expect(fake.badges[1]).toBeUndefined()
+    fake.facts = { account: true }
+    await submit("new@example.com", "right")
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(requests("check")).toMatchObject([{ password: "right" }])
+    expect(saver.pending(1)).toBeDefined()
+  })
+
+  test("after a failure, a page without evidence offers nothing; one with the account does", async () => {
+    fake.facts = { error: true }
+    await submit("new@example.com", "pw")
+    await settleOn("https://www.example.com/", "error-doc")
+    fake.facts = {}
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(requests("check")).toEqual([])
+    expect(saver.pending(1)).toBeUndefined()
+    // A username alone doesn't clear it either.
+    await saver.capture(pageSender(), { username: "new@example.com", title: "" })
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(requests("check")).toEqual([])
+    fake.facts = { account: true }
+    await settleOn("https://www.example.com/dashboard", "dash-doc")
+    expect(requests("check")).toHaveLength(1)
+    expect(saver.pending(1)).toBeDefined()
+  })
+
+  test("a new password after a failure starts over", async () => {
+    fake.facts = { error: true }
+    await submit("new@example.com", "wrong")
+    await settleOn("https://www.example.com/", "error-doc")
+    fake.facts = {}
+    await submit("new@example.com", "right")
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(requests("check")).toMatchObject([{ password: "right" }])
+    expect(saver.pending(1)).toBeDefined()
+  })
+
+  test("of two settled pages at once in a tab, only the newer goes on", async () => {
+    fake.facts = {}
+    await submit("new@example.com", "pw")
+    fake.frames["1:0"] = HOME
+    const first = saver.settled(pageSender(HOME))
+    const second = saver.settled(pageSender(HOME))
+    await Promise.all([first, second])
+    expect(requests("check")).toHaveLength(1)
+    // Each looked once; only the newer looked a second time.
+    expect(fake.delivered.filter((d) => d.message.type === "db:probe")).toHaveLength(3)
+    expect(saver.pending(1)).toBeDefined()
+  })
+
+  test("only whole PageFacts replies count", () => {
+    const full = { ...NO_FACTS, account: true }
+    expect(cleanFacts(full)).toEqual(full)
+    expect(cleanFacts({ ...full, text: "secret" })).toEqual(full)
+    expect(cleanFacts(null)).toBeNull()
+    expect(cleanFacts(true)).toBeNull()
+    expect(cleanFacts({ account: true })).toBeNull()
+    expect(cleanFacts({ ...full, error: "yes" })).toBeNull()
+    expect(cleanFacts({ ...full, loginish: 1 })).toBeNull()
+  })
+
+  test("a captcha holds the capture past its time; the page after it is offered", async () => {
+    let now = 1_000_000
+    saver = new Saver(host.host, { capture: 60_000, offer: 60_000, held: 120_000, reprobe: 5 }, () => now)
+    fake.facts = { challenge: true, loginish: true }
+    await submit("new@example.com", "pw")
+    now += 30_000
+    await settleOn("https://www.example.com/challenge", "challenge-doc")
+    expect(requests("check")).toEqual([])
+    expect(saver.pending(1)).toBeUndefined()
+    // Past the capture's own minute, within the held two.
+    now += 50_000
+    fake.facts = { signOut: true }
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(requests("check")).toHaveLength(1)
+    expect(saver.pending(1)).toBeDefined()
+    expect(fake.popups).toEqual([7])
+  })
+
+  test("a code step waits for the page after it", async () => {
+    fake.facts = (doc) => (doc === "mfa-doc" ? { mfa: true, loginish: true } : { account: true })
+    await submit("new@example.com", "pw")
+    await settleOn("https://www.example.com/mfa", "mfa-doc")
+    expect(requests("check")).toEqual([])
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(saver.pending(1)).toBeDefined()
+  })
+
+  test("a page with no evidence is offered by badge only, after a second look, and leaves the turn", async () => {
+    fake.facts = {}
+    await submit("new@example.com", "pw")
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(fake.delivered.filter((d) => d.message.type === "db:probe")).toHaveLength(2)
+    expect(saver.pending(1)).toBeDefined()
+    expect(fake.badges[1]).toBe("1")
+    expect(fake.popups).toEqual([])
+    // The site's turn is still there for a confirmed sign-in.
+    await saver.choose(1, saver.pending(1)!.id, "save")
+    fake.facts = { account: true }
+    await submit("other@example.com", "pw")
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(fake.popups).toEqual([7])
+  })
+
+  test("a sign-in URL without evidence offers nothing; with the account showing it's confirmed", async () => {
+    fake.facts = { loginish: true }
+    await submit("new@example.com", "pw")
+    await settleOn("https://www.example.com/login?error=1", "again-doc")
+    expect(requests("check")).toEqual([])
+    fake.facts = { loginish: true, account: true }
+    await settleOn("https://www.example.com/auth/complete", "complete-doc")
+    expect(saver.pending(1)).toBeDefined()
+    expect(fake.popups).toEqual([7])
+  })
+
+  test("a page that goes away before the second look offers nothing", async () => {
+    fake.facts = {}
+    await submit("new@example.com", "pw")
+    fake.frames["1:0"] = HOME
+    const settled = saver.settled(pageSender(HOME))
+    fake.frames["1:0"] = { url: "https://www.example.com/next", documentId: "next-doc" }
+    await settled
+    expect(requests("check")).toEqual([])
+  })
+})
+
+describe("quieter offers", () => {
+  test("Never for this site stops captures and offers there until turned back on", async () => {
+    await signIn("new@example.com", "a new password")
+    expect(await saver.choose(1, saver.pending(1)!.id, "never")).toEqual({ ok: true, message: "" })
+    expect(fake.local[NEVER_KEY]).toEqual(["example.com"])
+    expect(await saver.savingOff(1)).toBe("example.com")
+    await signIn("other@example.com", "pw")
+    expect(requests("check")).toHaveLength(1)
+    expect(saver.pending(1)).toBeUndefined()
+    expect(await saver.savingOn(1)).toBe(true)
+    expect(await saver.savingOff(1)).toBeUndefined()
+    fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc" }
+    await signIn("other@example.com", "pw")
+    expect(saver.pending(1)).toBeDefined()
+  })
+
+  test("Not now holds back the same login on the site for a day, by hash", async () => {
+    let now = 1_000_000
+    saver = new Saver(host.host, { capture: 60_000, offer: 60_000, reprobe: 5 }, () => now)
+    await signIn("new@example.com", "a new password")
+    await saver.choose(1, saver.pending(1)!.id, "later")
+    expect(JSON.stringify(fake.session)).not.toContain("new@example.com")
+    await signIn("new@example.com", "a new password")
+    expect(saver.pending(1)).toBeUndefined()
+    expect(requests("check")).toHaveLength(1)
+    // Another username on the site is still offered.
+    await signIn("b@example.com", "pw")
+    expect(saver.pending(1)?.username).toBe("b@example.com")
+    now += NOT_NOW_MS
+    await signIn("new@example.com", "a new password")
+    expect(saver.pending(1)?.username).toBe("new@example.com")
   })
 })

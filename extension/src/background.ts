@@ -38,11 +38,11 @@ host.onChange((status) => {
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
   switch (message.type) {
     case "db:query":
-      return autofill.query(sender, message.roles, message.focused, message.form)
+      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true)
     case "db:page":
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true)
-    case "db:quiet":
-      return saver.quiet(sender, message.loginish === true)
+    case "db:settled":
+      return saver.settled(sender)
     case "db:capture":
       return saver.capture(sender, message)
     case "db:menu-close":
@@ -60,12 +60,17 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       const reply: PopupReply = await autofill.popupLoad(message.tabId)
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
       const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
-      return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}) }
+      const savingOff = reply.status.state === "ready" ? await saver.savingOff(message.tabId) : undefined
+      return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}), ...(savingOff ? { savingOff } : {}) }
     }
     case "db:popup-fill":
       return fromExtensionPage(sender, "popup.html") ? autofill.popupFill(message.tabId, String(message.ref)) : { ok: false, message: "" }
     case "db:popup-offer":
-      return fromExtensionPage(sender, "popup.html") ? saver.choose(message.tabId, String(message.id), message.choice) : { ok: false, message: "" }
+      return fromExtensionPage(sender, "popup.html") && ["save", "later", "never"].includes(message.choice)
+        ? saver.choose(message.tabId, String(message.id), message.choice)
+        : { ok: false, message: "" }
+    case "db:popup-saving-on":
+      return fromExtensionPage(sender, "popup.html") ? saver.savingOn(message.tabId) : false
   }
 }
 
