@@ -4,8 +4,8 @@
 // email-first continuation are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/autofill/service.ts, by Ryan Vogel).
 
-import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
-import type { Account, ListReply, Want } from "../protocol"
+import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
 
@@ -24,6 +24,8 @@ interface MenuToken extends FrameTarget {
   createdAt: number
   /** The menu document that first loaded the token; only it may use it after. */
   menuDocumentId?: string
+  /** On a sign-up or change-password form's new-password box: what the page asks of a generated password. */
+  generate?: FieldRules
 }
 
 /**
@@ -124,15 +126,22 @@ export class Autofill {
     for (const [t, v] of this.tokens) if (now - v.createdAt > TOKEN_TTL_MS) this.tokens.delete(t)
   }
 
-  async query(sender: chrome.runtime.MessageSender, roles: unknown, focused: unknown, form: unknown): Promise<QueryReply> {
+  async query(sender: chrome.runtime.MessageSender, roles: unknown, focused: unknown, form: unknown, kind?: unknown, rules?: unknown): Promise<QueryReply> {
     const target = await targetFor(sender)
     const clean = sanitizeRoles(roles)
     // The menu opens only in the top page (see inline.ts).
     if (!target || target.frameId !== 0 || !Number.isSafeInteger(form) || !MENU_ROLES.includes(focused as FieldRole) || !clean.includes(focused as FieldRole)) return { rows: 0 }
+    // A new-password box offers a generated password, and only on sign-up and change-password forms.
+    const generating = focused === "new-password"
+    if (generating && !GENERATE_KINDS.includes(kind as SurfaceKind)) return { rows: 0 }
     await this.host.connect()
+    const generate = generating ? fieldRules(rules) : undefined
     let rows = 0
-    if (this.host.status.state === "locked") rows = 1
-    else if (this.host.status.state === "ready") {
+    const state = this.host.status.state
+    // Locked or not, the agent says whether the page's rules allow a strong password: no row if they don't.
+    if (generate && (state === "locked" || state === "ready")) rows = await this.host.send({ type: "generate-check", origin: target.origin, ...generate }).then(() => 1, () => 0)
+    else if (state === "locked") rows = 1
+    else if (state === "ready") {
       const reply = await this.list(target.origin).catch(() => null)
       rows = reply ? menuAccounts(reply.accounts, focused as FieldRole).length : 0
       rows += this.passkeys?.menuPasskeys(target, focused as FieldRole).length ?? 0
@@ -140,7 +149,7 @@ export class Autofill {
     if (!rows) return { rows: 0 }
     this.sweep()
     const token = newToken()
-    this.tokens.set(token, { ...target, roles: clean, focused: focused as FieldRole, form: form as number, createdAt: Date.now() })
+    this.tokens.set(token, { ...target, roles: clean, focused: focused as FieldRole, form: form as number, createdAt: Date.now(), generate })
     return { token, rows }
   }
 
@@ -148,6 +157,7 @@ export class Autofill {
     const t = await this.token(token, sender, parent)
     if (!t) return null
     if (this.host.status.state !== "ready") return { kind: "status", status: this.host.status }
+    if (t.generate) return { kind: "generate", site: new URL(t.origin).hostname }
     try {
       const reply = await this.list(t.origin)
       const passkeys = this.passkeys?.menuPasskeys(t, t.focused)
@@ -159,7 +169,8 @@ export class Autofill {
 
   async menuPick(token: string, ref: string, sender: chrome.runtime.MessageSender): Promise<PickReply> {
     const t = await this.token(token, sender)
-    if (!t) return { ok: false, message: "This menu has expired." }
+    // A generated-password menu lists no accounts to pick.
+    if (!t || t.generate) return { ok: false, message: "This menu has expired." }
     const signedIn = await this.passkeys?.menuPick(t, ref)
     if (signedIn) {
       this.tokens.delete(token)
@@ -171,6 +182,47 @@ export class Autofill {
     if (!account) return { ok: false, message: "That login isn't here anymore." }
     this.tokens.delete(token)
     return this.fillAndArm(t, account, t.roles, t.form)
+  }
+
+  /**
+   * The user picked the generated password: the agent makes one within the
+   * page's rules, a candidate for the page's origin, and it goes into every
+   * new-password box the content script approves. Once it's in, the agent
+   * holds it as pending; one that didn't go in is dropped. Nothing is saved;
+   * a successful submit offers to (see Saver). The content script asked for
+   * the characters and lengths its boxes' patterns take (see generate.ts), so
+   * a pattern turning the password down means the page changed, and there's
+   * no second try.
+   */
+  async menuGenerate(token: string, sender: chrome.runtime.MessageSender): Promise<PickReply> {
+    const t = await this.token(token, sender)
+    if (!t?.generate) return { ok: false, message: "This menu has expired." }
+    this.tokens.delete(token)
+    const generation = this.generation(t.tabId)
+    const approved = cleanApproved(await sendToFrame(t, { type: "db:approve", form: t.form, measure: false }))
+    if (!approved?.roles.includes("new-password")) return { ok: false, message: "The page changed. Try again." }
+    let generated: string
+    let filled: FieldRole[] = []
+    try {
+      const reply = await this.host.send({ type: "generate", origin: t.origin, ...t.generate })
+      generated = reply.generated
+      try {
+        if (generation !== this.generation(t.tabId)) return { ok: false, message: "" }
+        const values: FillValues = { newPassword: reply.password }
+        const ack = await sendToFrame<FillAck>(t, { type: "db:fill", values, form: t.form, approval: approved.approval, generated })
+        if (ack?.rejected) return { ok: false, message: NO_FIT }
+        filled = sanitizeRoles(ack?.filled)
+      } finally {
+        if (!filled.includes("new-password")) await this.host.send({ type: "generate-drop", origin: t.origin, generated }).catch(() => {})
+        // Only once the agent holds it may the page name it by id. If it
+        // can't (locked, gone, disconnected), a submit sends it as typed.
+        else if (await this.host.send({ type: "generate-keep", origin: t.origin, generated }).then(() => true, () => false))
+          await sendToFrame(t, { type: "db:generated", generated })
+      }
+    } catch (err) {
+      return { ok: false, message: generateError(err) }
+    }
+    return filled.includes("new-password") ? { ok: true } : { ok: false, message: "The page changed. Try again." }
   }
 
   async menuDismiss(token: string, sender: chrome.runtime.MessageSender) {
@@ -405,10 +457,27 @@ export class Autofill {
   }
 }
 
+const NO_FIT = "No password fits this site's rules."
+
+function generateError(err: unknown): string {
+  if (err instanceof HostError && err.code === "failed") return NO_FIT
+  if (err instanceof HostError && err.code === "weak") return "This site allows only weak passwords. Deadbolt won't make one."
+  return fillError(err)
+}
+
 /** Rate limiting is the host pacing fills, not a fault: say so calmly. */
 export function fillError(err: unknown): string {
   if (err instanceof HostError && err.code === "rate_limited") return "Filling too quickly. Try again in a moment."
   return (err as Error)?.message || "Couldn't fill."
+}
+
+/** A content script's field rules, kept to the documented fields. */
+export function fieldRules(raw: unknown): FieldRules {
+  const r = (typeof raw === "object" && raw !== null ? raw : {}) as Record<string, unknown>
+  const text = (v: unknown) => (typeof v === "string" && v.length > 0 && v.length <= 1024 ? v : undefined)
+  const length = (v: unknown) => (Number.isSafeInteger(v) && (v as number) > 0 && (v as number) < 1000 ? (v as number) : undefined)
+  const rules: FieldRules = { rules: text(r.rules), minLength: length(r.minLength), maxLength: length(r.maxLength), allowed: text(r.allowed) }
+  return Object.fromEntries(Object.entries(rules).filter(([, v]) => v !== undefined)) as FieldRules
 }
 
 function sanitizeRoles(roles: unknown): FieldRole[] {

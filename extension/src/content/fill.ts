@@ -1,7 +1,6 @@
 // Writes credentials into the page so plain forms and framework-controlled
 // inputs (React, Vue, Angular) both accept them. Ported from Foyer
-// (github.com/R44VC0RP/foyer, src/autofill/fill.ts, by Ryan Vogel), without
-// generated-password filling.
+// (github.com/R44VC0RP/foyer, src/autofill/fill.ts, by Ryan Vogel).
 //
 // The value is set through the native HTMLInputElement setter from the
 // extension's isolated world, then input/change events are dispatched. A
@@ -262,6 +261,21 @@ export async function fillFields(fields: Field[], values: FillValues, check = fi
   if (password && values.password && write(password, values.password)) {
     filled.push("password")
     last = password.el
+  }
+
+  // A generated password goes into every new-password box, the new one and
+  // its confirmation, and only when every one can take it.
+  if (values.newPassword) {
+    await pause()
+    const boxes = fields.filter((t) => t.role === "new-password")
+    if (boxes.length && boxes.every((b) => check(b.el))) {
+      let i = 0
+      while (i < boxes.length && write(boxes[i], values.newPassword, boxes)) i++
+      if (i === boxes.length) {
+        filled.push("new-password")
+        last = boxes[i - 1].el
+      }
+    }
   }
 
   if (values.totp) {

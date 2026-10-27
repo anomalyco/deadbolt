@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { fillError, wantFor, menuAccounts } from "../src/bg/autofill"
 import { Host, HostError } from "../src/bg/host"
 import type { Status } from "../src/messages"
-import type { Account } from "../src/protocol"
+import { PROTOCOL, type Account } from "../src/protocol"
 
 type Listener<T extends unknown[]> = (...args: T) => void
 
@@ -38,10 +38,10 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 const hello = (id: unknown, status = "ready", extra: Record<string, unknown> = {}) => ({
   id,
   type: "hello",
-  protocol: 1,
+  protocol: PROTOCOL,
   version: "0.4.0",
   status,
-  capabilities: ["list", "fill", "check", "save"],
+  capabilities: ["list", "fill", "check", "save", "generate"],
   ...extra,
 })
 
@@ -85,7 +85,7 @@ describe("Host", () => {
 
   test("a different protocol version is unavailable, not ready", async () => {
     const ready = host.connect()
-    ports[0].push(hello(1, "ready", { protocol: 2 }))
+    ports[0].push(hello(1, "ready", { protocol: PROTOCOL + 1 }))
     await ready
     expect(host.status.state).toBe("unavailable")
   })

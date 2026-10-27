@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { Autofill, nextStep } from "../src/bg/autofill"
+import { HostError } from "../src/bg/host"
 import { ACCOUNTS, fakeHost, installChrome, menuSender, pageSender, POPUP_URL, SITE, type FakeChrome, type FakeHost } from "./chrome"
 
 let fake: FakeChrome
@@ -163,6 +164,113 @@ describe("filling only the fields approved before the host is asked", () => {
     }
     expect(fills()).toEqual([])
     expect(delivered("db:fill")).toEqual([])
+  })
+})
+
+describe("generated passwords", () => {
+  const approve = () => (fake.answer = (message) => (message.type === "db:approve" ? { approval: "fixed", roles: ["email", "new-password"] } : true))
+  const generating = async (kind: string, rules?: unknown) => {
+    const reply = await autofill.query(pageSender(), ["email", "new-password"], "new-password", 1, kind, rules)
+    if (reply.token) await autofill.menuLoad(reply.token, menuSender(), SITE)
+    return reply
+  }
+
+  test("a new-password box offers one only on sign-up and change-password forms", async () => {
+    for (const kind of ["login", "mfa", null, "bogus"]) expect(await generating(kind as string)).toEqual({ rows: 0 })
+    for (const kind of ["signup", "change-password"]) expect(await generating(kind)).toMatchObject({ rows: 1 })
+    const reply = await autofill.query(pageSender(), ["email", "new-password"], "new-password", 1, "signup")
+    expect(await autofill.menuLoad(reply.token!, menuSender(), SITE)).toEqual({ kind: "generate", site: "www.example.com" })
+    expect(host.requests.filter((r) => r.type !== "generate-check")).toEqual([])
+  })
+
+  test("no row when the page's rules allow only weak passwords, locked or not", async () => {
+    expect(await generating("signup", { maxLength: 8, allowed: "0123456789" })).toEqual({ rows: 0 })
+    expect(host.requests.at(-1)).toEqual({ type: "generate-check", origin: "https://www.example.com", maxLength: 8, allowed: "0123456789" })
+    host.setStatus({ state: "locked" })
+    expect(await generating("signup", { maxLength: 8 })).toEqual({ rows: 0 })
+    expect(await generating("signup", { maxLength: 20 })).toMatchObject({ rows: 1 })
+  })
+
+  test("the host makes it within the page's rules, kept to the documented ones, and it fills every new-password box by id", async () => {
+    approve()
+    const { token } = await generating("signup", { rules: "minlength: 12;", maxLength: 16, minLength: -1, allowed: 7, extra: "x" })
+    fake.fillAck = () => ({ filled: ["new-password"] })
+    expect(await autofill.menuGenerate(token!, menuSender())).toEqual({ ok: true })
+    expect(host.requests.filter((r) => r.type === "generate")).toEqual([{ type: "generate", origin: "https://www.example.com", rules: "minlength: 12;", maxLength: 16 }])
+    expect(delivered("db:fill")).toMatchObject([{ message: { values: { newPassword: "generated 1" }, approval: "fixed", generated: "g1" } }])
+    // In the page, so the agent holds it as pending, and then the page names it by id.
+    expect(host.requests.at(-1)).toEqual({ type: "generate-keep", origin: "https://www.example.com", generated: "g1" })
+    expect(delivered("db:generated")).toMatchObject([{ message: { type: "db:generated", generated: "g1" } }])
+    expect(await autofill.menuGenerate(token!, menuSender())).toMatchObject({ ok: false })
+  })
+
+  test("if the agent can't keep it, the page isn't told its id, so a submit sends it as typed", async () => {
+    approve()
+    const send = host.host.send.bind(host.host)
+    for (const err of [new HostError("locked", "Locked."), new HostError("not_found", "Gone."), new Error("Disconnected.")]) {
+      fake.delivered.length = 0
+      host.host.send = (async (req: { type: string }) => {
+        if (req.type === "generate-keep") {
+          host.requests.push(req as never)
+          throw err
+        }
+        return send(req as never)
+      }) as typeof host.host.send
+      const { token } = await generating("signup")
+      fake.fillAck = () => ({ filled: ["new-password"] })
+      // It's in the page all the same.
+      expect(await autofill.menuGenerate(token!, menuSender())).toEqual({ ok: true })
+      expect(host.requests.at(-1)).toMatchObject({ type: "generate-keep" })
+      expect(delivered("db:fill")).toHaveLength(1)
+      expect(delivered("db:generated")).toEqual([])
+    }
+  })
+
+  test("one that doesn't go into the page is dropped, never kept, and not tried again", async () => {
+    approve()
+    const outcomes: Array<[() => unknown, string]> = [
+      [() => ({ filled: [], rejected: true }), "No password fits this site's rules."],
+      [() => ({ filled: [] }), "The page changed. Try again."],
+      [() => ({ filled: ["email"] }), "The page changed. Try again."],
+    ]
+    for (const [ack, message] of outcomes) {
+      host.requests.length = 0
+      const { token } = await generating("signup")
+      fake.fillAck = ack as typeof fake.fillAck
+      expect(await autofill.menuGenerate(token!, menuSender())).toEqual({ ok: false, message })
+      const made = host.requests.filter((r) => r.type === "generate")
+      expect(made).toHaveLength(1)
+      expect(host.requests.filter((r) => r.type === "generate-keep")).toEqual([])
+      expect(host.requests.at(-1)).toEqual({ type: "generate-drop", origin: "https://www.example.com", generated: `g${made.length}` })
+    }
+  })
+
+  test("so is one made while the user left", async () => {
+    approve()
+    const { token } = await generating("signup")
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: { type: string }) => {
+      const reply = await send(req as never)
+      if (req.type === "generate") await autofill.navigated({ tabId: 1, frameId: 0, url: "https://elsewhere.net/", transitionType: "typed" })
+      return reply
+    }) as typeof host.host.send
+    expect(await autofill.menuGenerate(token!, menuSender())).toEqual({ ok: false, message: "" })
+    expect(delivered("db:fill")).toEqual([])
+    expect(host.requests.at(-1)).toMatchObject({ type: "generate-drop" })
+  })
+
+  test("an account menu's token can't generate, a generator's can't pick, and nothing generates without an approved new-password box", async () => {
+    const token = await menu()
+    await autofill.menuLoad(token, menuSender(), SITE)
+    expect(await autofill.menuGenerate(token, menuSender())).toMatchObject({ ok: false })
+    fake.answer = (message) => (message.type === "db:approve" ? { approval: "fixed", roles: ["email"] } : true)
+    const reply = await generating("signup")
+    expect(await autofill.menuGenerate(reply.token!, menuSender())).toEqual({ ok: false, message: "The page changed. Try again." })
+    expect(host.requests.filter((r) => r.type === "generate")).toEqual([])
+    // Nor can a generated-password menu's token pick an account.
+    const generator = await generating("signup")
+    expect(await autofill.menuPick(generator.token!, ACCOUNTS[0].ref, menuSender())).toEqual({ ok: false, message: "This menu has expired." })
+    expect(fills()).toEqual([])
   })
 })
 
