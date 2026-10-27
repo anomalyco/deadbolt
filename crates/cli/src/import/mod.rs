@@ -10,13 +10,14 @@
 
 mod bitwarden;
 mod csv;
-mod onepassword;
+pub mod onepassword;
+pub mod op;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use anyhow::{Result, anyhow, bail};
 use deadbolt_core::item::{check_create, check_field, check_new_value, valid_item_name};
-use deadbolt_core::{Field, FieldType, Schema, schema};
+use deadbolt_core::{Field, FieldType, Schema, Source, schema};
 use serde_json::Value;
 
 use crate::items::with_scheme;
@@ -30,6 +31,107 @@ pub struct Imported {
     pub kind: &'static str,
     pub name: Option<String>,
     pub fields: BTreeMap<String, Field>,
+    /// Where it came from, for an export that says (1Password's).
+    pub source: Option<Source>,
+}
+
+impl Imported {
+    pub fn digest(&self) -> String {
+        digest(self.kind, self.name.as_deref(), &self.fields)
+    }
+}
+
+/// How an item here came to be a copy of a 1Password item, which says what
+/// a sync may do with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Origin {
+    /// Added by a sync, which deletes it once it is gone from 1Password.
+    Sync,
+    /// Made here or imported, then taken over by a sync, which releases it
+    /// once it is gone from 1Password.
+    Adopted,
+    /// Imported from a .1pux and not mirrored: only a record of where it
+    /// came from, so a sync can take it over rather than add it again.
+    Import,
+}
+
+/// A 1Password copy's version: when the original last changed (Unix
+/// seconds), a digest of the item as last written here, and its
+/// [`Origin`]. A sync compares the time with the original's and the digest
+/// with the item's own, to leave alone, without fetching it, an item that
+/// changed on neither side.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MirrorVersion {
+    pub updated: i64,
+    pub digest: String,
+    pub origin: Origin,
+    /// For an item taken over, the fields 1Password last wrote: a later
+    /// sync removes those 1Password no longer has, and keeps the rest,
+    /// which are the item's own.
+    pub fields: BTreeSet<String>,
+}
+
+impl MirrorVersion {
+    /// Whether a sync keeps it up to date.
+    pub fn mirrored(&self) -> bool {
+        self.origin != Origin::Import
+    }
+
+    /// `updated:digest`, then `:import`, or `:adopted:` and the fields'
+    /// names joined by commas, unless a sync added it.
+    pub fn parse(version: &str) -> Option<Self> {
+        let mut parts = version.split(':');
+        let updated = parts.next()?.parse().ok()?;
+        let digest = parts.next()?.to_string();
+        let mut fields = BTreeSet::new();
+        let origin = match parts.next() {
+            None => Origin::Sync,
+            Some("adopted") => {
+                let names = parts.next()?;
+                fields.extend(names.split(',').filter(|n| !n.is_empty()).map(String::from));
+                Origin::Adopted
+            }
+            Some("import") => Origin::Import,
+            Some(_) => return None,
+        };
+        parts.next().is_none().then_some(Self {
+            updated,
+            digest,
+            origin,
+            fields,
+        })
+    }
+}
+
+impl std::fmt::Display for MirrorVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.updated, self.digest)?;
+        match self.origin {
+            Origin::Sync => Ok(()),
+            Origin::Adopted => {
+                let names: Vec<&str> = self.fields.iter().map(String::as_str).collect();
+                write!(f, ":adopted:{}", names.join(","))
+            }
+            Origin::Import => f.write_str(":import"),
+        }
+    }
+}
+
+/// The digest part of a [`MirrorVersion`].
+pub fn digest(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> String {
+    let mut h = blake3::Hasher::new_derive_key("deadbolt 2026-10-26 mirror digest v1");
+    let mut put = |s: &str| {
+        h.update(&(s.len() as u64).to_le_bytes());
+        h.update(s.as_bytes());
+    };
+    put(kind);
+    put(name.unwrap_or_default());
+    for (field, value) in fields {
+        put(field);
+        put(value.kind.as_str());
+        put(&value.value);
+    }
+    h.finalize().to_hex()[..32].to_string()
 }
 
 /// Maps an export to items to create, and what was left out.
@@ -148,6 +250,26 @@ impl Summary {
         if n > 0 {
             *self.dropped.entry(reason).or_default() += n;
         }
+    }
+
+    /// Adds another summary's counts to these.
+    fn merge(&mut self, other: Summary) {
+        let add = |to: &mut BTreeMap<Reason, usize>, from: BTreeMap<Reason, usize>| {
+            for (reason, n) in from {
+                *to.entry(reason).or_default() += n;
+            }
+        };
+        for (kind, n) in other.new {
+            *self.new.entry(kind).or_default() += n;
+        }
+        add(&mut self.skipped, other.skipped);
+        add(&mut self.warnings, other.warnings);
+        add(&mut self.dropped, other.dropped);
+    }
+
+    /// Why an item was skipped, for a summary of that one item.
+    fn skip_reason(&self) -> Option<&'static str> {
+        self.skipped.keys().next().map(|(one, _)| *one)
     }
 
     /// Counts a mapped item.
@@ -453,7 +575,7 @@ impl Builder {
             summary.skip(EMPTY);
             return None;
         }
-        if check_create(kind, name.as_deref(), &self.fields).is_err() {
+        if check_create(kind, name.as_deref(), &self.fields, None).is_err() {
             summary.skip(INVALID);
             return None;
         }
@@ -461,6 +583,7 @@ impl Builder {
             kind,
             name,
             fields: self.fields,
+            source: None,
         })
     }
 }

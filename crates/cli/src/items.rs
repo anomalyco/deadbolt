@@ -468,6 +468,7 @@ mod tests {
                 f
             })
             .collect(),
+            source: None,
         };
         let cases = [
             (None, "pw", vec![("github", false)]),

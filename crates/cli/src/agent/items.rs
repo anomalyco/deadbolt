@@ -202,6 +202,7 @@ impl Listing {
             label: label(item),
             detail: detail(item),
             fields,
+            source: super::mirror::source_app(item.source.as_ref()),
         }
     }
 
@@ -486,11 +487,12 @@ pub fn import(
             }
             continue;
         }
-        new.push((
-            item.kind.to_string(),
-            item.name,
-            item.fields.into_iter().collect::<Vec<_>>(),
-        ));
+        new.push(DataOp::Create {
+            kind: item.kind.to_string(),
+            name: item.name,
+            fields: item.fields,
+            source: item.source,
+        });
     }
     if apply && !new.is_empty() {
         s.update(vault, |v, secret| {
@@ -871,7 +873,7 @@ mod tests {
             Field::new(FieldType::Secret, "4242424242424242"),
         )];
         s.update(vault, |v, secret| {
-            v.create_items(secret, [("card".to_string(), None, fields)])?;
+            v.create_items(secret, [DataOp::create("card", None, fields)])?;
             Ok(())
         })
         .unwrap();
@@ -962,6 +964,7 @@ mod tests {
                 .iter()
                 .map(|(k, v)| (k.to_string(), Field::new(FieldType::Text, *v)))
                 .collect(),
+            source: None,
             deleted: false,
         }
     }

@@ -1240,6 +1240,7 @@ fn many_items() -> Vec<ItemInfo> {
             label: format!("site-{i:02}.com"),
             detail: Some("dax".into()),
             fields: Vec::new(),
+            source: None,
         })
         .collect()
 }

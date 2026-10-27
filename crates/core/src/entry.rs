@@ -102,9 +102,21 @@ pub enum DataOp {
         kind: String,
         name: Option<String>,
         fields: BTreeMap<String, Field>,
+        /// Set when the item mirrors one held elsewhere.
+        source: Option<Source>,
     },
     /// Changes an existing item.
     Edit { item: ItemId, change: Change },
+}
+
+/// Where a mirrored item comes from: its id in another password manager
+/// and the version mirrored, both opaque here. Kept apart from the fields,
+/// so it is never shown, copied or edited as one. An item without a source
+/// is the user's own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Source {
+    pub id: String,
+    pub version: String,
 }
 
 /// A change to an existing item.
@@ -118,6 +130,8 @@ pub enum Change {
     Name(Option<String>),
     /// Marks the item deleted. A later edit restores it.
     Delete,
+    /// Sets or clears where the item is mirrored from.
+    Source(Option<Source>),
 }
 
 impl DataOp {
@@ -130,7 +144,27 @@ impl DataOp {
             kind: kind.into(),
             name,
             fields: fields.into_iter().collect(),
+            source: None,
         }
+    }
+
+    /// A `Create` that mirrors an item held elsewhere.
+    pub fn create_mirror(
+        kind: impl Into<String>,
+        name: Option<String>,
+        fields: impl IntoIterator<Item = (String, Field)>,
+        source: Source,
+    ) -> Self {
+        Self::Create {
+            kind: kind.into(),
+            name,
+            fields: fields.into_iter().collect(),
+            source: Some(source),
+        }
+    }
+
+    pub fn source(item: ItemId, source: Option<Source>) -> Self {
+        Self::edit(item, Change::Source(source))
     }
 
     pub fn set(item: ItemId, field: impl Into<String>, value: Field) -> Self {
@@ -375,14 +409,25 @@ fn write_field(w: &mut Writer, field: &Field) {
 
 fn write_data_op(w: &mut Writer, op: &DataOp) {
     match op {
-        DataOp::Create { kind, name, fields } => {
-            w.u8(0);
+        DataOp::Create {
+            kind,
+            name,
+            fields,
+            source,
+        } => {
+            // A mirror's `Create` has its own tag, so every other entry
+            // encodes (and hashes) as it did before sources existed.
+            w.u8(if source.is_some() { 2 } else { 0 });
             w.str(kind);
             write_opt_str(w, name.as_deref());
             w.len(fields.len());
             for (name, field) in fields {
                 w.str(name);
                 write_field(w, field);
+            }
+            if let Some(source) = source {
+                w.str(&source.id);
+                w.str(&source.version);
             }
         }
         DataOp::Edit { item, change } => {
@@ -403,8 +448,34 @@ fn write_data_op(w: &mut Writer, op: &DataOp) {
                     write_opt_str(w, name.as_deref());
                 }
                 Change::Delete => w.u8(3),
+                Change::Source(source) => {
+                    w.u8(4);
+                    write_source(w, source.as_ref());
+                }
             }
         }
+    }
+}
+
+fn write_source(w: &mut Writer, source: Option<&Source>) {
+    match source {
+        None => w.u8(0),
+        Some(source) => {
+            w.u8(1);
+            w.str(&source.id);
+            w.str(&source.version);
+        }
+    }
+}
+
+fn read_source(r: &mut Reader<'_>) -> Result<Option<Source>, DecodeError> {
+    match r.u8()? {
+        0 => Ok(None),
+        1 => Ok(Some(Source {
+            id: r.string()?,
+            version: r.string()?,
+        })),
+        tag => Err(DecodeError::InvalidTag(tag)),
     }
 }
 
@@ -425,7 +496,7 @@ fn read_field(r: &mut Reader<'_>) -> Result<Field, DecodeError> {
 
 fn read_data_op(r: &mut Reader<'_>) -> Result<DataOp, DecodeError> {
     Ok(match r.u8()? {
-        0 => {
+        tag @ (0 | 2) => {
             let kind = r.string()?;
             let name = read_opt_str(r)?;
             let mut fields = BTreeMap::new();
@@ -439,7 +510,19 @@ fn read_data_op(r: &mut Reader<'_>) -> Result<DataOp, DecodeError> {
                 }
                 fields.insert(name, read_field(r)?);
             }
-            DataOp::Create { kind, name, fields }
+            let source = match tag {
+                2 => Some(Source {
+                    id: r.string()?,
+                    version: r.string()?,
+                }),
+                _ => None,
+            };
+            DataOp::Create {
+                kind,
+                name,
+                fields,
+                source,
+            }
         }
         1 => {
             let item = ItemId(r.array()?);
@@ -451,6 +534,7 @@ fn read_data_op(r: &mut Reader<'_>) -> Result<DataOp, DecodeError> {
                 1 => Change::Remove { field: r.string()? },
                 2 => Change::Name(read_opt_str(r)?),
                 3 => Change::Delete,
+                4 => Change::Source(read_source(r)?),
                 tag => return Err(DecodeError::InvalidTag(tag)),
             };
             DataOp::Edit { item, change }
@@ -526,6 +610,23 @@ mod tests {
                 DataOp::name(item, None),
                 DataOp::name(item, Some("n".into())),
                 DataOp::delete(item),
+                DataOp::create_mirror(
+                    "note",
+                    Some("Mirrored".into()),
+                    [],
+                    Source {
+                        id: "op/a/v/i".into(),
+                        version: "2026-10-26T00:00:00Z".into(),
+                    },
+                ),
+                DataOp::source(
+                    item,
+                    Some(Source {
+                        id: "op/a/v/i".into(),
+                        version: String::new(),
+                    }),
+                ),
+                DataOp::source(item, None),
             ]),
         )
     }

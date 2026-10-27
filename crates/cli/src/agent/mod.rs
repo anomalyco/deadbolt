@@ -4,6 +4,7 @@
 mod autofill;
 pub mod biometric;
 mod items;
+mod mirror;
 mod pairing;
 mod session;
 #[cfg(test)]
@@ -48,6 +49,7 @@ use watchers::Watchers;
 const IO_TIMEOUT: Duration = Duration::from_secs(30);
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 const BIOMETRIC_CANCEL_COOLDOWN: Duration = Duration::from_secs(2);
+const INTERRUPTED: &str = "locked during the sync from 1Password; nothing was written";
 
 struct AbortOnDrop(JoinHandle<()>);
 
@@ -82,6 +84,13 @@ pub struct Agent {
     sync_now: Notify,
     /// Serializes setup, unlock and lock.
     transition: tokio::sync::Mutex<()>,
+    /// Held by the one sync from 1Password running.
+    syncing_op: tokio::sync::Mutex<()>,
+    /// Bumped by a lock and at shutdown: a sync from 1Password running
+    /// kills `op` and writes nothing.
+    interrupts: watch::Sender<u64>,
+    #[cfg(test)]
+    op_program: Mutex<Option<std::path::PathBuf>>,
     /// In-memory metadata of `"biometric.token"`, loaded once at startup and
     /// updated on enrollment/clear/wipe so `status()` never opens `store.redb`.
     biometric_slot: Mutex<Option<biometric::TokenMeta>>,
@@ -120,6 +129,10 @@ impl Agent {
             ready: watch::channel(false).0,
             sync_now: Notify::new(),
             transition: tokio::sync::Mutex::new(()),
+            syncing_op: tokio::sync::Mutex::new(()),
+            interrupts: watch::channel(0).0,
+            #[cfg(test)]
+            op_program: Mutex::default(),
             biometric_was_enrolled: AtomicBool::new(initial_slot.is_some()),
             biometric_slot: Mutex::new(initial_slot),
             biometric_flight: Mutex::default(),
@@ -133,6 +146,23 @@ impl Agent {
             shutdown: Notify::new(),
             watchers: Watchers::default(),
         })
+    }
+
+    fn interrupt_op(&self) {
+        self.interrupts.send_modify(|n| *n += 1);
+    }
+
+    fn op(&self) -> mirror::Op {
+        #[cfg(test)]
+        if let Some(program) = self
+            .op_program
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+        {
+            return mirror::Op::at(program);
+        }
+        mirror::Op::find()
     }
 
     fn cancel_biometric_prompt(&self) {
@@ -541,6 +571,123 @@ mod tests {
         agent.lock().await;
     }
 
+    /// An agent holding one empty vault, its `op` a script that records
+    /// its pid in `pid` and hangs.
+    async fn syncing_agent(dir: &std::path::Path) -> (Arc<Agent>, std::path::PathBuf) {
+        let fast = deadbolt_store::KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let mut loaded = Loaded::setup(dir, b"test", "device", fast).unwrap();
+        loaded.create_vault("personal").unwrap();
+        let key = *loaded.store.device_secret();
+        let agent = locked_agent(dir);
+        let node = Node::spawn(
+            NodeConfig::local_only(key),
+            Arc::new(|_: &PeerId| false),
+            sync::Handler(agent.clone()),
+        )
+        .await
+        .unwrap();
+        *agent.session.lock().unwrap() = Some(Session::new(loaded, node));
+        let pid = dir.join("pid");
+        let op = dir.join("op");
+        fs::write(
+            &op,
+            format!("#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n", pid.display()),
+        )
+        .unwrap();
+        fs::set_permissions(&op, fs::Permissions::from_mode(0o755)).unwrap();
+        *agent.op_program.lock().unwrap() = Some(op);
+        (agent, pid)
+    }
+
+    fn conversation() -> (Conversation, UnixStream, watch::Sender<bool>) {
+        let (socket, client) = UnixStream::pair().unwrap();
+        let (_, write) = socket.into_split();
+        let (closed, closed_rx) = watch::channel(false);
+        let conv = Conversation {
+            write: tokio::sync::Mutex::new(write),
+            answers: tokio::sync::Mutex::new(mpsc::channel(1).1),
+            closed: closed_rx,
+        };
+        (conv, client, closed)
+    }
+
+    fn sync_op() -> Command {
+        Command::SyncOnePassword {
+            vault: None,
+            account: None,
+            op_vaults: Vec::new(),
+            dry_run: false,
+        }
+    }
+
+    async fn started(pid: &std::path::Path) -> String {
+        for _ in 0..200 {
+            if let Ok(pid) = fs::read_to_string(pid)
+                && !pid.trim().is_empty()
+            {
+                return pid.trim().to_string();
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        panic!("op never ran");
+    }
+
+    #[tokio::test]
+    async fn the_idle_lock_stops_a_stuck_sync_from_1password() {
+        let dir = tempfile::tempdir().unwrap();
+        let (agent, pid) = syncing_agent(dir.path()).await;
+        let (conv, _client, _closed) = conversation();
+        let syncing = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+        };
+        let pid = started(&pid).await;
+
+        // One at a time.
+        let (conv, _client, _closed) = conversation();
+        let error = agent.clone().dispatch(sync_op(), &conv).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "already syncing from 1Password: try again when it finishes"
+        );
+
+        // It does not hold the vault open.
+        {
+            let mut idle = agent.idle.lock().unwrap();
+            idle.timeout = Some(Duration::from_secs(1));
+            idle.deadline = Some(Instant::now());
+        }
+        agent.check_idle().await;
+        assert!(!agent.status().unlocked);
+        let error = syncing.await.unwrap().unwrap_err();
+        let error = error.downcast::<AgentError>().unwrap();
+        assert_eq!(error.code, ErrorCode::Locked);
+        assert_eq!(error.message, INTERRUPTED);
+        assert!(mirror::tests::gone(&pid).await, "op {pid} still running");
+    }
+
+    #[tokio::test]
+    async fn a_client_that_goes_away_stops_its_sync_from_1password() {
+        let dir = tempfile::tempdir().unwrap();
+        let (agent, pid) = syncing_agent(dir.path()).await;
+        let (conv, _client, closed) = conversation();
+        let syncing = {
+            let agent = agent.clone();
+            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+        };
+        let pid = started(&pid).await;
+        closed.send_replace(true);
+        let error = syncing.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), "the sync from 1Password was cancelled");
+        assert!(mirror::tests::gone(&pid).await, "op {pid} still running");
+        assert!(agent.status().unlocked);
+        agent.lock().await;
+    }
+
     fn make_valid_biometric_token(now_secs: u64) -> Vec<u8> {
         let mut token = Vec::new();
         token.extend_from_slice(b"DBSE");
@@ -807,6 +954,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     info!("agent stopping");
     drop(listener);
     agent.cancel_biometric_prompt();
+    agent.interrupt_op();
     agent.watchers.stopping();
     drain_connections(&mut connections).await;
     agent.lock().await;
@@ -1041,7 +1189,12 @@ impl Agent {
             command,
             Command::ItemCode { .. } | Command::SiteLogins { .. } | Command::SiteCheck { .. }
         );
-        self.busy.fetch_add(1, Ordering::SeqCst);
+        // Nor does a sync from 1Password hold the vault open: `op` may hang,
+        // and a lock stops it before it writes anything.
+        let busy = !matches!(command, Command::SyncOnePassword { .. });
+        if busy {
+            self.busy.fetch_add(1, Ordering::SeqCst);
+        }
         if used {
             self.touch();
         }
@@ -1049,7 +1202,9 @@ impl Agent {
         if used {
             self.touch();
         }
-        self.busy.fetch_sub(1, Ordering::SeqCst);
+        if busy {
+            self.busy.fetch_sub(1, Ordering::SeqCst);
+        }
         result
     }
 
@@ -1211,6 +1366,38 @@ impl Agent {
                     self.sync_now.notify_one();
                 }
                 Ok(Reply::Import { report })
+            }
+            Command::SyncOnePassword {
+                vault,
+                account,
+                op_vaults,
+                dry_run,
+            } => {
+                let Ok(_syncing) = self.syncing_op.try_lock() else {
+                    bail!("already syncing from 1Password: try again when it finishes");
+                };
+                let mut interrupts = self.interrupts.subscribe();
+                // Locked fails here, before 1Password is asked anything. `op`
+                // runs outside the lock: it may wait on 1Password's prompt.
+                let known = self.with(|s| mirror::known(s, vault.as_deref()))?;
+                let fetch = mirror::fetch(self.op(), account.as_deref(), &op_vaults, &known);
+                // Dropping the fetch kills `op`.
+                let fetched = tokio::select! {
+                    fetched = fetch => fetched?,
+                    _ = interrupts.changed() => return Err(fail(ErrorCode::Locked, INTERRUPTED)),
+                    () = conv.closed() => bail!("the sync from 1Password was cancelled"),
+                };
+                let report = self.with(|s| {
+                    // A lock bumps `interrupts` before it lets go of the vault.
+                    if interrupts.has_changed().unwrap_or(true) {
+                        return Err(fail(ErrorCode::Locked, INTERRUPTED));
+                    }
+                    mirror::apply(s, &known, fetched, !dry_run)
+                })?;
+                if report.applied && report.changed() {
+                    self.sync_now.notify_one();
+                }
+                Ok(Reply::Mirror { report })
             }
             Command::Generate { length, symbols } => Ok(Reply::Password {
                 password: deadbolt_core::password::generate(length, symbols)?,
@@ -2022,6 +2209,7 @@ impl Agent {
 
     async fn lock(&self) {
         self.cancel_biometric_prompt();
+        self.interrupt_op();
         let _transition = self.transition.lock().await;
         *self
             .biometric_cooldown_until

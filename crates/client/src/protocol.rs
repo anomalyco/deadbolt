@@ -39,7 +39,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 7;
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -171,6 +171,17 @@ pub enum Command {
     Generate {
         length: usize,
         symbols: bool,
+    },
+    /// Mirrors 1Password into `vault` with the 1Password CLI (`op`), which
+    /// the agent runs: from every vault of `account` (`op`'s default
+    /// without one), or only the `op_vaults` named. Fails as `locked`
+    /// before asking 1Password anything. With `dry_run` it writes nothing.
+    /// Replies `mirror`.
+    SyncOnePassword {
+        vault: Option<String>,
+        account: Option<String>,
+        op_vaults: Vec<String>,
+        dry_run: bool,
     },
     /// Browser autofill: the logins, in every vault, saved for the site of
     /// the web page at `origin`, without values; replies `site-logins`.
@@ -441,6 +452,136 @@ pub enum Reply {
         login: LoginRef,
         created: bool,
     },
+    Mirror {
+        report: MirrorReport,
+    },
+}
+
+/// What a sync from 1Password did, or would do. Titles only, never values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorReport {
+    /// False for a dry run.
+    pub applied: bool,
+    /// Items already the same on both sides.
+    pub unchanged: usize,
+    /// Every item that was, or would be, added, updated, deleted, adopted,
+    /// released or skipped, in that order, each by title.
+    pub items: Vec<MirrorItem>,
+    /// Values mirrored differently, by reason.
+    pub warnings: Vec<Tally>,
+    /// What deadbolt has no place for (attachments, passkeys, ...).
+    pub dropped: Vec<Tally>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MirrorItem {
+    pub action: MirrorAction,
+    pub title: String,
+    /// The fields changed, or why it was skipped, released, taken over or
+    /// added beside another item.
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum MirrorAction {
+    /// New in 1Password.
+    Add,
+    /// Changed in 1Password, or in deadbolt: 1Password wins.
+    Update,
+    /// Deleted or archived in 1Password, or a second copy; only items the
+    /// mirror created.
+    Delete,
+    /// An item already in deadbolt, now mirrored: imported from a
+    /// 1Password export, the same content, or a login with the same
+    /// username and URL. Fields only deadbolt has are kept.
+    Adopt,
+    /// Adopted, then deleted in 1Password or a second copy: kept, and no
+    /// longer mirrored.
+    Release,
+    /// Not mirrored (a document, an SSH key without a private key, ...),
+    /// or changed in deadbolt while 1Password was asked.
+    Skip,
+}
+
+impl MirrorAction {
+    fn done(self, applied: bool) -> &'static str {
+        match (self, applied) {
+            (Self::Add, true) => "added",
+            (Self::Add, false) => "would add",
+            (Self::Update, true) => "updated",
+            (Self::Update, false) => "would update",
+            (Self::Delete, true) => "deleted",
+            (Self::Delete, false) => "would delete",
+            (Self::Adopt, true) => "adopted",
+            (Self::Adopt, false) => "would adopt",
+            (Self::Release, true) => "released",
+            (Self::Release, false) => "would release",
+            (Self::Skip, _) => "skipped",
+        }
+    }
+
+    fn verb(self) -> &'static str {
+        match self {
+            Self::Add => "add",
+            Self::Update => "update",
+            Self::Delete => "delete",
+            Self::Adopt => "adopt",
+            Self::Release => "release",
+            Self::Skip => "skip",
+        }
+    }
+}
+
+impl MirrorReport {
+    pub fn count(&self, action: MirrorAction) -> usize {
+        self.items.iter().filter(|i| i.action == action).count()
+    }
+
+    /// Whether anything was, or would be, written.
+    pub fn changed(&self) -> bool {
+        self.items.iter().any(|i| i.action != MirrorAction::Skip)
+    }
+
+    /// One line of what changed: "12 updated, 3 added", or "Up to date".
+    pub fn summary(&self) -> String {
+        use MirrorAction::*;
+        let parts: Vec<String> = [Update, Add, Delete, Adopt, Release]
+            .into_iter()
+            .map(|a| (a, self.count(a)))
+            .filter(|(_, n)| *n > 0)
+            .map(|(a, n)| format!("{n} {}", a.done(self.applied)))
+            .collect();
+        match (parts.is_empty(), self.applied) {
+            (true, true) => "Up to date".into(),
+            (true, false) => "Nothing to do".into(),
+            (false, _) => parts.join(", "),
+        }
+    }
+
+    /// The report as lines: the counts, then one line per item.
+    pub fn lines(&self) -> Vec<String> {
+        let skipped = match self.count(MirrorAction::Skip) {
+            0 => String::new(),
+            n => format!(", {n} skipped"),
+        };
+        let mut lines = vec![format!(
+            "{}{} ({} unchanged{skipped})",
+            if self.applied { "" } else { "dry run: " },
+            self.summary(),
+            self.unchanged
+        )];
+        lines.extend(self.items.iter().map(|i| match &i.reason {
+            Some(reason) => format!("  {:<7} {} ({reason})", i.action.verb(), i.title),
+            None => format!("  {:<7} {}", i.action.verb(), i.title),
+        }));
+        lines.extend(self.warnings.iter().map(|t| format!("warning: {t}")));
+        if !self.dropped.is_empty() {
+            let dropped: Vec<String> = self.dropped.iter().map(Tally::to_string).collect();
+            lines.push(format!("not mirrored: {}", dropped.join(", ")));
+        }
+        lines
+    }
 }
 
 /// A one-time code and when it stops being valid.
@@ -641,6 +782,9 @@ pub struct ItemInfo {
     pub detail: Option<String>,
     /// Known fields in schema order, then extra fields by name. Empty in lists.
     pub fields: Vec<FieldInfo>,
+    /// The app the item is mirrored from ("1Password"), which overwrites
+    /// changes made here; `None` for the user's own.
+    pub source: Option<String>,
 }
 
 /// The field an item's one-time code comes from, as the agent picks it:
@@ -764,6 +908,51 @@ mod tests {
             assert!(debug.contains("<redacted>"), "{debug}");
             assert!(!debug.contains("private-marker"), "{debug}");
         }
+    }
+
+    #[test]
+    fn mirror_reports_read_as_lines() {
+        let item = |action, title: &str, reason: Option<&str>| MirrorItem {
+            action,
+            title: title.into(),
+            reason: reason.map(Into::into),
+        };
+        let mut report = MirrorReport {
+            applied: true,
+            unchanged: 40,
+            items: vec![
+                item(MirrorAction::Add, "Bank", None),
+                item(MirrorAction::Update, "GitHub", Some("password")),
+                item(MirrorAction::Update, "Wi-Fi", Some("notes")),
+                item(MirrorAction::Skip, "Scan", Some("document")),
+            ],
+            warnings: vec![],
+            dropped: vec![Tally {
+                count: 2,
+                one: "attachment".into(),
+                many: "attachments".into(),
+            }],
+        };
+        assert_eq!(report.summary(), "2 updated, 1 added");
+        assert_eq!(
+            report.lines(),
+            [
+                "2 updated, 1 added (40 unchanged, 1 skipped)",
+                "  add     Bank",
+                "  update  GitHub (password)",
+                "  update  Wi-Fi (notes)",
+                "  skip    Scan (document)",
+                "not mirrored: 2 attachments",
+            ]
+        );
+        assert!(report.changed());
+        report.applied = false;
+        assert_eq!(report.summary(), "2 would update, 1 would add");
+        report.items.retain(|i| i.action == MirrorAction::Skip);
+        assert!(!report.changed());
+        assert_eq!(report.summary(), "Nothing to do");
+        report.applied = true;
+        assert_eq!(report.summary(), "Up to date");
     }
 
     #[test]

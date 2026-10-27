@@ -95,8 +95,12 @@ enum Commands {
     Lock,
     /// Show the agent, this device, its vaults and peers.
     Status,
-    /// Sync now with every device (or only the devices in --vault).
-    Sync,
+    /// Sync now with every device (or only the devices in --vault), or
+    /// mirror another password manager into --vault.
+    Sync {
+        #[command(subcommand)]
+        command: Option<SyncCommand>,
+    },
     /// Print what changes in the agent as JSON lines: lock state, items,
     /// vaults and devices, never values. Ends when the agent stops.
     Watch,
@@ -186,6 +190,36 @@ enum VaultCommand {
     Rename { old: String, new: String },
     /// Make a vault the default.
     Default { name: String },
+}
+
+#[derive(Subcommand)]
+enum SyncCommand {
+    /// Mirror 1Password into --vault with the 1Password CLI (`op`).
+    ///
+    /// 1Password stays the source of truth: new items are added, changed
+    /// ones updated, and ones deleted or archived there deleted here if this
+    /// sync added them. Items from a 1Password export imported earlier,
+    /// items with the same content and logins with the same username and
+    /// URL are taken over; other items here are never touched. Needs the 1Password app's CLI
+    /// integration (Settings › Developer), which may ask to approve access.
+    /// Exits 3 if deadbolt is locked, before 1Password is asked anything.
+    #[command(name = "1password", visible_alias = "op")]
+    OnePassword {
+        /// The 1Password account (sign-in address, email, shorthand or id);
+        /// needed only if the CLI knows several and --vault mirrors none.
+        #[arg(long)]
+        account: Option<String>,
+        /// Mirror only this 1Password vault (by name or id); repeat for
+        /// more. Default: every vault in the account.
+        #[arg(long = "op-vault", value_name = "NAME")]
+        op_vaults: Vec<String>,
+        /// Show what would change without writing anything.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print one line, and only if something changed.
+        #[arg(short, long)]
+        quiet: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -492,7 +526,34 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 println!("{}", serde_json::to_string(&change)?);
             }
         }
-        Commands::Sync => {
+        Commands::Sync {
+            command:
+                Some(SyncCommand::OnePassword {
+                    account,
+                    op_vaults,
+                    dry_run,
+                    quiet,
+                }),
+        } => {
+            client::ensure_running(&paths).await?;
+            let command = Command::SyncOnePassword {
+                vault,
+                account,
+                op_vaults,
+                dry_run,
+            };
+            let Reply::Mirror { report } = request(&paths, command, from_stdin).await? else {
+                bail!("unexpected reply");
+            };
+            if !quiet {
+                for line in report.lines() {
+                    println!("{line}");
+                }
+            } else if report.changed() {
+                println!("1Password: {}", report.summary());
+            }
+        }
+        Commands::Sync { command: None } => {
             client::ensure_running(&paths).await?;
             let Reply::Sync { peers } =
                 request(&paths, Command::Sync { vault }, from_stdin).await?

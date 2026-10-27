@@ -5,13 +5,15 @@
 use std::collections::BTreeSet;
 
 use anyhow::{Result, bail};
-use deadbolt_core::FieldType;
+use deadbolt_core::item::valid_source;
+use deadbolt_core::{FieldType, Source};
 use serde_json::Value;
 
 use super::{
     ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, Builder, FAVORITE,
-    Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSWORD_HISTORY, Reason, Summary, TAG,
-    UNKNOWN_TYPE, address, array, field_name, item_name, join, month, number, scalar, text,
+    Imported, LINKED_FIELD, MirrorVersion, NO_NUMBER, NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY,
+    Reason, Summary, TAG, UNKNOWN_TYPE, address, array, field_name, item_name, join, month, number,
+    scalar, text,
 };
 use crate::protocol::ImportSource;
 
@@ -150,12 +152,13 @@ fn section_value(key: &str, value: &Value) -> Option<String> {
             .get("metadata")
             .and_then(|m| text(m, "privateKey"))
             .or_else(|| text(value, "privateKey")),
-        "date" => value.as_i64().map(date),
+        // The `op` CLI's dates may come as text (`YYYY-MM-DD`) already.
+        "date" => value.as_i64().map(date).or_else(|| scalar(value)),
         "monthYear" => match value {
             Value::Number(n) => n.as_i64().map(month_year),
             _ => scalar(value),
         },
-        "address" => address(
+        "address" if value.is_object() => address(
             [text(value, "street")],
             text(value, "city"),
             text(value, "state"),
@@ -369,7 +372,64 @@ fn identity(item: &Value, summary: &mut Summary) -> Option<Imported> {
     b.finish("identity", item_name(text(overview, "title")), summary)
 }
 
-/// Maps a 1PUX `export.data`.
+/// Maps one 1PUX item, or says why it is skipped. The `op` CLI's items are
+/// mapped through here too (see [`super::op`]), so both agree.
+pub(super) fn item(item: &Value, summary: &mut Summary) -> Option<Imported> {
+    if text(item, "state").as_deref() == Some("archived") {
+        summary.skip(ARCHIVED);
+        return None;
+    }
+    let category = text(item, "categoryUuid").unwrap_or_default();
+    let mapped = match category.as_str() {
+        "001" | "005" | "102" | "109" | "110" | "112" => login(item, summary),
+        "002" => card(item, summary),
+        "004" => identity(item, summary),
+        "114" => ssh(item, summary),
+        "003" | "100" | "101" | "103" | "104" | "105" | "106" | "107" | "108" | "111" | "113" => {
+            note(item, &category, summary)
+        }
+        other => {
+            summary.skip(skipped(other));
+            return None;
+        }
+    }?;
+    let details = item.get("details").unwrap_or(&Value::Null);
+    if number(item, "favIndex").is_some_and(|i| i > 0) {
+        summary.drop_some(FAVORITE, 1);
+    }
+    if !array(details, "passwordHistory").is_empty() {
+        summary.drop_some(PASSWORD_HISTORY, 1);
+    }
+    summary.add(&mapped);
+    Some(mapped)
+}
+
+/// What a mirror of a 1Password item records: which item it is, and the
+/// version mirrored (see [`MirrorVersion`]).
+pub fn source(account: &str, vault: &str, item: &str, version: &MirrorVersion) -> Source {
+    Source {
+        id: source_id(account, vault, item),
+        version: version.to_string(),
+    }
+}
+
+pub fn source_id(account: &str, vault: &str, item: &str) -> String {
+    format!("{SOURCE_PREFIX}{account}/{vault}/{item}")
+}
+
+/// How a 1Password item's source id starts.
+pub const SOURCE_PREFIX: &str = "1password/";
+
+/// A 1Password source id's account, vault and item ids; `None` if it
+/// isn't one.
+pub fn source_key(id: &str) -> Option<(&str, &str, &str)> {
+    let mut parts = id.strip_prefix(SOURCE_PREFIX)?.splitn(3, '/');
+    let (account, vault, item) = (parts.next()?, parts.next()?, parts.next()?);
+    (!vault.is_empty() && !item.is_empty()).then_some((account, vault, item))
+}
+
+/// Maps a 1PUX `export.data`. Each item records where it came from, so a
+/// later sync from 1Password takes it over rather than adding it again.
 pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
     let Some(accounts) = export.get("accounts").and_then(Value::as_array) else {
         bail!("not a 1Password export: no \"accounts\" list");
@@ -377,55 +437,50 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
     let mut summary = Summary::new(ImportSource::OnePassword);
     let mut tags = BTreeSet::new();
     let mut out = Vec::new();
-    let items = accounts
-        .iter()
-        .flat_map(|account| array(account, "vaults"))
-        .flat_map(|vault| array(vault, "items"));
-    for item in items {
-        if text(item, "state").as_deref() == Some("archived") {
-            summary.skip(ARCHIVED);
-            continue;
-        }
-        let category = text(item, "categoryUuid").unwrap_or_default();
-        let mapped = match category.as_str() {
-            "001" | "005" | "102" | "109" | "110" | "112" => login(item, &mut summary),
-            "002" => card(item, &mut summary),
-            "004" => identity(item, &mut summary),
-            "114" => ssh(item, &mut summary),
-            "003" | "100" | "101" | "103" | "104" | "105" | "106" | "107" | "108" | "111"
-            | "113" => note(item, &category, &mut summary),
-            other => {
-                summary.skip(skipped(other));
-                continue;
+    for account in accounts {
+        // The user's id in the account, not the account's (`op account
+        // list` gives both).
+        let user_id = account
+            .get("attrs")
+            .and_then(|a| text(a, "uuid"))
+            .unwrap_or_default();
+        for vault in array(account, "vaults") {
+            let vault_id = vault.get("attrs").and_then(|a| text(a, "uuid"));
+            for entry in array(vault, "items") {
+                let Some(mut mapped) = item(entry, &mut summary) else {
+                    continue;
+                };
+                let overview = entry.get("overview").unwrap_or(&Value::Null);
+                tags.extend(array(overview, "tags").iter().filter_map(scalar));
+                if let (Some(vault_id), Some(item_id)) = (&vault_id, text(entry, "uuid")) {
+                    let version = MirrorVersion {
+                        updated: number(entry, "updatedAt").unwrap_or(0),
+                        digest: mapped.digest(),
+                        origin: Origin::Import,
+                        fields: BTreeSet::new(),
+                    };
+                    let source = source(&user_id, vault_id, &item_id, &version);
+                    mapped.source = valid_source(&source).then_some(source);
+                }
+                out.push(mapped);
             }
-        };
-        let Some(mapped) = mapped else {
-            continue;
-        };
-        let details = item.get("details").unwrap_or(&Value::Null);
-        let overview = item.get("overview").unwrap_or(&Value::Null);
-        if number(item, "favIndex").is_some_and(|i| i > 0) {
-            summary.drop_some(FAVORITE, 1);
         }
-        tags.extend(array(overview, "tags").iter().filter_map(scalar));
-        if !array(details, "passwordHistory").is_empty() {
-            summary.drop_some(PASSWORD_HISTORY, 1);
-        }
-        summary.add(&mapped);
-        out.push(mapped);
     }
     summary.drop_some(TAG, tags.len());
     Ok((out, summary))
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::import::parse;
     use crate::import::tests::{fields, lines};
 
+    /// The user id in [`EXPORT`]; `op account list` gives it as `user_uuid`.
+    pub const USER: &str = "USERUSERUSERUSERUSERUSERUS";
+
     /// Shaped like the `export.data` of a 1Password 8 `.1pux`: two vaults.
-    const EXPORT: &str = r#"{
+    pub const EXPORT: &str = r#"{
   "accounts": [
     {
       "attrs": {
@@ -433,7 +488,7 @@ mod tests {
         "name": "Dax Raad",
         "avatar": "",
         "email": "dax@example.com",
-        "uuid": "AAAABBBBCCCCDDDDEEEEFFFFGG",
+        "uuid": "USERUSERUSERUSERUSERUSERUS",
         "domain": "https://my.1password.com/"
       },
       "vaults": [
@@ -721,6 +776,28 @@ mod tests {
             ]
         );
         let github = &items[0];
+        // Each item records which 1Password item it is, so a sync can take
+        // it over. A .1pux names the user, not the account.
+        let source = github.source.as_ref().unwrap();
+        assert_eq!(
+            source.id,
+            format!("1password/{USER}/v1v1v1v1v1v1v1v1v1v1v1v1v1/item1item1item1item1item1a")
+        );
+        let version = MirrorVersion::parse(&source.version).unwrap();
+        assert_eq!(
+            (version.updated, version.origin),
+            (1_710_000_000, Origin::Import)
+        );
+        assert!(!version.mirrored());
+        assert_eq!(
+            source_key(&source.id),
+            Some((
+                USER,
+                "v1v1v1v1v1v1v1v1v1v1v1v1v1",
+                "item1item1item1item1item1a"
+            ))
+        );
+        assert!(items.iter().all(|i| i.source.is_some()));
         assert_eq!(
             fields(github),
             [

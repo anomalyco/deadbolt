@@ -67,6 +67,7 @@ pub fn form(s: &App, k: &Kit, f: &Form) -> El {
         .transition(swap());
     form.child(head(k, f))
         .children(conflict(k, f))
+        .children(mirrored(k, f))
         .child(
             col()
                 .key("form-scroll")
@@ -165,6 +166,26 @@ fn conflict(k: &Kit, f: &Form) -> Option<El> {
         );
     }
     Some(block)
+}
+
+/// Editing a mirrored item: allowed, but its source wins the next sync.
+fn mirrored(k: &Kit, f: &Form) -> Option<El> {
+    let source = f.source().filter(|_| f.conflict.is_none())?;
+    let notice = Notice {
+        severity: Severity::Caution,
+        title: format!("From {source}"),
+        body: format!(
+            "The next sync from {source} puts back its version. \
+             To keep a change, make it in {source}."
+        ),
+    };
+    Some(
+        col()
+            .key("mirrored")
+            .w_full()
+            .transition(fade())
+            .child(crate::onboarding::view::banner(k, &notice)),
+    )
 }
 
 fn placeholder(input: &Input) -> &'static str {

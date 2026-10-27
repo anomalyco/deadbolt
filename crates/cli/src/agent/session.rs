@@ -424,6 +424,11 @@ impl Loaded {
         &self.vaults[id]
     }
 
+    /// The vault, if still held.
+    pub fn held(&self, id: &VaultId) -> Option<&Vault> {
+        self.vaults.get(id)
+    }
+
     pub fn name_taken(&self, name: &str, except: Option<VaultId>) -> bool {
         self.vaults
             .iter()
