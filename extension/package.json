@@ -1,0 +1,24 @@
+{
+  "name": "@deadbolt/extension",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Deadbolt's browser extension: fill and save logins through the local Deadbolt agent.",
+  "type": "module",
+  "scripts": {
+    "build": "bun scripts/build.ts",
+    "watch": "bun scripts/build.ts --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "bun test",
+    "check": "tsc --noEmit && bun test"
+  },
+  "devDependencies": {
+    "@happy-dom/global-registrator": "21.0.4",
+    "@types/bun": "1.4.3",
+    "@types/chrome": "0.3.5",
+    "happy-dom": "21.0.4",
+    "typescript": "7.0.2"
+  },
+  "dependencies": {
+    "tldts": "7.4.18"
+  }
+}

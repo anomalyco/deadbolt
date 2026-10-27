@@ -1,0 +1,131 @@
+import { describe, expect, test } from "bun:test"
+import { fillableOrigin, saveTitle, saveUrl, sameSite, senderOrigin, siteOf } from "../src/bg/site"
+
+const u = (s: string) => new URL(s)
+
+describe("fillableOrigin", () => {
+  test("https pages", () => {
+    expect(fillableOrigin(u("https://github.com/login"))).toBe(true)
+    expect(fillableOrigin(u("https://127.0.0.1:8443/"))).toBe(true)
+  })
+
+  test("plain http only on local development hosts", () => {
+    expect(fillableOrigin(u("http://example.com/login"))).toBe(false)
+    expect(fillableOrigin(u("http://192.168.1.10/"))).toBe(false)
+    expect(fillableOrigin(u("http://localhost:3000/"))).toBe(true)
+    expect(fillableOrigin(u("http://127.0.0.1:5173/"))).toBe(true)
+    expect(fillableOrigin(u("http://app.localhost/"))).toBe(true)
+    expect(fillableOrigin(u("http://shop.test/"))).toBe(true)
+  })
+
+  test("local hosts may end with a dot", () => {
+    expect(fillableOrigin(u("http://localhost.:3000/"))).toBe(true)
+    expect(fillableOrigin(u("http://app.localhost./"))).toBe(true)
+    expect(fillableOrigin(u("http://shop.test./"))).toBe(true)
+    expect(fillableOrigin(u("http://localhost.evil.com/"))).toBe(false)
+    expect(fillableOrigin(u("http://example.com./"))).toBe(false)
+  })
+
+  test("other schemes never", () => {
+    expect(fillableOrigin(u("file:///Users/kit/login.html"))).toBe(false)
+    expect(fillableOrigin(u("chrome://settings/"))).toBe(false)
+    expect(fillableOrigin(u("data:text/html,<input type=password>"))).toBe(false)
+  })
+})
+
+describe("senderOrigin", () => {
+  test("the frame's URL when it matches the browser's origin", () => {
+    expect(senderOrigin({ url: "https://github.com/login?x=1", origin: "https://github.com" })?.origin).toBe("https://github.com")
+  })
+
+  test("sandboxed frames (opaque origin) get nothing", () => {
+    expect(senderOrigin({ url: "https://github.com/login", origin: "null" })).toBeNull()
+  })
+
+  test("a URL that disagrees with the origin gets nothing", () => {
+    // about:blank and srcdoc frames inherit the parent's origin.
+    expect(senderOrigin({ url: "about:blank", origin: "https://github.com" })).toBeNull()
+    expect(senderOrigin({ url: "https://evil.com/", origin: "https://github.com" })).toBeNull()
+  })
+
+  test("missing fields get nothing", () => {
+    expect(senderOrigin({ url: "https://github.com/" })).toBeNull()
+    expect(senderOrigin({ origin: "https://github.com" })).toBeNull()
+  })
+})
+
+describe("siteOf", () => {
+  test("registrable domains", () => {
+    expect(siteOf("github.com")).toBe("github.com")
+    expect(siteOf("gist.github.com")).toBe("github.com")
+    expect(siteOf("accounts.google.co.uk")).toBe("google.co.uk")
+    expect(siteOf("WWW.Example.COM.")).toBe("example.com")
+  })
+
+  test("private suffixes keep tenants apart", () => {
+    expect(siteOf("alice.github.io")).toBe("alice.github.io")
+    expect(siteOf("bob.github.io")).toBe("bob.github.io")
+  })
+
+  test("IPs, localhost and single labels are their own site", () => {
+    expect(siteOf("127.0.0.1")).toBe("127.0.0.1")
+    expect(siteOf("localhost")).toBe("localhost")
+    expect(siteOf("[::1]")).toBe("[::1]")
+  })
+
+  test("a public suffix itself has no site", () => {
+    expect(siteOf("co.uk")).toBeNull()
+    expect(siteOf("github.io")).toBeNull()
+  })
+})
+
+describe("sameSite", () => {
+  test("subdomains of one site", () => {
+    expect(sameSite(u("https://auth.example.com/frame"), u("https://www.example.com/"))).toBe(true)
+  })
+
+  test("another site's frame", () => {
+    expect(sameSite(u("https://ads.tracker.net/"), u("https://example.com/"))).toBe(false)
+  })
+
+  test("tenants of a shared host are different sites", () => {
+    expect(sameSite(u("https://bob.github.io/"), u("https://alice.github.io/"))).toBe(false)
+  })
+
+  test("a frame on a public suffix matches nothing", () => {
+    expect(sameSite(u("https://github.io/"), u("https://github.io/"))).toBe(false)
+  })
+})
+
+describe("saveTitle", () => {
+  test("the page title, tidied", () => {
+    expect(saveTitle("  Sign in \n\t to   Acme\u0000 ", "acme.com")).toBe("Sign in to Acme")
+  })
+
+  test("capped at 128 characters without splitting one", () => {
+    const title = saveTitle("🔐".repeat(200), "acme.com")
+    expect(Array.from(title)).toHaveLength(128)
+    expect(title).toBe("🔐".repeat(128))
+  })
+
+  test("the site when the page has no title", () => {
+    expect(saveTitle("", "acme.com")).toBe("acme.com")
+    expect(saveTitle(" \n ", "acme.com")).toBe("acme.com")
+    expect(saveTitle(undefined, "acme.com")).toBe("acme.com")
+  })
+})
+
+describe("saveUrl", () => {
+  test("origin and path, without query or fragment", () => {
+    expect(saveUrl(u("https://github.com/login?return_to=%2Fsettings#top"))).toBe("https://github.com/login")
+    expect(saveUrl(u("http://localhost:3000/"))).toBe("http://localhost:3000/")
+  })
+
+  test("spaces stay encoded", () => {
+    expect(saveUrl(u("https://acme.com/sign in"))).toBe("https://acme.com/sign%20in")
+  })
+
+  test("just the origin when the path is too long", () => {
+    expect(saveUrl(u(`https://acme.com/${"a".repeat(3000)}`))).toBe("https://acme.com")
+  })
+})
