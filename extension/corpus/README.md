@@ -9,6 +9,7 @@ where detection disagrees with what the pages declare. Not part of
 bun corpus/crawl.ts --top 50            # shake-out run
 bun corpus/crawl.ts --top 1000          # resumable: rerun to continue
 bun corpus/report.ts                    # report.md, report.json, contact.html
+bun corpus/compare.ts                   # engine vs detect.ts: compare.md, compare.json
 ```
 
 Flags for `crawl.ts`: `--top N` (Tranco top N, default 1000), `--sites file.txt`
@@ -38,6 +39,13 @@ Needs Playwright's Chromium (`bunx playwright-core install chromium`).
 - `labels.ts`: weak labels from the page's own markup (autocomplete tokens,
   then `type=password`/`email`, then name/id hints) and how they compare with
   the detector's roles. They are hints, not ground truth.
+- `snapshot.ts`: collects the autofill engine's value-free Snapshot
+  (`crates/autofill`) in each frame; `crawl.ts` saves one per page as
+  `snapshots/<page>.json`, and each probed input carries its snapshot `fid`.
+- `compare.ts`: replays `snapshots/` with
+  `cargo run -p deadbolt-autofill --bin replay` and compares the engine with
+  the recorded `scanPage()` result and the weak labels: page kind, field
+  roles, and on each disagreement which one matches the markup.
 - `step2.ts` (`--step2`): on identifier-first pages, types the reserved,
   undeliverable `deadbolt.corpus@example.com` (RFC 2606) into the identifier
   field and presses the detected submit control once per site, then records
