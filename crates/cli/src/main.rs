@@ -2,6 +2,7 @@
 compile_error!("deadbolt currently supports Unix platforms only");
 
 mod agent;
+mod app;
 mod browser;
 mod caller;
 #[expect(
@@ -10,6 +11,7 @@ mod caller;
 )]
 mod client;
 mod config;
+mod desktop;
 mod import;
 mod items;
 mod prompt;
@@ -192,6 +194,12 @@ enum Commands {
     Send(send::SendArgs),
     /// List, show or revoke sends.
     Sends(send::SendsArgs),
+    /// Open the desktop app (bare `deadbolt` does too when started from
+    /// an app launcher rather than a terminal; DEADBOLT_NO_UI=1 stops that).
+    App,
+    /// Add Deadbolt to the Linux app launcher, opening `deadbolt app`.
+    #[command(subcommand)]
+    Desktop(DesktopCommand),
     /// Connect Deadbolt's browser extension to this computer's Deadbolt.
     #[command(subcommand)]
     Browser(BrowserCommand),
@@ -199,6 +207,14 @@ enum Commands {
     /// run this; `deadbolt browser install` sets it up.
     #[command(hide = true)]
     BrowserHost { origin: String },
+}
+
+#[derive(Subcommand)]
+enum DesktopCommand {
+    /// Write the desktop entry and icon under ~/.local/share (again to update).
+    Install,
+    /// Remove the desktop entry and icon.
+    Uninstall,
 }
 
 #[derive(Subcommand)]
@@ -297,6 +313,16 @@ fn main() -> ExitCode {
     {
         args.insert(1, "browser-host".into());
     }
+    // Bare `deadbolt` from an app launcher opens the app; from a terminal,
+    // or when the app can't be opened, it prints usage as before.
+    if args.len() == 1
+        && app::bare_opens_app(app::from_terminal(), cfg!(target_os = "macos"), |name| {
+            config::env(name).ok()
+        })
+        && app::open().is_ok()
+    {
+        return ExitCode::SUCCESS;
+    }
     let cli = Cli::parse_from(args);
     let agent = matches!(cli.command, Commands::Agent { command: None });
     // Commands die quietly when piped into `head`. The agent and the browser
@@ -351,6 +377,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Agent { .. }
                 | Commands::TouchId { .. }
                 | Commands::Vault(_)
+                | Commands::App
+                | Commands::Desktop(_)
                 | Commands::Browser(_)
                 | Commands::BrowserHost { .. }
                 | Commands::Sends(_)
@@ -393,6 +421,9 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
+        Commands::App => app::open()?,
+        Commands::Desktop(DesktopCommand::Install) => desktop::install()?,
+        Commands::Desktop(DesktopCommand::Uninstall) => desktop::uninstall()?,
         Commands::Browser(BrowserCommand::Install { browser }) => browser::install(&browser)?,
         Commands::Browser(BrowserCommand::Uninstall { browser }) => browser::uninstall(&browser)?,
         Commands::BrowserHost { origin } => browser::host::run(paths, &origin).await?,
