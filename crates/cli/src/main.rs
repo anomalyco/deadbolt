@@ -194,8 +194,9 @@ enum Commands {
     Send(send::SendArgs),
     /// List, show or revoke sends.
     Sends(send::SendsArgs),
-    /// Open the desktop app (bare `deadbolt` does too when started from
-    /// an app launcher rather than a terminal; DEADBOLT_NO_UI=1 stops that).
+    /// Open the desktop app, or bring the running one forward (bare
+    /// `deadbolt` does too when started from an app launcher rather than a
+    /// terminal; DEADBOLT_NO_UI=1 stops that).
     App,
     /// Add Deadbolt to the Linux app launcher, opening `deadbolt app`.
     #[command(subcommand)]
@@ -319,7 +320,7 @@ fn main() -> ExitCode {
         && app::bare_opens_app(app::from_terminal(), cfg!(target_os = "macos"), |name| {
             config::env(name).ok()
         })
-        && app::open().is_ok()
+        && open_app()
     {
         return ExitCode::SUCCESS;
     }
@@ -357,6 +358,14 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Bare `deadbolt`'s `deadbolt app`, before the CLI's runtime exists.
+fn open_app() -> bool {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .is_ok_and(|runtime| runtime.block_on(app::open(&Paths::get())).is_ok())
 }
 
 async fn run(cli: Cli) -> Result<ExitCode> {
@@ -421,7 +430,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
-        Commands::App => app::open()?,
+        Commands::App => app::open(&paths).await?,
         Commands::Desktop(DesktopCommand::Install) => desktop::install()?,
         Commands::Desktop(DesktopCommand::Uninstall) => desktop::uninstall()?,
         Commands::Browser(BrowserCommand::Install { browser }) => browser::install(&browser)?,
@@ -608,7 +617,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         }
         Commands::Watch => {
             client::ensure_running(&paths).await?;
-            let mut changes = deadbolt_client::watch(&paths).await?;
+            let mut changes = deadbolt_client::watch(&paths, false).await?;
             while let Some(change) = changes.next().await? {
                 println!("{}", serde_json::to_string(&change)?);
             }

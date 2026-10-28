@@ -61,7 +61,9 @@ impl Files {
     }
 }
 
-/// The desktop entry that runs `program app`.
+/// The desktop entry that runs `program app`. `StartupNotify` is what has
+/// launchers (GLib's and KDE's) hand it an activation token, which a running
+/// app needs for the compositor to let it come forward.
 fn entry(program: &Path) -> Result<String> {
     let program = program
         .to_str()
@@ -80,6 +82,7 @@ fn entry(program: &Path) -> Result<String> {
          Terminal=false\n\
          Categories=Utility;Security;\n\
          Keywords=password;passwords;passkey;vault;\n\
+         StartupNotify=true\n\
          StartupWMClass={ID}\n",
         exec_arg(program)
     ))
@@ -159,6 +162,7 @@ mod tests {
              Terminal=false\n\
              Categories=Utility;Security;\n\
              Keywords=password;passwords;passkey;vault;\n\
+             StartupNotify=true\n\
              StartupWMClass=pw.deadbolt.Deadbolt\n"
         );
         assert!(entry(Path::new("/bin/dead\nbolt")).is_err());

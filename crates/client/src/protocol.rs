@@ -17,16 +17,20 @@
 //! `watch` keeps the connection open and streams what changed:
 //!
 //! ```text
-//! client -> agent   Request   {"v":2,"cmd":"watch"}
+//! client -> agent   Request   {"v":13,"cmd":"watch","app":false}
 //! agent  -> client  Message*  {"type":"change","change":"watching"}   first
 //!                             {"type":"change","change":"items","vault":"…"}
-//! agent  -> client  Message   {"type":"ok","reply":"done"}   after "stopping"
+//! agent  -> client  Message   {"type":"ok","reply":{"reply":"done"}}   after "stopping"
 //! ```
 //!
 //! Changes name what changed, never values: clients refetch. They are
 //! coalesced, so a burst (a sync batch, an import) arrives as one change per
 //! vault. A watcher that can't keep up gets `resync`, or is dropped if it
 //! stops reading. The stream ends when the client hangs up or the agent stops.
+//!
+//! The desktop app's main window watches with `app` set. `app-activate` (a
+//! second launch) reaches the most recent such watcher as an `activate`
+//! change, so the running app comes forward instead of a second one starting.
 //!
 //! `status` and `stop` are answered whatever `v` says, so a client can always
 //! find and replace an agent of an older protocol. They are the only messages
@@ -47,7 +51,7 @@ pub use caller::{
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
 
-pub const PROTOCOL_VERSION: u32 = 12;
+pub const PROTOCOL_VERSION: u32 = 13;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -88,7 +92,20 @@ pub enum Command {
     },
     Lock,
     /// Streams [`Change`]s until the client hangs up or the agent stops.
-    Watch,
+    /// `app` marks the desktop app's main window, which `app-activate`
+    /// brings forward.
+    Watch {
+        app: bool,
+    },
+    /// Brings the running desktop app forward: an `activate` change with
+    /// `token` (the launcher's `XDG_ACTIVATION_TOKEN` or `DESKTOP_STARTUP_ID`)
+    /// to the most recent app watcher, replying `activated`. With none, it
+    /// replies `no-app` and holds a short reservation for the app the caller
+    /// is about to start: an `app-activate` during it waits for that app to
+    /// watch, then activates it. Needs no unlock.
+    AppActivate {
+        token: Option<String>,
+    },
     VaultCreate {
         name: String,
     },
@@ -544,6 +561,11 @@ pub enum Change {
     Resync,
     /// The agent is stopping, which locks the store. The stream ends.
     Stopping,
+    /// Only to an app watcher: another launch asked for the window. Show
+    /// and focus it, with `token` for the compositor when there is one.
+    Activate {
+        token: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -591,6 +613,10 @@ pub struct Answer {
 pub enum Reply {
     Status(Box<Status>),
     Done,
+    /// `app-activate` reached a running app.
+    Activated,
+    /// `app-activate` found no app: the caller starts one.
+    NoApp,
     Vault {
         vault: VaultInfo,
     },
@@ -1313,20 +1339,47 @@ mod tests {
     }
 
     #[test]
-    fn watch_round_trips_as_flat_json_lines() {
+    fn app_activate_and_its_replies_are_flat_json_lines() {
         let request = serde_json::to_string(&Request {
             v: PROTOCOL_VERSION,
             claimed: None,
-            command: Command::Watch,
+            command: Command::AppActivate {
+                token: Some("launcher-token".into()),
+            },
         })
         .unwrap();
         assert_eq!(
             request,
-            format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"watch"}}"#)
+            format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"app-activate","token":"launcher-token"}}"#)
+        );
+        let replies = [
+            (
+                Reply::Activated,
+                r#"{"type":"ok","reply":{"reply":"activated"}}"#,
+            ),
+            (Reply::NoApp, r#"{"type":"ok","reply":{"reply":"no-app"}}"#),
+        ];
+        for (reply, json) in replies {
+            let line = serde_json::to_string(&Message::Ok { reply }).unwrap();
+            assert_eq!(line, json);
+        }
+    }
+
+    #[test]
+    fn watch_round_trips_as_flat_json_lines() {
+        let request = serde_json::to_string(&Request {
+            v: PROTOCOL_VERSION,
+            claimed: None,
+            command: Command::Watch { app: true },
+        })
+        .unwrap();
+        assert_eq!(
+            request,
+            format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"watch","app":true}}"#)
         );
         assert!(matches!(
             serde_json::from_str::<Request>(&request).unwrap().command,
-            Command::Watch
+            Command::Watch { app: true }
         ));
         let changes = [
             (Change::Watching, r#"{"type":"change","change":"watching"}"#),
@@ -1344,6 +1397,16 @@ mod tests {
             (Change::Activity, r#"{"type":"change","change":"activity"}"#),
             (Change::Resync, r#"{"type":"change","change":"resync"}"#),
             (Change::Stopping, r#"{"type":"change","change":"stopping"}"#),
+            (
+                Change::Activate {
+                    token: Some("t".into()),
+                },
+                r#"{"type":"change","change":"activate","token":"t"}"#,
+            ),
+            (
+                Change::Activate { token: None },
+                r#"{"type":"change","change":"activate","token":null}"#,
+            ),
         ];
         for (change, json) in changes {
             let line = serde_json::to_string(&Message::Change {

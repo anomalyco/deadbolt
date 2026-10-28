@@ -7,7 +7,7 @@
 
 mod support;
 
-use deadbolt_app::agent::{Agent, Done, Job, Values};
+use deadbolt_app::agent::{Agent, Done, Job, Values, Window};
 use deadbolt_app::model::{App, CODE_SLACK, Screen};
 use deadbolt_app::panel::{self, Phase};
 use deadbolt_client::protocol::{Change, Code, FieldInfo};
@@ -419,7 +419,7 @@ fn the_agent_computes_the_code() {
         "password=pw",
         "otp=otpauth://totp/GitHub:dax?secret=JBSWY3DPEHPK3PXP&issuer=GitHub",
     ]);
-    let agent = Agent::spawn(device.paths(), device.launch());
+    let agent = Agent::spawn(device.paths(), device.launch(), Window::Main);
     let mut rt = Runtime::new(
         App::new(agent),
         deadbolt_app::view::app,

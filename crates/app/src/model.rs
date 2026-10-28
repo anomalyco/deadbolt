@@ -452,6 +452,12 @@ impl App {
             Change::Activity => self.on_activity_changed(),
             Change::Items { vault } if self.shows(&vault) => self.refresh(),
             Change::Stopping => self.on_agent_gone(tx),
+            // Another launch (`deadbolt app`): only the main window's watch hears it.
+            Change::Activate { token } => {
+                if let Some(windows) = &self.windows {
+                    windows.activate_main(token);
+                }
+            }
             Change::Locked | Change::Unlocked | Change::Items { .. } => {}
         }
     }

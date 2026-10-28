@@ -46,7 +46,8 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::UnlockBiometric { .. } => (T::Never, "unlock-biometric"),
         C::TouchIdSet { .. } => (T::Never, "touch-id-set"),
         C::Lock => (T::Always, "lock"),
-        C::Watch => (T::Look, "watch"),
+        C::Watch { .. } => (T::Look, "watch"),
+        C::AppActivate { .. } => (T::Always, "app-activate"),
         C::VaultCreate { .. } => (T::Never, "vault-create"),
         C::VaultList => (T::Look, "vault-list"),
         C::VaultRename { .. } => (T::Never, "vault-rename"),
@@ -128,7 +129,7 @@ fn fill_name(fill: &Fill) -> String {
 /// The draft of an entry for `command` from a `class` peer, or `None` when
 /// it isn't recorded: the app's own requests (it reports its reveals and
 /// copies), a caller's `status` and `watch` (every command starts with a
-/// status), and the browser host's look-ups, which come with every page
+/// status) and `app-activate` (every `deadbolt app`), and the browser host's look-ups, which come with every page
 /// (and its generator checks and drops, asked before anyone chose a
 /// password).
 /// Reading Activity is never an entry, so a client that reads it on every
@@ -148,7 +149,10 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
                 | Command::PasskeyCreate { .. }
                 | Command::PasskeyGet { .. }
         ),
-        CallerClass::Caller => !matches!(command, Command::Status | Command::Watch),
+        CallerClass::Caller => !matches!(
+            command,
+            Command::Status | Command::Watch { .. } | Command::AppActivate { .. }
+        ),
     };
     if !recorded {
         return None;
@@ -750,7 +754,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let agent = set_up(dir.path()).await;
         let before = stored(&agent);
-        let changes = agent.watchers.subscribe();
+        let changes = agent.watchers.subscribe(false);
         for _ in 0..5 {
             let list = Command::ActivityList {
                 since: None,

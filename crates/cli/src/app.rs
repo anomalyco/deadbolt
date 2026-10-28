@@ -1,13 +1,19 @@
 //! Opening the desktop app: `deadbolt app` from anywhere, and bare
 //! `deadbolt` started from outside a terminal (docs/app.md, "One command").
 //! The app is its own program, so this binary stays free of GUI libraries.
+//! A running app is brought forward through the agent (`app-activate`)
+//! rather than started again.
 
 use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
+
+use crate::paths::Paths;
+use crate::protocol::Reply;
 
 /// The desktop app's program: beside `deadbolt`, or in `<prefix>/lib/deadbolt/`.
 pub const PROGRAM: &str = "deadbolt-ui";
@@ -15,6 +21,35 @@ pub const PROGRAM: &str = "deadbolt-ui";
 const BUNDLE_ID: &str = "pw.deadbolt.app";
 /// Keeps bare `deadbolt` from ever opening a window (scripts, agents).
 const NO_UI: &str = "DEADBOLT_NO_UI";
+/// The longest `app-activate` may take: the agent holds it while an app
+/// another launch is starting gets to its window (`watchers::STARTING`).
+const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// The token a launcher gave this process for the window it opens:
+/// Wayland's `XDG_ACTIVATION_TOKEN`, else X11's `DESKTOP_STARTUP_ID`. A
+/// running app needs it for the compositor to let it take focus.
+pub fn activation_token(var: impl Fn(&str) -> Option<String>) -> Option<String> {
+    ["XDG_ACTIVATION_TOKEN", "DESKTOP_STARTUP_ID"]
+        .into_iter()
+        .find_map(|name| var(name).filter(|v| !v.is_empty()))
+}
+
+/// Whether `app-activate`'s outcome means an app came forward, so none is
+/// started: only `activated`. No agent, an agent of another protocol, `no-app`
+/// or no answer in time all start one.
+fn came_forward<E>(outcome: Result<Result<Reply, E>, tokio::time::error::Elapsed>) -> bool {
+    matches!(outcome, Ok(Ok(Reply::Activated)))
+}
+
+/// Asks the agent, if one runs, to bring a running app forward with this
+/// launch's activation token. False when the caller should start the app.
+async fn activate_running(paths: &Paths) -> bool {
+    let token = activation_token(|name| crate::config::env(name).ok());
+    let command = crate::protocol::Command::AppActivate { token };
+    came_forward(
+        tokio::time::timeout(ACTIVATE_TIMEOUT, crate::client::simple(paths, command)).await,
+    )
+}
 
 /// Whether bare `deadbolt` (no arguments) opens the app instead of printing
 /// usage: only when none of stdin, stdout and stderr is a terminal, a
@@ -97,10 +132,11 @@ pub fn this_binary() -> Result<PathBuf> {
 }
 
 /// Opens the app and returns once it's launched, detached from this
-/// process. Deadbolt.app goes through Launch Services, which brings a
-/// running copy to the front; Rune has no single-instance support, so
-/// elsewhere a second launch opens a second window.
-pub fn open() -> Result<()> {
+/// process, or once a running one came forward. Deadbolt.app goes through
+/// Launch Services, which brings a running copy to the front. `deadbolt-ui`
+/// is asked through the agent first (`app-activate`), and only started when
+/// no app answers.
+pub async fn open(paths: &Paths) -> Result<()> {
     let exe = this_binary()?;
     let macos = cfg!(target_os = "macos");
     match locate(&exe, macos) {
@@ -114,6 +150,9 @@ pub fn open() -> Result<()> {
             )
         }
         Ok(Target::Program(program)) => {
+            if activate_running(paths).await {
+                return Ok(());
+            }
             let mut command = Command::new(&program);
             // The app runs this `deadbolt` as its agent, not another on PATH.
             if crate::config::env("DEADBOLT_BIN").is_err() {
@@ -169,6 +208,37 @@ mod tests {
                 .find(|(k, _)| *k == name)
                 .map(|(_, v)| v.to_string())
         }
+    }
+
+    #[test]
+    fn the_launchers_token_is_waylands_else_x11s() {
+        assert_eq!(activation_token(env(&[])), None);
+        let x11 = [("DESKTOP_STARTUP_ID", "kde-123_TIME456")];
+        assert_eq!(
+            activation_token(env(&x11)).as_deref(),
+            Some("kde-123_TIME456")
+        );
+        let both = [("DESKTOP_STARTUP_ID", "x"), ("XDG_ACTIVATION_TOKEN", "w")];
+        assert_eq!(activation_token(env(&both)).as_deref(), Some("w"));
+        let empty = [("XDG_ACTIVATION_TOKEN", ""), ("DESKTOP_STARTUP_ID", "x")];
+        assert_eq!(activation_token(env(&empty)).as_deref(), Some("x"));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn only_an_app_that_came_forward_keeps_another_from_starting() {
+        let answered = |reply| async move { Ok::<_, ()>(reply) };
+        let forward = tokio::time::timeout(ACTIVATE_TIMEOUT, answered(Reply::Activated)).await;
+        assert!(came_forward(forward));
+        let no_app = tokio::time::timeout(ACTIVATE_TIMEOUT, answered(Reply::NoApp)).await;
+        assert!(!came_forward(no_app));
+        // No agent, or one that refused the request.
+        let failed = tokio::time::timeout(ACTIVATE_TIMEOUT, async { Err::<Reply, _>(()) }).await;
+        assert!(!came_forward(failed));
+        let stuck = tokio::time::timeout(
+            ACTIVATE_TIMEOUT,
+            std::future::pending::<Result<Reply, ()>>(),
+        );
+        assert!(!came_forward(stuck.await));
     }
 
     #[test]

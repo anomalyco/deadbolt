@@ -92,6 +92,17 @@ impl Windows {
         self.main.open();
     }
 
+    /// Brings the main window forward for another launch: shown, restored
+    /// and focused, with the launcher's activation token so a Wayland
+    /// compositor lets it take focus. The Dock icon comes back as in `open_main`.
+    pub fn activate_main(&self, token: Option<String>) {
+        self.main.set_dock_icon(true);
+        match token {
+            Some(token) => self.main.activate(token),
+            None => self.main.open(),
+        }
+    }
+
     /// Tells the panel whether ⇧⌘Space inside it still closes it.
     pub fn shortcut_fallback(&self, on: bool) {
         self.panel.update(move |s, _| s.shortcut_fallback = on);

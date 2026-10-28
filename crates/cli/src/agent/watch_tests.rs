@@ -1,5 +1,6 @@
 //! `watch` through the agent: what a watcher sees, that a stuck watcher
-//! can't hold the agent up, and locking on system events.
+//! can't hold the agent up, locking on system events, and `app-activate`
+//! reaching the app's watcher.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,18 +48,29 @@ fn request(command: Command) -> Vec<u8> {
     line
 }
 
-/// Subscribes over a socket pair, returning the watcher's lines.
-async fn subscribe(
-    agent: &Arc<Agent>,
-    connections: &mut JoinSet<anyhow::Result<()>>,
-) -> (
+type Watcher = (
     Lines<BufReader<OwnedReadHalf>>,
     tokio::net::unix::OwnedWriteHalf,
-) {
+);
+
+/// Subscribes over a socket pair, returning the watcher's lines.
+async fn subscribe(agent: &Arc<Agent>, connections: &mut JoinSet<anyhow::Result<()>>) -> Watcher {
+    watch_as(agent, connections, false).await
+}
+
+/// Subscribes as the app's main window (`app`) or another watcher.
+async fn watch_as(
+    agent: &Arc<Agent>,
+    connections: &mut JoinSet<anyhow::Result<()>>,
+    app: bool,
+) -> Watcher {
     let (server, client) = UnixStream::pair().unwrap();
     connections.spawn(agent.clone().handle(server, MAX_LINE));
     let (read, mut write) = client.into_split();
-    write.write_all(&request(Command::Watch)).await.unwrap();
+    write
+        .write_all(&request(Command::Watch { app }))
+        .await
+        .unwrap();
     let mut lines = BufReader::new(read).lines();
     assert_eq!(next(&mut lines).await, Some(Change::Watching));
     (lines, write)
@@ -206,7 +218,10 @@ async fn a_watcher_that_stops_reading_cannot_stall_the_agent() {
     let dir = tempfile::tempdir().unwrap();
     let agent = agent(dir.path());
     let (server, mut client) = UnixStream::pair().unwrap();
-    client.write_all(&request(Command::Watch)).await.unwrap();
+    client
+        .write_all(&request(Command::Watch { app: false }))
+        .await
+        .unwrap();
     // Fill the agent's side of the socket: the client never reads.
     server.writable().await.unwrap();
     loop {
@@ -289,4 +304,94 @@ async fn system_events_lock_unless_lock_on_sleep_is_off() {
     std::fs::write(&agent.paths.config, "lock_on_sleep = \"sometimes\"\n").unwrap();
     deliver(&[SystemEvent::Sleep]).await;
     assert!(!unlocked());
+}
+
+/// One request over a socket pair, and its reply.
+async fn ask(agent: &Arc<Agent>, command: Command) -> Reply {
+    let (server, client) = UnixStream::pair().unwrap();
+    let handled = tokio::spawn(agent.clone().handle(server, MAX_LINE));
+    let (read, mut write) = client.into_split();
+    write.write_all(&request(command)).await.unwrap();
+    let line = tokio::time::timeout(
+        watchers::STARTING * 2,
+        BufReader::new(read).lines().next_line(),
+    )
+    .await
+    .expect("a reply in time")
+    .unwrap()
+    .expect("a reply");
+    handled.await.unwrap().unwrap();
+    match serde_json::from_str::<Message>(&line).unwrap() {
+        Message::Ok { reply } => reply,
+        other => panic!("unexpected {other:?}"),
+    }
+}
+
+fn activate(token: &str) -> Command {
+    Command::AppActivate {
+        token: Some(token.into()),
+    }
+}
+
+#[tokio::test]
+async fn app_activate_reaches_only_the_newest_app_watcher() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = agent(dir.path());
+    let mut connections = JoinSet::new();
+    let (mut other, _other) = subscribe(&agent, &mut connections).await;
+    let (mut older, _older) = watch_as(&agent, &mut connections, true).await;
+    let (mut newer, newer_write) = watch_as(&agent, &mut connections, true).await;
+
+    assert!(matches!(
+        ask(&agent, activate("one")).await,
+        Reply::Activated
+    ));
+    assert_eq!(
+        next(&mut newer).await,
+        Some(Change::Activate {
+            token: Some("one".into())
+        })
+    );
+    quiet(&mut older).await;
+    quiet(&mut other).await;
+
+    // The newest window gone, the one before it comes forward.
+    drop((newer, newer_write));
+    while agent.watchers.len() == 3 {
+        tokio::task::yield_now().await;
+    }
+    let none = Command::AppActivate { token: None };
+    assert!(matches!(ask(&agent, none).await, Reply::Activated));
+    assert_eq!(
+        next(&mut older).await,
+        Some(Change::Activate { token: None })
+    );
+    quiet(&mut other).await;
+}
+
+#[tokio::test]
+async fn without_an_app_a_second_launch_waits_for_the_first_ones() {
+    let dir = tempfile::tempdir().unwrap();
+    let agent = agent(dir.path());
+    let mut connections = JoinSet::new();
+    // A watcher that isn't the app doesn't count.
+    let (mut other, _other) = subscribe(&agent, &mut connections).await;
+
+    // The first launch starts the app; the second, meanwhile, waits for it.
+    assert!(matches!(ask(&agent, activate("first")).await, Reply::NoApp));
+    let second = tokio::spawn({
+        let agent = agent.clone();
+        async move { ask(&agent, activate("second")).await }
+    });
+    tokio::time::sleep(QUIET).await;
+    assert!(!second.is_finished(), "the second launch waits");
+    let (mut app, _app) = watch_as(&agent, &mut connections, true).await;
+    assert!(matches!(second.await.unwrap(), Reply::Activated));
+    assert_eq!(
+        next(&mut app).await,
+        Some(Change::Activate {
+            token: Some("second".into())
+        })
+    );
+    quiet(&mut other).await;
 }

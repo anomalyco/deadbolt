@@ -8,7 +8,7 @@ mod support;
 
 use std::path::PathBuf;
 
-use deadbolt_app::agent::{Agent, Job};
+use deadbolt_app::agent::{Agent, Job, Window};
 use deadbolt_app::import::Phase;
 use deadbolt_app::install::Installer;
 use deadbolt_app::model::{App, Screen};
@@ -85,7 +85,7 @@ const UNSUPPORTED_ONLY: &str = r#"{
 /// The app for a set-up `device`, unlocked in its vault.
 fn vault(device: &Device) -> Runtime<App> {
     let mut rt = Runtime::new(
-        App::new(Agent::spawn(device.paths(), device.launch())),
+        App::new(Agent::spawn(device.paths(), device.launch(), Window::Main)),
         deadbolt_app::view::app,
         (820.0, 540.0),
         Env {
