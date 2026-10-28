@@ -1960,6 +1960,7 @@ fn browser_install_registers_the_host() {
                 ("Arc", "Arc/User Data"),
                 ("Edge", "Microsoft Edge"),
                 ("Chromium", "Chromium"),
+                ("Helium", "net.imput.helium"),
             ]
         } else {
             &[
@@ -1967,6 +1968,7 @@ fn browser_install_registers_the_host() {
                 ("Brave", "BraveSoftware/Brave-Browser"),
                 ("Edge", "microsoft-edge"),
                 ("Chromium", "chromium"),
+                ("Helium", "net.imput.helium"),
             ]
         };
         names

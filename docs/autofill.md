@@ -1,7 +1,7 @@
 # Browser autofill
 
 Deadbolt fills and saves passwords, and makes and signs in with passkeys, in
-Chromium browsers (Chrome, Brave, Arc, Edge, Chromium) through its own
+Chromium browsers (Chrome, Brave, Arc, Edge, Chromium, Helium) through its own
 extension, in `extension/`. This doc covers
 the agent's side, the native messaging host, the extension, and the messages
 between them.
@@ -29,7 +29,7 @@ web page ─ content script ─ extension ══ native messaging ══ deadbol
 
 ```sh
 deadbolt browser install                      # browsers found on this computer
-deadbolt browser install --browser brave      # or name them: chrome brave arc edge chromium all
+deadbolt browser install --browser brave      # or name them: chrome brave arc edge chromium helium all
 deadbolt browser uninstall                    # every browser, or --browser
 ```
 
@@ -43,6 +43,7 @@ deadbolt browser uninstall                    # every browser, or --browser
 | Arc      | `Arc/User Data`                           | (none)                                      |
 | Edge     | `Microsoft Edge`                          | `microsoft-edge`                            |
 | Chromium | `Chromium`                                | `chromium`                                  |
+| Helium   | `net.imput.helium`                        | `net.imput.helium`                          |
 
 ```json
 {
@@ -79,7 +80,7 @@ The host refuses to start for any origin other than the extension's, and
 `allowed_origins` already stops the browser from connecting any other
 extension.
 
-## Load the extension unpacked (Brave, Chrome, Arc, Edge)
+## Load the extension unpacked (Brave, Chrome, Arc, Edge, Helium)
 
 There's no store listing yet. Build it and load it from disk:
 
@@ -90,8 +91,8 @@ bun run build                  # writes extension/dist
 deadbolt browser install       # lets the browser start deadbolt browser-host
 ```
 
-1. Open `brave://extensions` (`chrome://extensions` in Chrome and Arc,
-   `edge://extensions` in Edge).
+1. Open `brave://extensions` (`chrome://extensions` in Chrome, Arc and
+   Helium, `edge://extensions` in Edge).
 2. Turn on **Developer mode**.
 3. Click **Load unpacked** and choose `extension/dist`.
 

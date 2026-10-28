@@ -182,8 +182,8 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum BrowserCommand {
-    /// Let the extension reach Deadbolt in Chrome, Brave, Arc, Edge or
-    /// Chromium (default: those installed here).
+    /// Let the extension reach Deadbolt in Chrome, Brave, Arc, Edge,
+    /// Chromium or Helium (default: those installed here).
     Install {
         #[arg(long, value_enum)]
         browser: Vec<browser::Browser>,
