@@ -727,6 +727,7 @@ impl App {
             .as_ref()
             .and_then(|b| b.value(&form.fields[field].name));
         let input = &mut form.fields[field];
+        let mut shown = None;
         if input.edit.is_revealed() {
             input.edit.set_revealed(false);
             if input.lines && saved == Some(input.edit.text.as_str()) {
@@ -743,12 +744,16 @@ impl App {
             // Shown, it's an ordinary field: emptied on purpose, it's emptied.
             input.kept = false;
             input.edit.set_revealed(true);
+            shown = form.base.as_ref().map(|_| input.name.clone());
         }
         // Show and Hide are pressed to edit on: focus goes back to the field.
         self.search.focused = false;
         form.name.focused = false;
         for (i, input) in form.fields.iter_mut().enumerate() {
             input.edit.focused = i == field;
+        }
+        if let Some(name) = shown {
+            self.report(deadbolt_client::protocol::AppAction::Reveal, &name);
         }
     }
 
@@ -1109,19 +1114,20 @@ impl App {
         if !ev.is_command('c') || ev.mods.shift || ev.mods.alt || ev.mods.ctrl {
             return false;
         }
-        let Some(input) = self
-            .edit
-            .form
-            .as_ref()
-            .and_then(|f| f.fields.get(field))
-            .filter(|i| i.secret())
-        else {
+        let Some(form) = self.edit.form.as_ref() else {
+            return false;
+        };
+        let Some(input) = form.fields.get(field).filter(|i| i.secret()) else {
             return false;
         };
         let selected = input.edit.selected();
         if !selected.is_empty() {
+            let saved = form
+                .base
+                .as_ref()
+                .map(|b| (b.0.id.clone(), b.0.label.clone()));
             let (name, value) = (input.name.clone(), selected.to_owned());
-            self.copy_value(String::new(), name, value, tx);
+            self.copy_value(saved, name, value, tx);
         }
         true
     }

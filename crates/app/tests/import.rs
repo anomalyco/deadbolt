@@ -121,11 +121,15 @@ fn device() -> Device {
     device
 }
 
+/// Two frames per step: Rune holds a drag for one frame's build when the
+/// state changed that frame, as a change from the agent's watch can.
 fn drop_file(rt: &mut Runtime<App>, path: PathBuf) {
     rt.drag_files(vec![path.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
     assert!(rt.state.drop_hovering(), "the drop zone lights up");
     rt.drop_files(vec![path], Some((600.0, 300.0)));
+    rt.frame(1.0 / 60.0);
     rt.frame(1.0 / 60.0);
     assert!(!rt.state.drop_hovering());
 }
@@ -232,10 +236,12 @@ fn a_file_that_isnt_an_export_says_so() {
     let notes = device.file("notes.txt", "hello");
     rt.drag_files(vec![notes.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
     assert!(!rt.state.drop_hovering());
     assert_eq!(rt.state.import.error, None);
     assert_eq!(rt.find("import-error"), None);
     rt.drop_files(vec![notes.clone()], Some((600.0, 300.0)));
+    rt.frame(1.0 / 60.0);
     rt.frame(1.0 / 60.0);
     let error = rt.state.import.error.clone().expect("a caution");
     assert_eq!(error.severity, Severity::Caution);
@@ -505,6 +511,7 @@ fn a_drag_cut_short_doesnt_stick() {
     let mut rt = scene("vault");
     rt.drag_files(vec![export.clone()], Some((600.0, 300.0)));
     rt.frame(1.0 / 60.0);
+    rt.frame(1.0 / 60.0);
     assert!(rt.state.drop_hovering() && rt.find("drop-zone").is_some());
     rt.key(key(Key::Escape));
     rt.frame(1.0 / 60.0);
@@ -514,6 +521,7 @@ fn a_drag_cut_short_doesnt_stick() {
 
     rt.state.installer = Some(Installer::fixture());
     rt.drag_files(vec![export], Some((600.0, 300.0)));
+    rt.frame(1.0 / 60.0);
     rt.frame(1.0 / 60.0);
     assert!(rt.state.drop_hovering());
     rt.state.show_installer();

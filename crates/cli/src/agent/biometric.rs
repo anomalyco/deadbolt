@@ -332,6 +332,13 @@ pub fn refresh_status() -> BiometricStatus {
     status
 }
 
+/// The hash-checked `deadbolt-enclave`, which also identifies the agent's
+/// peers (`deadbolt-enclave identify`).
+#[cfg(target_os = "macos")]
+pub fn helper() -> anyhow::Result<std::path::PathBuf> {
+    macos::verified_helper_path()
+}
+
 /// Generates a fresh `.biometryCurrentSet` Secure Enclave key and seals a new
 /// 256-bit `biometric_key` without touching `store.redb`.
 pub fn seal_new(now_secs: u64) -> Result<SealedBiometric, UnlockError> {
@@ -590,10 +597,10 @@ mod macos {
     /// In production builds (`cfg(not(test))`), only `deadbolt-enclave` next to
     /// the running `deadbolt` executable (`Deadbolt.app/Contents/Helpers/`) is
     /// accepted; build-machine paths are never consulted.
-    fn verified_helper_path() -> Result<PathBuf> {
+    pub(super) fn verified_helper_path() -> Result<PathBuf> {
         #[cfg(not(test))]
         let (candidate, expected_sha) = {
-            let exe = std::env::current_exe().context("locating current executable")?;
+            let exe = crate::caller::own_exe().context("locating current executable")?;
             let dir = exe
                 .parent()
                 .ok_or_else(|| anyhow!("executable has no parent directory"))?;
@@ -621,6 +628,9 @@ mod macos {
     pub(super) fn verify_helper_at(path: &Path, expected_hex: &str) -> Result<()> {
         if expected_hex.len() != 64 {
             bail!("Touch ID helper was not compiled into this build");
+        }
+        if !path.is_file() {
+            bail!(deadbolt_client::peer::missing_helper(path));
         }
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading Touch ID helper at {}", path.display()))?;
@@ -1148,6 +1158,21 @@ mod macos_tests {
             macos::verify_helper_at(&fake_helper, env!("DEADBOLT_ENCLAVE_TEST_SHA256")).is_err()
         );
         assert!(macos::verify_helper_at(&fake_helper, "").is_err());
+    }
+
+    /// Without its helper, Deadbolt names the file it's missing rather than
+    /// going on unchecked.
+    #[test]
+    fn a_missing_helper_is_named() {
+        let tmp = TempDir::new().unwrap();
+        let gone = tmp.path().join("deadbolt-enclave");
+        let error = macos::verify_helper_at(&gone, env!("DEADBOLT_ENCLAVE_TEST_SHA256"))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(&format!("{} is missing", gone.display())),
+            "{error}"
+        );
     }
 
     #[test]

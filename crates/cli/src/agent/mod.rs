@@ -1,8 +1,10 @@
 //! The background agent: the only process that opens the store. Holds it
 //! unlocked, runs the iroh node while unlocked, and serves the control socket.
 
+mod activity;
 mod autofill;
 pub mod biometric;
+mod caller;
 mod items;
 mod mirror;
 mod pairing;
@@ -119,6 +121,11 @@ pub struct Agent {
     busy: AtomicUsize,
     shutdown: Notify,
     watchers: Watchers,
+    /// Who connections come from.
+    callers: caller::Callers,
+    /// Activity not stored yet: entries recorded while locked, and each
+    /// caller's count against its limit.
+    activity: Mutex<activity::Ledger>,
     /// Deadbolt Send's endpoint, started by the first send.
     send_server: tokio::sync::Mutex<Option<deadbolt_send::Server>>,
     /// Set as the agent stops, ending sends and anyone waiting on one.
@@ -155,6 +162,8 @@ impl Agent {
             busy: AtomicUsize::new(0),
             shutdown: Notify::new(),
             watchers: Watchers::default(),
+            callers: caller::Callers::new(),
+            activity: Mutex::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
         })
@@ -241,6 +250,7 @@ mod tests {
         }
         let mut request = serde_json::to_vec(&Request {
             v: PROTOCOL_VERSION,
+            claimed: None,
             command: Command::Stop,
         })
         .unwrap();
@@ -276,6 +286,7 @@ mod tests {
                 let (server, mut client) = UnixStream::pair().unwrap();
                 let mut request = serde_json::to_vec(&Request {
                     v: PROTOCOL_VERSION,
+                    claimed: None,
                     command: Command::Generate { length, symbols },
                 })
                 .unwrap();
@@ -357,6 +368,7 @@ mod tests {
         let (server, mut client) = UnixStream::pair().unwrap();
         let mut request = serde_json::to_vec(&Request {
             v: PROTOCOL_VERSION,
+            claimed: None,
             command: Command::Stop,
         })
         .unwrap();
@@ -1123,6 +1135,7 @@ impl Conversation {
 
 impl Agent {
     async fn handle(self: Arc<Self>, stream: UnixStream, max_line: usize) -> Result<()> {
+        let peer = deadbolt_client::peer::Peer::of(&stream);
         let (read, write) = stream.into_split();
         let mut read = BufReader::new(read);
         let request =
@@ -1169,7 +1182,13 @@ impl Agent {
                         ),
                     ))
                 } else {
-                    self.clone().dispatch(request.command, &conversation).await
+                    let (result, entry) = self.clone().answer(peer, request, &conversation).await;
+                    // Recorded before the reply goes: a client that never
+                    // reads it, or the agent stopping, can't lose the entry.
+                    if let Some(entry) = entry {
+                        self.record(entry);
+                    }
+                    result
                 }
             }
             Err(error) => Err(error),
@@ -1280,6 +1299,12 @@ impl Agent {
                 Ok(Reply::Done)
             }
             Command::Watch => bail!("watch streams on a connection of its own"),
+            Command::ActivityReport { .. } => bail!("reports are answered as they arrive"),
+            Command::ActivityList {
+                since,
+                limit,
+                before,
+            } => self.activity_list(since, limit, before),
             Command::VaultCreate { name } => {
                 let vault = self.with(|s| {
                     let id = s.create_vault(&name)?;
@@ -1716,6 +1741,8 @@ impl Agent {
             touch_id_enabled,
             touch_id_ready,
             touch_id_reset,
+            // Filled in for the connection that asked (`handle`).
+            caller: caller::nobody(),
         }
     }
 
@@ -1755,6 +1782,7 @@ impl Agent {
     ) -> Result<()> {
         self.cancel_biometric_prompt();
         let _transition = self.transition.lock().await;
+        self.settle_activity(true);
         *self
             .biometric_cooldown_until
             .lock()
@@ -1790,6 +1818,7 @@ impl Agent {
     ) -> Result<()> {
         self.cancel_biometric_prompt();
         let _transition = self.transition.lock().await;
+        self.settle_activity(true);
         *self
             .biometric_cooldown_until
             .lock()
@@ -2165,6 +2194,7 @@ impl Agent {
     async fn set_touch_id(&self, enabled: bool) -> Result<()> {
         self.cancel_biometric_prompt();
         let _transition = self.transition.lock().await;
+        self.settle_activity(true);
         *self
             .biometric_cooldown_until
             .lock()
@@ -2253,6 +2283,7 @@ impl Agent {
         let id: DeviceId = session.id;
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);
         self.watchers.unlocked();
+        self.settle_activity(false);
         self.set_timeout(timeout_secs)?;
         self.with(|s| {
             s.sync_task = Some(AbortOnDrop(tokio::spawn(sync::run(self.clone()))));
@@ -2266,6 +2297,7 @@ impl Agent {
         self.cancel_biometric_prompt();
         self.interrupt_op();
         let _transition = self.transition.lock().await;
+        self.settle_activity(true);
         *self
             .biometric_cooldown_until
             .lock()
