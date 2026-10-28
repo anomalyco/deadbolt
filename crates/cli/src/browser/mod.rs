@@ -140,10 +140,15 @@ fn manifest(program: &Path) -> Result<String> {
 }
 
 /// Writes `body` to `path` through a temporary file in the same directory.
-fn write_atomic(path: &Path, body: &str) -> Result<()> {
-    let dir = path.parent().context("manifest path has no directory")?;
+pub fn write_atomic(path: &Path, body: &str) -> Result<()> {
+    let dir = path.parent().context("path has no directory")?;
+    let name = path.file_name().context("path has no file name")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let temp = dir.join(format!(".{HOST_NAME}.json.{}", std::process::id()));
+    let temp = dir.join(format!(
+        ".{}.{}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
     std::fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
     let renamed = std::fs::rename(&temp, path);
     if renamed.is_err() {
