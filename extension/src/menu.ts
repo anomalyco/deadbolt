@@ -30,7 +30,6 @@ const highlightEl = document.getElementById("highlight")!
 const foot = document.getElementById("foot")!
 /** The site, small, over a list of two or more. */
 const caption = document.getElementById("caption")!
-const listEl = document.getElementById("list")!
 let accounts: Row[] = []
 let focused: FieldRole = "username"
 let active = 0
@@ -52,6 +51,8 @@ const FILLED_STAYS_MS = 900
 const FAILED_STAYS_MS = 1800
 /** How far the frame's width leads a pill's label roll. */
 const WIDTH_LEAD_MS = 80
+/** How long narrowing's row animations run: the dwell starts again after. */
+const NARROW_SETTLES_MS = 480
 /** "Saving…" stays in the Save button at least this long, so it can be read. */
 const SAVING_READS_MS = 520
 
@@ -106,6 +107,14 @@ function row(item: Row, i: number): HTMLElement {
   )
   // A pointer's click only: Enter or Space on a focused row clicks it too (detail 0).
   r.addEventListener("click", (e) => e.isTrusted && e.detail > 0 && void pick(i))
+  // The press shows at once, inside the frame (which doesn't move, so the
+  // dwell isn't disturbed); the pick itself waits for its checks.
+  r.addEventListener("pointerdown", (e) => {
+    if (!e.isTrusted || e.button !== 0 || busy || mode !== "accounts") return
+    active = i
+    highlight(false)
+    press(r)
+  })
   r.addEventListener("pointermove", () => {
     if (active === i) return
     active = i
@@ -149,7 +158,8 @@ function highlight(slide = true) {
   const el = rows[active]
   highlightEl.hidden = !el
   if (!el) return
-  const y = el.getBoundingClientRect().top - listEl.getBoundingClientRect().top + listEl.scrollTop
+  // Layout positions, not what's on screen: rows may be sliding.
+  const y = rowsEl.offsetTop + el.offsetTop
   const height = el.offsetHeight
   if (slide && hl.shown) {
     hl.y.to(y)
@@ -161,6 +171,100 @@ function highlight(slide = true) {
   hl.shown = true
   if (!hl.raf) hl.raf = requestAnimationFrame(stepHighlight)
   el.scrollIntoView({ block: "nearest" })
+}
+
+/** The row (or button) being pressed: a darker highlight and a ring on its avatar, until the pick goes ahead or doesn't. */
+function press(el: HTMLElement) {
+  relax()
+  // Nothing in the frame animates while the press is checked: running
+  // animations pause the visibility readings the check relies on.
+  document.body.classList.add("held")
+  el.classList.add("pressed")
+  if (el.classList.contains("row")) {
+    highlightEl.classList.add("pressing")
+    el.querySelector(".avatar")?.classList.add("busy")
+  }
+}
+
+function relax() {
+  document.body.classList.remove("held")
+  highlightEl.classList.remove("pressing")
+  for (const el of Array.from(document.querySelectorAll(".pressed"))) el.classList.remove("pressed")
+  for (const el of Array.from(document.querySelectorAll(".avatar.busy"))) el.classList.remove("busy")
+}
+
+// A press that didn't become a click (dragged off, or refused) lets go.
+addEventListener("pointerup", () => requestAnimationFrame(() => !busy && relax()), true)
+addEventListener("pointercancel", () => !busy && relax(), true)
+
+// ---- Narrowing as the user types ----------------------------------------------------
+
+/** What the user has typed in the field, lowercased; the list shows the rows it matches. */
+let query = ""
+
+function matches(item: Row, q: string): boolean {
+  if (!q) return true
+  const hay = "passkey" in item ? [item.passkey.username ?? ""] : [item.account.title, item.account.username ?? ""]
+  return hay.some((s) => s.toLowerCase().includes(q))
+}
+
+const visible = () => accounts.flatMap((a, i) => (matches(a, query) ? [i] : []))
+
+/**
+ * Narrows the list to the rows that match `text`, typed in the field below
+ * (it comes from the content script over the private channel and goes no
+ * further). Rows that stop matching fade where they are while their
+ * neighbours slide into the gap; rows that match again come back. The
+ * frame's height follows (see report), and the content script hears how
+ * many still match: none puts the menu away.
+ */
+function narrow(text: string) {
+  query = text.trim().toLowerCase().slice(0, 200)
+  if (mode !== "accounts" || !accounts.length) return
+  const rows = Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row"))
+  const shown = (r: HTMLElement) => !r.hidden && !r.classList.contains("leaving")
+  const before = new Map(rows.filter(shown).map((r) => [r, r.getBoundingClientRect().top]))
+  const reduced = reducedMotion()
+  rows.forEach((r, i) => {
+    const want = matches(accounts[i], query)
+    if (shown(r) && !want) {
+      // Out of the flow at once, so the rest slide up, while it fades where it was.
+      const top = r.offsetTop
+      r.classList.add("leaving")
+      r.style.cssText = `position:absolute;top:${top}px;left:0;right:0;pointer-events:none`
+      const finish = () => {
+        if (!r.classList.contains("leaving")) return
+        r.classList.remove("leaving")
+        r.hidden = true
+        r.style.cssText = ""
+      }
+      const anim = animateTo(r, reduced ? { opacity: "0" } : { opacity: "0", filter: "blur(3px)", transform: "scale(0.96)" }, 0.25, { fill: false })
+      if (anim) anim.finished.then(finish, finish)
+      else finish()
+    } else if (!shown(r) && want) {
+      for (const a of r.getAnimations()) a.cancel()
+      r.classList.remove("leaving")
+      r.hidden = false
+      r.style.cssText = ""
+      if (typeof r.animate === "function")
+        r.animate(reduced ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(3px)", transform: "scale(0.96)" }, { opacity: 1, filter: "blur(0px)", transform: "none" }], timing(0.3))
+    }
+  })
+  if (!reduced)
+    for (const [r, top] of before) {
+      if (!shown(r)) continue
+      const dy = top - r.getBoundingClientRect().top
+      if (Math.abs(dy) > 0.5) r.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], spring(0.4))
+    }
+  const left = visible()
+  if (left.length && !left.includes(active)) active = left[0]
+  if (left.length) highlight(true)
+  else highlightEl.hidden = true
+  // The rows' own animations pause the frame's visibility readings, so the
+  // dwell counts from when they're over, as if the menu had moved.
+  dwell.moved(performance.now())
+  setTimeout(() => dwell.moved(performance.now()), NARROW_SETTLES_MS)
+  port?.postMessage({ type: "db:matches", count: left.length })
 }
 
 function showStatus(status: Status) {
@@ -186,13 +290,21 @@ function showStatus(status: Status) {
  */
 async function pick(i: number) {
   const a = accounts[i]
-  if (!a || busy || mode !== "accounts") return
-  if (!dwell.settled(pressedAt)) return say(dwell.visible ? "Pick again in a moment." : COVERED)
+  if (!a || busy || mode !== "accounts" || !matches(a, query)) return
+  if (!dwell.settled(pressedAt)) {
+    relax()
+    return say(dwell.visible ? "Pick again in a moment." : COVERED)
+  }
   busy = true
   if (!(await confirmPick(dwell, pressedAt))) {
     busy = false
+    relax()
     return say(COVERED)
   }
+  // Checked: now it may move. The ring spins while the fill is on its way.
+  document.body.classList.remove("held")
+  highlightEl.classList.remove("pressing")
+  for (const el of Array.from(rowsEl.querySelectorAll(".avatar.busy"))) el.classList.add("spinning")
   const passkey = "passkey" in a
   const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, passkey ? "Signing in…" : "Filling…")
   const reply = await send<PickReply>({ type: "db:menu-pick", token, ref: passkey ? a.passkey.ref : a.account.ref })
@@ -366,6 +478,7 @@ function settle(label: HTMLElement, text: string, ok: boolean) {
         mark.style.transition = `width ${duration}ms ${easing}, margin-left ${duration}ms ${easing}, opacity 200ms ease-out 120ms`
       }
       rollLabel(label, text)
+      relax()
       pill.classList.toggle("ok", ok)
       pill.classList.toggle("failed", !ok)
     }, WIDTH_LEAD_MS),
@@ -389,11 +502,17 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") return void send({ type: "db:menu-dismiss", token })
   if (mode === "save") return
   if (e.key === "Enter" || e.key === " ") e.preventDefault()
-  if (!accounts.length || mode !== "accounts") return
-  if (e.key === "ArrowDown") active = Math.min(active + 1, accounts.length - 1)
-  else if (e.key === "ArrowUp") active = Math.max(active - 1, 0)
-  else if (e.key === "Enter") return void (entry.entered ? pick(active) : say("Press ↓ in the field to choose."))
-  else return
+  const rows = visible()
+  if (!rows.length || mode !== "accounts") return
+  const at = Math.max(0, rows.indexOf(active))
+  if (e.key === "ArrowDown") active = rows[Math.min(at + 1, rows.length - 1)]
+  else if (e.key === "ArrowUp") active = rows[Math.max(at - 1, 0)]
+  else if (e.key === "Enter") {
+    if (!entry.entered) return say("Press ↓ in the field to choose.")
+    const el = rowsEl.querySelectorAll<HTMLElement>("button.row")[active]
+    if (el && !busy) press(el)
+    return void pick(active)
+  } else return
   e.preventDefault()
   highlight(true)
 })
@@ -415,7 +534,11 @@ function show(reply: MenuLoadReply) {
   setCaption(accounts.length >= 2 ? reply.site : "")
   say("")
   // The list is already at rest when it opens: no slide on the first paint.
+  if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
+  const left = visible()
+  if (left.length && !left.includes(active)) active = left[0]
   highlight(false)
+  if (query) port?.postMessage({ type: "db:matches", count: left.length })
 }
 
 // ---- The save offer --------------------------------------------------------------
@@ -436,19 +559,28 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   const later = h("button", { class: "btn", type: "button" }, "Not now")
   const never = h("button", { class: "link never", type: "button" }, "Never for this site")
   const bar = h("span", { class: "bar", "aria-hidden": "true" })
-  bar.style.animationDuration = `${OFFER_STAYS_MS}ms`
   let barEnded = false
-  bar.addEventListener("animationend", () => {
+  const time = { total: OFFER_STAYS_MS, left: OFFER_STAYS_MS, last: performance.now() }
+  // Emptied frame by frame, never as an animation (see menu.css), and paused
+  // while the offer has the pointer or focus, the pointer is near, or a press is checked.
+  const tick = (now: number) => {
+    const section = bar.parentElement
+    if (!section?.isConnected || mode !== "save") return
+    const paused = section.matches(":hover, :focus-within") || document.body.matches(".near, .held, .busy")
+    if (!paused) time.left = Math.max(0, time.left - (now - time.last))
+    time.last = now
+    bar.style.transform = `scaleX(${time.left / time.total})`
+    if (time.left > 0) return void requestAnimationFrame(tick)
     barEnded = true
     if (!busy) leaveLikeSave()
-  })
+  }
+  requestAnimationFrame(tick)
   /** Runs the bar again for a while, after a save that failed once its time was up. */
   const rearm = () => {
+    if (!barEnded) return
     barEnded = false
-    bar.style.animation = "none"
-    void bar.offsetWidth
-    bar.style.animation = ""
-    bar.style.animationDuration = `${OFFER_REARM_MS}ms`
+    Object.assign(time, { total: OFFER_REARM_MS, left: OFFER_REARM_MS, last: performance.now() })
+    requestAnimationFrame(tick)
   }
   surface.replaceChildren(
     h(
@@ -474,12 +606,18 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   const answer = async (choice: OfferChoice, e: MouseEvent) => {
     // Real presses only; Enter or Space only once the user came into the surface themselves.
     if (!e.isTrusted || busy || (e.detail === 0 && !entry.entered)) return
-    if (!dwell.settled(pressedAt)) return say(dwell.visible ? "Press again in a moment." : "This offer is covered. Nothing was saved.")
+    if (!dwell.settled(pressedAt)) {
+      relax()
+      return say(dwell.visible ? "Press again in a moment." : "This offer is covered. Nothing was saved.")
+    }
     busy = true
+    if (e.currentTarget instanceof HTMLElement) press(e.currentTarget)
     if (!(await confirmPick(dwell, pressedAt))) {
       busy = false
+      relax()
       return say("This offer is covered. Nothing was saved.")
     }
+    document.body.classList.remove("held")
     // "Saving…" rolls in the button itself, and stays long enough to read.
     const shownAt = performance.now()
     if (choice === "save") {
@@ -502,11 +640,14 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     if (!reply || ("gone" in reply && reply.gone)) return leaveLikeSave()
     // Locked or busy: say so in place, and let Save be pressed again, for a while.
     busy = false
+    relax()
     document.body.classList.remove("busy")
     rollLabel(saveLabel, "Save")
     say(reply.message)
     if (barEnded) rearm()
   }
+  // The press shows at once; what it does waits for the checks.
+  for (const b of [save, later, never]) b.addEventListener("pointerdown", (e) => e.isTrusted && e.button === 0 && !busy && press(b))
   save.addEventListener("click", (e) => void answer("save", e))
   later.addEventListener("click", (e) => void answer("later", e))
   never.addEventListener("click", (e) => void answer("never", e))
@@ -536,8 +677,12 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
   if (channel) {
     port = channel
     channel.onmessage = (e: MessageEvent<{ type?: unknown }>) => {
-      if (e.data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
-      else if (e.data?.type === "db:fold") onFold(e.data as Parameters<typeof onFold>[0])
+      const data = e.data as { type?: unknown; query?: unknown; near?: unknown }
+      if (data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
+      else if (data?.type === "db:fold") onFold(e.data as Parameters<typeof onFold>[0])
+      else if (data?.type === "db:filter" && typeof data.query === "string") narrow(data.query)
+      // The pointer near the offer pauses its bar, as being on it does.
+      else if (data?.type === "db:near") document.body.classList.toggle("near", data.near === true)
     }
   }
   // Keep the frame exactly as big as the content (fonts load late and change

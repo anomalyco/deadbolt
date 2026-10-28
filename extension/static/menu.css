@@ -90,6 +90,54 @@ body {
   cursor: default;
 }
 
+.row[hidden] {
+  display: none;
+}
+
+/* A press shows at once: the highlight darkens and the avatar gets a ring
+   while the pick passes its checks. */
+.highlight {
+  transition: background-color 100ms ease-out;
+}
+
+.highlight.pressing {
+  background: var(--pressed);
+  transition: none;
+}
+
+.row .avatar,
+.pill .avatar {
+  position: relative;
+}
+
+/* Still while the press is checked: nothing in the frame may animate then,
+   or the browser's visibility readings, which the check relies on, pause.
+   It spins once the pick goes ahead. */
+.avatar.busy::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--text) 14%, transparent);
+  border-top-color: color-mix(in srgb, var(--text) 70%, transparent);
+}
+
+.avatar.busy.spinning::after {
+  animation: spin 700ms linear infinite;
+}
+
+/* While a press is checked, nothing transitions either. */
+body.held *,
+body.held *::after {
+  transition: none !important;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .text {
   display: flex;
   flex-direction: column;
@@ -326,6 +374,21 @@ body {
   min-width: 72px;
 }
 
+/* Pressed: at once, before the press passes its checks. */
+.offer-actions .btn.pressed {
+  transform: scale(0.97);
+  background: var(--pressed);
+  transition: none;
+}
+
+.offer-actions .btn.primary.pressed {
+  background: color-mix(in srgb, var(--contrast) 82%, var(--bg));
+}
+
+.never.pressed {
+  color: var(--text);
+}
+
 .never {
   position: relative;
   margin-right: auto;
@@ -339,8 +402,10 @@ body {
   white-space: nowrap;
 }
 
-/* Time left: a 2px line along the bottom edge, inside the radius. It empties
-   over the offer's stay, paused while the offer has the pointer or focus. */
+/* Time left: a 2px line along the bottom edge, inside the radius. menu.ts
+   empties it frame by frame (not as a CSS animation: a running animation in
+   the frame pauses the visibility readings its buttons rely on), paused
+   while the offer has the pointer or focus, or the pointer is near it. */
 .bar {
   position: absolute;
   left: 0;
@@ -349,26 +414,21 @@ body {
   height: 2px;
   background: color-mix(in srgb, var(--text) 18%, transparent);
   transform-origin: left;
-  animation: empty linear forwards;
 }
 
-.offer:hover .bar,
-.offer:focus-within .bar,
-body.busy .bar {
-  animation-play-state: paused;
-}
-
-@keyframes empty {
-  from {
-    transform: scaleX(1);
-  }
-  to {
-    transform: scaleX(0);
-  }
-}
 
 @media (prefers-reduced-motion: reduce) {
   .surface {
     transition: none;
+  }
+
+  /* No spinning: a still ring says the same. */
+  .avatar.busy.spinning::after {
+    animation: none;
+    border-color: color-mix(in srgb, var(--text) 40%, transparent);
+  }
+
+  .offer-actions .btn.pressed {
+    transform: none;
   }
 }

@@ -199,6 +199,18 @@ const server = Bun.serve({
           )
         case "/auth/complete":
           return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p>`)
+        // A signed-in page with its own fixed header, links at the top right.
+        case "/outcome/header":
+          return new Response(
+            `<!doctype html><html><head><meta charset="utf-8"><title>Acme</title><style>
+              body{margin:0;font:15px/1.5 system-ui,sans-serif;background:#f4f4f5}
+              header{position:fixed;top:0;left:0;right:0;height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:#fff;border-bottom:1px solid #e4e4e7}
+              header nav{display:flex;gap:16px;align-items:center}
+              main{padding:120px 40px}
+            </style></head><body><header><strong>Acme</strong><nav><span>${email}</span><a id="settings" href="#">Settings</a><a id="signout" href="#">Sign out</a></nav></header>
+            <main><h1>Dashboard</h1><p>Signed in.</p></main></body></html>`,
+            { headers: { "content-type": "text/html; charset=utf-8" } },
+          )
       }
     }
     switch (url.pathname) {
@@ -1426,6 +1438,74 @@ async function coveredMenu() {
   }
 }
 
+/** Typing narrows the menu, and a login typed by hand puts it away for the rest of the form. */
+async function narrowing() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "narrowing"))
+    const shown = () => menu.locator("button.row:not([hidden]):not(.leaving)")
+    const height = async () => (await (await menu.frameElement()).boundingBox())?.height ?? 0
+    const tall = await height()
+    await page.keyboard.type("k")
+    check(!!(await until("typing narrows the list", async () => (await shown().count()) === 1)), "typing in the field narrows the menu to the logins that match")
+    check(((await shown().locator(".sub").textContent()) ?? "") === "kit@acme.test", "to the one that matches")
+    check(!!(await until("the menu shrinks to fit", async () => (await height()) < tall - 30)), "and the menu shrinks to fit")
+    await page.keyboard.type("z")
+    check(!!(await until("nothing matches: the menu goes", () => !extensionFrame(page, "menu.html"), 5000)), "when nothing matches, the menu goes by itself")
+    await page.click("#password")
+    await Bun.sleep(1500)
+    check(!extensionFrame(page, "menu.html"), "and the rest of the form, typed by hand, gets no menu on click")
+    await page.keyboard.press("ArrowDown")
+    check(!!(await until("↓ still asks for it", () => extensionFrame(page, "menu.html"))), "↓ still brings it")
+    await page.keyboard.press("Escape")
+    // Clearing the identifier starts over; a password typed by hand puts the menu away.
+    await page.click("#email")
+    await until("a second click on the field brings the menu back", () => extensionFrame(page, "menu.html"))
+    await page.keyboard.press("Escape")
+    await page.keyboard.press("ControlOrMeta+a")
+    await page.keyboard.press("Backspace")
+    await page.click("#password")
+    check(!!(await until("with the identifier cleared, the password field gets its menu again", () => extensionFrame(page, "menu.html"))), "clearing the identifier brings the menu back to the form")
+    await Bun.sleep(700)
+    await page.keyboard.type("x")
+    check(!!(await until("typing a password puts the menu away", () => !extensionFrame(page, "menu.html"), 5000)), "typing a password by hand puts the menu away")
+    check((await fillCount(run)) === 0, "and nothing was filled")
+  } catch (err) {
+    check(false, `narrowing threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "narrowing")
+  } finally {
+    await close(run)
+  }
+}
+
+/** The save offer keeps clear of the page's own header links, and tucks away on a click in the page. */
+async function placement() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await signIn(run, page, "/outcome/login?to=/outcome/header", "header@acme.test", "header password")
+    const surface = await saveSurface(page)
+    if (!surface) return void (await diagnose(run, page, "placement"))
+    await Bun.sleep(600)
+    const frame = await (await surface.frameElement()).boundingBox()
+    const link = await page.locator("#signout").boundingBox()
+    const overlaps = !!frame && !!link && frame.x < link.x + link.width && link.x < frame.x + frame.width && frame.y < link.y + link.height && link.y < frame.y + frame.height
+    check(!!frame && !overlaps && frame.y >= 56, `the offer keeps clear of a header's links (${JSON.stringify(frame)})`)
+    await shotAround(page, "surface-placed", surface)
+    await page.mouse.click(80, 520)
+    check(!!(await until("a click in the page tucks the offer away", () => !extensionFrame(page, "menu.html"), 5000)), "a click in the page tucks the offer away")
+    check((await badge(run)) === "1", "and the toolbar keeps it")
+  } catch (err) {
+    check(false, `placement threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "placement")
+  } finally {
+    await close(run)
+  }
+}
+
 /**
  * The pill is an element of the page: a page that restyles it (with
  * !important) to cover the form while a fill is on its way gets nothing
@@ -1906,7 +1986,7 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
 }
 
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
+const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, narrowing, placement, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 

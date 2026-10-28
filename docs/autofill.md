@@ -127,7 +127,20 @@ not running without sending hello, which would start the agent again.
   there, so no transparent part of it is left over the page. Motion follows
   springs with no bounce, retargets from where it is, and is a short fade
   when the system asks for reduced motion (`ui/motion.ts`). The frame only
-  moves after a pick passed its checks, so moving it can't help a page.
+  moves after a pick passed its checks, so moving it can't help a page. A
+  press shows at once inside the frame (a darker highlight and a still ring
+  on the avatar, or a pressed button); the ring spins once the pick goes
+  ahead.
+- **Narrowing as you type.** Typing in the field the menu is open on
+  narrows it to the logins whose title or username contains the text: the
+  content script hands the text to the menu frame over their private
+  channel, nothing else gets it, and only the user's own (trusted) typing
+  counts. Rows that stop matching fade where they are and the rest slide up;
+  the menu's height follows. When nothing matches, the menu goes, and stays
+  away from that field until it's cleared, clicked again, or ↓; the rest of
+  that form, now being filled by hand, gets no menu on focus or click either,
+  only on ↓ or a second click. Typing a password by hand puts the menu
+  away the same way.
 - **Menu visibility.** The menu samples its own visibility rather than
   watching it continuously: an `IntersectionObserver` with `trackVisibility`
   gives a reading at most every 100 ms, saying whether the menu is fully on
@@ -140,6 +153,11 @@ not running without sending hello, which would start the agent again.
   500 ms again. If it's covered, faded, clipped, shown only at the press or
   can't be measured, it fills nothing and says so. A page that covers the
   menu briefly between two readings can go unseen (see the threat model).
+  The browser pauses these readings while anything animates inside the
+  frame, so nothing does while a press is checked (transitions are off, the
+  avatar's ring is still, the save offer's bar is stepped frame by frame,
+  never animated), and after narrowing's row animations the half second
+  starts again, as after a move.
 - **Keyboard picks.** ⏎ picks only after the user's own ↓ in the field
   moved focus into the menu, or a real press inside the menu put it there
   and passed the same visibility checks as a pick. A press the menu refused
@@ -225,11 +243,17 @@ not running without sending hello, which would start the agent again.
   the offer. After a confirmed sign-in, at most once per site every ten
   minutes (see the threat model), the offer also shows in the page: the
   service worker hands the settled document's content script a one-time
-  token, and it opens the surface at the top right, near the toolbar
-  button. The surface frame gets the site, the username and whether it's an
-  update, never the password. It asks "Save login?" or "Update password for
-  <username>?" with Save, Not now and Never for this site, under a bar that
-  empties over twelve seconds (paused while the pointer or focus is on it).
+  token, and it opens the surface where it's least in the way: the top
+  right, near the toolbar button, if nothing the user may want is there;
+  otherwise whichever of the top right, the top centre below the page's own
+  header, and the bottom right covers fewest links, buttons, fields and
+  pinned headers (sampled across each spot). It comes in from the side of
+  its spot. The surface frame gets the site, the username and whether it's
+  an update, never the password. It asks "Save login for <site>?" or
+  "Update password?" with Save, Not now and Never for this site, under a bar
+  that empties over twelve seconds (paused while the pointer or focus is on
+  it, or the pointer comes near). A click anywhere else in the page tucks it
+  away early, as when its time runs out.
   Save rolls to "Saving…", folds into a "Saved" pill (the same for a new
   login and an update) and leaves toward the toolbar button; a locked or
   busy Deadbolt says so in place, and a save that fails after the bar ran
@@ -500,8 +524,11 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
     the same way, so they look alike.
   - That Deadbolt is locked or busy, if a save fails: the status line makes
     the surface taller.
-  - Roughly how long the user took, from when the surface leaves. So every check that
-  finishes uses up the site's (registrable domain's) ten-minute turn, across
+  - Roughly how long the user took, from when the surface leaves.
+  - Where it went: the page can read its own layout, so it knows which spot
+    the surface picks.
+
+  Every check that finishes uses up the site's (registrable domain's) ten-minute turn, across
   tabs, whatever it said: `same`, `new`, `update`, or `rate_limited`. The
   offer shows by itself only when that check offered something and took the
   turn; every other offer only badges the toolbar button. Only a confirmed
@@ -513,6 +540,14 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   for every other offer. Not now and Never for this site stop checks, so a
   page that sees nothing where an offer would have shown may learn the user
   said one of them.
+
+  The account menu tells the page a little too, as the user types an
+  identifier into it: the menu's height follows how many saved logins for
+  this site match the text, and it goes when none do. So the page, which
+  sees the text anyway, learns whether Deadbolt holds a login for this site
+  whose title or username contains it. Only the user's own typing narrows
+  it; a page's script can't type into it to ask.
+
   The probe itself puts nothing in the page. A fill's values reach only the content script's isolated world
   and the fields it writes. The host rate-limits checks and fills as well, so
   a runaway or compromised caller can't guess quickly.

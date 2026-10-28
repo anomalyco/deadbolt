@@ -19,7 +19,7 @@
 // says what size its mode needs (db:menu-resize) and the host springs there,
 // so no transparent area is left over the page to swallow its clicks.
 
-import { MENU_ROLES, type FillAck, type QueryReply, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
+import { IDENTIFIER_ROLES, MENU_ROLES, type FillAck, type QueryReply, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import type { Field } from "./detect"
@@ -76,6 +76,29 @@ const SAVE_CAP_MS = 30_000
 /** The largest a pill can be. */
 const PILL_MAX = { width: 260, height: 32 }
 let dismissedFor: HTMLInputElement | null = null
+/**
+ * Fields whose typing narrowed the menu to nothing (or that the user typed a
+ * password into by hand): the menu doesn't come back on focus until the field
+ * is cleared, clicked again, or ↓.
+ */
+const quiet = new WeakSet<HTMLInputElement>()
+/**
+ * Forms the user is filling by hand: the identifier they typed matched no
+ * saved login. Their other fields don't open the menu on focus or click
+ * either, only on ↓ or a second click.
+ */
+const byHand = new WeakSet<Node>()
+const formOf = (el: HTMLInputElement): Node => el.form ?? el.closest("form") ?? el.getRootNode()
+/** Whether the pointer is near the save offer, as last told to its frame (it pauses the offer's bar). */
+let near = false
+/** Where the save offer goes: the least intrusive of a few spots, chosen as it opens. */
+type Place = "top-right" | "top-centre" | "bottom-right"
+let place: Place = "top-right"
+/** For the top-centre spot: the bottom of the page's own header band. */
+let headerLine = 0
+/** The offer's place when it folded into its pill, which stays at the offer's corner. */
+let offerRect: Rect | null = null
+const SAVE_HEIGHT_GUESS = 128
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
 let lastRect = ""
@@ -121,14 +144,12 @@ interface Rect {
 
 /** Where the surface goes in its mode, in the viewport. */
 function targetRect(): Rect | null {
-  if (mode === "save") {
-    const width = wanted.width || SAVE_WIDTH
-    return { left: Math.max(4, innerWidth - width - SAVE_INSET), top: SAVE_INSET, width, height: wanted.height || 140 }
-  }
-  // The saved pill stays where the offer was.
+  if (mode === "save") return (offerRect = placeRect(place, wanted.width || SAVE_WIDTH, wanted.height || SAVE_HEIGHT_GUESS))
+  // The saved pill stays at the offer's top right corner.
   if (mode === "pill" && !anchor) {
     const width = Math.min(wanted.width || 180, 320)
-    return { left: Math.max(4, innerWidth - width - SAVE_INSET), top: SAVE_INSET, width, height: 32 }
+    const at = offerRect ?? placeRect(place, SAVE_WIDTH, SAVE_HEIGHT_GUESS)
+    return { left: Math.max(4, at.left + at.width - width), top: at.top, width, height: 32 }
   }
   if (!anchor) return null
   const r = anchor.getBoundingClientRect()
@@ -146,6 +167,66 @@ function targetRect(): Rect | null {
   const top = fitsBelow ? below : Math.max(4, r.top - menuHeight - 6)
   const left = Math.min(Math.max(4, r.left), innerWidth - width - 4)
   return { left, top, width, height: menuHeight }
+}
+
+/** One of the save offer's spots, for a surface `width` × `height`. */
+function placeRect(p: Place, width: number, height: number): Rect {
+  const right = Math.max(4, innerWidth - width - SAVE_INSET)
+  if (p === "top-centre") return { left: Math.max(4, (innerWidth - width) / 2), top: headerLine + SAVE_INSET, width, height }
+  if (p === "bottom-right") return { left: right, top: Math.max(4, innerHeight - height - SAVE_INSET), width, height }
+  return { left: right, top: SAVE_INSET, width, height }
+}
+
+const INTERACTIVE = 'a[href], button, input, select, textarea, summary, [role=button], [role=link], [role=menuitem], [contenteditable=""], [contenteditable=true], [tabindex]:not([tabindex="-1"])'
+
+/** The bottom of a header band across the top of the page (fixed, sticky or not), if there is one. */
+function pageHeaderBottom(): number {
+  let bottom = 0
+  for (const x of [innerWidth * 0.25, innerWidth * 0.5, innerWidth * 0.75]) {
+    let el: Element | null = document.elementFromPoint(x, 2)
+    for (let depth = 0; el && el !== document.body && el !== document.documentElement && depth < 12; depth++, el = el.parentElement) {
+      const r = el.getBoundingClientRect()
+      if (r.top <= 2 && r.height <= 160 && r.width >= innerWidth * 0.5) bottom = Math.max(bottom, r.bottom)
+    }
+  }
+  return Math.min(bottom, 200)
+}
+
+const pinned = (el: Element | null) => {
+  for (let depth = 0; el && el !== document.documentElement && depth < 12; depth++, el = el.parentElement) {
+    const position = getComputedStyle(el).position
+    if (position === "fixed" || position === "sticky") return true
+  }
+  return false
+}
+
+/**
+ * How much of the page a surface at `r` would cover that the user may want:
+ * links, buttons, fields and pinned headers under a grid of points across it.
+ */
+function intrusion(r: Rect): number {
+  let score = 0
+  for (let i = 0; i < 5; i++)
+    for (let j = 0; j < 3; j++) {
+      const x = r.left + ((i + 0.5) * r.width) / 5
+      const y = r.top + ((j + 0.5) * r.height) / 3
+      const el = document.elementsFromPoint(x, y).find((e) => e !== host) ?? null
+      if (!el) continue
+      if (el.closest(INTERACTIVE)) score += 3
+      if (pinned(el)) score += 2
+    }
+  return score
+}
+
+/** The least intrusive spot for the save offer: the top right if it's clear, else whichever covers least. */
+function choosePlace(): Place {
+  headerLine = pageHeaderBottom()
+  const spots: Place[] = ["top-right", "top-centre", "bottom-right"]
+  const scores = spots.map((p) => intrusion(placeRect(p, SAVE_WIDTH, SAVE_HEIGHT_GUESS)))
+  if (scores[0] === 0) return "top-right"
+  let best = 0
+  for (let i = 1; i < spots.length; i++) if (scores[i] < scores[best]) best = i
+  return spots[best]
 }
 
 /**
@@ -193,6 +274,7 @@ function openMenu(el: HTMLInputElement | null, t: string, rows: number, as: Surf
   token = t
   mode = as
   closing = false
+  typedSinceOpen = false
   wanted = { width: 0, height: 0 }
   for (const s of Object.values(offset)) s.jump(0)
   lastTarget = null
@@ -209,12 +291,13 @@ function openMenu(el: HTMLInputElement | null, t: string, rows: number, as: Surf
   document.documentElement.append(host)
   position()
   if (as === "save") {
-    // From the top right, where the toolbar button is: 24 px of travel and a fade.
+    // From the side of its spot: 24 px of travel and a fade.
+    const from = place === "top-centre" ? "translate(0, -24px)" : place === "bottom-right" ? "translate(17px, 17px)" : "translate(17px, -17px)"
     frame.animate(
       reducedMotion()
         ? [{ opacity: 0 }, { opacity: 1 }]
         : [
-            { opacity: 0, transform: "translate(17px, -17px)" },
+            { opacity: 0, transform: from },
             { opacity: 1, transform: "none" },
           ],
       timing(0.4),
@@ -282,7 +365,8 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
  * toward the toolbar button at the top right, where it now lives.
  */
 function leave(travel = false) {
-  if (!host || !frame || closing) return closeMenu()
+  if (closing) return
+  if (!host || !frame) return closeMenu()
   closing = true
   const f = frame
   const done = () => {
@@ -323,6 +407,8 @@ export function closeMenu(refocus = false, dismissed = false) {
   closing = false
   lastTarget = null
   written = null
+  offerRect = null
+  near = false
   for (const t of saveTimers) clearTimeout(t)
   saveTimers = []
   menuOrigin = lastRect = ""
@@ -332,6 +418,8 @@ export function closeMenu(refocus = false, dismissed = false) {
 /** The save offer, opened by the background after a confirmed sign-in. Top page only. */
 export function openSaveSurface(t: string) {
   if (!isTop || document.hidden) return false
+  closeMenu()
+  place = choosePlace()
   openMenu(null, t, 0, "save")
   // A frame that never says its size never loaded the offer (it expired, or
   // the page got in the way): it doesn't stay. Nor does any offer for long,
@@ -376,14 +464,21 @@ let querying: Promise<void> | null = null
 const emptyUntil = new WeakMap<Element, number>()
 
 /**
- * `explicit`: the user clicked into the field or pressed ↓ in it, rather than
- * just focusing it (see Autofill.query on the locked row).
+ * How the field asks: it got focus ("focus"), the user clicked into it
+ * ("click"), or the user pressed ↓ in it or clicked it again while it had
+ * focus ("again"). A click or more counts as explicit for the locked row
+ * (see Autofill.query).
  */
-async function maybeOpen(el: HTMLInputElement, explicit = false) {
+type Asked = "focus" | "click" | "again"
+
+async function maybeOpen(el: HTMLInputElement, how: Asked = "focus") {
   if (!isTop || querying || dismissedFor === el || !recentGesture()) return
   // The save offer stays until it's answered or its time runs out.
   if (host && mode === "save") return
+  const explicit = how !== "focus"
   if (!explicit && (emptyUntil.get(el) ?? 0) > Date.now()) return
+  // Out of the way while the user types for themselves (see onInput).
+  if (quiet.has(el) ? how === "focus" : byHand.has(formOf(el)) && how !== "again") return
   const t = targetFor(el)
   if (!t || !MENU_ROLES.includes(t.role)) return
   if (anchor === el && host) return
@@ -400,7 +495,42 @@ function onFocusIn(event: FocusEvent) {
   const el = event.composedPath()[0]
   if (!(el instanceof HTMLInputElement)) return
   const clicked = recentGesture() && (lastPointer === el || (lastPointer instanceof HTMLLabelElement && lastPointer.control === el))
-  void maybeOpen(el, clicked)
+  void maybeOpen(el, clicked ? "click" : "focus")
+}
+
+/**
+ * The user's own typing (trusted input only; Deadbolt's fills dispatch
+ * untrusted events). In the field the menu is open on, an identifier narrows
+ * the list: the frame filters its rows by the text over the channel only it
+ * and this script hold, and says how many match (see onPortMessage). A
+ * password typed by hand puts the menu away.
+ */
+function onInput(event: Event) {
+  if (!event.isTrusted) return
+  const el = event.composedPath()[0]
+  if (!(el instanceof HTMLInputElement)) return
+  if (!el.value) {
+    quiet.delete(el)
+    byHand.delete(formOf(el))
+  }
+  if (!host || mode !== "accounts" || el !== anchor || closing) return
+  typedSinceOpen = true
+  const role = targetFor(el)?.role
+  if (role && IDENTIFIER_ROLES.includes(role)) return void port?.postMessage({ type: "db:filter", query: el.value.slice(0, 200) })
+  quiet.add(el)
+  leave()
+}
+
+/** The pointer coming near the save offer pauses its bar, as being on it does. */
+function onPointerMove(event: PointerEvent) {
+  if (!host || mode !== "save" || !lastTarget || !event.isTrusted) return
+  const r = lastTarget
+  const dx = Math.max(r.left - event.clientX, 0, event.clientX - (r.left + r.width))
+  const dy = Math.max(r.top - event.clientY, 0, event.clientY - (r.top + r.height))
+  const now = Math.hypot(dx, dy) < 72
+  if (now === near) return
+  near = now
+  port?.postMessage({ type: "db:near", near })
 }
 
 function onPointerDown(event: PointerEvent) {
@@ -411,9 +541,12 @@ function onPointerDown(event: PointerEvent) {
   // Clicking a field that already has focus (e.g. autofocus) opens the menu too.
   if (target instanceof HTMLInputElement && target === deepActiveElement() && !host) {
     if (dismissedFor === target) dismissedFor = null
-    void maybeOpen(target, true)
+    void maybeOpen(target, "again")
   }
-  if (!host || mode === "save") return
+  if (!host) return
+  // A click in the page while the offer shows: the user is getting on with
+  // it. The offer tucks away (as it does when its time runs out) and waits in the toolbar.
+  if (mode === "save") return leave(true)
   const path = event.composedPath()
   if (path.includes(host) || path.includes(anchor as EventTarget)) return
   if (mode === "pill") return leave()
@@ -430,7 +563,8 @@ function onKeyDown(event: KeyboardEvent) {
     if (event.key === "ArrowDown" && target instanceof HTMLInputElement && targetFor(target)) {
       dismissedFor = null
       emptyUntil.delete(target)
-      void maybeOpen(target, true)
+      quiet.delete(target)
+      void maybeOpen(target, "again")
     }
     return
   }
@@ -494,6 +628,20 @@ export function stepped(): boolean {
   return lastFilled.every((el) => !el.isConnected || !now.some((t) => t.el === el))
 }
 
+/** Whether the user typed in the menu's field since it opened. */
+let typedSinceOpen = false
+
+/** The frame, over the private channel: its pill or offer is done, or how many rows match what was typed. */
+function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown }>) {
+  if (e.data?.type === "db:surface-done") return leave(e.data.travel === true)
+  if (e.data?.type !== "db:matches" || mode !== "accounts" || !anchor || e.data.count !== 0) return
+  // Nothing saved matches what the user is typing: they're signing in by
+  // hand. Out of the way, here and on the rest of the form.
+  quiet.add(anchor)
+  byHand.add(formOf(anchor))
+  leave()
+}
+
 /**
  * The menu frame says it's ready; hand it the token. Only that frame's own
  * window can be the source, and the target origin keeps the token from a page
@@ -511,9 +659,10 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   const channel = new MessageChannel()
   port = channel.port1
   // The frame's own word that its pill or offer is done, over the channel only it and this script hold.
-  port.onmessage = (e: MessageEvent<{ type?: unknown; travel?: unknown }>) => {
-    if (e.data?.type === "db:surface-done") leave(e.data.travel === true)
-  }
+  port.onmessage = onPortMessage
+  // Typed before the frame was ready: narrow it now.
+  const typed = anchor && mode === "accounts" && anchor.value && typedSinceOpen ? anchor.value : ""
+  if (typed) port.postMessage({ type: "db:filter", query: typed.slice(0, 200) })
   win.postMessage({ type: "db:menu-token", token }, event.origin, [channel.port2])
 }
 
@@ -523,6 +672,8 @@ export function initMenu(page: PageState) {
   document.addEventListener("focusin", onFocusIn, true)
   document.addEventListener("pointerdown", onPointerDown, true)
   document.addEventListener("keydown", onKeyDown, true)
+  document.addEventListener("input", onInput, true)
+  window.addEventListener("pointermove", onPointerMove, { capture: true, passive: true })
   // Leaving the page (or entering the back/forward cache) takes the menu
   // along; coming back is a new visit.
   window.addEventListener("pagehide", () => {
@@ -558,5 +709,5 @@ export function initMenu(page: PageState) {
 
 /** Called after each page scan: offer the menu on an already-focused field. */
 export function refreshMenu(focused: HTMLInputElement) {
-  if (!host) void maybeOpen(focused)
+  if (!host) void maybeOpen(focused, "focus")
 }
