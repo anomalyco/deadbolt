@@ -85,6 +85,9 @@ pub struct Hotkey {
     pub recorder: ShortcutRecorderState,
     /// Why "Reset" couldn't take the default back.
     pub reset_error: Option<ShortcutError>,
+    /// Why a chord recorded from Settings' keys (`App::record_key`) was
+    /// refused, and the chord, while it records on.
+    pub refused: Option<(ShortcutError, Option<Shortcut>)>,
     /// Who holds the chords that were taken when they tried to register, when
     /// the desktop says (Spotlight, another Rune app, "macOS").
     holders: Vec<(Shortcut, String)>,
@@ -109,6 +112,7 @@ impl Hotkey {
             error: None,
             dismissed: false,
             reset_error: None,
+            refused: None,
             holders: Vec::new(),
             target: Target::Virtual { taken, owner: None },
             file: None,
@@ -339,6 +343,45 @@ impl App {
     }
 
     /// The recorder's `on_change`.
+    /// A key while Settings records a shortcut from its ↵, when the
+    /// recorder itself isn't focused (Rune can't move focus to it): Esc
+    /// stops, ⌫ clears, and a chord with ⌘, ⌃ or ⌥ is proposed as the
+    /// recorder's own keys are.
+    pub(crate) fn record_key(&mut self, ev: &rune::KeyEvent, tx: &mut Tx) {
+        if tx.key_repeat() {
+            return;
+        }
+        if ev.key == rune::Key::Escape {
+            self.hotkey.recorder.cancel();
+            self.hotkey.refused = None;
+            return;
+        }
+        let next = if ev.key == rune::Key::Backspace {
+            None
+        } else {
+            let Some(code) = tx.physical_key() else {
+                return;
+            };
+            match Shortcut::from_physical_key(code, ev.mods)
+                .and_then(|s| s.require_modifier().map(|()| s))
+            {
+                Ok(s) => Some(s),
+                Err(error) => {
+                    let chord = Shortcut::from_physical_key(code, ev.mods).ok();
+                    self.hotkey.refused = Some((error, chord));
+                    return;
+                }
+            }
+        };
+        match self.change_shortcut(next.as_ref()) {
+            Ok(()) => {
+                self.hotkey.recorder = ShortcutRecorderState::new(next);
+                self.hotkey.refused = None;
+            }
+            Err(error) => self.hotkey.refused = Some((error, next)),
+        }
+    }
+
     pub fn change_shortcut(&mut self, next: Option<&Shortcut>) -> Result<(), ShortcutError> {
         self.hotkey.change(next)?;
         self.shortcut_changed();
@@ -371,7 +414,11 @@ impl App {
 
     /// The notice's "Choose another…": Settings, with the recorder.
     fn choose_shortcut(&mut self) {
-        self.settings_open = true;
+        self.open_settings();
+        self.nav.row = crate::settings::rows(self)
+            .iter()
+            .position(|r| *r == crate::settings::Row::Shortcut)
+            .unwrap_or(0);
     }
 }
 
@@ -451,31 +498,15 @@ pub fn notice(s: &App, k: &Kit) -> Option<El> {
     )
 }
 
-/// Settings' shortcut: the recorder, which keeps showing a refused chord with
-/// why under it (`refusal`) and keeps the old shortcut, a way to try an unregistered one again, and a way
-/// back to the default.
-pub fn setting(s: &App, k: &Kit) -> El {
+/// Settings' shortcut: why a chosen or refused chord isn't in use (`refusal`,
+/// under the row's label), and the control: a way to try an unregistered
+/// one again, a way back to the default, and the recorder, which keeps the
+/// old shortcut while it shows a refused chord.
+pub fn setting(s: &App, k: &Kit) -> (Vec<El>, El) {
     let h = &s.hotkey;
     let default = default();
     let recording = h.recorder.is_recording();
     let holders = h.holders.clone();
-    let mut section = col()
-        .key("shortcut")
-        .w_full()
-        .gap(6.0)
-        .child(
-            text("Quick panel shortcut")
-                .key("shortcut-label")
-                .font(k.ty.text_small)
-                .color(k.c.text_muted),
-        )
-        .child(
-            ShortcutRecorder::new("recorder", &h.recorder, |s: &mut App| s.hotkey.recorder())
-                .on_change(|s: &mut App, next, _: &mut Tx| s.change_shortcut(next))
-                .error_message(move |error, chord| refusal(error, chord, &holders))
-                .width(240.0)
-                .build(k),
-        );
     let line = |message: String, key: &str| {
         text(message)
             .key(key)
@@ -484,29 +515,44 @@ pub fn setting(s: &App, k: &Kit) -> El {
             .wrap()
             .w_full()
     };
+    let mut problems = Vec::new();
     if let Some(error) = h.error.as_ref().filter(|_| !recording && !h.registered()) {
         let message = refusal(error, h.shortcut.as_ref(), &h.holders);
-        section = section.child(line(message, "shortcut-error"));
+        problems.push(line(message, "shortcut-error"));
+    }
+    if let Some((error, chord)) = h.refused.as_ref().filter(|_| recording) {
+        problems.push(line(
+            refusal(error, chord.as_ref(), &h.holders),
+            "record-error",
+        ));
     }
     if let Some(error) = h.reset_error.as_ref().filter(|_| !recording) {
         let message = refusal(error, Some(&default), &h.holders);
-        section = section.child(line(message, "reset-error"));
+        problems.push(line(message, "reset-error"));
     }
     let action = |label: String, key: &str, press: fn(&mut App)| {
         Button::new(label)
-            .variant(ButtonVariant::Ghost)
+            .variant(ButtonVariant::GhostMuted)
             .control_size(ControlSize::Regular)
             .on_press(press)
             .build(k)
             .key(key)
             .transition(Transition::opacity())
     };
+    let mut control = row().key("shortcut").gap(6.0).center_y();
     if h.shortcut.is_some() && !h.registered() && !recording {
-        section = section.child(action("Try again".into(), "retry", App::retry_shortcut));
+        control = control.child(action("Try again".into(), "retry", App::retry_shortcut));
     }
     if h.shortcut.as_ref() != Some(&default) && !recording {
         let label = format!("Reset to {}", name(&default));
-        section = section.child(action(label, "reset", App::reset_shortcut));
+        control = control.child(action(label, "reset", App::reset_shortcut));
     }
-    section
+    let control = control.child(
+        ShortcutRecorder::new("recorder", &h.recorder, |s: &mut App| s.hotkey.recorder())
+            .on_change(|s: &mut App, next, _: &mut Tx| s.change_shortcut(next))
+            .error_message(move |error, chord| refusal(error, chord, &holders))
+            .width(150.0)
+            .build(k),
+    );
+    (problems, control)
 }

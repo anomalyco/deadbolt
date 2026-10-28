@@ -4,13 +4,16 @@
 
 pub mod export;
 pub mod paths;
+pub mod peer;
 pub mod protocol;
 
 use std::fmt;
 use std::fs;
+use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -20,10 +23,54 @@ use zeroize::Zeroizing;
 
 pub use paths::Paths;
 use protocol::{
-    Answer, Change, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request, Status,
+    Answer, Change, Claim, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request,
+    Status,
 };
 
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Checks who holds the other end of a connection (a duplicate of its
+/// socket), before the client sends it the passphrase. `Err` says why not.
+pub type AgentCheck = Box<dyn Fn(OwnedFd) -> Result<(), String> + Send + Sync>;
+
+static AGENT_CHECK: OnceLock<AgentCheck> = OnceLock::new();
+static CLAIM: OnceLock<Claim> = OnceLock::new();
+
+/// Sets how this client checks the agent before sending a passphrase
+/// (`setup`, `unlock`). Without one, those requests fail. The first call wins.
+pub fn set_agent_check(check: AgentCheck) {
+    drop(AGENT_CHECK.set(check));
+}
+
+/// Sets what this client says about who drives it, sent with every request.
+/// The agent shows it as claimed and never trusts it. The first call wins.
+pub fn set_claim(claim: Claim) {
+    if !claim.is_empty() {
+        drop(CLAIM.set(claim));
+    }
+}
+
+fn request(command: Command) -> Request {
+    Request {
+        v: PROTOCOL_VERSION,
+        claimed: CLAIM.get().cloned(),
+        command,
+    }
+}
+
+/// Runs the [`AgentCheck`] on `stream`'s peer.
+async fn check_agent(stream: &UnixStream) -> Result<(), Error> {
+    let Some(check) = AGENT_CHECK.get() else {
+        return Err(Error::UncheckedAgent(
+            "this client has no way to check the agent".into(),
+        ));
+    };
+    let socket = stream.as_fd().try_clone_to_owned()?;
+    tokio::task::spawn_blocking(move || check(socket))
+        .await
+        .map_err(|e| Error::UncheckedAgent(e.to_string()))?
+        .map_err(Error::UncheckedAgent)
+}
 
 /// An error reported by the agent.
 #[derive(Debug)]
@@ -71,6 +118,9 @@ pub enum Error {
     NotStarted(PathBuf),
     #[error("the agent did not stop")]
     NotStopped,
+    /// The agent failed the [`AgentCheck`], so the passphrase wasn't sent.
+    #[error("not sending the passphrase: {0}")]
+    UncheckedAgent(String),
     #[error(
         "a newer Deadbolt agent is running ({}, version {}, pid {}): it speaks protocol {}, and this copy speaks {}. Update this copy of Deadbolt, or stop that agent with `deadbolt agent stop` and try again",
         .0.program.as_deref().unwrap_or("unknown program"),
@@ -147,12 +197,12 @@ where
     let stream = UnixStream::connect(&paths.socket)
         .await
         .map_err(Error::Connect)?;
+    if command.carries_passphrase() {
+        check_agent(&stream).await?;
+    }
     let (read, mut write) = stream.into_split();
     let mut lines = LineReader::new(BufReader::new(read));
-    let body = encode_line(&Request {
-        v: PROTOCOL_VERSION,
-        command,
-    })?;
+    let body = encode_line(&request(command))?;
     write.write_all(&body).await?;
     let mut queued = std::collections::VecDeque::new();
     loop {
@@ -310,10 +360,7 @@ pub async fn watch(paths: &Paths) -> Result<Watch, Error> {
         .await
         .map_err(Error::Connect)?;
     let (read, mut write) = stream.into_split();
-    let body = encode_line(&Request {
-        v: PROTOCOL_VERSION,
-        command: Command::Watch,
-    })?;
+    let body = encode_line(&request(Command::Watch))?;
     write.write_all(&body).await?;
     Ok(Watch {
         lines: LineReader::new(BufReader::new(read)),
@@ -359,10 +406,7 @@ async fn status_line(paths: &Paths) -> Result<String, Error> {
         .await
         .map_err(Error::Connect)?;
     let (read, mut write) = stream.into_split();
-    let body = encode_line(&Request {
-        v: PROTOCOL_VERSION,
-        command: Command::Status,
-    })?;
+    let body = encode_line(&request(Command::Status))?;
     write.write_all(&body).await?;
     BufReader::new(read)
         .lines()
@@ -576,6 +620,7 @@ mod tests {
                         touch_id_enabled: false,
                         touch_id_ready: false,
                         touch_id_reset: false,
+                        caller: protocol::CallerInfo::unverified("test"),
                     })),
                     Command::Stop => Reply::Done,
                     other => panic!("an agent of another build was sent {other:?}"),
@@ -685,6 +730,54 @@ mod tests {
             });
             let (reply, ()) = tokio::join!(client, server);
             assert!(matches!(reply, Ok(Reply::Done)));
+        });
+    }
+
+    /// The passphrase goes only to an agent that passes the client's check,
+    /// and the check sees the very connection the passphrase would travel on.
+    #[test]
+    fn a_passphrase_waits_for_the_agent_check() {
+        run(async {
+            let dir = tempfile::tempdir().unwrap();
+            let paths = paths(dir.path());
+            let listener = UnixListener::bind(&paths.socket).unwrap();
+            let unlock = || Command::Unlock {
+                passphrase: Zeroizing::new("hunter22".into()),
+                timeout_secs: None,
+            };
+            // No check set yet: nothing is sent.
+            let refused = tokio::join!(simple(&paths, unlock()), async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut line = String::new();
+                BufReader::new(stream).read_line(&mut line).await.unwrap();
+                line
+            });
+            assert!(
+                matches!(refused.0, Err(Error::UncheckedAgent(_))),
+                "{:?}",
+                refused.0
+            );
+            assert_eq!(refused.1, "");
+
+            set_agent_check(Box::new(|socket| {
+                let peer = std::os::unix::net::UnixStream::from(socket);
+                Err(format!(
+                    "peer is {:?}",
+                    peer.peer_addr().map(|_| "a socket")
+                ))
+            }));
+            let refused = tokio::join!(simple(&paths, unlock()), async {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut line = String::new();
+                BufReader::new(stream).read_line(&mut line).await.unwrap();
+                line
+            });
+            let error = refused.0.unwrap_err();
+            assert!(
+                error.to_string().contains("peer is Ok(\"a socket\")"),
+                "{error}"
+            );
+            assert_eq!(refused.1, "");
         });
     }
 

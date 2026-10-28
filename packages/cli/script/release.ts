@@ -6,6 +6,7 @@
 import { $ } from "bun"
 import { fileURLToPath } from "url"
 import pkg from "../package.json"
+import { pack, platforms } from "./pack"
 
 const dir = fileURLToPath(new URL("..", import.meta.url))
 process.chdir(dir)
@@ -17,13 +18,9 @@ const description = "Decentralized password manager"
 const download = (platform: string) =>
   `https://github.com/${repo}/releases/download/${tag}/deadbolt-${platform}.tar.gz`
 
-const platforms = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"]
 const sha: Record<string, string> = {}
 for (const platform of platforms) {
-  const tarball = `./dist/deadbolt-${platform}.tar.gz`
-  await $`chmod 755 ./dist/cli-${platform}/bin/deadbolt`
-  await $`tar -czf ${tarball} -C ./dist/cli-${platform}/bin deadbolt`
-  sha[platform] = new Bun.CryptoHasher("sha256").update(await Bun.file(tarball).arrayBuffer()).digest("hex")
+  sha[platform] = await pack("./dist", platform)
 }
 await Bun.write(
   "./dist/SHA256SUMS",
@@ -68,6 +65,7 @@ const formula = `class Deadbolt < Formula
 
   def install
     bin.install "deadbolt"
+    bin.install "deadbolt-enclave" if OS.mac?
   end
 
   test do

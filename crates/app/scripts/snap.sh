@@ -21,11 +21,18 @@ done
 "$bin" --scene copied --at 2.4 --snap "$out/copied.png" "$@"
 "$bin" --scene copied --at 2.4 --theme light --snap "$out/copied-light.png" "$@"
 "$bin" --scene locked --theme light --snap "$out/locked-light.png" "$@"
-# Item kinds, dark and light: a secure note (masked, then shown), an SSH
-# key (its public key wrapping, then its private key shown), an identity,
-# and a passkey (delete only), then its delete confirm.
+# Item kinds, dark and light: a login, a secure note (masked, then shown), an
+# SSH key (its public key wrapping, then its private key shown), an identity,
+# a passkey (delete only), then its delete confirm, and a card.
 for theme in dark light; do
-  for scene in note note-revealed ssh ssh-revealed identity passkey passkey-delete; do
+  for scene in vault note note-revealed ssh ssh-revealed identity passkey passkey-delete card; do
+    "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
+  done
+done
+# The keys, dark and light: ⇥ into a login's fields, the ⌘K action menu, the
+# ? shortcut sheet, and the ⌘, Settings page on its second row.
+for theme in dark light; do
+  for scene in field actions sheet settings-page; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done

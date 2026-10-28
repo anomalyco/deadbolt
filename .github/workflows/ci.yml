@@ -63,6 +63,18 @@ jobs:
       - run: bun run check
       - run: bun run build
 
+  # What each release tarball holds (packages/cli/script/pack.ts).
+  release:
+    name: Release packing
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun run test:release
+
   # Hidden and covered fields, form swaps, opaque origins, value swaps,
   # navigating mid-fill and the back/forward cache, in headless Chromium with
   # the fake host (extension/e2e). The full e2e run, with stills, stays local.

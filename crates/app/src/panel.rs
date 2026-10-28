@@ -5,6 +5,7 @@
 //! copy.
 //! `window` holds how it opens, closes and is placed. See docs/app.md.
 
+pub mod item;
 pub mod view;
 pub mod window;
 
@@ -282,7 +283,15 @@ impl App {
     /// Keys in the panel's search field: Escape closes; while the
     /// confirmation shows, nothing else does anything.
     pub fn panel_search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if self.panel_shortcut(ev, tx) || self.panel_escape(ev, tx) {
+        if self.panel_shortcut(ev, tx) {
+            return true;
+        }
+        // ⌘K's actions take Esc before it closes the panel.
+        if self.nav.palette.is_some() && !self.panel_inert() {
+            self.palette_key(ev, tx);
+            return true;
+        }
+        if self.panel_escape(ev, tx) {
             return true;
         }
         if self.panel_inert() {

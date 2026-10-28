@@ -50,7 +50,10 @@ fn emit_empty_enclave_env() {
     reason = "build script reads Cargo TARGET env to compile the macOS Secure Enclave helper"
 )]
 fn build_macos_enclave_helpers() -> Result<(), String> {
-    let swift_src = PathBuf::from("src/agent/enclave.swift");
+    let swift_srcs = [
+        PathBuf::from("src/agent/enclave.swift"),
+        PathBuf::from("src/agent/identify.swift"),
+    ];
     let build_rs = PathBuf::from("build.rs");
     let out_dir =
         PathBuf::from(std::env::var_os("OUT_DIR").ok_or_else(|| "OUT_DIR is not set".to_string())?);
@@ -94,7 +97,7 @@ fn build_macos_enclave_helpers() -> Result<(), String> {
         prev_identity.as_deref() != Some(signing_identity.as_deref().unwrap_or("-"));
 
     compile_one(
-        &swift_src,
+        &swift_srcs,
         &build_rs,
         &plist_path,
         target_triple,
@@ -104,7 +107,7 @@ fn build_macos_enclave_helpers() -> Result<(), String> {
         &prod_bin,
     )?;
     compile_one(
-        &swift_src,
+        &swift_srcs,
         &build_rs,
         &plist_path,
         target_triple,
@@ -153,7 +156,7 @@ fn build_macos_enclave_helpers() -> Result<(), String> {
     reason = "internal helper compiles production and test Secure Enclave binaries"
 )]
 fn compile_one(
-    swift_src: &Path,
+    swift_srcs: &[PathBuf],
     build_rs: &Path,
     plist_path: &Path,
     target_triple: Option<&str>,
@@ -162,19 +165,14 @@ fn compile_one(
     test_mode: bool,
     out_bin: &Path,
 ) -> Result<(), String> {
+    let modified = |path: &Path| std::fs::metadata(path).and_then(|m| m.modified()).ok();
     if !force_rebuild
-        && let (Ok(bin_meta), Ok(src_meta), Ok(build_meta)) = (
-            std::fs::metadata(out_bin),
-            std::fs::metadata(swift_src),
-            std::fs::metadata(build_rs),
-        )
-        && let (Ok(bin_t), Ok(src_t), Ok(build_t)) = (
-            bin_meta.modified(),
-            src_meta.modified(),
-            build_meta.modified(),
-        )
-        && bin_t >= src_t
-        && bin_t >= build_t
+        && let Some(bin_t) = modified(out_bin)
+        && swift_srcs
+            .iter()
+            .map(PathBuf::as_path)
+            .chain([build_rs])
+            .all(|src| modified(src).is_some_and(|t| bin_t >= t))
     {
         return Ok(());
     }
@@ -187,7 +185,7 @@ fn compile_one(
     if test_mode {
         cmd.arg("-DDEADBOLT_TEST");
     }
-    cmd.arg(swift_src)
+    cmd.args(swift_srcs)
         .args([
             "-Xlinker",
             "-sectcreate",

@@ -39,6 +39,7 @@ fn passphrase() -> Zeroizing<String> {
 fn request(command: Command) -> Vec<u8> {
     let mut line = serde_json::to_vec(&Request {
         v: PROTOCOL_VERSION,
+        claimed: None,
         command,
     })
     .unwrap();
