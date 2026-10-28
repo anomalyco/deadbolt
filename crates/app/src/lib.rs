@@ -4,6 +4,7 @@
 pub mod activity;
 pub mod agent;
 pub mod binary;
+pub mod direction;
 pub mod edit;
 pub mod import;
 pub mod install;
@@ -617,6 +618,15 @@ const SCENES: &[Scene] = &[
             &mut Tx::default(),
         );
     }),
+    // t387's design directions (direction/): A Document, B List first, C Floating.
+    ("dir-a", |s| direction::scene(s, "a")),
+    ("dir-a-field", |s| direction::scene(s, "a-field")),
+    ("dir-a-ssh", |s| direction::scene(s, "a-ssh")),
+    ("dir-a-actions", |s| direction::scene(s, "a-actions")),
+    ("dir-a-settings", |s| direction::scene(s, "a-settings")),
+    ("dir-b", |s| direction::scene(s, "b")),
+    ("dir-c", |s| direction::scene(s, "c")),
+    ("dir-c-actions", |s| direction::scene(s, "c-actions")),
     ("settings-sync-failed", |s| {
         vault(s);
         s.settings_open = true;

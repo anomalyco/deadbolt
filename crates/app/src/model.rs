@@ -116,6 +116,8 @@ pub struct App {
     pub installer: Option<crate::install::Installer>,
     /// The vault footer's Settings popover is open.
     pub settings_open: bool,
+    /// A design direction a scene draws instead of today's vault (`direction`).
+    pub look: Option<crate::direction::Look>,
     /// The quick panel's global shortcut (the main window's).
     pub hotkey: crate::shortcut::Hotkey,
     /// The default shortcut isn't registered globally, so ⇧⌘Space inside
@@ -180,6 +182,7 @@ impl App {
         App {
             installer: None,
             settings_open: false,
+            look: None,
             hotkey: crate::shortcut::Hotkey::default(),
             shortcut_fallback: true,
             agent,

@@ -50,6 +50,14 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     let k = rune_theme_opencode::kit(cx.system_dark());
     let inset = cx.titlebar_inset();
     let mut layer = Vec::new();
+    if let Some(look) = crate::direction::view(s, k, inset) {
+        return col()
+            .key("window")
+            .w_full()
+            .h_full()
+            .fill(k.c.bg_deep)
+            .child(look.grow(1.0).w_full());
+    }
     let screen = match &s.screen {
         Screen::Vault if !s.installing() => vault(s, k, inset, &mut layer),
         Screen::Vault => page(k, inset, crate::install::page(s, k)),
