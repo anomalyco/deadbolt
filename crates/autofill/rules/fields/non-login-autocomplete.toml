@@ -1,0 +1,95 @@
+# Shared negatives: autocomplete tokens that say "this is not a login field".
+# A trailing * matches any token with that prefix. Included by every field type.
+
+name = "non-login-autocomplete"
+
+[[autocomplete]]
+token = "name"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "given-name"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "family-name"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "additional-name"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "nickname"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "honorific-*"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "organization*"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "street-address"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "address-*"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "postal-code"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "country*"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "cc-*"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "bday*"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "sex"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "url"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "photo"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "language"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+
+[[autocomplete]]
+token = "transaction-*"
+score = -6
+why = "Ported from clues.ts: an identity, address, payment or profile token"
+

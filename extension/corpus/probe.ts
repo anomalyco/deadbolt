@@ -6,6 +6,7 @@
 
 import { isVisible, scanPage } from "../src/content/detect"
 import { openRoots, deepQueryAll } from "../src/content/shadow"
+import { collectFrame, type SnapshotFrame } from "./snapshot"
 
 export interface Rect {
   x: number
@@ -34,6 +35,8 @@ export interface InputFact {
   split?: number
   /** Outside the form the detector judged (it reports that form's fields only). */
   outOfScope?: boolean
+  /** This input's id in the frame's engine snapshot. */
+  fid?: number
 }
 
 export interface FrameProbe {
@@ -50,6 +53,9 @@ export interface FrameProbe {
   challenge: boolean
   error?: string
   scanMs: number
+  /** The autofill engine's input for this frame (crawl.ts moves it to snapshots/). */
+  snapshot?: SnapshotFrame
+  snapshotError?: string
 }
 
 export interface EntryCandidate {
@@ -149,6 +155,19 @@ function run(): FrameProbe {
   }
   const scanMs = performance.now() - s0
 
+  let snapshot: SnapshotFrame | undefined
+  let snapshotError: string | undefined
+  try {
+    const collected = collectFrame()
+    snapshot = collected.frame
+    for (const [el, i] of index) {
+      const fid = collected.index.get(el)
+      if (fid !== undefined) inputs[i].fid = fid
+    }
+  } catch (e) {
+    snapshotError = String(e)
+  }
+
   const iframes: FrameProbe["iframes"] = []
   for (const f of deepQueryAll<HTMLIFrameElement>("iframe", roots).slice(0, 50)) {
     const src = f.getAttribute("src") || ""
@@ -177,6 +196,8 @@ function run(): FrameProbe {
     challenge: CHALLENGE_TITLE.test(document.title) || !!document.querySelector(CHALLENGE_BOX),
     error,
     scanMs: Math.round(scanMs * 10) / 10,
+    snapshot,
+    snapshotError,
   }
 }
 

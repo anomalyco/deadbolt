@@ -1,0 +1,296 @@
+# Usernames, account ids and member numbers: the identifier of a login.
+#
+# Clue scores add up per field; see crates/autofill/README.md.
+
+type = "username"
+include = ["not-a-login-field", "non-login-autocomplete"]
+
+[[autocomplete]]
+token = "username"
+score = 13
+why = "The site declares the field a username; outvotes a type=email box's own email wording (myfritz.net, surveymonkey.com)"
+
+[[autocomplete]]
+token = "email"
+score = 2
+why = "An email field is often the account identifier too"
+
+[[autocomplete]]
+token = "webauthn"
+score = 2
+why = "Passkey-capable identifier box (autocomplete=username webauthn)"
+
+[[element]]
+element = "password"
+score = -10
+why = "A password box is never the identifier"
+
+[[element]]
+element = "email"
+score = 1
+why = "An email box can also be the username"
+
+[[inputmode]]
+mode = "numeric"
+score = -1
+why = "Numeric keyboards are more often codes than usernames"
+
+[[clue]]
+phrase = "username"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "user name"
+score = 5
+channel = "display"
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "user id"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "userid"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "login id"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "login"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "log in"
+score = 1
+channel = "display"
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "sign in"
+score = 1
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "account name"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "account"
+score = 1
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "identifier"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "member id"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "member number"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "customer number"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "handle"
+score = 1
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "email or username"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "username or email"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "email or phone"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "benutzername"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "benutzer"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "nombre de usuario"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "usuario"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "nom d utilisateur"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "identifiant"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "nome utente"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "utente"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "gebruikersnaam"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "nome de usuario"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "ユーザー名"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Japanese)"
+
+[[clue]]
+phrase = "ユーザーid"
+score = 4
+why = "Ported from clues.ts: label wording for this field (Japanese)"
+
+[[clue]]
+phrase = "用户名"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "账号"
+score = 4
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "帳號"
+score = 4
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "логин"
+score = 4
+why = "Ported from clues.ts: label wording for this field (Russian)"
+
+[[clue]]
+phrase = "имя пользователя"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Russian)"
+
+[[clue]]
+phrase = "아이디"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "사용자 이름"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "captcha"
+score = -6
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "address"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "your name"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "title"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "שם משתמש"
+score = 5
+why = "Hebrew: username"
+
+[[clue]]
+phrase = "קוד משתמש"
+score = 5
+why = "Hebrew: user code, the bank login id (biz2.bankhapoalim.co.il)"
+
+[[clue]]
+phrase = "uzivatelske jmeno"
+score = 5
+why = "Czech: username"
+
+[[clue]]
+phrase = "uzivatel"
+score = 3
+channel = "display"
+why = "Czech: user (www.horyinfo.cz/admin.html)"
+
+[[clue]]
+phrase = "access number"
+score = 3
+why = "Bank logins name the customer id an access number (ibanking.banksa.com.au)"
+
+[[clue]]
+phrase = "cpf"
+langs = ["cnpj"]
+score = 6
+why = "Brazilian tax ids are the login on many Brazilian sites, often in a type=tel box for the digit keyboard; must outweigh type=tel's phone score"
+
+[[clue]]
+phrase = "frequent flyer"
+langs = ["skymiles", "miles and more", "mileageplus", "aadvantage", "latam pass", "flying blue"]
+score = 6
+why = "Airline logins take the loyalty number, sometimes in a type=tel box (delta.com SkyMiles, lufthansa.com Miles & More)"
+
+[[clue]]
+phrase = "membership number"
+langs = ["loyalty number", "rewards number", "member no"]
+score = 4
+channel = "display"
+why = "Loyalty and club logins name the account id a membership number"
+
+[[clue]]
+phrase = "brukernavn"
+langs = ["användarnamn", "brugernavn", "käyttäjätunnus", "nazwa użytkownika", "kullanıcı adı", "tên đăng nhập"]
+score = 5
+why = "Username in Norwegian, Swedish, Danish, Finnish, Polish, Turkish and Vietnamese"
+

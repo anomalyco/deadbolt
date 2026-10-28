@@ -96,6 +96,8 @@ export interface SiteResult {
     via: Visit["via"]
     screenshot?: string
     html?: string
+    /** The engine's Snapshot JSON for the page (crates/autofill). */
+    snapshot?: string
     shot?: { w: number; h: number }
     frames: CapturedFrame[]
   }
@@ -372,6 +374,19 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string, step2S
     }
     result.summary = summarize(frames)
     const name = shotName(s)
+    // The engine's input, one file per page; results.jsonl keeps only the probe's facts.
+    const snapshot = {
+      url,
+      title: result.page.title,
+      // Index-aligned with page.frames: a frame whose collection failed is empty.
+      frames: frames.map((f, i) => ({
+        ...(f.snapshot ?? { url: f.url, title: "", dir: "ltr", headings: [], bodyHints: [], forms: [], fields: [] }),
+        frameRef: String(i),
+      })),
+    }
+    for (const f of frames) delete f.snapshot
+    await writeFile(join(out, "snapshots", `${name}.json`), JSON.stringify(snapshot))
+    result.page.snapshot = `snapshots/${name}.json`
     if (clock.left() > 1500) {
       const height = await within(page.evaluate(() => Math.min(2400, Math.max(document.documentElement.scrollHeight, innerHeight))), 1500, 800)
       const file = join(out, "shots", `${name}.png`)
@@ -420,6 +435,7 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string, step2S
 async function main() {
   await mkdir(join(out, "shots"), { recursive: true })
   await mkdir(join(out, "html"), { recursive: true })
+  await mkdir(join(out, "snapshots"), { recursive: true })
   const code = await buildProbe()
   const sites: Site[] = urlsFile
     ? (await readFile(urlsFile, "utf8"))

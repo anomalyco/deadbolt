@@ -1,0 +1,308 @@
+# Sign-in forms.
+#
+# Display clues match the form's text and header, the page title and headings
+# and its buttons; code clues match the form's id, name, action and the frame URL.
+
+kind = "login"
+
+[[clue]]
+phrase = "sign in"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "signin"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "log in"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "login"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "log on"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "sign on"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "welcome back"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "forgot password"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "forgot your password"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "remember me"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "keep me signed in"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "stay signed in"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "don t have an account"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "se connecter"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "connexion"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "anmelden"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "einloggen"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "iniciar sesion"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "entrar"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "accedi"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "inloggen"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "ログイン"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Japanese)"
+
+[[clue]]
+phrase = "サインイン"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Japanese)"
+
+[[clue]]
+phrase = "登录"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Chinese)"
+
+[[clue]]
+phrase = "登入"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Chinese)"
+
+[[clue]]
+phrase = "войти"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Russian)"
+
+[[clue]]
+phrase = "вход"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Russian)"
+
+[[clue]]
+phrase = "로그인"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "create account"
+score = -1
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "create an account"
+score = -1
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "create your account"
+score = -1
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "already have an account"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "confirm password"
+score = -4
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "repeat password"
+score = -4
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "i agree"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "subscribe"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "newsletter"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "checkout"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "shipping"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "billing"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "change password"
+score = -4
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "current password"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "reset password"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "login"
+langs = ["logon", "signin", "signon", "auth", "sso", "saml", "session", "identifier", "challenge", "mfa", "2fa", "twofactor", "verify", "webauthn", "passkey"]
+score = 2
+channel = "code"
+mode = "sanitised"
+why = "Ported from detect.ts LOGIN_URL: sign-in paths such as /login, /signin, /auth, /sso; counts once"
+
+[[clue]]
+phrase = "already a member"
+langs = ["already registered"]
+score = -2
+channel = "display"
+why = "Wording of a sign-up form's link back to sign-in"
+
+[[clue]]
+phrase = "join us or sign in"
+langs = ["sign in or join", "sign in or create an account", "sign in or register", "log in or sign up", "sign in or sign up", "login or signup", "login or register"]
+score = 3
+channel = "display"
+why = "Email lookup steps that branch to sign-in or sign-up after the identifier are sign-ins for filling (accounts.nike.com 'Enter your email to join us or sign in')"
+
+[[clue]]
+phrase = "logg inn"
+langs = ["logga in", "log ind", "kirjaudu", "zaloguj", "přihlásit", "giriş yap", "đăng nhập", "aanmelden", "acceder", "masuk"]
+score = 3
+channel = "display"
+why = "Sign-in in Nordic, Polish, Czech, Turkish, Vietnamese, Dutch, Spanish and Indonesian (payment.schibsted.no 'Logg inn'), the words corpus/probe.ts follows to sign-in pages"
+
+[[clue]]
+phrase = "page not found"
+langs = ["404 error", "page doesn't exist", "page does not exist", "page you requested"]
+score = -4
+channel = "display"
+why = "A missing page under a /login path is not a sign-in, whatever box its footer has"
+
+[[clue]]
+phrase = "first order"
+langs = ["exclusive offers", "special offers", "latest news", "be the first to know"]
+score = -3
+channel = "display"
+why = "Newsletter sign-up promises, not sign-in wording"
+

@@ -1,0 +1,81 @@
+# Forgotten-password forms that send a reset link.
+#
+# Display clues match the form's text and header, the page title and headings
+# and its buttons; code clues match the form's id, name, action and the frame URL.
+
+kind = "reset"
+
+[[clue]]
+phrase = "reset password"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "reset your password"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "forgot password"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "forgot your password"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "recover"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "recovery"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "send reset link"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "trouble signing in"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "mot de passe oublie"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "passwort vergessen"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "olvidaste tu contrasena"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "forgot"
+langs = ["reset", "recover"]
+score = 2
+channel = "code"
+mode = "sanitised"
+why = "Ported from detect.ts RESET_URL: /forgot, /reset, /recover paths; counts once"
+
