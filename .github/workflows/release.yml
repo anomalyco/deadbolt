@@ -125,7 +125,15 @@ jobs:
           scripts/package-cli.sh "$DEADBOLT_VERSION" "$PLATFORM" "target/$TARGET/release" "$RUNNER_TEMP/dist"
           check=$(mktemp -d)
           tar -xzf "$RUNNER_TEMP/dist/deadbolt-$DEADBOLT_VERSION-$PLATFORM.tar.gz" -C "$check"
-          file "$check/deadbolt" | grep -q 'statically linked' || { echo "::error::deadbolt is not static."; exit 1; }
+          # Static (x86_64 musl links static-pie, which `file` does not call
+          # "statically linked"): no program interpreter, no shared libraries.
+          headers=$(readelf -lW "$check/deadbolt")
+          dynamic=$(readelf -dW "$check/deadbolt")
+          if grep -q 'Requesting program interpreter' <<< "$headers" || grep -q '(NEEDED)' <<< "$dynamic"; then
+            printf '%s\n%s\n' "$headers" "$dynamic"
+            echo "::error::deadbolt is not static."
+            exit 1
+          fi
           "$check/deadbolt" --version | grep -qF "deadbolt $DEADBOLT_VERSION"
       - id: upload
         uses: ./.github/release/upload
