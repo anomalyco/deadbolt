@@ -45,6 +45,8 @@ const parse = (csv: string) =>
 export interface Site {
   rank: number
   domain: string
+  /** A page to open directly (crawl.ts --urls), instead of the homepage. */
+  target?: string
   skip?: "unwanted" | "infra"
 }
 

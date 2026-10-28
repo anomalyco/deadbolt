@@ -1,7 +1,13 @@
 // Crawl real sites' sign-in pages and run Deadbolt's form detector on them.
 //
-//   bun corpus/crawl.ts [--top 1000] [--sites file.txt] [--concurrency 6]
-//                       [--timeout 30] [--out <dir>] [--retry]
+//   bun corpus/crawl.ts [--top 1000] [--sites file.txt] [--urls file.txt]
+//                       [--step2] [--concurrency 6] [--timeout 30]
+//                       [--out <dir>] [--retry]
+//
+// `--urls` opens each listed page directly instead of finding the sign-in
+// page from the homepage (one hop to a clear "Sign in" link or button if the
+// page has no fields). `--step2` also tries the second step of
+// identifier-first sign-ins once per site (see step2.ts).
 //
 // For each site: the homepage, then at most two candidate sign-in pages (a
 // "Sign in" link or button, else /login and /signin). On the page it ends on
@@ -19,6 +25,7 @@ import { join } from "node:path"
 import { coarse, visibleRows, type FieldRow } from "./labels"
 import type { EntryCandidate, FrameProbe } from "./probe"
 import { DEFAULT_OUT, loadSites, type Site } from "./sites"
+import { step2, type Step2 } from "./step2"
 
 const arg = (name: string) => {
   const i = process.argv.indexOf(name)
@@ -27,17 +34,19 @@ const arg = (name: string) => {
 const out = arg("--out") ?? DEFAULT_OUT
 const top = Number(arg("--top") ?? 1000)
 const concurrency = Number(arg("--concurrency") ?? 6)
-const timeoutMs = Number(arg("--timeout") ?? 30) * 1000
+const urlsFile = arg("--urls")
+const doStep2 = process.argv.includes("--step2")
+const timeoutMs = Number(arg("--timeout") ?? (doStep2 ? 45 : 30)) * 1000
 const retry = process.argv.includes("--retry")
 
 /** Hosts other sites send their sign-in to. Following a link to one is allowed. */
-const AUTH_HOSTS =
+export const AUTH_HOSTS =
   /(^|\.)(accounts\.google\.com|login\.microsoftonline\.com|login\.live\.com|appleid\.apple\.com|idmsa\.apple\.com|auth0\.com|okta\.com|oktapreview\.com|onelogin\.com|signin\.aws\.amazon\.com|id\.atlassian\.com|login\.yahoo\.com|b2clogin\.com|ciamlogin\.com|pingone\.com|duosecurity\.com|cognito\.\w+|amazoncognito\.com|login\.gov|id\.me|clerk\.accounts\.dev|stytch\.com|fusionauth\.io|keycloak\.\w+|accounts\.firefox\.com|passport\.yandex\.\w+)$/i
 const LOGIN_URL = /log-?in|log_in|logon|sign-?in|sign_in|signon|auth|sso|saml|oauth|session|identifier|account/i
 const LOGIN_TITLE = /sign ?in|log ?in|login|anmelden|connexion|iniciar|entrar|accedi|войти|ログイン|登录|로그인|account/i
 
 export interface Visit {
-  via: "home" | "link" | "click" | "fallback"
+  via: "home" | "direct" | "link" | "click" | "fallback"
   url: string
   finalUrl?: string
   status?: number
@@ -73,6 +82,8 @@ export interface Summary {
 export interface SiteResult {
   rank: number
   domain: string
+  /** The page opened directly (--urls). Results are keyed by this, else by domain. */
+  target?: string
   status: "ok" | "no-entry" | "challenge" | "unreachable" | "timeout" | "error" | "skipped"
   error?: string
   visits: Visit[]
@@ -89,6 +100,7 @@ export interface SiteResult {
     frames: CapturedFrame[]
   }
   summary?: Summary
+  step2?: Step2
   ms: number
   at: string
 }
@@ -105,32 +117,37 @@ async function buildProbe(): Promise<string> {
 
 // ---- Helpers --------------------------------------------------------------------
 
-const site = (host: string) => getDomain(host) ?? host
-const hostOf = (url: string) => {
+export const site = (host: string) => getDomain(host) ?? host
+export const resultKey = (r: { target?: string; domain: string }) => r.target ?? r.domain
+export const hostOf = (url: string) => {
   try {
     return new URL(url).hostname
   } catch {
     return ""
   }
 }
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
-const within = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
+export const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
+export const within = <T>(p: Promise<T>, ms: number, fallback: T): Promise<T> =>
   Promise.race([p.catch(() => fallback), sleep(ms).then(() => fallback)])
 
-class Clock {
+export class Clock {
   constructor(private readonly end: number) {}
   left = () => Math.max(0, this.end - Date.now())
   cap = (ms: number) => Math.max(500, Math.min(ms, this.left() - 3000))
 }
 
-async function settle(page: Page, clock: Clock) {
+export async function settle(page: Page, clock: Clock) {
   await within(page.waitForLoadState("networkidle", { timeout: clock.cap(4000) }), clock.cap(4500), undefined)
   // Single-page apps often draw the form after the load settles.
   await within(page.waitForSelector("input[type=password], input[type=email], input[autocomplete~=username]", { timeout: clock.cap(2000), state: "attached" }), clock.cap(2500), null)
   await sleep(Math.min(700, clock.left()))
 }
 
-async function probeFrames(page: Page, code: string, clock: Clock): Promise<CapturedFrame[]> {
+/** The live frame each probe came from (never serialized). */
+const frameObjects = new WeakMap<CapturedFrame, Frame>()
+export const frameOf = (f: CapturedFrame) => frameObjects.get(f)
+
+export async function probeFrames(page: Page, code: string, clock: Clock): Promise<CapturedFrame[]> {
   const topOrigin = new URL(page.url()).origin
   const frames: CapturedFrame[] = []
   const scroll = await within(page.evaluate(() => ({ x: scrollX, y: scrollY })), 2000, { x: 0, y: 0 })
@@ -149,7 +166,9 @@ async function probeFrames(page: Page, code: string, clock: Clock): Promise<Capt
     }
     const probe = await within(runProbe(frame, code), Math.min(4000, clock.left() - 1000), null)
     if (!probe) continue
-    frames.push({ ...probe, offset, crossOrigin: probe.origin !== topOrigin })
+    const captured = { ...probe, offset, crossOrigin: probe.origin !== topOrigin }
+    frameObjects.set(captured, frame)
+    frames.push(captured)
   }
   return frames
 }
@@ -166,7 +185,7 @@ const loginish = (frames: FrameProbe[], url: string, title: string) => {
   return ident && (LOGIN_URL.test(url) || LOGIN_TITLE.test(title))
 }
 
-function summarize(frames: CapturedFrame[]): Summary {
+export function summarize(frames: CapturedFrame[]): Summary {
   const rows = visibleRows(frames)
   const visible = (f: CapturedFrame) => f.inputs.filter((i) => i.visible)
   let primary = frames.findIndex((f) => visible(f).some((i) => i.type === "password"))
@@ -207,11 +226,19 @@ function summarize(frames: CapturedFrame[]): Summary {
   }
 }
 
+/** File name for a site's or page's screenshot and HTML. */
+function shotName(s: Site): string {
+  if (!s.target) return s.domain.replace(/[^a-z0-9.-]/gi, "_")
+  const u = new URL(s.target)
+  const slug = (u.hostname + u.pathname).replace(/[^a-z0-9.-]+/gi, "_").slice(0, 80)
+  return `${slug}-${Bun.hash(s.target).toString(36).slice(0, 6)}`
+}
+
 // ---- One site -------------------------------------------------------------------
 
-async function crawl(browser: Browser, ua: string, s: Site, code: string): Promise<SiteResult> {
+async function crawl(browser: Browser, ua: string, s: Site, code: string, step2Sites: Set<string>): Promise<SiteResult> {
   const started = Date.now()
-  const result: SiteResult = { rank: s.rank, domain: s.domain, status: "error", visits: [], ms: 0, at: new Date().toISOString() }
+  const result: SiteResult = { rank: s.rank, domain: s.domain, target: s.target, status: "error", visits: [], ms: 0, at: new Date().toISOString() }
   if (s.skip) return { ...result, status: "skipped", error: s.skip, ms: 0 }
   const clock = new Clock(started + timeoutMs)
   let context: BrowserContext | undefined
@@ -224,8 +251,8 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string): Promi
       extraHTTPHeaders: { "Accept-Language": "en-US,en;q=0.9" },
     })
     let page = await context.newPage()
-    const home = `https://${s.domain}/`
-    const visit: Visit = { via: "home", url: home, loginish: false }
+    const home = s.target ?? `https://${s.domain}/`
+    const visit: Visit = { via: s.target ? "direct" : "home", url: home, loginish: false }
     result.visits.push(visit)
     try {
       const res = await page.goto(home, { waitUntil: "domcontentloaded", timeout: clock.cap(15000) })
@@ -242,11 +269,11 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string): Promi
     let title = await within(page.title(), 2000, "")
     if (frames[0]?.challenge) {
       result.status = "challenge"
-      await capture(page, frames, "home", clock)
+      await capture(page, frames, visit.via, clock)
       return
     }
     visit.loginish = loginish(frames, page.url(), title)
-    let via: Visit["via"] = "home"
+    let via: Visit["via"] = visit.via
 
     if (!visit.loginish) {
       const homeSite = site(hostOf(page.url()) || s.domain)
@@ -260,7 +287,8 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string): Promi
       // Links are visited directly; a button that has no link is clicked, once, first.
       const seen = new Set<string>()
       const plan: Array<{ via: Visit["via"]; url: string; text?: string; click?: number }> = []
-      for (const c of candidates) {
+      // A listed page gets one hop, and only to a clear "Sign in" control.
+      for (const c of s.target ? candidates.filter((c) => c.score >= 12).slice(0, 1) : candidates) {
         if (c.href) {
           const key = c.href.replace(/#.*$/, "")
           if (seen.has(key) || key === page.url().replace(/#.*$/, "")) continue
@@ -269,11 +297,11 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string): Promi
         } else if (plan.length === 0) plan.push({ via: "click", url: page.url(), text: c.text, click: c.i })
       }
       const base = page.url()
-      for (const path of ["/login", "/signin"]) plan.push({ via: "fallback", url: new URL(path, base).href })
+      if (!s.target) for (const path of ["/login", "/signin"]) plan.push({ via: "fallback", url: new URL(path, base).href })
 
       let tries = 0
       for (const step of plan) {
-        if (tries >= 2 || clock.left() < 8000) break
+        if (tries >= (s.target ? 1 : 2) || clock.left() < 8000) break
         tries++
         const v: Visit = { via: step.via, url: step.url, text: step.text, loginish: false }
         result.visits.push(v)
@@ -319,6 +347,15 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string): Promi
     result.status = "ok"
     await capture(page, frames, via, clock)
     void title
+    const key = site(s.domain)
+    // Only where the detector says sign-in, as the extension would: never a newsletter or search box.
+    if (doStep2 && result.summary?.identifierFirst && result.summary.kind === "login" && !step2Sites.has(key)) {
+      if (clock.left() < 16000) result.step2 = { skipped: "no time" }
+      else {
+        step2Sites.add(key)
+        result.step2 = await step2(context, page, frames, result.summary, code, clock, out, shotName(s)).catch((e) => ({ error: String(e).split("\n")[0].slice(0, 200) }))
+      }
+    }
   })()
 
   async function capture(page: Page, frames: CapturedFrame[], via: Visit["via"], clock: Clock) {
@@ -334,7 +371,7 @@ async function crawl(browser: Browser, ua: string, s: Site, code: string): Promi
       frames,
     }
     result.summary = summarize(frames)
-    const name = s.domain.replace(/[^a-z0-9.-]/gi, "_")
+    const name = shotName(s)
     if (clock.left() > 1500) {
       const height = await within(page.evaluate(() => Math.min(2400, Math.max(document.documentElement.scrollHeight, innerHeight))), 1500, 800)
       const file = join(out, "shots", `${name}.png`)
@@ -384,21 +421,29 @@ async function main() {
   await mkdir(join(out, "shots"), { recursive: true })
   await mkdir(join(out, "html"), { recursive: true })
   const code = await buildProbe()
-  const sites = await loadSites({ top, sitesFile: arg("--sites"), out })
+  const sites: Site[] = urlsFile
+    ? (await readFile(urlsFile, "utf8"))
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => /^https?:\/\//.test(l))
+        .map((target, i) => ({ rank: i + 1, domain: hostOf(target), target }))
+    : await loadSites({ top, sitesFile: arg("--sites"), out })
   const resultsFile = join(out, "results.jsonl")
   const done = new Map<string, SiteResult>()
+  const step2Sites = new Set<string>()
   if (existsSync(resultsFile)) {
     for (const line of (await readFile(resultsFile, "utf8")).split("\n")) {
       if (!line) continue
       try {
         const r = JSON.parse(line) as SiteResult
-        done.set(r.domain, r)
+        done.set(resultKey(r), r)
+        if (r.step2 && !r.step2.skipped) step2Sites.add(site(r.domain))
       } catch {}
     }
   }
   const redo = (r: SiteResult) => retry && (r.status === "error" || r.status === "timeout")
-  const queue = sites.filter((s) => !done.has(s.domain) || redo(done.get(s.domain)!))
-  console.log(`${sites.length} sites, ${sites.length - queue.length} already done, ${queue.length} to crawl -> ${out}`)
+  const queue = sites.filter((s) => !done.has(resultKey(s)) || redo(done.get(resultKey(s))!))
+  console.log(`${sites.length} ${urlsFile ? "pages" : "sites"}, ${sites.length - queue.length} already done, ${queue.length} to crawl -> ${out}`)
 
   let browser = await chromium.launch({ channel: "chromium", headless: true })
   const version = browser.version()
@@ -408,23 +453,37 @@ async function main() {
   const total = queue.length
   const t0 = Date.now()
 
+  // Never two visits to the same site at once: take the next page whose site is free.
+  const busy = new Set<string>()
+  async function next(): Promise<Site | undefined> {
+    while (queue.length) {
+      const i = queue.findIndex((s) => !busy.has(site(s.domain)))
+      if (i >= 0) return queue.splice(i, 1)[0]
+      await sleep(200)
+    }
+    return undefined
+  }
+
   async function worker() {
-    for (let s = queue.shift(); s; s = queue.shift()) {
+    for (let s = await next(); s; s = await next()) {
+      busy.add(site(s.domain))
       if (!browser.isConnected()) browser = await chromium.launch({ channel: "chromium", headless: true })
       let r: SiteResult
       try {
-        r = await crawl(browser, ua, s, code)
+        r = await crawl(browser, ua, s, code, step2Sites)
       } catch (e) {
-        r = { rank: s.rank, domain: s.domain, status: "error", error: String(e).slice(0, 300), visits: [], ms: 0, at: new Date().toISOString() }
+        r = { rank: s.rank, domain: s.domain, target: s.target, status: "error", error: String(e).slice(0, 300), visits: [], ms: 0, at: new Date().toISOString() }
       }
+      busy.delete(site(s.domain))
       const line = JSON.stringify(r) + "\n"
       writes = writes.then(() => appendFile(resultsFile, line))
       n++
       const sm = r.summary
       const pace = ((Date.now() - t0) / n / 1000) * (total - n)
       console.log(
-        `[${n}/${total}] #${r.rank} ${r.domain} ${r.status}` +
+        `[${n}/${total}] #${r.rank} ${r.target ?? r.domain} ${r.status}` +
           (sm ? ` kind=${sm.kind ?? "-"} pw=${sm.hasPassword ? 1 : 0} id=${sm.hasIdentifier ? 1 : 0}` : "") +
+          (r.step2 ? ` step2=${r.step2.outcome ?? r.step2.skipped ?? r.step2.error}${r.step2.outcome ? `/${r.step2.dom}/${r.step2.origin}/${r.step2.carry}` : ""}` : "") +
           (r.error && r.status !== "skipped" ? ` (${r.error.slice(0, 80)})` : "") +
           ` ${(r.ms / 1000).toFixed(1)}s, ~${Math.round(pace / 60)}m left`,
       )

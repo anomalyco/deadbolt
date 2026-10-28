@@ -12,8 +12,11 @@ bun corpus/report.ts                    # report.md, report.json, contact.html
 ```
 
 Flags for `crawl.ts`: `--top N` (Tranco top N, default 1000), `--sites file.txt`
-(one domain per line instead), `--concurrency 6`, `--timeout 30` (seconds per
-site), `--out <dir>`, `--retry` (redo sites that ended in an error or timeout).
+(one domain per line instead), `--urls file.txt` (open each listed page
+directly, one hop to a clear "Sign in" control if it has no fields),
+`--step2` (see below), `--concurrency 6`, `--timeout 30` (45 with `--step2`;
+seconds per site), `--out <dir>`, `--retry` (redo sites that ended in an error
+or timeout). Pages of the same site are never visited at the same time.
 Both scripts default to `$TMPDIR/opencode/deadbolt-corpus/`, never the repo.
 Needs Playwright's Chromium (`bunx playwright-core install chromium`).
 
@@ -35,6 +38,14 @@ Needs Playwright's Chromium (`bunx playwright-core install chromium`).
 - `labels.ts`: weak labels from the page's own markup (autocomplete tokens,
   then `type=password`/`email`, then name/id hints) and how they compare with
   the detector's roles. They are hints, not ground truth.
+- `step2.ts` (`--step2`): on identifier-first pages, types the reserved,
+  undeliverable `deadbolt.corpus@example.com` (RFC 2606) into the identifier
+  field and presses the detected submit control once per site, then records
+  what step 2 shows (password, code, magic link, sign-up, error, SSO redirect,
+  passkey, challenge, nothing), whether it's the same document, which origin,
+  and where the address is carried. Never types a password and never submits
+  step 2.
 - `report.ts`: reach and detection rates, field agreement and confusion,
   failure patterns with example sites, the worst pages, and `contact.html`, a
-  sheet of screenshots with each field boxed and tagged `label→role`.
+  sheet of screenshots with each field boxed and tagged `label→role`. With
+  step-2 results it adds their tables and `step2.html` (step 1 and 2 side by side).

@@ -88,8 +88,13 @@ const SSO = /\b(continue|sign ?in|log ?in|sign ?up)\s+(with|using|via)\s+(google
 const CHALLENGE_TITLE = /just a moment|attention required|verify you are human|are you a robot|access denied|request blocked|pardon our interruption|security check/i
 const CHALLENGE_BOX = "#challenge-form, #challenge-running, #challenge-stage, #cf-challenge-running, .cf-turnstile, #px-captcha, #sec-if-cpt-container"
 
+let lastInputs: HTMLInputElement[] = []
+let lastSubmit: Element | null = null
+
 function run(): FrameProbe {
   const roots = openRoots()
+  lastInputs = []
+  lastSubmit = null
   const all = deepQueryAll<HTMLInputElement>("input", roots).slice(0, 300)
   const index = new Map<Element, number>()
   const inputs: InputFact[] = []
@@ -97,6 +102,7 @@ function run(): FrameProbe {
     const type = (el.getAttribute("type") || "text").toLowerCase()
     if (["hidden", "submit", "button", "image", "reset", "checkbox", "radio", "file", "range", "color"].includes(type)) continue
     index.set(el, inputs.length)
+    lastInputs.push(el)
     const form = el.form ?? el.closest("form")
     inputs.push({
       i: inputs.length,
@@ -133,6 +139,7 @@ function run(): FrameProbe {
     }
     const form = result.fields.find((f) => f.owner.form)?.owner.form
     if (form) for (const [el, i] of index) if (!form.contains(el)) inputs[i].outOfScope = true
+    lastSubmit = result.submit ?? null
     if (result.submit) {
       const t = (result.submit as HTMLElement).innerText || (result.submit as HTMLInputElement).value || result.submit.getAttribute("aria-label") || ""
       submit = { text: clip(t, 40), rect: rectOf(result.submit) }
@@ -213,4 +220,47 @@ function clickEntry(i: number): boolean {
   return true
 }
 
-;(globalThis as unknown as { __deadboltCorpus: unknown }).__deadboltCorpus = { run, entries, clickEntry }
+// ---- Step 2 (crawl.ts --step2) ---------------------------------------------------
+
+/** The input numbered `i` by the last run(), and the submit control it found. */
+const input = (i: number) => lastInputs[i] ?? null
+const submitEl = () => lastSubmit
+
+/** Visible text, one trimmed line per entry, to tell what's new after a step. */
+function visibleLines(): string[] {
+  const parts = openRoots().map((r) => (r instanceof Document ? (r.body?.innerText ?? "") : ((r.host as HTMLElement).innerText ?? r.textContent ?? "")))
+  const lines = new Set<string>()
+  for (const line of parts.join("\n").split(/\n+/)) {
+    const t = line.replace(/\s+/g, " ").trim()
+    if (t && t.length <= 300) lines.add(t)
+    if (lines.size >= 600) break
+  }
+  return [...lines]
+}
+
+/** Where a value the crawler typed shows up in this frame. */
+function carried(value: string) {
+  const out = { editable: 0, readonly: 0, hidden: 0, text: false }
+  for (const el of deepQueryAll<HTMLInputElement>("input").slice(0, 400)) {
+    if (el.value.trim().toLowerCase() !== value) continue
+    if (el.type === "hidden" || !isVisible(el)) out.hidden++
+    else if (el.readOnly || el.disabled) out.readonly++
+    else out.editable++
+  }
+  out.text = visibleLines().some((l) => l.toLowerCase().includes(value))
+  return out
+}
+
+/** A cheap fingerprint of the frame, polled while waiting for step 2. */
+function signature() {
+  const inputs = deepQueryAll<HTMLInputElement>("input").slice(0, 300).filter((el) => el.type !== "hidden" && isVisible(el))
+  return {
+    password: inputs.filter((el) => el.type === "password").length,
+    otp: inputs.filter((el) => /one-time-code/.test(el.autocomplete) || el.maxLength === 1).length,
+    inputs: inputs.length,
+    text: (document.body?.innerText ?? "").length,
+    redirecting: /redirecting|taking you to|you('re| are) being (redirected|taken)|one moment|please wait/i.test((document.body?.innerText ?? "").slice(0, 4000)),
+  }
+}
+
+;(globalThis as unknown as { __deadboltCorpus: unknown }).__deadboltCorpus = { run, entries, clickEntry, input, submitEl, visibleLines, carried, signature }
