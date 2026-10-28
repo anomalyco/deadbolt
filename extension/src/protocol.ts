@@ -48,6 +48,13 @@ export interface Account {
   hasPassword: boolean
   hasTotp: boolean
   urls: string[]
+  /** A "Sign in with Google" login: the provider (a known id such as `google`, or a name), and the linked account's username or title. */
+  signIn?: SignIn
+}
+
+export interface SignIn {
+  provider: string
+  account?: string
 }
 
 export interface HelloReply {
@@ -208,7 +215,28 @@ function account(v: unknown): Account | null {
     hasPassword: v.hasPassword === true,
     hasTotp: v.hasTotp === true,
     urls: strings(v.urls),
+    ...signInOf(v.signIn),
   }
+}
+
+/** One line: no line breaks or other control characters. */
+const line = (v: unknown, max: number): string | undefined => {
+  const s = str(v, max)
+  return s && s.trim() && !/[\u0000-\u001f\u007f]/.test(s) ? s.trim() : undefined
+}
+
+/**
+ * `signIn`, if it's well formed: a provider of at most 64 characters on one
+ * line, and maybe an account of at most 500. Anything else leaves it out
+ * (the login still lists, as one without it).
+ */
+function signInOf(v: unknown): { signIn?: SignIn } {
+  if (!isObject(v)) return {}
+  const provider = line(v.provider, 64)
+  if (!provider) return {}
+  const account = v.account === undefined ? undefined : line(v.account, 500)
+  if (v.account !== undefined && !account) return {}
+  return { signIn: { provider, ...(account ? { account } : {}) } }
 }
 
 /**

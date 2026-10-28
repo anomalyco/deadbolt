@@ -5,10 +5,11 @@
 // Ryan Vogel), and so is the start of the sign-in session (its email-first
 // continuation), which here follows a login through every step of a sign-in.
 
-import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import { FIELD_ROLES, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type SignInReply, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, ListReply, Want } from "../protocol"
 import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
+import type { SignInWith } from "./signinwith"
 import { siteOf } from "./site"
 
 const TOKEN_TTL_MS = 2 * 60_000
@@ -102,12 +103,20 @@ export function wantFor(roles: FieldRole[], account: Pick<Account, "hasPassword"
   return want
 }
 
-/** What the menu offers under a field: on a code field, only logins with a one-time password. */
+/**
+ * What the menu offers under a field: on a code field, only logins with a
+ * one-time password; on a password field, logins with a password or a
+ * "Sign in with …" (which shows as that, never as a fill).
+ */
 export function menuAccounts(accounts: Account[], focused: FieldRole): Account[] {
   if (focused === "otp") return accounts.filter((a) => a.hasTotp)
-  if (focused === "password") return accounts.filter((a) => a.hasPassword)
+  if (focused === "password") return accounts.filter((a) => a.hasPassword || a.signIn)
   return accounts
 }
+
+/** How many rows the menu shows for these logins: a login with both a password and a sign-in-with has two. */
+export const menuRowCount = (accounts: Account[], focused: FieldRole) =>
+  accounts.reduce((n, a) => n + (a.signIn ? (a.hasPassword && focused !== "otp" ? 2 : 1) : 1), 0)
 
 /** The step a sign-in session waits for after its fills wrote `filled`, if any. */
 export function nextStep(filled: FieldRole[], account: Pick<Account, "hasPassword" | "hasTotp">): "password" | "otp" | undefined {
@@ -172,6 +181,8 @@ export class Autofill {
     private passkeys?: MenuPasskeys,
     /** The username the user submitted in this tab on `site`, if any (bg/save.ts holds it). */
     private submittedName?: (tabId: number, site: string) => string | undefined,
+    /** Sign-ins with a provider the tab is following (see bg/signinwith.ts). */
+    private signInWith?: SignInWith,
   ) {
     this.lastState = host.status.state
     host.onChange((status) => {
@@ -244,14 +255,22 @@ export class Autofill {
       let shown = reply ? menuAccounts(reply.accounts, focused as FieldRole) : []
       const later = focused === "password" || focused === "otp"
       const named = later ? (typeof identifier === "string" && identifier.length <= 500 && identifier.trim()) || this.submittedName?.(target.tabId, site) || "" : ""
-      if (named) {
+      // On the provider's own pages during a sign-in with it, its linked
+      // account: the menu narrows to that login. With none matching, the
+      // username named on the form narrows it as anywhere else.
+      const linked = this.signInWith?.accountFor(target.tabId, target.origin)
+      const linkedMatches = linked ? namedBy(shown, linked) : []
+      if (linkedMatches.length) {
+        shown = linkedMatches
+        only = linkedMatches.map((a) => a.ref)
+      } else if (named) {
         const matches = namedBy(shown, named)
         if (matches.length) {
           shown = matches
           only = matches.map((a) => a.ref)
         } else if (!again) shown = []
       }
-      rows = shown.length + (this.passkeys?.menuPasskeys(target, focused as FieldRole).length ?? 0)
+      rows = menuRowCount(shown, focused as FieldRole) + (this.passkeys?.menuPasskeys(target, focused as FieldRole).length ?? 0)
     }
     if (!rows) return { rows: 0 }
     this.sweep()
@@ -289,8 +308,30 @@ export class Autofill {
     const reply = await this.list(t.origin).catch(() => null)
     const account = reply?.accounts.find((a) => a.ref === ref)
     if (!account) return { ok: false, message: "That login isn't here anymore." }
+    // A login that signs in with a provider and has no password is never a fill.
+    if (account.signIn && !account.hasPassword) return { ok: false, message: "This login signs in with another account." }
     this.tokens.delete(token)
     return this.fillAndArm(t, account, t.roles, t.form)
+  }
+
+  /**
+   * The user picked a "Sign in with …" row: start following the sign-in in
+   * this tab (see SignInWith), and have the page's content script point at
+   * the site's own button for it. Nothing is filled, and nothing clicked.
+   */
+  async menuSignIn(token: string, ref: string, sender: chrome.runtime.MessageSender): Promise<SignInReply> {
+    const t = await this.token(token, sender)
+    if (!t || t.notice || (t.only && !t.only.includes(ref))) return { ok: false, message: "This menu has expired." }
+    const reply = await this.list(t.origin).catch(() => null)
+    const account = reply?.accounts.find((a) => a.ref === ref)
+    if (!account?.signIn) return { ok: false, message: "That login isn't here anymore." }
+    const site = siteOf(new URL(t.origin).hostname)
+    if (site) this.signInWith?.start(t.tabId, account.signIn, site)
+    // A sign-in with a provider isn't the session's step-by-step fill.
+    await this.cancel(t.tabId)
+    const found = (await sendToFrame<boolean>(t, { type: "db:point", provider: account.signIn.provider })) === true
+    if (found) this.tokens.delete(token)
+    return { ok: true, found, provider: account.signIn.provider }
   }
 
   async menuDismiss(token: string, sender: chrome.runtime.MessageSender) {
@@ -621,6 +662,8 @@ export class Autofill {
     if (reply instanceof Error) return { ok: false, message: fillError(reply) }
     const account = reply.accounts.find((a) => a.ref === ref)
     if (!account) return { ok: false, message: "That login isn't here anymore." }
+    // A login that signs in with a provider and has no password is never a fill.
+    if (account.signIn && !account.hasPassword) return { ok: false, message: "This login signs in with another account." }
     return this.fillAndArm(page, account, page.roles, page.form, framed)
   }
 }

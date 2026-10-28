@@ -55,6 +55,8 @@ export type ToBackground =
   /** `parent`: the origin of the parent window that handed the menu its token. */
   | { type: "db:menu-load"; token: string; parent: string }
   | { type: "db:menu-pick"; token: string; ref: string }
+  /** The user picked a "Sign in with …" row: point at the site's button for it (see SignInReply). */
+  | { type: "db:menu-signin"; token: string; ref: string }
   | { type: "db:menu-dismiss"; token: string }
   /** The size the surface needs; with `mode`, the mode it's folding into (only ever "pill"). */
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
@@ -94,6 +96,13 @@ export type ToContent =
    * PageFacts). `username`: the one just submitted, to look for on the page.
    */
   | { type: "db:probe"; username?: string }
+  /**
+   * Point at the site's own "Sign in with <provider>" button, if one shows;
+   * answers whether it found one. The user clicks it, never Deadbolt.
+   */
+  | { type: "db:point"; provider: string }
+  /** On the provider's account chooser: point at the tile for this account. Only the provider's own top page gets it. */
+  | { type: "db:chooser"; account: string }
   /** Report the login form now, or that there's none. Answers once the background has it. */
   | { type: "db:report" }
   | { type: "db:close-menu"; token: string }
@@ -182,6 +191,9 @@ export type MenuLoadReply =
   | { kind: "offer"; site: string; username: string; update: boolean }
 
 export type PickReply = { ok: true } | { ok: false; message: string }
+
+/** The answer to a "Sign in with …" pick: whether the site's button was found and is being pointed at. */
+export type SignInReply = { ok: true; found: boolean; provider: string } | { ok: false; message: string }
 
 export interface PopupReply {
   status: Status

@@ -447,11 +447,56 @@ provider only. A login with only a provider isn't an empty item.
 your unlocked vaults, its username (or its title when it has none) as
 `signIn`. Nothing else of that login is ever read for it: a `fill` of the
 site's login fills only that login's own values, so one with only a provider
-fills nothing. Showing `signIn` in the extension ("Sign in with Google ·
-dax@gmail.com" in place of a password) comes next; until then it lists the
-login as one without a password. `deadbolt show` prints
+fills nothing. The extension shows it as "Sign in with Google ·
+dax@gmail.com" in place of a password (see "In the extension" below).
+`deadbolt show` prints
 `sign-in-with  Google · dax@gmail.com`, and `ls` shows "Sign in with Google"
 for one without a username.
+
+### In the extension
+
+- **The menu.** On any login field, identifier fields included, a login with
+  `signIn` is a row "Sign in with Google" with its account (or the login's
+  title) beneath and the provider's initial as its mark; Deadbolt draws no
+  third-party logos. One with a password too gets two rows: its fill row,
+  then the sign-in row. One with only a provider never offers a fill, and the
+  background refuses one if asked. The toolbar popup shows "Sign in with
+  Google · kit@gmail.com" on the login and no Fill button when there's no
+  password.
+- **Picking it fills and clicks nothing.** The page's content script looks
+  for the site's own button (a Google Identity Services or Sign in with Apple
+  widget, or a button or link whose text, label or `data-provider` says
+  "continue / sign in with Google" and at most one other word; "Sign in with
+  Google to sync your calendar" and share or follow buttons don't count),
+  scrolls it into view and rings it, with a pill "Your Google sign-in". The user
+  clicks it. The ring follows the button as the page lays out and goes on any
+  click, Escape, the button scrolling away, or after 10 s; with reduced
+  motion it only fades. With no such button, the row says "Look for
+  “Continue with Google”" and nothing is ringed.
+- **On the provider's side.** Picking the row also starts a sign-in with the
+  provider in that tab (`bg/signinwith.ts`): the provider, the linked account
+  and the site, for 3 minutes. A popup the tab opens follows it. It ends on
+  coming back to the site, closing the tab, or locking. While it lasts:
+  - on Google's own sign-in host, `accounts.google.com`, over https, the
+    top page is told the account, and on the account chooser Deadbolt rings
+    the tile carrying it in `data-identifier` (or `data-email`) with a pill
+    "Your linked account". Never a tile found by its text, which the page
+    could make name anyone. The user picks it. Only Google's chooser has
+    such a pattern on a host that is only sign-in pages; no other provider's
+    page (GitHub, X, Discord, Slack and the like host their users' own
+    content) is ever told the account.
+  - the menu on the provider's own pages (its known sign-in hosts, over
+    https) narrows to the linked login (the Google account's own), as usual
+    on a click; this sends the page nothing. With no login for the linked
+    account, the username on the form narrows it as anywhere else. Nothing
+    fills by itself there.
+- **Test hosts, in e2e builds only.** `scripts/build.ts --e2e <dir>`
+  (which `e2e/run.ts` runs for itself) defines `DEADBOLT_E2E`: only that
+  build takes a provider host ending in `.test` for the same one in `.com`
+  (`accounts.google.test` for `accounts.google.com`), over http too. Every
+  other build, `bun run build` included, defines it false and the alias
+  isn't in its code, so a resolver answering for `.test` names can't pose
+  as a provider.
 
 ## Passkeys
 
@@ -710,6 +755,20 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   Touch ID still signs with UV=0 where the site allows it: anyone at the
   unlocked Mac, or a same-user process, can sign in with a saved passkey,
   just as they can fill a saved password.
+- **Sign in with a provider: what the pages learn.** The ring and its pill
+  are drawn in a closed shadow root on an element of Deadbolt's own, which
+  lets clicks through. The page can see that an element appeared, and work
+  out roughly where the ring points, but not read what it says, and the
+  pill names no one ("Your Google sign-in", "Your linked account"). So the site learns
+  that the user picked "Sign in with" in Deadbolt (as it would see the
+  click anyway), and the provider's chooser learns which of the accounts it
+  already shows Deadbolt points at. The linked account goes only to the
+  provider's own top page in the tab (or its popup) following the sign-in,
+  by its document id and origin, never to another origin or a frame, and
+  only to `https://accounts.google.com`: a provider whose chooser carries
+  the account in an attribute, on a host with nothing but its sign-in
+  pages. A provider whose hosts serve user content never gets it. No
+  password, fill or click is ever made for it.
 - **The idle lock:** fill, save, and a passkey registration or sign-in count
   as use. Hello, list, check and passkey-list don't, because a browser asks
   for those on every page and would otherwise hold the vault open.

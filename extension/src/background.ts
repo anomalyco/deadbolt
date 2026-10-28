@@ -7,12 +7,14 @@ import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
+import { SignInWith } from "./bg/signinwith"
 import type { PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
 const host = new Host()
 const saver = new Saver(host)
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
-const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site))
+const signInWith = new SignInWith(host)
+const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
 saver.signedIn = (tabId, site) => void autofill.learnFlow(tabId, site)
 passkeys.listen()
 
@@ -57,6 +59,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return autofill.menuLoad(message.token, sender, String(message.parent))
     case "db:menu-pick":
       return autofill.menuPick(message.token, String(message.ref), sender)
+    case "db:menu-signin":
+      return autofill.menuSignIn(message.token, String(message.ref), sender)
     case "db:menu-dismiss":
       if (saver.ownsSurface(message.token)) return saver.surfaceDismiss(message.token, sender)
       return autofill.menuDismiss(message.token, sender)
@@ -98,10 +102,18 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) =>
 chrome.tabs.onRemoved.addListener((tabId) => {
   autofill.forgetTab(tabId)
   saver.forgetTab(tabId)
+  signInWith.forgetTab(tabId)
 })
 chrome.webNavigation.onCommitted.addListener((d) => {
   void autofill.navigated(d)
-  if (d.frameId === 0) saver.navigated(d.tabId, d.url)
+  if (d.frameId === 0) {
+    saver.navigated(d.tabId, d.url)
+    signInWith.navigated(d.tabId, d.url)
+  }
 })
+// A sign-in with a provider: its popup follows it, and its pages get told the account to point at.
+chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => signInWith.opened(d.sourceTabId, d.tabId))
+chrome.webNavigation.onDOMContentLoaded.addListener((d) => void signInWith.loaded(d))
+chrome.webNavigation.onHistoryStateUpdated.addListener((d) => void signInWith.loaded(d))
 
 void host.connect()

@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { Autofill, FLOWS_KEY, namedBy, nextStep, resizeMessage, sameHost, stepLabel, stepRoles } from "../src/bg/autofill"
+import { Autofill, FLOWS_KEY, menuAccounts, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, stepLabel, stepRoles } from "../src/bg/autofill"
+import { SignInWith } from "../src/bg/signinwith"
 import { ACCOUNTS, fakeHost, installChrome, menuSender, pageSender, POPUP_URL, SITE, type FakeChrome, type FakeHost } from "./chrome"
 
 let fake: FakeChrome
@@ -716,5 +717,85 @@ describe("surface sizes", () => {
     expect(resizeMessage("t", 2000, 9000, "save")).toEqual({ type: "db:resize-menu", token: "t", height: 400, width: 420 })
     expect(resizeMessage("t", 1, 1, "pill")).toEqual({ type: "db:resize-menu", token: "t", height: 28, width: 28, mode: "pill" })
     expect(resizeMessage("t", Number.NaN, "wide")).toEqual({ type: "db:resize-menu", token: "t", height: 40 })
+  })
+})
+
+describe("sign in with a provider", () => {
+  const google = { ref: `${"a".repeat(64)}:${"3".repeat(32)}`, vault: "Personal", title: "Example", hasPassword: false, hasTotp: false, urls: [], signIn: { provider: "google", account: "kit@gmail.com" } }
+  const both = { ...ACCOUNTS[1], signIn: { provider: "github" } }
+  const providerLogin = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"4".repeat(32)}`, title: "Google", username: "kit@gmail.com" }
+  let withs: SignInWith
+
+  beforeEach(() => {
+    withs = new SignInWith(host.host)
+    autofill = new Autofill(host.host, undefined, undefined, withs)
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: { type: string }) =>
+      req.type === "list" ? { type: "list", site: "example.com", accounts: [ACCOUNTS[0], both, google, providerLogin] } : send(req as never)) as typeof host.host.send
+  })
+
+  test("a sign-in-with login shows on password fields too, never on code fields, and one with a password too is two rows", () => {
+    expect(menuAccounts([google, ACCOUNTS[0]], "password")).toEqual([google, ACCOUNTS[0]])
+    expect(menuAccounts([google], "otp")).toEqual([])
+    expect(menuRowCount([google, both, ACCOUNTS[0]], "email")).toBe(4)
+  })
+
+  test("picking it starts following the sign-in and points at the page's button; it never fills", async () => {
+    fake.answer = (m) => (m.type === "db:point" ? true : m.type === "db:approve" ? { approval: "x", roles: ["email"] } : true)
+    const token = await autofill.query(pageSender(), ["email", "password"], "email", 1)
+    await autofill.menuLoad(token.token!, menuSender(), SITE)
+    expect(await autofill.menuPick(token.token!, google.ref, menuSender())).toEqual({ ok: false, message: "This login signs in with another account." })
+    expect(await autofill.menuSignIn(token.token!, google.ref, menuSender())).toEqual({ ok: true, found: true, provider: "google" })
+    expect(delivered("db:point")[0].message).toEqual({ type: "db:point", provider: "google" })
+    expect(fills()).toEqual([])
+    expect(await autofill.menuSignIn(token.token!, ACCOUNTS[0].ref, menuSender())).toMatchObject({ ok: false })
+  })
+
+  test("the popup never fills one with no password", async () => {
+    await autofill.page(pageSender(), "login", ["email", "password"], 4)
+    expect(await autofill.popupFill(1, google.ref)).toEqual({ ok: false, message: "This login signs in with another account." })
+    expect(fills()).toEqual([])
+  })
+
+  test("only Google's chooser, over https, gets the account; other providers' pages never do", async () => {
+    withs.start(1, { provider: "github", account: "kit" }, "example.com")
+    await withs.loaded({ tabId: 1, frameId: 0, url: "https://github.com/login", documentId: "g-doc" })
+    withs.start(1, google.signIn, "example.com")
+    await withs.loaded({ tabId: 1, frameId: 0, url: "http://accounts.google.com/signin", documentId: "g-doc" })
+    expect(delivered("db:chooser")).toEqual([])
+    expect(withs.accountFor(1, "http://accounts.google.com")).toBeUndefined()
+  })
+
+  test("on the provider's page with no login for the linked account, the name on the form narrows as usual", async () => {
+    withs.start(1, { provider: "google", account: "nobody@gmail.com" }, "example.com")
+    const sender = pageSender({ url: "https://accounts.google.com/signin", origin: "https://accounts.google.com", documentId: "g-doc" })
+    // "admin" only: its fill row and its own sign-in-with row, not all five.
+    expect((await autofill.query(sender, ["password"], "password", 1, false, "admin")).rows).toBe(2)
+  })
+
+  test("on the provider's chooser, only its top page gets the account; the menu there narrows to its login", async () => {
+    withs.start(1, google.signIn, "example.com")
+    withs.navigated(1, "https://accounts.google.com/signin")
+    expect(withs.accountFor(1, "https://accounts.google.com")).toBe("kit@gmail.com")
+    expect(withs.accountFor(1, "https://evil.example.net")).toBeUndefined()
+    fake.frames["1:0"] = { url: "https://accounts.google.com/signin", documentId: "g-doc" }
+    await withs.loaded({ tabId: 1, frameId: 0, url: "https://accounts.google.com/signin", documentId: "g-doc" })
+    await withs.loaded({ tabId: 1, frameId: 0, url: "https://evil.example.net/", documentId: "g-doc" })
+    await withs.loaded({ tabId: 1, frameId: 2, url: "https://accounts.google.com/frame", documentId: "f-doc" })
+    expect(delivered("db:chooser").map((d) => [d.message, d.options])).toEqual([[{ type: "db:chooser", account: "kit@gmail.com" }, { documentId: "g-doc" }]])
+    const sender = pageSender({ url: "https://accounts.google.com/signin", origin: "https://accounts.google.com", documentId: "g-doc" })
+    const menu = await autofill.query(sender, ["email"], "email", 1)
+    expect(menu.rows).toBe(1)
+  })
+
+  test("a popup follows the sign-in; coming back to the site, closing the tab or locking ends it", async () => {
+    withs.start(1, google.signIn, "example.com")
+    withs.opened(1, 2)
+    expect(withs.accountFor(2, "https://accounts.google.com")).toBe("kit@gmail.com")
+    withs.navigated(1, "https://accounts.google.com/x")
+    withs.navigated(1, "https://www.example.com/home")
+    expect(withs.accountFor(1, "https://accounts.google.com")).toBeUndefined()
+    host.setStatus({ state: "locked" })
+    expect(withs.accountFor(2, "https://accounts.google.com")).toBeUndefined()
   })
 })
