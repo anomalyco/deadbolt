@@ -39,7 +39,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -358,6 +358,72 @@ pub struct SiteLogin {
     pub has_otp: bool,
     /// The login's URLs that match the site; others are left out.
     pub urls: Vec<String>,
+    /// How the site is signed in to with another account, if it is.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignIn>,
+}
+
+/// A "Sign in with Google" login: the provider and, if the login it signs
+/// in with is in one of the user's vaults, that login's username, else its
+/// title. Never any other value of that login.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignIn {
+    /// The provider's id (`google`, see [`SIGN_IN_PROVIDERS`]) or, for one
+    /// this version doesn't know, its name as given.
+    pub provider: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
+}
+
+/// The sign-in providers a login's `sign-in-with` names by id, with their
+/// names and other names for them.
+pub const SIGN_IN_PROVIDERS: [(&str, &str, &[&str]); 12] = [
+    ("google", "Google", &[]),
+    ("apple", "Apple", &[]),
+    ("github", "GitHub", &[]),
+    ("microsoft", "Microsoft", &[]),
+    ("facebook", "Facebook", &["meta"]),
+    ("x", "X", &["twitter"]),
+    ("amazon", "Amazon", &[]),
+    ("discord", "Discord", &[]),
+    ("slack", "Slack", &[]),
+    ("okta", "Okta", &[]),
+    ("linkedin", "LinkedIn", &[]),
+    ("gitlab", "GitLab", &[]),
+];
+
+/// A provider as a `sign-in-with` value: the id of a known one, matched
+/// by id, name or other name in any case and spacing ("Sign in with
+/// Twitter" is `x`); any other as one line of at most 64 characters.
+/// `None` if blank.
+pub fn sign_in_provider(text: &str) -> Option<String> {
+    let line = text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|w| !w.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let bare = line
+        .to_lowercase()
+        .strip_prefix("sign in with ")
+        .map_or_else(|| line.to_lowercase(), str::to_string);
+    let bare: String = bare.chars().filter(|c| c.is_alphanumeric()).collect();
+    if let Some((id, ..)) = SIGN_IN_PROVIDERS.iter().find(|(id, name, other)| {
+        *id == bare || name.to_lowercase() == bare || other.contains(&bare.as_str())
+    }) {
+        return Some((*id).to_string());
+    }
+    let line: String = line.chars().take(64).collect();
+    let line = line.trim_end();
+    (!line.is_empty()).then(|| line.to_string())
+}
+
+/// What a provider is called: "Google" for `google`; one this version
+/// doesn't know by its value.
+pub fn sign_in_name(provider: &str) -> &str {
+    SIGN_IN_PROVIDERS
+        .iter()
+        .find(|(id, ..)| *id == provider)
+        .map_or(provider, |(_, name, _)| name)
 }
 
 /// What a fill asked for and the login has.
@@ -794,6 +860,18 @@ pub struct ImportReport {
     pub warnings: Vec<Tally>,
     /// What deadbolt has no place for (folders, favorites, attachments, ...).
     pub dropped: Vec<Tally>,
+    /// The new logins' sign-in methods ("Sign in with Google").
+    #[serde(default)]
+    pub sign_in: SignInCounts,
+}
+
+/// The new logins that sign in with another account.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SignInCounts {
+    /// By provider ([`SignIn::provider`]).
+    pub providers: BTreeMap<String, usize>,
+    /// How many of them are linked to the login they sign in with.
+    pub linked: usize,
 }
 
 /// The app an export came from, detected from its content.
@@ -925,6 +1003,24 @@ impl ImportReport {
             self.source,
             counts.join(", ")
         )];
+        let methods: usize = self.sign_in.providers.values().sum();
+        if methods > 0 {
+            let mut providers: Vec<(&String, &usize)> = self.sign_in.providers.iter().collect();
+            providers.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+            let providers: Vec<String> = providers
+                .into_iter()
+                .map(|(p, n)| format!("{} {n}", sign_in_name(p)))
+                .collect();
+            let methods = Tally {
+                count: methods,
+                one: "sign-in method".into(),
+                many: "sign-in methods".into(),
+            };
+            lines.push(format!("kept {methods} ({})", providers.join(", ")));
+            if self.sign_in.linked > 0 {
+                lines.push(format!("linked {} to their accounts", self.sign_in.linked));
+            }
+        }
         if self.duplicates > 0 {
             let duplicates = Tally {
                 count: self.duplicates,
@@ -951,7 +1047,8 @@ pub struct ItemInfo {
     pub kind: String,
     /// The name, or one derived from the fields.
     pub label: String,
-    /// What the item is, if anything says: a login's username, a card's
+    /// What the item is, if anything says: a login's username (else "Sign
+    /// in with Google" for one that signs in with another account), a card's
     /// expiry, an SSH key's comment or fingerprint, an identity's email or
     /// phone. Never a secure note's body.
     pub detail: Option<String>,
@@ -1131,6 +1228,29 @@ mod tests {
     }
 
     #[test]
+    fn sign_in_providers_are_ids_or_one_line() {
+        for (text, id) in [
+            ("google", "google"),
+            ("Google", "google"),
+            ("Sign in with GitHub", "github"),
+            ("twitter", "x"),
+            (" Linked In ", "linkedin"),
+            ("Acme\tcorp\nSSO ", "Acme corp SSO"),
+        ] {
+            assert_eq!(sign_in_provider(text).as_deref(), Some(id), "{text:?}");
+        }
+        assert_eq!(sign_in_provider(" \n"), None);
+        assert_eq!(
+            sign_in_provider(&"é".repeat(100)).unwrap().chars().count(),
+            64
+        );
+        assert_eq!(
+            (sign_in_name("github"), sign_in_name("Acme")),
+            ("GitHub", "Acme")
+        );
+    }
+
+    #[test]
     fn import_reports_read_as_lines() {
         let tally = |count, one: &str, many: &str| Tally {
             count,
@@ -1144,11 +1264,22 @@ mod tests {
             skipped: vec![tally(1, "secure note", "secure notes")],
             warnings: vec![tally(2, "URL kept as text", "URLs kept as text")],
             dropped: vec![tally(1, "favorite", "favorites"), tally(3, "tag", "tags")],
+            sign_in: SignInCounts {
+                providers: [
+                    ("google".into(), 2),
+                    ("x".into(), 1),
+                    ("Acme SSO".into(), 2),
+                ]
+                .into(),
+                linked: 3,
+            },
         };
         assert_eq!(
             report.lines(true),
             [
                 "imported 4 from 1Password (logins 3, cards 1)",
+                "kept 5 sign-in methods (Acme SSO 2, Google 2, X 1)",
+                "linked 3 to their accounts",
                 "skipped 2 duplicates",
                 "skipped 1 secure note",
                 "warning: 2 URLs kept as text",
@@ -1168,6 +1299,7 @@ mod tests {
             skipped: vec![],
             warnings: vec![],
             dropped: vec![],
+            sign_in: SignInCounts::default(),
         };
         assert_eq!(
             kinds.lines(true),
@@ -1190,6 +1322,7 @@ mod tests {
             skipped: vec![],
             warnings: vec![],
             dropped: vec![],
+            sign_in: SignInCounts::default(),
         };
         assert_eq!(
             empty.lines(false),

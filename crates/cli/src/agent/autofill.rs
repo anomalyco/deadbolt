@@ -14,7 +14,9 @@ use deadbolt_core::{
 use super::items::{create, label};
 use super::session::{Loaded, hex, unhex};
 use super::{ErrorCode, fail};
-use crate::protocol::{FieldInput, Fill, LoginRef, Secret, SiteLogin, SiteStatus, SiteValues};
+use crate::protocol::{
+    FieldInput, Fill, LoginRef, Secret, SignIn, SiteLogin, SiteStatus, SiteValues,
+};
 use crate::site::{Site, page_url};
 
 fn site(origin: &str) -> Result<Site> {
@@ -82,6 +84,28 @@ fn find(s: &Loaded, login: &LoginRef, site: &Site) -> Result<(VaultId, Item)> {
     Ok((vault, item))
 }
 
+/// How a login signs in with another account: its `sign-in-with`, and the
+/// username (else the title) of its `sign-in-account`, if that login is in
+/// one of the vaults here. Nothing else of that login.
+fn sign_in(s: &Loaded, item: &Item) -> Option<SignIn> {
+    let provider = value(item, "sign-in-with")?.to_string();
+    let account = value(item, "sign-in-account")
+        .and_then(|id| unhex(id).ok())
+        .map(ItemId::from_bytes)
+        .filter(|id| *id != item.id)
+        .and_then(|id| {
+            s.vaults
+                .values()
+                .find_map(|v| v.item(&id).filter(|i| !i.deleted))
+        })
+        .map(|account| {
+            value(&account, "username")
+                .map(str::to_string)
+                .unwrap_or_else(|| label(&account))
+        });
+    Some(SignIn { provider, account })
+}
+
 pub fn list(s: &Loaded, origin: &str) -> Result<(String, Vec<SiteLogin>)> {
     let site = site(origin)?;
     let mut found: Vec<SiteLogin> = logins(s, &site)
@@ -96,6 +120,7 @@ pub fn list(s: &Loaded, origin: &str) -> Result<(String, Vec<SiteLogin>)> {
                 .filter(|url| site.matches_url(url))
                 .map(str::to_string)
                 .collect(),
+            sign_in: sign_in(s, &item),
         })
         .collect();
     found.sort_by(|a, b| {
@@ -339,6 +364,65 @@ mod tests {
             );
             assert!(values.username.is_none() && values.password.is_none());
         }
+    }
+
+    /// A "Sign in with" login lists its provider and the username of the
+    /// login it signs in with, and fills nothing of that login.
+    #[test]
+    fn sign_in_logins_name_their_account_and_fill_none_of_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let google = login(
+            &mut s,
+            &[
+                ("url", "https://accounts.google.com"),
+                ("username", "dax@gmail.com"),
+                ("password", "google-pw"),
+            ],
+        );
+        let notion = login(
+            &mut s,
+            &[
+                ("url", "https://www.notion.so"),
+                ("sign-in-with", "google"),
+                ("sign-in-account", &google.item),
+            ],
+        );
+        let gone = "0".repeat(32);
+        login(
+            &mut s,
+            &[
+                ("url", "https://notion.so/login"),
+                ("sign-in-with", "github"),
+                ("sign-in-account", &gone),
+            ],
+        );
+        let (_, logins) = list(&s, "https://www.notion.so").unwrap();
+        let sign_ins: Vec<_> = logins.iter().map(|l| l.sign_in.clone()).collect();
+        assert!(sign_ins.contains(&Some(SignIn {
+            provider: "google".into(),
+            account: Some("dax@gmail.com".into()),
+        })));
+        assert!(sign_ins.contains(&Some(SignIn {
+            provider: "github".into(),
+            account: None,
+        })));
+        assert!(
+            logins
+                .iter()
+                .all(|l| !l.has_password && l.username.is_none())
+        );
+        let (_, logins) = list(&s, "https://accounts.google.com").unwrap();
+        assert_eq!(logins[0].sign_in, None);
+        let values = fill(
+            &s,
+            "https://www.notion.so",
+            &notion,
+            &[Fill::Username, Fill::Password],
+            Duration::ZERO,
+        )
+        .unwrap();
+        assert_eq!(values, SiteValues::default());
     }
 
     #[test]
