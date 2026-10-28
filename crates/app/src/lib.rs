@@ -31,6 +31,10 @@ use model::{App, Screen};
 use onboarding::worker::{Progress, Stage, Worker};
 use onboarding::{Flow, Notice, Pairing, Severity, Step};
 
+/// The Wayland app id and X11 `WM_CLASS`, which the desktop matches to
+/// `deadbolt desktop install`'s entry of the same name.
+pub const APP_ID: &str = "pw.deadbolt.Deadbolt";
+
 pub fn spec() -> AppSpec<App> {
     AppSpec {
         title: "Deadbolt",
@@ -60,6 +64,7 @@ pub fn spec() -> AppSpec<App> {
 /// shortcut on the panel virtually, so a script's `{"shortcut": …}` and
 /// `{"menu": …}` steps reach it without touching the desktop.
 pub fn run() {
+    rune::set_app_id(APP_ID);
     let args = rune::tooling::Args::parse();
     let (live, headless) = (is_live(&args), args.headless());
     let extra = rune::extra_args();

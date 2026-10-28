@@ -195,7 +195,7 @@ impl Callers {
 
 /// The app of the agent's own bundle, `Deadbolt.app/Contents/MacOS/Deadbolt`
 /// for its `Contents/Helpers/deadbolt`, symlinks resolved. A development
-/// build also takes the `deadbolt-app` beside it.
+/// build also takes the `deadbolt-ui` beside it.
 #[cfg(any(test, target_os = "macos"))]
 fn app_beside(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
@@ -203,7 +203,7 @@ fn app_beside(exe: &Path) -> Option<PathBuf> {
     let app = if dir.file_name()? == "Helpers" && contents.file_name()? == "Contents" {
         contents.join("MacOS/Deadbolt")
     } else if cfg!(debug_assertions) {
-        dir.join("deadbolt-app")
+        dir.join("deadbolt-ui")
     } else {
         return None;
     };
@@ -536,15 +536,18 @@ mod tests {
     #[test]
     fn a_linux_peer_is_an_unverified_caller() {
         let process = Process {
-            exe: Some("/usr/bin/deadbolt-app".into()),
+            exe: Some("/usr/lib/deadbolt/deadbolt-ui".into()),
             args: vec!["deadbolt".into(), "chrome-extension://abc/".into()],
             ..Process::default()
         };
         let info = from_proc(peer(77, 1), process);
         assert_eq!(info.class, CallerClass::Caller);
         assert_eq!(info.check, Check::Unverified);
-        assert_eq!(info.program.as_deref(), Some("/usr/bin/deadbolt-app"));
-        assert_eq!(info.label, "deadbolt-app · unverified (Linux)");
+        assert_eq!(
+            info.program.as_deref(),
+            Some("/usr/lib/deadbolt/deadbolt-ui")
+        );
+        assert_eq!(info.label, "deadbolt-ui · unverified (Linux)");
     }
 
     #[test]
@@ -603,7 +606,7 @@ mod tests {
         // Only a development build takes the app beside it.
         assert_eq!(
             app_beside(Path::new("/w/target/debug/deadbolt")),
-            cfg!(debug_assertions).then(|| PathBuf::from("/w/target/debug/deadbolt-app"))
+            cfg!(debug_assertions).then(|| PathBuf::from("/w/target/debug/deadbolt-ui"))
         );
     }
 

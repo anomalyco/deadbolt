@@ -25,16 +25,16 @@ if $universal; then
   for arch in aarch64 x86_64; do
     cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app --target "$arch-apple-darwin" -j 2
   done
-  for bin in deadbolt deadbolt-enclave deadbolt-app; do
+  for bin in deadbolt deadbolt-enclave deadbolt-ui; do
     lipo -create "$target/aarch64-apple-darwin/release/$bin" "$target/x86_64-apple-darwin/release/$bin" -output "$scratch/$bin"
   done
 else
   cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app -j 2
-  cp "$target/release/deadbolt" "$target/release/deadbolt-enclave" "$target/release/deadbolt-app" "$scratch/"
+  cp "$target/release/deadbolt" "$target/release/deadbolt-enclave" "$target/release/deadbolt-ui" "$scratch/"
 fi
 app="$scratch/Deadbolt.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
-cp "$scratch/deadbolt-app" "$app/Contents/MacOS/Deadbolt"
+cp "$scratch/deadbolt-ui" "$app/Contents/MacOS/Deadbolt"
 cp "$scratch/deadbolt" "$app/Contents/Helpers/deadbolt"
 cp "$scratch/deadbolt-enclave" "$app/Contents/Helpers/deadbolt-enclave"
 chmod 755 "$app/Contents/MacOS/Deadbolt" "$app/Contents/Helpers/deadbolt" "$app/Contents/Helpers/deadbolt-enclave"

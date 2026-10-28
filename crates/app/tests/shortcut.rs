@@ -363,7 +363,7 @@ fn card_after(args: &[&str], events: Value) -> Option<f64> {
     let dir = tempfile::tempdir().unwrap();
     let (script, tree) = (dir.path().join("script.json"), dir.path().join("tree.json"));
     std::fs::write(&script, events.to_string()).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_deadbolt-app"))
+    let out = Command::new(env!("CARGO_BIN_EXE_deadbolt-ui"))
         .args(["--window", "panel", "--scene", "empty"])
         .args(args)
         .arg("--script")

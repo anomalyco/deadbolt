@@ -72,9 +72,16 @@ pub fn discover(
     if let Some(binary) = override_bin.filter(|s| !s.is_empty()) {
         return binary.into();
     }
-    let sibling = exe.and_then(Path::parent).map(|p| p.join("deadbolt"));
+    let dir = exe.and_then(Path::parent);
+    let sibling = dir.map(|p| p.join("deadbolt"));
+    // `<prefix>/lib/deadbolt/deadbolt-ui` runs `<prefix>/bin/deadbolt`.
+    let prefix = dir
+        .filter(|d| d.ends_with("lib/deadbolt"))
+        .and_then(|d| d.parent()?.parent())
+        .map(|p| p.join("bin/deadbolt"));
     sibling
         .into_iter()
+        .chain(prefix)
         .chain(
             search_dirs(path, home)
                 .into_iter()
@@ -163,7 +170,7 @@ mod tests {
             std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
         };
         write(&bin.join("deadbolt"));
-        let exe = dev.join("deadbolt-app");
+        let exe = dev.join("deadbolt-ui");
         assert_eq!(
             discover(Some(&exe), None, bin.as_os_str(), None),
             bin.join("deadbolt")
@@ -182,5 +189,19 @@ mod tests {
             ),
             Path::new("/override")
         );
+    }
+
+    #[test]
+    fn an_installed_app_runs_its_prefixs_deadbolt() {
+        let dir = tempfile::tempdir().unwrap();
+        let lib = dir.path().join("lib/deadbolt");
+        let bin = dir.path().join("bin");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir(&bin).unwrap();
+        let cli = bin.join("deadbolt");
+        std::fs::write(&cli, "").unwrap();
+        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let exe = lib.join("deadbolt-ui");
+        assert_eq!(discover(Some(&exe), None, OsStr::new(""), None), cli);
     }
 }
