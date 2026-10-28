@@ -1040,6 +1040,7 @@ name = "deadbolt-client"
 version = "0.0.0"
 dependencies = [
  "blake3",
+ "nix",
  "rustix 1.1.5",
  "serde",
  "serde_json",
@@ -3059,6 +3060,7 @@ dependencies = [
  "cfg-if",
  "cfg_aliases",
  "libc",
+ "memoffset",
 ]
 
 [[package]]

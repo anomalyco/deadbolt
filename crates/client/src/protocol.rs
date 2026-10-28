@@ -31,7 +31,10 @@
 //! `status` and `stop` are answered whatever `v` says, so a client can always
 //! find and replace an agent of an older protocol. They are the only messages
 //! exchanged between different builds, so `Request` and `Status` must stay
-//! readable by older and newer ones.
+//! readable by older and newer ones. `claimed` is left out when empty, so a
+//! status request reads the same to every agent.
+
+mod caller;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -39,7 +42,12 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
-pub const PROTOCOL_VERSION: u32 = 10;
+pub use caller::{
+    ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Claim,
+    Outcome, Signature, Tier, UNVERIFIED_LINUX,
+};
+
+pub const PROTOCOL_VERSION: u32 = 11;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -47,6 +55,9 @@ pub const MAX_LINE: usize = 64 * 1024 * 1024;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
     pub v: u32,
+    /// Who the client says it is acting for. Shown as claimed, never trusted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub claimed: Option<Claim>,
     #[serde(flatten)]
     pub command: Command,
 }
@@ -284,6 +295,34 @@ pub enum Command {
     SendWait {
         id: String,
     },
+    /// What callers did, newest first: entries at or after `since` (Unix
+    /// seconds) with ids before `before`, at most `limit` (default 500, at
+    /// most 1000; page back with the last id). Never an entry itself.
+    /// Replies `activity`.
+    ActivityList {
+        since: Option<u64>,
+        limit: Option<u32>,
+        #[serde(default)]
+        before: Option<u64>,
+    },
+    /// The app showed or copied `field` of the item `item` (its id, titled
+    /// `title`), which it reports for Activity. Only from Deadbolt.app.
+    /// Replies `done`.
+    ActivityReport {
+        action: AppAction,
+        vault: Option<String>,
+        item: String,
+        title: String,
+        field: String,
+    },
+}
+
+impl Command {
+    /// Whether the request carries the vault passphrase, so the client must
+    /// check who it is talking to before sending it.
+    pub fn carries_passphrase(&self) -> bool {
+        matches!(self, Self::Setup { .. } | Self::Unlock { .. })
+    }
 }
 
 /// What a site asks of user verification in a passkey ceremony.
@@ -442,6 +481,8 @@ pub enum Change {
     Devices {
         vault: String,
     },
+    /// New Activity entries were recorded.
+    Activity,
     /// Changes were dropped because the watcher fell behind. Fetch everything.
     Resync,
     /// The agent is stopping, which locks the store. The stream ends.
@@ -580,6 +621,9 @@ pub enum Reply {
     },
     Send {
         send: SendInfo,
+    },
+    Activity {
+        entries: Vec<ActivityEntry>,
     },
 }
 
@@ -1017,6 +1061,8 @@ pub struct Status {
     /// Whether Touch ID is enabled on this store, but its enrolled slot was
     /// reset (expired after 14 days, fingerprint set changed, or passphrase changed).
     pub touch_id_reset: bool,
+    /// How the agent sees the client asking (`deadbolt whoami`).
+    pub caller: CallerInfo,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1206,6 +1252,7 @@ mod tests {
     fn watch_round_trips_as_flat_json_lines() {
         let request = serde_json::to_string(&Request {
             v: PROTOCOL_VERSION,
+            claimed: None,
             command: Command::Watch,
         })
         .unwrap();
@@ -1230,6 +1277,7 @@ mod tests {
                 Change::Devices { vault: "ab".into() },
                 r#"{"type":"change","change":"devices","vault":"ab"}"#,
             ),
+            (Change::Activity, r#"{"type":"change","change":"activity"}"#),
             (Change::Resync, r#"{"type":"change","change":"resync"}"#),
             (Change::Stopping, r#"{"type":"change","change":"stopping"}"#),
         ];
@@ -1244,6 +1292,31 @@ mod tests {
                 other => panic!("expected a change, got {other:?}"),
             }
         }
+    }
+
+    /// A claim rides beside the command and is left out when there is none,
+    /// so a status request reads the same to agents of every protocol.
+    #[test]
+    fn a_claim_rides_beside_the_command() {
+        let claimed = Request {
+            v: PROTOCOL_VERSION,
+            claimed: Some(Claim {
+                caller: Some("deploy bot".into()),
+                opencode_session: None,
+            }),
+            command: Command::Status,
+        };
+        let line = serde_json::to_string(&claimed).unwrap();
+        assert_eq!(
+            line,
+            format!(
+                r#"{{"v":{PROTOCOL_VERSION},"claimed":{{"caller":"deploy bot","opencode_session":null}},"cmd":"status"}}"#
+            )
+        );
+        let back = serde_json::from_str::<Request>(&line).unwrap();
+        assert_eq!(back.claimed, claimed.claimed);
+        let old = serde_json::from_str::<Request>(r#"{"v":1,"cmd":"status"}"#).unwrap();
+        assert!(old.claimed.is_none() && matches!(old.command, Command::Status));
     }
 
     #[test]
@@ -1270,6 +1343,7 @@ mod tests {
     fn generate_round_trips() {
         let request = serde_json::to_string(&Request {
             v: PROTOCOL_VERSION,
+            claimed: None,
             command: Command::Generate {
                 length: 20,
                 symbols: false,
