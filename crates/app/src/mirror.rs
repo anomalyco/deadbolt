@@ -5,7 +5,7 @@
 
 use deadbolt_client::protocol::MirrorReport;
 use rune::{El, Transition, Tx, col, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
+use rune_kit::Kit;
 
 use crate::agent::{Failure, Job};
 use crate::model::App;
@@ -63,32 +63,14 @@ impl App {
     }
 }
 
-/// Settings' row: the button, then what the last sync did.
-pub fn setting(s: &App, k: &Kit) -> El {
+/// Settings' row: what the last sync did, under its label, and the button.
+pub fn setting(s: &App, k: &Kit) -> (El, El) {
     let m = &s.mirror;
-    let mut section = col()
-        .key("op-sync")
-        .w(240.0)
-        .gap(6.0)
-        .child(
-            text("1Password")
-                .key("op-sync-label")
-                .font(k.ty.text_small)
-                .color(k.c.text_muted),
-        )
-        .child(
-            Button::new(if m.syncing {
-                "Syncing…"
-            } else {
-                "Sync from 1Password"
-            })
-            .variant(ButtonVariant::Ghost)
-            .control_size(ControlSize::Regular)
-            .disabled(m.syncing)
-            .on_press(|s: &mut App| s.sync_one_password())
-            .build(k)
-            .key("op-sync-button"),
-        );
+    let button = crate::settings::button(if m.syncing { "Syncing…" } else { "Sync now" })
+        .disabled(m.syncing)
+        .on_press(|s: &mut App| s.sync_one_password())
+        .build(k)
+        .key("op-sync-button");
     let line = match &m.result {
         Some(Ok(summary)) => text(summary.clone())
             .key("op-sync-result")
@@ -98,8 +80,11 @@ pub fn setting(s: &App, k: &Kit) -> El {
             .key("op-sync-error")
             .font(k.ty.small_medium)
             .color(k.c.danger.fg),
-        None => return section,
+        None => text("Copies new and changed items from the 1Password app")
+            .key("about")
+            .font(crate::vault::FACT.lh(16.0))
+            .color(k.c.text_faint),
     };
-    section = section.child(line.wrap().w_full().transition(Transition::opacity()));
-    section
+    let line = line.wrap().w_full().transition(Transition::opacity());
+    (col().key("op-sync").w_full().child(line), button)
 }

@@ -172,7 +172,7 @@ fn the_code_shows_grouped_with_copy_and_no_show() {
     assert!(shows(&rt, "279 037"), "grouped 3+3");
     assert!(labelled(&rt, "Copy one-time code"));
     assert!(!labelled(&rt, "Show otp") && !labelled(&rt, "Show one-time code"));
-    assert!(shows(&rt, "Copy code"), "⌥⏎'s hint");
+    assert!(rt.find("h-code").is_some(), "⌥⏎'s hint");
     let otp = rt.state.otp.as_ref().unwrap();
     assert!(otp.item.starts_with(GITHUB));
     let detail = rt.state.detail.as_ref().unwrap();
@@ -403,8 +403,8 @@ fn an_item_without_an_otp_has_no_code() {
     );
     assert!(labelled(&rt, "Copy password"));
     assert!(rt.state.otp.is_none());
-    assert!(!shows(&rt, "One-time code") && !shows(&rt, "Copy code"));
-    assert!(shows(&rt, "Select"));
+    assert!(!shows(&rt, "One-time code") && rt.find("h-code").is_none());
+    assert!(shows(&rt, "Actions"));
 }
 
 /// Against a real agent: the item's reply carries the code, not the secret.

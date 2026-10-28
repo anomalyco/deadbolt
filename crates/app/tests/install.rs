@@ -151,10 +151,10 @@ fn settings_takes_keys_before_the_focused_search() {
     // Open it without moving focus: the search field would get keys first.
     rt.update(|s, _| s.settings_open = true);
     settle(&mut rt, 0.5);
-    assert!(shows(&rt, "Install deadbolt command…"));
+    assert!(shows(&rt, "deadbolt command") && shows(&rt, "Install…"));
     assert!(
         rt.state.search.focused,
-        "search keeps focus under the popover"
+        "search keeps focus beside Settings"
     );
 
     vault_keys(&mut rt);

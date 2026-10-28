@@ -557,6 +557,20 @@ impl App {
         }
     }
 
+    /// ⌃⇥ and ⌃⇧⇥ in a new item's form: the next or last type, round from the ends.
+    fn step_kind(&mut self, by: isize) {
+        let Some(at) = self
+            .edit
+            .form
+            .as_ref()
+            .and_then(|f| KINDS.iter().position(|k| *k == f.kind))
+        else {
+            return;
+        };
+        let next = (at as isize + by).rem_euclid(KINDS.len() as isize) as usize;
+        self.pick_kind(KINDS[next]);
+    }
+
     /// ⌘E: a form for the selected item, once its values are here.
     pub fn edit_selected(&mut self) {
         if !self.edits() || self.editing() {
@@ -1141,6 +1155,9 @@ impl App {
         let cmd_enter = ev.mods.cmd && plain;
         match (&ev.key, field) {
             (Key::Escape, _) => self.cancel_edit(),
+            (Key::Tab, _) if ev.mods.ctrl && !ev.mods.cmd && !ev.mods.alt => {
+                self.step_kind(if ev.mods.shift { -1 } else { 1 })
+            }
             // A secret's text area submits ⌘⏎ itself (its `on_submit` saves);
             // other ⌘ and ⌃ chords would submit too, so they do nothing.
             (Key::Enter, Field::SecretLines) if cmd_enter => return false,

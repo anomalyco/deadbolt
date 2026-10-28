@@ -5,8 +5,8 @@
 
 use deadbolt_client::Paths;
 use deadbolt_client::protocol::{ActivityEntry, AppAction, Command, Outcome, Reply};
-use rune::{El, ScrollSpec, Transition, Tx, col, text};
-use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
+use rune::{El, ScrollSpec, Tx, col, text};
+use rune_kit::Kit;
 
 use crate::agent::{Done, Failure, Job};
 use crate::model::App;
@@ -178,63 +178,36 @@ fn now() -> u64 {
         .map_or(0, |d| d.as_secs())
 }
 
-/// Settings' row: the button, then the newest entries.
-pub fn setting(s: &App, k: &Kit) -> El {
+/// Settings' Activity row: its Show or Hide button, and once open, the
+/// newest entries under the row.
+pub fn setting(s: &App, k: &Kit) -> (El, Option<El>) {
     let a = &s.activity;
-    let section = col().key("activity").w(240.0).gap(6.0).child(
-        text("Activity")
-            .key("activity-label")
-            .font(k.ty.text_small)
-            .color(k.c.text_muted),
-    );
-    let section = section.child(
-        Button::new(if a.open {
-            "Hide activity"
-        } else {
-            "Show activity"
-        })
-        .variant(ButtonVariant::Ghost)
-        .control_size(ControlSize::Regular)
+    let button = crate::settings::button(if a.open { "Hide" } else { "Show" })
         .on_press(|s: &mut App| s.toggle_activity())
         .build(k)
-        .key("activity-button"),
-    );
+        .key("activity-button");
     if !a.open {
-        return section;
+        return (button, None);
     }
-    if let Some(error) = &a.error {
-        return section.child(
-            text(error.clone())
-                .key("activity-error")
-                .font(k.ty.small_medium)
-                .color(k.c.danger.fg)
-                .wrap()
-                .w_full(),
-        );
-    }
-    if a.entries.is_empty() {
+    let quiet = |key: &str, words: String, ink| {
+        text(words)
+            .key(key.to_owned())
+            .font(k.ty.small)
+            .color(ink)
+            .wrap()
+            .w_full()
+    };
+    let list = if let Some(error) = &a.error {
+        quiet("activity-error", error.clone(), k.c.danger.fg)
+    } else if a.entries.is_empty() {
         let empty = if a.loading {
             "Loading…"
         } else {
             "Nothing yet"
         };
-        return section.child(
-            text(empty)
-                .key("activity-empty")
-                .font(k.ty.text_small)
-                .color(k.c.text_muted),
-        );
-    }
-    let now = now();
-    let rows = a.entries.iter().map(|entry| {
-        text(line(entry, now))
-            .key(format!("activity-{}", entry.id))
-            .font(k.ty.text_small)
-            .color(k.c.text_base)
-            .wrap()
-            .w_full()
-    });
-    section.child(
+        quiet("activity-empty", empty.into(), k.c.text_muted)
+    } else {
+        let now = now();
         col()
             .key("activity-list")
             .w_full()
@@ -243,8 +216,19 @@ pub fn setting(s: &App, k: &Kit) -> El {
             .scroll(ScrollSpec {
                 stick_bottom: false,
             })
-            .children(rows)
-            .transition(Transition::opacity()),
+            .scroll_edge_fade(crate::view::LIST_EDGE)
+            .children(a.entries.iter().map(|entry| {
+                text(line(entry, now))
+                    .key(format!("activity-{}", entry.id))
+                    .font(k.ty.small)
+                    .color(k.c.text_base)
+                    .wrap()
+                    .w_full()
+            }))
+    };
+    (
+        button,
+        Some(col().key("activity").w_full().pb(12.0).child(list)),
     )
 }
 
