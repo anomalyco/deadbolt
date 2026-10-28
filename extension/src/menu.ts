@@ -32,6 +32,8 @@ const foot = document.getElementById("foot")!
 const caption = document.getElementById("caption")!
 let accounts: Row[] = []
 let focused: FieldRole = "username"
+/** The site signs in username first and has one login: its row says "Continue as …". */
+let continueAs = false
 let active = 0
 let busy = false
 let mode: SurfaceMode = "accounts"
@@ -115,7 +117,9 @@ function row(item: Row, i: number): HTMLElement {
   const [tile, title, sub] =
     "passkey" in item
       ? [avatar("", icon("passkey")), item.passkey.username || "Passkey", `Passkey · ${item.passkey.vault}`]
-      : [avatar(item.account.title), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
+      : continueAs && item.account.username
+        ? [avatar(item.account.title), `Continue as ${item.account.username}`, item.account.title]
+        : [avatar(item.account.title), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
   const r = h(
     "button",
     { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", "aria-selected": String(i === active) },
@@ -537,10 +541,12 @@ document.addEventListener("keydown", (e) => {
 
 function show(reply: MenuLoadReply) {
   if (reply.kind === "offer") return showOffer(reply)
+  if (reply.kind === "notice") return showNotice(reply)
   if (mode !== "accounts") return
   if (reply.kind === "status") return showStatus(reply.status)
   accounts = [...(reply.passkeys ?? []).map((passkey) => ({ passkey })), ...reply.accounts.map((account) => ({ account }))]
   focused = reply.focused
+  continueAs = reply.continueAs === true && !reply.passkeys?.length
   active = Math.min(active, Math.max(accounts.length - 1, 0))
   if (!accounts.length) {
     highlightEl.hidden = true
@@ -557,6 +563,24 @@ function show(reply: MenuLoadReply) {
   if (left.length && !left.includes(active)) active = left[0]
   highlight(false)
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
+}
+
+// ---- A step filled without a pick -----------------------------------------------------
+
+/**
+ * "Password filled", "Code filled": a sign-in session filled the next step
+ * (see bg/autofill.ts Session), and this pill on the field says so, then goes.
+ */
+function showNotice(notice: Extract<MenuLoadReply, { kind: "notice" }>) {
+  mode = "pill"
+  surface.classList.add("folded")
+  for (const el of Array.from(surface.children) as HTMLElement[]) el.hidden = true
+  const label = h("span", { class: "pill-label" }, notice.label)
+  label.dataset.text = notice.label
+  const pill = h("div", { class: "pill ok", role: "status" }, avatar(notice.title), label, h("span", { class: "pill-mark", "aria-hidden": "true" }, icon("check")))
+  document.body.append(pill)
+  report()
+  setTimeout(() => done(), FILLED_STAYS_MS + 600)
 }
 
 // ---- The save offer --------------------------------------------------------------

@@ -32,7 +32,7 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/background.ts`      | Service worker: routes messages                                 |
 | `src/bg/host.ts`         | The one native port: hello, ids, backoff, `changed`             |
 | `src/bg/frames.ts`       | Which frames get logins; delivery to one document               |
-| `src/bg/autofill.ts`     | Menu tokens, fills, email-first continuation, popup             |
+| `src/bg/autofill.ts`     | Menu tokens, fills, sign-in sessions across steps, popup        |
 | `src/bg/save.ts`         | Captured submits, sign-in outcomes, `check`, offers, `save`     |
 | `src/bg/site.ts`         | Fillable origins and same-site frames                           |
 | `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback        |
@@ -82,7 +82,7 @@ Adapted from Foyer: form and field detection with weighted clues
 (`content/shadow.ts`), filling that frameworks notice (`content/fill.ts`), the
 inline menu as an extension frame in a closed shadow root
 (`content/inline.ts`, `menu.ts`), the visibility guard (`ui/dom.ts`),
-token-bound frame targeting and the email-first continuation (`bg/frames.ts`,
+token-bound frame targeting and the email-first continuation, which sign-in sessions grew from (`bg/frames.ts`,
 `bg/autofill.ts`), the capture-check-save flow (`bg/save.ts`), sender origin
 rules (`bg/site.ts`), the passkey hook (`passkey-hook.ts`,
 `passkey-options.ts`), its channel

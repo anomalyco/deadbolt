@@ -24,7 +24,7 @@ import { IDENTIFIER_ROLES, MENU_ROLES, type FillAck, type QueryReply, type Surfa
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import type { Field } from "./detect"
-import { fillable, fillFields } from "./fill"
+import { fillable, fillFields, ownValue } from "./fill"
 import { deepActiveElement } from "./shadow"
 
 export interface PageState {
@@ -421,7 +421,14 @@ async function maybeOpen(el: HTMLInputElement, how: Asked = "focus") {
   if (anchor === el && host) return
   querying = (async () => {
     const roles = [...new Set(state.targets().map((x) => x.role))]
-    const reply = await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), explicit })
+    // On a later step's field, the username the form holds: the menu narrows
+    // to the login it names, or stays away when it names none (see Autofill.query).
+    // Only a username the user typed (or Deadbolt filled) counts: one the
+    // page put there itself mustn't decide whether a menu shows.
+    const later = t.role === "password" || t.role === "otp"
+    const box = later ? state.targets().find((x) => IDENTIFIER_ROLES.includes(x.role))?.el : undefined
+    const named = box ? (await ownValue(box, box.value))?.slice(0, 500) : undefined
+    const reply = await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), explicit, again: how === "again", ...(named ? { identifier: named } : {}) })
     if (reply?.token && reply.rows > 0) {
       if (deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
     } else emptyUntil.set(el, Date.now() + 15_000)
@@ -561,6 +568,11 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
     submittedSinceFill = false
   }
   last?.focus({ preventScroll: true })
+  // A sign-in session's step, filled without a pick: a pill on the field
+  // says so ("Password filled"), then goes (see menu.ts showNotice).
+  // On the last field written: for a code in one box per digit, beside the last box.
+  const on = [...lastFilled].reverse().find((el) => el.isConnected)
+  if (filled.length && typeof message.notice === "string" && isTop && on && !host) openMenu(on, message.notice, 0, "pill")
   return { filled }
 }
 
@@ -568,14 +580,26 @@ export function markSubmitted() {
   if (lastFilled.length) submittedSinceFill = true
 }
 
+/** When the user last clicked a submit control or pressed Enter in a field themselves (content.ts). */
+let submitGestureAt = -Infinity
+const GONE_COUNTS_MS = 2000
+export function noteSubmitGesture() {
+  submitGestureAt = performance.now()
+}
+
 /**
- * Whether the page has moved on since the last fill here: the user submitted,
- * or none of the filled fields is still in the login form. Only then does the
- * background fill an email-first sign-in's next step into this document.
+ * Whether the page has moved on since the last fill here: the user submitted
+ * (content.ts counts only their own click or Enter), or, right after their
+ * own click or Enter, none of the filled fields is still in the login form.
+ * Only then does the background fill a sign-in session's next step into this
+ * document.
  */
 export function stepped(): boolean {
   if (!lastFilled.length) return false
   if (submittedSinceFill) return true
+  // The filled fields going away counts only right after the user's own
+  // click or Enter: a page's script can take them away itself.
+  if (performance.now() - submitGestureAt > GONE_COUNTS_MS) return false
   const now = state.targets()
   return lastFilled.every((el) => !el.isConnected || !now.some((t) => t.el === el))
 }

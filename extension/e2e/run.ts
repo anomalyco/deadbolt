@@ -174,6 +174,18 @@ const PASSKEY_PAGE = `<h1>Sign in to Acme</h1>
     window.abort = (name) => calls[name].abort.abort()
   </script>`
 
+/** Step two of a sign-in: the password, for the username step one sent (shown, and carried in a hidden box). */
+const FLOW_PASSWORD = (email: string) => `<h1>Enter your password</h1><p>${email}</p><form method="post" action="/flow/nav/next" novalidate>
+  <input type="hidden" name="email" value="${email}">
+  <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+  <button type="submit" id="go">Sign in</button></form><p><a id="other" href="/flow/nav">Use a different account</a></p>`
+
+/** Step three: a six-digit code, one box per digit. */
+const FLOW_CODE = (email: string) => `<h1>Two-step verification</h1><p>Enter the code from your authenticator app.</p><form method="post" action="/flow/done" novalidate>
+  <input type="hidden" name="email" value="${email}">
+  <div style="display:flex;gap:6px">${[1, 2, 3, 4, 5, 6].map((i) => `<input id="d${i}" name="d${i}" maxlength="1" inputmode="numeric" autocomplete="one-time-code" style="width:40px;text-align:center">`).join("")}</div>
+  <button type="submit" id="go">Verify</button></form>`
+
 // novalidate: "admin" isn't an email, and the browser would block the submit.
 const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="post" action="${action}" novalidate>
   <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
@@ -189,6 +201,15 @@ const server = Bun.serve({
     // posted is shown back where a real site would show the account.
     if (req.method === "POST") {
       const email = String((await req.formData().catch(() => null))?.get("email") ?? "").replace(/[<>&"]/g, "")
+      // Multi-step sign-ins (see signInSessions): the password page, then a
+      // code page for the login that has one, then the signed-in page.
+      if (url.pathname === "/flow/nav/password") return html("Enter your password", FLOW_PASSWORD(email))
+      if (url.pathname === "/flow/nav/next")
+        return email === "kit@acme.test"
+          ? html("Two-step verification", FLOW_CODE(email))
+          : html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
+      if (url.pathname === "/flow/done") return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
+      if (url.pathname === "/flow/failed") return Response.redirect(`/flow/failed?email=${encodeURIComponent(email)}`, 303)
       switch (url.pathname) {
         case "/":
           return html("Acme", `<h1>Acme</h1><div role="alert" class="notice">Incorrect password. Try again.</div><p><a href="/outcome/login?to=/">Back</a></p>`)
@@ -214,6 +235,79 @@ const server = Bun.serve({
       }
     }
     switch (url.pathname) {
+      // Step one, the username alone. With ?accounts, the next step is on
+      // another origin of the same site (accounts.acme.test).
+      case "/flow/nav": {
+        // ?to=<host>: the next step on another host of acme.test (accounts, or a user-content sibling).
+        const to = url.searchParams.get("to")
+        const next = to ? `http://${to}.acme.test:${url.port}/flow/nav/password` : url.searchParams.has("accounts") ? `http://accounts.acme.test:${url.port}/flow/nav/password` : "/flow/nav/password"
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form method="post" action="${next}" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+            <button type="submit" id="go">Continue</button></form>`,
+        )
+      }
+      // The same two steps in one document: Continue swaps the username box for a password box.
+      case "/flow/spa":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" novalidate>
+            <div id="step"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username"></div>
+            <button type="submit" id="go">Continue</button></form><script>
+            let who = ""
+            document.getElementById("f").addEventListener("submit", (e) => {
+              e.preventDefault()
+              if (!who) {
+                who = document.getElementById("email").value
+                document.getElementById("step").innerHTML = '<p>' + who.replace(/[<>&]/g, "") + '</p><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">'
+                document.getElementById("go").textContent = "Sign in"
+              } else location.assign("/flow/spa/done?u=" + encodeURIComponent(who))
+            })
+          </script>`,
+        )
+      case "/flow/spa/done":
+        return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</strong>.</p>`)
+      // A form whose "button" is a plain div: a click on it submits by script
+      // (form.requestSubmit()). ?step: the username alone, on to the password page.
+      case "/flow/divbutton": {
+        const step = url.searchParams.has("step")
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" method="post" action="${step ? "/flow/nav/password" : "/auth/complete"}" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+            ${step ? "" : `<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">`}
+            <div id="lets-go" class="fake-button" style="margin-top:18px;height:38px;border-radius:8px;background:#18181b;color:#fff;display:grid;place-items:center;cursor:pointer">Let's go</div>
+          </form><script>document.getElementById("lets-go").addEventListener("click", () => document.getElementById("f").requestSubmit())</script>`,
+        )
+      }
+      // Pages that try to step themselves once Deadbolt fills the username: one
+      // swaps the username box for a password box, one submits the form.
+      case "/flow/sneaky-swap":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" novalidate><div id="step"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username"></div><button type="submit">Continue</button></form><script>
+            document.getElementById("email").addEventListener("change", () => setTimeout(() => {
+              document.getElementById("step").innerHTML = '<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">'
+            }, 300))
+          </script>`,
+        )
+      case "/flow/sneaky-submit":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" method="post" action="/flow/nav/password" novalidate><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username"><button type="submit">Continue</button></form><script>
+            document.getElementById("email").addEventListener("change", () => setTimeout(() => document.getElementById("f").requestSubmit(), 300))
+          </script>`,
+        )
+      // A sign-in that failed, back with the username it was given (one no login has).
+      case "/flow/failed":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1>${url.searchParams.has("email") ? `<div role="alert">Incorrect password. Try again.</div>` : ""}<form method="post" action="/flow/failed" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" value="${(url.searchParams.get("email") ?? "").replace(/[<>&"]/g, "")}">
+            <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+            <button type="submit">Sign in</button></form>`,
+        )
       case "/outcome/login":
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
@@ -382,7 +476,8 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     colorScheme: options.scheme ?? "light",
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`],
+    // *.acme.test is one site on this machine: two origins of it for the sign-in session runs.
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1"],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -458,6 +553,17 @@ async function until<T>(what: string, fn: () => Promise<T | null | undefined | f
     await Bun.sleep(100)
   }
   check(false, `timed out: ${what}`)
+  return null
+}
+
+/** Like until, but not finding it in time is an answer, not a failure. */
+async function soon<T>(fn: () => T | null | undefined | false, timeout: number): Promise<T | null> {
+  const end = Date.now() + timeout
+  while (Date.now() < end) {
+    const v = fn()
+    if (v) return v
+    await Bun.sleep(100)
+  }
   return null
 }
 
@@ -614,12 +720,15 @@ async function fillAndTotp(scheme: Scheme) {
 async function type(run: Run, page: Page, selector: string, text: string) {
   await formFound(page)
   await page.click(selector)
-  // The test site always has logins, so the menu always comes; wait for it
-  // rather than click where it's about to appear.
-  if (await until(`menu opens on ${selector}`, () => extensionFrame(page, "menu.html"), 15_000)) {
+  // The test site always has logins, so the username box's menu always
+  // comes; wait for it rather than click where it's about to appear. A
+  // password box opens none when the username typed names no saved login.
+  const password = (await page.locator(selector).getAttribute("type")) === "password"
+  const menu = password ? await soon(() => extensionFrame(page, "menu.html"), 1500) : await until(`menu opens on ${selector}`, () => extensionFrame(page, "menu.html"), 15_000)
+  if (menu) {
     await page.keyboard.press("Escape")
     await until("esc closes the menu", () => !extensionFrame(page, "menu.html"))
-  } else await diagnose(run, page, `no menu on ${selector}`)
+  } else if (!password) await diagnose(run, page, `no menu on ${selector}`)
   await page.locator(selector).pressSequentially(text)
 }
 
@@ -744,6 +853,17 @@ async function signInShapes() {
     await clearBadge(run)
     const checks = (await hostLog(run)).filter((r) => r.type === "check")
     check(checks.some((r) => r.username === "two@acme.test" && r.password === "two step"), "email-first check pairs the username from step one")
+
+    // A div "button" whose click submits by script: the user's click still captures, and the save is offered.
+    await newTurn(run)
+    await page.goto(`${site}/flow/divbutton`)
+    await type(run, page, "#email", "div@acme.test")
+    await type(run, page, "#password", "div password")
+    await page.click("#lets-go")
+    await page.waitForURL("**/auth/complete")
+    if (!check(!!(await offered(run)), "a form submitted by script after a click on a div button offers a save")) await diagnose(run, page, "div button")
+    check((await hostLog(run)).some((r) => r.type === "check" && r.username === "div@acme.test"), "with the login typed")
+    await clearBadge(run)
 
     // A page script that sets a password and submits gets no check.
     const before = (await hostLog(run)).filter((r) => r.type === "check").length
@@ -1450,6 +1570,155 @@ async function coveredMenu() {
   }
 }
 
+/**
+ * Sign-in sessions: a login picked on the first step fills the later ones
+ * (password, code) without another pick, through same-document steps,
+ * navigations and another origin of the same site, with a pill for each,
+ * until a "Use a different account" step ends it. A username typed by hand
+ * narrows the password step's menu to its login; one no login has (a failed
+ * sign-in that came back with it) brings no menu at all.
+ */
+async function signInSessions() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  const pillSays = async (label: string) =>
+    until(`a pill says ${label}`, async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && ((await f.locator(".pill.ok .pill-label").textContent().catch(() => "")) ?? "").includes(label)
+    })
+  const pickLogin = async (username: string) => {
+    const menu = await menuOn(page)
+    if (!menu) throw new Error("no menu")
+    await menu.locator("button.row", { hasText: username }).click()
+    await until(`${username} fills`, async () => (await page.inputValue("#email")) === username)
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+  }
+  const wants = async () => (await hostLog(run)).filter((r) => r.type === "fill").map((r) => (r.want as string[]).join("+"))
+  try {
+    // (a) The same document: the username box is replaced by the password box.
+    await page.goto(`${site}/flow/spa`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    check(!!(await until("the password fills in place", async () => (await page.inputValue("#password").catch(() => "")) === "correct horse")), "a same-document password step fills from the login picked on the first")
+    check(!!(await pillSays("Password filled")), "and its pill says Password filled")
+    check(JSON.stringify(await wants()) === JSON.stringify(["username", "password"]), `with one fill per step (${await wants()})`)
+
+    // (b) + (d) Navigation to the password page, then a code page of split boxes.
+    await page.goto(`${site}/flow/nav`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/password")
+    check(!!(await until("the password page fills", async () => (await page.inputValue("#password")) === "correct horse")), "the password page after a navigation fills")
+    check(!!(await pillSays("Password filled")), "with its pill")
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/next")
+    const code = await until("the code boxes fill", async () => {
+      const digits = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => page.inputValue(`#d${i}`)))
+      return digits.join("") === "492039"
+    })
+    check(!!code, "the code step's split boxes fill with the current code")
+    check(!!(await pillSays("Code filled")), "and its pill says Code filled")
+
+    // (c) The password step on another origin of the same site.
+    await page.goto(`http://www.acme.test:${server.port}/flow/nav?accounts`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    await page.waitForURL("http://accounts.acme.test:*/flow/nav/password")
+    check(!!(await until("the other origin's password step fills", async () => (await page.inputValue("#password")) === "correct horse")), "a password step on another origin of the same site fills")
+
+    // (e) "Use a different account" ends the session.
+    await page.goto(`${site}/flow/nav`)
+    await pickLogin("admin")
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/password")
+    await until("admin's password fills", async () => (await page.inputValue("#password")) === "hunter2")
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    await page.click("#other")
+    await page.waitForURL("**/flow/nav")
+    await formFound(page)
+    await page.click("#email")
+    await page.locator("#email").pressSequentially("other@acme.test", { delay: 20 })
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/password")
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "after \"Use a different account\", the next password step gets nothing")
+    await page.click("#password")
+    await Bun.sleep(1200)
+    check(!extensionFrame(page, "menu.html"), "and, for a username no login has, no menu")
+
+    // (f) A username typed by hand that a login has: the password step's menu is just that login.
+    await page.goto(`${site}/flow/nav`)
+    await formFound(page)
+    await page.click("#email")
+    await page.locator("#email").pressSequentially("admin", { delay: 30 })
+    // Enter, as a person would with the narrowed menu still over the button.
+    await page.keyboard.press("Enter")
+    await page.waitForURL("**/flow/nav/password")
+    await formFound(page)
+    await page.click("#password")
+    const narrowed = await until("the password menu opens", async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && (await f.locator("button.row").count()) > 0 ? f : null
+    })
+    check(!!narrowed && (await narrowed.locator("button.row").count()) === 1 && ((await narrowed.locator(".row .sub").textContent()) ?? "") === "admin", "a username typed by hand narrows the password step's menu to its login")
+    await page.keyboard.press("Escape")
+
+    // (g) A failed sign-in, typed by hand, back with a username no login has: no menu on the password field.
+    await page.goto(`${site}/flow/failed`)
+    await type(run, page, "#email", "nobody@acme.test")
+    await type(run, page, "#password", "a wrong guess")
+    await page.keyboard.press("Enter")
+    await page.waitForURL("**/flow/failed?email=*")
+    await formFound(page)
+    await page.click("#password")
+    await Bun.sleep(1500)
+    check(!extensionFrame(page, "menu.html"), "a failed sign-in back with an unknown username opens no menu on the password field")
+    await page.keyboard.press("ArrowDown")
+    check(!!(await until("↓ still brings the full list", () => extensionFrame(page, "menu.html"))), "↓ still brings the list")
+    await page.keyboard.press("Escape")
+
+    // (h) A sibling host the agent would list the login on, but no saved URL names: nothing.
+    await page.goto(`http://www.acme.test:${server.port}/flow/nav?to=user-content`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    await page.waitForURL("http://user-content.acme.test:*/flow/nav/password")
+    await formFound(page)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a sibling host no saved URL names gets nothing on its password step")
+
+    // (i) The page swaps the username box for a password box itself: no user submit, no step.
+    await page.goto(`${site}/flow/sneaky-swap`)
+    await pickLogin("kit@acme.test")
+    await until("the page swaps its own form", async () => (await page.locator("#password").count()) > 0)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a page that swaps in a password box itself gets nothing")
+
+    // (k) A div "button" the user clicks, which submits by script: not the
+    // user's own submit to the step gate, so the next step isn't filled.
+    await page.goto(`${site}/flow/divbutton?step`)
+    await pickLogin("kit@acme.test")
+    await page.click("#lets-go")
+    await page.waitForURL("**/flow/nav/password")
+    await formFound(page)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a step submitted by script from a div \"button\" gets no auto-fill")
+
+    // (j) The page submits itself (form.requestSubmit()): no user submit, no step.
+    await page.goto(`${site}/flow/sneaky-submit`)
+    await pickLogin("kit@acme.test")
+    await page.waitForURL("**/flow/nav/password")
+    await formFound(page)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a page that submits its own form gets nothing on the next step")
+  } catch (err) {
+    check(false, `sign-in sessions threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "sessions")
+  } finally {
+    await close(run)
+  }
+}
+
 /** Typing narrows the menu, and a login typed by hand puts it away for the rest of the form. */
 async function narrowing() {
   const run = await launch()
@@ -2025,7 +2294,7 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
 }
 
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, narrowing, corner, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
+const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, narrowing, corner, signInSessions, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 

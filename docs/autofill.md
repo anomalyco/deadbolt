@@ -202,15 +202,66 @@ not running without sending hello, which would start the agent again.
   ancestor up to the top of the page, across shadow roots (display,
   visibility, opacity, clip, size, on screen, not covered). Split one-time
   code boxes fill only as one whole group within one form.
-- **Email-first sign-ins.** When the content script reports that it filled a
-  username into the top page, the next step (a password or code field) on
-  the same origin fills from the same login once, within two minutes. The
-  page has to have moved on first: a new document, or in the same one, the
-  user submitting or the filled fields going away. A matching field showing
-  up next to the one just filled isn't enough. Frames never continue. Esc,
-  closing the menu, another origin, or a navigation the page didn't make (a
-  typed address, a bookmark, a reload, back or forward) cancels it, including
-  for fills still on their way.
+- **Sign-in sessions.** Many sign-ins take more than one step: the
+  username on its own, then the password, sometimes a code. Picking a login
+  on any step starts a session in that tab, bound to the login, the tab and
+  the site (registrable domain). When the top page then shows the next step,
+  the session fills it from the same login without another pick, and a pill
+  on the field says so ("Password filled", "Code filled"):
+  - a password field gets the password (and the username, if its box is
+    there beside the password and empty);
+  - a one-time-code field, split boxes included, gets the current code, if
+    the login has one;
+  - a username box on its own, empty, is "Not you? Use a different
+    account": the session ends.
+  The bounds: each step fills once, and only after the user's own submit of
+  the step before: their trusted click on its submit control or Enter in
+  one of its fields. A submit event without one just before it (a page's
+  `form.requestSubmit()` fires one the browser marks trusted) doesn't
+  count, and neither does the page taking the filled fields away, unless
+  the user clicked or pressed Enter in the last two seconds. A step in
+  another document needs that submit to have come from the document the
+  last step filled, after it filled. (Saving asks less: any trusted click on
+  the submit control, Enter in a field or trusted submit event captures what
+  was submitted, since a capture only ever leads to an offer the user has to
+  accept, after the outcome is judged.) Deadbolt never submits. A step fills
+  only on the origin the pick was on, or one whose host (and scheme) a
+  saved URL of the login names exactly: the agent lists a login on every
+  subdomain of its sites, so its say alone isn't enough here. Every fill
+  goes through the same field checks and is bound to that frame, document
+  and form snapshot; frames never get a session. It
+  ends after three minutes (four on a site known to step by navigation),
+  when the code is filled or a password with no code to follow, and on Esc
+  or closing the menu, picking another login, a page of another site, a
+  navigation the page didn't make (a typed address, a bookmark, a reload,
+  back or forward), closing the tab, or Deadbolt locking, including for
+  fills still on their way. The session is kept in the extension's session
+  storage, so a service worker restart doesn't drop a step; it holds the
+  login's ref, the site, what it filled and when, never a value.
+- **Signing in by hand.** On a password or code field, the username the
+  sign-in is for narrows the menu: the form's own username box, if the user
+  typed what's in it (or Deadbolt filled it), or else the one the user
+  submitted on an earlier step (bg/save.ts keeps it in memory with the rest
+  of what was submitted). A username the page put in the box itself is
+  ignored, so whether a menu shows never depends on a name the page chose. The menu then shows only the logins
+  whose username is exactly that; when none is, the user is signing in by
+  hand, and the field opens no menu, unless they press ↓ or click it again.
+  So a failed sign-in that comes back with an unknown username doesn't
+  offer the whole list on its password field.
+- **What's remembered of a site's sign-in.** When a sign-in works (judged as
+  for saving: confirmed or likely), the extension records its shape in
+  local storage under `signinFlows`, with no usernames or values: whether
+  the username comes on a step of its own, whether a code step usually
+  follows, whether the steps are separate pages, how many sign-ins it was
+  learned from and when the last was. Sites are kept under a salted hash
+  (SHA-256 of a random per-install salt, `signinFlowsSalt`, and the site,
+  cut to 128 bits), not by name. Up to 300 sites are kept, the most recent,
+  at roughly a hundred bytes each. On a site that asks for the username first and
+  has one login, the menu on the first step says "Continue as <username>";
+  on one whose steps are pages, the session gets an extra minute for a slow
+  one. A username step on its own is never judged as a sign-in (only a
+  password is), so it neither waits for the page to settle nor counts as a
+  failure.
 - **Frames.** Every frame runs the content script, but only frames on the same
   site as the top page get logins, and sandboxed frames get none. A frame
   gets no inline menu: where it sits, how big it is and what covers it are
@@ -365,6 +416,42 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
 - **Every vault** is searched. A `ref` is `<vault id>:<item id>` (64 and 32
   lowercase hex digits), so it names one login without ambiguity. New logins
   go to the default vault.
+
+## Sign in with Google, Apple, GitHub…
+
+Many sites are signed in to with another account rather than a password.
+Deadbolt keeps that on the site's login, in two fields that aren't secret:
+
+- `sign-in-with`: the provider. A known one is stored by id: `google`,
+  `apple`, `github`, `microsoft`, `facebook`, `x` (Twitter too), `amazon`,
+  `discord`, `slack`, `okta`, `linkedin`, `gitlab`. Any other is kept as its
+  name, one line of at most 64 characters.
+- `sign-in-account`: the id of the login it signs in with (the Google
+  account's own login), 32 lowercase hex digits. Only meaningful when that
+  login is in one of your vaults; nothing breaks when it isn't.
+
+They're fields of a login, not a type of their own, so the login still
+matches its site by URL, syncs, keeps history, mirrors and lists like any
+other, and can have a password as well (a site that takes both). 1Password
+does the same: its "Sign in with" is a field of a login.
+
+A 1Password `.1pux` import fills both: the provider from 1Password's
+`ssoLogin` field, and the account from its link to the provider's login,
+once that login is in the vault (made by the same import, already there as a
+duplicate, or imported or mirrored from 1Password before). The import says
+"kept 114 sign-in methods (Google 95, …)" and "linked 96 to their accounts",
+and warns about links to a login that isn't in the export; those keep the
+provider only. A login with only a provider isn't an empty item.
+
+`list` gives such a login's provider and, when the linked login is in one of
+your unlocked vaults, its username (or its title when it has none) as
+`signIn`. Nothing else of that login is ever read for it: a `fill` of the
+site's login fills only that login's own values, so one with only a provider
+fills nothing. Showing `signIn` in the extension ("Sign in with Google ·
+dax@gmail.com" in place of a password) comes next; until then it lists the
+login as one without a password. `deadbolt show` prints
+`sign-in-with  Google · dax@gmail.com`, and `ls` shows "Sign in with Google"
+for one without a username.
 
 ## Passkeys
 
@@ -559,6 +646,21 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   The probe itself puts nothing in the page. A fill's values reach only the content script's isolated world
   and the fields it writes. The host rate-limits checks and fills as well, so
   a runaway or compromised caller can't guess quickly.
+- **Later steps fill without a click, within bounds.** A sign-in session
+  fills a password or code into a step the user didn't pick on. It's bound
+  to the login the user picked, the tab, the pick's origin or a host a saved
+  URL of the login names exactly, and a few minutes; it fills each step
+  once, only after the user's own submit of the step before (a trusted
+  click on the submit control or Enter in a field; a page submitting its
+  own form, or taking the fields away, doesn't count), and only into fields
+  that pass the usual checks, in the top page. A page on such an origin
+  that shows a password field right after the user submitted their username
+  gets the password, as it would with a pick; that is the site the user is
+  signing in to. A sibling subdomain (user content, say) that no saved URL
+  names gets nothing. A page of another site
+  ends the session, and an empty username step ("Use a different account")
+  does too, so a different person's sign-in never gets the first login's
+  password. The pill on the field is an extension frame, as for any fill.
 - **Pages can't steer fills.** A fill needs the user's pick in a menu the
   page can't script or see into, or a click in the popup. It goes only to the
   document and form that asked, only into fields the user can see that were
@@ -666,10 +768,14 @@ Hello starts the agent if needed. It's the only message that does.
 { "id": "2", "type": "list", "site": "github.com", "accounts": [
   { "ref": "<64 hex>:<32 hex>", "vault": "personal", "title": "GitHub",
     "username": "octocat", "hasPassword": true, "hasTotp": true,
-    "urls": ["https://github.com"] } ] }
+    "urls": ["https://github.com"],
+    "signIn": { "provider": "google", "account": "octocat@gmail.com" } } ] }
 ```
 
-`username` is left out when the login has none. `title` is the login's name,
+`username` is left out when the login has none. `signIn` is there only for a
+login that signs in with another account (see Sign in with Google, Apple,
+GitHub…); its `account` is left out when the linked login isn't in an
+unlocked vault. `title` is the login's name,
 else its URL's host. Accounts are sorted by title.
 
 ### fill: values of one login

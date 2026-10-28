@@ -392,6 +392,23 @@ describe("did the sign-in work", () => {
     expect(saver.pending(1)).toBeDefined()
   })
 
+  test("a username step isn't judged: the password step after it can still be offered on a page without evidence", async () => {
+    let told: unknown[] = []
+    saver.signedIn = (tabId, site) => (told = [tabId, site])
+    // Step one: only the username, and the page shows the password box, empty.
+    await saver.capture(pageSender(), { username: "new@example.com", title: "" })
+    expect(saver.username(1, "example.com")).toBe("new@example.com")
+    expect(saver.username(1, "elsewhere.net")).toBeUndefined()
+    fake.facts = { loginForm: true, passwordEmpty: true }
+    await settleOn("https://www.example.com/login", "step-doc")
+    expect(fake.delivered.filter((d) => d.message.type === "db:probe")).toEqual([])
+    fake.facts = {}
+    await saver.capture(pageSender(), { password: "pw", title: "" })
+    await settleOn("https://www.example.com/home", "home-doc")
+    expect(saver.pending(1)).toMatchObject({ username: "new@example.com" })
+    expect(told).toEqual([1, "example.com"])
+  })
+
   test("a new password after a failure starts over", async () => {
     fake.facts = { error: true }
     await submit("new@example.com", "wrong")

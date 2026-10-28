@@ -189,6 +189,8 @@ export class Saver {
 
   /** Save offers open in pages, by their surface token. */
   private surfaces = new Map<string, Surface>()
+  /** Told when a sign-in in a tab worked (confirmed or likely), with its site. */
+  signedIn?: (tabId: number, site: string) => void
   /** Bumped by each settled page in a tab; a second look for an older one is dropped. */
   private rounds = new Map<number, number>()
 
@@ -269,6 +271,16 @@ export class Saver {
     c.timer = setTimeout(() => this.dropCapture(tabId), Math.max(0, until - now))
   }
 
+  /**
+   * The username the user submitted in this tab on `site`, while its capture
+   * is kept: the next step's menu narrows to the login it names (see
+   * Autofill.query). It doesn't leave the extension.
+   */
+  username(tabId: number, site: string): string | undefined {
+    const c = this.captures.get(tabId)
+    return c && c.site === site && c.until > this.now() ? c.username : undefined
+  }
+
   private dropCapture(tabId: number) {
     const c = this.captures.get(tabId)
     if (!c) return
@@ -290,6 +302,9 @@ export class Saver {
     const target = await targetFor(sender)
     const c = this.captures.get(tabId)
     if (!target || !c || !this.fresh(tabId, ticket) || siteOf(new URL(target.origin).hostname) !== c.site) return
+    // A username on its own is the first step of a sign-in, not its end:
+    // nothing to judge (and no "failed" to keep) until a password comes.
+    if (!c.password && !c.newPassword) return
     const current = () => this.captures.get(tabId) === c && this.rounds.get(tabId) === round && this.fresh(tabId, ticket)
     const created = !!c.newPassword
     let facts = await this.probe(target, c)
@@ -306,6 +321,8 @@ export class Saver {
     // Failed or not sure: keep it. A retry replaces it; a later page may settle it,
     // but after a failure only by showing the account or Sign out.
     if (outcome !== "confirmed" && (outcome !== "likely" || c.failed)) return
+    // It worked: the site's sign-in shape is worth remembering (bg/autofill.ts Flow).
+    this.signedIn?.(tabId, c.site)
     this.dropCapture(tabId)
     if (c.until <= this.now()) return
     if ((await neverSites()).includes(c.site)) return

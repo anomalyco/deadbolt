@@ -16,7 +16,7 @@ FILL_DELAY = float(os.environ.get("DEADBOLT_FAKE_FILL_DELAY") or 0)
 REF1 = "a" * 64 + ":" + "1" * 32
 REF2 = "a" * 64 + ":" + "2" * 32
 ACCOUNTS = [
-    {"ref": REF1, "vault": "Personal", "title": "Acme", "username": "kit@acme.test", "hasPassword": True, "hasTotp": True, "urls": []},
+    {"ref": REF1, "vault": "Personal", "title": "Acme", "username": "kit@acme.test", "hasPassword": True, "hasTotp": True, "urls": ["http://www.acme.test", "http://accounts.acme.test"]},
     {"ref": REF2, "vault": "Work", "title": "Acme admin", "username": "admin", "hasPassword": True, "hasTotp": False, "urls": []},
 ]
 VALUES = {REF1: {"username": "kit@acme.test", "password": "correct horse", "totp": "492039"}, REF2: {"username": "admin", "password": "hunter2"}}

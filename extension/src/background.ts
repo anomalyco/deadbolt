@@ -12,7 +12,8 @@ import type { PopupReply, Status, StatusChanged, ToBackground } from "./messages
 const host = new Host()
 const saver = new Saver(host)
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
-const autofill = new Autofill(host, passkeys)
+const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site))
+saver.signedIn = (tabId, site) => void autofill.learnFlow(tabId, site)
 passkeys.listen()
 
 function title(status: Status): string {
@@ -38,13 +39,15 @@ host.onChange((status) => {
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
   switch (message.type) {
     case "db:query":
-      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true)
+      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true)
     case "db:page":
-      return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true)
+      return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true, message.idEmpty === true)
     case "db:settled":
       return saver.settled(sender)
     case "db:capture":
       return saver.capture(sender, message)
+    case "db:submitted":
+      return autofill.submitted(sender)
     // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
       if (saver.ownsSurface(message.token)) return saver.surfaceClosed(String(message.token), sender)

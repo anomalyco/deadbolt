@@ -72,9 +72,9 @@ export function installChrome(): FakeChrome {
     },
     storage: {
       session: {
-        get: async (key: string) => (key in fake.session ? { [key]: fake.session[key] } : {}),
+        get: async (key: string | null) => (key === null ? { ...fake.session } : key in fake.session ? { [key]: fake.session[key] } : {}),
         set: async (items: Record<string, unknown>) => void Object.assign(fake.session, items),
-        remove: async (key: string) => void delete fake.session[key],
+        remove: async (key: string | string[]) => void (Array.isArray(key) ? key : [key]).forEach((k) => delete fake.session[k]),
       },
       local: {
         get: async (key: string) => (key in fake.local ? { [key]: fake.local[key] } : {}),
