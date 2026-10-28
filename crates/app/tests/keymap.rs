@@ -302,6 +302,15 @@ fn command_comma_opens_settings_and_its_rows_take_the_keys() {
     assert!(!rt.state.hotkey.recorder.is_recording());
     assert!(rt.state.settings_open, "Esc stopped the recording first");
 
+    // ↵ on the last row, Activity, shows the agent's entries, and again hides them.
+    rt.update(move |s, _| s.nav.row = 99);
+    tap(&mut rt, Key::Down);
+    assert_eq!(rows.last(), Some(&deadbolt_app::settings::Row::Activity));
+    tap(&mut rt, Key::Enter);
+    assert!(rt.state.activity.open);
+    tap(&mut rt, Key::Enter);
+    assert!(!rt.state.activity.open);
+
     // Esc leaves, back to the search; ⌘, toggles too.
     tap(&mut rt, Key::Escape);
     assert!(!rt.state.settings_open);
