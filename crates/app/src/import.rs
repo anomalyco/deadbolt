@@ -529,6 +529,7 @@ mod tests {
             skipped: Vec::new(),
             warnings: Vec::new(),
             dropped: Vec::new(),
+            sign_in: Default::default(),
         }
     }
 

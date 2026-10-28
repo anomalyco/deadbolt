@@ -33,6 +33,11 @@ pub struct Imported {
     pub fields: BTreeMap<String, Field>,
     /// Where it came from, for an export that says (1Password's).
     pub source: Option<Source>,
+    /// For a login that signs in with another (`sign-in-with`), the
+    /// 1Password item that one is, by vault and item id as in its source id
+    /// ([`onepassword::source_key`]). The agent links it at import, as
+    /// `sign-in-account`, once that item is here.
+    pub sign_in_link: Option<(String, String)>,
 }
 
 impl Imported {
@@ -294,6 +299,7 @@ impl Summary {
             skipped: tallies(self.skipped),
             warnings: tallies(self.warnings),
             dropped: tallies(self.dropped),
+            sign_in: Default::default(),
         }
     }
 }
@@ -584,6 +590,7 @@ impl Builder {
             name,
             fields: self.fields,
             source: None,
+            sign_in_link: None,
         })
     }
 }

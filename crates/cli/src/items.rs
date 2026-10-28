@@ -8,7 +8,7 @@ use zeroize::Zeroizing;
 
 use crate::paths::Paths;
 use crate::prompt;
-use crate::protocol::{Code, Command, FieldInput, ItemInfo, Reply, code_field};
+use crate::protocol::{Code, Command, FieldInput, ItemInfo, Reply, code_field, sign_in_name};
 
 #[derive(Subcommand)]
 pub enum ItemCommand {
@@ -221,8 +221,10 @@ fn mask(item: &ItemInfo, field: &crate::protocol::FieldInfo) -> String {
     "••••••••".into()
 }
 
-/// `code` stands in for the code field's masked value.
-fn show(item: &ItemInfo, reveal: bool, code: Option<String>) {
+/// `code` stands in for the code field's masked value. `account` is the
+/// label of the login `sign-in-account` names, if it is here: then
+/// `sign-in-with` reads "Google · dax@example.com" and the id is left out.
+fn show(item: &ItemInfo, reveal: bool, code: Option<String>, account: Option<String>) {
     let code_field = code_field(&item.fields);
     let mut rows: Vec<(&str, String)> = vec![
         ("type", item.kind.clone()),
@@ -230,9 +232,18 @@ fn show(item: &ItemInfo, reveal: bool, code: Option<String>) {
         ("id", item.short.clone()),
     ];
     let mut code = code;
+    let sign_in = item.kind == "login";
     for (i, field) in item.fields.iter().enumerate() {
         let value = match code.take_if(|_| code_field == Some(i)) {
             Some(code) => code,
+            None if sign_in && field.name == "sign-in-with" => {
+                let provider = sign_in_name(&field.value).to_string();
+                match &account {
+                    Some(account) => format!("{provider} · {account}"),
+                    None => provider,
+                }
+            }
+            None if sign_in && field.name == "sign-in-account" && account.is_some() => continue,
             None if reveal => field.value.clone(),
             None => mask(item, field),
         };
@@ -313,6 +324,30 @@ async fn code(
     Ok(code)
 }
 
+/// The username, else the label, of the item with id `id`, if it is in
+/// the vault: never its other values.
+async fn sign_in_account(
+    paths: &Paths,
+    vault: Option<String>,
+    id: String,
+    from_stdin: bool,
+) -> Option<String> {
+    let command = Command::ItemList {
+        vault,
+        query: vec![id.clone()],
+        kind: None,
+    };
+    let Ok(Reply::Items { items }) = crate::request(paths, command, from_stdin).await else {
+        return None;
+    };
+    let item = items.into_iter().find(|i| i.id == id)?;
+    Some(
+        item.detail
+            .filter(|d| !d.starts_with("Sign in with "))
+            .unwrap_or(item.label),
+    )
+}
+
 pub async fn run(
     paths: &Paths,
     command: ItemCommand,
@@ -377,7 +412,7 @@ pub async fn run(
                 Some(_) if !reveal => {
                     // By id, so it's this item's code even if the vault changed.
                     let id = vec![item.id.clone()];
-                    match code(paths, vault, id, from_stdin).await {
+                    match code(paths, vault.clone(), id, from_stdin).await {
                         Ok(code) => Some(format!(
                             "{} ({}s left)",
                             code.code.as_str(),
@@ -388,7 +423,13 @@ pub async fn run(
                 }
                 _ => None,
             };
-            show(&item, reveal, code);
+            let account = match item.fields.iter().find(|f| f.name == "sign-in-account") {
+                Some(id) if item.kind == "login" => {
+                    sign_in_account(paths, vault, id.value.clone(), from_stdin).await
+                }
+                _ => None,
+            };
+            show(&item, reveal, code, account);
         }
         ItemCommand::Ls { query, kind } => {
             let command = Command::ItemList { vault, query, kind };

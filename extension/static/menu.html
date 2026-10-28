@@ -7,8 +7,14 @@
     <link rel="stylesheet" href="menu.css" />
   </head>
   <body>
-    <div id="list" class="list" role="listbox" aria-label="Logins"></div>
-    <div id="foot" class="foot"></div>
+    <main id="surface" class="surface">
+      <div id="list" class="list" role="listbox" aria-label="Logins">
+        <div id="caption" class="caption mono" hidden></div>
+        <div id="highlight" class="highlight" aria-hidden="true"></div>
+        <div id="rows" class="rows"></div>
+      </div>
+      <p id="foot" class="foot" role="status" hidden></p>
+    </main>
     <script src="menu.js"></script>
   </body>
 </html>

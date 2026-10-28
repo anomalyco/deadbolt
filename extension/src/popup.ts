@@ -5,9 +5,12 @@
 
 import type { ChooseReply, OfferChoice, PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, SaveOffer, Status, StatusChanged, ToBackground } from "./messages"
 import type { Account } from "./protocol"
+import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
+import { animateTo, reducedMotion, rollLabel, ROLL_CSS, timing } from "./ui/motion"
 
 const root = document.getElementById("app")!
+document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
 let rendered = ""
 
@@ -131,14 +134,18 @@ function accountRow(a: Account, first: boolean): HTMLElement {
     icon("copy"),
   )
   if (!a.username) copy.setAttribute("disabled", "")
-  const sub = [a.username || "No username", a.hasTotp ? "2FA code" : ""].filter(Boolean).join(" · ")
+  // "Sign in with Google · kit@gmail.com" for a login that signs in with another account.
+  const via = a.signIn ? `Sign in with ${provider(a.signIn.provider).name}${a.signIn.account ? ` · ${a.signIn.account}` : ""}` : ""
+  const sub = via && !a.hasPassword ? via : [a.username || "No username", a.hasTotp ? "2FA code" : "", via].filter(Boolean).join(" · ")
+  // One that signs in with another account and has no password has nothing to fill.
+  const fillable = a.hasPassword || !a.signIn
   const row = h(
     "div",
     { class: "account" },
     monogram(a.title),
     h("div", { class: "account-text" }, h("div", { class: "account-title" }, a.title), h("div", { class: "account-sub" }, sub)),
     copy,
-    fill,
+    fillable ? fill : null,
   )
   copy.addEventListener("click", async () => {
     if (!a.username) return
@@ -183,9 +190,11 @@ function offerCard(offer: SaveOffer): HTMLElement {
     if (tabId === undefined) return
     card.classList.add("busy")
     button.setAttribute("disabled", "")
+    if (choice === "save") rollLabel(saveLabel, "Saving…")
     const reply = await send<ChooseReply>({ type: "db:popup-offer", tabId, id: offer.id, choice })
     card.classList.remove("busy")
     button.removeAttribute("disabled")
+    if (choice === "save" && !reply?.ok) rollLabel(saveLabel, "Save")
     // Another offer took this one's place: show that one instead.
     if (reply && !reply.ok && reply.gone) return void render(true)
     if (!reply?.ok) {
@@ -194,14 +203,20 @@ function offerCard(offer: SaveOffer): HTMLElement {
       return
     }
     if (choice !== "save") return void render(true)
-    card.replaceChildren(h("div", { class: "done" }, h("span", { class: "done-mark" }, icon("check")), h("span", {}, reply.message)))
+    const doneEl = h("div", { class: "done" }, h("span", { class: "done-mark" }, icon("check")), h("span", {}, reply.message))
+    card.replaceChildren(doneEl)
+    doneEl.animate(reducedMotion() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(4px)", transform: "scale(0.96)" }, { opacity: 1, filter: "none", transform: "none" }], timing(0.3))
     setTimeout(() => void render(true), 1200)
   }
+  const never = h("button", { class: "link", type: "button" }, "Never for this site")
   const later = h("button", { class: "btn", type: "button" }, "Not now")
-  const save = h("button", { class: "btn primary", type: "button" }, "Save")
+  const saveLabel = h("span", { class: "roll-label" }, "Save")
+  saveLabel.dataset.text = "Save"
+  const save = h("button", { class: "btn primary", type: "button" }, saveLabel)
+  never.addEventListener("click", () => void choose("never", never))
   later.addEventListener("click", () => void choose("later", later))
   save.addEventListener("click", () => void choose("save", save))
-  card.append(h("div", { class: "buttons" }, later, save))
+  card.append(h("div", { class: "buttons" }, never, later, save))
   return card
 }
 
@@ -275,6 +290,18 @@ function passkeyCard(prompt: PasskeyPrompt): HTMLElement {
   return card
 }
 
+/** "Saving is off for acme.com. Turn on": undoes Never for this site. */
+function savingOffLine(site: string): HTMLElement {
+  const on = h("button", { class: "link", type: "button" }, "Turn on")
+  on.addEventListener("click", async () => {
+    if (tabId === undefined) return
+    on.setAttribute("disabled", "")
+    await send<boolean>({ type: "db:popup-saving-on", tabId })
+    void render(true)
+  })
+  return h("p", { class: "note saving-off" }, h("span", {}, `Saving is off for ${site}.`), on)
+}
+
 function siteBody(reply: PopupReply): HTMLElement {
   if (reply.unfillable === "scheme") return state(icon("keyhole"), "Nothing to fill here", para("Open a website to see its logins."))
   if (reply.unfillable === "insecure")
@@ -309,7 +336,7 @@ async function render(changed = false) {
   const body = statusBody(status) ?? (reply ? siteBody(reply) : null)
 
   // Status pushes re-render; skip it when nothing visible changed.
-  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey])
+  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff])
   if (key === rendered && !changed) return
   const first = rendered === ""
   rendered = key
@@ -318,10 +345,31 @@ async function render(changed = false) {
   const hasOpen = status.state === "locked" || status.state === "not-set-up"
   const open = hasOpen ? null : h("button", { class: "link", type: "button" }, "Open Deadbolt", icon("arrow"))
   open?.addEventListener("click", openApp)
+  const oldBody = root.querySelector<HTMLElement>(".body")
+  const oldTop = oldBody?.offsetTop ?? 0
+  const body2 = h(
+      "div",
+      { class: "body" },
+      ...(reply?.passkey ? [passkeyCard(reply.passkey)] : [reply?.offer ? offerCard(reply.offer) : null, body, reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff) : null]),
+  )
   root.replaceChildren(
     h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill(status)),
-    h("div", { class: `body${first ? "" : " changed"}` }, ...(reply?.passkey ? [passkeyCard(reply.passkey)] : [reply?.offer ? offerCard(reply.offer) : null, body])),
+    body2,
     h("footer", { class: "bottom" }, open ?? h("span"), status.state === "ready" ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : null),
+  )
+  // The first paint is at rest. After that, a whole new state is softened:
+  // the old one blurs, shrinks and fades out over the new one as it comes in,
+  // on the same frame, never waiting for the exit.
+  if (first || !oldBody) return
+  oldBody.classList.add("leaving")
+  oldBody.style.top = `${oldTop}px`
+  root.append(oldBody)
+  const out = animateTo(oldBody, reducedMotion() ? { opacity: "0" } : { opacity: "0", filter: "blur(4px)", transform: "scale(0.96)" }, 0.25, { fill: false })
+  if (out) out.finished.then(() => oldBody.remove(), () => oldBody.remove())
+  else oldBody.remove()
+  body2.animate(
+    reducedMotion() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(4px)", transform: "scale(0.96)" }, { opacity: 1, filter: "blur(0px)", transform: "none" }],
+    timing(0.3),
   )
 }
 

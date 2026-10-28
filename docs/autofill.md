@@ -1,7 +1,7 @@
 # Browser autofill
 
 Deadbolt fills and saves passwords, and makes and signs in with passkeys, in
-Chromium browsers (Chrome, Brave, Arc, Edge, Chromium) through its own
+Chromium browsers (Chrome, Brave, Arc, Edge, Chromium, Helium) through its own
 extension, in `extension/`. This doc covers
 the agent's side, the native messaging host, the extension, and the messages
 between them.
@@ -29,7 +29,7 @@ web page ─ content script ─ extension ══ native messaging ══ deadbol
 
 ```sh
 deadbolt browser install                      # browsers found on this computer
-deadbolt browser install --browser brave      # or name them: chrome brave arc edge chromium all
+deadbolt browser install --browser brave      # or name them: chrome brave arc edge chromium helium all
 deadbolt browser uninstall                    # every browser, or --browser
 ```
 
@@ -43,6 +43,7 @@ deadbolt browser uninstall                    # every browser, or --browser
 | Arc      | `Arc/User Data`                           | (none)                                      |
 | Edge     | `Microsoft Edge`                          | `microsoft-edge`                            |
 | Chromium | `Chromium`                                | `chromium`                                  |
+| Helium   | `net.imput.helium`                        | `net.imput.helium`                          |
 
 ```json
 {
@@ -79,7 +80,7 @@ The host refuses to start for any origin other than the extension's, and
 `allowed_origins` already stops the browser from connecting any other
 extension.
 
-## Load the extension unpacked (Brave, Chrome, Arc, Edge)
+## Load the extension unpacked (Brave, Chrome, Arc, Edge, Helium)
 
 There's no store listing yet. Build it and load it from disk:
 
@@ -90,8 +91,8 @@ bun run build                  # writes extension/dist
 deadbolt browser install       # lets the browser start deadbolt browser-host
 ```
 
-1. Open `brave://extensions` (`chrome://extensions` in Chrome and Arc,
-   `edge://extensions` in Edge).
+1. Open `brave://extensions` (`chrome://extensions` in Chrome, Arc and
+   Helium, `edge://extensions` in Edge).
 2. Turn on **Developer mode**.
 3. Click **Load unpacked** and choose `extension/dist`.
 
@@ -112,9 +113,35 @@ not running without sending hello, which would start the agent again.
 - **Inline menu.** Focusing a username, email, password or code field in the
   top page after a click or keypress opens a menu of that site's logins,
   title and username, under the field. ↓/↑ choose, ⏎ fills, esc closes, and
-  ↓ reopens it. Fields in frames get no menu (see Frames). It's an extension
+  ↓ reopens it. While Deadbolt is locked, the menu's "locked" row opens on
+  focus once per site until Deadbolt locks or unlocks again; after that it
+  takes a click into the field or ↓. Fields in frames get no menu (see Frames). It's an extension
   page in an iframe inside a closed shadow root on a plain element, so the
   page can't read it or click it for you.
+- **One surface.** That frame is Deadbolt's only UI in the page, and it
+  morphs between modes rather than swapping for another: the account list
+  grows from the field; a pick folds it into a pill at the end of the field
+  that says "Filling…", then "Filled" once the content script says it wrote
+  something (or "Couldn't fill"), and goes by itself; after a confirmed
+  sign-in it shows the save offer in the top right corner (see Saving). The frame
+  says what size each mode needs and the content script springs the frame
+  there, so no transparent part of it is left over the page. Motion follows
+  springs with no bounce, retargets from where it is, and is a short fade
+  when the system asks for reduced motion (`ui/motion.ts`). The frame only
+  moves after a pick passed its checks, so moving it can't help a page. A
+  press shows at once inside the frame (a darker highlight and a still ring
+  on the avatar, or a pressed button); the ring spins once the pick goes
+  ahead.
+- **Narrowing as you type.** Typing in the field the menu is open on
+  narrows it to the logins whose title or username contains the text: the
+  content script hands the text to the menu frame over their private
+  channel, nothing else gets it, and only the user's own (trusted) typing
+  counts. Rows that stop matching fade where they are and the rest slide up;
+  the menu's height follows. When nothing matches, the menu goes, and stays
+  away from that field until it's cleared, clicked again, or ↓; the rest of
+  that form, now being filled by hand, gets no menu on focus or click either,
+  only on ↓ or a second click. Typing a password by hand puts the menu
+  away the same way.
 - **Menu visibility.** The menu samples its own visibility rather than
   watching it continuously: an `IntersectionObserver` with `trackVisibility`
   gives a reading at most every 100 ms, saying whether the menu is fully on
@@ -127,6 +154,11 @@ not running without sending hello, which would start the agent again.
   500 ms again. If it's covered, faded, clipped, shown only at the press or
   can't be measured, it fills nothing and says so. A page that covers the
   menu briefly between two readings can go unseen (see the threat model).
+  The browser pauses these readings while anything animates inside the
+  frame, so nothing does while a press is checked (transitions are off, the
+  avatar's ring is still, the save offer's bar is stepped frame by frame,
+  never animated), and after narrowing's row animations the half second
+  starts again, as after a move.
 - **Keyboard picks.** ⏎ picks only after the user's own ↓ in the field
   moved focus into the menu, or a real press inside the menu put it there
   and passed the same visibility checks as a pick. A press the menu refused
@@ -153,8 +185,13 @@ not running without sending hello, which would start the agent again.
   fields changed, nothing is filled. When the user picks or clicks Fill, the
   content script fixes which of the form's fields may be filled right then;
   the host is asked only for their values and only those fields are written
-  (the open menu itself doesn't count as covering a field then; it closes
-  before anything is written).
+  (when the user picks, Deadbolt's own open menu doesn't count as covering a
+  field; anything of the page's still does). A pick from the menu folds it
+  into a pill at the end of the field, and nothing is written until the pill
+  has settled there. The pill is an element of the page, which can restyle
+  it, so it's exempt from the cover check only while it's exactly where and
+  as big as the content script put it, and no bigger than a pill; stretched
+  over a field, it's a cover like any other and the field gets nothing.
   A field the page enables or shows later, such as a disabled password it
   turns on when the username is focused for the fill, gets nothing. If the
   sign-in was cancelled (Esc, or a
@@ -166,15 +203,66 @@ not running without sending hello, which would start the agent again.
   ancestor up to the top of the page, across shadow roots (display,
   visibility, opacity, clip, size, on screen, not covered). Split one-time
   code boxes fill only as one whole group within one form.
-- **Email-first sign-ins.** When the content script reports that it filled a
-  username into the top page, the next step (a password or code field) on
-  the same origin fills from the same login once, within two minutes. The
-  page has to have moved on first: a new document, or in the same one, the
-  user submitting or the filled fields going away. A matching field showing
-  up next to the one just filled isn't enough. Frames never continue. Esc,
-  closing the menu, another origin, or a navigation the page didn't make (a
-  typed address, a bookmark, a reload, back or forward) cancels it, including
-  for fills still on their way.
+- **Sign-in sessions.** Many sign-ins take more than one step: the
+  username on its own, then the password, sometimes a code. Picking a login
+  on any step starts a session in that tab, bound to the login, the tab and
+  the site (registrable domain). When the top page then shows the next step,
+  the session fills it from the same login without another pick, and a pill
+  on the field says so ("Password filled", "Code filled"):
+  - a password field gets the password (and the username, if its box is
+    there beside the password and empty);
+  - a one-time-code field, split boxes included, gets the current code, if
+    the login has one;
+  - a username box on its own, empty, is "Not you? Use a different
+    account": the session ends.
+  The bounds: each step fills once, and only after the user's own submit of
+  the step before: their trusted click on its submit control or Enter in
+  one of its fields. A submit event without one just before it (a page's
+  `form.requestSubmit()` fires one the browser marks trusted) doesn't
+  count, and neither does the page taking the filled fields away, unless
+  the user clicked or pressed Enter in the last two seconds. A step in
+  another document needs that submit to have come from the document the
+  last step filled, after it filled. (Saving asks less: any trusted click on
+  the submit control, Enter in a field or trusted submit event captures what
+  was submitted, since a capture only ever leads to an offer the user has to
+  accept, after the outcome is judged.) Deadbolt never submits. A step fills
+  only on the origin the pick was on, or one whose host (and scheme) a
+  saved URL of the login names exactly: the agent lists a login on every
+  subdomain of its sites, so its say alone isn't enough here. Every fill
+  goes through the same field checks and is bound to that frame, document
+  and form snapshot; frames never get a session. It
+  ends after three minutes (four on a site known to step by navigation),
+  when the code is filled or a password with no code to follow, and on Esc
+  or closing the menu, picking another login, a page of another site, a
+  navigation the page didn't make (a typed address, a bookmark, a reload,
+  back or forward), closing the tab, or Deadbolt locking, including for
+  fills still on their way. The session is kept in the extension's session
+  storage, so a service worker restart doesn't drop a step; it holds the
+  login's ref, the site, what it filled and when, never a value.
+- **Signing in by hand.** On a password or code field, the username the
+  sign-in is for narrows the menu: the form's own username box, if the user
+  typed what's in it (or Deadbolt filled it), or else the one the user
+  submitted on an earlier step (bg/save.ts keeps it in memory with the rest
+  of what was submitted). A username the page put in the box itself is
+  ignored, so whether a menu shows never depends on a name the page chose. The menu then shows only the logins
+  whose username is exactly that; when none is, the user is signing in by
+  hand, and the field opens no menu, unless they press ↓ or click it again.
+  So a failed sign-in that comes back with an unknown username doesn't
+  offer the whole list on its password field.
+- **What's remembered of a site's sign-in.** When a sign-in works (judged as
+  for saving: confirmed or likely), the extension records its shape in
+  local storage under `signinFlows`, with no usernames or values: whether
+  the username comes on a step of its own, whether a code step usually
+  follows, whether the steps are separate pages, how many sign-ins it was
+  learned from and when the last was. Sites are kept under a salted hash
+  (SHA-256 of a random per-install salt, `signinFlowsSalt`, and the site,
+  cut to 128 bits), not by name. Up to 300 sites are kept, the most recent,
+  at roughly a hundred bytes each. On a site that asks for the username first and
+  has one login, the menu on the first step says "Continue as <username>";
+  on one whose steps are pages, the session gets an extra minute for a slow
+  one. A username step on its own is never judged as a sign-in (only a
+  password is), so it neither waits for the page to settle nor counts as a
+  failure.
 - **Frames.** Every frame runs the content script, but only frames on the same
   site as the top page get logins, and sandboxed frames get none. A frame
   gets no inline menu: where it sits, how big it is and what covers it are
@@ -198,20 +286,95 @@ not running without sending hello, which would start the agent again.
   which keeps them in memory for up to three minutes from when the password
   was submitted (a username on its own joins it but doesn't extend that), and
   forgets them when Deadbolt locks or disconnects or the tab moves to another
-  site. When the
-  top page then shows no login form for a couple of seconds, it sends `check`.
-  On `new` or `update` the offer goes to the toolbar popup, never the page:
-  the toolbar button gets a badge, and the popup opens by itself where the
-  browser allows it, at most once per site every ten minutes (see the threat
-  model). The popup asks "Save login for <site>?" or
-  "Update password for <username>?" with Save and Not now, and sends `save`
-  only on Save. Each offer has its own id, and Save or Not now answers only
+  site.
+- **Did the sign-in work?** The top page says when it settles: no login form
+  for a couple of seconds, a code step, or a couple of seconds after a
+  submit. The service worker then asks that document what it shows (see
+  Sign-in outcomes) and judges it. Only a sign-in that worked gets a `check`.
+  On `new` or `update` the toolbar button gets a badge and the popup holds
+  the offer. After a confirmed sign-in, at most once per site every ten
+  minutes (see the threat model), the offer also shows in the page: the
+  service worker hands the settled document's content script a one-time
+  token, and it opens the surface in the top right corner, 12 px in, near
+  the toolbar button: out of the way, over the corner of the site's own
+  header if that's where it falls. It comes in from the corner as a small
+  pill: Deadbolt's mark, "Save login?" (or "Update password?") and Save.
+  The surface frame gets the site, the username and whether it's an update,
+  never the password. When the pointer comes onto it or it gets keyboard
+  focus, it opens down and to the left from the corner to show the username
+  and site, Not now and Never for this site, and it closes again 300 ms
+  after the pointer leaves. The card is laid out once at its open size and
+  anchored to the corner, so only the frame's clip and corners move. A 2 px
+  bar along the pill's bottom edge empties over twelve seconds (paused while
+  it's open, under the pointer or focus, or the pointer comes near). When
+  it runs out, or the user clicks anywhere else in the page, the pill
+  shrinks to a dot: Deadbolt's mark with a small red badge, in the same
+  corner. Hovering or clicking the dot brings the pill back for eight more
+  seconds; otherwise the dot leaves toward the toolbar after twenty, and the
+  offer waits in the toolbar.
+  Save rolls to "Saving…", folds into a "Saved" pill (the same for a new
+  login and an update) in the same corner and leaves toward the toolbar
+  button; a locked or busy Deadbolt opens the card and says so there, and a
+  save that fails after the time ran out gets six more seconds. Not now and
+  Never for this site leave the same way, toward the toolbar button; Not now
+  only puts the surface away, and the offer stays in the toolbar. Every
+  button, in the pill and in the open card, takes only real presses that
+  pass the menu's visibility and dwell checks, and the frame changing shape
+  restarts the dwell like any move, so a button that just came into view
+  takes no press until it has sat still. The surface closes when the page navigates,
+  when Deadbolt locks, and when the offer expires or is answered in the
+  popup (if the offer went while the page was still opening it, a close
+  follows the open). The content script closes it too if its frame hasn't
+  loaded the offer within three seconds, and after a minute in any
+  case. Where the page can't take it (a hidden tab, say), the popup
+  opens by itself instead. A likely sign-in only badges. The popup asks
+  "Save login for <site>?" or "Update password for <username>?" with Save,
+  Not now and Never for this site, and sends `save` only on Save; the page's
+  surface and the popup answer the same offer id. Not now also holds back the same
+  username on the site for a day (the service worker keeps a SHA-256 of the
+  site and username, salted once per browser session, in session storage,
+  not the username). Never for this
+  site keeps the site in the extension's local storage, and from then on
+  nothing typed there is kept or checked; the popup says "Saving is off for
+  <site>" with Turn on. Each offer has its own id, and Save or Not now answers only
   the offer the popup showed; if another took its place, the popup shows that
   one instead. A check that finishes after the tab left the site, closed, or
   Deadbolt locked offers nothing. Offers expire after five minutes. A new login is named after
   the form's page title and saved with that page's URL, without its query or
   fragment. A `rate_limited` check offers nothing; a `rate_limited` fill says
   to try again in a moment.
+- **Sign-in outcomes.** The content script answers with yes-or-no facts
+  only, never page text or values (`content/outcome.ts`): a login form still
+  shows, and its password box is empty; a code step; an error (a field
+  marked `aria-invalid`, or an alert or error box in view whose text says
+  incorrect, invalid, too many attempts and the like, in English, French,
+  German or Spanish; vaguer words such as expired, locked or try again, and
+  polite live regions and `alert` boxes, count only by a login form); a
+  captcha or bot check (a "Just a moment" page, a visible reCAPTCHA,
+  hCaptcha, Turnstile or Arkose frame or widget, or a captcha box on a login
+  form); the submitted username, or an email's part before the @, as a whole
+  word of four characters or more; a Sign out control; a sign-in looking
+  URL. Each walk is bounded: 400 elements, error boxes with more than 400
+  characters or a dozen elements skipped, 200 characters read from each, and
+  30 ms in all. The judgment, in order:
+  - An error with no account or Sign out showing, or with the form back, or
+    the form back with an empty password: failed. No offer, and from then on
+    that password is offered only by a confirmed sign-in.
+  - A code step or a captcha: pending. No offer yet, and the password is
+    kept up to five minutes from the submit, for the page after it.
+  - The form still there: not yet.
+  - The account or Sign out shows: confirmed. Offered, and the popup may
+    open.
+  - Nothing either way: looked at again four seconds later. Still nothing is
+    likely, and offered with the badge only. On a sign-in looking URL
+    (`/login?error=1`, `/session`) nothing is offered, except after a sign-up
+    or new password, whose next page is often "verify your email".
+  Failed and pending keep what was typed until it expires: a retry with the
+  right password replaces it and starts over.
+- **Sites that opt out.** A field is left alone, with no menu, fill or save,
+  when it, its form or the page's `<body>` has `data-1p-ignore`,
+  `data-op-ignore`, `data-lpignore="true"`, `data-bwignore`,
+  `data-form-type="other"` or `data-deadbolt-ignore`.
 - **Noise filters.** Only a real click, Enter or form submit (a trusted
   event) captures, and only a password typed in the field or filled by
   Deadbolt counts. The extension keeps an HMAC of those values, under a key
@@ -254,6 +417,87 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
 - **Every vault** is searched. A `ref` is `<vault id>:<item id>` (64 and 32
   lowercase hex digits), so it names one login without ambiguity. New logins
   go to the default vault.
+
+## Sign in with Google, Apple, GitHub…
+
+Many sites are signed in to with another account rather than a password.
+Deadbolt keeps that on the site's login, in two fields that aren't secret:
+
+- `sign-in-with`: the provider. A known one is stored by id: `google`,
+  `apple`, `github`, `microsoft`, `facebook`, `x` (Twitter too), `amazon`,
+  `discord`, `slack`, `okta`, `linkedin`, `gitlab`. Any other is kept as its
+  name, one line of at most 64 characters.
+- `sign-in-account`: the id of the login it signs in with (the Google
+  account's own login), 32 lowercase hex digits. Only meaningful when that
+  login is in one of your vaults; nothing breaks when it isn't.
+
+They're fields of a login, not a type of their own, so the login still
+matches its site by URL, syncs, keeps history, mirrors and lists like any
+other, and can have a password as well (a site that takes both). 1Password
+does the same: its "Sign in with" is a field of a login.
+
+A 1Password `.1pux` import fills both: the provider from 1Password's
+`ssoLogin` field, and the account from its link to the provider's login,
+once that login is in the vault (made by the same import, already there as a
+duplicate, or imported or mirrored from 1Password before). The import says
+"kept 114 sign-in methods (Google 95, …)" and "linked 96 to their accounts",
+and warns about links to a login that isn't in the export; those keep the
+provider only. A login with only a provider isn't an empty item.
+
+`list` gives such a login's provider and, when the linked login is in one of
+your unlocked vaults, its username (or its title when it has none) as
+`signIn`. Nothing else of that login is ever read for it: a `fill` of the
+site's login fills only that login's own values, so one with only a provider
+fills nothing. The extension shows it as "Sign in with Google ·
+dax@gmail.com" in place of a password (see "In the extension" below).
+`deadbolt show` prints
+`sign-in-with  Google · dax@gmail.com`, and `ls` shows "Sign in with Google"
+for one without a username.
+
+### In the extension
+
+- **The menu.** On any login field, identifier fields included, a login with
+  `signIn` is a row "Sign in with Google" with its account (or the login's
+  title) beneath and the provider's initial as its mark; Deadbolt draws no
+  third-party logos. One with a password too gets two rows: its fill row,
+  then the sign-in row. One with only a provider never offers a fill, and the
+  background refuses one if asked. The toolbar popup shows "Sign in with
+  Google · kit@gmail.com" on the login and no Fill button when there's no
+  password.
+- **Picking it fills and clicks nothing.** The page's content script looks
+  for the site's own button (a Google Identity Services or Sign in with Apple
+  widget, or a button or link whose text, label or `data-provider` says
+  "continue / sign in with Google" and at most one other word; "Sign in with
+  Google to sync your calendar" and share or follow buttons don't count),
+  scrolls it into view and rings it, with a pill "Your Google sign-in". The user
+  clicks it. The ring follows the button as the page lays out and goes on any
+  click, Escape, the button scrolling away, or after 10 s; with reduced
+  motion it only fades. With no such button, the row says "Look for
+  “Continue with Google”" and nothing is ringed.
+- **On the provider's side.** Picking the row also starts a sign-in with the
+  provider in that tab (`bg/signinwith.ts`): the provider, the linked account
+  and the site, for 3 minutes. A popup the tab opens follows it. It ends on
+  coming back to the site, closing the tab, or locking. While it lasts:
+  - on Google's own sign-in host, `accounts.google.com`, over https, the
+    top page is told the account, and on the account chooser Deadbolt rings
+    the tile carrying it in `data-identifier` (or `data-email`) with a pill
+    "Your linked account". Never a tile found by its text, which the page
+    could make name anyone. The user picks it. Only Google's chooser has
+    such a pattern on a host that is only sign-in pages; no other provider's
+    page (GitHub, X, Discord, Slack and the like host their users' own
+    content) is ever told the account.
+  - the menu on the provider's own pages (its known sign-in hosts, over
+    https) narrows to the linked login (the Google account's own), as usual
+    on a click; this sends the page nothing. With no login for the linked
+    account, the username on the form narrows it as anywhere else. Nothing
+    fills by itself there.
+- **Test hosts, in e2e builds only.** `scripts/build.ts --e2e <dir>`
+  (which `e2e/run.ts` runs for itself) defines `DEADBOLT_E2E`: only that
+  build takes a provider host ending in `.test` for the same one in `.com`
+  (`accounts.google.test` for `accounts.google.com`), over http too. Every
+  other build, `bun run build` included, defines it false and the alias
+  isn't in its code, so a resolver answering for `.test` names can't pose
+  as a provider.
 
 ## Passkeys
 
@@ -403,22 +647,66 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
 - **Secrets in transit** go only over stdin/stdout and the agent socket, never
   argv. They are held in `Zeroizing` buffers, and Debug output prints
   `<redacted>` in their place. Neither the host nor the agent logs them.
-- **Check results stay in the extension.** A check is a password oracle
-  for the page's site, so nothing the page can see depends on it: the offer
-  is shown only in the toolbar popup, and the page gets no prompt, message or
-  element from it. A page can still choose a password and submit it in a way
-  that passes the noise filters; the result is an offer the user sees and can
-  decline, and no value reaches the page. One bit can: when the extension
-  opens the popup by itself, the page's window loses focus, so a page
-  watching for `blur` learns that an offer appeared, and so whether the
-  password it chose matched. So every check that finishes uses up the site's
-  (registrable domain's) ten-minute turn, across tabs, whatever it said:
-  `same`, `new`, `update`, or `rate_limited`. The popup opens by itself only
-  when that check offered something and took the turn; every other offer only
-  badges the toolbar button. A page therefore learns at most one bit per site
-  per ten minutes, and each time the user sees a popup they can decline. A fill's values reach only the content script's isolated world
+- **What a check tells the page.** A check is a password oracle for the
+  page's site, so what a page can see of it is kept to one bit per site per
+  ten minutes. A page can still choose a password and submit it in a way that
+  passes the noise filters; the result is an offer the user sees and can
+  decline, and no value reaches the page. The offer's surface is an element
+  the page can see appear and change shape (it can't read or click into
+  it), and the popup, where it opens instead, takes focus from the page,
+  which a page can see too. Exactly what the page can infer from the
+  surface:
+  - That an offer appeared: a confirmed check found a new or changed login,
+    so the password it chose isn't the one saved, and Deadbolt is installed
+    (which any menu already shows). Not which: a new login and an update
+    have the same size, and both fold into the same "Saved" pill.
+  - That the user pressed Save: the surface folds into the pill before it
+    leaves. Not now and Never for this site leave the same way, so they
+    look alike.
+  - That the user came near it or focused it (it opens), and that they
+    clicked elsewhere or let it be (it shrinks to the dot).
+  - That Deadbolt is locked or busy, if a save fails: the card opens and its
+    status line makes it taller.
+  - Roughly how long the user took, from when the surface leaves.
+
+  Every check that finishes uses up the site's (registrable domain's) ten-minute turn, across
+  tabs, whatever it said: `same`, `new`, `update`, or `rate_limited`. The
+  offer shows by itself only when that check offered something and took the
+  turn; every other offer only badges the toolbar button. Only a confirmed
+  sign-in (see Sign-in outcomes) can show it, so only its check takes the
+  turn; a page decides what it shows, so it can choose which checks those
+  are, but a check that can't show anything tells it nothing. That's the
+  same one bit the popup opening by itself always gave away, and in return
+  the offer appears where the user is looking; the badge and popup remain
+  for every other offer. Not now and Never for this site stop checks, so a
+  page that sees nothing where an offer would have shown may learn the user
+  said one of them.
+
+  The account menu tells the page a little too, as the user types an
+  identifier into it: the menu's height follows how many saved logins for
+  this site match the text, and it goes when none do. So the page, which
+  sees the text anyway, learns whether Deadbolt holds a login for this site
+  whose title or username contains it. Only the user's own typing narrows
+  it; a page's script can't type into it to ask.
+
+  The probe itself puts nothing in the page. A fill's values reach only the content script's isolated world
   and the fields it writes. The host rate-limits checks and fills as well, so
   a runaway or compromised caller can't guess quickly.
+- **Later steps fill without a click, within bounds.** A sign-in session
+  fills a password or code into a step the user didn't pick on. It's bound
+  to the login the user picked, the tab, the pick's origin or a host a saved
+  URL of the login names exactly, and a few minutes; it fills each step
+  once, only after the user's own submit of the step before (a trusted
+  click on the submit control or Enter in a field; a page submitting its
+  own form, or taking the fields away, doesn't count), and only into fields
+  that pass the usual checks, in the top page. A page on such an origin
+  that shows a password field right after the user submitted their username
+  gets the password, as it would with a pick; that is the site the user is
+  signing in to. A sibling subdomain (user content, say) that no saved URL
+  names gets nothing. A page of another site
+  ends the session, and an empty username step ("Use a different account")
+  does too, so a different person's sign-in never gets the first login's
+  password. The pill on the field is an extension frame, as for any fill.
 - **Pages can't steer fills.** A fill needs the user's pick in a menu the
   page can't script or see into, or a click in the popup. It goes only to the
   document and form that asked, only into fields the user can see that were
@@ -468,6 +756,20 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   Touch ID still signs with UV=0 where the site allows it: anyone at the
   unlocked Mac, or a same-user process, can sign in with a saved passkey,
   just as they can fill a saved password.
+- **Sign in with a provider: what the pages learn.** The ring and its pill
+  are drawn in a closed shadow root on an element of Deadbolt's own, which
+  lets clicks through. The page can see that an element appeared, and work
+  out roughly where the ring points, but not read what it says, and the
+  pill names no one ("Your Google sign-in", "Your linked account"). So the site learns
+  that the user picked "Sign in with" in Deadbolt (as it would see the
+  click anyway), and the provider's chooser learns which of the accounts it
+  already shows Deadbolt points at. The linked account goes only to the
+  provider's own top page in the tab (or its popup) following the sign-in,
+  by its document id and origin, never to another origin or a frame, and
+  only to `https://accounts.google.com`: a provider whose chooser carries
+  the account in an attribute, on a host with nothing but its sign-in
+  pages. A provider whose hosts serve user content never gets it. No
+  password, fill or click is ever made for it.
 - **The idle lock:** fill, save, and a passkey registration or sign-in count
   as use. Hello, list, check and passkey-list don't, because a browser asks
   for those on every page and would otherwise hold the vault open.
@@ -526,10 +828,14 @@ Hello starts the agent if needed. It's the only message that does.
 { "id": "2", "type": "list", "site": "github.com", "accounts": [
   { "ref": "<64 hex>:<32 hex>", "vault": "personal", "title": "GitHub",
     "username": "octocat", "hasPassword": true, "hasTotp": true,
-    "urls": ["https://github.com"] } ] }
+    "urls": ["https://github.com"],
+    "signIn": { "provider": "google", "account": "octocat@gmail.com" } } ] }
 ```
 
-`username` is left out when the login has none. `title` is the login's name,
+`username` is left out when the login has none. `signIn` is there only for a
+login that signs in with another account (see Sign in with Google, Apple,
+GitHub…); its `account` is left out when the linked login isn't in an
+unlocked vault. `title` is the login's name,
 else its URL's host. Accounts are sorted by title.
 
 ### fill: values of one login

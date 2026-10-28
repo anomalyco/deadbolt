@@ -24,6 +24,26 @@ const SKIP_INPUT_TYPES = new Set([
   "datetime-local", "month", "week", "time", "search",
 ])
 
+/**
+ * Marks sites put on fields, forms or <body> to keep password managers away:
+ * 1Password's, LastPass's, Bitwarden's, Dashlane's and Deadbolt's own.
+ */
+function optedOut(el: Element | null | undefined): boolean {
+  if (!el) return false
+  const on = (name: string) => el.hasAttribute(name) && el.getAttribute(name)?.toLowerCase() !== "false"
+  return (
+    on("data-1p-ignore") ||
+    on("data-op-ignore") ||
+    on("data-bwignore") ||
+    on("data-deadbolt-ignore") ||
+    el.getAttribute("data-lpignore")?.toLowerCase() === "true" ||
+    el.getAttribute("data-form-type")?.toLowerCase() === "other"
+  )
+}
+
+/** The site asked password managers to leave this field alone, on it, its form or the page. */
+export const ignored = (el: HTMLInputElement) => optedOut(el) || optedOut(el.form ?? el.closest("form")) || optedOut(document.body)
+
 /** Minimum score for the page to count as a given kind of form. */
 const FORM_THRESHOLD = 3
 
@@ -139,7 +159,7 @@ function collectFields(roots: Array<Document | ShadowRoot>): { fields: ScannedFi
   const fields: ScannedField[] = []
   const otpBoxes: HTMLInputElement[] = []
   for (const el of deepQueryAll<HTMLInputElement>("input", roots).slice(0, 200)) {
-    if (!eligible(el) || !isVisible(el)) continue
+    if (!eligible(el) || !isVisible(el) || ignored(el)) continue
     // One-character boxes for codes are grouped into a single split OTP field.
     if (el.maxLength === 1) {
       otpBoxes.push(el)
@@ -297,4 +317,81 @@ export function scanPage(): ScanResult {
   if (otpBoxes.length && inScope(otpBoxes[0])) for (const el of otpBoxes) fields.push({ el, role: "otp", split: otpBoxes.length, owner: ownerOf(el) })
 
   return { kind: formKind === "newsletter" ? null : formKind, fields, submit: controls.submit }
+}
+
+// ---- "Sign in with …" ------------------------------------------------------------
+
+/** What a sign-in-with button says around the provider's name; anything else counts against it. */
+const SIGN_IN_WORDS = new Set(["continue", "sign", "in", "signin", "up", "signup", "log", "login", "connect", "use", "with", "using", "via", "through", "your", "account", "to", "id"])
+const VERB = /\b(continue|sign\s?in|sign\s?up|log\s?in|login|signin|signup|connect)\b/
+
+/**
+ * Whether a control's text (or label) asks to sign in with this provider:
+ * a sign-in verb, the provider's name, and at most one other word ("Sign in
+ * with Google", "Continue with your Apple ID", "Log in via GitHub"). Longer
+ * text is a sentence about the provider, not its button ("Sign in with
+ * Google to sync your calendar"); no verb is a share or follow button.
+ */
+export function signInWithText(text: string, p: { words: string[] }): boolean {
+  const t = text
+    .toLowerCase()
+    .replace(/[“”"'’()[\]{}.,!?:·|—–-]+/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+  if (!t || t.length > 60 || !VERB.test(t)) return false
+  // The provider's name, as whole words (longest first: "apple id" before "apple").
+  const words = [...p.words].sort((a, b) => b.length - a.length)
+  const name = words.find((w) => new RegExp(`(^| )${w.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}( |$)`).test(t))
+  if (!name) return false
+  const rest = ` ${t} `.replace(` ${name} `, " ").trim().split(" ").filter((w) => w && !SIGN_IN_WORDS.has(w))
+  return rest.length <= 1
+}
+
+const BUTTONS = 'button, a[href], [role=button], [role=link], input[type=submit], input[type=button]'
+/** Provider widgets with no text of their own to read: Google Identity Services, Sign in with Apple. */
+const WIDGETS: Record<string, string> = {
+  google: '.g_id_signin, #g_id_signin, iframe[src*="accounts.google.com/gsi/button"], div[id^="gsi_"][role=button]',
+  apple: "#appleid-signin, [data-type=sign-in][data-color]",
+}
+
+/**
+ * The site's own button for signing in with the provider, if one shows: a
+ * provider widget, or a control whose text, label or data attributes say
+ * "sign in with <provider>" and little else (see signInWithText). Deadbolt
+ * only points at it; the user clicks it.
+ */
+export function findProviderButton(p: { id: string; words: string[] }): Element | null {
+  const roots = openRoots()
+  const widget = WIDGETS[p.id]
+  if (widget) for (const el of deepQueryAll(widget, roots)) if (isVisible(el)) return el
+  const candidates = deepQueryAll(BUTTONS, roots).slice(0, 600)
+  let best: Element | null = null
+  for (const el of candidates) {
+    if (!isVisible(el)) continue
+    const img = el.querySelector("img[alt]")?.getAttribute("alt") ?? ""
+    const data = [el.getAttribute("data-provider"), el.getAttribute("data-testid"), el.getAttribute("data-test")].filter(Boolean).join(" ").toLowerCase()
+    const named = signInWithText(controlText(el), p) || signInWithText(img, p)
+    const tagged = !!data && p.words.some((w) => data.split(/[\s_-]+/).includes(w)) && /(sign|log)\s?in|login|signin|sso|oauth|social|continue/.test(data)
+    const providerOnly = el.getAttribute("data-provider")?.toLowerCase() === p.id
+    if (!named && !tagged && !providerOnly) continue
+    // The innermost match: the button itself, not a wrapper around it.
+    if (!best || best.contains(el)) best = el
+  }
+  return best
+}
+
+/**
+ * On the provider's account chooser, the tile for `account` (an email or
+ * username), by the attribute Google's tiles carry it in. Never by text: a
+ * page's own text could name anyone.
+ */
+export function findAccountTile(account: string): Element | null {
+  const want = account.trim().toLowerCase()
+  if (!want) return null
+  const roots = openRoots()
+  for (const el of deepQueryAll("[data-identifier], [data-email]", roots)) {
+    const id = (el.getAttribute("data-identifier") ?? el.getAttribute("data-email") ?? "").trim().toLowerCase()
+    if (id === want && isVisible(el)) return el.closest('[role=link], [role=button], li, a, button') ?? el
+  }
+  return null
 }

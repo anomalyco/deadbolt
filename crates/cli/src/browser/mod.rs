@@ -37,16 +37,18 @@ pub enum Browser {
     Arc,
     Edge,
     Chromium,
+    Helium,
     /// Every browser above, installed or not.
     All,
 }
 
-const BROWSERS: [Browser; 5] = [
+const BROWSERS: [Browser; 6] = [
     Browser::Chrome,
     Browser::Brave,
     Browser::Arc,
     Browser::Edge,
     Browser::Chromium,
+    Browser::Helium,
 ];
 
 impl Browser {
@@ -57,6 +59,7 @@ impl Browser {
             Self::Arc => "Arc",
             Self::Edge => "Edge",
             Self::Chromium => "Chromium",
+            Self::Helium => "Helium",
             Self::All => "all",
         }
     }
@@ -72,6 +75,7 @@ impl Browser {
                 Self::Arc => "Arc/User Data",
                 Self::Edge => "Microsoft Edge",
                 Self::Chromium => "Chromium",
+                Self::Helium => "net.imput.helium",
                 Self::All => return None,
             }))
         } else {
@@ -80,6 +84,7 @@ impl Browser {
                 Self::Brave => "BraveSoftware/Brave-Browser",
                 Self::Edge => "microsoft-edge",
                 Self::Chromium => "chromium",
+                Self::Helium => "net.imput.helium",
                 Self::Arc | Self::All => return None,
             }))
         }
@@ -163,7 +168,7 @@ fn pick(chosen: &[Browser], dirs: &Dirs) -> Result<Vec<Browser>> {
             .filter(|b| dirs.data_dir(*b).is_some_and(|d| d.is_dir()))
             .collect();
         if installed.is_empty() {
-            bail!("found no Chrome, Brave, Arc, Edge or Chromium; name one with --browser");
+            bail!("found no Chrome, Brave, Arc, Edge, Chromium or Helium; name one with --browser");
         }
         return Ok(installed);
     }
@@ -278,6 +283,10 @@ mod tests {
             path(&linux, Browser::Edge).unwrap(),
             format!("/xdg/microsoft-edge/{file}")
         );
+        assert_eq!(
+            path(&linux, Browser::Helium).unwrap(),
+            format!("/xdg/net.imput.helium/{file}")
+        );
         let macos = Dirs::from_vars(true, |name| match name {
             "HOME" => Some("/Users/kit".into()),
             "XDG_CONFIG_HOME" => Some("/xdg".into()),
@@ -287,6 +296,10 @@ mod tests {
         assert_eq!(
             path(&macos, Browser::Arc).unwrap(),
             format!("/Users/kit/Library/Application Support/Arc/User Data/{file}")
+        );
+        assert_eq!(
+            path(&macos, Browser::Helium).unwrap(),
+            format!("/Users/kit/Library/Application Support/net.imput.helium/{file}")
         );
         assert!(Dirs::from_vars(false, |_| None).is_err());
         assert!(Dirs::from_vars(false, |_| Some(String::new())).is_err());

@@ -32,17 +32,22 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/background.ts`      | Service worker: routes messages                                 |
 | `src/bg/host.ts`         | The one native port: hello, ids, backoff, `changed`             |
 | `src/bg/frames.ts`       | Which frames get logins; delivery to one document               |
-| `src/bg/autofill.ts`     | Menu tokens, fills, email-first continuation, popup             |
-| `src/bg/save.ts`         | Captured submits, `check`, offers in the popup, `save`          |
+| `src/bg/autofill.ts`     | Menu tokens, fills, sign-in sessions across steps, popup        |
+| `src/bg/save.ts`         | Captured submits, sign-in outcomes, `check`, offers, `save`     |
 | `src/bg/site.ts`         | Fillable origins and same-site frames                           |
+| `src/bg/signinwith.ts`   | "Sign in with" sessions: popup, provider pages, chooser account |
 | `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback        |
 | `src/passkey-hook.ts`    | Page-world `navigator.credentials` hook                         |
 | `src/passkey-options.ts` | The hook's options, serialized whole for the extension          |
-| `src/content.ts`         | Content script: scans, submit capture, quiet-page signal        |
+| `src/content.ts`         | Content script: scans, submit capture, settled-page signal      |
+| `src/content/outcome.ts` | What a settled page shows, as yes-or-no facts for `bg/save.ts`  |
+| `src/content/ring.ts`    | Ring and pill around what the user should click, closed shadow  |
 | `src/content/`           | Detection, Shadow DOM, filling, the menu frame, passkey channel |
-| `src/menu.ts`            | Inline menu page                                                |
+| `src/menu.ts`            | The in-page surface: account list, fill pill, save offer        |
 | `src/popup.ts`           | Toolbar popup: status, logins, save offers, passkey prompts     |
+| `src/ui/motion.ts`       | Springs (CSS `linear()` and retargeting), rolled labels         |
 | `src/protocol.ts`        | Host message types and parsing                                  |
+| `src/signin.ts`          | "Sign in with" providers: names, hosts, button words            |
 | `src/messages.ts`        | Messages inside the extension                                   |
 | `static/`                | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons       |
 | `e2e/`                   | Headless Chromium runs against a fake host                      |
@@ -52,10 +57,12 @@ fixtures (including Shadow DOM and frames), origin and same-site rules, frame
 targeting, menu tokens and fills against a fake `chrome`, offers and their
 timers, host message parsing, and the host client against a fake port.
 
-`bun run e2e` loads the built extension in headless Chromium with fresh
+`bun run e2e` loads an e2e build of the extension (`scripts/build.ts --e2e`,
+which e2e/run.ts makes for itself) in headless Chromium with fresh
 profiles and `e2e/fake-host.py` as the host. `--only security` runs the
 hidden, covered, swapped and navigated cases that CI runs; `--stills <dir>`
-saves screenshots. `--only passkeys --deadbolt <path to deadbolt>` runs the
+saves screenshots, and `--video <dir>` records the `film` run (menu, fill,
+sign-in, save offer in the page). `--only passkeys --deadbolt <path to deadbolt>` runs the
 passkey cases against the real `deadbolt browser-host` and a throwaway store,
 and checks every registration and assertion with `@simplewebauthn/server`.
 
@@ -79,7 +86,7 @@ Adapted from Foyer: form and field detection with weighted clues
 (`content/shadow.ts`), filling that frameworks notice (`content/fill.ts`), the
 inline menu as an extension frame in a closed shadow root
 (`content/inline.ts`, `menu.ts`), the visibility guard (`ui/dom.ts`),
-token-bound frame targeting and the email-first continuation (`bg/frames.ts`,
+token-bound frame targeting and the email-first continuation, which sign-in sessions grew from (`bg/frames.ts`,
 `bg/autofill.ts`), the capture-check-save flow (`bg/save.ts`), sender origin
 rules (`bg/site.ts`), the passkey hook (`passkey-hook.ts`,
 `passkey-options.ts`), its channel
@@ -92,7 +99,7 @@ its call reporting and FedCM hooks, SSO memory, the external-extension allowlist
 and its dataset, and the dashboard.
 
 New for Deadbolt: the host client and protocol types, the popup and its save
-offers, the same-site frame check, the quiet-page sign-in signal, the
+offers, the one in-page surface and its motion, the same-site frame check, the sign-in outcome probe, the
 postMessage token handoff, form-bound fills and fill acks, the single acked
 passkey port (Foyer accepted whichever port acked first), passkey prompts in
 the popup, the OpenCode theme and the icons.
