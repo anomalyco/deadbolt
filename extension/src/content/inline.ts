@@ -14,8 +14,9 @@
 //
 // The same frame is Deadbolt's one surface in the page, in three modes it
 // morphs between: the account list under a field, a pill on the field while
-// it fills, and, after a confirmed sign-in, the save offer at the top right
-// (see bg/save.ts). This script owns the frame's place and size: the frame
+// it fills, and, after a confirmed sign-in, the save offer in the top right
+// corner (see bg/save.ts): a small pill that opens on approach and shrinks to
+// a dot when it's not wanted. This script owns the frame's place and size: the frame
 // says what size its mode needs (db:menu-resize) and the host springs there,
 // so no transparent area is left over the page to swallow its clicks.
 
@@ -40,9 +41,10 @@ const MENU_CHROME = 12
 /** The site's caption, over two or more rows. */
 const MENU_CAPTION = 22
 const MENU_WIDTH = 300
-/** The save offer's place: the top right, near the toolbar button. */
+/** The save offer's place: the top right corner, near the toolbar button. */
 const SAVE_INSET = 12
-const SAVE_WIDTH = 320
+/** The offer's compact pill, before its frame says its size. */
+const SAVE_GUESS = { width: 220, height: 36 }
 const RADIUS = 14
 const light = () => !matchMedia("(prefers-color-scheme: dark)").matches
 /** A hairline, then soft layers: close and crisp, wide and faint. */
@@ -72,7 +74,7 @@ let closing = false
 /** The save offer's fallbacks: it goes if its frame never loads, and in any case after a while. */
 let saveTimers: ReturnType<typeof setTimeout>[] = []
 const SAVE_LOAD_MS = 3000
-const SAVE_CAP_MS = 30_000
+const SAVE_CAP_MS = 60_000
 /** The largest a pill can be. */
 const PILL_MAX = { width: 260, height: 32 }
 let dismissedFor: HTMLInputElement | null = null
@@ -91,14 +93,7 @@ const byHand = new WeakSet<Node>()
 const formOf = (el: HTMLInputElement): Node => el.form ?? el.closest("form") ?? el.getRootNode()
 /** Whether the pointer is near the save offer, as last told to its frame (it pauses the offer's bar). */
 let near = false
-/** Where the save offer goes: the least intrusive of a few spots, chosen as it opens. */
-type Place = "top-right" | "top-centre" | "bottom-right"
-let place: Place = "top-right"
-/** For the top-centre spot: the bottom of the page's own header band. */
-let headerLine = 0
-/** The offer's place when it folded into its pill, which stays at the offer's corner. */
-let offerRect: Rect | null = null
-const SAVE_HEIGHT_GUESS = 128
+
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
 let lastRect = ""
@@ -144,13 +139,9 @@ interface Rect {
 
 /** Where the surface goes in its mode, in the viewport. */
 function targetRect(): Rect | null {
-  if (mode === "save") return (offerRect = placeRect(place, wanted.width || SAVE_WIDTH, wanted.height || SAVE_HEIGHT_GUESS))
-  // The saved pill stays at the offer's top right corner.
-  if (mode === "pill" && !anchor) {
-    const width = Math.min(wanted.width || 180, 320)
-    const at = offerRect ?? placeRect(place, SAVE_WIDTH, SAVE_HEIGHT_GUESS)
-    return { left: Math.max(4, at.left + at.width - width), top: at.top, width, height: 32 }
-  }
+  if (mode === "save") return corner(wanted.width || SAVE_GUESS.width, wanted.height || SAVE_GUESS.height)
+  // The saved pill stays in the same corner.
+  if (mode === "pill" && !anchor) return corner(Math.min(wanted.width || 180, 320), 32)
   if (!anchor) return null
   const r = anchor.getBoundingClientRect()
   if (mode === "pill") {
@@ -169,64 +160,12 @@ function targetRect(): Rect | null {
   return { left, top, width, height: menuHeight }
 }
 
-/** One of the save offer's spots, for a surface `width` × `height`. */
-function placeRect(p: Place, width: number, height: number): Rect {
-  const right = Math.max(4, innerWidth - width - SAVE_INSET)
-  if (p === "top-centre") return { left: Math.max(4, (innerWidth - width) / 2), top: headerLine + SAVE_INSET, width, height }
-  if (p === "bottom-right") return { left: right, top: Math.max(4, innerHeight - height - SAVE_INSET), width, height }
-  return { left: right, top: SAVE_INSET, width, height }
-}
-
-const INTERACTIVE = 'a[href], button, input, select, textarea, summary, [role=button], [role=link], [role=menuitem], [contenteditable=""], [contenteditable=true], [tabindex]:not([tabindex="-1"])'
-
-/** The bottom of a header band across the top of the page (fixed, sticky or not), if there is one. */
-function pageHeaderBottom(): number {
-  let bottom = 0
-  for (const x of [innerWidth * 0.25, innerWidth * 0.5, innerWidth * 0.75]) {
-    let el: Element | null = document.elementFromPoint(x, 2)
-    for (let depth = 0; el && el !== document.body && el !== document.documentElement && depth < 12; depth++, el = el.parentElement) {
-      const r = el.getBoundingClientRect()
-      if (r.top <= 2 && r.height <= 160 && r.width >= innerWidth * 0.5) bottom = Math.max(bottom, r.bottom)
-    }
-  }
-  return Math.min(bottom, 200)
-}
-
-const pinned = (el: Element | null) => {
-  for (let depth = 0; el && el !== document.documentElement && depth < 12; depth++, el = el.parentElement) {
-    const position = getComputedStyle(el).position
-    if (position === "fixed" || position === "sticky") return true
-  }
-  return false
-}
-
 /**
- * How much of the page a surface at `r` would cover that the user may want:
- * links, buttons, fields and pinned headers under a grid of points across it.
+ * The save offer's place: the top right corner, 12 px in, whatever its size.
+ * It grows from there, down and to the left, as it opens.
  */
-function intrusion(r: Rect): number {
-  let score = 0
-  for (let i = 0; i < 5; i++)
-    for (let j = 0; j < 3; j++) {
-      const x = r.left + ((i + 0.5) * r.width) / 5
-      const y = r.top + ((j + 0.5) * r.height) / 3
-      const el = document.elementsFromPoint(x, y).find((e) => e !== host) ?? null
-      if (!el) continue
-      if (el.closest(INTERACTIVE)) score += 3
-      if (pinned(el)) score += 2
-    }
-  return score
-}
-
-/** The least intrusive spot for the save offer: the top right if it's clear, else whichever covers least. */
-function choosePlace(): Place {
-  headerLine = pageHeaderBottom()
-  const spots: Place[] = ["top-right", "top-centre", "bottom-right"]
-  const scores = spots.map((p) => intrusion(placeRect(p, SAVE_WIDTH, SAVE_HEIGHT_GUESS)))
-  if (scores[0] === 0) return "top-right"
-  let best = 0
-  for (let i = 1; i < spots.length; i++) if (scores[i] < scores[best]) best = i
-  return spots[best]
+function corner(width: number, height: number): Rect {
+  return { left: Math.max(4, innerWidth - width - SAVE_INSET), top: SAVE_INSET, width, height }
 }
 
 /**
@@ -291,13 +230,13 @@ function openMenu(el: HTMLInputElement | null, t: string, rows: number, as: Surf
   document.documentElement.append(host)
   position()
   if (as === "save") {
-    // From the side of its spot: 24 px of travel and a fade.
-    const from = place === "top-centre" ? "translate(0, -24px)" : place === "bottom-right" ? "translate(17px, 17px)" : "translate(17px, -17px)"
+    // From the corner, where the toolbar button is: 24 px of travel and a fade.
+    frame.style.borderRadius = `${SAVE_GUESS.height / 2}px`
     frame.animate(
       reducedMotion()
         ? [{ opacity: 0 }, { opacity: 1 }]
         : [
-            { opacity: 0, transform: from },
+            { opacity: 0, transform: "translate(17px, -17px)" },
             { opacity: 1, transform: "none" },
           ],
       timing(0.4),
@@ -407,7 +346,6 @@ export function closeMenu(refocus = false, dismissed = false) {
   closing = false
   lastTarget = null
   written = null
-  offerRect = null
   near = false
   for (const t of saveTimers) clearTimeout(t)
   saveTimers = []
@@ -419,7 +357,6 @@ export function closeMenu(refocus = false, dismissed = false) {
 export function openSaveSurface(t: string) {
   if (!isTop || document.hidden) return false
   closeMenu()
-  place = choosePlace()
   openMenu(null, t, 0, "save")
   // A frame that never says its size never loaded the offer (it expired, or
   // the page got in the way): it doesn't stay. Nor does any offer for long,
@@ -521,9 +458,20 @@ function onInput(event: Event) {
   leave()
 }
 
-/** The pointer coming near the save offer pauses its bar, as being on it does. */
+/** When the offer was last told the pointer is in the page, not over it. */
+let awaySaidAt = 0
+
+/**
+ * The pointer moving in the page: it isn't over the offer (the page gets no
+ * events over the frame), which the offer needs to know to close again (see
+ * menu.ts). Coming near pauses its bar, as being on it does.
+ */
 function onPointerMove(event: PointerEvent) {
   if (!host || mode !== "save" || !lastTarget || !event.isTrusted) return
+  if (event.timeStamp - awaySaidAt > 120) {
+    awaySaidAt = event.timeStamp
+    port?.postMessage({ type: "db:away" })
+  }
   const r = lastTarget
   const dx = Math.max(r.left - event.clientX, 0, event.clientX - (r.left + r.width))
   const dy = Math.max(r.top - event.clientY, 0, event.clientY - (r.top + r.height))
@@ -545,8 +493,12 @@ function onPointerDown(event: PointerEvent) {
   }
   if (!host) return
   // A click in the page while the offer shows: the user is getting on with
-  // it. The offer tucks away (as it does when its time runs out) and waits in the toolbar.
-  if (mode === "save") return leave(true)
+  // it. The offer shrinks to a dot in the corner (as when its time runs
+  // out), still there to reopen for a while.
+  if (mode === "save") {
+    port?.postMessage({ type: "db:away" })
+    return port ? void port.postMessage({ type: "db:tuck" }) : leave(true)
+  }
   const path = event.composedPath()
   if (path.includes(host) || path.includes(anchor as EventTarget)) return
   if (mode === "pill") return leave()
@@ -628,12 +580,28 @@ export function stepped(): boolean {
   return lastFilled.every((el) => !el.isConnected || !now.some((t) => t.el === el))
 }
 
+/** Springs the frame's corners to `radius`, from wherever they are now. */
+function roundTo(radius: number) {
+  const f = frame
+  if (!f) return
+  const anim = f.animate([{ borderRadius: getComputedStyle(f).borderRadius }, { borderRadius: `${radius}px` }], { ...timing(0.37), fill: "forwards" })
+  anim.finished.then(
+    () => {
+      f.style.borderRadius = `${radius}px`
+      anim.cancel()
+    },
+    () => {},
+  )
+}
+
 /** Whether the user typed in the menu's field since it opened. */
 let typedSinceOpen = false
 
 /** The frame, over the private channel: its pill or offer is done, or how many rows match what was typed. */
-function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown }>) {
+function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown }>) {
   if (e.data?.type === "db:surface-done") return leave(e.data.travel === true)
+  // The offer changing shape (pill, card, dot): its corners follow its frame's size.
+  if (e.data?.type === "db:radius" && mode === "save" && frame && typeof e.data.radius === "number") return roundTo(Math.min(Math.max(e.data.radius, 0), 20))
   if (e.data?.type !== "db:matches" || mode !== "accounts" || !anchor || e.data.count !== 0) return
   // Nothing saved matches what the user is typing: they're signing in by
   // hand. Out of the way, here and on the rest of the form.

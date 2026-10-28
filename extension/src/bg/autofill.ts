@@ -424,11 +424,12 @@ export class Autofill {
 
 /**
  * What a surface frame asked for, within bounds: a height of 28 to 400 px,
- * a width of 100 to 420, and the one mode a surface may fold into (a pill).
+ * a width of 28 (the save offer's dot) to 420, and the one mode a surface
+ * may fold into (a pill).
  */
 export function resizeMessage(token: string, height: number, width?: unknown, mode?: unknown): ToContent {
   const h = Number.isFinite(height) ? Math.min(Math.max(height, 28), 400) : 40
-  const w = typeof width === "number" && Number.isFinite(width) ? Math.min(Math.max(width, 100), 420) : undefined
+  const w = typeof width === "number" && Number.isFinite(width) ? Math.min(Math.max(width, 28), 420) : undefined
   return { type: "db:resize-menu", token, height: h, ...(w !== undefined ? { width: w } : {}), ...(mode === "pill" ? { mode: "pill" as const } : {}) }
 }
 

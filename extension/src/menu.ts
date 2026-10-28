@@ -46,6 +46,23 @@ const COVERED = "This menu is covered. Nothing was filled."
 const OFFER_STAYS_MS = 12_000
 /** After a save that failed once the offer's time was up, it stays this much longer. */
 const OFFER_REARM_MS = 6000
+/** The dot the offer shrinks to stays this long before leaving the offer to the toolbar. */
+const DOT_STAYS_MS = 20_000
+/** Reopened from the dot, the pill stays this long. */
+const OFFER_REOPENED_MS = 8000
+/** The offer's compact pill is this tall; its dot this wide. */
+const ROW = 36
+const DOT = 28
+/** The pointer resting on the pill this long opens it. */
+const OPEN_AFTER_MS = 350
+/** Leaving the open offer closes it after this grace. */
+const COLLAPSE_GRACE_MS = 300
+/** Reopened from the dot under the pointer, it waits this long before opening further. */
+const REOPEN_SETTLES_MS = 500
+/** Pointer events this soon after the frame changed size may be the browser replaying an old position. */
+const REPLAY_MS = 150
+/** The pill and the dot cross-fade over this long (menu.css). */
+const CROSSFADE_MS = 260
 /** How long a pill says how it went before it goes. */
 const FILLED_STAYS_MS = 900
 const FAILED_STAYS_MS = 1800
@@ -77,10 +94,11 @@ let reported = ""
 /** Tells the parent the size this mode needs, whenever it changes. */
 function report(grow = 0) {
   if (!token) return
-  const height = Math.ceil(mode === "pill" ? 32 : surface.getBoundingClientRect().height)
+  const height = Math.ceil(mode === "pill" ? 32 : mode === "save" ? offerSize().height : surface.getBoundingClientRect().height)
   const pill = document.querySelector<HTMLElement>(".pill")
   // The pill hugs its content: it is the whole pill, padding included.
-  const width = mode === "pill" && pill ? Math.ceil(pill.getBoundingClientRect().width + grow) : mode === "save" ? 320 : undefined
+  const offer = mode === "save" ? offerSize() : null
+  const width = mode === "pill" && pill ? Math.ceil(pill.getBoundingClientRect().width + grow) : offer ? offer.width : undefined
   const key = `${mode}:${height}:${width}`
   if (key === reported) return
   reported = key
@@ -544,14 +562,30 @@ function show(reply: MenuLoadReply) {
 // ---- The save offer --------------------------------------------------------------
 
 /**
- * "Save login?" after a confirmed sign-in, at the top right of the page. It
- * shows the site and username only; the password stays in the background.
- * A bar empties over twelve seconds (paused while the pointer or focus is
- * on it), then the surface leaves and the offer waits in the toolbar.
+ * The save offer's shape: a small pill in the corner ("compact"), opened on
+ * approach to show who and the other choices ("open"), or just Deadbolt's
+ * mark ("dot") once it's not wanted for now.
+ */
+type OfferState = "compact" | "open" | "dot"
+let offerState: OfferState = "compact"
+/** Re-measures the offer and tells the parent its size (see report). */
+let offerSize: () => { width: number; height: number } = () => ({ width: 0, height: 0 })
+
+/**
+ * "Save login?" after a confirmed sign-in, in the top right corner of the
+ * page. It shows the username and site only; the password stays in the
+ * background.
+ *
+ * The whole card is laid out once, at its open size, anchored to the top
+ * right corner; the frame shows only as much of it as the shape needs, so
+ * opening and closing are the frame's clip and radius moving, with nothing
+ * inside reflowing. The parent moving the frame restarts the dwell, so a
+ * button that just came into view takes no press until it has sat still.
  */
 function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   mode = "save"
   document.body.classList.add("save")
+  document.body.dataset.offer = offerState
   const status = h("p", { class: "offer-status", role: "status" })
   const saveLabel = h("span", { class: "roll-label" }, "Save")
   saveLabel.dataset.text = "Save"
@@ -559,45 +593,140 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   const later = h("button", { class: "btn", type: "button" }, "Not now")
   const never = h("button", { class: "link never", type: "button" }, "Never for this site")
   const bar = h("span", { class: "bar", "aria-hidden": "true" })
+  const mark = h("span", { class: "offer-mark", "aria-hidden": "true" }, svg(ICONS.deadbolt))
+  const row = h("div", { class: "offer-row" }, mark, h("h1", { class: "offer-title" }, offer.update ? "Update password?" : "Save login?"), save)
+  const section = h(
+    "section",
+    { class: "offer", "aria-label": offer.update ? "Update password" : "Save login" },
+    row,
+    h(
+      "div",
+      { class: "offer-more" },
+      h("p", { class: "offer-user" }, h("span", { class: "value" }, offer.username), h("span", { class: "site" }, ` · ${offer.site}`)),
+      status,
+      h("div", { class: "offer-actions" }, never, later),
+    ),
+    bar,
+  )
+  const dot = h("button", { class: "dot", type: "button", "aria-label": offer.update ? "Update password?" : "Save login?" }, svg(ICONS.deadbolt))
+  surface.replaceChildren(section, dot)
+
+  // The compact pill: the top row, from the mark (with the row's padding) to the corner.
+  const compactWidth = () => Math.ceil(section.getBoundingClientRect().right - mark.getBoundingClientRect().left + 12)
+  offerSize = () => {
+    if (offerState === "dot") return { width: DOT, height: DOT }
+    const box = section.getBoundingClientRect()
+    if (offerState === "open") return { width: Math.ceil(box.width), height: Math.ceil(box.height) }
+    return { width: compactWidth(), height: ROW }
+  }
+  // The bar runs along the compact pill's bottom edge.
+  bar.style.width = `${compactWidth()}px`
+
+  // ---- Shape ----
+  let grace: ReturnType<typeof setTimeout> | undefined
+  let reopenedAt = -Infinity
+  const shape = (next: OfferState) => {
+    clearTimeout(grace)
+    if (next === offerState || mode !== "save") return
+    const fromDot = offerState === "dot"
+    offerState = next
+    document.body.dataset.offer = next
+    if (fromDot) reopenedAt = performance.now()
+    port?.postMessage({ type: "db:radius", radius: next === "open" ? 14 : next === "dot" ? DOT / 2 : ROW / 2 })
+    // The pill and the dot cross-fade (inside the frame): the dwell counts
+    // from when that's over, as after a move.
+    if (fromDot || next === "dot") {
+      dwell.moved(performance.now())
+      setTimeout(() => dwell.moved(performance.now()), CROSSFADE_MS)
+    }
+    report()
+  }
+  // Where the pointer is, by real movement only. The browser's own idea
+  // (:hover) goes stale once the pointer leaves for the page, and after the
+  // frame changes size it replays the last position here as if the pointer
+  // had moved; the content script says when the pointer is in the page
+  // (db:away), and only movement after that counts.
+  const pointer = { inside: false }
+  const real = (e: PointerEvent) => e.isTrusted && (!pointerAway || e.movementX !== 0 || e.movementY !== 0 || e.timeStamp - resizedAt > REPLAY_MS)
+  const wanted = () => pointer.inside || section.matches(":focus-within")
+  // Approach opens it; leaving closes it again after a moment's grace.
+  // Opening waits a moment under the pointer: a quick Save from the pill
+  // goes ahead without the card opening (which, being a move, would make
+  // the press wait out the dwell again).
+  let opening: ReturnType<typeof setTimeout> | undefined
+  const approach = (e: PointerEvent) => {
+    if (!real(e)) return
+    pointerAway = false
+    pointer.inside = true
+    if (offerState === "dot") return shape("compact")
+    // Just reopened from the dot under the pointer: stay compact until the pointer moves on it.
+    if (offerState !== "compact" || opening !== undefined || performance.now() - reopenedAt < REOPEN_SETTLES_MS) return
+    opening = setTimeout(() => {
+      opening = undefined
+      if (pointer.inside && offerState === "compact" && !busy && !document.body.classList.contains("held")) shape("open")
+    }, OPEN_AFTER_MS)
+  }
+  const depart = () => {
+    pointer.inside = false
+    clearTimeout(opening)
+    opening = undefined
+    clearTimeout(grace)
+    grace = setTimeout(() => offerState === "open" && !wanted() && !busy && shape("compact"), COLLAPSE_GRACE_MS)
+  }
+  section.addEventListener("pointerenter", approach)
+  section.addEventListener("pointermove", approach)
+  section.addEventListener("pointerleave", depart)
+  // Keyboard focus opens it; the focus a click gives a button doesn't (that
+  // would move the frame under the press, and the press would be refused).
+  section.addEventListener("focusin", (e) => offerState !== "dot" && e.target instanceof Element && e.target.matches(":focus-visible") && shape("open"))
+  section.addEventListener("focusout", () => !pointer.inside && depart())
+  dot.addEventListener("pointerenter", approach)
+  dot.addEventListener("pointermove", approach)
+  dot.addEventListener("pointerleave", () => (pointer.inside = false))
+  dot.addEventListener("click", (e) => e.isTrusted && shape("compact"))
+  dot.addEventListener("focus", () => shape("compact"))
+  away = () => {
+    pointerAway = true
+    if (pointer.inside || offerState === "open") depart()
+  }
+
+  // ---- Time ----
+  // The pill's bar empties over twelve seconds, then it shrinks to the dot,
+  // which stays twenty more before leaving the offer to the toolbar. Stepped
+  // frame by frame, never animated (see menu.css), and paused while the offer
+  // is open, under the pointer or focus, approached, or a press is checked.
   let barEnded = false
-  const time = { total: OFFER_STAYS_MS, left: OFFER_STAYS_MS, last: performance.now() }
-  // Emptied frame by frame, never as an animation (see menu.css), and paused
-  // while the offer has the pointer or focus, the pointer is near, or a press is checked.
+  const time = { total: OFFER_STAYS_MS, left: OFFER_STAYS_MS, last: performance.now(), shape: offerState }
   const tick = (now: number) => {
-    const section = bar.parentElement
-    if (!section?.isConnected || mode !== "save") return
-    const paused = section.matches(":hover, :focus-within") || document.body.matches(".near, .held, .busy")
+    if (!section.isConnected || mode !== "save") return
+    if (time.shape !== offerState) {
+      // The dot has its own time, and so does the pill reopened from it;
+      // opening and closing the pill keeps the time it had.
+      const from = time.shape
+      time.shape = offerState
+      if (offerState === "dot") Object.assign(time, { total: DOT_STAYS_MS, left: DOT_STAYS_MS })
+      else if (from === "dot") Object.assign(time, { total: OFFER_REOPENED_MS, left: OFFER_REOPENED_MS })
+    }
+    const paused = offerState === "open" || wanted() || dot.matches(":focus") || document.body.matches(".near, .held, .busy")
     if (!paused) time.left = Math.max(0, time.left - (now - time.last))
     time.last = now
-    bar.style.transform = `scaleX(${time.left / time.total})`
+    if (offerState !== "dot") bar.style.transform = `scaleX(${time.left / time.total})`
     if (time.left > 0) return void requestAnimationFrame(tick)
+    if (offerState === "dot") return leaveLikeSave()
     barEnded = true
-    if (!busy) leaveLikeSave()
+    if (!busy) shape("dot")
+    requestAnimationFrame(tick)
   }
   requestAnimationFrame(tick)
-  /** Runs the bar again for a while, after a save that failed once its time was up. */
+  /** After a save that failed once the time was up: the pill stays a while longer. */
   const rearm = () => {
     if (!barEnded) return
     barEnded = false
-    Object.assign(time, { total: OFFER_REARM_MS, left: OFFER_REARM_MS, last: performance.now() })
-    requestAnimationFrame(tick)
+    Object.assign(time, { total: OFFER_REARM_MS, left: OFFER_REARM_MS, last: performance.now(), shape: offerState })
   }
-  surface.replaceChildren(
-    h(
-      "section",
-      { class: "offer", "aria-label": offer.update ? "Update password" : "Save login" },
-      h(
-        "div",
-        { class: "offer-head" },
-        h("span", { class: "offer-mark", "aria-hidden": "true" }, svg(ICONS.deadbolt)),
-        h("h1", { class: "offer-title" }, offer.update ? "Update password?" : `Save login for ${offer.site}?`),
-      ),
-      h("p", { class: "offer-user" }, h("span", { class: "value" }, offer.username), offer.update ? h("span", { class: "site" }, ` · ${offer.site}`) : null),
-      status,
-      h("div", { class: "offer-actions" }, never, later, save),
-      bar,
-    ),
-  )
+  // A click elsewhere in the page (the content script says so): the dot.
+  tuck = () => !busy && shape("dot")
+
   const say = (text: string) => {
     status.hidden = !text
     if (text) rollLabel(status, text)
@@ -605,9 +734,10 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   say("")
   const answer = async (choice: OfferChoice, e: MouseEvent) => {
     // Real presses only; Enter or Space only once the user came into the surface themselves.
-    if (!e.isTrusted || busy || (e.detail === 0 && !entry.entered)) return
+    if (!e.isTrusted || busy || offerState === "dot" || (e.detail === 0 && !entry.entered)) return
     if (!dwell.settled(pressedAt)) {
       relax()
+      shape("open")
       return say(dwell.visible ? "Press again in a moment." : "This offer is covered. Nothing was saved.")
     }
     busy = true
@@ -615,6 +745,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     if (!(await confirmPick(dwell, pressedAt))) {
       busy = false
       relax()
+      shape("open")
       return say("This offer is covered. Nothing was saved.")
     }
     document.body.classList.remove("held")
@@ -628,7 +759,6 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     if (choice !== "save") return leaveLikeSave()
     if (reply?.ok) {
       await new Promise((r) => setTimeout(r, Math.max(0, SAVING_READS_MS - (performance.now() - shownAt))))
-      const mark = document.querySelector<HTMLElement>(".offer-mark") ?? h("span", { class: "offer-mark", "aria-hidden": "true" }, svg(ICONS.deadbolt))
       const label = fold(saveLabel, "Saving…", true, mark)
       // Once the pill has its place, its label rolls on to the result: "Saved"
       // for a new login and an update alike, so the pill is the same either way.
@@ -638,13 +768,14 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
       }, 380)
     }
     if (!reply || ("gone" in reply && reply.gone)) return leaveLikeSave()
-    // Locked or busy: say so in place, and let Save be pressed again, for a while.
+    // Locked or busy: open, say so in place, and let Save be pressed again, for a while.
     busy = false
     relax()
     document.body.classList.remove("busy")
     rollLabel(saveLabel, "Save")
+    shape("open")
     say(reply.message)
-    if (barEnded) rearm()
+    rearm()
   }
   // The press shows at once; what it does waits for the checks.
   for (const b of [save, later, never]) b.addEventListener("pointerdown", (e) => e.isTrusted && e.button === 0 && !busy && press(b))
@@ -653,6 +784,16 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   never.addEventListener("click", (e) => void answer("never", e))
   report()
 }
+
+/** The offer's answer to a click elsewhere in the page, once it's showing. */
+let tuck = () => {}
+/** The offer's answer to the pointer moving in the page (see db:away). */
+let away = () => {}
+/** Whether the pointer was last seen in the page, not here (see showOffer). */
+let pointerAway = true
+/** When the frame last changed size: the browser replays the last pointer position just after. */
+let resizedAt = -Infinity
+addEventListener("resize", (e) => (resizedAt = e.timeStamp))
 
 // ---- The token ---------------------------------------------------------------------
 
@@ -683,6 +824,8 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
       else if (data?.type === "db:filter" && typeof data.query === "string") narrow(data.query)
       // The pointer near the offer pauses its bar, as being on it does.
       else if (data?.type === "db:near") document.body.classList.toggle("near", data.near === true)
+      else if (data?.type === "db:tuck") tuck()
+      else if (data?.type === "db:away") away()
     }
   }
   // Keep the frame exactly as big as the content (fonts load late and change

@@ -122,7 +122,7 @@ not running without sending hello, which would start the agent again.
   grows from the field; a pick folds it into a pill at the end of the field
   that says "Filling…", then "Filled" once the content script says it wrote
   something (or "Couldn't fill"), and goes by itself; after a confirmed
-  sign-in it shows the save offer at the top right (see Saving). The frame
+  sign-in it shows the save offer in the top right corner (see Saving). The frame
   says what size each mode needs and the content script springs the frame
   there, so no transparent part of it is left over the page. Motion follows
   springs with no bounce, retargets from where it is, and is a short fade
@@ -243,29 +243,37 @@ not running without sending hello, which would start the agent again.
   the offer. After a confirmed sign-in, at most once per site every ten
   minutes (see the threat model), the offer also shows in the page: the
   service worker hands the settled document's content script a one-time
-  token, and it opens the surface where it's least in the way: the top
-  right, near the toolbar button, if nothing the user may want is there;
-  otherwise whichever of the top right, the top centre below the page's own
-  header, and the bottom right covers fewest links, buttons, fields and
-  pinned headers (sampled across each spot). It comes in from the side of
-  its spot. The surface frame gets the site, the username and whether it's
-  an update, never the password. It asks "Save login for <site>?" or
-  "Update password?" with Save, Not now and Never for this site, under a bar
-  that empties over twelve seconds (paused while the pointer or focus is on
-  it, or the pointer comes near). A click anywhere else in the page tucks it
-  away early, as when its time runs out.
+  token, and it opens the surface in the top right corner, 12 px in, near
+  the toolbar button: out of the way, over the corner of the site's own
+  header if that's where it falls. It comes in from the corner as a small
+  pill: Deadbolt's mark, "Save login?" (or "Update password?") and Save.
+  The surface frame gets the site, the username and whether it's an update,
+  never the password. When the pointer comes onto it or it gets keyboard
+  focus, it opens down and to the left from the corner to show the username
+  and site, Not now and Never for this site, and it closes again 300 ms
+  after the pointer leaves. The card is laid out once at its open size and
+  anchored to the corner, so only the frame's clip and corners move. A 2 px
+  bar along the pill's bottom edge empties over twelve seconds (paused while
+  it's open, under the pointer or focus, or the pointer comes near). When
+  it runs out, or the user clicks anywhere else in the page, the pill
+  shrinks to a dot: Deadbolt's mark with a small red badge, in the same
+  corner. Hovering or clicking the dot brings the pill back for eight more
+  seconds; otherwise the dot leaves toward the toolbar after twenty, and the
+  offer waits in the toolbar.
   Save rolls to "Saving…", folds into a "Saved" pill (the same for a new
-  login and an update) and leaves toward the toolbar button; a locked or
-  busy Deadbolt says so in place, and a save that fails after the bar ran
-  out gets six more seconds. Not now, Never for this site and the time
-  running out leave the same way, toward the toolbar button; Not now and the
-  time running out only put the surface away, and the offer stays in the
-  toolbar. Its buttons take only real presses that pass the menu's
-  visibility and dwell checks. The surface closes when the page navigates,
+  login and an update) in the same corner and leaves toward the toolbar
+  button; a locked or busy Deadbolt opens the card and says so there, and a
+  save that fails after the time ran out gets six more seconds. Not now and
+  Never for this site leave the same way, toward the toolbar button; Not now
+  only puts the surface away, and the offer stays in the toolbar. Every
+  button, in the pill and in the open card, takes only real presses that
+  pass the menu's visibility and dwell checks, and the frame changing shape
+  restarts the dwell like any move, so a button that just came into view
+  takes no press until it has sat still. The surface closes when the page navigates,
   when Deadbolt locks, and when the offer expires or is answered in the
   popup (if the offer went while the page was still opening it, a close
   follows the open). The content script closes it too if its frame hasn't
-  loaded the offer within three seconds, and after thirty seconds in any
+  loaded the offer within three seconds, and after a minute in any
   case. Where the page can't take it (a hidden tab, say), the popup
   opens by itself instead. A likely sign-in only badges. The popup asks
   "Save login for <site>?" or "Update password for <username>?" with Save,
@@ -520,13 +528,13 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
     (which any menu already shows). Not which: a new login and an update
     have the same size, and both fold into the same "Saved" pill.
   - That the user pressed Save: the surface folds into the pill before it
-    leaves. Not now, Never for this site and the time running out all leave
-    the same way, so they look alike.
-  - That Deadbolt is locked or busy, if a save fails: the status line makes
-    the surface taller.
+    leaves. Not now and Never for this site leave the same way, so they
+    look alike.
+  - That the user came near it or focused it (it opens), and that they
+    clicked elsewhere or let it be (it shrinks to the dot).
+  - That Deadbolt is locked or busy, if a save fails: the card opens and its
+    status line makes it taller.
   - Roughly how long the user took, from when the surface leaves.
-  - Where it went: the page can read its own layout, so it knows which spot
-    the surface picks.
 
   Every check that finishes uses up the site's (registrable domain's) ten-minute turn, across
   tabs, whatever it said: `same`, `new`, `update`, or `rate_limited`. The

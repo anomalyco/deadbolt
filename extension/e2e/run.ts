@@ -788,6 +788,9 @@ const saveSurface = (page: Page, what = "the save offer shows in the page", time
     return f && (await f.locator(".offer").count().catch(() => 0)) > 0 ? f : null
   }, timeout)
 
+/** Where a surface's frame is on the page. */
+const frameBox = async (f: Frame) => (await (await f.frameElement()).boundingBox()) ?? { x: 0, y: 0, width: 0, height: 0 }
+
 /** A new turn for the site, so the next confirmed sign-in may show its offer again. */
 const newTurn = (run: Run) => run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
 
@@ -800,12 +803,16 @@ async function savedInPage(scheme: Scheme) {
     await signIn(run, page, "/outcome/login?to=/auth/complete", "surface@acme.test", "surface password")
     let surface = await saveSurface(page)
     if (!surface) return void (await diagnose(run, page, "surface"))
-    check(((await surface.locator(".offer-title").textContent()) ?? "") === "Save login for localhost?", "the surface asks to save")
-    check(((await surface.locator(".offer-user").textContent()) ?? "") === "surface@acme.test", "with the username under it")
+    check(((await surface.locator(".offer-title").textContent()) ?? "") === "Save login?", "the surface asks to save")
+    check(((await surface.locator(".offer-user").textContent()) ?? "") === "surface@acme.test · localhost", "with the username and site inside")
     await Bun.sleep(500)
-    await shotAround(page, `surface-save-${scheme}`, surface)
+    check((await frameBox(surface)).height <= 40, "it starts as a small pill in the corner")
+    await shotAround(page, `surface-compact-${scheme}`, surface)
+    await surface.locator(".offer-row").hover()
+    check(!!(await until("it opens on approach", async () => (await frameBox(surface!)).height > 60)), "it opens on approach")
     await settled(surface)
-    await surface.locator(".offer-actions .btn.primary").click()
+    await shotAround(page, `surface-expanded-${scheme}`, surface)
+    await surface.locator(".offer-row .btn.primary").click()
     await until("Save in the page saves", async () => (await hostLog(run)).some((r) => r.type === "save" && (r.entry as { username?: string })?.username === "surface@acme.test"))
     check(!!(await until("the surface folds into a Saved pill", async () => (await surface!.locator(".pill.ok").count().catch(() => 0)) > 0)), "the surface folds into a Saved pill")
     await Bun.sleep(300)
@@ -818,8 +825,11 @@ async function savedInPage(scheme: Scheme) {
     await signIn(run, page, "/outcome/login?to=/auth/complete", "later@acme.test", "later password")
     surface = await saveSurface(page)
     if (surface) {
+      await Bun.sleep(500)
+      await surface.locator(".offer-row").hover()
+      await until("it opens on approach", async () => (await frameBox(surface!)).height > 60)
       await settled(surface)
-      await surface.locator(".offer-actions .btn:not(.primary)").click()
+      await surface.locator(".offer-actions .btn").click()
       check(!!(await until("Not now puts the surface away", () => !extensionFrame(page, "menu.html"), 5000)), "Not now puts the surface away")
       check((await badge(run)) === "1", "and the toolbar keeps the offer")
       const { p, title } = await offerIn(run)
@@ -835,8 +845,10 @@ async function savedInPage(scheme: Scheme) {
       check(((await surface.locator(".offer-title").textContent()) ?? "") === "Update password?" && ((await surface.locator(".offer-user").textContent()) ?? "").startsWith("admin"), "a changed password asks to update, for its username")
       await Bun.sleep(500)
       await shotAround(page, `surface-update-${scheme}`, surface)
-      check(!!(await until("the offer leaves when its time runs out", () => !extensionFrame(page, "menu.html"), 16_000)), "the offer leaves the page when its time runs out")
-      check((await badge(run)) === "1", "and waits in the toolbar")
+      check(!!(await until("its time runs out: a dot in the corner", async () => (await frameBox(surface!)).width <= 30, 16_000)), "when its time runs out it shrinks to a dot in the corner")
+      await Bun.sleep(400)
+      await shotAround(page, `surface-dot-${scheme}`, surface)
+      check((await badge(run)) === "1", "and the toolbar keeps the offer")
     }
 
     // A likely sign-in only badges: nothing in the page.
@@ -900,7 +912,7 @@ async function film() {
     await settled(surface)
     await Bun.sleep(600)
     marks.save = { at: (Date.now() - t0) / 1000, clip: { x: 900 - 400, y: 0, width: 400, height: 200 } }
-    await surface.locator(".offer-actions .btn.primary").click()
+    await surface.locator(".offer-row .btn.primary").click()
     await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
     await Bun.sleep(800)
     check(true, "recorded the surface")
@@ -1481,26 +1493,53 @@ async function narrowing() {
   }
 }
 
-/** The save offer keeps clear of the page's own header links, and tucks away on a click in the page. */
-async function placement() {
+/**
+ * The save offer sits in the top right corner as a small pill, even over a
+ * site's own header; it opens on approach and closes after, and a click in
+ * the page shrinks it to a dot that reopens it.
+ */
+async function corner() {
   const run = await launch()
   const page = await run.context.newPage()
   try {
     await signIn(run, page, "/outcome/login?to=/outcome/header", "header@acme.test", "header password")
     const surface = await saveSurface(page)
-    if (!surface) return void (await diagnose(run, page, "placement"))
-    await Bun.sleep(600)
-    const frame = await (await surface.frameElement()).boundingBox()
-    const link = await page.locator("#signout").boundingBox()
-    const overlaps = !!frame && !!link && frame.x < link.x + link.width && link.x < frame.x + frame.width && frame.y < link.y + link.height && link.y < frame.y + frame.height
-    check(!!frame && !overlaps && frame.y >= 56, `the offer keeps clear of a header's links (${JSON.stringify(frame)})`)
-    await shotAround(page, "surface-placed", surface)
+    if (!surface) return void (await diagnose(run, page, "corner"))
+    await Bun.sleep(700)
+    const compact = await frameBox(surface)
+    const view = page.viewportSize() ?? { width: 900, height: 640 }
+    const inCorner = (b: typeof compact) => Math.abs(b.x + b.width - (view.width - 12)) <= 1.5 && Math.abs(b.y - 12) <= 1.5
+    check(inCorner(compact) && compact.height <= 40 && compact.width < 260, `the offer is a small pill in the top right corner (${JSON.stringify(compact)})`)
+    await surface.locator(".offer-row").hover()
+    const open = await until("it opens on approach, down and to the left", async () => {
+      const b = await frameBox(surface)
+      return b.height > 60 && b.width > compact.width ? b : null
+    })
+    check(!!open && inCorner(open), `it opens on approach, from the corner (${JSON.stringify(open)})`)
+    await page.mouse.move(80, 520)
+    check(!!(await until("leaving closes it again", async () => (await frameBox(surface)).height <= 40, 3000)), "moving away closes it again")
     await page.mouse.click(80, 520)
-    check(!!(await until("a click in the page tucks the offer away", () => !extensionFrame(page, "menu.html"), 5000)), "a click in the page tucks the offer away")
+    const dot = await until("a click in the page shrinks it to a dot", async () => {
+      const b = await frameBox(surface)
+      return b.width <= 30 && b.height <= 30 ? b : null
+    }, 3000)
+    check(!!dot && inCorner(dot), `a click in the page shrinks it to a dot in the corner (${JSON.stringify(dot)})`)
     check((await badge(run)) === "1", "and the toolbar keeps it")
+    // Onto the dot, from the page, as a hand would.
+    await page.mouse.move(dot!.x - 40, dot!.y + 40)
+    await page.mouse.move(dot!.x + dot!.width / 2, dot!.y + dot!.height / 2, { steps: 6 })
+    check(!!(await until("hovering the dot brings the pill back", async () => (await frameBox(surface)).width > 100, 3000)), "hovering the dot brings the pill back")
+    // Save straight from the pill, without waiting for it to open.
+    {
+      await Bun.sleep(1200)
+      const b = await surface.locator(".offer-row .btn.primary").boundingBox()
+      await page.mouse.click(b!.x + b!.width / 2, b!.y + b!.height / 2)
+      check(!!(await until("Save from the compact pill saves", async () => (await hostLog(run)).some((r) => r.type === "save"))), "Save straight from the compact pill saves")
+      await until("the saved pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    }
   } catch (err) {
-    check(false, `placement threw: ${(err as Error).message.split("\n")[0]}`)
-    await diagnose(run, page, "placement")
+    check(false, `corner threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "corner")
   } finally {
     await close(run)
   }
@@ -1986,7 +2025,7 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
 }
 
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, narrowing, placement, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
+const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, narrowing, corner, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
