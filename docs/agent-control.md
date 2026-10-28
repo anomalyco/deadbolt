@@ -80,11 +80,16 @@ The agent reads the socket's peer, not anything the caller says:
 
 - **The process:** macOS gives the peer's audit token (`LOCAL_PEERTOKEN`):
   pid plus pid version, so a reused pid can't pass. Linux gives
-  `SO_PEERCRED`. The workspace forbids `unsafe`, so this comes from a
-  dependency.
+  `SO_PEERCRED`, with no pid version: the process's start time (clock
+  ticks, from `/proc`) stands in. The workspace forbids `unsafe`, so this
+  comes from a dependency (`nix`, in `deadbolt-client`'s `peer` module,
+  shared by the agent, the CLI and the app).
 - **Its code signature:** checked against the audit token
   (`SecCodeCopyGuestWithAttributes`) in the hash-pinned Swift helper that
-  already does Touch ID (`docs/touch-id.md`).
+  already does Touch ID (`docs/touch-id.md`), as `deadbolt-enclave
+  identify`. It reads the process's facts by pid, then confirms the token
+  still names that process, so a reused pid can't lend its facts. A team ID
+  counts only when the signature chains to Apple for that team.
 - **Its terminal:** the controlling tty and when its session started.
 - **Its ancestry:** parents up to launchd, for the label ("OpenCode › zsh",
   "Ghostty › zsh").
@@ -93,13 +98,26 @@ The agent reads the socket's peer, not anything the caller says:
 
 That sorts every connection into one of three:
 
-- **Deadbolt.app:** signed by the same identity as the agent's own bundle
-  (the team ID for Developer ID builds; for ad-hoc builds, the cdhash of the
-  `MacOS/Deadbolt` beside the agent's own helper). Everything, as today.
+- **Deadbolt.app:** for a Developer ID build, code signed by the team
+  compiled into the agent (`DEADBOLT_APPLE_TEAM_ID`, or the team in
+  `DEADBOLT_APPLE_SIGNING_IDENTITY`, at build time) as `pw.deadbolt.app`.
+  For an ad-hoc build, the process must run the `MacOS/Deadbolt` of the
+  agent's own bundle, by real path, and match that file's cdhash, since two
+  ad-hoc builds with one identifier aren't the same code. A copy of the app
+  run from anywhere else, byte for byte, is a caller. A debug build's app is
+  also the `deadbolt-app` beside the agent's binary. Everything, as today.
+  - **Ad-hoc is only as strong as the bundle's directory.** Something that
+    can write into `Deadbolt.app` can swap `MacOS/Deadbolt` and be the app.
+    Developer ID builds close this: the team and identifier come from
+    Apple's chain, not from a path.
 - **The browser host:** the `deadbolt` binary launched by a browser Kit
   paired, speaking for an extension install Kit paired. Site commands only.
   Today any process can run `deadbolt browser-host chrome-extension://…`,
   name any origin and get that site's password; this closes it.
+  - **Until pairing lands** (build order 3), the agent calls a peer the
+    browser host when it runs the agent's own code with `browser-host`
+    arguments. Arguments are read by pid and a process can rewrite its own,
+    so that label is for Activity only and never grants anything.
   - **Why not a vendor list or the extension id:** the id's manifest key is
     public (`extension/manifest-key.txt`), so anyone can load an unpacked
     copy with the same id into a real, vendor-signed browser (a throwaway
@@ -127,9 +145,13 @@ That sorts every connection into one of three:
   of its tree. So ancestry labels prompts and refuses the Never tier to AIs
   outright, and never grants anything.
 
-Linux has no code signatures to check, so the app and the browser are
-recognised by executable path. That's weaker, and the Activity list says
-which check was used.
+**Linux is labels only.** There are no code signatures, and `/proc/<pid>/exe`
+is read after the connection, so a process can race it. A Linux peer is
+always a caller, its check `unverified`, and its label ends "unverified
+(Linux)" in `whoami`, Activity and the app. Nothing a Linux peer sends is
+taken on its word: the agent refuses every `ActivityReport`, so the app's
+reveals and copies aren't entries there. Its requests for the values it
+shows are, as an unverified caller's.
 
 **What a grant is tied to (its anchor):**
 
@@ -154,10 +176,23 @@ which check was used.
   gate. Anything that would (later: standing grants) lives in `store.redb`
   and changes in the app with a tap. Restarting the agent leaves it locked,
   with no grants.
-- It can't fake the agent: the app and the CLI check that the socket's
-  owner is the bundled `deadbolt`, by the same signature check, before
-  sending a passphrase. A process that stops the agent and binds the socket
-  gets nothing.
+- It can't fake the agent: before sending a passphrase, the app and the CLI
+  check that the socket's owner runs from the exact `deadbolt` they expect
+  (the CLI's own binary, the app's bundled helper), by real path, and is
+  that code: by team and the `deadbolt` identifier for a Developer ID build,
+  by the cdhash of that file for an ad-hoc one. A copy elsewhere is refused.
+  A process that stops the agent and binds the socket gets nothing. The
+  check is `deadbolt_client::set_agent_check`; a client that sets none can't
+  send `setup` or `unlock` at all. The CLI runs its hash-pinned helper; the
+  app runs the `deadbolt-enclave` in its own bundle, which the bundle's
+  signature covers.
+  - Every macOS distribution ships `deadbolt-enclave` beside `deadbolt`
+    (the release tarballs, Homebrew, `deadbolt.pw/install`). Without it,
+    `setup` and `unlock` fail and name the missing file; there is no
+    unchecked fallback.
+  - On Linux the check is only that the socket's owner runs as this user.
+    The socket's 0700 directory keeps other users out; that isn't
+    authentication, and any process of Kit's could stand in for the agent.
 - What it can still do: use what was granted, from inside the anchor,
   until it expires. And an approved command can send the value anywhere.
   That is why the panel shows the command.
@@ -263,6 +298,25 @@ touched, from a helper it hash-checks before running.
     Entries made while locked wait in memory until unlock.
   - The app's Settings › Activity lists them, with live grants and Revoke.
     The CLI has `deadbolt activity`, and `watch` sends an `activity` change.
+  - The app reports its own reveals and copies (`ActivityReport`), which
+    the agent can't see; every copy in the app, the editor's ⌘C included,
+    goes through one function that reports it. The app's own requests, a
+    caller's `status` and `watch`, the browser host's lookups
+    (`site-logins`, `site-check`, `passkey-list`) and `ActivityList` itself
+    aren't entries: they come with every command or page, and a client that
+    reads Activity on every change mustn't feed itself.
+  - An entry is written before its reply goes, so a client that never reads
+    the reply, or the agent stopping, can't lose it.
+  - **Bounded.** Each string in an entry (the claim, labels, paths, titles,
+    field names) keeps at most 256 bytes, marked "…(cut)", and each list 16
+    items. Past 60 entries a minute from one anchor (the tty and its
+    session, else the label and claimed session), the rest fold into one
+    `more-past-limit` entry saying how many. While locked, at most 1,000
+    entries or 1 MiB wait; past that they fold into one `more-while-locked`
+    entry naming who made them. The store keeps at most 100,000 entries or
+    64 MiB; past that the oldest go, and the listing ends with one
+    `more-past-budget` entry counting them. An `ActivityList` returns at
+    most 1,000 entries; older ones page back by id (`before`).
 
 ## Keeping secrets out of transcripts
 
@@ -299,10 +353,29 @@ deadbolt activity --since 1h
 - **`--no-prompt`** fails with `needs-approval` instead of waiting.
 - **Exit codes:** denied exits 4, beside today's 3 for locked.
 
-## Protocol (version 9)
+## Protocol
+
+Version 11 (build order 1):
 
 - `Status.caller: CallerInfo`, for `whoami`.
-- `Command::Resolve { refs, purpose, claimed, prompt }`, where `purpose` is
+- `Request.claimed`: what the client claims (`DEADBOLT_CALLER`,
+  `OPENCODE_SESSION_ID`), on every request.
+- `ActivityList { since, limit, before }`, newest first, at most 1,000 a
+  page, and `Change::Activity`. `ActivityEntry.more` counts the requests a
+  folded entry stands for.
+  Until enforcement, `deadbolt activity` uses it too; build order 3 decides
+  whether the CLI keeps it.
+- `ActivityReport { action, vault, item, title, field }`: the app's
+  reveals and copies. Only from Deadbolt.app, so never on Linux.
+- `deadbolt-enclave identify`: `{"token", "files"}` on stdin, the running
+  code's signature, the process (args, tty, start times, ancestry) and each
+  file's signature out; exit 15 when the token's process is gone.
+- Outcomes so far are `allowed`, `locked` and `failed`; approvals bring the
+  rest.
+
+Later:
+
+- `Command::Resolve { refs, purpose, prompt }`, where `purpose` is
   `Run { argv, cwd, mask }`, `Inject { output }` or `Read`. It may send
   `Event::Waiting { approval, summary }` (the CLI prints "Waiting for
   approval in Deadbolt…"), then replies `Secrets { values }` in reference
@@ -313,12 +386,11 @@ deadbolt activity --since 1h
   fields are Read. `show` without `--reveal` sends `Some([])`, so masked
   display stops receiving values at all.
 - App only: `ApprovalList`, `ApprovalAnswer { id, allow: Option<Scope> }`,
-  `GrantList`, `ActivityList { since, limit }`.
+  `GrantList`, `ActivityList { since, limit, before }`.
 - Anyone: `GrantRevoke { id: Option<String> }`. Narrowing is always safe.
-- `Change::Approvals` and `Change::Activity`.
+- `Change::Approvals`.
 - `ErrorCode::Denied`, `NeedsApproval` and `RateLimited`.
-- `deadbolt-enclave` gains `confirm <reason>` and `identify` (an audit
-  token in, a signature verdict out).
+- `deadbolt-enclave` gains `confirm <reason>`.
 
 ## Build order
 
