@@ -1163,7 +1163,7 @@ fn main_after(scene: &str, steps: serde_json::Value) -> Option<Vec<String>> {
     );
     std::fs::write(&script, steps.to_string()).unwrap();
     std::fs::write(&backdrop, BACKDROP).unwrap();
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_deadbolt-app"))
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_deadbolt-ui"))
         .args(["--window", "main", "--scene", scene, "--at", "0.6"])
         .args(["--size", "1200x800", "--scale", "1", "--desktop"])
         .arg(&backdrop)

@@ -106,7 +106,7 @@ That sorts every connection into one of three:
   agent's own bundle, by real path, and match that file's cdhash, since two
   ad-hoc builds with one identifier aren't the same code. A copy of the app
   run from anywhere else, byte for byte, is a caller. A debug build's app is
-  also the `deadbolt-app` beside the agent's binary. Everything, as today.
+  also the `deadbolt-ui` beside the agent's binary. Everything, as today.
   - **Ad-hoc is only as strong as the bundle's directory.** Something that
     can write into `Deadbolt.app` can swap `MacOS/Deadbolt` and be the app.
     Developer ID builds close this: the team and identifier come from

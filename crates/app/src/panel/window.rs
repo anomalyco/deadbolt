@@ -26,7 +26,7 @@ pub const PLACE: (DisplayTarget, OverlayPlacement) = (
     },
 );
 
-/// `deadbolt-app --panel` starts with the panel instead of the main window.
+/// `deadbolt-ui --panel` starts with the panel instead of the main window.
 pub const FLAG: &str = "--panel";
 
 /// The default shortcut pressed inside Deadbolt: ⇧⌘Space (Ctrl+Shift+Space
