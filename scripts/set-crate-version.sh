@@ -33,8 +33,9 @@ awk -v current="$current" -v version="$version" '
   { print }
 ' "$root/Cargo.toml" > "$root/Cargo.toml.next"
 mv "$root/Cargo.toml.next" "$root/Cargo.toml"
-awk -v current="$current" -v version="$version" -v crates="$crates" '
-  BEGIN { n = split(crates, list, "\n"); for (i = 1; i <= n; i++) ours["name = \"" list[i] "\""] = 1 }
+# The crate list goes through the environment: BSD awk refuses a newline in -v.
+CRATES=$crates awk -v current="$current" -v version="$version" '
+  BEGIN { n = split(ENVIRON["CRATES"], list, "\n"); for (i = 1; i <= n; i++) ours["name = \"" list[i] "\""] = 1 }
   /^\[\[package\]\]/ { package = 0 }
   $0 in ours { package = 1 }
   package && $0 == "version = \"" current "\"" { $0 = "version = \"" version "\""; package = 0 }
