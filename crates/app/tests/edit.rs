@@ -679,6 +679,8 @@ fn show_theirs_reloads_the_form_from_the_other_device() {
     let items = r.rt.state.items.clone();
     r.synced(items, Some(theirs));
     assert!(r.shows("Show theirs"));
+    // The fields make room for the notice first.
+    r.settle(0.4);
     let [x, y, w, h] =
         r.rt.elements()
             .iter()
@@ -1030,7 +1032,7 @@ fn a_passkey_shows_its_site_and_is_only_deleted() {
     assert!(!labelled("Copy created"), "the date doesn't");
     assert!(r.rt.find("edit").is_none(), "no Edit button");
     assert!(
-        r.shows("Copy username") && !r.shows("Copy code"),
+        r.shows("Copy username") && r.rt.find("h-code").is_none(),
         "the hints are a passkey's"
     );
     r.command('e');
@@ -1362,7 +1364,7 @@ fn created(r: &mut Rig) -> (String, Vec<(String, String)>) {
 fn add_offers_a_secure_note_whose_body_keeps_its_lines() {
     let mut r = rig("vault");
     r.command('n');
-    assert!(r.shows("Secure note") && r.shows("SSH key"));
+    assert!(r.shows("Note") && r.shows("SSH key"));
     r.rt.update(|s, _| s.pick_kind("note"));
     r.settle(0.05);
     let form = r.rt.state.edit.form.as_ref().unwrap();
@@ -2001,11 +2003,16 @@ fn a_pasted_public_key_keeps_to_one_line() {
         r.value("public-key").ends_with("ci@anoma.ly!"),
         "the caret stays at the end"
     );
+    focus(&mut r, "fingerprint");
+    r.command('a');
+    r.type_text(&"SHA256:Fx7tQ2mVb9yLr4cWkP0sN8hJd3aZe6uGo1iTq5XwYnE".repeat(2));
+    r.settle(0.05);
     let height = |r: &Rig, key: &str| at(&r.rt, key).unwrap().0[3];
     assert!(
         height(&r, "field-fingerprint") > height(&r, "field-comment") + 10.0,
         "the fingerprint wraps"
     );
+    focus(&mut r, "public-key");
     r.sent();
     r.tap(Key::Enter);
     match r.sent().pop() {
@@ -2085,8 +2092,7 @@ fn a_mirrored_item_warns_on_edit_but_saves() {
 
     let mut r = rig("mirrored");
     let github = r.github();
-    let kind = format!("login · {} · From 1Password", github.short);
-    assert!(r.shows(&kind));
+    assert!(r.shows("Login · From 1Password"));
     r.command('e');
     assert!(r.shows("From 1Password"));
     r.fill("username", "kit");

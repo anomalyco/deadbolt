@@ -7,11 +7,16 @@ pub mod binary;
 pub mod edit;
 pub mod import;
 pub mod install;
+pub mod keys;
 pub mod mirror;
 pub mod model;
 pub mod onboarding;
+pub mod palette;
 pub mod panel;
+pub mod settings;
+pub mod sheet;
 pub mod shortcut;
+pub mod vault;
 pub mod view;
 
 use deadbolt_client::Paths;
@@ -549,14 +554,14 @@ const SCENES: &[Scene] = &[
         s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), vec![other_shortcut()])
             .taken_by("Finder search");
         s.start_shortcut(false);
-        s.settings_open = true;
+        s.open_settings();
     }),
     // Changed to ⌥⌘Space: Settings offers the default back.
     ("settings-changed", |s| {
         vault(s);
         s.hotkey = shortcut::Hotkey::new(Some(other_shortcut()), Vec::new());
         s.start_shortcut(false);
-        s.settings_open = true;
+        s.open_settings();
     }),
     ("shortcut-conflict", |s| {
         vault(s);
@@ -568,7 +573,7 @@ const SCENES: &[Scene] = &[
         vault(s);
         s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), vec![shortcut::default()]);
         s.start_shortcut(false);
-        s.settings_open = true;
+        s.open_settings();
     }),
     // Settings on a Mac with Touch ID enabled.
     ("settings-touch-id", |s| {
@@ -582,7 +587,7 @@ const SCENES: &[Scene] = &[
         s.installer = Some(i);
         s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), Vec::new());
         s.start_shortcut(false);
-        s.settings_open = true;
+        s.open_settings();
     }),
     // github.com mirrored from 1Password, shown, then opened with ⌘E.
     ("mirrored", mirrored),
@@ -593,7 +598,7 @@ const SCENES: &[Scene] = &[
     // Settings after a sync from 1Password, and one 1Password refused.
     ("settings-synced", |s| {
         vault(s);
-        s.settings_open = true;
+        s.open_settings();
         s.sync_one_password();
         let item = |action, title: &str| deadbolt_client::protocol::MirrorItem {
             action,
@@ -617,9 +622,50 @@ const SCENES: &[Scene] = &[
             &mut Tx::default(),
         );
     }),
+    // The card, selected.
+    ("card", |s| {
+        vault(s);
+        s.selected = s
+            .items
+            .iter()
+            .find(|i| i.kind == "card")
+            .map(|i| i.id.clone());
+        detail_for_selection(s);
+    }),
+    // ⇥ moved into github.com's fields, on its password.
+    ("field", |s| {
+        vault(s);
+        s.search.focused = false;
+        s.nav.field = Some(1);
+    }),
+    // ⌘K on github.com.
+    ("actions", |s| {
+        vault(s);
+        s.open_palette();
+    }),
+    // ?: every shortcut.
+    ("sheet", |s| {
+        vault(s);
+        s.nav.sheet = true;
+    }),
+    // ⌘, on a Mac with Touch ID, the keys on its second row.
+    ("settings-page", |s| {
+        vault(s);
+        if let Some(st) = &mut s.status {
+            st.touch_id_available = true;
+            st.touch_id_enabled = true;
+        }
+        let mut i = install::Installer::fixture();
+        i.offered = true;
+        s.installer = Some(i);
+        s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), Vec::new());
+        s.start_shortcut(false);
+        s.open_settings();
+        s.nav.row = 1;
+    }),
     ("settings-sync-failed", |s| {
         vault(s);
-        s.settings_open = true;
+        s.open_settings();
         s.sync_one_password();
         let failure = agent::Failure {
             code: None,

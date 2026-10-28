@@ -185,7 +185,7 @@ fn a_dropped_export_is_previewed_then_imported() {
     assert!(shows(&rt, "Imported 3 from Bitwarden"));
     assert!(!rt.state.import.showing());
     // The note lists by its name, never its body.
-    assert!(shows(&rt, "Wifi") && shows(&rt, "secure note"));
+    assert!(shows(&rt, "Wifi") && shows(&rt, "Secure note"));
     no_secrets(&rt);
     assert_eq!(device.output(&["ls"]).lines().count(), 3);
 }
