@@ -1091,6 +1091,7 @@ fn settings(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
                 .children(touch_id_setting(s, k))
                 .child(crate::shortcut::setting(s, k))
                 .child(crate::mirror::setting(s, k))
+                .child(crate::activity::setting(s, k))
                 .children(crate::install::setting(s, k)),
         )
         .build(k, layer)

@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use deadbolt_client::protocol::{
-    Change, Code, FieldInfo, ItemInfo, Status, code_field, noun, primary_field,
+    AppAction, Change, Code, FieldInfo, ItemInfo, Status, code_field, noun, primary_field,
 };
 use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
@@ -153,6 +153,7 @@ pub struct App {
     pub notice: Option<String>,
     pub import: crate::import::Import,
     pub mirror: crate::mirror::Mirror,
+    pub activity: crate::activity::Activity,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
@@ -205,6 +206,7 @@ impl App {
             notice: None,
             import: crate::import::Import::default(),
             mirror: crate::mirror::Mirror::default(),
+            activity: crate::activity::Activity::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
@@ -407,6 +409,8 @@ impl App {
             Done::Saved { seq, result } => self.on_saved(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
+            Done::Activity { seq, result } => self.on_activity(seq, result, tx),
+            Done::Reported => {}
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
         }
@@ -439,6 +443,7 @@ impl App {
                 self.refresh();
             }
             Change::Devices { .. } => self.agent.send(Job::Status),
+            Change::Activity => self.on_activity_changed(),
             Change::Items { vault } if self.shows(&vault) => self.refresh(),
             Change::Stopping => self.on_agent_gone(tx),
             Change::Locked | Change::Unlocked | Change::Items { .. } => {}
@@ -644,6 +649,7 @@ impl App {
         self.forget_import();
         self.forget_edit();
         self.mirror.forget();
+        self.activity.forget();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -1137,13 +1143,26 @@ impl App {
     /// Copies `value`, the shown item's `field`, and starts its countdown.
     fn put_on_clipboard(&mut self, field: String, value: String, tx: &mut Tx) {
         let Some(item) = &self.detail else { return };
-        let id = item.id.clone();
-        self.copy_value(id, field, value, tx);
+        let saved = (item.id.clone(), item.label.clone());
+        self.copy_value(Some(saved), field, value, tx);
     }
 
-    /// Puts `value` on the clipboard, concealed, to clear after the countdown.
-    /// `item` and `field` mark the item's copy button while it lasts.
-    pub(crate) fn copy_value(&mut self, item: String, field: String, value: String, tx: &mut Tx) {
+    /// Puts `value` on the clipboard, concealed, to clear after the countdown:
+    /// `field` of the saved item `item` (id, title), or of a form not saved
+    /// yet. Every copy of a value goes through here, so a saved item's is
+    /// always reported for Activity. `item` and `field` mark the item's copy
+    /// button while it lasts.
+    pub(crate) fn copy_value(
+        &mut self,
+        item: Option<(String, String)>,
+        field: String,
+        value: String,
+        tx: &mut Tx,
+    ) {
+        if let Some((id, title)) = &item {
+            self.report_item(AppAction::Copy, id, title, &field);
+        }
+        let item = item.map(|(id, _)| id).unwrap_or_default();
         let lasts = Duration::from_secs_f64(self.clear_after);
         let copied = tx.copy_secret(value, lasts);
         self.copy = Some(Copy {
@@ -1246,7 +1265,10 @@ impl App {
             Some(i) => {
                 self.revealed.remove(i);
             }
-            None => self.revealed.push(field.into()),
+            None => {
+                self.report(AppAction::Reveal, field);
+                self.revealed.push(field.into());
+            }
         }
     }
 
@@ -1292,6 +1314,7 @@ impl App {
         self.hotkey.reset_error = None;
         self.touch_id_error = None;
         self.mirror.result = None;
+        self.activity.forget();
     }
 
     /// App-level keys: before the focused field when there is none, after it

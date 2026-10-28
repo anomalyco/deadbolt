@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use deadbolt_app::agent::{Agent, Done, Failure, Job, Values};
 use deadbolt_app::edit::Conflict;
 use deadbolt_app::model::{App, Screen};
-use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo};
+use deadbolt_client::protocol::{AppAction, Change, FieldInfo, ItemInfo};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use zeroize::Zeroizing;
 
@@ -844,6 +844,53 @@ fn copying_from_a_password_field_clears_after_the_countdown() {
         r.settle(1.5);
         assert_eq!(text(), None, "{revealed}: cleared after the countdown");
     }
+}
+
+/// ⌘C in a saved item's password field is a copy of that item's password,
+/// reported for Activity like any other.
+#[test]
+fn copying_from_a_saved_password_field_is_reported() {
+    let mut r = rig("vault");
+    let board = rune::clipboard::memory();
+    r.rt.use_clipboard(&board);
+    r.command('e');
+    let (id, title) = {
+        let item = r.rt.state.detail.as_ref().unwrap();
+        (item.id.clone(), item.label.clone())
+    };
+    r.rt.update(|s, _| {
+        s.search.focused = false;
+        let form = s.edit.form.as_mut().unwrap();
+        form.name.focused = false;
+        let input = form
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "password")
+            .unwrap();
+        input.edit.focused = true;
+    });
+    r.settle(0.05);
+    r.command('a');
+    drop(r.sent());
+    r.command('c');
+    assert!(r.rt.state.copy.is_some(), "copied");
+    let reports: Vec<_> = r
+        .sent()
+        .into_iter()
+        .filter_map(|job| match job {
+            Job::Report {
+                action,
+                item,
+                title,
+                field,
+            } => Some((action, item, title, field)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reports,
+        [(AppAction::Copy, id, title, "password".to_string())]
+    );
 }
 
 /// ⌘N over an unchanged edit opens a new item in its place.

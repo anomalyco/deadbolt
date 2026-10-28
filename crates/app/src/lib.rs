@@ -1,6 +1,7 @@
 //! Deadbolt's desktop app: a thin Rune client of the running agent, over
 //! the same socket protocol as the CLI. See docs/app.md.
 
+pub mod activity;
 pub mod agent;
 pub mod binary;
 pub mod edit;
@@ -798,6 +799,7 @@ fn status(unlocked: bool) -> Status {
         initialized: true,
         unlocked,
         locks_in_secs: None,
+        caller: deadbolt_client::protocol::CallerInfo::unverified("fixture"),
         device: Some(DeviceInfo {
             id: "d1".into(),
             name: Some("studio".into()),
