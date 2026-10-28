@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
-import { scanPage } from "../src/content/detect"
+import { findAccountTile, findProviderButton, scanPage, signInWithText } from "../src/content/detect"
+import { isChooserPage, isProviderPage, provider } from "../src/signin"
 import { pageFacts } from "../src/content/outcome"
 
 function page(html: string, path = "/login", title = "") {
@@ -244,5 +245,63 @@ describe("what the page shows after a sign-in", () => {
   test("a code step", () => {
     const f = facts(`<form><label for="c">Authentication code</label><input id="c" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`, "kit", "/mfa")
     expect(f).toMatchObject({ mfa: true, loginForm: false })
+  })
+})
+
+describe("sign in with a provider", () => {
+  const google = provider("google")
+
+  test("button text that asks to sign in with the provider, and little else", () => {
+    for (const yes of ["Sign in with Google", "Continue with Google", "Log in via Google", "SIGN IN WITH GOOGLE", "Sign up with Google", "Continue with your Google account", "Google – Sign in"])
+      expect([yes, signInWithText(yes, google)]).toEqual([yes, true])
+    for (const no of ["Sign in with Google to sync your calendar", "Share on Google", "Follow us on Google", "Google", "Sign in", "Continue with Apple", "Learn how we use Google to sign you in"])
+      expect([no, signInWithText(no, google)]).toEqual([no, false])
+    expect(signInWithText("Continue with your Apple ID", provider("apple"))).toBe(true)
+    expect(signInWithText("Sign in with X", provider("x"))).toBe(true)
+    expect(signInWithText("Sign in to X Corp's blog with your email", provider("x"))).toBe(false)
+  })
+
+  test("finds the site's button, not a sentence about it or a share button", () => {
+    page(`<p><a href="/about">Sign in with Google to sync your calendar</a></p>
+      <button id="share">Share on Google</button>
+      <div class="social"><button id="go" type="button"><img alt="" src="g.svg"><span>Continue with Google</span></button></div>`, "/login")
+    expect(findProviderButton(google)?.id).toBe("go")
+    page(`<a id="tagged" href="/auth/google" data-provider="google"><img alt="Google"></a>`, "/login")
+    expect(findProviderButton(google)?.id).toBe("tagged")
+    page(`<div id="gis" class="g_id_signin"></div>`, "/login")
+    expect(findProviderButton(google)?.id).toBe("gis")
+    page(`<button>Share on Google</button><a href="/x">Sign in with Google to sync your calendar</a>`, "/login")
+    expect(findProviderButton(google)).toBeNull()
+  })
+
+  test("finds the chooser tile for the account", () => {
+    page(`<ul><li><div role="link" id="a" data-identifier="other@gmail.com">Other<br>other@gmail.com</div></li>
+      <li><div role="link" id="b" data-identifier="Kit@Gmail.com">Kit<br>kit@gmail.com</div></li></ul>`, "/signin")
+    expect(findAccountTile("kit@gmail.com")?.id).toBe("b")
+    // Never by text alone: the page's own text could name anyone.
+    page(`<ul><li id="c"><button id="d">Kit Mercer kit@gmail.com</button></li></ul>`, "/signin")
+    expect(findAccountTile("kit@gmail.com")).toBeNull()
+    expect(findAccountTile("someone@gmail.com")).toBeNull()
+  })
+
+  test("provider pages: its own hosts over https; .test hosts only in an e2e build", () => {
+    expect(isProviderPage(google, "https://accounts.google.com/signin")).toBe(true)
+    expect(isProviderPage(google, "http://accounts.google.com/signin")).toBe(false)
+    expect(isProviderPage(google, "http://accounts.google.test:8080/x")).toBe(false)
+    expect(isProviderPage(google, "https://accounts.google.test/x")).toBe(false)
+    expect(isProviderPage(google, "https://mail.google.com/")).toBe(false)
+    expect(isProviderPage(provider("Acme SSO"), "https://acme.com/")).toBe(false)
+    // Only Google's chooser gets the account; GitHub's pages are its users' too.
+    expect(isChooserPage(google, "https://accounts.google.com/")).toBe(true)
+    expect(isChooserPage(provider("github"), "https://github.com/login")).toBe(false)
+    expect(isProviderPage(provider("github"), "https://github.com/login")).toBe(true)
+    const g = globalThis as { DEADBOLT_E2E?: boolean }
+    g.DEADBOLT_E2E = true
+    try {
+      expect(isProviderPage(google, "http://accounts.google.test:8080/x")).toBe(true)
+      expect(isProviderPage(google, "http://accounts.google.com.evil.test/x")).toBe(false)
+    } finally {
+      delete g.DEADBOLT_E2E
+    }
   })
 })

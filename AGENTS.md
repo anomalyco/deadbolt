@@ -14,7 +14,8 @@ internal APIs directly and update their callers.
 
 ## Commands
 
-`bun run check` runs the extension's typecheck, tests and build, then formatting,
+`bun run check` runs the extension's typecheck, tests and build, the release packing
+test, then formatting,
 Clippy (warnings are errors), workspace tests and `cargo deny check`. Install
 stable Rust with rustfmt/Clippy and cargo-deny first. CI runs the same steps, with
 cargo-deny and the extension in their own jobs and Rust on Linux and macOS.

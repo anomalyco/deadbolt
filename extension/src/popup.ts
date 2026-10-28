@@ -5,6 +5,7 @@
 
 import type { ChooseReply, OfferChoice, PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, SaveOffer, Status, StatusChanged, ToBackground } from "./messages"
 import type { Account } from "./protocol"
+import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, timing } from "./ui/motion"
 
@@ -133,14 +134,18 @@ function accountRow(a: Account, first: boolean): HTMLElement {
     icon("copy"),
   )
   if (!a.username) copy.setAttribute("disabled", "")
-  const sub = [a.username || "No username", a.hasTotp ? "2FA code" : ""].filter(Boolean).join(" · ")
+  // "Sign in with Google · kit@gmail.com" for a login that signs in with another account.
+  const via = a.signIn ? `Sign in with ${provider(a.signIn.provider).name}${a.signIn.account ? ` · ${a.signIn.account}` : ""}` : ""
+  const sub = via && !a.hasPassword ? via : [a.username || "No username", a.hasTotp ? "2FA code" : "", via].filter(Boolean).join(" · ")
+  // One that signs in with another account and has no password has nothing to fill.
+  const fillable = a.hasPassword || !a.signIn
   const row = h(
     "div",
     { class: "account" },
     monogram(a.title),
     h("div", { class: "account-text" }, h("div", { class: "account-title" }, a.title), h("div", { class: "account-sub" }, sub)),
     copy,
-    fill,
+    fillable ? fill : null,
   )
   copy.addEventListener("click", async () => {
     if (!a.username) return

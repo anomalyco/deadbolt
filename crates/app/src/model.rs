@@ -4,7 +4,7 @@
 use std::time::Duration;
 
 use deadbolt_client::protocol::{
-    Change, Code, FieldInfo, ItemInfo, Status, code_field, noun, primary_field,
+    AppAction, Change, Code, FieldInfo, ItemInfo, Status, code_field, noun, primary_field,
 };
 use rune::{Key, KeyEvent, SecretCopy, SecretState, TextEdit, Tx};
 use zeroize::{Zeroize, Zeroizing};
@@ -114,8 +114,10 @@ impl Otp {
 
 pub struct App {
     pub installer: Option<crate::install::Installer>,
-    /// The vault footer's Settings popover is open.
+    /// Settings shows in the item's place (⌘,).
     pub settings_open: bool,
+    /// Where the keys are past the search: a field, ⌘K's actions, the ? sheet.
+    pub nav: crate::keys::Nav,
     /// The quick panel's global shortcut (the main window's).
     pub hotkey: crate::shortcut::Hotkey,
     /// The default shortcut isn't registered globally, so ⇧⌘Space inside
@@ -153,10 +155,13 @@ pub struct App {
     pub notice: Option<String>,
     pub import: crate::import::Import,
     pub mirror: crate::mirror::Mirror,
+    pub activity: crate::activity::Activity,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
     pub sidebar: rune_kit::shell::PaneState,
+    /// Where the list's highlight sits, under the selected row; it slides there.
+    pub highlight: rune::Live<[f32; 2]>,
     /// `--reduced-motion`; otherwise Rune follows the system's setting.
     pub reduced_motion: bool,
     /// Set in the quick panel's `App` only.
@@ -179,6 +184,7 @@ impl App {
         App {
             installer: None,
             settings_open: false,
+            nav: crate::keys::Nav::default(),
             hotkey: crate::shortcut::Hotkey::default(),
             shortcut_fallback: true,
             agent,
@@ -205,10 +211,12 @@ impl App {
             notice: None,
             import: crate::import::Import::default(),
             mirror: crate::mirror::Mirror::default(),
+            activity: crate::activity::Activity::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
             sidebar: rune_kit::shell::PaneState::new(272.0).range(200.0, 312.0),
+            highlight: rune::Live::new([0.0; 2]),
             reduced_motion: false,
             panel: None,
             windows: None,
@@ -407,6 +415,8 @@ impl App {
             Done::Saved { seq, result } => self.on_saved(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
+            Done::Activity { seq, result } => self.on_activity(seq, result, tx),
+            Done::Reported => {}
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
         }
@@ -439,6 +449,7 @@ impl App {
                 self.refresh();
             }
             Change::Devices { .. } => self.agent.send(Job::Status),
+            Change::Activity => self.on_activity_changed(),
             Change::Items { vault } if self.shows(&vault) => self.refresh(),
             Change::Stopping => self.on_agent_gone(tx),
             Change::Locked | Change::Unlocked | Change::Items { .. } => {}
@@ -639,11 +650,13 @@ impl App {
         self.loaded = false;
         self.selected = None;
         self.search = TextEdit::new("");
+        self.nav = crate::keys::Nav::default();
         self.pending_copy = None;
         self.notice = None;
         self.forget_import();
         self.forget_edit();
         self.mirror.forget();
+        self.activity.forget();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -939,6 +952,7 @@ impl App {
             return;
         }
         self.selected = id.clone();
+        self.nav.field = None;
         self.notice = None;
         self.edit.delete = None;
         self.set_detail(None);
@@ -949,7 +963,7 @@ impl App {
         }
     }
 
-    fn step(&mut self, by: isize) {
+    pub(crate) fn step(&mut self, by: isize) {
         let visible = self.visible();
         if visible.is_empty() {
             return;
@@ -969,7 +983,10 @@ impl App {
     /// Keys in the search field (the vault's and the panel's), before its
     /// editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if let Some(handled) = self.overlay_key(ev) {
+        if let Some(handled) = self.nav_key(ev, tx) {
+            return handled;
+        }
+        if let Some(handled) = self.overlay_key(ev, tx) {
             return handled;
         }
         if let Some(handled) = self.import_key(ev) {
@@ -982,52 +999,6 @@ impl App {
             return true;
         }
         self.list_key(ev, tx)
-    }
-
-    /// The vault's keys wherever focus is, after overlays and the import view
-    /// (`on_key`): the list's, and ⌘F and ⌘K to the search.
-    fn vault_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        let chord = |c| ev.is_command(c) && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
-        if chord('f') || chord('k') {
-            self.focus_search();
-            return true;
-        }
-        self.list_key(ev, tx)
-    }
-
-    /// ↑↓ select, ⏎, ⇧⏎ and ⌥⏎ copy, esc clears the search.
-    fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        match ev.key {
-            Key::Up | Key::Down => {
-                // The selection moves under the user's hand: the item replaces at
-                // once, and a hidden list opens to show where it went.
-                tx.instant();
-                self.sidebar.set_open(true);
-                self.step(if ev.key == Key::Up { -1 } else { 1 });
-                if let Some(id) = &self.selected {
-                    tx.scroll_into_view(format!("item-{id}"));
-                }
-            }
-            Key::Enter => {
-                let field = if ev.mods.alt {
-                    "otp"
-                } else if ev.mods.shift {
-                    "username"
-                } else {
-                    self.primary_field()
-                };
-                self.copy_selected(field, tx);
-            }
-            Key::Escape if !self.search.text.is_empty() => {
-                // As typing does, clearing the search replaces the list at once.
-                tx.instant();
-                self.search.clear();
-                self.search_changed();
-            }
-            Key::Escape => {}
-            _ => return false,
-        }
-        true
     }
 
     /// The search changed: the list it filters shows (a hidden sidebar opens,
@@ -1079,7 +1050,7 @@ impl App {
     }
 
     /// What ⏎ copies: the field the item is for (`protocol::primary_field`).
-    fn primary_field(&self) -> &'static str {
+    pub(crate) fn primary_field(&self) -> &'static str {
         self.selected_item()
             .and_then(|i| primary_field(&i.kind))
             .unwrap_or("password")
@@ -1137,13 +1108,26 @@ impl App {
     /// Copies `value`, the shown item's `field`, and starts its countdown.
     fn put_on_clipboard(&mut self, field: String, value: String, tx: &mut Tx) {
         let Some(item) = &self.detail else { return };
-        let id = item.id.clone();
-        self.copy_value(id, field, value, tx);
+        let saved = (item.id.clone(), item.label.clone());
+        self.copy_value(Some(saved), field, value, tx);
     }
 
-    /// Puts `value` on the clipboard, concealed, to clear after the countdown.
-    /// `item` and `field` mark the item's copy button while it lasts.
-    pub(crate) fn copy_value(&mut self, item: String, field: String, value: String, tx: &mut Tx) {
+    /// Puts `value` on the clipboard, concealed, to clear after the countdown:
+    /// `field` of the saved item `item` (id, title), or of a form not saved
+    /// yet. Every copy of a value goes through here, so a saved item's is
+    /// always reported for Activity. `item` and `field` mark the item's copy
+    /// button while it lasts.
+    pub(crate) fn copy_value(
+        &mut self,
+        item: Option<(String, String)>,
+        field: String,
+        value: String,
+        tx: &mut Tx,
+    ) {
+        if let Some((id, title)) = &item {
+            self.report_item(AppAction::Copy, id, title, &field);
+        }
+        let item = item.map(|(id, _)| id).unwrap_or_default();
         let lasts = Duration::from_secs_f64(self.clear_after);
         let copied = tx.copy_secret(value, lasts);
         self.copy = Some(Copy {
@@ -1246,7 +1230,10 @@ impl App {
             Some(i) => {
                 self.revealed.remove(i);
             }
-            None => self.revealed.push(field.into()),
+            None => {
+                self.report(AppAction::Reveal, field);
+                self.revealed.push(field.into());
+            }
         }
     }
 
@@ -1255,10 +1242,10 @@ impl App {
         self.screen == Screen::Vault && self.installer.as_ref().is_some_and(|i| i.open)
     }
 
-    /// Keys for the Settings popover or the install page, which sit over the
-    /// vault: Escape closes them, Tab moves between their buttons, and
+    /// Keys for Settings or the install page, which sit in the vault's place:
+    /// Escape closes them, Settings' rows take the arrows, ↵ and Space, and
     /// nothing else reaches the vault behind. `None` when neither is open.
-    fn overlay_key(&mut self, ev: &KeyEvent) -> Option<bool> {
+    fn overlay_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
         // The quick panel has no Settings or install offer; its keys are its own.
         if self.screen != Screen::Vault || self.panel.is_some() {
             return None;
@@ -1272,8 +1259,14 @@ impl App {
         if crate::import::is_shortcut(ev) && !self.hotkey.recorder.is_recording() {
             return None;
         }
+        // Locking still locks.
+        if ev.is_command('l') && !self.hotkey.recorder.is_recording() {
+            return None;
+        }
+        if self.settings_open {
+            return Some(self.settings_key(ev, tx));
+        }
         match ev.key {
-            Key::Escape if self.settings_open => self.close_settings(),
             Key::Escape => {
                 if let Some(installer) = &mut self.installer {
                     installer.close();
@@ -1285,20 +1278,25 @@ impl App {
         Some(true)
     }
 
-    /// Closes the Settings popover; a recording in it is cancelled.
+    /// Closes Settings; a recording in it is cancelled.
     pub fn close_settings(&mut self) {
         self.settings_open = false;
+        self.nav.row = 0;
         self.hotkey.recorder.cancel();
         self.hotkey.reset_error = None;
         self.touch_id_error = None;
         self.mirror.result = None;
+        self.activity.forget();
     }
 
     /// App-level keys: before the focused field when there is none, after it
     /// otherwise. In the vault that includes the list's keys, so they work
     /// with focus on a button or nowhere.
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if let Some(handled) = self.overlay_key(ev) {
+        if let Some(handled) = self.nav_key(ev, tx) {
+            return handled;
+        }
+        if let Some(handled) = self.overlay_key(ev, tx) {
             return handled;
         }
         if let Some(handled) = self.import_key(ev) {

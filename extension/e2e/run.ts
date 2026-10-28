@@ -1,5 +1,7 @@
-// End-to-end run of the built extension in headless Chromium against a fake
-// native host (e2e/fake-host.py) and local test pages. Nothing here touches a
+// End-to-end run of the extension in headless Chromium against a fake
+// native host (e2e/fake-host.py) and local test pages. It builds its own copy
+// first (scripts/build.ts --e2e, into a temporary directory), the only build
+// whose provider pages may be on `.test` hosts. Nothing here touches a
 // real browser profile or vault: each run uses a fresh profile directory with
 // the fake host's manifest in it.
 //
@@ -27,7 +29,10 @@ import { join } from "node:path"
 
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const root = join(import.meta.dir, "..")
-const dist = join(root, "dist")
+// An e2e build of its own (DEADBOLT_E2E: provider pages on .test hosts), never dist/.
+const dist = await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-"))
+const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist], { stdout: "inherit", stderr: "inherit" })
+if (!built.success) throw new Error("the e2e build failed")
 const arg = (name: string) => {
   const i = process.argv.indexOf(name)
   return i > 0 ? process.argv[i + 1] : undefined
@@ -268,6 +273,25 @@ const server = Bun.serve({
         )
       case "/flow/spa/done":
         return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</strong>.</p>`)
+      // A site's sign-in page with a "Continue with Google" button, and a fake
+      // Google account chooser on accounts.google.test (mapped to this server).
+      case "/social":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1>${loginForm("/home").replace("</form>", "</form>")}
+          <p style="text-align:center;color:#71717a;margin:18px 0 0">or</p>
+          <button id="google" type="button" style="background:#fff;color:#18181b;border:1px solid #d4d4d8">Continue with Google</button>
+          <script>document.getElementById("google").addEventListener("click", () => location.assign("http://accounts.google.test:${url.port}/o/oauth2/chooser?return=" + encodeURIComponent(location.origin + "/social/done")))</script>`,
+        )
+      case "/social/done":
+        return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("as") ?? "").replace(/[<>&"]/g, "")}</strong> with Google.</p>`)
+      case "/o/oauth2/chooser": {
+        const back = url.searchParams.get("return") ?? "/"
+        const tile = (name: string, email: string) =>
+          `<li style="list-style:none;border-top:1px solid #e4e4e7"><div role="link" tabindex="0" data-identifier="${email}" style="display:flex;gap:12px;align-items:center;padding:12px 8px;cursor:pointer"><span style="width:28px;height:28px;border-radius:50%;background:#e0e7ff;display:grid;place-items:center">${name[0]}</span><span><span style="display:block;font-weight:500">${name}</span><span style="color:#71717a;font-size:13px">${email}</span></span></div></li>`
+        return html("Sign in - Google Accounts", `<h1 style="font-weight:400">Choose an account</h1><p>to continue to Acme</p><ul style="padding:0">${tile("Other Person", "other@gmail.com")}${tile("Kit Mercer", "kit@gmail.com")}</ul>
+          <script>for (const t of document.querySelectorAll("[data-identifier]")) t.addEventListener("click", () => location.assign(${JSON.stringify(back)} + "?as=" + encodeURIComponent(t.dataset.identifier)))</script>`)
+      }
       // A form whose "button" is a plain div: a click on it submits by script
       // (form.requestSubmit()). ?step: the username alone, on to the password page.
       case "/flow/divbutton": {
@@ -452,6 +476,8 @@ interface LaunchOptions {
   record?: string
   /** Device pixels per CSS pixel (2 unless set). */
   scale?: number
+  /** The fake host adds "Sign in with Google" logins. */
+  signIn?: boolean
 }
 
 async function launch(options: LaunchOptions = {}): Promise<Run> {
@@ -477,7 +503,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
     // *.acme.test is one site on this machine: two origins of it for the sign-in session runs.
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1"],
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.google.test 127.0.0.1"],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -486,6 +512,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_LOG: log,
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
+      DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       ...options.realHost,
     },
   })
@@ -1719,6 +1746,56 @@ async function signInSessions() {
   }
 }
 
+/** The rings Deadbolt draws (closed shadow roots on elements of its own): how many show, and where. */
+const rings = (page: Page) =>
+  page.evaluate(() => [...document.documentElement.children].filter((el) => el.nodeName === "DIV" && (el as HTMLElement).style.inset === "0px" && el.shadowRoot === null).length)
+
+/**
+ * "Sign in with Google": the menu shows the login as that, picking it rings
+ * the site's own button (nothing filled, nothing clicked), and on Google's
+ * account chooser the linked account's tile is ringed.
+ */
+async function signInWith(scheme: Scheme) {
+  const run = await launch({ scheme, signIn: true })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`http://www.acme.test:${server.port}/social`)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "sign in with"))
+    const row = menu.locator("button.row", { hasText: "Sign in with Google" })
+    check((await row.count()) === 1 && ((await row.locator(".sub").textContent()) ?? "") === "kit@gmail.com", "the menu shows the login as Sign in with Google · its account")
+    check((await menu.locator("button.row", { hasText: "Acme admin" }).count()) === 1, "beside the site's password logins")
+    await shotAround(page, `signin-menu-${scheme}`, menu, "#email")
+    await settled(menu)
+    await row.click()
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 5000)), "picking it puts the menu away")
+    check(!!(await until("a ring shows", async () => (await rings(page)) === 1, 5000)), "and rings the site's Continue with Google button")
+    await Bun.sleep(600)
+    const button = await page.locator("#google").boundingBox()
+    if (stills && button) await page.screenshot({ path: join(stills, `signin-ring-${scheme}.png`), clip: { x: Math.max(0, button.x - 60), y: Math.max(0, button.y - 70), width: button.width + 120, height: button.height + 120 } })
+    await Bun.sleep(1000)
+    check(new URL(page.url()).pathname === "/social", "nothing clicks it for the user")
+    check((await page.inputValue("#email")) === "" && (await page.inputValue("#password")) === "", "and nothing is filled")
+    await page.click("#google")
+    await page.waitForURL("http://accounts.google.test:*/o/oauth2/chooser*")
+    check(!!(await until("the chooser's tile is ringed", async () => (await rings(page)) === 1, 6000)), "on Google's chooser, a ring shows")
+    await Bun.sleep(600)
+    const tile = await page.locator('[data-identifier="kit@gmail.com"]').boundingBox()
+    if (stills && tile) await page.screenshot({ path: join(stills, `signin-chooser-${scheme}.png`), clip: { x: Math.max(0, tile.x - 40), y: Math.max(0, tile.y - 60), width: tile.width + 80, height: tile.height + 100 } })
+    await Bun.sleep(1200)
+    check(new URL(page.url()).pathname === "/o/oauth2/chooser", "and nothing picks the account for the user")
+    check(!(await hostLog(run)).some((r) => r.type === "fill"), "no fill anywhere")
+    await page.click('[data-identifier="kit@gmail.com"]')
+    await page.waitForURL("**/social/done**")
+    check((await rings(page)) === 0, "back on the site, nothing is pointed at")
+  } catch (err) {
+    check(false, `sign in with threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "sign in with")
+  } finally {
+    await close(run)
+  }
+}
+
 /** Typing narrows the menu, and a login typed by hand puts it away for the rest of the form. */
 async function narrowing() {
   const run = await launch()
@@ -2293,7 +2370,7 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
   if (v) check(v.verified && !v.authenticationInfo.userVerified, `@simplewebauthn/server verifies the ${how} assertion (no UV without Touch ID)`)
 }
 
-const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, locked, notInstalled }
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, signInWith, locked, notInstalled }
 const once: Record<string, () => Promise<void>> = { film, coldSave, signInShapes, signInOutcomes, narrowing, corner, signInSessions, rateLimited, securityPage, keyboardEntry, coveredMenu, occlusionSweep, midFill, coveredPill, backForward, passkeys }
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])

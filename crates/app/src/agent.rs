@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use deadbolt_client::export::{self, ExportError};
 use deadbolt_client::protocol::{
-    Change, Code, Command, ErrorCode, FieldInput, ImportReport, ItemInfo, MirrorReport, Reply,
-    Status, code_field,
+    ActivityEntry, AppAction, Change, Code, Command, ErrorCode, FieldInput, ImportReport, ItemInfo,
+    MirrorReport, Reply, Status, code_field,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -89,6 +89,17 @@ pub enum Job {
         symbols: bool,
         seq: u64,
     },
+    /// The newest Activity entries (`activity::Activity`).
+    Activity {
+        seq: u64,
+    },
+    /// Tells the agent the app showed or copied a field, for Activity.
+    Report {
+        action: AppAction,
+        item: String,
+        title: String,
+        field: String,
+    },
 }
 
 pub enum Done {
@@ -140,6 +151,12 @@ pub enum Done {
         seq: u64,
         result: Result<Zeroizing<String>, Failure>,
     },
+    Activity {
+        seq: u64,
+        result: Result<Vec<ActivityEntry>, Failure>,
+    },
+    /// A report went, or didn't: nothing waits on it.
+    Reported,
     /// From the watch stream.
     Changed(Change),
     /// The watch stream broke without the agent saying it was stopping.
@@ -602,6 +619,7 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             }
         }
         Job::SyncOnePassword { seq } => mirror(paths, seq).await,
+        job @ (Job::Activity { .. } | Job::Report { .. }) => crate::activity::run(paths, job).await,
         Job::Create {
             kind,
             name,
@@ -742,6 +760,8 @@ fn unexpected() -> Failure {
 }
 
 /// Bundles always launch their own helper. Development runs allow an override.
+/// A passphrase goes only to an agent running that program, as the
+/// `deadbolt-enclave` beside it sees the agent's code signature.
 pub fn launch() -> Launch {
     let program = crate::binary::discover(
         std::env::current_exe().ok().as_deref(),
@@ -749,6 +769,11 @@ pub fn launch() -> Launch {
         &std::env::var_os("PATH").unwrap_or_default(),
         std::env::var_os("HOME").map(PathBuf::from).as_deref(),
     );
+    let expected = std::fs::canonicalize(&program).unwrap_or_else(|_| program.clone());
+    deadbolt_client::set_agent_check(Box::new(move |socket| {
+        let helper = expected.with_file_name("deadbolt-enclave");
+        deadbolt_client::peer::check(&socket, &helper, &expected)
+    }));
     Launch { program }
 }
 

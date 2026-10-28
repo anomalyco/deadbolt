@@ -1,6 +1,6 @@
 //! The vault's keys, headless and offline: ↑↓, ⏎ and ⇧⏎ work wherever focus
-//! is, a clicked row hands focus back to the search, ⌘F and ⌘K go to the
-//! search, and esc clears it.
+//! is, a clicked row hands focus back to the search, ⌘F goes to the search,
+//! and esc clears it. `keymap.rs` has the rest of the keyboard.
 
 #![cfg(test)]
 
@@ -177,10 +177,10 @@ fn enter_copies_what_each_kind_is_for() {
     assert_eq!(rt.state.visible()[0].kind, "ssh");
 }
 
-/// Long values wrap in the item's pane instead of being cut off: a public
-/// key and a fingerprint inside their unbroken runs, a shown private key's
-/// base64 line too (without the empty line its final newline would draw).
-/// A short value keeps its one-line row.
+/// Long values wrap in the item's page instead of being cut off: a public
+/// key inside its unbroken run, a shown private key's base64 line too
+/// (without the empty line its final newline would draw). A short value
+/// keeps its one-line field, its name over it.
 #[test]
 fn long_values_wrap_in_the_detail() {
     let mut rt = scene("ssh");
@@ -193,10 +193,11 @@ fn long_values_wrap_in_the_detail() {
     for field in ["public-key", "fingerprint"] {
         let row = find(&rt, &format!("field-{field}")).rect;
         let value = find(&rt, &format!("field-{field}/value")).rect;
-        assert!(value[3] >= 40.0, "{field} wraps: {value:?}");
         assert!(value[0] + value[2] <= row[0] + row[2], "{field} in its row");
     }
-    assert_eq!(find(&rt, "field-comment").rect[3], 40.0);
+    let key = find(&rt, "field-public-key/value").rect;
+    assert!(key[3] >= 40.0, "the public key wraps: {key:?}");
+    assert_eq!(find(&rt, "field-comment").rect[3], 56.0);
 
     // Show moves neither the name nor the buttons.
     let still = |rt: &Runtime<App>| {
@@ -210,16 +211,12 @@ fn long_values_wrap_in_the_detail() {
     rt.update(|s, _| s.toggle_reveal("private-key"));
     settle(&mut rt, 0.5);
     assert_eq!(still(&rt), hidden);
-    // Three lines (20 pt each, inside 10 pt above and below), its base64
-    // one wrapping.
+    // Three lines of 20 pt, its base64 one wrapping.
     let shown = find(&rt, "field-private-key/value");
     assert!(rt.element_is_secure(&shown.path), "a secure label");
     assert_eq!((shown.role, shown.text), ("text", None));
     let value = shown.rect;
-    assert!(
-        value[3] >= 4.0 * 20.0 + 20.0,
-        "its base64 line wraps: {value:?}"
-    );
+    assert!(value[3] >= 4.0 * 20.0, "its base64 line wraps: {value:?}");
     // The key file's final line break draws no empty line: without it, the
     // same height.
     rt.update(|s, _| {
@@ -302,23 +299,21 @@ fn key_hints_follow_the_item() {
 }
 
 #[test]
-fn command_f_and_k_focus_the_search_with_its_text_selected() {
-    for c in ['f', 'k'] {
-        let mut rt = scene("search");
-        let query = rt.state.search.text.clone();
-        assert!(!query.is_empty(), "the scene has a query");
-        blur(&mut rt);
+fn command_f_focuses_the_search_with_its_text_selected() {
+    let mut rt = scene("search");
+    let query = rt.state.search.text.clone();
+    assert!(!query.is_empty(), "the scene has a query");
+    blur(&mut rt);
 
-        command(&mut rt, c);
-        settle(&mut rt, 0.1);
-        let search = &rt.state.search;
-        assert!(search.focused, "⌘{c} focused the search");
-        assert_eq!(search.selected(), query, "⌘{c} selected the query");
+    command(&mut rt, 'f');
+    settle(&mut rt, 0.1);
+    let search = &rt.state.search;
+    assert!(search.focused, "⌘F focused the search");
+    assert_eq!(search.selected(), query, "⌘F selected the query");
 
-        // Typing replaces it.
-        tap(&mut rt, Key::Text("h".into()));
-        assert_eq!(rt.state.search.text, "h");
-    }
+    // Typing replaces it.
+    tap(&mut rt, Key::Text("h".into()));
+    assert_eq!(rt.state.search.text, "h");
 }
 
 #[test]
@@ -389,9 +384,9 @@ fn a_press_anywhere_on_the_search_focuses_it() {
     }
 }
 
-/// With the list hidden (⇧⌘B), ↑↓ and a search edit open it again, so the
-/// selection never moves out of sight. Hiding it leaves focus in the search,
-/// so typing goes on straight after.
+/// With the list hidden (⇧⌘B), ↑↓ and typing open it again, so the
+/// selection never moves out of sight. Hiding it takes the search with it,
+/// and typing goes back into it.
 #[test]
 fn a_hidden_list_opens_when_the_selection_moves() {
     let toggle = Mods {
@@ -406,9 +401,12 @@ fn a_hidden_list_opens_when_the_selection_moves() {
         }
         press(&mut rt, Key::Command('b'), toggle);
         assert!(!rt.state.sidebar.is_open(), "⇧⌘B hides the list");
-        assert!(rt.state.search.focused, "⇧⌘B keeps the search focused");
         tap(&mut rt, step.clone());
         assert!(rt.state.sidebar.is_open(), "{step:?} opens it");
+        if step == Key::Text("g".into()) {
+            assert!(rt.state.search.focused, "typing went back to the search");
+            assert!(rt.state.search.text.ends_with('g'));
+        }
     }
 }
 

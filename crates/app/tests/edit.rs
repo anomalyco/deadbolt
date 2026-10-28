@@ -9,7 +9,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use deadbolt_app::agent::{Agent, Done, Failure, Job, Values};
 use deadbolt_app::edit::Conflict;
 use deadbolt_app::model::{App, Screen};
-use deadbolt_client::protocol::{Change, FieldInfo, ItemInfo};
+use deadbolt_client::protocol::{AppAction, Change, FieldInfo, ItemInfo};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use zeroize::Zeroizing;
 
@@ -679,6 +679,8 @@ fn show_theirs_reloads_the_form_from_the_other_device() {
     let items = r.rt.state.items.clone();
     r.synced(items, Some(theirs));
     assert!(r.shows("Show theirs"));
+    // The fields make room for the notice first.
+    r.settle(0.4);
     let [x, y, w, h] =
         r.rt.elements()
             .iter()
@@ -846,6 +848,53 @@ fn copying_from_a_password_field_clears_after_the_countdown() {
     }
 }
 
+/// ⌘C in a saved item's password field is a copy of that item's password,
+/// reported for Activity like any other.
+#[test]
+fn copying_from_a_saved_password_field_is_reported() {
+    let mut r = rig("vault");
+    let board = rune::clipboard::memory();
+    r.rt.use_clipboard(&board);
+    r.command('e');
+    let (id, title) = {
+        let item = r.rt.state.detail.as_ref().unwrap();
+        (item.id.clone(), item.label.clone())
+    };
+    r.rt.update(|s, _| {
+        s.search.focused = false;
+        let form = s.edit.form.as_mut().unwrap();
+        form.name.focused = false;
+        let input = form
+            .fields
+            .iter_mut()
+            .find(|f| f.name == "password")
+            .unwrap();
+        input.edit.focused = true;
+    });
+    r.settle(0.05);
+    r.command('a');
+    drop(r.sent());
+    r.command('c');
+    assert!(r.rt.state.copy.is_some(), "copied");
+    let reports: Vec<_> = r
+        .sent()
+        .into_iter()
+        .filter_map(|job| match job {
+            Job::Report {
+                action,
+                item,
+                title,
+                field,
+            } => Some((action, item, title, field)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        reports,
+        [(AppAction::Copy, id, title, "password".to_string())]
+    );
+}
+
 /// ⌘N over an unchanged edit opens a new item in its place.
 #[test]
 fn cmd_n_replaces_an_unchanged_edit() {
@@ -983,7 +1032,7 @@ fn a_passkey_shows_its_site_and_is_only_deleted() {
     assert!(!labelled("Copy created"), "the date doesn't");
     assert!(r.rt.find("edit").is_none(), "no Edit button");
     assert!(
-        r.shows("Copy username") && !r.shows("Copy code"),
+        r.shows("Copy username") && r.rt.find("h-code").is_none(),
         "the hints are a passkey's"
     );
     r.command('e');
@@ -1315,7 +1364,7 @@ fn created(r: &mut Rig) -> (String, Vec<(String, String)>) {
 fn add_offers_a_secure_note_whose_body_keeps_its_lines() {
     let mut r = rig("vault");
     r.command('n');
-    assert!(r.shows("Secure note") && r.shows("SSH key"));
+    assert!(r.shows("Note") && r.shows("SSH key"));
     r.rt.update(|s, _| s.pick_kind("note"));
     r.settle(0.05);
     let form = r.rt.state.edit.form.as_ref().unwrap();
@@ -1954,11 +2003,16 @@ fn a_pasted_public_key_keeps_to_one_line() {
         r.value("public-key").ends_with("ci@anoma.ly!"),
         "the caret stays at the end"
     );
+    focus(&mut r, "fingerprint");
+    r.command('a');
+    r.type_text(&"SHA256:Fx7tQ2mVb9yLr4cWkP0sN8hJd3aZe6uGo1iTq5XwYnE".repeat(2));
+    r.settle(0.05);
     let height = |r: &Rig, key: &str| at(&r.rt, key).unwrap().0[3];
     assert!(
         height(&r, "field-fingerprint") > height(&r, "field-comment") + 10.0,
         "the fingerprint wraps"
     );
+    focus(&mut r, "public-key");
     r.sent();
     r.tap(Key::Enter);
     match r.sent().pop() {
@@ -2038,8 +2092,7 @@ fn a_mirrored_item_warns_on_edit_but_saves() {
 
     let mut r = rig("mirrored");
     let github = r.github();
-    let kind = format!("login · {} · From 1Password", github.short);
-    assert!(r.shows(&kind));
+    assert!(r.shows("Login · From 1Password"));
     r.command('e');
     assert!(r.shows("From 1Password"));
     r.fill("username", "kit");

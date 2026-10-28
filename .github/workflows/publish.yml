@@ -80,6 +80,9 @@ jobs:
       - run: |
           cargo build --release --locked -p deadbolt-cli --target ${{ matrix.target }}
           mkdir -p out/bin && cp target/${{ matrix.target }}/release/deadbolt out/bin/
+      # The CLI checks the agent with the helper its build pinned, so it ships beside it.
+      - if: runner.os == 'macOS'
+        run: cp target/${{ matrix.target }}/release/deadbolt-enclave out/bin/
       - name: No compromised eMudhra CA roots
         run: scripts/check-ca-roots.sh out/bin/deadbolt
       - uses: actions/upload-artifact@v4

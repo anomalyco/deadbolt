@@ -1,0 +1,343 @@
+//! The vault's keyboard: everything without a mouse. The search has the keys
+//! first; ⇥ moves into the item's fields and back out, ⌘K opens the actions
+//! for the item, ? lists every shortcut, ⌘, has Settings, and Esc backs out
+//! of each. `SHORTCUTS` is the map the ? sheet and Settings show.
+
+use deadbolt_client::protocol::FieldInfo;
+use rune::{Key, KeyEvent, Tx};
+
+use crate::model::{App, Screen, is_secret};
+
+/// Every shortcut, as the ? sheet and Settings list them.
+pub const SHORTCUTS: &[(&[&str], &str)] = &[
+    (&["⌘", "F"], "Search"),
+    (&["↑", "↓"], "Move (or J K)"),
+    (&["⌘", "1–9"], "Jump to an item"),
+    (&["↵"], "Copy password"),
+    (&["⇧", "↵"], "Copy username"),
+    (&["⌥", "↵"], "Copy code"),
+    (&["O"], "Open the website"),
+    (&["⇥"], "Into the fields"),
+    (&["Space"], "Show a secret"),
+    (&["⌘", "K"], "Actions"),
+    (&["⌘", "N"], "New item"),
+    (&["⌃", "⇥"], "Its type, while new"),
+    (&["⌘", "E"], "Edit"),
+    (&["⌘", "⌫"], "Delete"),
+    (&["⌘", ","], "Settings"),
+    (&["⌘", "L"], "Lock"),
+    (&["⇧", "⌘", "Space"], "Quick panel"),
+    (&["⇧", "⌘", "I"], "Import"),
+    (&["?"], "Shortcuts"),
+];
+
+/// Where the keys are, past the search.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Nav {
+    /// ⇥ moved into the item: the shown field the keys act on.
+    pub field: Option<usize>,
+    /// ⌘K's actions are open, on this row.
+    pub palette: Option<usize>,
+    /// The ? sheet shows.
+    pub sheet: bool,
+    /// The Settings row the keys are on.
+    pub row: usize,
+}
+
+/// Whether the item page shows this field. A passkey shows its site,
+/// username, date and notes; its credential id and user handle are the
+/// site's bookkeeping, and the agent never sends its private key.
+pub fn shown(kind: &str, field: &str) -> bool {
+    kind != "passkey" || matches!(field, "rp-id" | "username" | "created" | "notes")
+}
+
+fn plain(ev: &KeyEvent) -> bool {
+    !ev.mods.cmd && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl
+}
+
+fn chord(ev: &KeyEvent, c: char) -> bool {
+    ev.is_command(c) && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl
+}
+
+/// J and K, ↑ and ↓: -1, 1 or none.
+fn step(ev: &KeyEvent, letters: bool) -> Option<isize> {
+    match &ev.key {
+        Key::Up if !ev.mods.cmd => Some(-1),
+        Key::Down if !ev.mods.cmd => Some(1),
+        Key::Text(t) if letters && plain(ev) && t == "k" => Some(-1),
+        Key::Text(t) if letters && plain(ev) && t == "j" => Some(1),
+        _ => None,
+    }
+}
+
+impl App {
+    /// The selected item's fields as its page shows them, in order.
+    pub fn shown_fields(&self) -> Vec<&FieldInfo> {
+        let Some(item) = self.selected_item() else {
+            return Vec::new();
+        };
+        let Some(full) = self.detail.as_ref().filter(|d| d.id == item.id) else {
+            return Vec::new();
+        };
+        full.fields
+            .iter()
+            .filter(|f| shown(&full.kind, &f.name))
+            .collect()
+    }
+
+    /// The field ⇥ moved into, if it's still there.
+    pub fn focused_field(&self) -> Option<&FieldInfo> {
+        self.shown_fields().get(self.nav.field?).copied()
+    }
+
+    /// Whether letters type into the search rather than acting.
+    fn typing(&self) -> bool {
+        self.search.focused
+    }
+
+    /// The main window's vault keys, before the overlays and the list
+    /// (`search_key`, `on_key`): ⌘K's actions and the ? sheet take every key
+    /// while open, then ⌘, and ⇥, then the keys of the field ⇥ moved into.
+    /// `None` for keys they leave alone.
+    pub(crate) fn nav_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
+        if self.screen != Screen::Vault || self.installing() {
+            return None;
+        }
+        if self.nav.palette.is_some() {
+            self.palette_key(ev, tx);
+            return Some(true);
+        }
+        if self.panel.is_some() {
+            return chord(ev, 'k').then(|| {
+                self.open_palette();
+                true
+            });
+        }
+        if self.nav.sheet {
+            if matches!(ev.key, Key::Escape | Key::Enter) || is_question(ev) {
+                self.nav.sheet = false;
+            }
+            // Locking still locks.
+            return (!chord(ev, 'l')).then_some(true);
+        }
+        if chord(ev, ',') {
+            if self.settings_open {
+                self.close_settings();
+                self.search.focused = true;
+            } else {
+                self.open_settings();
+            }
+            return Some(true);
+        }
+        if self.settings_open {
+            return None;
+        }
+        // The form and the import view have keys of their own.
+        let free = !self.editing() && !self.import.showing() && !self.drop_hovering();
+        if !free || self.edit.delete.is_some() {
+            return None;
+        }
+        if chord(ev, 'k') {
+            self.open_palette();
+            return Some(true);
+        }
+        if is_question(ev) && (!self.typing() || self.search.text.is_empty()) {
+            self.nav.sheet = true;
+            return Some(true);
+        }
+        if let Key::Command(c @ '1'..='9') = ev.key
+            && !ev.mods.shift
+            && !ev.mods.alt
+        {
+            let at = c as usize - '1' as usize;
+            if let Some(id) = self.visible().get(at).map(|i| i.id.clone()) {
+                tx.instant();
+                self.select(Some(id.clone()));
+                tx.scroll_into_view(format!("item-{id}"));
+            }
+            return Some(true);
+        }
+        if chord(ev, 'o') || (!self.typing() && is_letter(ev, "o")) {
+            self.open_site(tx);
+            return Some(true);
+        }
+        if self.nav.field.is_some() {
+            return Some(self.field_key(ev, tx));
+        }
+        if ev.key == Key::Tab && !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl {
+            if !ev.mods.shift && !self.shown_fields().is_empty() {
+                tx.instant();
+                self.nav.field = Some(0);
+                self.search.focused = false;
+            }
+            return Some(true);
+        }
+        if !self.typing()
+            && let Some(by) = step(ev, true).filter(|_| matches!(ev.key, Key::Text(_)))
+        {
+            self.move_selection(by, tx);
+            return Some(true);
+        }
+        None
+    }
+
+    /// Keys on the field ⇥ moved into: ↑↓ (or J K) move between fields, Space
+    /// shows or hides a secret, ↵ copies it, and ⇥ or Esc go back to the search.
+    fn field_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        let count = self.shown_fields().len();
+        let Some(at) = self.nav.field.filter(|at| *at < count) else {
+            self.leave_fields();
+            return false;
+        };
+        if let Some(by) = step(ev, true) {
+            let next = (at as isize + by).clamp(0, count as isize - 1) as usize;
+            tx.instant();
+            self.nav.field = Some(next);
+            tx.scroll_into_view(format!("field-{}", self.shown_fields()[next].name));
+            return true;
+        }
+        let field = self.shown_fields()[at].clone();
+        match &ev.key {
+            Key::Tab | Key::Escape => {
+                tx.instant();
+                self.leave_fields();
+            }
+            Key::Text(t) if t == " " && plain(ev) => {
+                if is_secret(&field.kind) && field.kind != "otp" {
+                    self.toggle_reveal(&field.name);
+                }
+            }
+            Key::Enter if ev.mods.shift || ev.mods.alt => return self.list_key(ev, tx),
+            Key::Enter => self.copy_field(&field.name, tx),
+            // Typing goes back to the search with what was typed.
+            Key::Text(_) if plain(ev) || ev.mods.shift => {
+                self.leave_fields();
+                return false;
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Back from the fields to the search.
+    pub fn leave_fields(&mut self) {
+        self.nav.field = None;
+        self.search.focused = true;
+    }
+
+    /// ↑↓, J and K on the list: the item replaces at once, and a hidden list
+    /// opens to show where the selection went.
+    pub(crate) fn move_selection(&mut self, by: isize, tx: &mut Tx) {
+        tx.instant();
+        self.sidebar.set_open(true);
+        self.step(by);
+        if let Some(id) = &self.selected {
+            tx.scroll_into_view(format!("item-{id}"));
+        }
+    }
+
+    /// O and ⌘O: the item's website in the browser.
+    pub fn open_site(&mut self, tx: &mut Tx) {
+        let Some(url) = self.site() else { return };
+        if let Err(e) = tx.open_url(&url) {
+            self.notice = Some(format!("Couldn't open {url}: {e}"));
+        }
+    }
+
+    /// The selected item's website, with a scheme if it had none.
+    pub fn site(&self) -> Option<String> {
+        let full = self.detail.as_ref()?;
+        if self.selected.as_deref() != Some(full.id.as_str()) {
+            return None;
+        }
+        let name = if full.kind == "passkey" {
+            "rp-id"
+        } else {
+            "url"
+        };
+        let url = full.fields.iter().find(|f| f.name == name)?.value.trim();
+        if url.is_empty() {
+            return None;
+        }
+        Some(if url.contains("://") {
+            url.to_owned()
+        } else {
+            format!("https://{url}")
+        })
+    }
+
+    /// The vault's keys wherever focus is, after overlays and the import view
+    /// (`on_key`): the list's, ⌘F to the search, and typing into it from
+    /// anywhere, the list hidden or not.
+    pub(crate) fn vault_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if chord(ev, 'f') {
+            self.nav.field = None;
+            self.sidebar.set_open(true);
+            self.focus_search();
+            return true;
+        }
+        if let Key::Text(t) = &ev.key
+            && !ev.mods.cmd
+            && !ev.mods.alt
+            && !ev.mods.ctrl
+            && !t.trim().is_empty()
+            && !self.search.focused
+            && !self.editing()
+        {
+            tx.instant();
+            self.nav.field = None;
+            self.search.focused = true;
+            self.search.set_caret(self.search.text.len());
+            self.search.insert(t);
+            self.search_changed();
+            return true;
+        }
+        self.list_key(ev, tx)
+    }
+
+    /// ↑↓ select, ⏎, ⇧⏎ and ⌥⏎ copy, esc clears the search.
+    pub(crate) fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        match ev.key {
+            Key::Up | Key::Down => {
+                self.move_selection(if ev.key == Key::Up { -1 } else { 1 }, tx);
+            }
+            Key::Enter => {
+                let field = if ev.mods.alt {
+                    "otp"
+                } else if ev.mods.shift {
+                    "username"
+                } else {
+                    self.primary_field()
+                };
+                self.copy_selected(field, tx);
+            }
+            Key::Escape if !self.search.text.is_empty() => {
+                // As typing does, clearing the search replaces the list at once.
+                tx.instant();
+                self.search.clear();
+                self.search_changed();
+            }
+            Key::Escape => {}
+            _ => return false,
+        }
+        true
+    }
+
+    /// ⌘,: Settings in the item's place, on its first row.
+    pub fn open_settings(&mut self) {
+        if self.editing() || self.deleting() {
+            return;
+        }
+        self.settings_open = true;
+        self.nav = Nav::default();
+        self.search.focused = false;
+    }
+}
+
+fn is_question(ev: &KeyEvent) -> bool {
+    matches!(&ev.key, Key::Text(t) if t == "?") && !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl
+}
+
+fn is_letter(ev: &KeyEvent, letter: &str) -> bool {
+    matches!(&ev.key, Key::Text(t) if t == letter) && plain(ev)
+}

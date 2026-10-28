@@ -10,13 +10,14 @@
 // labels roll. Every pick and button waits for the visibility guard and the
 // dwell (see ui/dom.ts) before it does anything.
 
-import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, PickReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
+import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
+import { provider as providerOf } from "./signin"
 import type { Account } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
 
 /** A row: a login to fill, or a passkey the page's sign-in is waiting for. */
-type Row = { passkey: MenuPasskey } | { account: Account }
+type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account }
 
 // Set once the background accepts a token from the parent window.
 let token = ""
@@ -117,7 +118,10 @@ function row(item: Row, i: number): HTMLElement {
   const [tile, title, sub] =
     "passkey" in item
       ? [avatar("", icon("passkey")), item.passkey.username || "Passkey", `Passkey · ${item.passkey.vault}`]
-      : continueAs && item.account.username
+      : "provider" in item
+        ? // "Sign in with Google · kit@gmail.com": the provider's mark and name, then the account it uses.
+          [providerMark(item.provider.signIn!.provider), `Sign in with ${providerOf(item.provider.signIn!.provider).name}`, item.provider.signIn!.account || item.provider.title]
+        : continueAs && item.account.username
         ? [avatar(item.account.title), `Continue as ${item.account.username}`, item.account.title]
         : [avatar(item.account.title), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
   const r = h(
@@ -144,6 +148,14 @@ function row(item: Row, i: number): HTMLElement {
     highlight(false)
   })
   return r
+}
+
+/** A provider's mark: its initial on its own tint (Deadbolt draws no third-party logos). */
+function providerMark(id: string): HTMLElement {
+  const p = providerOf(id)
+  const el = avatar(p.name)
+  el.classList.add("provider")
+  return el
 }
 
 function notice(glyph: Element, title: string, sub: string): HTMLElement {
@@ -226,7 +238,12 @@ let query = ""
 
 function matches(item: Row, q: string): boolean {
   if (!q) return true
-  const hay = "passkey" in item ? [item.passkey.username ?? ""] : [item.account.title, item.account.username ?? ""]
+  const hay =
+    "passkey" in item
+      ? [item.passkey.username ?? ""]
+      : "provider" in item
+        ? [item.provider.title, item.provider.signIn?.account ?? "", providerOf(item.provider.signIn?.provider ?? "").name]
+        : [item.account.title, item.account.username ?? ""]
   return hay.some((s) => s.toLowerCase().includes(q))
 }
 
@@ -323,6 +340,8 @@ async function pick(i: number) {
     relax()
     return say(COVERED)
   }
+  // "Sign in with …" fills nothing: the page's own button for it gets a ring, and the user clicks it.
+  if ("provider" in a) return signInWith(i, a.provider)
   // Checked: now it may move. The ring spins while the fill is on its way.
   document.body.classList.remove("held")
   highlightEl.classList.remove("pressing")
@@ -342,6 +361,23 @@ async function pick(i: number) {
   label.title = message
   settle(label, "Couldn't fill", false)
   setTimeout(() => done(), FAILED_STAYS_MS)
+}
+
+/**
+ * A "Sign in with …" row picked: the page's content script rings the site's
+ * own button for the provider and the menu goes; with no such button, the
+ * row says what to look for, and the menu stays.
+ */
+async function signInWith(i: number, account: Account) {
+  const reply = await send<SignInReply>({ type: "db:menu-signin", token, ref: account.ref })
+  busy = false
+  relax()
+  if (!reply?.ok) return say(reply?.message || "Couldn't do that. Try again.")
+  if (reply.found) return
+  const name = providerOf(reply.provider).name
+  const sub = rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".sub")
+  if (sub) sub.textContent = `Look for “Continue with ${name}”`
+  say(`Deadbolt couldn't find the page's ${name} button.`)
 }
 
 // ---- Folding into a pill ---------------------------------------------------------
@@ -544,7 +580,13 @@ function show(reply: MenuLoadReply) {
   if (reply.kind === "notice") return showNotice(reply)
   if (mode !== "accounts") return
   if (reply.kind === "status") return showStatus(reply.status)
-  accounts = [...(reply.passkeys ?? []).map((passkey) => ({ passkey })), ...reply.accounts.map((account) => ({ account }))]
+  // A "Sign in with …" login shows as that; one with a password too gets its fill row first.
+  accounts = [
+    ...(reply.passkeys ?? []).map((passkey) => ({ passkey })),
+    ...reply.accounts.flatMap((account): Row[] =>
+      account.signIn ? [...(account.hasPassword && reply.focused !== "otp" ? [{ account }] : []), { provider: account }] : [{ account }],
+    ),
+  ]
   focused = reply.focused
   continueAs = reply.continueAs === true && !reply.passkeys?.length
   active = Math.min(active, Math.max(accounts.length - 1, 0))

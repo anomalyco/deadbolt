@@ -3,6 +3,7 @@ compile_error!("deadbolt currently supports Unix platforms only");
 
 mod agent;
 mod browser;
+mod caller;
 #[expect(
     clippy::disallowed_methods,
     reason = "client version override awaits the separate client-crate extraction"
@@ -106,6 +107,25 @@ enum Commands {
     /// Print what changes in the agent as JSON lines: lock state, items,
     /// vaults and devices, never values. Ends when the agent stops.
     Watch,
+    /// Show how the agent sees this process: its verified program, terminal
+    /// and parents, and what it claims (DEADBOLT_CALLER, OPENCODE_SESSION_ID).
+    Whoami {
+        #[arg(long)]
+        json: bool,
+    },
+    /// List what callers asked the agent for, and what the app showed or
+    /// copied, newest first. Names items and fields, never values.
+    Activity {
+        /// Only entries this recent (30m, 1h, 7d).
+        #[arg(long)]
+        since: Option<String>,
+        /// At most this many entries (default 500).
+        #[arg(long)]
+        limit: Option<u32>,
+        /// One JSON object per line.
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the background agent in the foreground, or manage it.
     Agent {
         #[command(subcommand)]
@@ -182,8 +202,8 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum BrowserCommand {
-    /// Let the extension reach Deadbolt in Chrome, Brave, Arc, Edge or
-    /// Chromium (default: those installed here).
+    /// Let the extension reach Deadbolt in Chrome, Brave, Arc, Edge,
+    /// Chromium or Helium (default: those installed here).
     Install {
         #[arg(long, value_enum)]
         browser: Vec<browser::Browser>,
@@ -325,6 +345,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Lock
                 | Commands::Status
                 | Commands::Watch
+                | Commands::Whoami { .. }
+                | Commands::Activity { .. }
                 | Commands::Agent { .. }
                 | Commands::TouchId { .. }
                 | Commands::Vault(_)
@@ -335,6 +357,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     {
         bail!("--vault does not apply to this command");
     }
+    caller::install();
     match cli.command {
         Commands::Send(args) => return send::send(&paths, args, vault, from_stdin).await,
         Commands::Sends(args) => send::sends(&paths, args).await?,
@@ -546,6 +569,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Status => {
             let status = client::ensure_running(&paths).await?;
             print_status(&status);
+        }
+        Commands::Whoami { json } => caller::whoami(&paths, json).await?,
+        Commands::Activity { since, limit, json } => {
+            caller::activity(&paths, since, limit, json, from_stdin).await?;
         }
         Commands::Watch => {
             client::ensure_running(&paths).await?;

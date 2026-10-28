@@ -817,14 +817,12 @@ mod view {
     pub fn setting(s: &App, k: &Kit) -> Option<El> {
         let i = s.installer.as_ref()?;
         let label = if i.installed() {
-            "deadbolt command…"
+            "Details…"
         } else {
-            "Install deadbolt command…"
+            "Install…"
         };
         Some(
-            Button::new(label)
-                .variant(ButtonVariant::Ghost)
-                .control_size(ControlSize::Large)
+            crate::settings::button(label)
                 .on_press(|s: &mut App| {
                     s.close_settings();
                     s.show_installer();

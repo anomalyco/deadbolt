@@ -4,7 +4,8 @@
 The browser passes its environment through: DEADBOLT_FAKE_STATUS picks the
 hello status, DEADBOLT_FAKE_LOG gets one JSON line per request, and
 DEADBOLT_FAKE_RATE_LIMIT=fill answers every fill with rate_limited, and
-DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds. Saves
+DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds, and
+DEADBOLT_FAKE_SIGNIN adds "Sign in with Google" logins. Saves
 are checked against the spec's title and URL rules.
 """
 import json, os, struct, sys, time
@@ -20,6 +21,15 @@ ACCOUNTS = [
     {"ref": REF2, "vault": "Work", "title": "Acme admin", "username": "admin", "hasPassword": True, "hasTotp": False, "urls": []},
 ]
 VALUES = {REF1: {"username": "kit@acme.test", "password": "correct horse", "totp": "492039"}, REF2: {"username": "admin", "password": "hunter2"}}
+# DEADBOLT_FAKE_SIGNIN=1 adds a "Sign in with Google" login for the site, and
+# the Google account's own login it signs in with.
+if os.environ.get("DEADBOLT_FAKE_SIGNIN"):
+    REF3 = "a" * 64 + ":" + "3" * 32
+    REF4 = "a" * 64 + ":" + "4" * 32
+    ACCOUNTS.append({"ref": REF3, "vault": "Personal", "title": "Acme", "hasPassword": False, "hasTotp": False, "urls": [], "signIn": {"provider": "google", "account": "kit@gmail.com"}})
+    ACCOUNTS.append({"ref": REF4, "vault": "Personal", "title": "Google", "username": "kit@gmail.com", "hasPassword": True, "hasTotp": False, "urls": ["https://accounts.google.com"]})
+    VALUES[REF3] = {}
+    VALUES[REF4] = {"username": "kit@gmail.com", "password": "google password"}
 
 
 def read():
@@ -69,8 +79,8 @@ while True:
         values = {k: v for k, v in VALUES.get(req["ref"], {}).items() if k in req["want"]}
         write({"id": rid, "type": "fill", **values})
     elif kind == "check":
-        known = [r for r, v in VALUES.items() if v["username"] == req["username"]]
-        same = [r for r in known if VALUES[r]["password"] == req["password"]]
+        known = [r for r, v in VALUES.items() if v.get("username") == req["username"]]
+        same = [r for r in known if VALUES[r].get("password") == req["password"]]
         status = "same" if same else "update" if known else "new"
         write({"id": rid, "type": "check", "status": status, "matches": same or known})
     elif kind == "save" and not valid_entry(req.get("entry") or {}, req["origin"]):

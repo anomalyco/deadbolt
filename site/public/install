@@ -53,6 +53,12 @@ tar -xzf "$tmp/$file" -C "$tmp"
 mkdir -p "$dir"
 mv "$tmp/deadbolt" "$dir/deadbolt"
 chmod 755 "$dir/deadbolt"
+# On macOS deadbolt checks its agent with deadbolt-enclave, which must sit beside it
+# (releases before it shipped have none).
+if [ "$os" = darwin ] && [ -f "$tmp/deadbolt-enclave" ]; then
+  mv "$tmp/deadbolt-enclave" "$dir/deadbolt-enclave"
+  chmod 755 "$dir/deadbolt-enclave"
+fi
 
 echo "Installed $("$dir/deadbolt" --version) to $dir/deadbolt"
 case ":$PATH:" in

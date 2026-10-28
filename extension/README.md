@@ -35,16 +35,19 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/bg/autofill.ts`     | Menu tokens, fills, sign-in sessions across steps, popup        |
 | `src/bg/save.ts`         | Captured submits, sign-in outcomes, `check`, offers, `save`     |
 | `src/bg/site.ts`         | Fillable origins and same-site frames                           |
+| `src/bg/signinwith.ts`   | "Sign in with" sessions: popup, provider pages, chooser account |
 | `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback        |
 | `src/passkey-hook.ts`    | Page-world `navigator.credentials` hook                         |
 | `src/passkey-options.ts` | The hook's options, serialized whole for the extension          |
 | `src/content.ts`         | Content script: scans, submit capture, settled-page signal      |
 | `src/content/outcome.ts` | What a settled page shows, as yes-or-no facts for `bg/save.ts`  |
+| `src/content/ring.ts`    | Ring and pill around what the user should click, closed shadow  |
 | `src/content/`           | Detection, Shadow DOM, filling, the menu frame, passkey channel |
 | `src/menu.ts`            | The in-page surface: account list, fill pill, save offer        |
 | `src/popup.ts`           | Toolbar popup: status, logins, save offers, passkey prompts     |
 | `src/ui/motion.ts`       | Springs (CSS `linear()` and retargeting), rolled labels         |
 | `src/protocol.ts`        | Host message types and parsing                                  |
+| `src/signin.ts`          | "Sign in with" providers: names, hosts, button words            |
 | `src/messages.ts`        | Messages inside the extension                                   |
 | `static/`                | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons       |
 | `e2e/`                   | Headless Chromium runs against a fake host                      |
@@ -54,7 +57,8 @@ fixtures (including Shadow DOM and frames), origin and same-site rules, frame
 targeting, menu tokens and fills against a fake `chrome`, offers and their
 timers, host message parsing, and the host client against a fake port.
 
-`bun run e2e` loads the built extension in headless Chromium with fresh
+`bun run e2e` loads an e2e build of the extension (`scripts/build.ts --e2e`,
+which e2e/run.ts makes for itself) in headless Chromium with fresh
 profiles and `e2e/fake-host.py` as the host. `--only security` runs the
 hidden, covered, swapped and navigated cases that CI runs; `--stills <dir>`
 saves screenshots, and `--video <dir>` records the `film` run (menu, fill,

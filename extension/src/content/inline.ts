@@ -23,7 +23,9 @@
 import { IDENTIFIER_ROLES, MENU_ROLES, type FillAck, type QueryReply, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
-import type { Field } from "./detect"
+import { findAccountTile, findProviderButton, type Field } from "./detect"
+import { hideRing, showRing } from "./ring"
+import { provider } from "../signin"
 import { fillable, fillFields, ownValue } from "./fill"
 import { deepActiveElement } from "./shadow"
 
@@ -670,6 +672,8 @@ export function initMenu(page: PageState) {
   // along; coming back is a new visit.
   window.addEventListener("pagehide", () => {
     closeMenu()
+    hideRing()
+    clearInterval(tileTimer)
     dismissedFor = null
     lastGestureAt = 0
     lastPointer = null
@@ -695,8 +699,47 @@ export function initMenu(page: PageState) {
         return void respond(true)
       case "db:surface":
         return void respond(openSaveSurface(String(message.token)))
+      case "db:point":
+        return void respond(pointAtProvider(String(message.provider)))
+      case "db:chooser":
+        if (isTop) pointAtTile(String(message.account))
+        return void respond(true)
     }
   })
+}
+
+/**
+ * "Sign in with <provider>": ring the site's own button for it, if one
+ * shows, and say whether it did. The user clicks it; Deadbolt doesn't.
+ */
+function pointAtProvider(id: string): boolean {
+  if (!isTop) return false
+  const p = provider(id)
+  const button = findProviderButton(p)
+  if (!button) return false
+  closeMenu()
+  showRing(button, `Your ${p.name} sign-in`)
+  return true
+}
+
+let tileTimer: ReturnType<typeof setInterval> | undefined
+/**
+ * On the provider's account chooser: ring the tile for the linked account
+ * once it shows (choosers draw late), with a pill that names no one (the
+ * page shows the account itself). The user picks it.
+ */
+function pointAtTile(account: string) {
+  clearInterval(tileTimer)
+  let tries = 0
+  const look = () => {
+    const tile = findAccountTile(account)
+    if (tile) {
+      clearInterval(tileTimer)
+      showRing(tile, "Your linked account")
+    } else if (++tries > 25) clearInterval(tileTimer)
+  }
+  look()
+  tileTimer = setInterval(look, 300)
 }
 
 /** Called after each page scan: offer the menu on an already-focused field. */
