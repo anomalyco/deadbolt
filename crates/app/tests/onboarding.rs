@@ -305,6 +305,7 @@ fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
         initialized: true,
         unlocked: false,
         locks_in_secs: None,
+        caller: deadbolt_client::protocol::CallerInfo::unverified("fixture"),
         device: None,
         vaults: Vec::new(),
         peers_online: 0,

@@ -416,6 +416,54 @@ fn agent_is_single_instance() {
 }
 
 #[test]
+fn whoami_and_activity_name_the_caller_never_values() {
+    let a = Device::new();
+    a.run(&["init"]);
+    let me = a.output(
+        a.cmd(&["whoami", "--json"])
+            .env("DEADBOLT_CALLER", "Deadbolt")
+            .env("OPENCODE_SESSION_ID", "ses_test"),
+    );
+    assert!(me.status.success());
+    let me: serde_json::Value = serde_json::from_slice(&me.stdout).unwrap();
+    // Claiming to be the app changes nothing but the claim.
+    assert_eq!(me["class"], "caller");
+    assert_eq!(me["claimed"]["caller"], "Deadbolt");
+    assert_eq!(me["claimed"]["opencode_session"], "ses_test");
+    assert_ne!(me["pid"], 0);
+
+    a.run(&[
+        "new",
+        "login",
+        "--name",
+        "GitHub",
+        "password=hunter2-hunter2",
+    ]);
+    let out = a.output(
+        a.cmd(&["get", "GitHub"])
+            .env("DEADBOLT_CALLER", "an AI")
+            .env_remove("OPENCODE_SESSION_ID"),
+    );
+    assert!(out.status.success());
+    let activity = a.run(&["activity", "--since", "1h", "--json"]);
+    assert!(!activity.contains("hunter2"), "{activity}");
+    let entries: Vec<serde_json::Value> = activity
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let get = &entries[0];
+    assert_eq!(get["command"], "item-get");
+    assert_eq!(get["items"][0]["title"], "GitHub");
+    assert_eq!(get["fields"], serde_json::json!(["password"]));
+    assert_eq!(get["caller"]["claimed"]["caller"], "an AI");
+    assert!(entries.iter().any(|e| e["command"] == "item-new"));
+    assert!(
+        a.run(&["activity"])
+            .contains("\titem-get\tGitHub\tpassword")
+    );
+}
+
+#[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();
     let old = a.output(a.cmd(&["status"]).env("DEADBOLT_TEST_VERSION", "0.0.0-old"));
@@ -1214,9 +1262,16 @@ fn watch_prints_changes_as_json_lines() {
             }
         }
     });
+    // Each command here is also an Activity entry; those come in between.
     let next = || -> serde_json::Value {
-        let line = rx.recv_timeout(Duration::from_secs(30)).expect("a change");
-        serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"))
+        loop {
+            let line = rx.recv_timeout(Duration::from_secs(30)).expect("a change");
+            let change: serde_json::Value =
+                serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"));
+            if change != serde_json::json!({"change": "activity"}) {
+                return change;
+            }
+        }
     };
     assert_eq!(next(), serde_json::json!({"change": "watching"}));
 
@@ -2476,4 +2531,31 @@ fn a_waiting_send_reports_the_pickup() {
         .read_to_string(&mut err)
         .unwrap();
     assert!(err.contains("picked up"), "{err}");
+}
+
+/// Release builds take `deadbolt-enclave` from `scripts/build-enclave.sh`,
+/// not `build.rs`, so both compile every Swift source in the helper, or a
+/// release ships a helper missing part of it (caller identity, say).
+#[test]
+fn the_release_helper_builds_every_swift_source() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let script = std::fs::read_to_string(root.join("scripts/build-enclave.sh")).unwrap();
+    let build = std::fs::read_to_string(root.join("build.rs")).unwrap();
+    let mut sources: Vec<String> = std::fs::read_dir(root.join("src/agent"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".swift"))
+        .collect();
+    sources.sort();
+    assert!(sources.len() >= 2, "{sources:?}");
+    for name in &sources {
+        assert!(
+            script.contains(&format!("\"$src/{name}\"")),
+            "build-enclave.sh doesn't compile {name}"
+        );
+        assert!(
+            build.contains(&format!("\"src/agent/{name}\"")),
+            "build.rs doesn't compile {name}"
+        );
+    }
 }
