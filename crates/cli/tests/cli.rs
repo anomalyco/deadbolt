@@ -28,7 +28,12 @@ impl Device {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new(BIN);
+        self.cmd_of(BIN.as_ref(), args)
+    }
+
+    /// `cmd` with another copy of deadbolt.
+    fn cmd_of(&self, program: &std::path::Path, args: &[&str]) -> Command {
+        let mut cmd = Command::new(program);
         cmd.args(args)
             .env("DEADBOLT_HOME", self.path("home"))
             .env("XDG_RUNTIME_DIR", self.path("run"))
@@ -399,6 +404,99 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
             .status
             .success()
     );
+}
+
+/// `deadbolt app` beside a stand-in `deadbolt-ui` that records each start
+/// and the token it was given. The app's window is a watcher with `app` set.
+#[cfg(target_os = "linux")]
+#[test]
+fn app_comes_forward_through_the_agent_instead_of_starting_again() {
+    use deadbolt_client::protocol::Change;
+    use std::os::unix::fs::PermissionsExt;
+
+    let a = Device::new();
+    let bin = a.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let deadbolt = bin.join("deadbolt");
+    if std::fs::hard_link(BIN, &deadbolt).is_err() {
+        std::fs::copy(BIN, &deadbolt).unwrap();
+    }
+    let starts = a.path("starts");
+    let ui = bin.join("deadbolt-ui");
+    std::fs::write(
+        &ui,
+        format!(
+            "#!/bin/sh\necho \"${{XDG_ACTIVATION_TOKEN:-none}}\" >> '{}'\n",
+            starts.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&ui, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let app = |vars: &[(&str, &str)]| {
+        let mut cmd = a.cmd_of(&deadbolt, &["app"]);
+        cmd.env_remove("XDG_ACTIVATION_TOKEN")
+            .env_remove("DESKTOP_STARTUP_ID")
+            .env_remove("DEADBOLT_BIN")
+            .envs(vars.iter().copied());
+        assert!(a.output(&mut cmd).status.success());
+    };
+    let started = || {
+        std::fs::read_to_string(&starts)
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect::<Vec<_>>()
+    };
+
+    // No agent: the app starts, and takes the launcher's token itself.
+    app(&[("XDG_ACTIVATION_TOKEN", "one")]);
+    eventually("the first start", || started() == ["one"]);
+    assert_eq!(a.agent_pid(), None, "opening the app starts no agent");
+
+    // An agent, but no app watching: it starts.
+    a.run(&["status"]);
+    app(&[("XDG_ACTIVATION_TOKEN", "two")]);
+    eventually("the second start", || started() == ["one", "two"]);
+
+    // The app's window watches: later launches bring it forward with their token.
+    let paths = deadbolt_client::Paths::from_vars(|name| match name {
+        "DEADBOLT_HOME" => Some(a.path("home").into()),
+        "XDG_RUNTIME_DIR" => Some(a.path("run").into()),
+        "XDG_STATE_HOME" => Some(a.path("state").into()),
+        "XDG_CONFIG_HOME" => Some(a.path("config").into()),
+        _ => None,
+    });
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let next = |watch: &mut deadbolt_client::Watch| {
+        runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), watch.next())
+                .await
+                .expect("a change in time")
+                .unwrap()
+        })
+    };
+    let mut watch = runtime
+        .block_on(deadbolt_client::watch(&paths, true))
+        .unwrap();
+    assert_eq!(next(&mut watch), Some(Change::Watching));
+    app(&[("XDG_ACTIVATION_TOKEN", "three")]);
+    assert_eq!(
+        next(&mut watch),
+        Some(Change::Activate {
+            token: Some("three".into())
+        })
+    );
+    app(&[("DESKTOP_STARTUP_ID", "x11-startup_TIME42")]);
+    assert_eq!(
+        next(&mut watch),
+        Some(Change::Activate {
+            token: Some("x11-startup_TIME42".into())
+        })
+    );
+    app(&[]);
+    assert_eq!(next(&mut watch), Some(Change::Activate { token: None }));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(started(), ["one", "two"], "nothing started again");
 }
 
 #[test]

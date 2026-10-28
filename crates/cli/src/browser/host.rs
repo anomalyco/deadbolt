@@ -861,7 +861,9 @@ fn changed(change: &Change) -> Option<&'static str> {
         Change::Unlocked => Some("unlocked"),
         Change::Items { .. } | Change::Vaults | Change::Resync => Some("items"),
         Change::Stopping => Some("stopped"),
-        Change::Watching | Change::Devices { .. } | Change::Activity => None,
+        Change::Watching | Change::Devices { .. } | Change::Activity | Change::Activate { .. } => {
+            None
+        }
     }
 }
 
@@ -889,7 +891,7 @@ async fn watch(
         }
     };
     loop {
-        if let Ok(mut stream) = deadbolt_client::watch(&paths).await {
+        if let Ok(mut stream) = deadbolt_client::watch(&paths, false).await {
             let mut watching = false;
             let mut stopped = false;
             loop {

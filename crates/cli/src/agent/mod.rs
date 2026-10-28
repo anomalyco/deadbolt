@@ -1167,8 +1167,12 @@ impl Agent {
         };
         let mut stop = false;
         let result = match request {
-            Ok(request) if matches!(request.command, Command::Watch) && request.v == protocol() => {
-                return self.watch(&conversation).await;
+            Ok(Request {
+                v,
+                command: Command::Watch { app },
+                ..
+            }) if v == protocol() => {
+                return self.watch(&conversation, app).await;
             }
             Ok(request) => {
                 stop = matches!(request.command, Command::Stop);
@@ -1227,6 +1231,7 @@ impl Agent {
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.
         // Nor are sends, which never touch the vault.
+        // Nor is bringing the app forward.
         let send = matches!(
             command,
             Command::SendCreate { .. }
@@ -1244,13 +1249,16 @@ impl Agent {
                     | Command::PasskeyList { .. }
                     | Command::SiteGenerateCheck { .. }
                     | Command::SiteGenerateDrop { .. }
+                    | Command::AppActivate { .. }
             );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
         // and a lock stops it before it writes anything. Nor does waiting
-        // for a send to be picked up.
+        // for a send to be picked up, or for an app to start.
         let busy = !matches!(
             command,
-            Command::SyncOnePassword { .. } | Command::SendWait { .. }
+            Command::SyncOnePassword { .. }
+                | Command::SendWait { .. }
+                | Command::AppActivate { .. }
         );
         if busy {
             self.busy.fetch_add(1, Ordering::SeqCst);
@@ -1301,7 +1309,12 @@ impl Agent {
                 self.lock().await;
                 Ok(Reply::Done)
             }
-            Command::Watch => bail!("watch streams on a connection of its own"),
+            Command::Watch { .. } => bail!("watch streams on a connection of its own"),
+            Command::AppActivate { token } => Ok(if self.watchers.activate(token).await {
+                Reply::Activated
+            } else {
+                Reply::NoApp
+            }),
             Command::ActivityReport { .. } => bail!("reports are answered as they arrive"),
             Command::ActivityList {
                 since,
@@ -1634,8 +1647,8 @@ impl Agent {
     /// Streams changes to one watcher until it hangs up or the agent stops.
     /// A watcher that stops reading is dropped after [`watchers::SEND_TIMEOUT`];
     /// publishing never waits for it.
-    async fn watch(&self, conv: &Conversation) -> Result<()> {
-        let subscription = self.watchers.subscribe();
+    async fn watch(&self, conv: &Conversation, app: bool) -> Result<()> {
+        let subscription = self.watchers.subscribe(app);
         let send = |change| async move {
             tokio::time::timeout(
                 watchers::SEND_TIMEOUT,

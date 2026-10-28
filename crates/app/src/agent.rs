@@ -2,7 +2,8 @@
 //! (each is one socket connection, like the CLI's) and their results land in
 //! an inbox the UI drains each frame. A second thread holds a `watch` stream
 //! open, reconnecting with backoff, and posts each change to the same inbox.
-//! Both wake the window when something lands; nothing polls.
+//! Both wake the window when something lands; nothing polls. The main
+//! window's stream watches as the app, so another launch brings it forward.
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -23,6 +24,14 @@ use zeroize::{Zeroize, Zeroizing};
 const RECONNECT_FIRST: Duration = Duration::from_millis(100);
 /// The longest wait between attempts while no agent is running.
 const RECONNECT_MAX: Duration = Duration::from_secs(2);
+
+/// Whose connection this is. The main window's watch is the app's, which a
+/// second launch brings forward (`app-activate`); the quick panel's isn't.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    Main,
+    Panel,
+}
 
 pub enum Job {
     /// Start the agent if needed and read its status.
@@ -290,7 +299,7 @@ impl Agent {
         clippy::expect_used,
         reason = "the app can't run without its agent thread"
     )]
-    pub fn spawn(paths: Paths, launch: Launch) -> Agent {
+    pub fn spawn(paths: Paths, launch: Launch, window: Window) -> Agent {
         let (jobs, requests) = channel::<Job>();
         let (results, inbox) = channel();
         let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
@@ -302,7 +311,7 @@ impl Agent {
         let watch_paths = paths.clone();
         std::thread::Builder::new()
             .name("deadbolt-watch".into())
-            .spawn(move || watch(watch_paths, post, stop))
+            .spawn(move || watch(watch_paths, window == Window::Main, post, stop))
             .expect("spawning the watch thread");
         let wake = waker.clone();
         std::thread::Builder::new()
@@ -384,9 +393,10 @@ impl Post {
     }
 }
 
-/// Keeps a watch stream open until `stop` fires or the app is gone. It never
-/// starts the agent: that's the worker's `Connect` and `Unlock`.
-fn watch(paths: Paths, post: Post, mut stop: oneshot::Receiver<()>) {
+/// Keeps a watch stream open until `stop` fires or the app is gone, as the
+/// app's main window when `app`. It never starts the agent: that's the
+/// worker's `Connect` and `Unlock`.
+fn watch(paths: Paths, app: bool, post: Post, mut stop: oneshot::Receiver<()>) {
     let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -397,7 +407,7 @@ fn watch(paths: Paths, post: Post, mut stop: oneshot::Receiver<()>) {
         let mut delay = RECONNECT_FIRST;
         loop {
             tokio::select! {
-                gone = follow(&paths, &post, &mut delay) => if gone { return },
+                gone = follow(&paths, app, &post, &mut delay) => if gone { return },
                 _ = &mut stop => return,
             }
             tokio::select! {
@@ -410,8 +420,8 @@ fn watch(paths: Paths, post: Post, mut stop: oneshot::Receiver<()>) {
 }
 
 /// Follows one watch stream to its end. True once the app is gone.
-async fn follow(paths: &Paths, post: &Post, delay: &mut Duration) -> bool {
-    let Ok(mut stream) = deadbolt_client::watch(paths).await else {
+async fn follow(paths: &Paths, app: bool, post: &Post, delay: &mut Duration) -> bool {
+    let Ok(mut stream) = deadbolt_client::watch(paths, app).await else {
         return false;
     };
     loop {

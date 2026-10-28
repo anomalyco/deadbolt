@@ -354,13 +354,15 @@ impl Watch {
 }
 
 /// Subscribes to the running agent's changes. The first is
-/// [`Change::Watching`]; fetch state after it so nothing is missed.
-pub async fn watch(paths: &Paths) -> Result<Watch, Error> {
+/// [`Change::Watching`]; fetch state after it so nothing is missed. `app`
+/// marks the desktop app's main window, which alone gets
+/// [`Change::Activate`].
+pub async fn watch(paths: &Paths, app: bool) -> Result<Watch, Error> {
     let stream = UnixStream::connect(&paths.socket)
         .await
         .map_err(Error::Connect)?;
     let (read, mut write) = stream.into_split();
-    let body = encode_line(&request(Command::Watch))?;
+    let body = encode_line(&request(Command::Watch { app }))?;
     write.write_all(&body).await?;
     Ok(Watch {
         lines: LineReader::new(BufReader::new(read)),

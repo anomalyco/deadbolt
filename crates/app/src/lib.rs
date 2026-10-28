@@ -96,7 +96,11 @@ pub fn run() {
         main = main
             .init(move || {
                 let mut app = if live {
-                    let mut app = App::new(Agent::spawn(Paths::get(), agent::launch()));
+                    let mut app = App::new(Agent::spawn(
+                        Paths::get(),
+                        agent::launch(),
+                        agent::Window::Main,
+                    ));
                     app.onboarding.worker = Worker::new(Paths::get(), agent::launch());
                     if let Some(source) = std::env::current_exe()
                         .ok()
@@ -135,7 +139,11 @@ pub fn run() {
         let mut quick = quick
             .init(move || {
                 let mut app = if live {
-                    App::panel(Agent::spawn(Paths::get(), agent::launch()))
+                    App::panel(Agent::spawn(
+                        Paths::get(),
+                        agent::launch(),
+                        agent::Window::Panel,
+                    ))
                 } else {
                     App::panel(Agent::offline())
                 };

@@ -9,7 +9,7 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use deadbolt_app::agent::{Agent, Job};
+use deadbolt_app::agent::{Agent, Job, Window};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::worker::{ALREADY_SET_UP, NewDevice, Progress, Stage, Worker};
 use deadbolt_app::onboarding::{Flow, Severity, Step};
@@ -38,7 +38,7 @@ fn unlock_search_copy_lock() {
     device.run(&["lock"]);
 
     let board = rune::clipboard::memory();
-    let agent = Agent::spawn(device.paths(), device.launch());
+    let agent = Agent::spawn(device.paths(), device.launch(), Window::Main);
     let mut rt = Runtime::new(
         App::new(agent),
         deadbolt_app::view::app,
@@ -166,7 +166,7 @@ fn quick_panel_unlock_filter_copy() {
     device.run(&["lock"]);
 
     let board = rune::clipboard::memory();
-    let agent = Agent::spawn(device.paths(), device.launch());
+    let agent = Agent::spawn(device.paths(), device.launch(), Window::Panel);
     let mut rt = Runtime::new(
         App::panel(agent),
         deadbolt_app::panel::view::panel,
@@ -232,6 +232,80 @@ fn quick_panel_unlock_filter_copy() {
     assert_eq!(text(&board).as_deref(), Some("ops"));
 }
 
+/// Another launch (`deadbolt app`, `app-activate`) reaches the main window's
+/// watch, never the quick panel's, and bringing the window forward leaves
+/// what it shows as it was. Headless runs drop window requests, so the
+/// focus itself isn't seen here.
+#[test]
+fn a_second_launch_reaches_the_main_window_not_the_panel() {
+    use deadbolt_client::protocol::{Command, Reply};
+
+    let device = Device::new();
+    device.run(&["init"]);
+    device.run(&["lock"]);
+    let paths = device.paths();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let activate = |token: &str| {
+        let command = Command::AppActivate {
+            token: Some(token.into()),
+        };
+        runtime
+            .block_on(deadbolt_client::simple(&paths, command))
+            .unwrap()
+    };
+
+    let mut panel = Runtime::new(
+        App::panel(Agent::spawn(paths.clone(), device.launch(), Window::Panel)),
+        deadbolt_app::panel::view::panel,
+        deadbolt_app::panel::SIZE,
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    panel.poll = Some(|s, now, tx| s.poll(now, tx));
+    panel.update(|s, tx| s.summon(tx));
+    until(&mut panel, "the locked panel", |s| {
+        s.screen == Screen::Locked
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        matches!(activate("first"), Reply::NoApp),
+        "the panel's watch isn't the app's"
+    );
+
+    // The main window opens meanwhile; the next launch brings it forward.
+    let main = rune::App::new(deadbolt_app::spec());
+    let quick = rune::App::new(deadbolt_app::panel::spec());
+    let mut rt = Runtime::new(
+        App::new(Agent::spawn(paths.clone(), device.launch(), Window::Main)),
+        deadbolt_app::view::app,
+        (820.0, 540.0),
+        Env {
+            system_dark: true,
+            scale: 1.0,
+        },
+    );
+    rt.state.windows = Some(deadbolt_app::panel::window::Windows::new(
+        main.handle(),
+        quick.handle(),
+    ));
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+    rt.state.agent.send(Job::Connect);
+    until(&mut rt, "the locked screen", |s| s.screen == Screen::Locked);
+    assert!(matches!(activate("second"), Reply::Activated));
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(rt.state.screen, Screen::Locked);
+    assert!(rt.has_secure_focus(), "the passphrase field keeps the keys");
+}
+
 #[test]
 fn the_clipboard_clears_itself_unless_something_else_was_copied() {
     let board = rune::clipboard::memory();
@@ -286,7 +360,7 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
 
 /// The app for `device`, as `run` builds it, before it connects.
 fn app(device: &Device) -> Runtime<App> {
-    let mut app = App::new(Agent::spawn(device.paths(), device.launch()));
+    let mut app = App::new(Agent::spawn(device.paths(), device.launch(), Window::Main));
     app.onboarding.worker = Worker::new(device.paths(), device.launch());
     let mut rt = Runtime::new(
         app,
@@ -682,7 +756,7 @@ fn add_edit_and_delete_items() {
         "url=github.com",
         "password=hunter22",
     ]);
-    let agent = Agent::spawn(device.paths(), device.launch());
+    let agent = Agent::spawn(device.paths(), device.launch(), Window::Main);
     let mut rt = Runtime::new(
         App::new(agent),
         deadbolt_app::view::app,

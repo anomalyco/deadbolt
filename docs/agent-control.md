@@ -65,7 +65,7 @@ How today's protocol (`crates/client/src/protocol.rs`) maps:
   too.
 - **Always allowed:** `status` and `stop` (version handover depends on
   them, `docs/app.md`), `lock` (makes things safer), `generate` (no vault
-  needed), `sync`.
+  needed), `sync`, `app-activate` (brings the desktop app forward).
 - **Browser only:** `site-logins`, `site-fill`, `site-check`, `site-save`
   and `site-generate` with its check, keep and drop, from a caller the agent
   sees as the browser host (next section).
@@ -302,7 +302,7 @@ touched, from a helper it hash-checks before running.
   - The app reports its own reveals and copies (`ActivityReport`), which
     the agent can't see; every copy in the app, the editor's ⌘C included,
     goes through one function that reports it. The app's own requests, a
-    caller's `status` and `watch`, the browser host's lookups
+    caller's `status`, `watch` and `app-activate`, the browser host's lookups
     (`site-logins`, `site-check`, `passkey-list`, and `site-generate-check`
     and `site-generate-drop`, asked before anyone picked a password) and
     `ActivityList` itself aren't entries: they come with every command or
