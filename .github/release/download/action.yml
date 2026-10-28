@@ -5,16 +5,18 @@ inputs:
     description: Artifact name pattern
     required: true
   digests:
-    description: Space-separated name=digest pairs, from the outputs of the jobs that made the artifacts
+    description: Space-separated name=digest pairs, from the outputs of the jobs that made the artifacts; exactly the artifacts the pattern matches
     required: true
 runs:
   using: composite
   steps:
+    # A pattern that matches one artifact extracts it without its <name>/
+    # directory; verify-artifacts.sh puts every artifact in $RUNNER_TEMP/in/<name>.
     - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
       with:
         pattern: ${{ inputs.pattern }}
-        path: ${{ runner.temp }}/in
+        path: ${{ runner.temp }}/download
     - shell: bash
-      run: bash "${GITHUB_ACTION_PATH//\\//}/../verify-artifacts.sh" "$RUNNER_TEMP/in"
+      run: bash "${GITHUB_ACTION_PATH//\\//}/../verify-artifacts.sh" "$RUNNER_TEMP/download" "$RUNNER_TEMP/in"
       env:
         DEADBOLT_DIGESTS: ${{ inputs.digests }}
