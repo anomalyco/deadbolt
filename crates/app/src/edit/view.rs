@@ -36,12 +36,11 @@ pub static REGENERATE: Icon = Icon {
     body: r#"<path d="M12.75 8a4.75 4.75 0 1 1-1.39-3.36" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><path d="M11.75 2.25v2.5h-2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
 };
 
-/// The field names' column, as the item's.
-const LABEL_W: f32 = 84.0;
 /// A shown secret's text area grows to this, then scrolls inside.
 const SECRET_LINES: usize = 12;
 const SECRET_MAX_H: f32 = 200.0;
-const LABEL_GAP: f32 = 12.0;
+/// Around the form's fields, for a focused one's edge.
+const FIELD_PAD: f32 = 3.0;
 /// The delete button's growth into its confirm, and back.
 const GROW: Spring = Spring::new(0.3, 0.0);
 /// The confirm's fade where nothing grows (Reduce Motion).
@@ -53,7 +52,7 @@ fn fade() -> Transition {
 
 /// The detail pane while a form is open.
 pub fn form(s: &App, k: &Kit, f: &Form) -> El {
-    let mut fields = col().key("fields").w_full().gap(8.0);
+    let mut fields = col().key("fields").w_full().gap(14.0);
     for i in 0..f.fields.len() {
         fields = fields.child(field(s, k, f, i));
     }
@@ -65,7 +64,8 @@ pub fn form(s: &App, k: &Kit, f: &Form) -> El {
         .min_h(0.0)
         .gap(16.0)
         .transition(swap());
-    form.child(head(k, f))
+    // The head and the foot line up with the scroll's padded fields.
+    form.child(head(k, f).px(FIELD_PAD))
         .children(conflict(k, f))
         .children(mirrored(k, f))
         .child(
@@ -75,15 +75,15 @@ pub fn form(s: &App, k: &Kit, f: &Form) -> El {
                 .grow(1.0)
                 .shrink()
                 .min_h(0.0)
-                // Room for the focus rings the viewport would clip.
-                .padding(3.0)
+                // Room for a focused field's edge the viewport would clip.
+                .padding(FIELD_PAD)
                 .scroll(rune::ScrollSpec {
                     stick_bottom: false,
                 })
                 .scroll_edge_fade(crate::view::LIST_EDGE)
                 .child(fields),
         )
-        .child(foot(k, f))
+        .child(foot(k, f).px(FIELD_PAD))
 }
 
 /// The name, and the type: a picker for a new item.
@@ -100,19 +100,23 @@ fn head(k: &Kit, f: &Form) -> El {
         .on_edit(|s: &mut App| s.name_mut())
         .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line))
         .on_change(|s: &mut App, _| s.form_changed())
-        .on_submit(|s: &mut App, _| s.save())
-        .build(k)
+        .on_submit(|s: &mut App, _| s.save());
+    let name = quiet(k, name.build(k), &f.name, f.problem_for("name").is_some())
         .key("name")
         .label("Name");
     let mut head = col().key("head").w_full().gap(8.0);
     if f.is_new() {
+        // "Note": "Secure note" doesn't fit a fifth of the pane.
         let labels: Vec<String> = KINDS
             .iter()
-            .map(|kind| title_case(deadbolt_client::protocol::noun(kind, 1)))
+            .map(|kind| match *kind {
+                "note" => "Note".to_owned(),
+                kind => title_case(deadbolt_client::protocol::noun(kind, 1)),
+            })
             .collect();
         let at = KINDS.iter().position(|kind| *kind == f.kind);
         let kinds = SegmentedControl::new(&labels, at)
-            .fit()
+            .width(None)
             .on_pick(|s: &mut App, i, _| {
                 if let Some(kind) = KINDS.get(i) {
                     s.pick_kind(kind);
@@ -121,6 +125,7 @@ fn head(k: &Kit, f: &Form) -> El {
         head = head.child(
             row()
                 .key("kinds")
+                .w_full()
                 .child(disable(kinds, labels.len(), f.saving).build(k)),
         );
     }
@@ -228,23 +233,28 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
             .items_start()
             .child(
                 el().grow(1.0).shrink().min_w(0.0).child(
-                    TextArea::new(&input.edit)
-                        .secure()
-                        .revealed(shown)
-                        .wrap_anywhere()
-                        .width(None)
-                        .auto_grow(1, SECRET_LINES)
-                        .max_height(SECRET_MAX_H)
-                        .placeholder(placeholder(input))
-                        .invalid(invalid)
-                        .on_edit(move |s: &mut App| s.input_mut(i))
-                        .on_key(move |s: &mut App, ev, tx| {
-                            s.form_key(ev, Field::SecretLines) || s.copy_secret_input(i, ev, tx)
-                        })
-                        .on_change(|s: &mut App, _| s.form_changed())
-                        .on_submit(|s: &mut App, _| s.save())
-                        .build(k)
-                        .label(named.clone()),
+                    quiet(
+                        k,
+                        TextArea::new(&input.edit)
+                            .secure()
+                            .revealed(shown)
+                            .wrap_anywhere()
+                            .width(None)
+                            .auto_grow(1, SECRET_LINES)
+                            .max_height(SECRET_MAX_H)
+                            .placeholder(placeholder(input))
+                            .invalid(invalid)
+                            .on_edit(move |s: &mut App| s.input_mut(i))
+                            .on_key(move |s: &mut App, ev, tx| {
+                                s.form_key(ev, Field::SecretLines) || s.copy_secret_input(i, ev, tx)
+                            })
+                            .on_change(|s: &mut App, _| s.form_changed())
+                            .on_submit(|s: &mut App, _| s.save())
+                            .build(k),
+                        &input.edit,
+                        invalid,
+                    )
+                    .label(named.clone()),
                 ),
             )
             .child(secret_actions(k, input, i, false, f.saving).mt(6.0))
@@ -266,7 +276,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                 .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Wrapped))
                 .on_change(move |s: &mut App, _| s.wrapped_changed(i))
         };
-        area.build(k).label(named.clone())
+        quiet(k, area.build(k), &input.edit, invalid).label(named.clone())
     } else {
         let mut t = TextInput::new(&input.edit)
             .width(None)
@@ -285,7 +295,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         } else {
             t = t.on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line));
         }
-        let built = t.build(k).label(named.clone());
+        let built = quiet(k, t.build(k), &input.edit, invalid).label(named.clone());
         if generates {
             // Each generated password replaces the last, rather than popping in.
             el().key(format!("value-{}", f.generated))
@@ -310,21 +320,28 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
     if let Some(p) = problem_text {
         value = value.child(problem(k, "problem", p));
     }
-    row()
+    // Its name over it, as the item's page has them.
+    col()
         .key(format!("field-{}", input.name))
         .w_full()
-        .gap(LABEL_GAP)
-        .items_start()
+        .gap(6.0)
         .child(
             text(named)
                 .key("name")
-                .w(LABEL_W)
-                // Level with the first line of the control's text.
-                .mt(7.0)
-                .font(k.ty.text_small)
-                .color(k.c.text_muted),
+                .font(k.ty.small_medium)
+                .color(k.c.text_faint),
         )
-        .child(value)
+        .child(value.w_full())
+}
+
+/// A focused field keeps a neutral edge instead of the kit's blue ring;
+/// the caret says where typing goes.
+fn quiet(k: &Kit, field: El, edit: &rune::TextEdit, invalid: bool) -> El {
+    if edit.focused && !invalid {
+        field.outline(1.0, 0.0, k.c.border_strong)
+    } else {
+        field
+    }
 }
 
 /// Show or hide, and for the generated password, a new one. A value the

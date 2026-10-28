@@ -44,13 +44,20 @@ struct Pending {
     vaults: bool,
     items: BTreeSet<VaultId>,
     devices: BTreeSet<VaultId>,
+    /// New Activity entries were stored.
+    activity: bool,
     resync: bool,
     stopping: bool,
 }
 
 impl Pending {
     fn is_empty(&self) -> bool {
-        !(self.locked || self.unlocked || self.vaults || self.resync || self.stopping)
+        !(self.locked
+            || self.unlocked
+            || self.vaults
+            || self.activity
+            || self.resync
+            || self.stopping)
             && self.items.is_empty()
             && self.devices.is_empty()
     }
@@ -89,6 +96,9 @@ impl Pending {
             out.extend(pending.items.iter().map(|v| Change::Items {
                 vault: v.to_string(),
             }));
+            if pending.activity {
+                out.push(Change::Activity);
+            }
         }
         if pending.stopping {
             out.push(Change::Stopping);
@@ -146,6 +156,10 @@ impl Watchers {
 
     pub fn unlocked(&self) {
         self.publish(|p| p.unlocked = true);
+    }
+
+    pub fn activity(&self) {
+        self.publish(|p| p.activity = true);
     }
 
     pub fn stopping(&self) {

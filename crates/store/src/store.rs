@@ -11,6 +11,10 @@ use crate::crypto::{self, KEY_LEN, SecretKey};
 use crate::error::{Error, Result};
 use crate::kdf::{KdfHeader, KdfParams};
 
+mod activity;
+
+pub use activity::{ActivityPage, ActivityRow, Budget, Dropped};
+
 /// Name of the database file inside the data directory.
 pub const DB_FILE: &str = "store.redb";
 
@@ -99,6 +103,7 @@ pub fn init_with_params(
             write_log_len(&keys, &mut header, 0)?;
             txn.open_table(LOG)?;
             txn.open_table(META)?;
+            txn.open_table(activity::ACTIVITY)?;
         }
         txn.commit()?;
         File::open(&tmp.0)?.sync_all()?;

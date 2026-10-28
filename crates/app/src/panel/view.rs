@@ -1,5 +1,6 @@
-//! The quick panel's card: a search field over the vault view's rows, and a
-//! footer that says what ⏎ does, then shows the copy as the vault does.
+//! The quick panel's card: a search field over the vault's rows beside the
+//! selected item, and a footer that says what ⏎ and ⌘K do, then shows the
+//! copy as the vault does. ⌘K's actions open over its corner.
 //!
 //! Motion: it opens at rest on the next frame, like a menu, and only its
 //! close fades (`.25/0`). Rows filter as in the vault (rows that stay slide,
@@ -16,12 +17,12 @@ use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 
 use super::{CLOSE, MARGIN, Phase};
 use crate::model::{App, Screen};
-use crate::view::{
-    LIST_EDGE, copy_line, hint, passphrase_field, rows, search_placeholder, unlock_error,
-};
+use crate::view::{LIST_EDGE, copy_line, hint, passphrase_field, search_placeholder, unlock_error};
 
 const HEADER_H: f32 = 56.0;
 const FOOTER_H: f32 = 40.0;
+/// The list beside the item.
+const LIST_W: f32 = 250.0;
 
 pub fn panel(s: &App, cx: &mut Cx<App>) -> El {
     if s.reduced_motion {
@@ -41,7 +42,7 @@ pub fn panel(s: &App, cx: &mut Cx<App>) -> El {
 
 fn card(s: &App, k: &Kit) -> El {
     let (header, body) = match &s.screen {
-        Screen::Vault => (search(s, k), list(s, k)),
+        Screen::Vault => (search(s, k), vault(s, k)),
         Screen::Locked => (
             title(k, "locked", k.glyph.lock, "Unlock Deadbolt"),
             locked(s, k),
@@ -98,7 +99,8 @@ fn card(s: &App, k: &Kit) -> El {
     for shadow in k.shadow_layers(&k.elevation.floating) {
         card = card.box_shadow(shadow);
     }
-    card.child(header.transition(Transition::blur_replace()))
+    let card = card
+        .child(header.transition(Transition::blur_replace()))
         .child(rule("rule-top", k))
         .child(
             col()
@@ -109,7 +111,21 @@ fn card(s: &App, k: &Kit) -> El {
                 .child(body.transition(Transition::blur_replace())),
         )
         .child(rule("rule-bottom", k))
-        .child(footer(s, k))
+        .child(footer(s, k));
+    match crate::palette::view(s, k) {
+        Some(actions) => card.child(
+            col()
+                .key("over")
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .items_end()
+                .justify_end()
+                .pr(16.0)
+                .pb(FOOTER_H + 8.0)
+                .on_press(|s: &mut App| s.close_palette())
+                .child(actions.on_press(|_: &mut App| {})),
+        ),
+        None => card,
+    }
 }
 
 fn rule(key: &str, k: &Kit) -> El {
@@ -165,18 +181,27 @@ fn title(k: &Kit, key: &str, glyph: &'static Icon, label: &str) -> El {
         )
 }
 
-fn list(s: &App, k: &Kit) -> El {
-    col()
-        .key("list")
+/// The list beside the selected item.
+fn vault(s: &App, k: &Kit) -> El {
+    row()
+        .key("split")
         .w_full()
-        .grow(1.0)
-        .min_h(0.0)
-        .scroll(ScrollSpec {
-            stick_bottom: false,
-        })
-        .scroll_edge_fade(LIST_EDGE)
-        .scroll_margin(LIST_EDGE)
-        .child(rows(s, k))
+        .h_full()
+        .items_stretch()
+        .child(
+            col()
+                .key("list")
+                .w(LIST_W)
+                .h_full()
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
+                .scroll_edge_fade(LIST_EDGE)
+                .scroll_margin(LIST_EDGE)
+                .child(crate::vault::rows(s, k)),
+        )
+        .child(el().key("rule-side").w(1.0).h_full().fill(k.c.border_weak))
+        .child(super::item::view(s, k))
 }
 
 fn locked(s: &App, k: &Kit) -> El {
@@ -293,6 +318,9 @@ fn footer(s: &App, k: &Kit) -> El {
     }
     if crate::model::has_code(s) {
         bar = bar.child(hint(k, "h-code", &["⌥", "⏎"], "Code").transition(Transition::opacity()));
+    }
+    if s.screen == Screen::Vault && s.selected_item().is_some() {
+        bar = bar.child(hint(k, "h-actions", &["⌘", "K"], "Actions"));
     }
     bar.child(hint(k, "h-close", &["esc"], "Close"))
 }

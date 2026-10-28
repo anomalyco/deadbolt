@@ -73,10 +73,10 @@ iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbol
 # break the agent's SHA-256 verification.
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
 if [[ $sign_id != "-" ]]; then
-  codesign --force --options runtime --timestamp --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
+  codesign --force --options runtime --timestamp --identifier deadbolt --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
   codesign --force --options runtime --timestamp --sign "$sign_id" "$app"
 else
-  codesign --force --sign - "$app/Contents/Helpers/deadbolt"
+  codesign --force --identifier deadbolt --sign - "$app/Contents/Helpers/deadbolt"
   codesign --force --sign - "$app"
 fi
 plutil -lint "$app/Contents/Info.plist"
