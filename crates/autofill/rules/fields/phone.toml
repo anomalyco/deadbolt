@@ -1,0 +1,172 @@
+# Phone numbers used as the login identifier.
+#
+# Clue scores add up per field; see crates/autofill/README.md.
+
+type = "phone"
+include = ["not-a-login-field", "non-login-autocomplete"]
+
+[[autocomplete]]
+token = "tel"
+score = 8
+why = "The site declares the field a phone number"
+
+[[autocomplete]]
+token = "tel-national"
+score = 8
+why = "The site declares the field a phone number"
+
+[[autocomplete]]
+token = "tel-local"
+score = 8
+why = "The site declares the field a phone number"
+
+[[element]]
+element = "password"
+score = -10
+why = "A password box is never the identifier"
+
+[[element]]
+element = "tel"
+score = 5
+why = "type=tel"
+
+[[element]]
+element = "number"
+score = 1
+why = "type=number is sometimes a phone box"
+
+[[inputmode]]
+mode = "tel"
+score = 3
+why = "inputmode=tel"
+
+[[clue]]
+phrase = "phone"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "phone number"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "mobile"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "mobile number"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "cell"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "telephone"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "tel"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "telefono"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "numero de telephone"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "handynummer"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "telefonnummer"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "携帯"
+score = 4
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "电话"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "手机"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "電話"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "телефон"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Russian)"
+
+[[clue]]
+phrase = "휴대폰"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "전화"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "country code"
+score = -4
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "extension"
+score = -4
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "fax"
+score = -5
+channel = "display"
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "area code"
+score = -3
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "cpf"
+langs = ["cnpj"]
+score = -6
+why = "A Brazilian tax id in a type=tel box is not a phone number"
+
+[[clue]]
+phrase = "miles"
+langs = ["frequent flyer", "loyalty", "membership"]
+score = -5
+why = "A loyalty or frequent-flyer number in a type=tel box is not a phone number"
+
+[[clue]]
+phrase = "code"
+langs = ["codigo", "kod", "コード", "验证码", "인증"]
+score = -4
+channel = "display"
+why = "A type=tel box asking for a code (SMS code, código SMS) is a one-time code, not a phone number"
+

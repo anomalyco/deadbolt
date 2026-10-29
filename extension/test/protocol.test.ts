@@ -36,6 +36,23 @@ describe("parseHostMessage", () => {
     ])
   })
 
+  test("a sign-in-with login keeps its provider and account, and a malformed one is left out", () => {
+    const list = (signIn: unknown) => {
+      const m = parseHostMessage({ id: 9, type: "list", site: "acme.test", accounts: [{ ref: REF, vault: "V", title: "Acme", hasPassword: false, hasTotp: false, urls: [], signIn }] })
+      if (m?.kind !== "reply" || m.reply.type !== "list") throw new Error("expected a list")
+      return m.reply.accounts[0].signIn
+    }
+    expect(list({ provider: "google", account: "kit@gmail.com", extra: 1 })).toEqual({ provider: "google", account: "kit@gmail.com" })
+    expect(list({ provider: "Okta Acme" })).toEqual({ provider: "Okta Acme" })
+    expect(list({ provider: "" })).toBeUndefined()
+    expect(list({ provider: "x".repeat(65) })).toBeUndefined()
+    expect(list({ provider: "google\nadmin" })).toBeUndefined()
+    expect(list({ provider: "google", account: 7 })).toBeUndefined()
+    expect(list({ provider: "google", account: "a".repeat(501) })).toBeUndefined()
+    expect(list("google")).toBeUndefined()
+    expect(list(undefined)).toBeUndefined()
+  })
+
   test("fill, check, save", () => {
     expect(parseHostMessage({ id: "3", type: "fill", username: "octocat", password: "hunter2" })).toEqual({
       kind: "reply",

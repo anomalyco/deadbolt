@@ -1,0 +1,18 @@
+[package]
+name = "deadbolt-autofill"
+description = "Deadbolt's autofill engine: classifies login fields and forms from a value-free page snapshot."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+aho-corasick = "1.1.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.21"
+toml = "1.1.6"

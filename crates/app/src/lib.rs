@@ -921,6 +921,7 @@ fn import_report() -> ImportReport {
             tally(9, "tag", "tags"),
             tally(4, "attachment", "attachments"),
         ],
+        sign_in: Default::default(),
     }
 }
 

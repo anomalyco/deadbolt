@@ -125,6 +125,12 @@ Items map exactly as a `.1pux` import does (the same code: `op` JSON becomes
 Values that aren't valid for their Deadbolt field (an otp that isn't TOTP, a
 card number with letters) become extra fields with a warning, as on import.
 
+A `.1pux` login that signs in with Google, Apple, GitHub and so on keeps its
+provider as `sign-in-with`, and the import links it to the provider's login
+as `sign-in-account` (see `docs/autofill.md`). A sync doesn't read these from
+`op` yet; it keeps the two fields on an item it takes over, as it keeps any
+field only Deadbolt has.
+
 ## Not mirrored
 
 - **Passkeys.** Deadbolt has nowhere to put them; the login is mirrored

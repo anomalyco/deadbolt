@@ -1,0 +1,27 @@
+# Captcha answers, which Deadbolt never fills.
+#
+# Clue scores add up per field; see crates/autofill/README.md.
+
+type = "captcha"
+include = ["non-login-autocomplete"]
+
+[[clue]]
+phrase = "captcha"
+score = 8
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "recaptcha"
+score = 8
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "are you human"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "characters shown"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+

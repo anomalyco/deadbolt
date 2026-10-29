@@ -1,0 +1,221 @@
+# One-time codes from SMS, email or an authenticator app.
+#
+# Clue scores add up per field; see crates/autofill/README.md.
+
+type = "otp"
+include = ["not-a-login-field", "non-login-autocomplete"]
+
+[[autocomplete]]
+token = "one-time-code"
+score = 12
+why = "The site declares a one-time code"
+
+[[element]]
+element = "password"
+score = -4
+why = "A masked box is a password or PIN far more often than a one-time code (library and bank PIN logins such as pac.greenwichlibrary.org/patroninfo)"
+
+[[element]]
+element = "email"
+score = -3
+why = "An email box is not a code box"
+
+[[element]]
+element = "tel"
+score = 1
+why = "Codes often use type=tel for the digit keyboard"
+
+[[clue]]
+phrase = "one time code"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "one time password"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "otp"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "totp"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "verification code"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "verify code"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "security code"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "authentication code"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "auth code"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "authenticator"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "2fa"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "two factor"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "mfa"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "sms code"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "login code"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "code"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "passcode"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "6 digit"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "enter code"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "pin"
+score = 3
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "token"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "token code"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "codigo de verificacion"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "code de verification"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "bestatigungscode"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "verifizierungscode"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "確認コード"
+score = 6
+why = "Ported from clues.ts: label wording for this field (Japanese)"
+
+[[clue]]
+phrase = "認証コード"
+score = 6
+why = "Ported from clues.ts: label wording for this field (Japanese)"
+
+[[clue]]
+phrase = "код подтверждения"
+score = 6
+why = "Ported from clues.ts: label wording for this field (Russian)"
+
+[[clue]]
+phrase = "인증번호"
+score = 6
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "captcha"
+score = -6
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "country"
+score = -4
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "area code"
+score = -6
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "invite"
+score = -5
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "tracking"
+score = -6
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "codigo sms"
+langs = ["code sms", "sms kod", "codice sms"]
+score = 6
+channel = "display"
+why = "Reversed word order of 'SMS code' in Spanish, Portuguese, French and Italian"
+
+[[clue]]
+phrase = "sms"
+score = 2
+why = "Codes sent by text message; short, so whole words only in ids (sms_code, smsCode)"
+
+[[clue]]
+phrase = "codigo de seguranca"
+langs = ["codigo de acesso", "codice di verifica", "verificatiecode", "kod weryfikacyjny"]
+score = 6
+channel = "display"
+why = "Portuguese, Italian, Dutch and Polish code labels"
+

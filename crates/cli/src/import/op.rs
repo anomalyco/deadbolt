@@ -377,6 +377,7 @@ pub(crate) mod tests {
                     .map(|i| (format!("{i:0>60}"), Field::new(FieldType::Text, "v")))
                     .collect(),
                 source: None,
+                sign_in_link: None,
             },
             vault: "v1v1v1v1v1v1v1v1v1v1v1v1v1".into(),
             id: "item1item1item1item1item1a".into(),
