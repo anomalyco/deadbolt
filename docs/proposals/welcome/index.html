@@ -1,0 +1,347 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Deadbolt — welcome concept</title>
+<style>
+  html, body { margin: 0; background: #0a0a0a; color: #f2f2f2; font-family: Inter, "SF Pro Text", system-ui, sans-serif; -webkit-font-smoothing: antialiased; }
+  .tabs { position: fixed; top: 14px; left: 0; right: 0; display: flex; justify-content: center; gap: 8px; z-index: 5; }
+  .tabs button { background: #161616; color: #9a9a9a; border: 1px solid #262626; border-radius: 999px; padding: 6px 14px; font: 13px Inter, system-ui; cursor: pointer; }
+  .tabs button.on { color: #f2f2f2; border-color: #3a3a3a; background: #1e1e1e; }
+  .screen { height: 100vh; display: none; flex-direction: column; align-items: center; justify-content: center; gap: 34px; }
+  .screen.on { display: flex; }
+  canvas { width: 520px; height: 300px; }
+  .card { width: 420px; background: #151515; border: 1px solid #262626; border-radius: 14px; overflow: hidden;
+    box-shadow: 0 24px 60px rgba(0,0,0,.55), inset 0 1px 0 rgba(255,255,255,.04); }
+  .row { display: flex; align-items: center; gap: 14px; padding: 14px 16px; cursor: pointer; transition: background .18s ease; }
+  .row + .row { border-top: 1px solid #222; }
+  .row:hover { background: #1c1c1c; }
+  .tile { width: 36px; height: 36px; border-radius: 10px; display: grid; place-items: center; background: linear-gradient(#2a2a2a, #1b1b1b);
+    box-shadow: inset 0 1px 0 rgba(255,255,255,.07), 0 1px 2px rgba(0,0,0,.5); transition: transform .35s cubic-bezier(.34,1.56,.64,1), box-shadow .25s; }
+  .row:hover .tile { transform: scale(1.06); box-shadow: inset 0 1px 0 rgba(255,255,255,.12), 0 0 0 1px rgba(255,255,255,.08), 0 0 18px rgba(255,255,255,.07); }
+  .label { flex: 1; font-size: 15px; font-weight: 500; }
+  .chev { color: #6b6b6b; transition: transform .3s cubic-bezier(.34,1.56,.64,1), color .2s; }
+  .row:hover .chev { transform: translateX(3px); color: #aaa; }
+  .hint { position: fixed; bottom: 14px; left: 0; right: 0; text-align: center; color: #555; font-size: 12px; }
+</style>
+</head>
+<body>
+<div class="tabs"><button data-s="b" class="on">The password dots</button><button data-s="a">Alt · The keyhole</button></div>
+
+<template id="card">
+  <div class="card">
+    <div class="row" data-hover="create">
+      <div class="tile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f2f2f2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4" width="17" height="15" rx="2.5"/><circle cx="12" cy="11.5" r="3.2"/><path d="M12 8.3v1.2M12 13.5v1.2M8.8 11.5h1.2M14 11.5h1.2M6.5 19v1.5M17.5 19v1.5"/></svg></div>
+      <div class="label">Create a vault</div>
+      <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+    </div>
+    <div class="row" data-hover="join">
+      <div class="tile"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#f2f2f2" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><rect x="2.5" y="5" width="12" height="8.5" rx="1.5"/><path d="M1.5 16h14"/><rect x="16.5" y="7" width="5.5" height="10" rx="1.4"/><path d="M14.5 10.5h2"/></svg></div>
+      <div class="label">Join my devices</div>
+      <svg class="chev" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M9 6l6 6-6 6"/></svg>
+    </div>
+  </div>
+</template>
+
+<div class="screen" id="a"><canvas id="ca" width="1040" height="600"></canvas></div>
+<div class="screen on" id="b"><canvas id="cb" width="1040" height="600"></canvas></div>
+<div class="hint">prototype · move the cursor around, hover the two rows, wait a bit</div>
+
+<script>
+// ---------- shared ----------
+document.querySelectorAll(".screen").forEach(s => s.appendChild(document.getElementById("card").content.cloneNode(true)));
+let hover = null;
+document.querySelectorAll(".row").forEach(r => {
+  r.addEventListener("mouseenter", () => hover = r.dataset.hover);
+  r.addEventListener("mouseleave", () => hover = null);
+});
+let active = "b";
+document.querySelectorAll(".tabs button").forEach(b => b.onclick = () => {
+  document.querySelectorAll(".tabs button").forEach(x => x.classList.toggle("on", x === b));
+  document.querySelectorAll(".screen").forEach(s => s.classList.toggle("on", s.id === b.dataset.s));
+  active = b.dataset.s;
+});
+const mouse = { x: -1e4, y: -1e4 };
+addEventListener("mousemove", e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+
+// semi-implicit spring: s = {v, x, target}
+class Spring {
+  constructor(x, k = 180, c = 16) { this.x = x; this.v = 0; this.t = x; this.k = k; this.c = c; }
+  step(dt) { const a = this.k * (this.t - this.x) - this.c * this.v; this.v += a * dt; this.x += this.v * dt; return this.x; }
+}
+const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
+const lerp = (a, b, t) => a + (b - a) * t;
+function local(canvas) { const r = canvas.getBoundingClientRect(); return { x: (mouse.x - r.left) * 2, y: (mouse.y - r.top) * 2, inside: mouse.x > r.left && mouse.x < r.right && mouse.y > r.top && mouse.y < r.bottom }; }
+
+// ---------- A: the keyhole ----------
+const ca = document.getElementById("ca"), xa = ca.getContext("2d");
+const K = {
+  lookX: new Spring(0, 120, 14), lookY: new Spring(0, 120, 14),
+  bob: new Spring(0, 90, 7), squash: new Spring(1, 260, 12), lid: new Spring(0, 400, 26),
+  happy: new Spring(0, 160, 16), squint: new Spring(0, 200, 18), horror: new Spring(0, 220, 14),
+  brow: new Spring(0, 160, 14),
+  nextBlink: 1.5, blinkT: -1, search: 0,
+  note: { on: false, t: 0, x: new Spring(1300, 60, 10), y: new Spring(140, 60, 10), r: new Spring(0.3, 80, 8), next: 6 },
+};
+function keyholePath(ctx, cx, cy, s) {
+  // round head + flared stem, one smooth outline
+  const R = 92 * s;
+  ctx.beginPath();
+  ctx.moveTo(cx - 30 * s, cy + 52 * s);
+  ctx.arc(cx, cy - 6 * s, R, Math.PI * 0.62, Math.PI * 0.38, false);
+  ctx.lineTo(cx + 58 * s, cy + 168 * s);
+  ctx.quadraticCurveTo(cx + 62 * s, cy + 186 * s, cx + 44 * s, cy + 186 * s);
+  ctx.lineTo(cx - 44 * s, cy + 186 * s);
+  ctx.quadraticCurveTo(cx - 62 * s, cy + 186 * s, cx - 58 * s, cy + 168 * s);
+  ctx.closePath();
+}
+let last = performance.now(), T = 0;
+function drawA(dt) {
+  const ctx = xa, W = ca.width, H = ca.height;
+  ctx.clearRect(0, 0, W, H);
+  const cx = W / 2, cy = 230 + K.bob.x;
+  const m = local(ca);
+  const dx = m.x - cx, dy = m.y - (cy - 10), dist = Math.hypot(dx, dy);
+  const near = m.inside && dist < 150;
+
+  // targets
+  K.bob.t = Math.sin(T * 1.6) * 6 + (hover === "create" ? -14 : 0);
+  K.happy.t = hover === "create" ? 1 : 0;
+  K.squint.t = near && !hover ? 1 : 0;
+  K.brow.t = near && !hover ? 1 : (K.horror.x > 0.3 ? -1 : 0);
+  if (hover === "join") { K.search += dt; K.lookX.t = Math.sin(K.search * 3.2) * 18; K.lookY.t = -4; }
+  else if (K.note.on && K.note.t > 0.4) { K.lookX.t = clamp((K.note.x.x - cx) / 22, -18, 18); K.lookY.t = clamp((K.note.y.y ?? 0, K.note.y.x - cy) / 22, -12, 12); }
+  else if (mouse.x > -1e3) { K.lookX.t = clamp(dx / 18, -18, 18); K.lookY.t = clamp(dy / 22, -12, 12); }
+  // blink
+  K.nextBlink -= dt;
+  if (K.nextBlink < 0) { K.blinkT = 0; K.nextBlink = 2.5 + Math.random() * 3; }
+  if (K.blinkT >= 0) { K.blinkT += dt; K.lid.t = K.blinkT < 0.09 ? 1 : 0; if (K.blinkT > 0.25) K.blinkT = -1; }
+  // the hunter2 note gag
+  const N = K.note;
+  N.next -= dt;
+  if (!N.on && N.next < 0 && !hover) { N.on = true; N.t = 0; N.x.x = W + 80; N.y.x = 120; N.x.t = cx + 190; N.y.t = 150; N.r.x = 0.5; N.r.t = -0.12; }
+  if (N.on) {
+    N.t += dt;
+    K.horror.t = N.t > 0.55 && N.t < 1.6 ? 1 : 0;
+    if (N.t > 1.15 && N.t < 1.2) { K.squash.v -= 6; N.x.t = W + 260; N.y.t = -140; N.r.t = 1.4; N.x.v = 1600; N.y.v = -900; }
+    if (N.t > 2.4) { N.on = false; N.next = 9 + Math.random() * 5; K.horror.t = 0; }
+  } else K.horror.t = 0;
+  K.squash.t = 1 + (hover === "create" ? 0.03 : 0);
+  for (const s of [K.lookX, K.lookY, K.bob, K.squash, K.lid, K.happy, K.squint, K.horror, K.brow, N.x, N.y, N.r]) s.step(dt);
+
+  // shadow
+  ctx.save(); ctx.globalAlpha = 0.5;
+  const sh = ctx.createRadialGradient(cx, 440, 0, cx, 440, 120);
+  sh.addColorStop(0, "rgba(255,255,255,0.10)"); sh.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = sh; ctx.beginPath(); ctx.ellipse(cx, 440, 120 - K.bob.x, 14, 0, 0, 7); ctx.fill(); ctx.restore();
+
+  // body
+  ctx.save();
+  ctx.translate(cx, cy + 90); ctx.scale(1 / K.squash.x ** 0.5, K.squash.x); ctx.translate(-cx, -(cy + 90));
+  keyholePath(ctx, cx, cy - 40, 1);
+  const g = ctx.createLinearGradient(cx - 90, cy - 140, cx + 90, cy + 150);
+  g.addColorStop(0, "#2a2a2a"); g.addColorStop(0.45, "#0d0d0d"); g.addColorStop(1, "#050505");
+  ctx.fillStyle = g; ctx.fill();
+  ctx.lineWidth = 3; ctx.strokeStyle = "rgba(255,255,255,0.22)"; ctx.stroke();
+  // gloss
+  ctx.save(); keyholePath(ctx, cx, cy - 40, 1); ctx.clip();
+  const gl = ctx.createRadialGradient(cx - 50, cy - 110, 4, cx - 50, cy - 110, 90);
+  gl.addColorStop(0, "rgba(255,255,255,0.20)"); gl.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = gl; ctx.fillRect(cx - 200, cy - 250, 400, 450);
+  ctx.beginPath(); ctx.ellipse(cx - 46, cy - 118, 26, 9, -0.6, 0, 7); ctx.fillStyle = "rgba(255,255,255,0.35)"; ctx.fill();
+  ctx.restore();
+
+  // eyes
+  const ey = cy - 52, ex = 34;
+  const open = 1 - Math.max(K.lid.x, K.squint.x * 0.62);
+  const big = 1 + K.horror.x * 0.35;
+  for (const side of [-1, 1]) {
+    const x = cx + side * ex + K.lookX.x * 0.5, y = ey + K.lookY.x * 0.4;
+    if (K.happy.x > 0.5) {
+      // ^ ^ happy eyes
+      ctx.beginPath(); ctx.lineWidth = 7; ctx.lineCap = "round"; ctx.strokeStyle = "#f4f4f4";
+      ctx.arc(x, y + 8, 15, Math.PI * 1.15, Math.PI * 1.85); ctx.stroke();
+      continue;
+    }
+    ctx.save();
+    ctx.beginPath(); ctx.ellipse(x, y, 19 * big, Math.max(1.5, 24 * big * open), 0, 0, 7); ctx.fillStyle = "#f4f4f4"; ctx.fill();
+    ctx.clip();
+    ctx.beginPath(); ctx.arc(x + K.lookX.x * 0.45, y + K.lookY.x * 0.45, 8.5 * (1 - K.horror.x * 0.35), 0, 7); ctx.fillStyle = "#0a0a0a"; ctx.fill();
+    ctx.beginPath(); ctx.arc(x + K.lookX.x * 0.45 + 3, y + K.lookY.x * 0.45 - 3, 2.6, 0, 7); ctx.fillStyle = "#fff"; ctx.fill();
+    ctx.restore();
+    // brows: suspicious (angled in) or alarmed (raised)
+    ctx.save(); ctx.translate(x, y - 38 - K.horror.x * 10); ctx.rotate(side * K.brow.x * 0.32 * (K.brow.x > 0 ? 1 : -0.6));
+    ctx.beginPath(); ctx.roundRect(-18, -3.5, 36, 7, 4); ctx.fillStyle = "#e9e9e9"; ctx.fill(); ctx.restore();
+  }
+  // mouth
+  ctx.beginPath(); ctx.lineWidth = 4; ctx.lineCap = "round"; ctx.strokeStyle = "#eaeaea";
+  const my = cy + 2;
+  if (K.horror.x > 0.4) { ctx.ellipse(cx, my + 6, 9, 12 * K.horror.x, 0, 0, 7); ctx.stroke(); }
+  else if (K.squint.x > 0.4) { ctx.moveTo(cx - 12, my + 4); ctx.lineTo(cx + 12, my + 2); ctx.stroke(); }
+  else { const smile = 6 + K.happy.x * 10; ctx.moveTo(cx - 16, my); ctx.quadraticCurveTo(cx, my + smile, cx + 16, my); ctx.stroke(); }
+  ctx.restore();
+
+  // sticky note
+  if (N.on) {
+    ctx.save(); ctx.translate(N.x.x, N.y.x); ctx.rotate(N.r.x);
+    ctx.fillStyle = "#f2f2f2"; ctx.shadowColor = "rgba(0,0,0,.6)"; ctx.shadowBlur = 20; ctx.fillRect(-62, -40, 124, 80); ctx.shadowBlur = 0;
+    ctx.fillStyle = "#111"; ctx.font = "500 15px Inter, system-ui"; ctx.textAlign = "center";
+    ctx.fillText("password:", 0, -6); ctx.font = "700 19px ui-monospace, Menlo, monospace"; ctx.fillText("hunter2", 0, 20);
+    ctx.restore();
+  }
+}
+
+// ---------- B: the password dots ----------
+const cb = document.getElementById("cb"), xb = cb.getContext("2d");
+const DOTS = 8, base = { x: 520, y: 300 }, gap = 62;
+// equilateral triangle, circumradius TRI, centred a touch low so it reads balanced
+const TRI = 262, triCy = 338;
+const VERTS = [-90, 150, 30].map(a => ({ x: base.x + TRI * Math.cos(a * Math.PI / 180), y: triCy + TRI * Math.sin(a * Math.PI / 180) }));
+const GROUP_SIZE = [3, 3, 2];
+const GROUP_OFFSETS = { 3: [[0, -20], [-19, 13], [19, 13]], 2: [[-17, 0], [17, 0]] };
+const EDGES = [[0, 1], [1, 2], [2, 0], [1, 0], [2, 1], [0, 2]];
+const clusterR = 50;
+// pulse vocabulary from OpenTunnel's Pulse.tsx: gather → travel (ease-in-out cubic) → absorb, with a cooling heat trail
+const GATHER = 0.34, TRAVEL = 0.72, ABSORB = 0.32, COOL = 0.3, BANDS = 90;
+const easeInOutCubic = p => (p < 0.5 ? 4 * p * p * p : 1 - Math.pow(-2 * p + 2, 3) / 2);
+const easeOutCubic = p => 1 - Math.pow(1 - p, 3);
+const heatOf = age => 0.7 * Math.pow(1 - clamp(age / COOL, 0, 1), 1.7);
+const linkS = new Spring(0, 70, 14);
+let pulses = [], pulseClock = 0, nextPulse = 0.5, edgeIx = 0, joinT = 0;
+function segment(e) {
+  const A = VERTS[e[0]], B = VERTS[e[1]], len = Math.hypot(B.x - A.x, B.y - A.y);
+  const ux = (B.x - A.x) / len, uy = (B.y - A.y) / len;
+  return { ax: A.x + ux * clusterR, ay: A.y + uy * clusterR, bx: B.x - ux * clusterR, by: B.y - uy * clusterR, to: e[1] };
+}
+const dots = Array.from({ length: DOTS }, (_, i) => ({
+  x: new Spring(base.x + (i - (DOTS - 1) / 2) * gap, 150, 13), y: new Spring(base.y, 150, 13),
+  sq: new Spring(1, 300, 12), eyes: new Spring(0, 140, 14), i, lastHop: 0,
+}));
+let waveT = 0;
+function drawB(dt) {
+  const ctx = xb, W = cb.width, H = cb.height;
+  ctx.clearRect(0, 0, W, H);
+  const m = local(cb);
+  waveT += dt;
+  dots.forEach((d, i) => {
+    let tx, ty;
+    if (hover === "create") {
+      // huddle into a tight safe: 3x3 minus centre → keyhole in the middle
+      const slots = [[-1, -1], [0, -1], [1, -1], [-1, 0], [1, 0], [-1, 1], [0, 1], [1, 1]];
+      const [sx, sy] = slots[i]; tx = base.x + sx * 40; ty = base.y + sy * 40;
+    } else if (hover === "join") {
+      // three groups at the corners of an equilateral triangle
+      const g = i % 3, k = Math.floor(i / 3);
+      const v = VERTS[g];
+      const off = GROUP_OFFSETS[GROUP_SIZE[g]][k];
+      tx = v.x + off[0]; ty = v.y + off[1] + Math.sin(waveT * 2.4 + g * 2.1) * 3;
+    } else {
+      tx = base.x + (i - (DOTS - 1) / 2) * gap;
+      const ph = waveT * 2.2 - i * 0.45;
+      ty = base.y - Math.max(0, Math.sin(ph)) ** 6 * 46;
+      if (Math.sin(ph) > 0.99 && waveT - d.lastHop > 1) { d.sq.v += 5; d.lastHop = waveT; }
+    }
+    // shy: flee the cursor
+    if (m.inside) {
+      const dx = d.x.x - m.x, dy = d.y.x - m.y, dist = Math.hypot(dx, dy);
+      if (dist < 130) { const f = (130 - dist) / 130; tx += dx / (dist + 1) * f * 90; ty += dy / (dist + 1) * f * 90; d.eyes.t = 1; } else d.eyes.t = 0;
+    } else d.eyes.t = 0;
+    d.x.t = tx; d.y.t = ty; d.sq.t = 1;
+    d.x.step(dt); d.y.step(dt); d.sq.step(dt); d.eyes.step(dt);
+    const r = hover === "create" ? 17 : 15;
+    const sq = d.sq.x, vy = d.y.v;
+    const stretch = clamp(1 + Math.abs(vy) / 1800, 1, 1.35);
+    ctx.save(); ctx.translate(d.x.x, d.y.x); ctx.scale(sq / stretch, stretch / sq);
+    const g = ctx.createRadialGradient(-5, -6, 1, 0, 0, r);
+    g.addColorStop(0, "#ffffff"); g.addColorStop(1, "#cfcfcf");
+    ctx.beginPath(); ctx.arc(0, 0, r, 0, 7); ctx.fillStyle = g; ctx.fill();
+    // tiny worried eyes when the cursor gets close
+    if (d.eyes.x > 0.05) {
+      const e = d.eyes.x;
+      ctx.fillStyle = "#0a0a0a";
+      ctx.beginPath(); ctx.ellipse(-5, -2, 2.2 * e, 3.2 * e, 0, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(5, -2, 2.2 * e, 3.2 * e, 0, 0, 7); ctx.fill();
+      ctx.beginPath(); ctx.ellipse(0, 6, 2.6 * e, 2 * e, 0, 0, 7); ctx.fill();
+    }
+    ctx.restore();
+  });
+  // join: faint links draw in, pulses ping around the triangle
+  linkS.t = hover === "join" ? 1 : 0; linkS.step(dt);
+  if (hover === "join") joinT += dt; else { joinT = 0; pulses = []; nextPulse = 0.55; }
+  if (linkS.x > 0.01) {
+    ctx.save(); ctx.lineCap = "round";
+    [[0, 1], [1, 2], [2, 0]].forEach((e, n) => {
+      const s = segment(e), p = clamp(linkS.x * 1.15 - n * 0.08, 0, 1);
+      ctx.strokeStyle = `rgba(255,255,255,${0.14 * p})`; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(s.ax, s.ay); ctx.lineTo(lerp(s.ax, s.bx, p), lerp(s.ay, s.by, p)); ctx.stroke();
+    });
+    ctx.restore();
+  }
+  if (hover === "join" && joinT > 0.5) {
+    nextPulse -= dt;
+    if (nextPulse <= 0) { pulses.push({ seg: segment(EDGES[edgeIx % EDGES.length]), t: 0, heated: new Float64Array(BANDS).fill(-1e9), painted: 0, landed: false }); edgeIx++; nextPulse = 0.85; }
+  }
+  pulseClock += dt;
+  pulses = pulses.filter(p => p.t < GATHER + TRAVEL + ABSORB + COOL + 0.1);
+  for (const p of pulses) {
+    p.t += dt;
+    const s = p.seg, ft = p.t - GATHER;
+    // stamp the trail as the dot passes each band
+    if (ft > 0) {
+      const dist = easeInOutCubic(clamp(ft / TRAVEL, 0, 1));
+      while (p.painted < BANDS && (p.painted + 0.5) / BANDS <= dist) { p.heated[p.painted] = pulseClock; p.painted++; }
+    }
+    ctx.save(); ctx.lineCap = "round"; ctx.lineWidth = 2.6;
+    for (let i = 0; i < BANDS; i++) {
+      const h = heatOf(pulseClock - p.heated[i]);
+      if (h <= 0.001) continue;
+      ctx.strokeStyle = `rgba(255,255,255,${h})`;
+      ctx.beginPath();
+      ctx.moveTo(lerp(s.ax, s.bx, i / BANDS), lerp(s.ay, s.by, i / BANDS));
+      ctx.lineTo(lerp(s.ax, s.bx, (i + 1) / BANDS), lerp(s.ay, s.by, (i + 1) / BANDS));
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.save(); ctx.fillStyle = "#fff"; ctx.strokeStyle = "#fff";
+    if (p.t < GATHER) {
+      // gather: a faint ring shrinks onto the origin while light condenses
+      const g = easeOutCubic(p.t / GATHER);
+      ctx.globalAlpha = 0.5 * Math.sin(g * Math.PI); ctx.lineWidth = 1.5;
+      ctx.beginPath(); ctx.arc(s.ax, s.ay, 4 + 16 * (1 - g), 0, 7); ctx.stroke();
+      ctx.globalAlpha = g; ctx.shadowColor = "rgba(255,255,255,.9)"; ctx.shadowBlur = 14;
+      ctx.beginPath(); ctx.arc(s.ax, s.ay, 4 * g, 0, 7); ctx.fill();
+    } else if (ft < TRAVEL) {
+      const d = easeInOutCubic(ft / TRAVEL);
+      ctx.shadowColor = "rgba(255,255,255,.9)"; ctx.shadowBlur = 16;
+      ctx.beginPath(); ctx.arc(lerp(s.ax, s.bx, d), lerp(s.ay, s.by, d), 4.5, 0, 7); ctx.fill();
+    } else if (ft < TRAVEL + ABSORB) {
+      const q = (ft - TRAVEL) / ABSORB;
+      if (!p.landed) { p.landed = true; dots.forEach(dd => { if (dd.i % 3 === s.to) { dd.sq.v += 3.5; dd.y.v -= 140; } }); }
+      // absorbed: dot shrinks in, landing ring expands and fades
+      ctx.globalAlpha = 1 - q; ctx.shadowColor = "rgba(255,255,255,.8)"; ctx.shadowBlur = 12;
+      ctx.beginPath(); ctx.arc(s.bx, s.by, 4.5 * (1 - q), 0, 7); ctx.fill();
+      ctx.shadowBlur = 0; ctx.globalAlpha = 0.55 * Math.pow(1 - q, 1.5); ctx.lineWidth = 1.6;
+      ctx.beginPath(); ctx.arc(s.bx, s.by, 6 + 30 * easeOutCubic(q), 0, 7); ctx.stroke();
+    }
+    ctx.restore();
+  }
+  // the keyhole that appears in the middle of the huddle
+  const kh = hover === "create" ? 1 : 0;
+  khS.t = kh; khS.step(dt);
+  if (khS.x > 0.02) {
+    ctx.save(); ctx.translate(base.x, base.y); ctx.scale(khS.x, khS.x); ctx.fillStyle = "#f2f2f2";
+    ctx.beginPath(); ctx.arc(0, -5, 7, 0, 7); ctx.fill(); ctx.beginPath(); ctx.moveTo(-4, -1); ctx.lineTo(4, -1); ctx.lineTo(6, 12); ctx.lineTo(-6, 12); ctx.closePath(); ctx.fill();
+    ctx.restore();
+  }
+}
+const khS = new Spring(0, 220, 14);
+
+function frame(now) {
+  const dt = Math.min(0.033, (now - last) / 1000); last = now; T += dt;
+  if (active === "a") drawA(dt); else drawB(dt);
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
