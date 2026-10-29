@@ -2661,3 +2661,341 @@ fn the_release_helper_builds_every_swift_source() {
         );
     }
 }
+
+/// A release service on 127.0.0.1 for `deadbolt update`: serves whatever
+/// `files` holds at each path, one request per connection.
+fn release_service(
+    files: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, Vec<u8>>>>,
+) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}/release/", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).ok();
+            let mut line = String::new();
+            while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                line.clear();
+            }
+            let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+            let body = files.lock().unwrap().get(&path).cloned();
+            let (status, body) = match body {
+                Some(body) => ("200 OK", body),
+                None => ("404 Not Found", b"{}".to_vec()),
+            };
+            let head = format!(
+                "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).ok();
+            stream.write_all(&body).ok();
+        }
+    });
+    base
+}
+
+#[test]
+fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
+    use sha2::Digest;
+    let a = Device::new();
+    let bin = a.path("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let exe = bin.join("deadbolt");
+    std::fs::copy(BIN, &exe).unwrap();
+    let original = std::fs::read(&exe).unwrap();
+
+    // The release: a tarball whose deadbolt is a stand-in script.
+    let release = a.path("release");
+    std::fs::create_dir_all(&release).unwrap();
+    std::fs::write(
+        release.join("deadbolt"),
+        "#!/bin/sh\necho stand-in deadbolt\n",
+    )
+    .unwrap();
+    let tarball = a.path("deadbolt.tar.gz");
+    let status = Command::new("tar")
+        .arg("-czf")
+        .arg(&tarball)
+        .arg("-C")
+        .arg(&release)
+        .arg("deadbolt")
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let tar = std::fs::read(&tarball).unwrap();
+    let sha = |bytes: &[u8]| data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(bytes));
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    let arch = if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "x64"
+    };
+    let manifest = |artifact: &str, channel: &str, version: &str, target: &str, size, sha256| {
+        let mut targets = serde_json::Map::new();
+        targets.insert(
+            target.to_string(),
+            serde_json::json!({
+                "url": format!("/release/deadbolt/files/{sha256}/{artifact}.bin"),
+                "size": size,
+                "sha256": sha256,
+            }),
+        );
+        serde_json::json!({
+            "schema": 1, "app": "deadbolt", "artifact": artifact, "channel": channel,
+            "sequence": 1, "published_at": "2026-10-28T00:00:00Z",
+            "release": {
+                "version": version, "rollout_percent": 100, "targets": targets,
+                "distributions": [{ "kind": "direct" }], "revoked_versions": []
+            }
+        })
+        .to_string()
+        .into_bytes()
+    };
+    let target = format!("{os}-{arch}");
+    let good = sha(&tar);
+    let wrong = sha(b"something else");
+    let files = std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::from([
+        (
+            format!("/release/deadbolt/files/{good}/cli.bin"),
+            tar.clone(),
+        ),
+        (
+            format!("/release/deadbolt/files/{wrong}/cli.bin"),
+            tar.clone(),
+        ),
+        (
+            "/release/deadbolt/cli/beta.json".to_string(),
+            manifest(
+                "cli",
+                "beta",
+                "0.0.0-beta.9",
+                &target,
+                tar.len(),
+                wrong.clone(),
+            ),
+        ),
+        (
+            "/release/deadbolt/cli/stable.json".to_string(),
+            manifest(
+                "cli",
+                "stable",
+                "9.9.9",
+                &target,
+                tar.len() + 1,
+                good.clone(),
+            ),
+        ),
+        (
+            "/release/deadbolt/cli/dev.json".to_string(),
+            manifest(
+                "cli",
+                "dev",
+                env!("CARGO_PKG_VERSION"),
+                &target,
+                tar.len(),
+                good.clone(),
+            ),
+        ),
+    ])));
+    let base = release_service(files.clone());
+    let update = |args: &[&str]| {
+        let mut cmd = a.cmd_of(&exe, args);
+        cmd.env("DEADBOLT_RELEASE_URL", &base);
+        a.output(&mut cmd)
+    };
+    let leftovers = || {
+        std::fs::read_dir(&bin)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name != "deadbolt")
+            .collect::<Vec<_>>()
+    };
+
+    // A build from source follows no channel until told one.
+    let output = update(&["update", "--check"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--channel"));
+
+    // The running version is the channel's: nothing to do.
+    let output = update(&["update", "--check", "--channel", "dev"]);
+    assert_eq!(output.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&output.stdout).contains("up to date"));
+
+    // A wrong SHA-256 or size leaves the old binary alone.
+    for channel in ["beta", "stable"] {
+        let output = update(&["update", "--channel", channel]);
+        assert!(!output.status.success(), "{channel}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("SHA-256") || stderr.contains("size"),
+            "{stderr}"
+        );
+        assert!(std::fs::read(&exe).unwrap() == original, "{channel}");
+        assert!(leftovers().is_empty(), "{:?}", leftovers());
+    }
+    // So does a manifest pointing anywhere but the service's files.
+    files.lock().unwrap().insert(
+        "/release/deadbolt/cli/dev.json".to_string(),
+        String::from_utf8(manifest(
+            "cli",
+            "dev",
+            "0.0.0-dev-99",
+            &target,
+            tar.len(),
+            good.clone(),
+        ))
+        .unwrap()
+        .replace(
+            "/release/deadbolt/files/",
+            "http://198.51.100.1/release/deadbolt/files/",
+        )
+        .into_bytes(),
+    );
+    let output = update(&["update", "--channel", "dev"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("outside"));
+    assert!(std::fs::read(&exe).unwrap() == original);
+
+    // A replayed older manifest is refused unless asked for.
+    let sequenced = |n: u32| {
+        String::from_utf8(manifest(
+            "cli",
+            "dev",
+            "0.0.0-dev-99",
+            &target,
+            tar.len(),
+            good.clone(),
+        ))
+        .unwrap()
+        .replace("\"sequence\":1", &format!("\"sequence\":{n}"))
+        .into_bytes()
+    };
+    let serve = |n: u32| {
+        files
+            .lock()
+            .unwrap()
+            .insert("/release/deadbolt/cli/dev.json".to_string(), sequenced(n));
+    };
+    serve(3);
+    assert_eq!(
+        update(&["update", "--check", "--channel", "dev"])
+            .status
+            .code(),
+        Some(10)
+    );
+    serve(2);
+    let output = update(&["update", "--channel", "dev"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-rollback"));
+    assert!(std::fs::read(&exe).unwrap() == original);
+    let output = update(&["update", "--check", "--channel", "dev", "--allow-rollback"]);
+    assert_eq!(output.status.code(), Some(10));
+    serve(3);
+
+    // On macOS the new deadbolt pins its own helper: a release without one
+    // never replaces a deadbolt that has one beside it.
+    if cfg!(target_os = "macos") {
+        std::fs::write(bin.join("deadbolt-enclave"), "old helper").unwrap();
+        let output = update(&["update", "--channel", "dev"]);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("deadbolt-enclave"));
+        assert!(std::fs::read(&exe).unwrap() == original);
+        assert_eq!(
+            std::fs::read(bin.join("deadbolt-enclave")).unwrap(),
+            b"old helper"
+        );
+        std::fs::remove_file(bin.join("deadbolt-enclave")).unwrap();
+    }
+
+    // A good release, with an unpacked extension registered beside it.
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(br#"{"name":"Deadbolt","version":"0.0.0.99","version_name":"0.0.0-dev-99"}"#)
+        .unwrap();
+    let extension = zip.finish().unwrap().into_inner();
+    let ext_sha = sha(&extension);
+    files.lock().unwrap().extend([
+        (
+            format!("/release/deadbolt/files/{ext_sha}/extension.bin"),
+            extension.clone(),
+        ),
+        (
+            "/release/deadbolt/extension/dev.json".to_string(),
+            manifest(
+                "extension",
+                "dev",
+                "0.0.0-dev-99",
+                "chromium",
+                extension.len(),
+                ext_sha,
+            ),
+        ),
+    ]);
+    let ext = a.path("extension");
+    std::fs::create_dir_all(&ext).unwrap();
+    std::fs::write(ext.join("mine.txt"), "not an extension").unwrap();
+    let output = a.output(
+        a.cmd(&[
+            "browser",
+            "install",
+            "--browser",
+            "chrome",
+            "--extension-dir",
+        ])
+        .arg(&ext)
+        .env("HOME", a.path("user")),
+    );
+    assert!(
+        !output.status.success(),
+        "replaced a directory that isn't the extension"
+    );
+    std::fs::remove_file(ext.join("mine.txt")).unwrap();
+    let output = a.output(
+        a.cmd(&[
+            "browser",
+            "install",
+            "--browser",
+            "chrome",
+            "--extension-dir",
+        ])
+        .arg(&ext)
+        .env("HOME", a.path("user")),
+    );
+    assert!(output.status.success());
+
+    let output = update(&["update", "--check", "--channel", "dev"]);
+    assert_eq!(output.status.code(), Some(10));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("0.0.0-dev-99 is available"), "{stdout}");
+    assert!(
+        stdout.contains("Browser extension 0.0.0-dev-99"),
+        "{stdout}"
+    );
+    assert!(std::fs::read(&exe).unwrap() == original);
+
+    let output = update(&["update", "--channel", "dev"]);
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("chrome://extensions"));
+    assert_eq!(
+        std::fs::read(&exe).unwrap(),
+        b"#!/bin/sh\necho stand-in deadbolt\n"
+    );
+    let ran = Command::new(&exe).output().unwrap();
+    assert_eq!(String::from_utf8_lossy(&ran.stdout), "stand-in deadbolt\n");
+    assert!(leftovers().is_empty(), "{:?}", leftovers());
+    assert!(
+        std::fs::read_to_string(ext.join("manifest.json"))
+            .unwrap()
+            .contains("0.0.0-dev-99")
+    );
+    // It knows the files it put there, and nothing else is in the way.
+    assert_eq!(
+        std::fs::read_to_string(ext.join(".deadbolt-extension")).unwrap(),
+        "manifest.json\n"
+    );
+}

@@ -6,7 +6,7 @@ internal APIs directly and update their callers.
 - `crates/core`: signed vault log, membership and item rules.
 - `crates/store`: encrypted redb persistence and passphrase derivation.
 - `crates/net`: iroh transport, membership gates, sync and pairing.
-- `crates/cli`: commands, background agent, control socket and deterministic simulator.
+- `crates/cli`: commands, background agent, control socket, deterministic simulator and `deadbolt update` (`src/update.rs`, docs/releasing.md "Updater").
 - `crates/autofill`: the autofill engine: field and form classification from a value-free page snapshot, clue tables in `rules/*.toml` (not yet used by the extension).
 - `crates/send`: Deadbolt Send links, sealing and delivery (native and wasm32); `crates/send-web`: its browser build for the site's `/r`.
 - `extension/`: the Chromium MV3 extension (TypeScript, `bun build`), talking to `deadbolt browser-host`.
