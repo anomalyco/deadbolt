@@ -1260,7 +1260,7 @@ Every field but `origin` is optional: `rules` is the field's
 `passwordrules` (at most 1024 bytes), `minLength` and `maxLength` its
 limits (numbers), and `allowed` the only characters to use. A site in
 Apple's [password-manager-resources](https://github.com/apple/password-manager-resources)
-quirks (vendored in `crates/cli/data/password-rules`, MIT) gets those rules
+quirks (vendored in `crates/core/data/password-rules`, MIT) gets those rules
 instead of `rules`, and the field's limits always apply. Without either, it's
 20 characters of letters, digits and symbols with one of each kind. Limits no
 password fits get `failed`, and ones that allow under 60 bits get `weak`.

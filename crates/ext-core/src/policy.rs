@@ -36,6 +36,12 @@ pub fn may_reveal(preset: Preset, passphrase_given: bool) -> bool {
     !preset.reauth() || passphrase_given
 }
 
+/// Whether this form fill needs a passphrase. Comfortable and Relaxed follow
+/// the native Touch-ID-off rule: an explicit pick is enough.
+pub fn card_reauth(preset: Preset, sensitive: bool) -> bool {
+    preset == Preset::Strict && sensitive
+}
+
 /// A login's title as saved: trimmed, and never empty.
 pub fn login_title(title: &str) -> Result<&str, &'static str> {
     let title = title.trim();
@@ -55,6 +61,15 @@ mod tests {
         assert!(may_reveal(Preset::Strict, true));
         assert!(may_reveal(Preset::Comfortable, false));
         assert!(may_reveal(Preset::Relaxed, false));
+    }
+
+    #[test]
+    fn only_strict_card_secrets_require_reauthentication() {
+        assert!(card_reauth(Preset::Strict, true));
+        assert!(!card_reauth(Preset::Comfortable, true));
+        assert!(!card_reauth(Preset::Relaxed, true));
+        assert!(!card_reauth(Preset::Strict, false));
+        assert!(card_reauth(Preset::default(), true));
     }
 
     #[test]

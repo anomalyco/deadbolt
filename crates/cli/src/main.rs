@@ -14,7 +14,7 @@ mod items;
 mod prompt;
 mod secrets;
 mod send;
-mod site;
+use deadbolt_core::site;
 mod update;
 mod webauthn;
 

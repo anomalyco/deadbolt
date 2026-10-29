@@ -852,33 +852,7 @@ impl FormKind {
     }
 }
 
-/// An identity's fields a form may ask for: never its ID numbers or notes.
-pub const IDENTITY_FORM_FIELDS: [&str; 17] = [
-    "honorific",
-    "given-name",
-    "additional-name",
-    "family-name",
-    "nickname",
-    "organization",
-    "job-title",
-    "email",
-    "phone",
-    "address-line1",
-    "address-line2",
-    "address-line3",
-    "city",
-    "region",
-    "postal-code",
-    "country",
-    "birthday",
-];
-
-/// A card's fields a form may ask for: never its PIN or notes. `number`
-/// and `cvv` verify the user ([`CARD_VERIFIED_FIELDS`]).
-pub const CARD_FORM_FIELDS: [&str; 5] = ["cardholder", "number", "expiry", "cvv", "brand"];
-
-/// A card's fields whose fill verifies the user.
-pub const CARD_VERIFIED_FIELDS: [&str; 2] = ["number", "cvv"];
+pub use deadbolt_core::forms::{CARD_FORM_FIELDS, CARD_VERIFIED_FIELDS, IDENTITY_FORM_FIELDS};
 
 /// An identity a form can be filled from, without values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

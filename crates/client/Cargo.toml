@@ -11,6 +11,7 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+deadbolt-core = { path = "../core" }
 blake3 = "1.8"
 data-encoding = "2.11.1"
 nix = { version = "0.31", default-features = false, features = ["socket"] }

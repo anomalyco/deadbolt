@@ -9,115 +9,52 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow};
-use deadbolt_core::{Item, ItemId, VaultId};
+use anyhow::Result;
+use deadbolt_core::{Item, ItemId, VaultId, forms};
 
-use super::autofill::{login_ref, site, value};
-use super::items::{label, person};
+use super::autofill::{login_ref, site};
+use super::items::label;
 use super::session::{Loaded, unhex};
 use super::{Agent, Conversation, ErrorCode, fail};
-use crate::protocol::{
-    CARD_FORM_FIELDS, CARD_VERIFIED_FIELDS, FormCard, FormIdentity, FormKind, IDENTITY_FORM_FIELDS,
-    LoginRef, Reply, Secret, Verify,
-};
-
-/// The form fields of an item of `kind`.
-fn form_fields(kind: &str) -> &'static [&'static str] {
-    match kind {
-        "identity" => &IDENTITY_FORM_FIELDS,
-        "card" => &CARD_FORM_FIELDS,
-        _ => &[],
-    }
-}
-
-/// The form fields `item` has a value for.
-fn present(item: &Item) -> Vec<String> {
-    form_fields(&item.kind)
-        .iter()
-        .filter(|f| value(item, f).is_some())
-        .map(|f| (*f).to_string())
-        .collect()
-}
-
-/// "Kit Langton · 123 Main St, Brooklyn": the person, and the first address
-/// line and city. Empty when it has neither.
-pub fn summary(item: &Item) -> String {
-    let place: Vec<&str> = ["address-line1", "city"]
-        .iter()
-        .filter_map(|f| value(item, f))
-        .collect();
-    let place = (!place.is_empty()).then(|| place.join(", "));
-    [person(item), place]
-        .into_iter()
-        .flatten()
-        .collect::<Vec<_>>()
-        .join(" · ")
-}
-
-fn last4(item: &Item) -> String {
-    let number = value(item, "number").unwrap_or_default();
-    number[number.len().saturating_sub(4)..].to_string()
-}
-
-/// Every identity and card of `kinds`, in every vault.
-fn items<'a>(s: &'a Loaded, kinds: &'a [FormKind]) -> impl Iterator<Item = (VaultId, Item)> + 'a {
-    s.vaults.iter().flat_map(move |(id, vault)| {
-        vault
-            .items()
-            .into_iter()
-            .filter(|item| kinds.iter().any(|k| k.as_str() == item.kind))
-            .map(move |item| (*id, item))
-    })
-}
-
-/// The identity `billing` names, if it is in one of the vaults here.
-fn billing(s: &Loaded, card: &Item) -> Option<LoginRef> {
-    let id = ItemId::from_bytes(unhex(value(card, "billing")?).ok()?);
-    s.vaults.iter().find_map(|(vault, v)| {
-        v.item(&id)
-            .filter(|i| !i.deleted && i.kind == "identity")
-            .map(|_| login_ref(vault, &id))
-    })
-}
+use crate::protocol::{FormCard, FormIdentity, FormKind, LoginRef, Reply, Secret, Verify};
 
 /// The identities and cards a form on the page at `origin` can be filled
-/// from, by title.
+/// from, by title. The shared core owns listing metadata and field rules.
 pub fn list(
     s: &Loaded,
     origin: &str,
     kinds: &[FormKind],
 ) -> Result<(Vec<FormIdentity>, Vec<FormCard>)> {
     site(origin)?;
-    let (mut identities, mut cards) = (Vec::new(), Vec::new());
-    for (vault, item) in items(s, kinds) {
-        let vault_name = s.vault(&vault).name().to_string();
-        let item_ref = login_ref(&vault, &item.id);
-        if item.kind == "identity" {
-            identities.push(FormIdentity {
-                item: item_ref,
-                vault: vault_name,
-                title: label(&item),
-                summary: summary(&item),
-                fields: present(&item),
-            });
-        } else {
-            cards.push(FormCard {
-                item: item_ref,
-                vault: vault_name,
-                title: label(&item),
-                brand: value(&item, "brand").map(str::to_string),
-                last4: last4(&item),
-                expiry: value(&item, "expiry").map(str::to_string),
-                cardholder: value(&item, "cardholder").map(str::to_string),
-                billing: billing(s, &item),
-                fields: present(&item),
-            });
-        }
-    }
-    let order = |title: &str, item: &LoginRef| (title.to_lowercase(), item.item.clone());
-    identities.sort_by_key(|i| order(&i.title, &i.item));
-    cards.sort_by_key(|c| order(&c.title, &c.item));
-    Ok((identities, cards))
+    let vaults: Vec<_> = s.vaults.values().collect();
+    let kinds: Vec<_> = kinds.iter().map(|kind| kind.as_str()).collect();
+    let (identities, cards) = forms::list(&vaults, &kinds);
+    Ok((
+        identities
+            .into_iter()
+            .map(|i| FormIdentity {
+                item: login_ref(&i.item.vault, &i.item.item),
+                vault: i.vault,
+                title: i.title,
+                summary: i.summary,
+                fields: i.fields,
+            })
+            .collect(),
+        cards
+            .into_iter()
+            .map(|c| FormCard {
+                item: login_ref(&c.item.vault, &c.item.item),
+                vault: c.vault,
+                title: c.title,
+                brand: c.brand,
+                last4: c.last4,
+                expiry: c.expiry,
+                cardholder: c.cardholder,
+                billing: c.billing.map(|r| login_ref(&r.vault, &r.item)),
+                fields: c.fields,
+            })
+            .collect(),
+    ))
 }
 
 /// The identity or card `target` names, for the page at `origin`, and the
@@ -133,29 +70,14 @@ pub fn find(s: &Loaded, origin: &str, target: &LoginRef, fields: &[String]) -> R
         .and_then(|v| v.item(&id))
         .filter(|item| !item.deleted && matches!(item.kind.as_str(), "identity" | "card"))
         .ok_or_else(not_found)?;
-    if fields.is_empty() {
-        return Err(anyhow!("no fields asked for"));
-    }
-    let allowed = form_fields(&item.kind);
-    if let Some(other) = fields.iter().find(|f| !allowed.contains(&f.as_str())) {
-        return Err(anyhow!("a form can't ask a {} for {other}", item.kind));
-    }
+    forms::validate(&item, fields)?;
     Ok(item)
-}
-
-/// Whether filling `fields` of `item` verifies the user first.
-pub fn needs_verify(item: &Item, fields: &[String]) -> bool {
-    item.kind == "card"
-        && fields
-            .iter()
-            .any(|f| CARD_VERIFIED_FIELDS.contains(&f.as_str()) && value(item, f).is_some())
 }
 
 /// The values of `fields` that `item` has.
 pub fn values(item: &Item, fields: &[String]) -> BTreeMap<String, Secret> {
-    fields
-        .iter()
-        .filter_map(|f| value(item, f).map(|v| (f.clone(), Secret::new(v))))
+    forms::values(item, fields)
+        .map(|(f, v)| (f.to_string(), Secret::new(v)))
         .collect()
 }
 
@@ -182,7 +104,7 @@ impl Agent {
         conv: &Conversation,
     ) -> Result<Reply> {
         let item = self.with(|s| find(s, origin, target, fields))?;
-        let verified = if needs_verify(&item, fields) {
+        let verified = if forms::needs_verify(&item, fields) {
             let host = crate::site::url_host(origin).unwrap_or_else(|| origin.to_string());
             let reason = format!("fill {} on {host}", label(&item));
             drop(item);
