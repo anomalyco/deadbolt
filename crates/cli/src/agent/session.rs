@@ -32,10 +32,6 @@ pub fn hex(bytes: &[u8]) -> String {
     HEXLOWER.encode(bytes)
 }
 
-pub fn short(bytes: &[u8]) -> String {
-    hex(&bytes[..4])
-}
-
 pub fn unhex<const N: usize>(text: &str) -> Result<[u8; N]> {
     HEXLOWER
         .decode(text.as_bytes())
@@ -192,7 +188,23 @@ impl Loaded {
         device_name: &str,
         params: KdfParams,
     ) -> Result<Self> {
-        let secret = DeviceSecret::generate();
+        Self::setup_with(
+            dir,
+            passphrase,
+            device_name,
+            params,
+            DeviceSecret::generate(),
+        )
+    }
+
+    /// Creates the store for an existing device key. Blocking (Argon2).
+    pub fn setup_with(
+        dir: &Path,
+        passphrase: &[u8],
+        device_name: &str,
+        params: KdfParams,
+        secret: DeviceSecret,
+    ) -> Result<Self> {
         let store = deadbolt_store::init_with_params(dir, passphrase, *secret.to_bytes(), params)?;
         let meta = Meta {
             device_name: device_name.into(),

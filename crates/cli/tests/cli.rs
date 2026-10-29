@@ -180,10 +180,11 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
     }
 }
 
-/// `new` runs `deadbolt join`, `inviter` runs `deadbolt pair <ticket>`.
-fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) {
+/// Starts `deadbolt join` on `new`: the process, its stdout lines after the
+/// code, and the code.
+fn start_join(new: &Device, device_name: &str) -> (Child, mpsc::Receiver<String>, String) {
     let mut child = new
-        .cmd(&["join", "--yes", "--device-name", device_name])
+        .cmd(&["join", "--device-name", device_name])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -197,17 +198,17 @@ fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) 
             }
         }
     });
-    let ticket = rx.recv_timeout(Duration::from_secs(30)).expect("no ticket");
-    assert!(ticket.starts_with("DBPAIR"), "{ticket}");
-    let mut args = vec!["pair", &ticket];
-    if let Some(vault) = vault {
-        args.extend(["--vault", vault]);
-    }
-    let out = inviter.run(&args);
-    assert!(
-        out.starts_with(&format!("added {device_name} to ")),
-        "{out}"
-    );
+    let line = rx.recv_timeout(Duration::from_secs(30)).expect("no code");
+    let code = line
+        .strip_prefix("Code: ")
+        .expect("a code line")
+        .to_string();
+    assert_eq!(code.split('-').count(), 4, "{code}");
+    (child, rx, code)
+}
+
+/// Waits for `join` to finish and returns its stderr.
+fn finish_join(mut child: Child) -> (std::process::ExitStatus, String) {
     let status = wait(&mut child, Duration::from_secs(30));
     let mut err = String::new();
     child
@@ -217,9 +218,26 @@ fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) 
         .read_to_string(&mut err)
         .unwrap();
     eprintln!("join stderr:\n{err}");
+    (status, err)
+}
+
+/// `new` runs `deadbolt join`, `inviter` runs `deadbolt pair <code>`.
+fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) {
+    let (child, rx, code) = start_join(new, device_name);
+    let mut args = vec!["pair", &code];
+    if let Some(vault) = vault {
+        args.extend(["--vault", vault]);
+    }
+    let out = inviter.run(&args);
+    assert!(
+        out.starts_with(&format!("✓ added \"{device_name}\" to ")),
+        "{out}"
+    );
+    let (status, err) = finish_join(child);
     assert!(status.success(), "join failed");
+    assert!(err.contains(&format!("run: deadbolt pair {code}")), "{err}");
     let joined = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(joined.starts_with("joined vault "), "{joined}");
+    assert!(joined.starts_with("✓ joined \""), "{joined}");
 }
 
 #[test]
@@ -300,7 +318,7 @@ fn pairing_membership_and_removal() {
     a.run(&["init", "--device-name", "alpha"]);
     a.run(&["init", "other"]);
 
-    pair(&a, &b, "beta", None);
+    pair(&a, &b, "beta", Some("personal"));
     assert_eq!(a.devices(), ["alpha", "beta"]);
     assert_eq!(b.devices(), ["alpha", "beta"]);
     let ls = b.run(&["vault", "ls"]);
@@ -353,34 +371,23 @@ fn pairing_membership_and_removal() {
     let out = b.run(&["sync"]);
     assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
 
-    // Re-pairing gamma into family (from which it was removed) is refused before
-    // dialing, while pairing that same ticket into a's other vault succeeds.
-    let mut child = c
-        .cmd(&["join", "--yes", "--device-name", "gamma"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if tx.send(line.unwrap()).is_err() {
-                break;
-            }
-        }
-    });
-    let ticket = rx.recv_timeout(Duration::from_secs(30)).expect("no ticket");
-    let err = a.fail(&["pair", &ticket, "--vault", "family"]);
+    // Re-pairing gamma into family (from which it was removed) is refused, and
+    // that spends the code; gamma's next code into a's other vault works.
+    let (child, _rx, code) = start_join(&c, "gamma");
+    let err = a.fail(&["pair", &code, "--vault", "family"]);
     assert!(
         err.contains("that device was removed from family and can't rejoin it"),
         "{err}"
     );
-    let out = a.run(&["pair", &ticket, "--vault", "other"]);
-    assert!(out.starts_with("added gamma to other"), "{out}");
-    assert!(wait(&mut child, Duration::from_secs(30)).success());
+    let (status, err) = finish_join(child);
+    assert!(!status.success());
+    assert!(err.contains("can't rejoin"), "{err}");
+    let (child, rx, code) = start_join(&c, "gamma");
+    let out = a.run(&["pair", &code, "--vault", "other"]);
+    assert_eq!(out, "✓ added \"gamma\" to other\n");
+    assert!(finish_join(child).0.success());
     let joined = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(joined, "joined vault other");
+    assert_eq!(joined, "✓ joined \"other\" from alpha");
     let out = c.run(&["sync", "--vault", "other"]);
     assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
 
@@ -402,11 +409,154 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
     // Joining another vault on an existing device.
     pair(&a, &b, "beta", Some("personal"));
     assert_eq!(b.run(&["vault", "ls"]).lines().count(), 2);
-    assert!(
-        !a.try_run(&["pair", "DBPAIRAAAA", "--vault", "nope"])
-            .status
-            .success()
-    );
+    let err = a.fail(&["pair", "violin-garden-tiger-lamp", "--vault", "nope"]);
+    assert!(err.contains("no vault named nope"), "{err}");
+    let err = a.fail(&["pair", "DBPAIRAAAA"]);
+    assert!(err.contains("invalid pairing code"), "{err}");
+    // Several vaults and no terminal to choose on: name one.
+    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp"]);
+    assert!(err.contains("several vaults (personal, work)"), "{err}");
+}
+
+/// A code works once: someone else using it is loud on the device that comes
+/// second. A mistyped code finds no device.
+#[test]
+fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
+    let a = Device::new();
+    let b = Device::new();
+    let c = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    c.run(&["init", "--device-name", "gamma"]);
+    let (child, _rx, code) = start_join(&b, "beta");
+
+    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp"]);
+    wrong.env("DEADBOLT_TEST_PAIR_FIND_SECS", "1");
+    let out = c.output(&mut wrong);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no device is waiting for that code"), "{err}");
+
+    // c gets there first; a, the legitimate device, hears it was used.
+    assert_eq!(c.run(&["pair", &code]), "✓ added \"beta\" to personal\n");
+    assert!(finish_join(child).0.success());
+    let err = a.fail(&["pair", &code]);
+    assert!(err.contains("that code was already used"), "{err}");
+    assert!(err.contains("someone else may have used it"), "{err}");
+    assert_eq!(a.devices(), ["alpha"]);
+}
+
+/// The agent's side of `join` on a device that isn't set up, as a client
+/// without a passphrase up front sees it: the code, then `joined` asking for
+/// the passphrase, and nothing on disk before the answer. Hanging up instead
+/// discards the join; the inviter then lists a device never seen, which
+/// `devices remove` takes out.
+#[test]
+fn a_new_device_asks_for_its_passphrase_last() {
+    use std::os::unix::net::UnixStream;
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    for answer in [false, true] {
+        let b = Device::new();
+        b.run(&["status"]);
+        let paths = deadbolt_client::Paths::from_vars(|name| match name {
+            "DEADBOLT_HOME" => Some(b.path("home").into()),
+            "XDG_RUNTIME_DIR" => Some(b.path("run").into()),
+            "XDG_STATE_HOME" => Some(b.path("state").into()),
+            "XDG_CONFIG_HOME" => Some(b.path("config").into()),
+            _ => None,
+        });
+        let mut socket = UnixStream::connect(&paths.socket).unwrap();
+        let request = serde_json::json!({
+            "v": deadbolt_client::protocol::PROTOCOL_VERSION,
+            "cmd": "join",
+            "device_name": "beta",
+            "passphrase": null,
+        });
+        socket.write_all(format!("{request}\n").as_bytes()).unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        let mut next = || -> serde_json::Value {
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+        };
+        let code = next();
+        assert_eq!(code["event"]["event"], "code", "{code}");
+        let code = code["event"]["code"].as_str().unwrap().to_string();
+        assert_eq!(a.run(&["pair", &code]), "✓ added \"beta\" to personal\n");
+        let joined = next();
+        assert_eq!(joined["event"]["event"], "joined", "{joined}");
+        assert_eq!(joined["event"]["vault"], "personal");
+        assert_eq!(joined["event"]["inviter"]["name"], "alpha");
+        assert_eq!(joined["event"]["passphrase"], true);
+        assert!(b.run(&["status"]).contains("state\tnot set up\n"));
+        assert!(!b.path("home").join("store.redb").exists());
+        if answer {
+            socket
+                .write_all(b"{\"answer\":true,\"passphrase\":\"chosen late\"}\n")
+                .unwrap();
+            let reply = next();
+            assert_eq!(reply["type"], "ok", "{reply}");
+            assert_eq!(reply["reply"]["vault"]["name"], "personal");
+            assert_eq!(b.devices(), ["alpha", "beta"]);
+            b.run(&["lock"]);
+            let out = b.try_run_stdin(&["unlock", "--passphrase-stdin"], "chosen late\n");
+            assert!(out.status.success());
+            eventually("a to see beta", || {
+                a.run(&["sync"]);
+                a.run(&["devices"]).contains("beta\t")
+                    && !a.run(&["devices"]).contains("never seen")
+            });
+        } else {
+            drop(lines);
+            drop(socket);
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(b.run(&["status"]).contains("state\tnot set up\n"));
+            assert!(!b.path("home").join("store.redb").exists());
+            let devices = a.run(&["devices"]);
+            assert!(
+                devices.contains("beta\t") && devices.contains("never seen"),
+                "{devices}"
+            );
+            a.run(&["devices", "remove", "beta"]);
+            assert_eq!(a.devices(), ["alpha"]);
+        }
+    }
+}
+
+/// Without a passphrase from the env, stdin or a terminal, a new device's
+/// join fails before showing a code; with one on stdin it joins.
+#[test]
+fn a_new_device_join_needs_a_passphrase_source() {
+    let a = Device::new();
+    let b = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut cmd = b.cmd(&["join"]);
+    cmd.env_remove("DEADBOLT_PASSPHRASE");
+    let out = b.output(&mut cmd);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--passphrase-stdin"));
+
+    let mut cmd = b.cmd(&["join", "--passphrase-stdin", "--device-name", "beta"]);
+    cmd.env_remove("DEADBOLT_PASSPHRASE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from stdin\n")
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let code = line.trim().strip_prefix("Code: ").unwrap().to_string();
+    a.run(&["pair", &code]);
+    let (status, _) = finish_join(child);
+    assert!(status.success());
+    b.run(&["lock"]);
+    let out = b.try_run_stdin(&["unlock", "--passphrase-stdin"], "from stdin\n");
+    assert!(out.status.success());
 }
 
 /// `deadbolt app` beside a stand-in `deadbolt-ui` that records each start

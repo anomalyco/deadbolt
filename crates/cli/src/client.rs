@@ -6,7 +6,7 @@ use deadbolt_client::{Error, Launch};
 pub use deadbolt_client::{AgentError, running, simple, status, stop};
 
 use crate::paths::Paths;
-use crate::protocol::{Command, ErrorCode, Event, PROTOCOL_VERSION, Reply, Status};
+use crate::protocol::{Answer, Command, ErrorCode, Event, PROTOCOL_VERSION, Reply, Status};
 
 /// This binary's version. `DEADBOLT_TEST_VERSION` overrides it in a debug
 /// build so tests can run an agent of another build.
@@ -36,7 +36,7 @@ pub fn code(error: &anyhow::Error) -> Option<ErrorCode> {
 pub async fn call(
     paths: &Paths,
     command: Command,
-    on_event: impl FnMut(Event) -> Result<Option<bool>>,
+    on_event: impl FnMut(Event) -> Result<Option<Answer>>,
 ) -> Result<Reply> {
     Ok(deadbolt_client::call(paths, command, on_event).await?)
 }
