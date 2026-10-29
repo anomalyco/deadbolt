@@ -102,6 +102,12 @@ pub enum Job {
     Activity {
         seq: u64,
     },
+    /// The agent clients and grants, after revoking one if asked
+    /// (`agents::Agents`).
+    Agents {
+        seq: u64,
+        revoke: Option<crate::agents::Revoke>,
+    },
     /// Tells the agent the app showed or copied a field, for Activity.
     Report {
         action: AppAction,
@@ -163,6 +169,10 @@ pub enum Done {
     Activity {
         seq: u64,
         result: Result<Vec<ActivityEntry>, Failure>,
+    },
+    Agents {
+        seq: u64,
+        result: Result<crate::agents::Listing, Failure>,
     },
     /// A report went, or didn't: nothing waits on it.
     Reported,
@@ -630,6 +640,7 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         }
         Job::SyncOnePassword { seq } => mirror(paths, seq).await,
         job @ (Job::Activity { .. } | Job::Report { .. }) => crate::activity::run(paths, job).await,
+        Job::Agents { seq, revoke } => crate::agents::run(paths, seq, revoke).await,
         Job::Create {
             kind,
             name,
