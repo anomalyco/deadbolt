@@ -327,6 +327,104 @@ impl App {
         self.nav = Nav::default();
         self.search.focused = false;
     }
+
+    /// Keys in the search field (the vault's and the panel's), before its
+    /// editor. True when handled.
+    pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if let Some(handled) = self.nav_key(ev, tx) {
+            return handled;
+        }
+        if let Some(handled) = self.overlay_key(ev, tx) {
+            return handled;
+        }
+        if let Some(handled) = self.import_key(ev) {
+            return handled;
+        }
+        if let Some(handled) = self.edit_key(ev) {
+            return handled;
+        }
+        if self.panel_shortcut(ev, tx) {
+            return true;
+        }
+        self.list_key(ev, tx)
+    }
+
+    /// Keys for Settings or the install page, which sit in the vault's place:
+    /// Escape closes them, Settings' rows take the arrows, ↵ and Space, and
+    /// nothing else reaches the vault behind. `None` when neither is open.
+    fn overlay_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
+        // The quick panel has no Settings or install offer; its keys are its own.
+        if self.screen != Screen::Vault || self.panel.is_some() {
+            return None;
+        }
+        let installing = self.installing();
+        if !self.settings_open && !installing {
+            return None;
+        }
+        // Import Passwords… leaves either for the import view, as the menu
+        // item does; without native menus the key is the only way.
+        if crate::import::is_shortcut(ev) && !self.hotkey.recorder.is_recording() {
+            return None;
+        }
+        // Locking still locks.
+        if ev.is_command('l') && !self.hotkey.recorder.is_recording() {
+            return None;
+        }
+        if self.settings_open {
+            return Some(self.settings_key(ev, tx));
+        }
+        match ev.key {
+            Key::Escape => {
+                if let Some(installer) = &mut self.installer {
+                    installer.close();
+                }
+            }
+            Key::Tab => return Some(false),
+            _ => {}
+        }
+        Some(true)
+    }
+
+    /// App-level keys: before the focused field when there is none, after it
+    /// otherwise. In the vault that includes the list's keys, so they work
+    /// with focus on a button or nowhere.
+    pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if let Some(handled) = self.nav_key(ev, tx) {
+            return handled;
+        }
+        if let Some(handled) = self.overlay_key(ev, tx) {
+            return handled;
+        }
+        if let Some(handled) = self.import_key(ev) {
+            return handled;
+        }
+        if let Some(handled) = self.edit_key(ev) {
+            return handled;
+        }
+        if self.panel_shortcut(ev, tx) {
+            return true;
+        }
+        match ev.key {
+            Key::Command('l') if self.screen == Screen::Vault => {
+                self.lock();
+                true
+            }
+            Key::Enter if self.screen == Screen::Locked => {
+                self.submit_unlock();
+                true
+            }
+            _ if self.screen == Screen::Vault
+                && self.panel.is_none()
+                && rune_kit::shell::is_sidebar_toggle(ev) =>
+            {
+                self.sidebar.toggle();
+                true
+            }
+            _ if self.screen == Screen::Vault && self.panel.is_none() => self.vault_key(ev, tx),
+            _ if self.screen == Screen::Onboarding => crate::onboarding::key(self, ev, tx),
+            _ => false,
+        }
+    }
 }
 
 fn is_question(ev: &KeyEvent) -> bool {
