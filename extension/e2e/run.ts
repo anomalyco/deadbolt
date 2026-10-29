@@ -5,12 +5,15 @@
 // real browser profile or vault: each run uses a fresh profile directory with
 // the fake host's manifest in it.
 //
-//   bun run e2e [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>]
+//   bun run e2e [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
 //
 // `--video <dir>` records the `film` run (the menu, a fill, a sign-in and
 // the save offer in the page) to <dir>/deadbolt-surface.webm.
 //
-// `--only security` is the subset CI runs: hidden and covered fields, form
+// `--dist <dir>` uses an e2e build already made there (scripts/build.ts
+// --e2e <dir>) instead of building, so parallel shards share one build.
+//
+// `--only security` is the fast subset CI runs first: hidden and covered fields, form
 // swaps, opaque origins, value swaps, navigation during a fill and the
 // back/forward cache.
 //
@@ -25,22 +28,26 @@ import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthe
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const root = join(import.meta.dir, "..")
-// An e2e build of its own (DEADBOLT_E2E: provider pages on .test hosts), never dist/.
-const dist = await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-"))
-const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist], { stdout: "inherit", stderr: "inherit" })
-if (!built.success) throw new Error("the e2e build failed")
 const arg = (name: string) => {
   const i = process.argv.indexOf(name)
   return i > 0 ? process.argv[i + 1] : undefined
 }
+// An e2e build of its own (DEADBOLT_E2E: provider pages on .test hosts), never dist/.
+const prebuilt = arg("--dist")
+const dist = prebuilt ?? (await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-")))
+if (!prebuilt) {
+  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist], { stdout: "inherit", stderr: "inherit" })
+  if (!built.success) throw new Error("the e2e build failed")
+}
 const stills = arg("--stills")
 const video = arg("--video")
 const only = arg("--only")
-const deadbolt = arg("--deadbolt")
+// Absolute: Chromium reads a relative host path in the manifest as relative to the manifest.
+const deadbolt = arg("--deadbolt") && resolve(arg("--deadbolt")!)
 if (stills) await mkdir(stills, { recursive: true })
 if (video) await mkdir(video, { recursive: true })
 
@@ -3042,20 +3049,45 @@ const once: Record<string, () => Promise<void>> = {
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
+// `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
+// (each scenario in each scheme, then each `once` entry), balanced by these
+// rough run times in seconds (per scheme; unlisted ones count 10); `--list`
+// prints the units and their shards.
+const cost: Record<string, number> = {
+  detection: 108, occlusionSweep: 55, signInSessions: 52, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
+  coldSave: 8, backForward: 7, narrowing: 6, midFill: 6, coveredPill: 5, locked: 2, notInstalled: 1,
+}
+const units = [
+  ...(["light", "dark"] as const).flatMap((scheme) =>
+    Object.entries(scenarios).map(([name, run]) => ({ key: name, name: `${name} (${scheme})`, run: () => run(scheme) })),
+  ),
+  ...Object.entries(once).map(([name, run]) => ({ key: name, name, run })),
+  // The recording runs only when asked for.
+].filter((u) => (!picked || picked.includes(u.key)) && (u.key !== "film" || video))
+const [part, parts] = (arg("--shard") ?? "1/1").split("/").map(Number)
+if (!(parts >= 1 && part >= 1 && part <= parts)) throw new Error("--shard wants <i>/<n> with 1 <= i <= n")
+const load = Array<number>(parts).fill(0)
+const shardOf = new Map<string, number>()
+for (const u of [...units].sort((a, b) => (cost[b.key] ?? 10) - (cost[a.key] ?? 10))) {
+  const bin = load.indexOf(Math.min(...load))
+  load[bin] += cost[u.key] ?? 10
+  shardOf.set(u.name, bin + 1)
+}
+const mine = units.filter((u) => shardOf.get(u.name) === part)
+if (process.argv.includes("--list")) {
+  for (const u of units) console.log(`${shardOf.get(u.name)}/${parts}  ${u.name}`)
+  server.stop(true)
+  process.exit(0)
+}
+if (parts > 1) console.log(`shard ${part}/${parts}: ${mine.map((u) => u.name).join(", ") || "nothing"}`)
+
 try {
-  for (const scheme of ["light", "dark"] as const) {
-    for (const [name, run] of Object.entries(scenarios)) {
-      if (picked && !picked.includes(name)) continue
-      console.log(`\n# ${name} (${scheme})`)
-      await run(scheme)
-    }
-  }
-  for (const [name, run] of Object.entries(once)) {
-    if (picked && !picked.includes(name)) continue
-    // The recording runs only when asked for.
-    if (name === "film" && !video) continue
-    console.log(`\n# ${name}`)
-    await run()
+  for (const u of mine) {
+    console.log(`\n# ${u.name}`)
+    const start = Date.now()
+    await u.run()
+    console.log(`  (${u.name}: ${((Date.now() - start) / 1000).toFixed(1)} s)`)
   }
 } finally {
   server.stop(true)

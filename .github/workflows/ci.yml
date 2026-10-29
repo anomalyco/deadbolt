@@ -65,7 +65,7 @@ jobs:
 
   # Hidden and covered fields, form swaps, opaque origins, value swaps,
   # navigating mid-fill and the back/forward cache, in headless Chromium with
-  # the fake host (extension/e2e). The full e2e run, with stills, stays local.
+  # the fake host (extension/e2e): the fast gate before the full run below.
   extension-security:
     name: Browser extension security e2e
     if: github.event_name != 'schedule'
@@ -82,6 +82,41 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
       - run: bun run e2e --only security
+
+  # The whole e2e suite, stills and the passkey run against a real
+  # `deadbolt browser-host` included, in four balanced slices
+  # (`e2e/run.ts --shard`). Locally, `bun run e2e:parallel` runs it the same way.
+  extension-e2e:
+    name: Browser extension e2e (shard ${{ matrix.shard }}/4)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    defaults:
+      run:
+        shell: bash
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: cargo +stable build -p deadbolt-cli --locked
+      - run: bun install --frozen-lockfile
+      - run: bunx playwright-core install --with-deps chromium
+      - run: |
+          mkdir -p e2e-out
+          bun e2e/run.ts --shard ${{ matrix.shard }}/4 --deadbolt ../target/debug/deadbolt --stills e2e-out/stills 2>&1 | tee e2e-out/run.log
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: e2e-shard-${{ matrix.shard }}
+          path: extension/e2e-out
+          if-no-files-found: ignore
 
   deny:
     name: cargo-deny
