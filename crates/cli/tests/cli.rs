@@ -4184,6 +4184,41 @@ fn documents_and_attachments() {
     let err = a.fail(&["get", "github", "-o", out.to_str().unwrap()]);
     assert!(err.contains("--output is for file fields"), "{err}");
 
+    // References: a file goes only into a file inject writes, decoded, as
+    // the template's one reference.
+    let template = a.path("file.tpl");
+    std::fs::write(&template, "{{ deadbolt://personal/Passport scan/file }}\n").unwrap();
+    let injected = a.path("injected.txt");
+    let (tpl, inj) = (template.to_str().unwrap(), injected.to_str().unwrap());
+    a.run(&["inject", "-i", tpl, "-o", inj]);
+    assert_eq!(std::fs::read(&injected).unwrap(), b"1111 2222");
+    std::fs::write(
+        &template,
+        "codes: {{ deadbolt://personal/Passport scan/file }}\n",
+    )
+    .unwrap();
+    let err = a.fail(&["inject", "-i", tpl, "-o", inj, "--force"]);
+    assert!(
+        err.contains("is a file") && err.contains("one reference"),
+        "{err}"
+    );
+    let err = a.fail(&["read", "deadbolt://personal/Passport scan/file"]);
+    assert!(
+        err.contains("is a file") && err.contains("inject -o"),
+        "{err}"
+    );
+    let err = a.fail(&[
+        "run",
+        "--env",
+        "CODES=deadbolt://personal/Passport scan/file",
+        "--",
+        "true",
+    ]);
+    assert!(
+        err.contains("is a file") && err.contains("environment"),
+        "{err}"
+    );
+
     // The size cap: 10 MiB.
     let big = a.path("big.bin");
     let file = std::fs::File::create(&big).unwrap();

@@ -155,7 +155,7 @@ fn schema(kind: &str) -> &'static [(&'static str, &'static str, bool, bool)] {
         "membership" => &[
             ("organization", "text", false, false),
             ("member-name", "text", false, false),
-            ("member-id", "text", false, false),
+            ("member-id", "secret", false, false),
             ("pin", "secret", false, false),
             ("url", "url", false, false),
             ("phone", "text", false, false),

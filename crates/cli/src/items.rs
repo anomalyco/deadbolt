@@ -320,7 +320,7 @@ async fn get(
         vault: vault.clone(),
         query,
         otp,
-        files: false,
+        files: Vec::new(),
     };
     let mut item = fetch(command).await?;
     let name = match field {
@@ -351,7 +351,11 @@ async fn get(
             vault,
             query: vec![item.id.clone()],
             otp: kind == "otp",
-            files: kind == "file",
+            files: if kind == "file" {
+                vec![name.clone()]
+            } else {
+                Vec::new()
+            },
         };
         (_, value, kind) = find(&mut fetch(command).await?)?;
     }
@@ -480,7 +484,7 @@ pub async fn run(
                 vault: vault.clone(),
                 query,
                 otp: reveal,
-                files: false,
+                files: Vec::new(),
             };
             let item = item(paths, command, from_stdin).await?;
             let code = match code_field(&item.fields) {

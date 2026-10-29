@@ -154,13 +154,14 @@ pub enum Command {
     /// password secrets (fields of type otp) come back empty unless `otp`
     /// asks for them: a client that shows codes asks `ItemCode` instead.
     /// A file field (type file) comes back as its name alone unless `files`
-    /// asks for its contents too (`deadbolt_core::item::file_parts`).
+    /// names it, for its contents too (`deadbolt_core::item::file_parts`):
+    /// a client asks for the one file it needs, never all of an item's.
     ItemGet {
         vault: Option<String>,
         query: Vec<String>,
         otp: bool,
         #[serde(default)]
-        files: bool,
+        files: Vec<String>,
     },
     /// Finds exactly one item and computes its current one-time code from
     /// its code field (`code_field`); replies `code`. The secret itself
@@ -560,6 +561,11 @@ pub struct ResolvedSecret {
     pub title: String,
     pub field: String,
     pub value: Secret,
+    /// A file field: `value` is its name and contents in base64, which only
+    /// `inject` writes out (decoded), for a template that is that one
+    /// reference.
+    #[serde(default)]
+    pub file: bool,
 }
 
 /// A standing grant letting AI callers resolve one item's fields.
@@ -928,11 +934,15 @@ pub enum SiteStatus {
 
 /// A file from an export, beside its text: a `.1pux`'s attachment, named
 /// as in the archive's `files/` (`<documentId>__<fileName>`), its contents
-/// in base64. Wiped on drop; Debug leaves out the contents.
+/// in base64. `too_large` (and no contents) for one over the cap or past
+/// what fits in the request, so the agent can say why it's left out. Wiped
+/// on drop; Debug leaves out the contents.
 #[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
 pub struct ExportFile {
     pub name: String,
     pub data: String,
+    #[serde(default)]
+    pub too_large: bool,
 }
 
 impl std::fmt::Debug for ExportFile {

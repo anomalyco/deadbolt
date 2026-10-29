@@ -576,7 +576,7 @@ mod tests {
                 vault: None,
                 query: vec!["offline-login".into()],
                 otp: false,
-                files: false,
+                files: Vec::new(),
             },
             Command::ItemList {
                 vault: None,
@@ -1592,7 +1592,7 @@ impl Agent {
                 otp,
                 files,
             } => Ok(Reply::Item {
-                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp, files))?,
+                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp, &files))?,
             }),
             Command::ItemCode { vault, query } => Ok(Reply::Code {
                 code: self.with(|s| {

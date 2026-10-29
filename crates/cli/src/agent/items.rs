@@ -417,19 +417,20 @@ fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
 }
 
 /// One item with its values; one-time password secrets only with `otp`,
-/// files' contents only with `files`.
+/// and the contents only of the file fields `files` names.
 pub fn get(
     s: &Loaded,
     vault: Option<&str>,
     query: &[String],
     otp: bool,
-    files: bool,
+    files: &[String],
 ) -> Result<ItemInfo> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
     let item = listing.find(query)?;
     let mut info = listing.info(item, true, otp);
-    if files {
-        for field in info.fields.iter_mut().filter(|f| f.kind == "file") {
+    if !files.is_empty() {
+        let named = |f: &&mut FieldInfo| f.kind == "file" && files.contains(&f.name);
+        for field in info.fields.iter_mut().filter(named) {
             if let Some(file) = item.fields.get(&field.name) {
                 field.value.zeroize();
                 field.value = file.value.clone();
@@ -923,7 +924,7 @@ mod tests {
         ];
         create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
         let values = |otp| {
-            let item = get(&s, None, &words("site"), otp, false).unwrap();
+            let item = get(&s, None, &words("site"), otp, &[]).unwrap();
             item.fields
                 .into_iter()
                 .map(|f| (f.name.clone(), f.value.clone()))
@@ -942,6 +943,55 @@ mod tests {
                 pair("backup", "KRSXG5CTMVRXEZLU")
             ]
         );
+    }
+
+    /// Asking for one file sends that file alone: an item with five files
+    /// near the item's cap between them still reads one at a time.
+    #[test]
+    fn a_get_carries_only_the_files_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let each = deadbolt_core::item::MAX_FILE / 5 - 1024;
+        let fields: Vec<FieldInput> = (0..5u8)
+            .map(|i| FieldInput {
+                name: format!("part-{i}"),
+                kind: Some("file".into()),
+                value: deadbolt_core::item::file_value(&format!("{i}.bin"), &vec![i; each])
+                    .to_string(),
+            })
+            .collect();
+        create(&mut s, None, "note", Some("Parts".into()), fields).unwrap();
+        // A sixth would take the item past the cap.
+        let sixth = FieldInput {
+            name: "part-5".into(),
+            kind: Some("file".into()),
+            value: deadbolt_core::item::file_value("5.bin", &vec![5; each]).to_string(),
+        };
+        let error = set(&mut s, None, &words("parts"), vec![sixth], None, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("at most 10 MiB together"),
+            "{error}"
+        );
+
+        let item = get(&s, None, &words("parts"), false, &["part-3".to_string()]).unwrap();
+        for field in &item.fields {
+            let (name, contents) = deadbolt_core::item::file_parts(&field.value);
+            if field.name == "part-3" {
+                let decoded = data_encoding::BASE64.decode(contents.unwrap().as_bytes());
+                assert_eq!(decoded.unwrap(), vec![3; each]);
+            } else {
+                assert_eq!(contents, None, "{}", field.name);
+                assert!(name.ends_with(".bin"));
+            }
+        }
+        let reply = serde_json::to_string(&item).unwrap();
+        assert!(
+            reply.len() < each * 4 / 3 + 4096,
+            "one file's worth: {}",
+            reply.len()
+        );
+        let none = get(&s, None, &words("parts"), false, &[]).unwrap();
+        assert!(none.fields.iter().all(|f| !f.value.contains('\n')));
     }
 
     #[test]
@@ -1167,7 +1217,7 @@ mod tests {
         let item = set(&mut s, None, &query, fields, name, &unset).unwrap();
         assert_eq!(s.vault(&vault).entries().len(), before + 1);
         assert_eq!(item.label, "GitHub");
-        let item = get(&s, None, &query, false, false).unwrap();
+        let item = get(&s, None, &query, false, &[]).unwrap();
         let fields: Vec<(&str, &str)> = item
             .fields
             .iter()
@@ -1224,7 +1274,7 @@ mod tests {
         );
         assert!(item.is_ok(), "{item:?}");
         assert_eq!(s.vault(&vault).entries().len(), before + 1);
-        let item = get(&s, None, &query, false, false).unwrap();
+        let item = get(&s, None, &query, false, &[]).unwrap();
         let names: Vec<&str> = item.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["password"]);
 

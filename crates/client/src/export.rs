@@ -268,21 +268,30 @@ fn attachments<R: Read + Seek>(
         let mut entry = archive
             .by_name(&format!("files/{name}"))
             .map_err(ExportError::Zip)?;
+        let too_large = |name: String| ExportFile {
+            name,
+            data: String::new(),
+            too_large: true,
+        };
         if entry.size() > MAX_FILE as u64 {
+            files.push(too_large(name));
             continue;
         }
         let buffer = Zeroizing::new(Vec::with_capacity(entry.size() as usize));
         let Some(bytes) = bounded(&mut entry, MAX_FILE, buffer).map_err(ExportError::Io)? else {
+            files.push(too_large(name));
             continue;
         };
         let need = bytes.len().div_ceil(3) * 4 + escaped_len(&name) + 32;
         if need > room {
+            files.push(too_large(name));
             continue;
         }
         room -= need;
         files.push(ExportFile {
             data: data_encoding::BASE64.encode(&bytes),
             name,
+            too_large: false,
         });
     }
     Ok(files)
@@ -388,12 +397,18 @@ mod tests {
         ]);
         let export = decode(bytes).unwrap();
         assert_eq!(export.text.as_str(), data);
-        let files: Vec<(&str, &str)> = export
+        let files: Vec<(&str, &str, bool)> = export
             .files
             .iter()
-            .map(|f| (f.name.as_str(), f.data.as_str()))
+            .map(|f| (f.name.as_str(), f.data.as_str(), f.too_large))
             .collect();
-        assert_eq!(files, [("doc1__scan.pdf", "JVBERg==")]);
+        assert_eq!(
+            files,
+            [
+                ("doc1__scan.pdf", "JVBERg==", false),
+                ("doc2__big.bin", "", true)
+            ]
+        );
         assert!(!format!("{:?}", export.files).contains("JVBERg"));
         assert_eq!(decode(onepux_bytes()).unwrap().files.len(), 0);
     }

@@ -229,6 +229,54 @@ pub(crate) fn check(items: &BTreeMap<ItemId, ItemState>, op: &DataOp) -> Result<
     }
 }
 
+/// The files rule for a new local entry: an item one of its ops gives a
+/// file holds at most [`item::MAX_FILE`] in files once the entry is
+/// applied. Only writes are held to it: concurrent changes on two devices
+/// can't see each other, so applying stays order-independent and ignores it.
+pub(crate) fn check_files(
+    items: &BTreeMap<ItemId, ItemState>,
+    ops: &[DataOp],
+) -> Result<(), ItemError> {
+    let mut after: BTreeMap<ItemId, (BTreeMap<String, usize>, Option<String>)> = BTreeMap::new();
+    for op in ops {
+        let DataOp::Edit { item, change } = op else {
+            continue;
+        };
+        let Some(state) = items.get(item) else {
+            continue;
+        };
+        let (sizes, grew) = after.entry(*item).or_insert_with(|| {
+            let sizes = state
+                .item(*item)
+                .fields
+                .iter()
+                .map(|(name, field)| (name.clone(), item::files_size([field])))
+                .collect();
+            (sizes, None)
+        });
+        match change {
+            Change::Set { field, value } => {
+                if value.kind == crate::FieldType::File {
+                    *grew = Some(field.clone());
+                }
+                sizes.insert(field.clone(), item::files_size([value]));
+            }
+            Change::Remove { field } => {
+                sizes.remove(field);
+            }
+            _ => {}
+        }
+    }
+    for (sizes, grew) in after.values() {
+        if let Some(field) = grew
+            && sizes.values().sum::<usize>() > item::MAX_FILE
+        {
+            return Err(item::too_many_files(field));
+        }
+    }
+    Ok(())
+}
+
 /// Applies a data entry, in causal order, to the item states. Invalid ops
 /// are skipped.
 pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {

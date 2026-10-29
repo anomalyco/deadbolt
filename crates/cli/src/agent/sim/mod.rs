@@ -30,6 +30,9 @@ const PASS: &[u8] = b"simulation-only";
 const MAX: usize = 1 << 20;
 const DEVICES: usize = 4;
 const SECRET_MARKER: &str = "SIM-SECRET-";
+/// A file's contents start with the marker, so its value (base64) starts
+/// with this: the marker's first nine bytes, encoded.
+const FILE_MARKER: &str = "U0lNLVNFQ1JF";
 
 struct Device {
     dir: tempfile::TempDir,
@@ -245,6 +248,9 @@ impl Joiner for Device {
 enum Action {
     Add(usize, u64),
     Edit(usize, u64),
+    /// Sets a file field (its name and contents carrying the marker) on
+    /// the first item, or a new note.
+    Attach(usize, u64),
     Delete(usize),
     Pair(usize),
     Remove(usize),
@@ -578,6 +584,28 @@ impl World {
                     Ok(())
                 })?;
             }
+            Action::Attach(i, value) if self.can_write(i) => {
+                let name = format!("{SECRET_MARKER}{value:016x}.txt");
+                let contents = format!("{SECRET_MARKER}{value:016x}-never-on-disk");
+                let file = deadbolt_core::item::file_value(&name, contents.as_bytes());
+                self.devices[i].with(|s| {
+                    let fields = vec![crate::protocol::FieldInput {
+                        name: "receipt".into(),
+                        kind: Some("file".into()),
+                        value: file.to_string(),
+                    }];
+                    match s.vault(&self.vault).items().first() {
+                        Some(item) => {
+                            let id = [item.id.to_string()];
+                            super::items::set(s, None, &id, fields, None, &[])?;
+                        }
+                        None => {
+                            super::items::create(s, None, "note", Some("n".into()), fields)?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
             Action::Delete(i) if self.can_write(i) => {
                 self.devices[i].with(|s| {
                     if let Some(item) = s.vault(&self.vault).items().first() {
@@ -686,7 +714,8 @@ impl World {
                 }
                 let bytes = std::fs::read(file.path())?;
                 ensure!(
-                    memchr::memmem::find(&bytes, SECRET_MARKER.as_bytes()).is_none(),
+                    memchr::memmem::find(&bytes, SECRET_MARKER.as_bytes()).is_none()
+                        && memchr::memmem::find(&bytes, FILE_MARKER.as_bytes()).is_none(),
                     "plaintext on device {i} disk"
                 );
                 self.scanned.insert(file.path(), version);
@@ -771,6 +800,7 @@ fn actions(seed: u64) -> Vec<Action> {
             8 => Action::Partition(i, j),
             9 => Action::Heal,
             10 => Action::Sync(i, j, value, Some((value % 500) as usize)),
+            11 => Action::Attach(i, value),
             12 => Action::WriteFailure(i),
             13 => Action::RevokeDuringSync(i, value, (value % 400) as usize),
             14 => Action::Startup(i),
@@ -1047,4 +1077,28 @@ fn startup_learns_removal_before_sending_locally_written_data() {
         })
         .unwrap();
     world.converge().unwrap();
+}
+
+/// A file's name and contents carry the marker, and neither reaches the
+/// disk in the clear: the scan looks for the marker and its base64.
+#[test]
+fn files_never_reach_the_disk_in_the_clear() {
+    assert_eq!(
+        data_encoding::BASE64.encode(&SECRET_MARKER.as_bytes()[..9]),
+        FILE_MARKER
+    );
+    let mut world = World::new().unwrap();
+    world.step(&Action::Pair(1)).unwrap();
+    world.step(&Action::Attach(0, 3)).unwrap();
+    world.step(&Action::Attach(0, 4)).unwrap();
+    world.converge().unwrap();
+    let file = world.devices[1]
+        .with(|s| {
+            let item = s.vault(&world.vault).items()[0].clone();
+            Ok(item.fields["receipt"].value.clone())
+        })
+        .unwrap();
+    let (name, contents) = deadbolt_core::item::file_parts(&file);
+    assert!(name.starts_with(SECRET_MARKER), "{name}");
+    assert!(contents.unwrap().starts_with(FILE_MARKER));
 }

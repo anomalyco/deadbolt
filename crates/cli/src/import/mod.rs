@@ -238,13 +238,21 @@ const COLLECTION: Reason = ("collection", "collections");
 const FAVORITE: Reason = ("favorite", "favorites");
 const TAG: Reason = ("tag", "tags");
 const ATTACHMENT: Reason = ("attachment", "attachments");
-const BIG_ATTACHMENT: Reason = (
-    "attachment missing from the export or too large (over 10 MiB)",
-    "attachments missing from the export or too large (over 10 MiB)",
+const MISSING_ATTACHMENT: Reason = (
+    "attachment missing from the export",
+    "attachments missing from the export",
 );
-const NO_FILE: Reason = (
-    "document whose file is missing from the export or too large (over 10 MiB)",
-    "documents whose files are missing from the export or too large (over 10 MiB)",
+const BIG_ATTACHMENT: Reason = (
+    "attachment over the 10 MiB an item's files hold",
+    "attachments over the 10 MiB an item's files hold",
+);
+const MISSING_FILE: Reason = (
+    "document whose file is missing from the export",
+    "documents whose files are missing from the export",
+);
+const BIG_FILE: Reason = (
+    "document whose file is over 10 MiB",
+    "documents whose files are over 10 MiB",
 );
 const BAD_VALUE: Reason = (
     "value that doesn't fit its field kept as an extra field",

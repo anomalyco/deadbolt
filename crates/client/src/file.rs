@@ -4,9 +4,9 @@
 //! alone unless asked for its contents (`ItemGet` with `files`). Contents
 //! read or decoded here are wiped once dropped.
 
-use std::fs::{File, OpenOptions};
+use std::fs::File;
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
@@ -28,13 +28,15 @@ pub enum FileError {
     NoContents,
 }
 
-/// A file field's value for the file at `path`: its name and contents.
+/// A file field's value for the file at `path`: its name (with `\` and
+/// `:`, which other systems take as separators, as `_`) and contents.
 pub fn read(path: &Path) -> Result<Zeroizing<String>, FileError> {
     let error = |e| FileError::Read(path.into(), e);
     let name = path
         .file_name()
         .and_then(|n| n.to_str())
-        .ok_or_else(|| FileError::NotAFile(path.into()))?;
+        .ok_or_else(|| FileError::NotAFile(path.into()))?
+        .replace(['\\', ':'], "_");
     let file = File::open(path).map_err(error)?;
     let metadata = file.metadata().map_err(error)?;
     if !metadata.is_file() {
@@ -50,7 +52,7 @@ pub fn read(path: &Path) -> Result<Zeroizing<String>, FileError> {
     if contents.len() > MAX_FILE {
         return Err(FileError::TooLarge(path.into()));
     }
-    Ok(value(name, &contents))
+    Ok(value(&name, &contents))
 }
 
 /// A file field's value: `name`, a line break, `contents` in base64.
@@ -83,18 +85,26 @@ pub fn contents(value: &str) -> Result<Zeroizing<Vec<u8>>, FileError> {
         .map_err(|_| FileError::NoContents)
 }
 
-/// Writes a file field's contents to `path`, readable only by its owner.
+/// Writes a file field's contents to `path`, readable only by its owner:
+/// into a new file beside it, created 0600, then renamed over `path`. The
+/// rename replaces a symlink at `path` rather than following it, and an
+/// existing file's mode doesn't carry over.
 pub fn write(value: &str, path: &Path) -> Result<(), FileError> {
     let contents = contents(value)?;
     let error = |e| FileError::Write(path.into(), e);
-    let mut file = OpenOptions::new()
-        .write(true)
-        .create(true)
-        .truncate(true)
-        .mode(0o600)
-        .open(path)
+    let dir = match path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => Path::new("."),
+    };
+    let mut file = tempfile::Builder::new()
+        .prefix(".deadbolt-file")
+        .permissions(std::fs::Permissions::from_mode(0o600))
+        .tempfile_in(dir)
         .map_err(error)?;
-    file.write_all(&contents).map_err(error)
+    file.write_all(&contents).map_err(error)?;
+    file.as_file().sync_all().map_err(error)?;
+    file.persist(path).map_err(|e| error(e.error))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -113,7 +123,6 @@ mod tests {
         let out = dir.path().join("out.pdf");
         write(&value, &out).unwrap();
         assert_eq!(std::fs::read(&out).unwrap(), b"%PDF-1.7");
-        use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&out).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600);
         assert!(matches!(

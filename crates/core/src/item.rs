@@ -133,10 +133,14 @@ impl Field {
     }
 }
 
-/// The largest file a [`FieldType::File`] field holds. Its value is base64,
-/// 4/3 as long, and an item's create or change travels in one entry of at
-/// most [`crate::MAX_ENTRY_LEN`] (16 MiB), so a file fits with room to spare;
-/// larger files would need chunking, which the log doesn't do.
+/// The most an item's files hold, together: one file, or all of an item's.
+/// A value is base64, 4/3 as long, and an item's create or change travels
+/// in one entry of at most [`crate::MAX_ENTRY_LEN`] (16 MiB), so its files
+/// fit with room to spare; more would need chunking, which the log doesn't
+/// do. Capping the item and not only each file keeps a vault from becoming
+/// a blob store. Creates are held to it everywhere ([`check_create`]);
+/// changes when written ([`crate::Vault::write`]), since two devices'
+/// concurrent changes can't see each other.
 pub const MAX_FILE: usize = 10 * 1024 * 1024;
 
 /// The longest file name, in characters.
@@ -144,11 +148,15 @@ pub const MAX_FILE_NAME: usize = 255;
 
 /// A file field's value: `name`, a line break, then `contents` in standard
 /// base64 with padding.
-pub fn file_value(name: &str, contents: &[u8]) -> String {
-    let mut value = String::with_capacity(name.len() + 1 + contents.len().div_ceil(3) * 4);
+pub fn file_value(name: &str, contents: &[u8]) -> zeroize::Zeroizing<String> {
+    let mut value = zeroize::Zeroizing::new(String::with_capacity(
+        name.len() + 1 + contents.len().div_ceil(3) * 4,
+    ));
     value.push_str(name);
     value.push('\n');
-    value.push_str(&data_encoding::BASE64.encode(contents));
+    value.push_str(&zeroize::Zeroizing::new(
+        data_encoding::BASE64.encode(contents),
+    ));
     value
 }
 
@@ -162,32 +170,70 @@ pub fn file_parts(value: &str) -> (&str, Option<&str>) {
     }
 }
 
-/// A file field's contents, decoded; `None` if the value holds none or
-/// they aren't base64.
-pub fn file_contents(value: &str) -> Option<Vec<u8>> {
-    data_encoding::BASE64
-        .decode(file_parts(value).1?.as_bytes())
-        .ok()
-}
-
-/// How many bytes base64 `contents` decode to, if they are base64.
+/// How many bytes base64 `contents` decode to, if they are canonical
+/// base64 (standard alphabet, padded, unused bits zero), so one file has
+/// one encoding.
 pub fn file_size(contents: &str) -> Option<usize> {
     let b = contents.as_bytes();
     if !b.len().is_multiple_of(4) {
         return None;
     }
     let pad = b.iter().rev().take_while(|c| **c == b'=').count();
-    let alphabet = |c: &u8| c.is_ascii_alphanumeric() || matches!(c, b'+' | b'/');
-    (pad <= 2 && b[..b.len() - pad].iter().all(alphabet)).then(|| b.len() / 4 * 3 - pad)
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    if pad > 2 || !b[..b.len() - pad].iter().all(|c| value(*c).is_some()) {
+        return None;
+    }
+    // The last character before the padding carries 2 (one `=`) or 4 (two)
+    // bits that encode nothing: they must be zero.
+    if pad > 0 {
+        let last = value(b[b.len() - pad - 1])?;
+        let unused = if pad == 1 { 0b11 } else { 0b1111 };
+        if last & unused != 0 {
+            return None;
+        }
+    }
+    Some(b.len() / 4 * 3 - pad)
 }
 
-/// A file name: 1–255 characters on one line, no `/`, not `.` or `..`,
-/// without surrounding whitespace.
+/// The bytes `fields`' files hold together (values that aren't files, or
+/// hold no contents, count nothing).
+pub fn files_size<'a>(fields: impl IntoIterator<Item = &'a Field>) -> usize {
+    fields
+        .into_iter()
+        .filter(|f| f.kind == FieldType::File)
+        .filter_map(|f| file_parts(&f.value).1)
+        .filter_map(file_size)
+        .sum()
+}
+
+/// Why an item whose files hold more than [`MAX_FILE`] is refused.
+pub(crate) fn too_many_files(field: &str) -> ItemError {
+    invalid(
+        field,
+        format!(
+            "an item's files can be at most {} MiB together",
+            MAX_FILE >> 20
+        ),
+    )
+}
+
+/// A file name: 1–255 characters on one line, without `/`, `\` or `:`
+/// (path separators somewhere), not `.` or `..`, without surrounding
+/// whitespace.
 pub fn valid_file_name(name: &str) -> bool {
     !name.is_empty()
         && name.trim() == name
         && name.chars().count() <= MAX_FILE_NAME
-        && !name.chars().any(|c| c.is_control() || c == '/')
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
         && name != "."
         && name != ".."
 }
@@ -196,19 +242,39 @@ pub fn valid_file_name(name: &str) -> bool {
 fn file_values() {
     let value = file_value("scan.pdf", b"%PDF-1.7 hello");
     assert_eq!(file_parts(&value).0, "scan.pdf");
+    let contents = file_parts(&value).1.unwrap();
     assert_eq!(
-        file_contents(&value).as_deref(),
-        Some(&b"%PDF-1.7 hello"[..])
+        data_encoding::BASE64.decode(contents.as_bytes()).unwrap(),
+        b"%PDF-1.7 hello"
     );
-    assert_eq!(file_size(file_parts(&value).1.unwrap()), Some(14));
+    assert_eq!(file_size(contents), Some(14));
     for (contents, size) in [("", Some(0)), ("YQ==", Some(1)), ("YWI=", Some(2))] {
         assert_eq!(file_size(contents), size, "{contents}");
     }
-    for bad in ["YQ=", "Y===", "YQ==YQ==x", "Y-Q="] {
+    // Not base64, or not canonical: "YR==" and "YWJ=" decode as "a" and
+    // "ab" too, with stray bits set.
+    for bad in [
+        "YQ=",
+        "Y===",
+        "YQ==YQ==x",
+        "Y-Q=",
+        "YR==",
+        "YWJ=",
+        "YQ==YQ==",
+    ] {
         assert_eq!(file_size(bad), None, "{bad}");
     }
     assert_eq!(file_parts("scan.pdf"), ("scan.pdf", None));
-    for bad in ["", " a", "a/b", "..", "a\tb", &"x".repeat(256)] {
+    for bad in [
+        "",
+        " a",
+        "a/b",
+        "a\\b",
+        "C:x",
+        "..",
+        "a\tb",
+        &"x".repeat(256),
+    ] {
         assert!(!valid_file_name(bad), "{bad:?}");
     }
     let field = |v: &str| Field::new(FieldType::File, v);
@@ -229,6 +295,17 @@ fn file_values() {
     assert_eq!(
         error.to_string(),
         "invalid value for file: files can be at most 10 MiB"
+    );
+    // And an item's files together, at create.
+    let half = file_value("half.bin", &vec![0; MAX_FILE / 2 + 1]);
+    let fields: BTreeMap<String, Field> = [
+        ("file".to_string(), field(&half)),
+        ("copy".to_string(), field(&half)),
+    ]
+    .into();
+    assert_eq!(
+        check_create("document", None, &fields, None),
+        Err(too_many_files("file"))
     );
     // A file may be an extra field of any item.
     let login = schema("login").unwrap();
@@ -620,7 +697,7 @@ static SCHEMAS: [Schema; 18] = [
         fields: &[
             optional("organization", FieldType::Text),
             optional("member-name", FieldType::Text),
-            optional("member-id", FieldType::Text),
+            optional("member-id", FieldType::Secret),
             optional("pin", FieldType::Secret),
             optional("url", FieldType::Url),
             formatted("phone", Format::Phone),
@@ -1114,5 +1191,13 @@ pub fn check_create(
     }
     fields
         .iter()
-        .try_for_each(|(name, field)| check_field(schema, name, field))
+        .try_for_each(|(name, field)| check_field(schema, name, field))?;
+    if files_size(fields.values()) > MAX_FILE {
+        let last = fields
+            .iter()
+            .rfind(|(_, f)| f.kind == FieldType::File)
+            .map_or("file", |(name, _)| name.as_str());
+        return Err(too_many_files(last));
+    }
+    Ok(())
 }

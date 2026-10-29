@@ -20,9 +20,9 @@ use serde_json::Value;
 
 use super::{
     ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, BAD_VALUE,
-    BIG_ATTACHMENT, Builder, FAVORITE, Imported, LINKED_FIELD, MirrorVersion, NO_FILE, NO_NUMBER,
-    NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY, Summary, TAG, UNKNOWN_TYPE, address, array,
-    field_name, item_name, month, number, scalar, text,
+    BIG_ATTACHMENT, BIG_FILE, Builder, FAVORITE, Imported, LINKED_FIELD, MISSING_ATTACHMENT,
+    MISSING_FILE, MirrorVersion, NO_NUMBER, NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY, Summary, TAG,
+    UNKNOWN_TYPE, address, array, field_name, item_name, month, number, scalar, text,
 };
 use crate::items::with_scheme;
 use crate::protocol::{ExportFile, ImportSource, sign_in_provider};
@@ -37,16 +37,31 @@ impl<'a> Files<'a> {
 
     /// The file with `documentId` `id` (named `<id>__<fileName>` in the
     /// archive, or `<id>`), in base64.
-    fn get(&self, id: &str) -> Option<&'a str> {
-        self.0?
+    fn get(&self, id: &str) -> Result<&'a str, Missing> {
+        let file = self
+            .0
+            .ok_or(Missing::Gone)?
             .iter()
             .find(|f| {
                 f.name
                     .strip_prefix(id)
                     .is_some_and(|rest| rest.is_empty() || rest.starts_with("__"))
             })
-            .map(|f| f.data.as_str())
+            .ok_or(Missing::Gone)?;
+        if file.too_large {
+            return Err(Missing::TooLarge);
+        }
+        Ok(file.data.as_str())
     }
+}
+
+/// Why a file an item names isn't imported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Missing {
+    /// Not in the export (or, from the `op` CLI, not fetched).
+    Gone,
+    /// Over 10 MiB, alone or with the item's other files.
+    TooLarge,
 }
 
 /// A file a 1Password item names: an attachment or a document's file.
@@ -69,24 +84,30 @@ impl Attachment {
     /// The file field's value, if its contents came and `budget` (the
     /// bytes the item may still hold in files) has room; the budget shrinks
     /// by what it takes.
-    fn value(&self, files: Files, budget: &mut usize) -> Option<String> {
-        let data = files.get(self.id.as_deref()?)?;
-        let size = deadbolt_core::item::file_size(data)?;
+    fn value(&self, files: Files, budget: &mut usize) -> Result<String, Missing> {
+        let data = files.get(self.id.as_deref().ok_or(Missing::Gone)?)?;
+        let size = deadbolt_core::item::file_size(data).ok_or(Missing::Gone)?;
         if size > *budget {
-            return None;
+            return Err(Missing::TooLarge);
         }
         *budget -= size;
-        Some(format!("{}\n{data}", file_name(&self.file_name)))
+        Ok(format!("{}\n{data}", file_name(&self.file_name)))
     }
 }
 
-/// A file name another app gave, as a valid one: `/` and control
-/// characters become `_`, at most 255 characters.
+/// A file name another app gave, as a valid one: separators (`/`, `\`,
+/// `:`) and control characters become `_`, at most 255 characters.
 fn file_name(name: &str) -> String {
     let name: String = name
         .trim()
         .chars()
-        .map(|c| if c == '/' || c.is_control() { '_' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
         .take(deadbolt_core::item::MAX_FILE_NAME)
         .collect();
     let name = name.trim().to_string();
@@ -220,14 +241,20 @@ impl Entries {
     fn extras(self, b: &mut Builder, files: Files, summary: &mut Summary) {
         let mut budget = deadbolt_core::item::MAX_FILE.saturating_sub(b.file_bytes());
         for attachment in &self.attachments {
-            let Some(value) = attachment.value(files, &mut budget) else {
-                let reason = if files.0.is_some() {
-                    BIG_ATTACHMENT
-                } else {
-                    ATTACHMENT
-                };
-                summary.drop_some(reason, 1);
-                continue;
+            let value = match attachment.value(files, &mut budget) {
+                Ok(value) => value,
+                Err(_) if files.0.is_none() => {
+                    summary.drop_some(ATTACHMENT, 1);
+                    continue;
+                }
+                Err(Missing::Gone) => {
+                    summary.drop_some(MISSING_ATTACHMENT, 1);
+                    continue;
+                }
+                Err(Missing::TooLarge) => {
+                    summary.drop_some(BIG_ATTACHMENT, 1);
+                    continue;
+                }
             };
             let base = if attachment.title.trim().is_empty() {
                 let name = attachment.file_name.as_str();
@@ -601,10 +628,16 @@ fn document(item: &Value, files: Files, summary: &mut Summary) -> Option<Importe
     let mut budget = deadbolt_core::item::MAX_FILE;
     let file = details
         .get("documentAttributes")
-        .and_then(|a| Attachment::new(String::new(), a).value(files, &mut budget));
+        .map_or(Err(Missing::Gone), |a| {
+            Attachment::new(String::new(), a).value(files, &mut budget)
+        });
     let mut b = Builder::new("document");
-    if !b.known("file", file) || !b.has_required() {
-        summary.skip(NO_FILE);
+    let reason = match &file {
+        Err(Missing::TooLarge) => BIG_FILE,
+        _ => MISSING_FILE,
+    };
+    if !b.known("file", file.ok()) || !b.has_required() {
+        summary.skip(reason);
         return None;
     }
     b.known("notes", text(details, "notesPlain"));
@@ -1301,10 +1334,10 @@ pub(crate) mod tests {
                 "imported 12 from 1Password (logins 3, cards 1, secure notes 1, SSH keys 2, identities 1, API credentials 1, software licenses 1, bank accounts 1, passports 1)",
                 "skipped 1 SSH key without a private key",
                 "skipped 1 archived item",
-                "skipped 1 document whose file is missing from the export or too large (over 10 MiB)",
+                "skipped 1 document whose file is missing from the export",
                 "skipped 1 item of unknown type",
                 "warning: 1 invalid email address kept as text",
-                "dropped: 1 attachment missing from the export or too large (over 10 MiB), 2 favorites, 1 item's password history, 1 linked field, 3 tags",
+                "dropped: 1 attachment missing from the export, 2 favorites, 1 item's password history, 1 linked field, 3 tags",
             ]
         );
     }
@@ -1391,10 +1424,18 @@ pub(crate) mod tests {
             ExportFile {
                 name: "doc1__recovery codes.txt".into(),
                 data: "Y29kZXM=".into(),
+                too_large: false,
             },
             ExportFile {
                 name: "doc2__scan.pdf".into(),
                 data: "JVBERg==".into(),
+                too_large: false,
+            },
+            // Left out by the client as over the cap.
+            ExportFile {
+                name: "doc9__big.bin".into(),
+                data: String::new(),
+                too_large: true,
             },
         ];
         let (items, report) = crate::import::parse_with(CATEGORIES, &files).unwrap();
@@ -1493,7 +1534,7 @@ pub(crate) mod tests {
         assert_eq!(
             fields(by("Gym")),
             [
-                ("member-id", "text", "M-77"),
+                ("member-id", "secret", "M-77"),
                 ("member-since", "month", "2020-01"),
                 ("organization", "text", "Gym Co"),
                 ("phone", "text", "+15550100"),
@@ -1551,8 +1592,8 @@ pub(crate) mod tests {
         assert_eq!(
             lines(&report)[1..],
             [
-                "skipped 1 document whose file is missing from the export or too large (over 10 MiB)",
-                "dropped: 1 attachment missing from the export or too large (over 10 MiB)",
+                "skipped 1 document whose file is missing from the export",
+                "dropped: 1 attachment over the 10 MiB an item's files hold",
             ]
         );
     }
@@ -1569,13 +1610,14 @@ pub(crate) mod tests {
         let files = ["da__a.bin", "db__b.bin"].map(|name| ExportFile {
             name: name.into(),
             data: data.clone(),
+            too_large: false,
         });
         let (items, report) = crate::import::parse_with(export, &files).unwrap();
         let names: Vec<&str> = items[0].fields.keys().map(String::as_str).collect();
         assert_eq!(names, ["a"]);
         assert_eq!(
             lines(&report)[1..],
-            ["dropped: 1 attachment missing from the export or too large (over 10 MiB)"]
+            ["dropped: 1 attachment over the 10 MiB an item's files hold"]
         );
     }
 
