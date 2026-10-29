@@ -108,7 +108,11 @@ impl State for Loaded {
         Ok(())
     }
 
-    fn received(&mut self, _: &DeviceId) -> Result<()> {
+    fn received(&mut self, peer: &DeviceId) -> Result<()> {
+        self.seen
+            .insert(peer.to_string(), crate::unix_time() as u64);
+        self.store
+            .meta_set("extension/peer-seen", &serde_json::to_vec(&self.seen)?)?;
         Ok(())
     }
 }

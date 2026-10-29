@@ -248,7 +248,18 @@ pub(super) async fn finish(body: &mut Value) -> Result<Value> {
         published = true;
         let store =
             deadbolt_store::unlock_with_backend(backend(false).await?, passphrase.as_bytes())?;
-        crate::start(store, None).await
+        crate::start(store, None).await?;
+        // The vault came in the welcome, but the inviter hasn't heard from
+        // this device since: until its first sync it lists it as never seen.
+        // Give that sync a moment, so joined means the other device knows.
+        n0_future::time::timeout(Duration::from_secs(10), async {
+            while !crate::state().with(|s| Ok(s.ready)).unwrap_or(true) {
+                n0_future::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_default();
+        Ok(())
     }
     .await;
     match result {

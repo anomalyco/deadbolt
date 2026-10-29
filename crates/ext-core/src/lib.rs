@@ -16,7 +16,7 @@ use opfs::OpfsBackend;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
-    cell::RefCell,
+    cell::{Cell, RefCell},
     collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex},
     time::Duration,
@@ -123,6 +123,9 @@ struct Loaded {
     ready: bool,
     name: String,
     peer_names: BTreeMap<String, String>,
+    /// When each other member last completed a sync with this device (unix
+    /// seconds), as the CLI's address book keeps it: only direct contact counts.
+    seen: BTreeMap<String, u64>,
 }
 
 impl Loaded {
@@ -144,6 +147,10 @@ impl Loaded {
             .meta_get("extension/peer-names")?
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
             .unwrap_or_default();
+        let seen = store
+            .meta_get("extension/peer-seen")?
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
         let secret = DeviceSecret::from_bytes(store.device_secret());
         let ready = vault.members().all(|peer| peer == secret.device_id());
         Ok(Self {
@@ -155,6 +162,7 @@ impl Loaded {
             ready,
             name,
             peer_names,
+            seen,
         })
     }
 
@@ -201,6 +209,8 @@ thread_local! {
     static STATE: Handler = Handler(Arc::new(Mutex::new(None)));
     static NODE: RefCell<Option<Node>> = const { RefCell::new(None) };
     static SYNC: RefCell<Option<SyncTask>> = const { RefCell::new(None) };
+    /// Sync rounds finished since the worker started, for a sync that waits for one.
+    static ROUNDS: Cell<u64> = const { Cell::new(0) };
 }
 
 struct SyncTask {
@@ -231,6 +241,7 @@ fn start_sync() {
             if sync_round().await.is_err() {
                 sync_failed();
             }
+            ROUNDS.with(|r| r.set(r.get() + 1));
         }
     });
     SYNC.with(|slot| *slot.borrow_mut() = Some(SyncTask { wake, task }));
@@ -537,6 +548,150 @@ fn save_login(body: &Value) -> Result<Value> {
     Ok(reply)
 }
 
+fn login(s: &Loaded, body: &Value) -> Result<Item> {
+    let id = item_ref(&s.vault, text(body, "ref")?)?;
+    s.vault
+        .item(&id)
+        .filter(|i| !i.deleted && i.kind == "login")
+        .ok_or(Error::Protocol("That login isn't in the vault any more"))
+}
+
+/// One login for the vault page's detail view: everything but its password,
+/// and its current one-time code with when that code ends.
+fn login_detail(body: &Value) -> Result<Value> {
+    state().with(|s| {
+        let item = login(s, body)?;
+        let mut reply = account(&item, &s.vault);
+        reply["type"] = json!("device-item");
+        reply["url"] = json!(field(&item, "url"));
+        if let Some(totp) = otp(&item).and_then(|f| Totp::parse(&f.value).ok()) {
+            let now = unix_time() as u64;
+            reply["totp"] = json!({"code": totp.code(now), "period": totp.period(), "until": totp.valid_until(now)});
+        }
+        Ok(reply)
+    })
+}
+
+/// A login's password, for the vault page's reveal and copy. With a
+/// `passphrase` (the Strict lock preset asks for it every time), only if it
+/// unlocks this store; the KDF runs without holding the vault.
+fn login_secret(body: &mut Value) -> Result<Value> {
+    let passphrase = body.get_mut("passphrase").map(Value::take);
+    if let Some(passphrase) = passphrase {
+        let Value::String(passphrase) = passphrase else {
+            return Err(Error::Protocol("A required field is missing"));
+        };
+        let passphrase = Zeroizing::new(passphrase);
+        let check = state().with(|s| Ok(s.store.passphrase_check()?))?;
+        if !check.matches(passphrase.as_bytes()) {
+            return Err(Error::Protocol("That passphrase isn't right"));
+        }
+    }
+    state().with(|s| {
+        let item = login(s, body)?;
+        Ok(json!({"type": "device-secret", "password": field(&item, "password")}))
+    })
+}
+
+/// Adds a login by hand, or edits one, from the vault page: unlike a page's
+/// save it isn't tied to the page's origin. An edit with no password keeps
+/// the one it has.
+fn edit_login(body: &Value) -> Result<Value> {
+    let input = body.get("entry").ok_or(Error::Protocol("Missing login"))?;
+    let url = origin(text(input, "url")?)?;
+    let title = text(input, "title")?.trim();
+    let password = text(input, "password")?;
+    let reply = state().with(|s| {
+        let mut fields = vec![
+            (
+                "username".to_owned(),
+                Field::new(FieldType::Text, text(input, "username")?),
+            ),
+            ("url".to_owned(), Field::new(FieldType::Url, &url)),
+        ];
+        if !password.is_empty() {
+            fields.push(("password".into(), Field::new(FieldType::Secret, password)));
+        }
+        let mut staged = s.vault.clone();
+        let (id, created) = if body.get("ref").is_some() {
+            let id = login(s, body)?.id;
+            let mut ops = vec![DataOp::name(id, Some(title.into()))];
+            ops.extend(
+                fields
+                    .into_iter()
+                    .map(|(name, value)| DataOp::set(id, name, value)),
+            );
+            staged.write(&s.secret, ops)?;
+            (id, false)
+        } else {
+            if password.is_empty() {
+                return Err(Error::Protocol("A new login needs a password"));
+            }
+            let (id, _) = staged.create_item(&s.secret, "login", Some(title.into()), fields)?;
+            (id, true)
+        };
+        s.commit(staged)?;
+        Ok(json!({"type": "device-save", "ref": reference(&s.vault, id), "created": created}))
+    })?;
+    request_sync();
+    Ok(reply)
+}
+
+/// Removes another device from the vault, as `deadbolt devices remove` does.
+fn remove_device(body: &Value) -> Result<Value> {
+    let target = DeviceId::from_bytes(unhex(text(body, "id")?)?);
+    state().with(|s| {
+        s.require_ready()?;
+        if target == s.secret.device_id() {
+            return Err(Error::Protocol(
+                "This browser can't remove itself; remove it from another device",
+            ));
+        }
+        if !s.vault.is_member(&target) {
+            return Err(Error::Protocol("That device isn't in the vault"));
+        }
+        let mut staged = s.vault.clone();
+        staged.remove(&s.secret, target)?;
+        s.commit(staged)
+    })?;
+    enforce_membership();
+    request_sync();
+    Ok(json!({"type": "device-remove", "ok": true}))
+}
+
+fn rename_vault(body: &Value) -> Result<Value> {
+    let name = text(body, "name")?.trim();
+    state().with(|s| {
+        s.require_ready()?;
+        if name == s.vault.name() {
+            return Ok(());
+        }
+        let mut staged = s.vault.clone();
+        staged.rename(&s.secret, name)?;
+        s.commit(staged)
+    })?;
+    request_sync();
+    Ok(json!({"type": "device-rename", "ok": true}))
+}
+
+/// Asks for a sync round now; with `wait`, answers once one has finished
+/// (or after 30 seconds), so "Sync now" can say when it's done.
+async fn sync_now(body: &Value) -> Result<Value> {
+    node()?;
+    let before = ROUNDS.with(Cell::get);
+    request_sync();
+    if body.get("wait").and_then(Value::as_bool) == Some(true) {
+        timeout(Duration::from_secs(30), async {
+            while ROUNDS.with(Cell::get) == before {
+                sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_default();
+    }
+    Ok(json!({"type": "device-sync", "ok": true}))
+}
+
 fn all_logins() -> Result<Value> {
     state().with(|s| Ok(json!({"type": "device-logins", "accounts": s.vault.items().iter()
         .filter(|i| !i.deleted && i.kind == "login").map(|i| account(i, &s.vault)).collect::<Vec<_>>()})))
@@ -545,12 +700,13 @@ fn all_logins() -> Result<Value> {
 fn devices() -> Result<Value> {
     state().with(|s| {
         Ok(
-            json!({"type": "device-devices", "devices": s.vault.members().map(|id| {
+            json!({"type": "device-devices", "vault": s.vault.name(), "now": unix_time() as u64,
+        "devices": s.vault.members().map(|id| {
         let current = id == s.secret.device_id();
         let name = if current { s.name.clone() } else {
             s.peer_names.get(&id.to_string()).cloned().unwrap_or_else(|| id.to_string())
         };
-        json!({"id": id.to_string(), "name": name, "current": current})
+        json!({"id": id.to_string(), "name": name, "current": current, "lastSeen": s.seen.get(&id.to_string())})
     }).collect::<Vec<_>>()}),
         )
     })
@@ -630,12 +786,13 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "device-join-start" => join::start(&body).await,
         "device-join-status" => Ok(join::status()),
         "device-join-finish" => join::finish(&mut body).await,
-        "device-sync" => {
-            node()?;
-            request_sync();
-            Ok(json!({"type": "device-sync", "ok": true}))
-        }
+        "device-sync" => sync_now(&body).await,
         "device-logins" => all_logins(),
+        "device-item" => login_detail(&body),
+        "device-secret" => login_secret(&mut body),
+        "device-save" => edit_login(&body),
+        "device-remove" => remove_device(&body),
+        "device-rename" => rename_vault(&body),
         "device-devices" => devices(),
         "device-pair" => {
             wait_ready().await?;
