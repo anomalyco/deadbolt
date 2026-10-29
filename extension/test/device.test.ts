@@ -37,8 +37,8 @@ async function answer(c: Command): Promise<DeviceReply> {
       phase = { phase: "idle" }
       status = { state: "ready", version: "test" }
       return ok({ type: "device-join-finish", ok: true })
-    case "device-logins":
-      return ok({ type: "device-logins", accounts: [] })
+    case "device-items":
+      return ok({ type: "device-items", items: [] })
     case "device-devices":
       return ok({ type: "device-devices", devices: [{ id: "d".repeat(64), name: "Chrome on macOS", current: true }] })
   }
@@ -182,7 +182,7 @@ describe("first run", () => {
     expect(commands().find((c) => c.type === "device-join-finish")).toEqual({ type: "device-join-finish", passphrase: "browser pass" })
     // The vault: its (empty) logins, and the footer saying no other device shares it yet.
     expect(app().querySelector('input[type="search"]')).not.toBeNull()
-    expect(app().textContent).toContain("No logins yet")
+    expect(app().textContent).toContain("Nothing saved yet")
     expect(app().querySelector(".bottom")!.textContent).toContain("Only on this browser")
   })
 
