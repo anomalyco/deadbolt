@@ -5,7 +5,7 @@
 // content script after the user submitted a login form.
 
 import type { LearnSession, LearnStep } from "./learn"
-import type { Account, FieldRules, HostStatus } from "./protocol"
+import type { Account, FieldRules, FormCard, FormIdentity, FormItemKind, HostStatus } from "./protocol"
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
@@ -20,6 +20,67 @@ export const GENERATE_KINDS: SurfaceKind[] = ["signup", "change-password"]
 export const IDENTIFIER_ROLES: FieldRole[] = ["username", "email", "phone"]
 /** Roles a fill can write. */
 export const FIELD_ROLES: FieldRole[] = ["username", "email", "phone", "password", "new-password", "otp"]
+
+/**
+ * What an identity or payment field takes, named by its HTML autocomplete
+ * token (see content/forms.ts). `country` covers country and country-name.
+ */
+export const IDENTITY_ROLES = [
+  "name", "honorific-prefix", "given-name", "additional-name", "family-name", "email", "tel", "tel-national", "tel-country-code",
+  "organization", "organization-title", "street-address", "address-line1", "address-line2", "address-line3", "address-level1",
+  "address-level2", "postal-code", "country", "bday", "bday-day", "bday-month", "bday-year",
+] as const
+export const CARD_ROLES = ["cc-name", "cc-given-name", "cc-family-name", "cc-number", "cc-exp", "cc-exp-month", "cc-exp-year", "cc-csc", "cc-type"] as const
+export type IdentityRole = (typeof IDENTITY_ROLES)[number]
+export type CardRole = (typeof CARD_ROLES)[number]
+export type FormRole = IdentityRole | CardRole
+export const FORM_ROLES: FormRole[] = [...IDENTITY_ROLES, ...CARD_ROLES]
+export const formKindOf = (role: FormRole): FormItemKind => ((CARD_ROLES as readonly string[]).includes(role) ? "card" : "identity")
+
+/** The host fields each role needs. */
+export const FIELDS_FOR: Record<FormRole, string[]> = {
+  name: ["given-name", "additional-name", "family-name"],
+  "honorific-prefix": ["honorific"],
+  "given-name": ["given-name"],
+  "additional-name": ["additional-name"],
+  "family-name": ["family-name"],
+  email: ["email"],
+  tel: ["phone", "country"],
+  "tel-national": ["phone", "country"],
+  "tel-country-code": ["phone", "country"],
+  organization: ["organization"],
+  "organization-title": ["job-title"],
+  "street-address": ["address-line1", "address-line2", "address-line3"],
+  "address-line1": ["address-line1"],
+  "address-line2": ["address-line2"],
+  "address-line3": ["address-line3"],
+  "address-level1": ["region", "country"],
+  "address-level2": ["city"],
+  "postal-code": ["postal-code"],
+  country: ["country"],
+  bday: ["birthday"],
+  "bday-day": ["birthday"],
+  "bday-month": ["birthday"],
+  "bday-year": ["birthday"],
+  "cc-name": ["cardholder"],
+  "cc-given-name": ["cardholder"],
+  "cc-family-name": ["cardholder"],
+  "cc-number": ["number"],
+  "cc-exp": ["expiry"],
+  "cc-exp-month": ["expiry"],
+  "cc-exp-year": ["expiry"],
+  "cc-csc": ["cvv"],
+  "cc-type": ["brand"],
+}
+
+/** Every host field the roles need, once each. */
+export const fieldsFor = (roles: FormRole[]) => [...new Set(roles.flatMap((r) => FIELDS_FOR[r]))]
+
+/** Host fields that make the agent ask for Touch ID. */
+export const VERIFIED_FIELDS = ["number", "cvv"]
+
+/** An identity's or card's values, by the host's field names (see FIELDS_FOR). */
+export type FormValues = Record<string, string>
 
 export interface FillValues {
   username?: string
@@ -62,6 +123,15 @@ export type ToBackground =
   /** The user themselves submitted a login form here: a trusted click on its submit control, or Enter in one of its fields. */
   | { type: "db:submitted" }
   | { type: "db:menu-close"; token: string; dismissed?: boolean }
+  /**
+   * The user clicked into an identity or card field (see content/forms.ts):
+   * the menu for it. `section` names the field's section in form snapshot
+   * `form`. From a frame, `box` is where the field shows in the frame's
+   * viewport, so the menu can open in the top page under it.
+   */
+  | { type: "db:forms-query"; kind: FormItemKind; form: number; section: string; explicit?: boolean; box?: Box }
+  /** The identity and card sections this frame's forms have now, for card fills that span frames. */
+  | { type: "db:forms-page"; kinds: FormItemKind[]; form: number }
   /** A frame that just loaded asks whether its tab is learning (see src/learn.ts): a LearnSession or null. */
   | { type: "db:learn-ask" }
   /** A step of the learning session `session`, from this frame. */
@@ -131,6 +201,16 @@ export type ToContent =
   | { type: "db:report" }
   | { type: "db:close-menu"; token: string }
   | { type: "db:resize-menu"; token: string; height: number; width?: number; mode?: SurfaceMode }
+  /** Open the forms menu under `box` (in this page's viewport), for a field in a frame below. Top page only. */
+  | { type: "db:forms-open"; token: string; rows: number; box: Box }
+  /** Which of the form's identity or card fields may be filled now: those of `section`, or every one of `kind` (see Approved). */
+  | { type: "db:forms-approve"; form: number; kind: FormItemKind; section?: string; measure: boolean }
+  /** Where the fields of a forms approval show now, if every one of them still does. */
+  | { type: "db:forms-approved"; approval: string }
+  /** An identity's or card's values for the fields `approval` named, in form snapshot `form`. */
+  | { type: "db:forms-fill"; values: FormValues; form: number; approval: string }
+  /** Resolves once the surface `token` has folded into its pill, so it covers no field a frame's check reads. */
+  | { type: "db:forms-settle"; token: string }
   /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
   | { type: "db:surface"; token: string }
   // Can the user see a frame's form? (see shownInPage)
@@ -189,6 +269,18 @@ export interface Approved {
   boxes?: Box[]
 }
 
+/** A content script's answer to db:forms-approve: which identity or card fields may be filled. */
+export interface FormsApproved {
+  approval: string
+  roles: FormRole[]
+  boxes?: Box[]
+}
+
+/** A content script's answer to db:forms-fill: the fields it actually wrote. */
+export interface FormsAck {
+  filled: FormRole[]
+}
+
 /** A content script's answer to db:fill: the fields it actually wrote. */
 export interface FillAck {
   filled: FieldRole[]
@@ -213,6 +305,12 @@ export type MenuLoadReply =
   /** `continueAs`: the site signs in identifier first and has one login: say "Continue as …". */
   | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean }
   | { kind: "generate"; site: string }
+  /**
+   * An identity or card field's menu: the identities or cards to pick from.
+   * `into`: a card goes into a payment provider's frame too ("Stripe").
+   * `verify`: Deadbolt may ask for Touch ID before a card's number goes out.
+   */
+  | { kind: "forms"; form: FormItemKind; site: string; identities: FormIdentity[]; cards: FormCard[]; into?: string; verify: boolean }
   /** A pill on a field a sign-in session's step just filled ("Password filled"). */
   | { kind: "notice"; label: string; title: string }
   | { kind: "status"; status: Status }

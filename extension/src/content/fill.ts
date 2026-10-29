@@ -8,7 +8,7 @@
 // value differ from what it last rendered and runs its change handler.
 
 import { IDENTIFIER_ROLES, type Box, type FieldRole, type FillValues } from "../messages"
-import { inPlace, type Field } from "./detect"
+import { inPlace, type Field, type FormControl } from "./detect"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -154,7 +154,7 @@ export function visibleBox(el: Element): Box | null {
  * What the user would hit in the middle of the visible part is the field.
  * `ours`, Deadbolt's own menu, doesn't count as covering it.
  */
-function onTop(el: HTMLInputElement, box: Box, ours?: Element | null): boolean {
+function onTop(el: FormControl, box: Box, ours?: Element | null): boolean {
   const root = el.getRootNode() as Document | ShadowRoot
   const x = (box.left + box.right) / 2
   const y = (box.top + box.bottom) / 2
@@ -171,8 +171,8 @@ function onTop(el: HTMLInputElement, box: Box, ours?: Element | null): boolean {
  * field: `ours` names it, so it isn't taken for a cover. It's gone by the
  * time anything is written.
  */
-export function fillable(el: HTMLInputElement, ours?: Element | null): boolean {
-  if (!el.isConnected || el.disabled || el.readOnly) return false
+export function fillable(el: FormControl, ours?: Element | null): boolean {
+  if (!el.isConnected || el.disabled || ("readOnly" in el && el.readOnly)) return false
   const r = el.getBoundingClientRect()
   if (r.width < MIN_SIDE || r.height < MIN_SIDE || hiddenByStyle(el)) return false
   el.scrollIntoView?.({ block: "nearest", inline: "nearest" })
@@ -239,7 +239,7 @@ export function setInputValue(el: HTMLInputElement, value: string, guard: (el: H
  * as many boxes as digits, all in the same form and all fillable, and none
  * moved before each digit goes in.
  */
-export async function fillFields(fields: Field[], values: FillValues, check = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement }> {
+export async function fillFields(fields: Field[], values: FillValues, check: (el: HTMLInputElement) => boolean = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement }> {
   const filled: FieldRole[] = []
   let last: HTMLInputElement | undefined
   const write = (f: Field, value: string, group: Field[] = [f]) => {

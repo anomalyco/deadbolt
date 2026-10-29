@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test"
+import { paymentProvider, securePage } from "../src/payments"
 import { fillableOrigin, saveTitle, saveUrl, sameSite, senderOrigin, siteOf } from "../src/bg/site"
 
 const u = (s: string) => new URL(s)
@@ -127,5 +128,24 @@ describe("saveUrl", () => {
 
   test("just the origin when the path is too long", () => {
     expect(saveUrl(u(`https://acme.com/${"a".repeat(3000)}`))).toBe("https://acme.com")
+  })
+})
+
+describe("payment provider frames", () => {
+  const provider = (url: string) => paymentProvider(new URL(url))?.name ?? null
+  test("only the listed hosts, over https on the default port", () => {
+    expect(provider("https://js.stripe.com/v3/elements-inner-card.html")).toBe("Stripe")
+    expect(provider("https://checkoutshopper-live-us.adyen.com/checkoutshopper/securedfields/")).toBe("Adyen")
+    expect(provider("https://checkout.pci.shopifyinc.com/build/card-fields")).toBe("Shopify")
+    expect(provider("http://js.stripe.com/")).toBeNull()
+    expect(provider("https://js.stripe.com:8443/")).toBeNull()
+    expect(provider("https://evil-stripe.com/")).toBeNull()
+    expect(provider("https://stripe.com.evil.test/")).toBeNull()
+    // The e2e aliases exist only in e2e builds.
+    expect(provider("http://js.stripe.test:8080/")).toBeNull()
+  })
+  test("cards go into them only from an https page", () => {
+    expect(securePage(new URL("https://shop.example/checkout"))).toBe(true)
+    expect(securePage(new URL("http://localhost:3000/checkout"))).toBe(false)
   })
 })

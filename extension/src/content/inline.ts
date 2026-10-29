@@ -29,13 +29,15 @@
 // says what size its mode needs (db:menu-resize) and the host springs there,
 // so no transparent area is left over the page to swallow its clicks.
 
-import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type FillAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
+import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
-import { findAccountTile, findProviderButton, type Field } from "./detect"
+import { findAccountTile, findProviderButton, type Field, type FormControl } from "./detect"
+import { approvedForms, approveForms, fillForm, takeApproved, type FormsState } from "./formfill"
+import type { FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
 import { provider } from "../signin"
-import { fillable, fillFields, ownValue } from "./fill"
+import { fillable, fillFields, ownValue, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { learning } from "./learn"
 import { deepActiveElement } from "./shadow"
@@ -47,6 +49,9 @@ export interface PageState {
   kind(): SurfaceKind | null
   /** Scan again now, so `targets` and `form` are current. */
   rescan(): void
+  /** Identity and payment fields (see forms.ts), and which snapshot they are. */
+  formFields(): FormField[]
+  formsForm(): number
 }
 
 export const MENU_ROW = 44
@@ -80,7 +85,12 @@ const SAMPLES = [
 let state: PageState
 let host: HTMLElement | null = null
 let frame: HTMLIFrameElement | null = null
-let anchor: HTMLInputElement | null = null
+let anchor: FormControl | null = null
+/**
+ * For a field in a frame below: where it showed in this page when the menu
+ * opened, and the page's scroll then. The menu follows the page's scrolling.
+ */
+let anchorBox: { box: Box; x: number; y: number } | null = null
 let token: string | null = null
 /** Handed to the menu with its token; only this script can say "the user pressed ↓" over it. */
 let port: MessagePort | null = null
@@ -104,26 +114,33 @@ const SAVE_LOAD_MS = 3000
 const SAVE_CAP_MS = 60_000
 /** The largest a pill can be. */
 const PILL_MAX = { width: 260, height: 32 }
-let dismissedFor: HTMLInputElement | null = null
+let dismissedFor: Element | null = null
 /**
  * Fields whose typing narrowed the menu to nothing (or that the user typed a
  * password into by hand): the menu doesn't come back on focus until the field
  * is cleared, clicked again, or ↓.
  */
-const quiet = new WeakSet<HTMLInputElement>()
+const quiet = new WeakSet<Element>()
 /**
  * Forms the user is filling by hand: the identifier they typed matched no
  * saved login. Their other fields don't open the menu on focus or click
  * either, only on ↓ or a second click.
  */
 const byHand = new WeakSet<Node>()
-const formOf = (el: HTMLInputElement): Node => el.form ?? el.closest("form") ?? el.getRootNode()
+const formOf = (el: FormControl): Node => el.form ?? el.closest("form") ?? el.getRootNode()
 /** Whether the pointer is near the save offer, as last told to its frame (it pauses the offer's bar). */
 let near = false
 
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
 let lastRect = ""
+/** Where a frame's field is in this page now (see anchorBox). */
+function boxNow(): DOMRect | null {
+  if (!anchorBox) return null
+  const { box, x, y } = anchorBox
+  return new DOMRect(box.left - (scrollX - x), box.top - (scrollY - y), box.right - box.left, box.bottom - box.top)
+}
+
 /** The fields the last fill in this document wrote, and whether the user submitted since. */
 let lastFilled: HTMLInputElement[] = []
 let submittedSinceFill = false
@@ -246,9 +263,10 @@ interface Rect {
 function targetRect(): Rect | null {
   if (mode === "save") return corner(wanted.width || SAVE_GUESS.width, wanted.height || SAVE_GUESS.height)
   // The saved pill stays in the same corner.
+  // So does a pill for a frame's field: on the field, it would cover what the frame's checks read.
   if (mode === "pill" && !anchor) return corner(Math.min(wanted.width || 180, 320), 32)
-  if (!anchor) return null
-  const r = anchor.getBoundingClientRect()
+  const r = anchor ? anchor.getBoundingClientRect() : boxNow()
+  if (!r) return null
   if (mode === "pill") {
     // On the field, at its end: beside the text the user sees being filled, not over the next field.
     const height = 32
@@ -327,9 +345,10 @@ function frameStyle(radius: number) {
 }
 
 /** Opens the surface: under `el` with the account list, or with no field, the save offer. */
-function openMenu(el: HTMLInputElement | null, t: string, rows: number, as: SurfaceMode = "accounts") {
+function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMode = "accounts", at?: Box) {
   closeMenu()
   anchor = el
+  anchorBox = at ? { box: at, x: scrollX, y: scrollY } : null
   token = t
   mode = as
   closing = false
@@ -374,7 +393,7 @@ function openMenu(el: HTMLInputElement | null, t: string, rows: number, as: Surf
   // Grows from the field: scale .96 → 1 from the edge that faces it. Only
   // while it opens: the menu's visibility guard refuses picks while it's
   // scaled or see-through, so they wait until it's at rest.
-  const r = el!.getBoundingClientRect()
+  const r = el ? el.getBoundingClientRect() : boxNow()!
   const below = ((lastTarget as Rect | null)?.top ?? r.bottom) >= r.bottom
   frame.style.transformOrigin = below ? "top left" : "bottom left"
   frame.animate(
@@ -469,6 +488,7 @@ export function closeMenu(refocus = false, dismissed = false) {
   const field = anchor
   const el = host
   host = frame = anchor = null
+  anchorBox = null
   el?.remove()
   token = null
   mode = "accounts"
@@ -537,7 +557,8 @@ const emptyUntil = new WeakMap<Element, number>()
  */
 type Asked = "focus" | "click" | "again"
 
-async function maybeOpen(el: HTMLInputElement, how: Asked = "focus") {
+async function maybeOpen(el: FormControl, how: Asked = "focus") {
+  if (!(el instanceof HTMLInputElement) || !targetFor(el)) return maybeOpenForms(el, how)
   // While the tab learns its site, the user signs in by hand.
   if (!isTop || querying || dismissedFor === el || !recentGesture() || learning()) return
   // The save offer stays until it's answered or its time runs out.
@@ -573,9 +594,34 @@ async function maybeOpen(el: HTMLInputElement, how: Asked = "focus") {
   })().finally(() => (querying = null))
 }
 
+/**
+ * An identity or card field: the identities or cards to fill its section
+ * with, on the same gesture rules as a login field. In a frame, the
+ * background opens the menu in the top page, under where the field shows
+ * (see Forms.query); the frame only says where that is.
+ */
+async function maybeOpenForms(el: FormControl, how: Asked) {
+  if (querying || dismissedFor === el || !recentGesture() || learning()) return
+  if (host && mode === "save") return
+  const explicit = how !== "focus"
+  if (!explicit && (emptyUntil.get(el) ?? 0) > Date.now()) return
+  if (quiet.has(el) && how === "focus") return
+  const f = state.formFields().find((x) => x.el === el)
+  if (!f || (anchor === el && host)) return
+  querying = (async () => {
+    const box = isTop ? undefined : fillable(el) ? visibleBox(el) : null
+    if (box === null) return
+    const reply = await send<QueryReply>({ type: "db:forms-query", kind: f.kind, form: state.formsForm(), section: f.section, explicit, ...(box ? { box } : {}) })
+    if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
+    else if (isTop && reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
+  })().finally(() => (querying = null))
+}
+
+const isControl = (el: unknown): el is FormControl => el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
+
 function onFocusIn(event: FocusEvent) {
   const el = event.composedPath()[0]
-  if (!(el instanceof HTMLInputElement)) return
+  if (!isControl(el)) return
   const clicked = recentGesture() && (lastPointer === el || (lastPointer instanceof HTMLLabelElement && lastPointer.control === el))
   void maybeOpen(el, clicked ? "click" : "focus")
 }
@@ -632,7 +678,7 @@ function onPointerDown(event: PointerEvent) {
   const target = event.composedPath()[0]
   lastPointer = target ?? null
   // Clicking a field that already has focus (e.g. autofocus) opens the menu too.
-  if (target instanceof HTMLInputElement && target === deepActiveElement() && !host) {
+  if (isControl(target) && target === deepActiveElement() && !host) {
     if (dismissedFor === target) dismissedFor = null
     void maybeOpen(target, "again")
   }
@@ -657,7 +703,7 @@ function onKeyDown(event: KeyboardEvent) {
   const target = event.composedPath()[0]
   if (!host) {
     // ↓ in a field that has no menu (dismissed, or focused from script) asks for one.
-    if (event.key === "ArrowDown" && target instanceof HTMLInputElement && targetFor(target)) {
+    if (event.key === "ArrowDown" && target instanceof HTMLInputElement && (targetFor(target) || state.formFields().some((f) => f.el === target))) {
       dismissedFor = null
       emptyUntil.delete(target)
       quiet.delete(target)
@@ -718,6 +764,24 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
   // On the last field written: for a code in one box per digit, beside the last box.
   const on = [...lastFilled].reverse().find((el) => el.isConnected)
   if (filled.length && typeof message.notice === "string" && isTop && on && !host) openMenu(on, message.notice, 0, "pill")
+  return { filled }
+}
+
+const formsState = (): FormsState => ({ fields: () => state.formFields(), form: () => state.formsForm(), rescan: () => state.rescan() })
+
+/**
+ * Writes an identity or card into the fields db:forms-approve fixed for
+ * this fill, in the snapshot it was chosen for, as applyFill does for a login.
+ */
+async function applyFormsFill(message: Extract<ToContent, { type: "db:forms-fill" }>): Promise<FormsAck> {
+  if (mode !== "pill") closeMenu()
+  lastGestureAt = 0
+  const values = message.values && typeof message.values === "object" ? message.values : {}
+  const targets = takeApproved(formsState(), String(message.approval), message.form)
+  if (!targets?.length) return { filled: [] }
+  if (mode === "pill") await pillSettled(700)
+  if (state.formsForm() !== message.form) return { filled: [] }
+  const { filled } = await fillForm(targets, values, (el) => fillable(el, ownPill()))
   return { filled }
 }
 
@@ -863,6 +927,21 @@ export function initMenu(page: PageState) {
       case "db:fill":
         applyFill(message).then(respond, () => respond({ filled: [] }))
         return true
+      case "db:forms-fill":
+        applyFormsFill(message).then(respond, () => respond({ filled: [] }))
+        return true
+      case "db:forms-approve":
+        approveForms(formsState(), message.form, message.kind === "card" ? "card" : "identity", typeof message.section === "string" ? message.section : undefined, message.measure === true, menuHost()).then(respond, () => respond(null))
+        return true
+      case "db:forms-approved":
+        approvedForms(formsState(), String(message.approval)).then((boxes) => respond(boxes ? { boxes } : null), () => respond(null))
+        return true
+      case "db:forms-open":
+        return void respond(openForFrame(String(message.token), Number(message.rows), message.box))
+      case "db:forms-settle":
+        if (message.token !== token) return void respond(true)
+        pillSettled(900).then(() => respond(true))
+        return true
       case "db:generated":
         keptGenerated(String(message.generated))
         return void respond(true)
@@ -920,6 +999,14 @@ function pointAtTile(account: string) {
   }
   look()
   tileTimer = setInterval(look, 300)
+}
+
+/** The forms menu for a field in a frame below, at `box` in this page (see Forms.query). Top page only. */
+function openForFrame(t: string, rows: number, box: Box): boolean {
+  if (!isTop || document.hidden || (host && mode === "save") || !Number.isFinite(rows) || rows < 1) return false
+  if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
+  openMenu(null, t, rows, "accounts", box)
+  return true
 }
 
 /** Called after each page scan: offer the menu on an already-focused field. */

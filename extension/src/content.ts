@@ -6,6 +6,7 @@
 
 import { isVisible, scanPage, type Field } from "./content/detect"
 import { initFrameChecks } from "./content/embed"
+import { scanForms, type FormField } from "./content/forms"
 import { ownValue, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
@@ -29,6 +30,10 @@ let kind: SurfaceKind | null = null
 let provider = false
 /** Bumped whenever the set of fields changes, so a fill can't land on a different form. */
 let formId = 0
+/** Live identity and payment fields (see content/forms.ts), and their snapshot, as for logins. */
+let formFields: FormField[] = []
+let formsId = 0
+let formsReported = ""
 let lastSignature = ""
 /** Whether the background was last told of a form here, so it hears when it goes. */
 let reported = false
@@ -57,6 +62,20 @@ function refresh() {
   if (!sameFields(fields, next)) formId++
   fields = next
   submitControl = kind ? result.submit : undefined
+  // A field a login form claims (its email box) is the login's.
+  const forms = scanForms().filter((f) => !fields.some((l) => l.el === f.el))
+  const same = forms.length === formFields.length && forms.every((f, i) => f.el === formFields[i].el && f.role === formFields[i].role && f.section === formFields[i].section && f.form === formFields[i].form && f.parent === formFields[i].parent)
+  if (!same) formsId++
+  formFields = forms
+}
+
+/** Tells the background which kinds of form this frame has, when that changes (card fills span frames). */
+function reportForms() {
+  const kinds = [...new Set(formFields.map((f) => f.kind))].sort()
+  const signature = JSON.stringify([location.href, kinds, formsId])
+  if (signature === formsReported || (!kinds.length && !formsReported)) return
+  formsReported = kinds.length ? signature : ""
+  void send({ type: "db:forms-page", kinds, form: formsId })
 }
 
 function scan() {
@@ -67,6 +86,7 @@ function scan() {
   }
   refresh()
   void report(false)
+  reportForms()
   learnScanned()
 
   // Autofocused login fields get the menu once the form is recognised.
@@ -178,6 +198,7 @@ function start() {
   window.addEventListener("pageshow", (event) => {
     if (!event.persisted) return
     lastSignature = ""
+    formsReported = ""
     scheduleScan()
   })
 }
@@ -317,7 +338,7 @@ function onKeydown(event: KeyboardEvent) {
 
 // First, while it's still document_start: the hook is waiting for its port.
 initPasskeyChannel(send)
-const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh }
+const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh, formFields: () => formFields, formsForm: () => formsId }
 initMenu(state)
 initFrameChecks(state)
 initLearn()

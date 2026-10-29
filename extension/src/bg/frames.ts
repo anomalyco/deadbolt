@@ -104,7 +104,7 @@ export async function menuFrameOf(sender: chrome.runtime.MessageSender, owner: F
 /** Frames nested deeper than this are never verified. */
 const MAX_DEPTH = 8
 
-const isBoxes = (boxes: unknown): boxes is Box[] =>
+export const isBoxes = (boxes: unknown): boxes is Box[] =>
   Array.isArray(boxes) && boxes.length > 0 && boxes.every((b: Box) => b && [b.left, b.top, b.right, b.bottom].every(Number.isFinite))
 
 /**
@@ -112,18 +112,18 @@ const isBoxes = (boxes: unknown): boxes is Box[] =>
  * see every one of them through every frame above it, now. The frame's
  * content script fixes the fields that pass the checks a field gets before a
  * fill and says where they show in its own viewport (with a fresh
- * Intersection Observer v2 reading); see throughParents for the rest. The
+ * Intersection Observer v2 reading); see boxesInTop for the rest. The
  * fill then asks for and writes only those fields.
  */
 export async function shownInPage(target: FrameTarget, form: number): Promise<Approved | null> {
   const approved = cleanApproved(await sendToFrame(target, { type: "db:approve", form, measure: true }))
-  return approved?.boxes && (await throughParents(target, approved.boxes)) ? approved : null
+  return approved?.boxes && (await boxesInTop(target, approved.boxes)) ? approved : null
 }
 
 /** Whether the fields `approved` fixed still all show, through every frame above. */
 export async function stillShown(target: FrameTarget, approved: Approved): Promise<boolean> {
   const boxes = (await sendToFrame<FrameBoxes>(target, { type: "db:approved", approval: approved.approval }))?.boxes
-  return isBoxes(boxes) && throughParents(target, boxes)
+  return isBoxes(boxes) && !!(await boxesInTop(target, boxes))
 }
 
 /**
@@ -139,28 +139,28 @@ export function cleanApproved(reply: unknown): Approved | null {
 }
 
 /**
- * Whether `boxes`, where fields show in frame `target`'s viewport, show in
- * the top page. One frame up at a time, the parent's content script finds the
+ * Where `boxes`, where fields show in frame `target`'s viewport, show in
+ * the top page, if they do. One frame up at a time, the parent's content script finds the
  * element that embeds the frame below (that frame names it by posting a
  * one-time nonce to its parent), gives it the checks a field gets and passes
  * the boxes up in its own coordinates. A frame that can't answer, such as an
  * ancestor without the content script, means no.
  */
-async function throughParents(target: FrameTarget, first: Box[]): Promise<boolean> {
+export async function boxesInTop(target: FrameTarget, first: Box[]): Promise<Box[] | null> {
   const chain = await frameChain(target)
-  if (!chain) return false
+  if (!chain) return null
   let boxes: Box[] | undefined = first
   let child = target
   for (const parent of chain.slice(1)) {
-    if (!isBoxes(boxes)) return false
+    if (!isBoxes(boxes)) return null
     const nonce = newToken()
     // Ask the parent first, so it's listening when the child speaks up.
     const answer: Promise<FrameBoxes | null> = sendToFrame<FrameBoxes>(parent, { type: "db:frame-child", nonce, boxes })
-    if (!(await sendToFrame(child, { type: "db:frame-announce", nonce }))) return false
+    if (!(await sendToFrame(child, { type: "db:frame-announce", nonce }))) return null
     boxes = (await answer)?.boxes
     child = parent
   }
-  return isBoxes(boxes)
+  return isBoxes(boxes) ? boxes : null
 }
 
 /**

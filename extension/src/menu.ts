@@ -12,12 +12,12 @@
 
 import type { ChooseReply, FieldRole, MenuLoadReply, MenuPasskey, OfferChoice, PickReply, SignInReply, Status, StatusChanged, SurfaceMode, ToBackground } from "./messages"
 import { provider as providerOf } from "./signin"
-import type { Account } from "./protocol"
+import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
 
 /** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
-type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account } | { generate: true }
+type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account } | { generate: true } | { identity: FormIdentity } | { card: FormCard }
 
 // Set once the background accepts a token from the parent window.
 let token = ""
@@ -114,9 +114,19 @@ new ResizeObserver(() => mode !== "pill" && report()).observe(surface)
 
 // ---- The account list ----------------------------------------------------------
 
+/** "Visa ••4242 · 08/28": the brand (or the card's name), its last digits, and when it expires. */
+export function cardLine(card: FormCard): string {
+  const expiry = card.expiry ? ` · ${card.expiry.slice(5, 7)}/${card.expiry.slice(2, 4)}` : ""
+  return `${card.brand || card.title} ••${card.last4}${expiry}`
+}
+
 function row(item: Row, i: number): HTMLElement {
   const [tile, title, sub] =
-    "generate" in item
+    "identity" in item
+      ? [avatar(item.identity.title), item.identity.title, item.identity.summary || "Fill this address"]
+      : "card" in item
+      ? [avatar(item.card.brand || item.card.title, icon("card")), cardLine(item.card), item.card.brand && item.card.title !== item.card.brand ? item.card.title : item.card.cardholder || item.card.title]
+      : "generate" in item
       ? [avatar("", icon("key")), "Use a strong password", "Saved only if you sign up with it"]
       : "passkey" in item
       ? [avatar("", icon("passkey")), item.passkey.username || "Passkey", `Passkey · ${item.passkey.vault}`]
@@ -243,7 +253,11 @@ function matches(item: Row, q: string): boolean {
   // A generated password matches nothing typed: typing a password of one's own puts it away.
   if ("generate" in item) return false
   const hay =
-    "passkey" in item
+    "identity" in item
+      ? [item.identity.title, item.identity.summary]
+      : "card" in item
+      ? [item.card.title, item.card.brand ?? "", item.card.cardholder ?? ""]
+      : "passkey" in item
       ? [item.passkey.username ?? ""]
       : "provider" in item
         ? [item.provider.title, item.provider.signIn?.account ?? "", providerOf(item.provider.signIn?.provider ?? "").name]
@@ -352,7 +366,8 @@ async function pick(i: number) {
   for (const el of Array.from(rowsEl.querySelectorAll(".avatar.busy"))) el.classList.add("spinning")
   const passkey = "passkey" in a
   const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, passkey ? "Signing in…" : "Filling…")
-  const reply = await send<PickReply>("generate" in a ? { type: "db:menu-generate", token } : { type: "db:menu-pick", token, ref: passkey ? a.passkey.ref : a.account.ref })
+  const ref = "identity" in a ? a.identity.ref : "card" in a ? a.card.ref : passkey ? a.passkey.ref : "account" in a ? a.account.ref : ""
+  const reply = await send<PickReply>("generate" in a ? { type: "db:menu-generate", token } : { type: "db:menu-pick", token, ref })
   busy = false
   if (reply?.ok) {
     // A passkey's sign-in closes the surface from the background once it's through.
@@ -584,6 +599,7 @@ function show(reply: MenuLoadReply) {
   if (reply.kind === "notice") return showNotice(reply)
   if (mode !== "accounts") return
   if (reply.kind === "status") return showStatus(reply.status)
+  if (reply.kind === "forms") return showForms(reply)
   // A new-password box offers one row, a generated password; otherwise the logins.
   // A "Sign in with …" login shows as that; one with a password too gets its fill row first.
   accounts =
@@ -613,6 +629,33 @@ function show(reply: MenuLoadReply) {
   if (left.length && !left.includes(active)) active = left[0]
   highlight(false)
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
+}
+
+// ---- Addresses and cards ------------------------------------------------------------
+
+/**
+ * An identity or card field's menu: the identities ("Home · 123 Main St")
+ * or cards ("Visa ••4242 · 08/28") to fill the whole section with. A card
+ * says where it goes when that's a payment provider's frame ("Into Stripe
+ * on shop.com"), and that Deadbolt may ask for Touch ID first.
+ */
+function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
+  accounts = reply.form === "card" ? reply.cards.map((card) => ({ card })) : reply.identities.map((identity) => ({ identity }))
+  continueAs = false
+  active = Math.min(active, Math.max(accounts.length - 1, 0))
+  if (!accounts.length) {
+    highlightEl.hidden = true
+    rowsEl.replaceChildren(notice(icon(reply.form === "card" ? "card" : "keyhole"), reply.form === "card" ? "No cards saved" : "No addresses saved", "Add one in Deadbolt"))
+    setCaption("")
+    return say("")
+  }
+  rowsEl.replaceChildren(...accounts.map(row))
+  setCaption(reply.into ? `Into ${reply.into} on ${reply.site}` : accounts.length >= 2 ? reply.site : "")
+  say(reply.verify ? "Deadbolt may ask for Touch ID." : "")
+  if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
+  const left = visible()
+  if (left.length && !left.includes(active)) active = left[0]
+  highlight(false)
 }
 
 // ---- A step filled without a pick -----------------------------------------------------
