@@ -144,6 +144,12 @@ pub enum Format {
     },
     /// Another item's id: 32 lowercase hex digits.
     ItemRef,
+    /// A telephone number: one line of at most 64 characters, in E.164
+    /// form (`+15550100`) whenever it reads as an international number
+    /// ([`phone`]); a national number stays as typed.
+    Phone,
+    /// An ISO 3166-1 alpha-2 country code, upper case ([`country`]).
+    Country,
 }
 
 /// A known field of an item type.
@@ -214,6 +220,74 @@ const fn formatted(name: &'static str, format: Format) -> SchemaField {
     }
 }
 
+/// The officially assigned ISO 3166-1 alpha-2 codes, sorted.
+const COUNTRIES: &str = "AD AE AF AG AI AL AM AO AQ AR AS AT AU AW AX AZ \
+BA BB BD BE BF BG BH BI BJ BL BM BN BO BQ BR BS BT BV BW BY BZ \
+CA CC CD CF CG CH CI CK CL CM CN CO CR CU CV CW CX CY CZ \
+DE DJ DK DM DO DZ EC EE EG EH ER ES ET FI FJ FK FM FO FR \
+GA GB GD GE GF GG GH GI GL GM GN GP GQ GR GS GT GU GW GY HK HM HN HR HT HU \
+ID IE IL IM IN IO IQ IR IS IT JE JM JO JP KE KG KH KI KM KN KP KR KW KY KZ \
+LA LB LC LI LK LR LS LT LU LV LY \
+MA MC MD ME MF MG MH MK ML MM MN MO MP MQ MR MS MT MU MV MW MX MY MZ \
+NA NC NE NF NG NI NL NO NP NR NU NZ OM PA PE PF PG PH PK PL PM PN PR PS PT PW PY \
+QA RE RO RS RU RW SA SB SC SD SE SG SH SI SJ SK SL SM SN SO SR SS ST SV SX SY SZ \
+TC TD TF TG TH TJ TK TL TM TN TO TR TT TV TW TZ UA UG UM US UY UZ \
+VA VC VE VG VI VN VU WF WS YE YT ZA ZM ZW";
+
+/// `text` as an ISO 3166-1 alpha-2 country code, in any case and with
+/// surrounding space (`" us"` is `US`); `None` if it isn't one.
+pub fn country(text: &str) -> Option<&'static str> {
+    let code = text.trim().to_ascii_uppercase();
+    if code.len() != 2 {
+        return None;
+    }
+    COUNTRIES.split(' ').find(|c| *c == code)
+}
+
+/// `text` in E.164 form (`+` and 7–15 digits, the first not 0) if it reads
+/// as an international number: a `+` (or `00`), then digits with spaces,
+/// dots, dashes, slashes or parentheses between. `None` for anything else,
+/// such as a national number or one with an extension, which is kept as
+/// typed.
+pub fn phone(text: &str) -> Option<String> {
+    let text = text.trim();
+    let rest = text.strip_prefix('+').or_else(|| text.strip_prefix("00"))?;
+    let mut digits = String::from("+");
+    for c in rest.chars() {
+        match c {
+            '0'..='9' => digits.push(c),
+            ' ' | '.' | '-' | '/' | '(' | ')' | '\u{a0}' => {}
+            _ => return None,
+        }
+    }
+    let n = digits.len() - 1;
+    ((7..=15).contains(&n) && !digits[1..].starts_with('0')).then_some(digits)
+}
+
+#[test]
+fn countries_and_phones() {
+    assert_eq!(COUNTRIES.split(' ').count(), 249);
+    let codes: Vec<&str> = COUNTRIES.split(' ').collect();
+    assert!(codes.windows(2).all(|w| w[0] < w[1]), "sorted, no repeats");
+    assert_eq!(country(" us"), Some("US"));
+    assert_eq!(country("GB"), Some("GB"));
+    for bad in ["UK", "USA", "", "U", "XK", "United States"] {
+        assert_eq!(country(bad), None, "{bad}");
+    }
+    assert_eq!(phone("+1 (555) 010-0100").as_deref(), Some("+15550100100"));
+    assert_eq!(phone("0044 20 7946 0958").as_deref(), Some("+442079460958"));
+    assert_eq!(phone("+1 555 0100").as_deref(), Some("+15550100"));
+    for national in [
+        "(555) 010-0100",
+        "+1 555 0100 x12",
+        "+0 123 4567",
+        "+12345",
+        "",
+    ] {
+        assert_eq!(phone(national), None, "{national}");
+    }
+}
+
 static SCHEMAS: [Schema; 6] = [
     // `sign-in-with` names the provider of a "Sign in with Google" login
     // (`google`, `apple`, ...; see `deadbolt_client::protocol::sign_in_provider`)
@@ -241,6 +315,8 @@ static SCHEMAS: [Schema; 6] = [
             known("pin", FieldType::Secret, false),
             known("brand", FieldType::Text, false),
             known("notes", FieldType::Note, false),
+            // An identity whose address is the card's billing address.
+            formatted("billing", Format::ItemRef),
         ],
     },
     // A secure note: the name is its title, and its body is secret.
@@ -259,13 +335,28 @@ static SCHEMAS: [Schema; 6] = [
             known("notes", FieldType::Note, false),
         ],
     },
+    // A person's details as forms ask for them, named after the HTML
+    // autocomplete tokens: `city` is `address-level2` and `region`
+    // `address-level1`. See docs/autofill.md, "Forms".
     Schema {
         kind: "identity",
         fields: &[
-            known("name", FieldType::Text, false),
+            known("honorific", FieldType::Text, false),
+            known("given-name", FieldType::Text, false),
+            known("additional-name", FieldType::Text, false),
+            known("family-name", FieldType::Text, false),
+            known("nickname", FieldType::Text, false),
+            known("organization", FieldType::Text, false),
+            known("job-title", FieldType::Text, false),
             known("email", FieldType::Email, false),
-            known("phone", FieldType::Text, false),
-            known("address", FieldType::Note, false),
+            formatted("phone", Format::Phone),
+            known("address-line1", FieldType::Text, false),
+            known("address-line2", FieldType::Text, false),
+            known("address-line3", FieldType::Text, false),
+            known("city", FieldType::Text, false),
+            known("region", FieldType::Text, false),
+            known("postal-code", FieldType::Text, false),
+            formatted("country", Format::Country),
             known("birthday", FieldType::Date, false),
             known("national-id", FieldType::Secret, false),
             known("passport", FieldType::Secret, false),
@@ -480,6 +571,25 @@ pub fn check_field(schema: &Schema, name: &str, field: &Field) -> Result<(), Ite
                     return Err(invalid(name, "not an item id"));
                 }
             }
+            Format::Phone => {
+                if value.chars().any(char::is_control)
+                    || value.trim() != value
+                    || value.chars().count() > 64
+                {
+                    return Err(invalid(name, "must be one line of at most 64 characters"));
+                }
+                if phone(value).is_some_and(|e164| e164 != value) {
+                    return Err(invalid(
+                        name,
+                        "an international number is stored as +15550100",
+                    ));
+                }
+            }
+            Format::Country => {
+                if country(value) != Some(value) {
+                    return Err(invalid(name, "not an ISO country code (US, GB, ...)"));
+                }
+            }
         }
     }
     Ok(())
@@ -508,6 +618,55 @@ fn sign_in_fields() {
     // Not secret: never masked.
     let secret = Field::new(FieldType::Secret, "google");
     assert!(check_field(login, "sign-in-with", &secret).is_err());
+}
+
+#[test]
+fn identity_and_card_fields() {
+    let identity = schema("identity").unwrap();
+    let text = |v: &str| Field::new(FieldType::Text, v);
+    for (name, ok) in [
+        ("phone", "+15550100"),
+        ("phone", "(555) 010-0100"),
+        ("phone", "+1 555 0100 ext. 3"),
+        ("country", "US"),
+        ("given-name", "Kit"),
+        ("address-line1", "123 Main St"),
+    ] {
+        assert!(
+            check_field(identity, name, &text(ok)).is_ok(),
+            "{name} {ok}"
+        );
+    }
+    for (name, bad) in [
+        ("phone", "+1 555 0100"),
+        ("phone", "555\n0100"),
+        ("country", "us"),
+        ("country", "USA"),
+        ("country", "ZZ"),
+    ] {
+        assert!(
+            check_field(identity, name, &text(bad)).is_err(),
+            "{name} {bad}"
+        );
+    }
+    let date = |v: &str| Field::new(FieldType::Date, v);
+    assert!(check_field(identity, "birthday", &date("1990-03-01")).is_ok());
+    assert!(check_field(identity, "birthday", &date("1990-13-01")).is_err());
+    // The old free-text fields are extras like any other.
+    assert!(identity.field("name").is_none() && identity.field("address").is_none());
+    assert!(
+        check_field(
+            identity,
+            "address",
+            &Field::new(FieldType::Note, "1 Main St\nX")
+        )
+        .is_ok()
+    );
+
+    let card = schema("card").unwrap();
+    let id = "0123456789abcdef0123456789abcdef";
+    assert!(check_field(card, "billing", &text(id)).is_ok());
+    assert!(check_field(card, "billing", &text("home")).is_err());
 }
 
 /// Checks what only values written now must satisfy: an otp must be a TOTP

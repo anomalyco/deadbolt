@@ -61,6 +61,7 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 | | pin | secret | |
 | | brand | text | |
 | | notes | note | |
+| | billing | text (an identity's item id, its billing address) | |
 | note | notes | secret, multi-line | |
 | ssh | private-key | secret, multi-line | yes |
 | | public-key | text | |
@@ -68,21 +69,32 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 | | passphrase | secret | |
 | | comment | text | |
 | | notes | note | |
-| identity | name | text | |
+| identity | honorific | text | |
+| | given-name | text | |
+| | additional-name | text | |
+| | family-name | text | |
+| | nickname | text | |
+| | organization | text | |
+| | job-title | text | |
 | | email | email | |
-| | phone | text | |
-| | address | note | |
+| | phone | text (one line; E.164, `+15550100`, when it reads as international) | |
+| | address-line1, address-line2, address-line3 | text | |
+| | city | text (`address-level2`) | |
+| | region | text (state, province; `address-level1`) | |
+| | postal-code | text | |
+| | country | text (ISO 3166-1 alpha-2, upper case) | |
 | | birthday | date | |
 | | national-id | secret | |
 | | passport | secret | |
 | | license | secret | |
 | | notes | note | |
 
+- An identity is a person's details as web forms ask for them (docs/autofill.md, "Forms"), named after the HTML autocomplete tokens, so the browser extension maps fields without guessing; people keep several (Home, Work), told apart by name. The agent writes an international phone number in E.164 form and a country code in upper case whatever was typed; core refuses `+1 555 0100` (store `+15550100`) and anything but an assigned alpha-2 code. Identities made before names and addresses had parts keep their one-line `name` and multi-line `address` as extra fields, shown and searched as before; an import or a sync from 1Password writes the parts.
 - Card brand: the optional `brand` field, shown in the label when set. (Later: derive it from the number's prefix for major networks when the field is empty; a Luhn check as a CLI warning.)
 - A login needs no password (a passkey-only or SSO account, an export's login without one); `new login` without one still generates one. No item may have neither a name nor a field (core rejects it at create), so a note or identity needs only one of them.
 - Each type has one field ⏎ and `get` use by default: login password, card number, note body, SSH private key, identity email.
-- **Names are optional labels on every item** (alongside the type, not one of its fields), **not identifiers**, and need not be unique. Without a name, an item displays as a derived label (login: the URL's host without `www.`; card: brand + last four digits; ssh: the comment, else "SSH key"; identity: the name, else the email). Identity is the item id; the CLI shows a short id prefix.
-- **Lookup is search**: query words are ANDed, case-insensitive, over name, URL host, username, for cards cardholder, brand and last four, for SSH keys the comment and for identities the name and email (never secret values, so never a note's body). An id prefix also matches. One match: use it. Several: fail listing the candidates (short id, label, username). Scripts that must be unambiguous use the id.
+- **Names are optional labels on every item** (alongside the type, not one of its fields), **not identifiers**, and need not be unique. Without a name, an item displays as a derived label (login: the URL's host without `www.`; card: brand + last four digits; ssh: the comment, else "SSH key"; identity: given and family name, else the nickname, else an old one-line `name`, else the email). Identity is the item id; the CLI shows a short id prefix.
+- **Lookup is search**: query words are ANDed, case-insensitive, over name, URL host, username, for cards cardholder, brand and last four, for SSH keys the comment and for identities the name parts, organization, email and phone (never secret values, so never a note's body). An id prefix also matches. One match: use it. Several: fail listing the candidates (short id, label, username). Scripts that must be unambiguous use the id.
 - Two Google accounts are just two logins with the same URL and different usernames; nobody has to invent a naming scheme.
 
 ## CLI

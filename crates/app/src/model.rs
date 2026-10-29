@@ -577,8 +577,15 @@ pub fn forget(item: &mut ItemInfo) {
 /// "private-key" is "private key", "national-id" is "national ID", and a
 /// passkey's "rp-id" is "site".
 pub fn field_words(name: &str) -> String {
-    if name == "rp-id" {
-        return "site".into();
+    match name {
+        "rp-id" => return "site".into(),
+        // An identity's address lines, and `region` as forms usually ask.
+        "address-line1" => return "address line 1".into(),
+        "address-line2" => return "address line 2".into(),
+        "address-line3" => return "address line 3".into(),
+        "region" => return "state / region".into(),
+        "billing" => return "billing address".into(),
+        _ => {}
     }
     name.split('-')
         .map(|word| {

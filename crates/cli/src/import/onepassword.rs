@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::{
     ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, Builder, FAVORITE,
     Imported, LINKED_FIELD, MirrorVersion, NO_NUMBER, NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY,
-    Reason, Summary, TAG, UNKNOWN_TYPE, address, array, field_name, item_name, join, month, number,
+    Reason, Summary, TAG, UNKNOWN_TYPE, address, array, field_name, item_name, month, number,
     scalar, text,
 };
 use crate::protocol::{ImportSource, sign_in_provider};
@@ -368,28 +368,86 @@ fn ssh(item: &Value, summary: &mut Summary) -> Option<Imported> {
     b.finish("ssh", item_name(text(overview, "title")), summary)
 }
 
+/// A 1Password address as its parts: street, city, state, zip and
+/// country. An export has them apart; the `op` CLI joins them with ", ",
+/// leaving out empty ones, so that text is split back: the country is the
+/// last part if it is a country code, then the street and the city, then a
+/// part with digits is the zip and one without the state. Text that doesn't
+/// split that way is all street.
+fn address_parts(value: &Value) -> Option<[Option<String>; 5]> {
+    if value.is_object() {
+        return Some([
+            text(value, "street"),
+            text(value, "city"),
+            text(value, "state"),
+            text(value, "zip"),
+            text(value, "country"),
+        ]);
+    }
+    let line = scalar(value)?;
+    let mut parts: Vec<String> = line.split(", ").map(|p| p.trim().to_string()).collect();
+    let country = parts
+        .last()
+        .filter(|c| deadbolt_core::item::country(c).is_some())
+        .cloned();
+    if country.is_some() {
+        parts.pop();
+    }
+    let all_street = || [Some(line.clone()), None, None, None, None];
+    if parts.is_empty() || parts.len() > 4 || parts.iter().any(String::is_empty) {
+        return Some(all_street());
+    }
+    let mut it = parts.into_iter();
+    let (street, city) = (it.next(), it.next());
+    let (mut state, mut zip) = (None, None);
+    for part in it {
+        let slot = if part.bytes().any(|b| b.is_ascii_digit()) {
+            &mut zip
+        } else {
+            &mut state
+        };
+        if slot.replace(part).is_some() {
+            return Some(all_street());
+        }
+    }
+    Some([street, city, state, zip, country])
+}
+
+/// The value of an identity's address field (`address`), as given.
+fn identity_address(details: &Value) -> Option<&Value> {
+    array(details, "sections")
+        .iter()
+        .flat_map(|section| array(section, "fields"))
+        .filter(|field| text(field, "id").as_deref() == Some("address"))
+        .find_map(|field| field.get("value")?.get("address"))
+}
+
 fn identity(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut entries = Entries::new(details);
     let mut b = Builder::new("identity");
     let mut by_id = |id: &str| entries.take(|e| e.id == id);
-    let name = join(
-        [by_id("firstname"), by_id("initial"), by_id("lastname")],
-        " ",
-    );
-    b.known("name", name);
+    b.known("given-name", by_id("firstname"));
+    b.known("additional-name", by_id("initial"));
+    b.known("family-name", by_id("lastname"));
+    b.known("organization", by_id("company"));
+    b.known("job-title", by_id("jobtitle"));
     let birthday = by_id("birthdate");
     let phone = by_id("defphone")
         .or_else(|| by_id("cellphone"))
         .or_else(|| by_id("homephone"))
         .or_else(|| by_id("busphone"));
     let email = by_id("email");
-    let address = by_id("address");
     b.known_or_extra("birthday", birthday, BAD_BIRTHDAY, summary);
-    b.known("phone", phone);
+    b.phone(phone);
     b.known_or_extra("email", email, BAD_EMAIL, summary);
-    b.known("address", address);
+    if let Some([street, city, state, zip, country]) =
+        identity_address(details).and_then(address_parts)
+    {
+        entries.take(|e| e.id == "address" && e.key == "address");
+        b.postal_address([street], [city, state, zip, country], summary);
+    }
     b.known("notes", text(details, "notesPlain"));
     b.urls(urls(overview), summary);
     entries.extras(&mut b, summary);
@@ -878,12 +936,17 @@ pub(crate) mod tests {
         assert_eq!(
             fields(&items[6]),
             [
-                ("address", "note", "1 Main St\nSpringfield, IL 12345\nus"),
+                ("address-line1", "text", "1 Main St"),
                 ("birthday", "date", "1990-03-01"),
-                ("company", "text", "Anomaly"),
+                ("city", "text", "Springfield"),
+                ("country", "text", "US"),
                 ("email-2", "text", "not an email"),
-                ("name", "text", "Dax Raad"),
-                ("phone", "text", "+1 555 0100"),
+                ("family-name", "text", "Raad"),
+                ("given-name", "text", "Dax"),
+                ("organization", "text", "Anomaly"),
+                ("phone", "text", "+15550100"),
+                ("postal-code", "text", "12345"),
+                ("region", "text", "IL"),
             ]
         );
         // A 1Password 8 key: its values from the item's fields, each once.
@@ -956,6 +1019,34 @@ pub(crate) mod tests {
                 "dropped: 1 attachment, 2 favorites, 1 item's password history, 1 linked field, 3 tags",
             ]
         );
+    }
+
+    #[test]
+    fn addresses_split_as_op_joins_them() {
+        let parts = |v: Value| address_parts(&v).unwrap();
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            parts("1 Main St, Springfield, IL, 12345, us".into()),
+            [
+                s("1 Main St"),
+                s("Springfield"),
+                s("IL"),
+                s("12345"),
+                s("us")
+            ]
+        );
+        assert_eq!(
+            parts("1 Main St, Springfield, 12345, us".into()),
+            [s("1 Main St"), s("Springfield"), None, s("12345"), s("us")]
+        );
+        assert_eq!(
+            parts("1 Main St, Springfield".into()),
+            [s("1 Main St"), s("Springfield"), None, None, None]
+        );
+        // Two zips, or too many parts: all street, nothing lost.
+        for odd in ["1 Main St, Springfield, 12, 34", "a, b, c, d, e, f"] {
+            assert_eq!(parts(odd.into()), [s(odd), None, None, None, None]);
+        }
     }
 
     #[test]
