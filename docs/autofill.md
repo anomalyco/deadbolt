@@ -114,8 +114,8 @@ not running without sending hello, which would start the agent again.
 - **Inline menu.** Focusing a username, email, password or code field in the
   top page after a click or keypress opens a menu of that site's logins,
   title and username, under the field. It's as wide as the field and
-  left-aligned with it, at least 240 px (room for the avatar, title,
-  username and ⏎) and at most the viewport less 4 px each side. It doesn't
+  left-aligned with it, at least 240 px (room for the avatar, title
+  and username) and at most the viewport less 4 px each side. It doesn't
   name the site: logins are only ever offered for the page's own site, or a
   same-site frame's own site, which the page already shows. ↓/↑ choose, ⏎
   fills, esc closes, and ↓ reopens it. While Deadbolt is locked, the menu's

@@ -59,7 +59,7 @@ export const MENU_ROW = 44
 const MENU_CHROME = 12
 /** The caption over an identity or card list: where a pick goes. Login lists have none. */
 const MENU_CAPTION = 22
-/** The narrowest the menu gets under a narrow field: an avatar, a title and username, and ⏎. */
+/** The narrowest the menu gets under a narrow field: an avatar, a title and username. */
 const MENU_MIN_WIDTH = 240
 /** The menu's gap to each side of the viewport. */
 const MENU_MARGIN = 4

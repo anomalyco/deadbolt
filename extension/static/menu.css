@@ -167,22 +167,6 @@ body.held *::after {
   color: var(--muted);
 }
 
-.enter {
-  font-size: 11px;
-  color: var(--muted);
-  opacity: 0;
-  transform: translateX(-3px);
-  transition:
-    opacity 100ms ease-out,
-    transform 180ms var(--settle);
-}
-
-.row.active .enter {
-  opacity: 1;
-  transform: none;
-  transition: none;
-}
-
 /* Only when there's something to say. */
 .foot {
   margin: -2px 14px 10px;
