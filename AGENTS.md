@@ -38,9 +38,8 @@ working around it.
 
 ## Shipping
 
-Branch from `dev`, make focused commits, and open a PR against `dev`. Pushes to `dev`
-release nothing: dispatch a dev build when you want one (`gh workflow run
-release.yml --ref dev -f channel=dev`); `production` is
+Branch from `dev`, make focused commits, and open a PR against `dev`. Every push to
+`dev` publishes a dev build (runs queue, never cancel); `production` is
 fast-forwarded from `dev` to release stable (`docs/releasing.md`). `.github/release/`
 and `.github/workflows/release.yml` are the release security boundary. Coordinate
 shared-file changes with other active worktrees.

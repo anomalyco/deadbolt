@@ -2,7 +2,7 @@
 # plan.sh: decides what this run builds and where it publishes, from the event
 # and the ref, and writes the plan to $GITHUB_OUTPUT.
 #
-#   dev    a dispatch from dev (channel: dev): 0.0.0-dev-<run number> on
+#   dev    a push to dev (or a dispatch from dev): 0.0.0-dev-<run number> on
 #          the release service's dev channel, as OpenCode numbers dev builds
 #          (a full rerun adds .<attempt>, so it never reuses a version).
 #   check  a dispatch: the same build, signed and verified, published

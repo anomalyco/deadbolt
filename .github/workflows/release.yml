@@ -23,9 +23,9 @@ name: Release
 # This file and .github/release/ are the security boundary for releases.
 #
 # Channels (.github/release/plan.sh):
-# - dev: a dispatch from dev (channel: dev) publishes 0.0.0-dev-<run number>
-#   on the dev channel. Pushes to dev release nothing: we trigger dev builds.
-#   Without the Apple values it publishes the CLI unsigned and no app.
+# - dev: every push to dev (except docs/site/Markdown-only), or a dispatch
+#   from dev, publishes 0.0.0-dev-<run number> on the dev channel. Without the
+#   Apple values it publishes the CLI unsigned and no app.
 # - check: a dispatch from dev or production builds, signs, and verifies, and
 #   publishes nothing.
 # - stable: a push to production or of tag v<version>, or a dispatch from
@@ -40,7 +40,7 @@ on:
         options: [check, dev, stable]
         default: check
   push:
-    branches: [production]
+    branches: [dev, production]
     tags: ["v*"]
     # Docs and the site alone cut no build (tag pushes ignore paths).
     paths-ignore: ["docs/**", "site/**", "**/*.md"]
@@ -50,8 +50,9 @@ permissions:
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || (github.ref_type == 'tag' || github.ref_name == 'production') && 'stable' || 'dev' }}
-  # Never cancel a release in progress: a macOS build signs and notarizes for
-  # a long time, and a newer dispatch waits for it (the newest waiting one runs).
+  # Releases never cancel each other (as Hex's): the running one finishes, and
+  # of the pushes that land meanwhile only the newest waits (GitHub replaces an
+  # older pending run in the group), so a busy dev branch still publishes.
   cancel-in-progress: false
 
 defaults:
