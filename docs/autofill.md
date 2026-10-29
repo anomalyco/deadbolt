@@ -678,6 +678,17 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
     popup says when Touch ID will be asked.
   Clicking Deadbolt's prompt is presence, not verification, so it never sets
   UV on its own.
+- **Agent sign-ins** (`agent-passkey-get`, `docs/agent-control.md`,
+  "Standing grants") sign for a paired agent client, such as Browse's relay,
+  under a grant with `passkeys` for the site. Nobody is at the Mac, so UP is
+  set because the grant is the user's standing consent to sign in there, and
+  UV is never set: no finger touched anything. A `required` request fails
+  before anything is signed; sites that demand verification don't get
+  agents in, which is correct. Client data comes from the frame origin the
+  relay read over CDP, the relying party id is checked as below, and the
+  passkey is the first of `allowCredentials` saved here, or with none the
+  site's only one (a grant for one login narrows it to that login's
+  username).
 - **Client data** is built by the agent from the origin the browser reported
   for the frame (`sender.origin`): `type`, the challenge, that origin, and
   `crossOrigin: false`. Nothing the page says goes into it except the

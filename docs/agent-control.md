@@ -1,7 +1,9 @@
 # AI agents using Deadbolt
 
-2026-10-27. Design, not built yet. How AI agents (OpenCode sessions and the
-like) may use Deadbolt, carefully. Questions for Kit are at the end.
+2026-10-27. Design, mostly not built yet: build order 1 (caller identity
+and Activity) and standing grants for agent sign-ins (below) are. How AI
+agents (OpenCode sessions and the like) may use Deadbolt, carefully.
+Questions for Kit are at the end.
 
 Words: **the agent** is Deadbolt's background agent (`deadbolt agent`), as
 everywhere else in these docs. **An AI** is an AI agent calling Deadbolt.
@@ -415,6 +417,115 @@ Later:
 7. **The OpenCode skill**, and the threat model in `docs/autofill.md`
    updated to match.
 
+## Standing grants: agent sign-ins (built)
+
+2026-10-28. Built, and scoped to one kind of client: a browser relay, such
+as Browse's, that signs an AI's browser in to sites without a person at the
+Mac, and never shows the AI a value. This is the "AI-driven browser fills"
+and "standing grants" items of Later, made unattended. Browse's side of the
+contract is in Browse's repo; this is Deadbolt's.
+
+```text
+AI ── secrets.signIn ──▶ Browse relay ── agent-fill {client, origin, login, want} ──▶ agent
+                         (reads the frame's origin over CDP,      checks token, grant, site
+                          types the values, forgets them)  ◀────  values (never to the AI)
+```
+
+**Pairing a client.** `deadbolt agents add-client browse` (Browse's
+`opencode-browser deadbolt connect` runs it) asks the agent for a new client.
+The agent makes an id and a token of 32 random bytes (64 hex digits), keeps
+only the token's SHA-256, and returns the token once. The client stores it
+(Browse: 0600 under its data root) and sends `client: {id, token}` with every
+request; the agent finds the id and compares the hashes in constant time.
+An unknown id, a wrong token or a removed client is `forbidden`.
+
+**Granting.** `deadbolt agents allow github.com` lets the client fill the
+logins saved for a site; `--login kit` narrows it to one login, `--fields
+username,password,totp` to some fields (default: all three), `--passkeys`
+adds signing in with the site's passkeys, `--expires 30d` ends it (default:
+never). A site is a registrable domain (`www.github.com` is kept as
+`github.com`) or an exact origin with its scheme (`https://app.example.com`,
+that origin only). Setting the same client, site and login again replaces
+the grant. `deadbolt agents grants`, `revoke <id>`, `clients` and
+`remove-client <id>` list and narrow; Settings › Agents in the app lists
+clients and grants with Revoke.
+
+**Proof that the user is there.** Pairing and granting need the vault
+unlocked and one of:
+
+- Touch ID, raised by the agent itself with its own sentence ("let browse
+  sign in to sites for AI agents"), when Touch ID unlock is on and set up;
+- the vault passphrase, typed on the CLI's terminal (no echo) or given with
+  `--passphrase-stdin`. Never `DEADBOLT_PASSPHRASE`: an AI's shell inherits
+  Kit's environment. The CLI checks the agent's identity before it sends the
+  passphrase, as for `unlock`.
+
+And the caller must not look like an AI: an AI host among its parents
+(OpenCode, Claude Code, Codex, Cursor, Gemini CLI, Aider) or a claimed
+`OPENCODE_SESSION_ID` is refused (`forbidden`), passphrase or not. That is
+ancestry, a hint (see "Who is asking"), so it only ever refuses.
+
+**Using a grant.** `agent-logins` lists a site's logins without values and
+what the client's live grants cover of each (nothing, with `granted: false`,
+when no grant covers the site). `agent-fill` gives the values asked for only
+if live grants cover the client, the site of the frame's origin, the login
+and every field; the login must also be saved for that site, by the same
+rules as the extension's fills (`domain-mismatch` otherwise). A one-time
+code is computed now; the secret never leaves. Anything uncovered is
+`not-granted`, naming the site and (once the site is granted) the login, so
+the client can tell the user exactly what to allow. `agent-passkey-get`
+signs with a passkey for the frame's relying party under a grant with
+`passkeys` (see `docs/autofill.md`, "Passkeys").
+
+**Limits and lock.** Each client gets a burst of 30 requests, then one a
+second (`rate-limited`). Agent requests don't count as use for the idle
+lock, so a looping AI can't hold the vault open. Locked, every agent request
+is `locked`: nothing unlocks without a person, and no grant can change that.
+
+**Activity.** Every agent request, and every pairing, grant and removal, is
+an entry: the client's name (proved by its token, unlike a claim), the
+caller, the page, the login, the fields asked for, and whether it was
+allowed, refused or locked. Never a value.
+
+**Kept on this device, not synced.** Clients and grants are rows in this
+device's encrypted store (`cli/agent-clients`, `cli/agent-grants`), not vault
+entries. The token is a credential for one computer's relay; synced, it
+would be one more place to steal it from, and a grant made on the laptop
+would let a relay on another device in without that device's user ever
+being asked. Each device pairs and grants for itself.
+
+**Trust model, honestly.**
+
+- The relay is the only client. It types values into fields over CDP after
+  checking the field's real frame origin, and never returns them to the AI.
+  Deadbolt can't see that; it trusts the relay to keep its promise.
+- The token is a bearer secret on disk. Any process running as Kit that can
+  read Browse's data root can use what was granted, without asking. That is
+  the price of unattended use: keep grants small (one login, the fields it
+  needs, an expiry), and revoke what you don't use.
+- A grant covers only fills and passkey sign-ins for its site. No item-get,
+  no listing beyond the granted site's logins, no export, no writes.
+- An AI that gets a terminal outside its own process tree passes the
+  ancestry check; it still needs Kit's finger or passphrase to pair or grant.
+- An AI driving the tab can read `input.value` after a fill. Browse fills and
+  submits in one call so control doesn't return in between; that is a
+  narrower promise than `deadbolt run`, and it is Browse's to keep.
+- Passkeys sign with user presence (the grant is Kit's standing consent) and
+  never user verification: no finger touched anything. Sites that require
+  verification fail, which is correct.
+
+**Protocol (15).** `agent-client-add {name, passphrase?}` → `agent-client-added
+{client, token}`; `agent-client-list` → `agent-clients`; `agent-client-remove
+{id}`; `agent-grant-set {client_id, site, login?, fields, passkeys,
+expires_at?, passphrase?}` → `agent-grant`; `agent-grant-list` →
+`agent-grants`; `agent-grant-remove {id}`; `agent-logins {client, origin}` →
+`agent-logins {site, granted, logins}`; `agent-fill {client, origin, login,
+want}` → `site-fill {values}`; `agent-passkey-get {client, origin, rp_id?,
+challenge, allow_credentials, user_verification}` → `passkey-assertion` with
+`verified: false`. New error codes `forbidden`, `not-granted` (with
+`grant: {site, login}` beside the message) and `rate-limited`; a new tier
+`agent` and outcome `refused` in Activity, which also gains `client`.
+
 ## Prior art
 
 - **1Password CLI with the app**
@@ -464,9 +575,9 @@ Later:
 
 ## Later
 
-- AI-driven browser fills: `site-fill` for a page an AI's browser has
-  open, approved per login, as in 1Password for Agents. Shape (from Ryan's
-  Foyer, which already fills this way):
+- AI-driven browser fills approved per use, with a tap, as in 1Password for
+  Agents. Unattended fills under a standing grant are built (above); per-use
+  approval is not. Shape (from Ryan's Foyer, which already fills this way):
   - **By reference.** The AI sees metadata and an opaque ref, picks the ref
     and the step, and gets back only "submitted" or "failed". Values go
     agent → extension → field, never to the AI.
@@ -484,7 +595,7 @@ Later:
 - An SSH agent that confirms each use of a key.
 - Approving from the iPhone.
 - Standing grants for scripts, by code signature and item list, set in the
-  app with a tap.
+  app with a tap. (Standing grants for a browser relay are built, above.)
 - A per-session key held by OpenCode's server that signs requests, to tell
   sessions on one server apart for real.
 
