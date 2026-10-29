@@ -947,8 +947,8 @@ fn schema_is_enforced_at_commit() {
     };
     let cases = [
         (
-            create("wifi", vec![("password", secret("x"))]),
-            ItemError::UnknownType("wifi".into()),
+            create("hovercraft", vec![("password", secret("x"))]),
+            ItemError::UnknownType("hovercraft".into()),
         ),
         (
             create("ssh", vec![("public-key", text("ssh-ed25519 AAAA"))]),
@@ -1159,7 +1159,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
         ),
     ]);
     let created = b.raw(vec![
-        DataOp::create("wifi", None, [("password".into(), secret("x"))]),
+        DataOp::create("hovercraft", None, [("password".into(), secret("x"))]),
         DataOp::create("card", None, [("cvv".into(), secret("123"))]),
         DataOp::create(
             "card",
