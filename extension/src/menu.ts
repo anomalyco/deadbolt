@@ -145,7 +145,6 @@ function row(item: Row, i: number): HTMLElement {
     { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", "aria-selected": String(i === active) },
     tile,
     h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)),
-    h("kbd", { class: "enter", "aria-hidden": "true" }, "⏎"),
   )
   // A pointer's click only: Enter or Space on a focused row clicks it too (detail 0).
   r.addEventListener("click", (e) => e.isTrusted && e.detail > 0 && void pick(i))
