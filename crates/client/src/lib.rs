@@ -3,6 +3,7 @@
 //! requests. The CLI and the desktop app are both clients of this crate.
 
 pub mod export;
+pub mod file;
 pub mod paths;
 pub mod peer;
 pub mod protocol;

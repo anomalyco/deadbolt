@@ -7,15 +7,15 @@
 //! last one with the app's blur replacement. Problems, the conflict notice and
 //! the nudge fade in where they show.
 
-use rune::{El, Shadow, Spring, SpringPair, Transition, col, el, row, spacer, text};
+use rune::{El, Shadow, Spring, SpringPair, Transition, col, el, icon, row, spacer, text};
 use rune_kit::{
-    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl,
-    State, Switch, TextArea, TextInput,
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, Placement, Popover,
+    SegmentedControl, State, Switch, TextArea, TextInput,
 };
 
-use super::{Conflict, Delete, Field, Form, Input, KINDS, LENGTHS, editable};
+use super::{Conflict, Delete, Field, Form, Input, LENGTHS, editable, type_matches};
 use crate::model::{App, title_case};
-use crate::view::theme::{PLUS, REGENERATE, TRASH};
+use crate::view::theme::{PLUS, REGENERATE, TRASH, kind_icon, kind_name};
 use crate::view::{Notice, Severity};
 use crate::view::{replace, reveal_button, scroll_col};
 
@@ -30,7 +30,7 @@ const GROW: Spring = Spring::new(0.3, 0.0);
 const FADE: Spring = Spring::new(0.2, 0.0);
 
 /// The detail pane while a form is open.
-pub fn form(s: &App, k: &Kit, f: &Form) -> El {
+pub fn form(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
     let mut fields = col().key("fields").w_full().gap(14.0);
     for i in 0..f.fields.len() {
         fields = fields.child(field(s, k, f, i));
@@ -44,7 +44,7 @@ pub fn form(s: &App, k: &Kit, f: &Form) -> El {
         .gap(16.0)
         .transition(replace());
     // The head and the foot line up with the scroll's padded fields.
-    form.child(head(k, f).px(FIELD_PAD))
+    form.child(head(s, k, f, layer).px(FIELD_PAD))
         .children(conflict(k, f))
         .children(mirrored(k, f))
         .child(
@@ -61,7 +61,7 @@ pub fn form(s: &App, k: &Kit, f: &Form) -> El {
 }
 
 /// The name, and the type: a picker for a new item.
-fn head(k: &Kit, f: &Form) -> El {
+fn head(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
     let invalid = f.problem_for("name").is_some();
     let name = TextInput::new(&f.name)
         .placeholder(if f.is_new() {
@@ -81,31 +81,200 @@ fn head(k: &Kit, f: &Form) -> El {
         .label("Name");
     let mut head = col().key("head").w_full().gap(8.0);
     if f.is_new() {
-        // "Note": "Secure note" doesn't fit a fifth of the pane.
-        let labels: Vec<String> = KINDS
-            .iter()
-            .map(|kind| match *kind {
-                "note" => "Note".to_owned(),
-                kind => title_case(deadbolt_client::protocol::noun(kind, 1)),
-            })
-            .collect();
-        let at = KINDS.iter().position(|kind| *kind == f.kind);
-        let kinds = SegmentedControl::new(&labels, at)
-            .width(None)
-            .on_pick(|s: &mut App, i, _| {
-                if let Some(kind) = KINDS.get(i) {
-                    s.pick_kind(kind);
-                }
-            });
-        head = head.child(
-            row()
-                .key("kinds")
-                .w_full()
-                .child(disable(kinds, labels.len(), f.saving).build(k)),
-        );
+        // Spaced from the name as the fields are from each other.
+        head = head.child(type_row(s, k, f, layer).mb(6.0));
     }
     head.child(name)
         .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
+}
+
+/// The New Item form's type: one row with the type's icon, name and a
+/// chevron. A press, ⌘T, Space or ⏎ opens the list of types under it, with
+/// a filter field on top (`types`). Built from Rune's `Popover` and
+/// `TextInput`: rune-kit's `Combobox` has no icons on its trigger or its
+/// options, no keywords to match beside the label, and no way to open it
+/// with the filter focused from the app.
+fn type_row(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
+    let open = s.types_open();
+    let name = kind_name(&f.kind);
+    let chevron = if open {
+        k.glyph.chevron_up
+    } else {
+        k.glyph.chevron_down
+    };
+    let trigger = Button::new(name)
+        .icon(kind_icon(&f.kind))
+        .label_with(move |font, ink| {
+            row()
+                .gap(4.0)
+                .center_y()
+                .child(text(name).font(font).color(ink))
+                .child(icon(chevron, 14.0).key("chevron").color(ink))
+        })
+        .variant(ButtonVariant::Neutral)
+        .control_size(ControlSize::Regular)
+        .expanded(open)
+        .disabled(f.saving)
+        .help("Change the type")
+        .shortcut("⌘T")
+        .on_press(|s: &mut App| s.toggle_types())
+        .build(k)
+        .key("type")
+        .label(format!("Type: {name}"))
+        .on_key(|s: &mut App, ev, _| {
+            let plain = ev.mods == rune::Mods::default();
+            if plain && ev.key == rune::Key::Enter && !s.types_open() {
+                s.open_types();
+                return true;
+            }
+            false
+        });
+    let popover = Popover::new("types")
+        .trigger(trigger)
+        .placement(Placement::BottomStart)
+        .open(open && !f.saving)
+        .on_close(|s: &mut App| s.close_types());
+    let popover = if open && !f.saving {
+        popover.child(type_list(s, k, f))
+    } else {
+        popover
+    };
+    row().key("type-row").child(popover.build(k, layer))
+}
+
+/// The list under the type row: the filter, then each matching type with
+/// its icon and full name, the keys' one lit, the current one checked.
+fn type_list(s: &App, k: &Kit, f: &Form) -> El {
+    let types = &s.edit.types;
+    let filter = TextInput::new(&types.filter)
+        .width(None)
+        .placeholder("Filter types")
+        .on_edit(|s: &mut App| &mut s.edit.types.filter)
+        .on_change(|s: &mut App, _| s.types_filtered())
+        .on_key(|s: &mut App, ev, tx| s.types_key(ev, tx));
+    let filter = quiet(k, filter.build(k), &types.filter, false)
+        .key("type-filter")
+        .label("Filter types");
+    let found = type_matches(&types.filter.text);
+    let active = types.active.min(found.len().saturating_sub(1));
+    let mut rows = col().key("type-rows").role("listbox").w_full().gap(1.0);
+    for (i, kind) in found.iter().copied().enumerate() {
+        let lit = i == active;
+        let check = icon(k.glyph.check_small, 14.0)
+            .color(k.c.icon_base)
+            .opacity(if kind == f.kind { 1.0 } else { 0.0 });
+        rows = rows.child(
+            row()
+                .key(format!("type-{kind}"))
+                .role("option")
+                .label(kind_name(kind))
+                .w_full()
+                .h(30.0)
+                .px(8.0)
+                .gap(10.0)
+                .center_y()
+                .radius(k.radius.sm)
+                .fill(if lit {
+                    k.c.hover
+                } else {
+                    rune::Color::TRANSPARENT
+                })
+                .child(icon(kind_icon(kind), 16.0).color(k.c.icon_base))
+                .child(
+                    text(kind_name(kind))
+                        .font(k.ty.ui)
+                        .color(k.c.text_base)
+                        .grow(1.0)
+                        .shrink()
+                        .truncate(),
+                )
+                .child(check)
+                .on_hover(move |s: &mut App| s.hover_type(i))
+                .on_press(move |s: &mut App| s.choose_type(kind)),
+        );
+    }
+    if found.is_empty() {
+        rows = rows.child(
+            row()
+                .key("type-none")
+                .h(30.0)
+                .px(8.0)
+                .center_y()
+                .child(text("No type matches").font(k.ty.ui).color(k.c.text_faint)),
+        );
+    }
+    col()
+        .key("type-list")
+        .w(TYPE_LIST_W)
+        .gap(8.0)
+        .child(filter)
+        .child(
+            scroll_col("type-scroll")
+                .w_full()
+                .max_h(TYPE_LIST_H)
+                .preserve_focus_on_press(true)
+                .child(rows),
+        )
+}
+
+/// The type list's width, and the height it scrolls past: nine rows and
+/// half of the next, so the list says there's more.
+const TYPE_LIST_W: f32 = 248.0;
+const TYPE_LIST_H: f32 = 9.5 * 31.0;
+
+/// A file field: the file's name (or none yet), Choose File… and, unless
+/// it's required, Remove.
+fn file_control(k: &Kit, input: &Input, i: usize, invalid: bool, saving: bool) -> El {
+    let name = input.value().map(deadbolt_client::file::name);
+    let shown = text(name.unwrap_or("No file chosen").to_owned())
+        .key("file-name")
+        .font(k.ty.ui)
+        .color(if name.is_some() {
+            k.c.text_base
+        } else {
+            k.c.text_faint
+        })
+        .truncate_fade()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0);
+    let mut control = row()
+        .key("file")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .padding(8.0)
+        .radius(k.radius.md)
+        .fill(k.c.layer_01)
+        .child(shown)
+        .child(
+            Button::new(if name.is_some() {
+                "Choose Another…"
+            } else {
+                "Choose File…"
+            })
+            .variant(ButtonVariant::Neutral)
+            .control_size(ControlSize::Small)
+            .disabled(saving)
+            .on_press_tx(move |s: &mut App, tx| s.choose_field_file(i, tx))
+            .build(k)
+            .key("choose"),
+        );
+    if name.is_some() && !input.required {
+        control = control.child(
+            Button::new("Remove")
+                .variant(ButtonVariant::GhostMuted)
+                .control_size(ControlSize::Small)
+                .disabled(saving)
+                .on_press(move |s: &mut App| s.remove_file(i))
+                .build(k)
+                .key("remove"),
+        );
+    }
+    if invalid {
+        control = control.outline(1.0, 0.0, k.c.danger.fg);
+    }
+    control
 }
 
 /// Another device changed or deleted the item while it was open here.
@@ -165,7 +334,7 @@ fn mirrored(k: &Kit, f: &Form) -> Option<El> {
     )
 }
 
-fn placeholder(input: &Input) -> &'static str {
+fn placeholder(kind: &str, input: &Input) -> &'static str {
     if input.held {
         return "Kept · type to replace";
     }
@@ -175,15 +344,20 @@ fn placeholder(input: &Input) -> &'static str {
     match input.name.as_str() {
         "url" => "example.com",
         "expiry" => "MM/YY",
-        "number" => "Card number",
+        "number" if kind == "card" => "Card number",
         "cvv" => "3 or 4 digits",
         "otp" => "otpauth:// link or secret",
         "email" => "name@example.com",
         "birthday" => "YYYY-MM-DD",
         "phone" => "+1 555 010 0100",
-        "country" => "US, GB, DE…",
+        "country" if kind == "identity" => "US, GB, DE…",
         "public-key" => "ssh-ed25519 AAAA…",
         "fingerprint" => "SHA256:…",
+        "credential" => "Token or key",
+        "port" => "5432",
+        "expires" | "issued" | "purchased" if input.kind == "date" => "YYYY-MM-DD",
+        "expires" | "member-since" if input.kind == "month" => "MM/YY",
+        "admin-console" => "example.com/admin",
         _ if input.required => "Required",
         _ => "",
     }
@@ -195,7 +369,9 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
     let problem_text = f.problem_for(&input.name);
     let invalid = problem_text.is_some();
     let generates = f.generates() == Some(i);
-    let control = if input.lines && input.secret() {
+    let control = if input.file() {
+        file_control(k, input, i, invalid, f.saving).label(named.clone())
+    } else if input.lines && input.secret() {
         // A secret over several lines: hidden, one fixed row of dots, or
         // empty for a value kept (`Input::kept`); shown, the whole value,
         // wrapping and editable anywhere. Still secure either way.
@@ -215,7 +391,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                             .width(None)
                             .auto_grow(1, SECRET_LINES)
                             .max_height(SECRET_MAX_H)
-                            .placeholder(placeholder(input))
+                            .placeholder(placeholder(&f.kind, input))
                             .invalid(invalid)
                             .on_edit(move |s: &mut App| s.input_mut(i))
                             .on_key(move |s: &mut App, ev, tx| {
@@ -235,7 +411,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         let area = TextArea::new(&input.edit)
             .wrap_anywhere()
             .width(None)
-            .placeholder(placeholder(input))
+            .placeholder(placeholder(&f.kind, input))
             .invalid(invalid)
             .on_edit(move |s: &mut App| s.input_mut(i));
         let area = if input.lines {
@@ -253,7 +429,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
     } else {
         let mut t = TextInput::new(&input.edit)
             .width(None)
-            .placeholder(placeholder(input))
+            .placeholder(placeholder(&f.kind, input))
             .invalid(invalid)
             .on_edit(move |s: &mut App| s.input_mut(i))
             .on_change(|s: &mut App, _| s.form_changed())

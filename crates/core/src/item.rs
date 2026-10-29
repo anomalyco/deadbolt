@@ -36,6 +36,9 @@ pub enum FieldType {
     Date,
     /// Multi-line text.
     Note,
+    /// A file: its name, a line break, then its contents in base64
+    /// ([`file_value`]), at most [`MAX_FILE`] bytes.
+    File,
     Other(String),
 }
 
@@ -51,6 +54,7 @@ impl FieldType {
             "month" => Self::Month,
             "date" => Self::Date,
             "note" => Self::Note,
+            "file" => Self::File,
             other => Self::Other(other.into()),
         }
     }
@@ -65,6 +69,7 @@ impl FieldType {
             Self::Month => "month",
             Self::Date => "date",
             Self::Note => "note",
+            Self::File => "file",
             Self::Other(s) => s,
         }
     }
@@ -126,6 +131,186 @@ impl Field {
             value: value.into(),
         }
     }
+}
+
+/// The most an item's files hold, together: one file, or all of an item's.
+/// A value is base64, 4/3 as long, and an item's create or change travels
+/// in one entry of at most [`crate::MAX_ENTRY_LEN`] (16 MiB), so its files
+/// fit with room to spare; more would need chunking, which the log doesn't
+/// do. Capping the item and not only each file keeps a vault from becoming
+/// a blob store. Creates are held to it everywhere ([`check_create`]);
+/// changes when written ([`crate::Vault::write`]), since two devices'
+/// concurrent changes can't see each other.
+pub const MAX_FILE: usize = 10 * 1024 * 1024;
+
+/// The longest file name, in characters.
+pub const MAX_FILE_NAME: usize = 255;
+
+/// A file field's value: `name`, a line break, then `contents` in standard
+/// base64 with padding.
+pub fn file_value(name: &str, contents: &[u8]) -> zeroize::Zeroizing<String> {
+    let mut value = zeroize::Zeroizing::new(String::with_capacity(
+        name.len() + 1 + contents.len().div_ceil(3) * 4,
+    ));
+    value.push_str(name);
+    value.push('\n');
+    value.push_str(&zeroize::Zeroizing::new(
+        data_encoding::BASE64.encode(contents),
+    ));
+    value
+}
+
+/// A file field's name and its contents in base64. The contents are `None`
+/// where a value holds the name alone: what the agent lists in place of a
+/// file it wasn't asked for.
+pub fn file_parts(value: &str) -> (&str, Option<&str>) {
+    match value.split_once('\n') {
+        Some((name, contents)) => (name, Some(contents)),
+        None => (value, None),
+    }
+}
+
+/// How many bytes base64 `contents` decode to, if they are canonical
+/// base64 (standard alphabet, padded, unused bits zero), so one file has
+/// one encoding.
+pub fn file_size(contents: &str) -> Option<usize> {
+    let b = contents.as_bytes();
+    if !b.len().is_multiple_of(4) {
+        return None;
+    }
+    let pad = b.iter().rev().take_while(|c| **c == b'=').count();
+    let value = |c: u8| match c {
+        b'A'..=b'Z' => Some(c - b'A'),
+        b'a'..=b'z' => Some(c - b'a' + 26),
+        b'0'..=b'9' => Some(c - b'0' + 52),
+        b'+' => Some(62),
+        b'/' => Some(63),
+        _ => None,
+    };
+    if pad > 2 || !b[..b.len() - pad].iter().all(|c| value(*c).is_some()) {
+        return None;
+    }
+    // The last character before the padding carries 2 (one `=`) or 4 (two)
+    // bits that encode nothing: they must be zero.
+    if pad > 0 {
+        let last = value(b[b.len() - pad - 1])?;
+        let unused = if pad == 1 { 0b11 } else { 0b1111 };
+        if last & unused != 0 {
+            return None;
+        }
+    }
+    Some(b.len() / 4 * 3 - pad)
+}
+
+/// The bytes `fields`' files hold together (values that aren't files, or
+/// hold no contents, count nothing).
+pub fn files_size<'a>(fields: impl IntoIterator<Item = &'a Field>) -> usize {
+    fields
+        .into_iter()
+        .filter(|f| f.kind == FieldType::File)
+        .filter_map(|f| file_parts(&f.value).1)
+        .filter_map(file_size)
+        .sum()
+}
+
+/// Why an item whose files hold more than [`MAX_FILE`] is refused.
+pub(crate) fn too_many_files(field: &str) -> ItemError {
+    invalid(
+        field,
+        format!(
+            "an item's files can be at most {} MiB together",
+            MAX_FILE >> 20
+        ),
+    )
+}
+
+/// A file name: 1–255 characters on one line, without `/`, `\` or `:`
+/// (path separators somewhere), not `.` or `..`, without surrounding
+/// whitespace.
+pub fn valid_file_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.trim() == name
+        && name.chars().count() <= MAX_FILE_NAME
+        && !name
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+        && name != "."
+        && name != ".."
+}
+
+#[test]
+fn file_values() {
+    let value = file_value("scan.pdf", b"%PDF-1.7 hello");
+    assert_eq!(file_parts(&value).0, "scan.pdf");
+    let contents = file_parts(&value).1.unwrap();
+    assert_eq!(
+        data_encoding::BASE64.decode(contents.as_bytes()).unwrap(),
+        b"%PDF-1.7 hello"
+    );
+    assert_eq!(file_size(contents), Some(14));
+    for (contents, size) in [("", Some(0)), ("YQ==", Some(1)), ("YWI=", Some(2))] {
+        assert_eq!(file_size(contents), size, "{contents}");
+    }
+    // Not base64, or not canonical: "YR==" and "YWJ=" decode as "a" and
+    // "ab" too, with stray bits set.
+    for bad in [
+        "YQ=",
+        "Y===",
+        "YQ==YQ==x",
+        "Y-Q=",
+        "YR==",
+        "YWJ=",
+        "YQ==YQ==",
+    ] {
+        assert_eq!(file_size(bad), None, "{bad}");
+    }
+    assert_eq!(file_parts("scan.pdf"), ("scan.pdf", None));
+    for bad in [
+        "",
+        " a",
+        "a/b",
+        "a\\b",
+        "C:x",
+        "..",
+        "a\tb",
+        &"x".repeat(256),
+    ] {
+        assert!(!valid_file_name(bad), "{bad:?}");
+    }
+    let field = |v: &str| Field::new(FieldType::File, v);
+    let document = schema("document").unwrap();
+    assert!(check_field(document, "file", &field(&value)).is_ok());
+    assert!(check_field(document, "file", &field("scan.pdf\n")).is_ok());
+    for bad in ["scan.pdf", "\nYQ==", "a/b\nYQ==", "scan.pdf\nnot base64"] {
+        assert!(
+            check_field(document, "file", &field(bad)).is_err(),
+            "{bad:?}"
+        );
+    }
+    // The size cap, without building a 10 MiB value twice.
+    let at_cap = file_value("big.bin", &vec![0; MAX_FILE]);
+    assert!(check_field(document, "file", &field(&at_cap)).is_ok());
+    let over = file_value("big.bin", &vec![0; MAX_FILE + 1]);
+    let error = check_field(document, "file", &field(&over)).unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "invalid value for file: files can be at most 10 MiB"
+    );
+    // And an item's files together, at create.
+    let half = file_value("half.bin", &vec![0; MAX_FILE / 2 + 1]);
+    let fields: BTreeMap<String, Field> = [
+        ("file".to_string(), field(&half)),
+        ("copy".to_string(), field(&half)),
+    ]
+    .into();
+    assert_eq!(
+        check_create("document", None, &fields, None),
+        Err(too_many_files("file"))
+    );
+    // A file may be an extra field of any item.
+    let login = schema("login").unwrap();
+    assert!(check_field(login, "receipt", &field(&value)).is_ok());
+    assert!(check_field(login, "receipt", &field("receipt")).is_err());
 }
 
 /// Extra constraint on a known field's value.
@@ -209,6 +394,11 @@ const fn digits(name: &'static str, required: bool, min: usize, max: usize) -> S
     }
 }
 
+/// A field of any type, not required.
+const fn optional(name: &'static str, kind: FieldType) -> SchemaField {
+    known(name, kind, false)
+}
+
 /// A plain text field with a format.
 const fn formatted(name: &'static str, format: Format) -> SchemaField {
     SchemaField {
@@ -288,7 +478,7 @@ fn countries_and_phones() {
     }
 }
 
-static SCHEMAS: [Schema; 6] = [
+static SCHEMAS: [Schema; 18] = [
     // `sign-in-with` names the provider of a "Sign in with Google" login
     // (`google`, `apple`, ...; see `deadbolt_client::protocol::sign_in_provider`)
     // and `sign-in-account` the login it signs in with, by id. Neither is
@@ -380,7 +570,267 @@ static SCHEMAS: [Schema; 6] = [
             known("notes", FieldType::Note, false),
         ],
     },
+    // An API credential: a token or key and what it's for. `type` says how
+    // it's used (bearer, basic, aws-access-key, ...), `username` is the key
+    // id or account it goes with.
+    Schema {
+        kind: "api",
+        fields: &[
+            known("credential", FieldType::Secret, true),
+            optional("username", FieldType::Text),
+            optional("type", FieldType::Text),
+            optional("url", FieldType::Url),
+            optional("host", FieldType::Text),
+            optional("environment", FieldType::Text),
+            optional("expires", FieldType::Date),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    Schema {
+        kind: "database",
+        fields: &[
+            optional("type", FieldType::Text),
+            optional("host", FieldType::Text),
+            formatted("port", Format::Digits { min: 1, max: 5 }),
+            optional("database", FieldType::Text),
+            optional("username", FieldType::Text),
+            optional("password", FieldType::Secret),
+            optional("connection-string", FieldType::Secret),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    Schema {
+        kind: "server",
+        fields: &[
+            optional("url", FieldType::Url),
+            optional("username", FieldType::Text),
+            optional("password", FieldType::Secret),
+            optional("admin-console", FieldType::Url),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    Schema {
+        kind: "wifi",
+        fields: &[
+            optional("ssid", FieldType::Text),
+            optional("password", FieldType::Secret),
+            optional("security", FieldType::Text),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    // A software license.
+    Schema {
+        kind: "license",
+        fields: &[
+            optional("product", FieldType::Text),
+            optional("version", FieldType::Text),
+            secret_lines("license-key", false),
+            optional("licensed-to", FieldType::Text),
+            optional("email", FieldType::Email),
+            optional("order-number", FieldType::Text),
+            optional("purchased", FieldType::Date),
+            optional("expires", FieldType::Date),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    // A bank account.
+    Schema {
+        kind: "bank",
+        fields: &[
+            optional("bank", FieldType::Text),
+            optional("account-holder", FieldType::Text),
+            optional("account-number", FieldType::Secret),
+            optional("routing-number", FieldType::Text),
+            optional("iban", FieldType::Secret),
+            optional("swift", FieldType::Text),
+            optional("pin", FieldType::Secret),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    // A file: its name travels in the value ([`file_value`]). Any other item
+    // may carry files too, as extra fields of type file.
+    Schema {
+        kind: "document",
+        fields: &[
+            known("file", FieldType::File, true),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    // Documents as 1Password models them. Their numbers are secret; their
+    // countries are free text, as the documents print them.
+    Schema {
+        kind: "passport",
+        fields: &[
+            optional("full-name", FieldType::Text),
+            optional("number", FieldType::Secret),
+            optional("type", FieldType::Text),
+            optional("issuing-country", FieldType::Text),
+            optional("issuing-authority", FieldType::Text),
+            optional("nationality", FieldType::Text),
+            optional("sex", FieldType::Text),
+            optional("birthday", FieldType::Date),
+            optional("birthplace", FieldType::Text),
+            optional("issued", FieldType::Date),
+            optional("expires", FieldType::Date),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    Schema {
+        kind: "driver-license",
+        fields: &[
+            optional("full-name", FieldType::Text),
+            optional("number", FieldType::Secret),
+            optional("class", FieldType::Text),
+            optional("conditions", FieldType::Text),
+            optional("state", FieldType::Text),
+            optional("country", FieldType::Text),
+            optional("address", FieldType::Note),
+            optional("birthday", FieldType::Date),
+            optional("sex", FieldType::Text),
+            optional("height", FieldType::Text),
+            optional("expires", FieldType::Month),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    Schema {
+        kind: "membership",
+        fields: &[
+            optional("organization", FieldType::Text),
+            optional("member-name", FieldType::Text),
+            optional("member-id", FieldType::Secret),
+            optional("pin", FieldType::Secret),
+            optional("url", FieldType::Url),
+            formatted("phone", Format::Phone),
+            optional("member-since", FieldType::Month),
+            optional("expires", FieldType::Month),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    // A cryptocurrency wallet.
+    Schema {
+        kind: "crypto",
+        fields: &[
+            secret_lines("recovery-phrase", false),
+            optional("password", FieldType::Secret),
+            optional("address", FieldType::Text),
+            optional("network", FieldType::Text),
+            optional("notes", FieldType::Note),
+        ],
+    },
+    // Another identity document: a social security number, a national ID
+    // card, a residence permit; `type` says which.
+    Schema {
+        kind: "id-document",
+        fields: &[
+            optional("full-name", FieldType::Text),
+            optional("number", FieldType::Secret),
+            optional("type", FieldType::Text),
+            optional("country", FieldType::Text),
+            optional("issued", FieldType::Date),
+            optional("expires", FieldType::Date),
+            optional("notes", FieldType::Note),
+        ],
+    },
 ];
+
+#[test]
+fn every_schema_names_each_field_once_with_valid_names() {
+    let mut kinds = std::collections::BTreeSet::new();
+    for schema in schemas() {
+        assert!(kinds.insert(schema.kind), "{} twice", schema.kind);
+        let mut names = std::collections::BTreeSet::new();
+        for field in schema.fields {
+            assert!(
+                valid_field_name(field.name),
+                "{}.{}",
+                schema.kind,
+                field.name
+            );
+            assert!(
+                names.insert(field.name),
+                "{}.{} twice",
+                schema.kind,
+                field.name
+            );
+        }
+    }
+}
+
+#[test]
+fn new_kinds_check_their_fields() {
+    let ok = |kind: &str, name: &str, field: Field| {
+        check_field(schema(kind).unwrap(), name, &field).is_ok()
+    };
+    let text = |v: &str| Field::new(FieldType::Text, v);
+    let secret = |v: &str| Field::new(FieldType::Secret, v);
+    assert!(ok("api", "credential", secret("sk_live_x")));
+    assert!(!ok("api", "credential", text("sk_live_x")), "secret only");
+    assert!(ok(
+        "api",
+        "expires",
+        Field::new(FieldType::Date, "2027-01-31")
+    ));
+    assert!(!ok(
+        "api",
+        "expires",
+        Field::new(FieldType::Date, "2027-02-31")
+    ));
+    assert!(ok("database", "port", text("5432")));
+    for bad in ["", "543210", "54a", " 5432"] {
+        assert!(!ok("database", "port", text(bad)), "{bad:?}");
+    }
+    assert!(!ok("database", "password", text("pw")), "secret only");
+    assert!(ok("wifi", "ssid", text("Home")));
+    assert!(ok("license", "license-key", secret("AAAA-BBBB\nCCCC")));
+    assert!(ok("bank", "iban", secret("DE89370400440532013000")));
+    assert!(!ok("bank", "account-number", text("123")), "secret only");
+    assert!(ok(
+        "membership",
+        "expires",
+        Field::new(FieldType::Month, "2027-04")
+    ));
+    assert!(ok("membership", "phone", text("+15550100")));
+    assert!(!ok("membership", "phone", text("+1 555 0100")));
+    assert!(ok(
+        "crypto",
+        "recovery-phrase",
+        secret("abandon ability able")
+    ));
+    assert!(ok("passport", "number", secret("X1234567")));
+    assert!(ok(
+        "driver-license",
+        "expires",
+        Field::new(FieldType::Month, "2030-06")
+    ));
+    assert!(ok("id-document", "number", secret("078-05-1120")));
+
+    // Required fields at create: an API credential needs its credential, a
+    // document its file; the others need only a name or a field.
+    let none = BTreeMap::new();
+    assert_eq!(
+        check_create("api", Some("Stripe"), &none, None),
+        Err(ItemError::MissingField("credential"))
+    );
+    assert_eq!(
+        check_create("document", Some("Scan"), &none, None),
+        Err(ItemError::MissingField("file"))
+    );
+    for kind in [
+        "database",
+        "server",
+        "wifi",
+        "license",
+        "bank",
+        "passport",
+        "driver-license",
+        "membership",
+        "crypto",
+        "id-document",
+    ] {
+        assert_eq!(check_create(kind, Some("x"), &none, None), Ok(()), "{kind}");
+        assert_eq!(check_create(kind, None, &none, None), Err(ItemError::Empty));
+    }
+}
 
 /// The built-in item types.
 pub fn schemas() -> &'static [Schema] {
@@ -481,6 +931,22 @@ fn check_value(name: &str, field: &Field) -> Result<(), ItemError> {
         }
         FieldType::Date if !valid_date(value) => {
             return Err(invalid(name, "not a date (YYYY-MM-DD)"));
+        }
+        FieldType::File => {
+            let (file, contents) = file_parts(value);
+            if !valid_file_name(file) {
+                return Err(invalid(name, "not a file name"));
+            }
+            match contents.map(file_size) {
+                None | Some(None) => return Err(invalid(name, "not a file")),
+                Some(Some(size)) if size > MAX_FILE => {
+                    return Err(invalid(
+                        name,
+                        format!("files can be at most {} MiB", MAX_FILE >> 20),
+                    ));
+                }
+                Some(Some(_)) => {}
+            }
         }
         _ => {}
     }
@@ -725,5 +1191,13 @@ pub fn check_create(
     }
     fields
         .iter()
-        .try_for_each(|(name, field)| check_field(schema, name, field))
+        .try_for_each(|(name, field)| check_field(schema, name, field))?;
+    if files_size(fields.values()) > MAX_FILE {
+        let last = fields
+            .iter()
+            .rfind(|(_, f)| f.kind == FieldType::File)
+            .map_or("file", |(name, _)| name.as_str());
+        return Err(too_many_files(last));
+    }
+    Ok(())
 }

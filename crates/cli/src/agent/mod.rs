@@ -576,6 +576,7 @@ mod tests {
                 vault: None,
                 query: vec!["offline-login".into()],
                 otp: false,
+                files: Vec::new(),
             },
             Command::ItemList {
                 vault: None,
@@ -599,6 +600,7 @@ mod tests {
                 export: "name,password\nimported,offline-import\n"
                     .to_string()
                     .into(),
+                files: Vec::new(),
                 apply: true,
             },
             Command::ItemRemove {
@@ -1584,8 +1586,13 @@ impl Agent {
                 passphrase,
             } => pairing::join(&self, conv, device_name, passphrase).await,
             Command::Pair { code, vault } => pairing::pair(&self, conv, code, vault).await,
-            Command::ItemGet { vault, query, otp } => Ok(Reply::Item {
-                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp))?,
+            Command::ItemGet {
+                vault,
+                query,
+                otp,
+                files,
+            } => Ok(Reply::Item {
+                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp, &files))?,
             }),
             Command::ItemCode { vault, query } => Ok(Reply::Code {
                 code: self.with(|s| {
@@ -1619,11 +1626,12 @@ impl Agent {
             Command::Import {
                 vault,
                 export,
+                files,
                 apply,
             } => {
                 // Mapping needs no session: it runs before taking the lock.
-                let parsed = crate::import::parse(&export)?;
-                drop(export);
+                let parsed = crate::import::parse_with(&export, &files)?;
+                drop((export, files));
                 let report = self.with(|s| items::import(s, vault.as_deref(), parsed, apply))?;
                 if apply {
                     self.sync_now.notify_one();

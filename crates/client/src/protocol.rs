@@ -53,7 +53,7 @@ pub use caller::{
 };
 pub use reference::{Reference, SCHEME};
 
-pub const PROTOCOL_VERSION: u32 = 18;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -153,10 +153,15 @@ pub enum Command {
     /// Finds exactly one item, with its field values; replies `item`. One-time
     /// password secrets (fields of type otp) come back empty unless `otp`
     /// asks for them: a client that shows codes asks `ItemCode` instead.
+    /// A file field (type file) comes back as its name alone unless `files`
+    /// names it, for its contents too (`deadbolt_core::item::file_parts`):
+    /// a client asks for the one file it needs, never all of an item's.
     ItemGet {
         vault: Option<String>,
         query: Vec<String>,
         otp: bool,
+        #[serde(default)]
+        files: Vec<String>,
     },
     /// Finds exactly one item and computes its current one-time code from
     /// its code field (`code_field`); replies `code`. The secret itself
@@ -195,9 +200,12 @@ pub enum Command {
     /// vault, or earlier in the export, are skipped as duplicates. With
     /// `apply` it creates all new items or none, in as few entries as fit;
     /// without, it writes nothing. Replies `import`.
+    /// A `.1pux`'s attachments come in `files` ([`crate::export`]).
     Import {
         vault: Option<String>,
         export: Zeroizing<String>,
+        #[serde(default)]
+        files: Vec<ExportFile>,
         apply: bool,
     },
     /// A new random password of `length` characters (8 to 256): letters and
@@ -553,6 +561,11 @@ pub struct ResolvedSecret {
     pub title: String,
     pub field: String,
     pub value: Secret,
+    /// A file field: `value` is its name and contents in base64, which only
+    /// `inject` writes out (decoded), for a template that is that one
+    /// reference.
+    #[serde(default)]
+    pub file: bool,
 }
 
 /// A standing grant letting AI callers resolve one item's fields.
@@ -917,6 +930,28 @@ pub enum SiteStatus {
     Update,
     /// Saved with that password.
     Same,
+}
+
+/// A file from an export, beside its text: a `.1pux`'s attachment, named
+/// as in the archive's `files/` (`<documentId>__<fileName>`), its contents
+/// in base64. `too_large` (and no contents) for one over the cap or past
+/// what fits in the request, so the agent can say why it's left out. Wiped
+/// on drop; Debug leaves out the contents.
+#[derive(Clone, Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+pub struct ExportFile {
+    pub name: String,
+    pub data: String,
+    #[serde(default)]
+    pub too_large: bool,
+}
+
+impl std::fmt::Debug for ExportFile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ExportFile")
+            .field("name", &self.name)
+            .field("data", &"<redacted>")
+            .finish()
+    }
 }
 
 /// A field as typed by the user. Without `kind`, the agent uses the item
@@ -1475,13 +1510,25 @@ impl fmt::Display for ImportSource {
 
 /// The item types clients name, in the order they list them: the type, then
 /// what one and several are called.
-pub const KINDS: [(&str, &str, &str); 6] = [
+pub const KINDS: [(&str, &str, &str); 18] = [
     ("login", "login", "logins"),
     ("card", "card", "cards"),
     ("note", "secure note", "secure notes"),
     ("ssh", "SSH key", "SSH keys"),
     ("identity", "identity", "identities"),
     ("passkey", "passkey", "passkeys"),
+    ("api", "API credential", "API credentials"),
+    ("database", "database", "databases"),
+    ("server", "server", "servers"),
+    ("wifi", "Wi-Fi network", "Wi-Fi networks"),
+    ("license", "software license", "software licenses"),
+    ("bank", "bank account", "bank accounts"),
+    ("document", "document", "documents"),
+    ("passport", "passport", "passports"),
+    ("driver-license", "driver's license", "driver's licenses"),
+    ("membership", "membership", "memberships"),
+    ("crypto", "crypto wallet", "crypto wallets"),
+    ("id-document", "ID document", "ID documents"),
 ];
 
 /// What `count` items of type `kind` are called: "secure note", "SSH keys".
@@ -1495,16 +1542,25 @@ pub fn noun(kind: &str, count: usize) -> &str {
 
 /// The field an item is for, which clients copy or print by default: a
 /// login's password, a card's number, a secure note's body, an SSH key's
-/// private key, an identity's email, a passkey's username. `None` for a
-/// type this version doesn't know.
+/// private key, an identity's email, a passkey's username, an API
+/// credential's credential, a database's, server's or Wi-Fi network's
+/// password, a license's key, a bank account's number, a document's file,
+/// an ID's number, a membership's id, a wallet's recovery phrase. `None`
+/// for a type this version doesn't know.
 pub fn primary_field(kind: &str) -> Option<&'static str> {
     Some(match kind {
-        "login" => "password",
-        "card" => "number",
+        "login" | "database" | "server" | "wifi" => "password",
+        "card" | "passport" | "driver-license" | "id-document" => "number",
         "note" => "notes",
         "ssh" => "private-key",
         "identity" => "email",
         "passkey" => "username",
+        "api" => "credential",
+        "license" => "license-key",
+        "bank" => "account-number",
+        "document" => "file",
+        "membership" => "member-id",
+        "crypto" => "recovery-phrase",
         _ => return None,
     })
 }

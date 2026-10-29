@@ -733,6 +733,7 @@ mod tests {
             vault: None,
             query: vec!["github".into()],
             otp: false,
+            files: Vec::new(),
         }
     }
 
@@ -1125,6 +1126,7 @@ mod tests {
                 vault: None,
                 query: vec!["big".into()],
                 otp: false,
+                files: Vec::new(),
             },
         })
         .unwrap();

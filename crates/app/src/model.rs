@@ -248,6 +248,11 @@ impl App {
             Done::Saved { seq, result } => self.on_saved(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
+            Done::FileSaved(result) => match result {
+                Ok(name) => self.notice = Some(format!("Saved {name}")),
+                Err(failure) if failure.locked() => self.on_locked(tx),
+                Err(failure) => self.notice = Some(crate::onboarding::sentence(&failure.message)),
+            },
             Done::Activity { seq, result } => self.on_activity(seq, result, tx),
             Done::Agents { seq, result } => self.on_agents(seq, result, tx),
             Done::Reported => {}
@@ -585,11 +590,14 @@ pub fn field_words(name: &str) -> String {
         "address-line3" => return "address line 3".into(),
         "region" => return "state / region".into(),
         "billing" => return "billing address".into(),
+        "ssid" => return "network name (SSID)".into(),
+        "iban" => return "IBAN".into(),
+        "swift" => return "SWIFT / BIC".into(),
         _ => {}
     }
     name.split('-')
         .map(|word| {
-            if matches!(word, "url" | "otp" | "cvv" | "pin" | "id" | "ssh") {
+            if matches!(word, "url" | "otp" | "cvv" | "pin" | "id" | "ssh" | "api") {
                 word.to_uppercase()
             } else {
                 word.to_owned()
@@ -625,6 +633,13 @@ pub fn copy_label(kind: &str) -> &'static str {
         "ssh" => "Copy private key",
         "identity" => "Copy email",
         "passkey" => "Copy username",
+        "api" => "Copy credential",
+        "license" => "Copy license key",
+        "bank" => "Copy account number",
+        "document" => "Save file…",
+        "passport" | "driver-license" | "id-document" => "Copy number",
+        "membership" => "Copy member ID",
+        "crypto" => "Copy recovery phrase",
         _ => "Copy password",
     }
 }

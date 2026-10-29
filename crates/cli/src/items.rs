@@ -1,5 +1,10 @@
 //! Item commands on the client side: parsing `field[:type]=value`
-//! assignments, filling in missing input, and printing.
+//! assignments, filling in missing input, and printing. A file field's
+//! value is a path: the client reads the file and sends its name and
+//! contents (`deadbolt_core::item::file_value`).
+
+use std::io::{IsTerminal, Write};
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow, bail};
 use clap::Subcommand;
@@ -13,14 +18,22 @@ use crate::protocol::{Code, Command, FieldInput, ItemInfo, Reply, code_field, si
 #[derive(Subcommand)]
 pub enum ItemCommand {
     /// Create an item and print its short id. A login without `password=`
-    /// gets a generated one.
+    /// gets a generated one. A file field takes a path (at most 10 MiB);
+    /// any item can carry files as `name:file=PATH`.
     ///
-    /// Example: deadbolt new login username=dax url=github.com
+    /// Types: login, card, note, ssh, identity, api, database, server, wifi,
+    /// license, bank, document, passport, driver-license, membership, crypto,
+    /// id-document.
+    ///
+    /// Examples: deadbolt new login username=dax url=github.com
+    ///           deadbolt new api credential=- username=deploy-bot type=bearer
+    ///           deadbolt new document file=./passport.pdf --name Passport scan
     New {
-        /// Item type: login, card, note, ssh or identity.
+        /// Item type (see above).
         #[arg(value_name = "TYPE")]
         kind: String,
-        /// `field[:type]=value`; `field=-` reads the value from stdin.
+        /// `field[:type]=value`; `field=-` reads the value from stdin; a
+        /// file field's value is a path.
         #[arg(value_name = "FIELD=VALUE")]
         fields: Vec<String>,
         /// An optional label; need not be unique.
@@ -33,14 +46,20 @@ pub enum ItemCommand {
         #[arg(long)]
         no_symbols: bool,
     },
-    /// Print one field's raw value (default: login password, card number,
-    /// note body, SSH private key, identity email).
+    /// Print one field's raw value. Default: login, database, server or
+    /// Wi-Fi password, card or ID number, note body, SSH private key,
+    /// identity email, API credential, license key, bank account number,
+    /// membership id, wallet recovery phrase, a document's file. A file's
+    /// contents go to --output, or to stdout when it isn't a terminal.
     Get {
         /// Words that must all match, or an id prefix.
         #[arg(required = true, value_name = "QUERY")]
         query: Vec<String>,
         #[arg(short, long)]
         field: Option<String>,
+        /// Write a file field's contents here (mode 0600).
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
     },
     /// Print the current one-time code from an item's otp field.
     Code {
@@ -56,8 +75,8 @@ pub enum ItemCommand {
         #[arg(long)]
         reveal: bool,
     },
-    /// List items: short id, label, and username, card expiry, SSH key
-    /// comment or fingerprint, or identity email or phone.
+    /// List items: short id, label, and what tells it apart (username,
+    /// card expiry, SSH key comment, identity email, a document's size, ...).
     Ls {
         #[arg(value_name = "QUERY")]
         query: Vec<String>,
@@ -69,6 +88,7 @@ pub enum ItemCommand {
     /// assignments, the others are the query.
     ///
     /// Example: deadbolt set github dax password=- url=github.com
+    ///          deadbolt set github recovery:file=./codes.pdf
     Set {
         #[arg(required = true, value_name = "QUERY|FIELD=VALUE")]
         args: Vec<String>,
@@ -147,19 +167,33 @@ fn known_type(kind: Option<&str>, input: &FieldInput) -> Option<FieldType> {
     }
 }
 
+/// A file field's value for the file at `path`: its name and contents.
+fn read_file(path: &str) -> Result<String> {
+    Ok(deadbolt_client::file::read(Path::new(path))?.to_string())
+}
+
 /// Parses assignments and fills `field=-` values: from stdin (at most one),
 /// or asked for on a terminal, without echo unless the field is known not
-/// to be secret. `kind` is the item type, if known.
+/// to be secret. A file field's path becomes the file. `kind` is the item
+/// type, if known.
 fn assignments<'a>(
     args: impl IntoIterator<Item = &'a String>,
     kind: Option<&str>,
 ) -> Result<Vec<FieldInput>> {
     let mut inputs: Vec<FieldInput> = args.into_iter().map(|a| parse(a)).collect::<Result<_>>()?;
+    for input in &mut inputs {
+        if known_type(kind, input) == Some(FieldType::File) {
+            input.value = read_file(&input.value)?;
+        }
+    }
     let interactive = prompt::interactive();
     if !interactive && inputs.iter().filter(|i| i.value == "-").count() > 1 {
         bail!("only one field can read its value from stdin");
     }
-    for input in inputs.iter_mut().filter(|i| i.value == "-") {
+    for input in inputs
+        .iter_mut()
+        .filter(|i| i.value == "-" && known_type(kind, i) != Some(FieldType::File))
+    {
         let value = if interactive {
             let hidden = known_type(kind, input).is_none_or(|t| t.is_secret());
             prompt::ask_value(&input.name, hidden)?
@@ -182,18 +216,25 @@ fn fill_required(kind: &str, inputs: &mut Vec<FieldInput>) -> Result<()> {
         if inputs.iter().any(|i| i.name == field.name) {
             continue;
         }
+        let file = field.kind == FieldType::File;
         let value = prompt::fill(
             None,
             prompt::interactive(),
             || prompt::ask_value(field.name, field.kind.is_secret()),
             || {
                 anyhow!(
-                    "missing required field {}: pass {}=...",
+                    "missing required field {}: pass {}={}",
                     field.name,
-                    field.name
+                    field.name,
+                    if file { "PATH" } else { "..." }
                 )
             },
         )?;
+        let value = if file {
+            Zeroizing::new(read_file(&value)?)
+        } else {
+            value
+        };
         inputs.push(FieldInput {
             name: field.name.into(),
             kind: None,
@@ -263,21 +304,23 @@ fn show(item: &ItemInfo, reveal: bool, code: Option<String>, account: Option<Str
     }
 }
 
-/// One field's raw value, the item's default field without `field`.
-/// One-time password secrets come only for the field asked: `-f otp` asks
-/// up front, and another field turns out to be of type otp only once it
-/// comes back empty, so that item is asked for again by id.
+/// One field's raw value and type, the item's default field without
+/// `field`. One-time password secrets and files' contents come only for the
+/// field asked: `-f otp` and a document's file ask up front, and another
+/// field turns out to be of type otp (empty) or file (its name alone) only
+/// once it comes back, so that item is asked for again by id.
 async fn get(
     vault: Option<String>,
     query: Vec<String>,
     field: Option<&str>,
     mut fetch: impl AsyncFnMut(Command) -> Result<ItemInfo>,
-) -> Result<Zeroizing<String>> {
+) -> Result<(Zeroizing<String>, String)> {
     let otp = field == Some("otp");
     let command = Command::ItemGet {
         vault: vault.clone(),
         query,
         otp,
+        files: Vec::new(),
     };
     let mut item = fetch(command).await?;
     let name = match field {
@@ -292,23 +335,50 @@ async fn get(
             .iter_mut()
             .find(|f| f.name == name)
             .map(|f| {
+                let withheld = (f.kind == "otp" && f.value.is_empty())
+                    || (f.kind == "file" && !deadbolt_client::file::has_contents(&f.value));
                 (
-                    f.kind == "otp" && f.value.is_empty(),
-                    std::mem::take(&mut f.value),
+                    withheld,
+                    Zeroizing::new(std::mem::take(&mut f.value)),
+                    f.kind.clone(),
                 )
             })
             .ok_or_else(|| anyhow!("{label} has no field {name}"))
     };
-    let (withheld, mut value) = find(&mut item)?;
-    if withheld && !otp {
+    let (withheld, mut value, mut kind) = find(&mut item)?;
+    if withheld && !(otp && kind == "otp") {
         let command = Command::ItemGet {
             vault,
             query: vec![item.id.clone()],
-            otp: true,
+            otp: kind == "otp",
+            files: if kind == "file" {
+                vec![name.clone()]
+            } else {
+                Vec::new()
+            },
         };
-        (_, value) = find(&mut fetch(command).await?)?;
+        (_, value, kind) = find(&mut fetch(command).await?)?;
     }
-    Ok(Zeroizing::new(value))
+    Ok((value, kind))
+}
+
+/// Writes a file field's contents to `output`, else to stdout unless it is
+/// a terminal.
+fn write_file(value: &str, output: Option<&Path>) -> Result<()> {
+    use deadbolt_client::file;
+    match output {
+        Some(path) => file::write(value, path)?,
+        None if std::io::stdout().is_terminal() => {
+            bail!(
+                "{} is a file; pass -o FILE, or redirect stdout",
+                file::name(value)
+            )
+        }
+        None => std::io::stdout()
+            .lock()
+            .write_all(&file::contents(value)?)?,
+    }
+    Ok(())
 }
 
 async fn code(
@@ -388,12 +458,20 @@ pub async fn run(
             };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
-        ItemCommand::Get { query, field } => {
+        ItemCommand::Get {
+            query,
+            field,
+            output,
+        } => {
             let fetch = async |command| item(paths, command, from_stdin).await;
-            println!(
-                "{}",
-                get(vault, query, field.as_deref(), fetch).await?.as_str()
-            );
+            let (value, kind) = get(vault, query, field.as_deref(), fetch).await?;
+            if kind == "file" {
+                write_file(&value, output.as_deref())?;
+            } else if output.is_some() {
+                bail!("--output is for file fields");
+            } else {
+                println!("{}", value.as_str());
+            }
         }
         ItemCommand::Code { query } => {
             println!(
@@ -406,6 +484,7 @@ pub async fn run(
                 vault: vault.clone(),
                 query,
                 otp: reveal,
+                files: Vec::new(),
             };
             let item = item(paths, command, from_stdin).await?;
             let code = match code_field(&item.fields) {
@@ -449,10 +528,21 @@ pub async fn run(
             if assigns.is_empty() && name.is_none() {
                 bail!("nothing to change: give field=value assignments or --name");
             }
+            let query: Vec<String> = query.into_iter().cloned().collect();
+            // The item's type says which fields take a file's path.
+            let list = Command::ItemList {
+                vault: vault.clone(),
+                query: query.clone(),
+                kind: None,
+            };
+            let kind = match crate::request(paths, list, from_stdin).await? {
+                Reply::Items { items } if items.len() == 1 => Some(items[0].kind.clone()),
+                _ => None,
+            };
             let command = Command::ItemSet {
                 vault,
-                query: query.into_iter().cloned().collect(),
-                fields: assignments(assigns, None)?,
+                query,
+                fields: assignments(assigns, kind.as_deref())?,
                 name,
                 unset: Vec::new(),
             };
@@ -530,7 +620,7 @@ mod tests {
                 sent.push((query.join(" "), otp));
                 Ok(agent(otp))
             };
-            let got = get(None, vec!["github".into()], name, fetch).await.unwrap();
+            let (got, _) = get(None, vec!["github".into()], name, fetch).await.unwrap();
             assert_eq!(got.as_str(), value, "{name:?}");
             let asked: Vec<_> = asked.into_iter().map(|(q, o)| (q.to_owned(), o)).collect();
             assert_eq!(sent, asked, "{name:?}");

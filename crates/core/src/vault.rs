@@ -342,6 +342,7 @@ impl Vault {
             for op in ops {
                 data::check(&self.items, op)?;
             }
+            data::check_files(&self.items, ops)?;
         }
         let tips = match log_id.log {
             Log::Membership => &self.membership_tips,

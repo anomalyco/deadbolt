@@ -1610,7 +1610,10 @@ fn items() {
 
     // Schema rejection.
     for (args, error) in [
-        (&["new", "wifi", "password=x"][..], "unknown item type"),
+        (
+            &["new", "hovercraft", "password=x"][..],
+            "unknown item type",
+        ),
         (&["new", "note"], "needs a name or a field"),
         (&["new", "card", "cvv=123"], "missing required field number"),
         (
@@ -3957,4 +3960,358 @@ fn forms_fill_from_an_imported_identity_and_card() {
     let looked_up = entries.iter().any(|e| e["command"] == "form-items");
     assert_eq!((identity, looked_up), (!browser, !browser), "{entries:?}");
     assert_eq!(entries.len(), if browser { 1 } else { 3 });
+}
+
+/// Every item type: its fields checked by its schema, `get` printing the
+/// field it's for, `ls` naming it.
+#[test]
+fn item_types() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let cases: [(&[&str], &str, &str); 12] = [
+        (
+            &[
+                "api",
+                "credential=sk_test_1",
+                "username=deploy-bot",
+                "type=bearer",
+                "--name",
+                "Stripe",
+            ],
+            "sk_test_1",
+            "Stripe\tdeploy-bot",
+        ),
+        (
+            &[
+                "database",
+                "type=postgres",
+                "host=db.example",
+                "port=5432",
+                "database=app",
+                "username=app",
+                "password=pg-pw",
+            ],
+            "pg-pw",
+            "app on db.example\tapp",
+        ),
+        (
+            &[
+                "server",
+                "url=box.example",
+                "username=root",
+                "password=root-pw",
+            ],
+            "root-pw",
+            "box.example\troot",
+        ),
+        (
+            &["wifi", "ssid=Home", "password=wifi-pw", "security=WPA2"],
+            "wifi-pw",
+            "Home\tWPA2",
+        ),
+        (
+            &[
+                "license",
+                "product=Editor",
+                "license-key=KEY-1",
+                "licensed-to=Dax",
+            ],
+            "KEY-1",
+            "Editor\tDax",
+        ),
+        (
+            &[
+                "bank",
+                "bank=Example Bank",
+                "account-number=12345678",
+                "account-holder=Dax",
+            ],
+            "12345678",
+            "Example Bank\tDax",
+        ),
+        (
+            &[
+                "passport",
+                "full-name=Dax Raad",
+                "number=X123",
+                "issuing-country=United States",
+            ],
+            "X123",
+            "Dax Raad\tUnited States",
+        ),
+        (
+            &[
+                "driver-license",
+                "number=D123",
+                "state=IL",
+                "expires=06/30",
+                "--name",
+                "Driving",
+            ],
+            "D123",
+            "Driving\tIL",
+        ),
+        (
+            &[
+                "membership",
+                "organization=Gym Co",
+                "member-id=M-7",
+                "phone=+1 555 0100",
+            ],
+            "M-7",
+            "Gym Co",
+        ),
+        (
+            &[
+                "crypto",
+                "recovery-phrase=abandon ability able",
+                "address=bc1qxy",
+            ],
+            "abandon ability able",
+            "crypto wallet\tbc1qxy",
+        ),
+        (
+            &[
+                "id-document",
+                "type=SSN",
+                "number=078-05-1120",
+                "full-name=Kit",
+            ],
+            "078-05-1120",
+            "Kit\tSSN",
+        ),
+        (
+            &["note", "notes=alarm 4417", "--name", "Codes"],
+            "alarm 4417",
+            "Codes",
+        ),
+    ];
+    for (args, primary, listed) in cases {
+        let id = new(&a, args);
+        assert_eq!(a.run(&["get", &id]), format!("{primary}\n"), "{args:?}");
+        let ls = a.run(&["ls", "--type", args[0]]);
+        let row = ls
+            .lines()
+            .map(|l| l.split_once('\t').unwrap().1)
+            .collect::<Vec<_>>();
+        assert_eq!(row, [listed], "{args:?}");
+    }
+    // Inputs are normalized and checked against each type's schema.
+    let show = a.run(&["show", "driving"]);
+    assert!(show.contains("expires  2030-06\n"), "{show}");
+    assert!(a.run(&["show", "gym"]).contains("+15550100"));
+    assert!(a.run(&["show", "box"]).contains("https://box.example"));
+    assert_eq!(a.run(&["get", "home", "-f", "ssid"]), "Home\n");
+    // Lookup searches the plain identifying fields, never secrets.
+    assert_eq!(a.run(&["get", "deploy-bot"]), "sk_test_1\n");
+    assert!(a.fail(&["get", "alarm"]).contains("no item matches"));
+    for (args, err) in [
+        (
+            &["new", "api", "username=x"][..],
+            "missing required field credential",
+        ),
+        (
+            &["new", "database", "port=postgres"][..],
+            "invalid value for port",
+        ),
+        (
+            &["new", "api", "credential=x", "expires=2027-02-30"][..],
+            "not a date",
+        ),
+        (
+            &["new", "passport", "number:text=X1"][..],
+            "field number must be of type secret",
+        ),
+    ] {
+        let out = a.fail(args);
+        assert!(out.contains(err), "{args:?}: {out}");
+    }
+    // Secrets stay masked in show.
+    let show = a.run(&["show", "stripe"]);
+    assert!(
+        !show.contains("sk_test_1") && show.contains("credential"),
+        "{show}"
+    );
+}
+
+/// Documents and attachments: a file field takes a path, `get` writes the
+/// file, files over 10 MiB are refused, and one at the cap travels to
+/// another device in one entry.
+#[test]
+fn documents_and_attachments() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let scan = a.path("scan.pdf");
+    std::fs::write(&scan, b"%PDF-1.7 scan").unwrap();
+    let scan = scan.to_str().unwrap();
+    new(
+        &a,
+        &[
+            "document",
+            &format!("file={scan}"),
+            "--name",
+            "Passport scan",
+        ],
+    );
+    let ls = a.run(&["ls", "--type", "document"]);
+    assert!(ls.ends_with("\tPassport scan\t13 bytes\n"), "{ls}");
+    let show = a.run(&["show", "passport"]);
+    assert!(show.contains("file   scan.pdf\n"), "{show}");
+    assert!(!show.contains("JVBER"), "{show}");
+    // To a file (0600), or to stdout when it isn't a terminal.
+    let out = a.path("out.pdf");
+    a.run(&["get", "passport", "-o", out.to_str().unwrap()]);
+    assert_eq!(std::fs::read(&out).unwrap(), b"%PDF-1.7 scan");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let piped = a.try_run(&["get", "passport"]);
+    assert!(piped.status.success());
+    assert_eq!(piped.stdout, b"%PDF-1.7 scan");
+    // Searchable by its file name.
+    assert_eq!(a.try_run(&["get", "scan.pdf"]).stdout, b"%PDF-1.7 scan");
+
+    // A file on any item: `name:file=PATH`, or a file field its type knows.
+    new(&a, &["login", "url=github.com", "password=pw"]);
+    let codes = a.path("codes.txt");
+    std::fs::write(&codes, b"1111 2222").unwrap();
+    a.run(&[
+        "set",
+        "github",
+        &format!("recovery:file={}", codes.display()),
+    ]);
+    assert_eq!(
+        a.try_run(&["get", "github", "-f", "recovery"]).stdout,
+        b"1111 2222"
+    );
+    assert_eq!(a.run(&["get", "github"]), "pw\n");
+    a.run(&["set", "passport", &format!("file={}", codes.display())]);
+    assert_eq!(a.try_run(&["get", "passport"]).stdout, b"1111 2222");
+    assert!(a.run(&["show", "passport"]).contains("file   codes.txt\n"));
+    let err = a.fail(&["get", "github", "-o", out.to_str().unwrap()]);
+    assert!(err.contains("--output is for file fields"), "{err}");
+
+    // References: a file goes only into a file inject writes, decoded, as
+    // the template's one reference.
+    let template = a.path("file.tpl");
+    std::fs::write(&template, "{{ deadbolt://personal/Passport scan/file }}\n").unwrap();
+    let injected = a.path("injected.txt");
+    let (tpl, inj) = (template.to_str().unwrap(), injected.to_str().unwrap());
+    a.run(&["inject", "-i", tpl, "-o", inj]);
+    assert_eq!(std::fs::read(&injected).unwrap(), b"1111 2222");
+    std::fs::write(
+        &template,
+        "codes: {{ deadbolt://personal/Passport scan/file }}\n",
+    )
+    .unwrap();
+    let err = a.fail(&["inject", "-i", tpl, "-o", inj, "--force"]);
+    assert!(
+        err.contains("is a file") && err.contains("one reference"),
+        "{err}"
+    );
+    let err = a.fail(&["read", "deadbolt://personal/Passport scan/file"]);
+    assert!(
+        err.contains("is a file") && err.contains("inject -o"),
+        "{err}"
+    );
+    let err = a.fail(&[
+        "run",
+        "--env",
+        "CODES=deadbolt://personal/Passport scan/file",
+        "--",
+        "true",
+    ]);
+    assert!(
+        err.contains("is a file") && err.contains("environment"),
+        "{err}"
+    );
+
+    // The size cap: 10 MiB.
+    let big = a.path("big.bin");
+    let file = std::fs::File::create(&big).unwrap();
+    file.set_len(10 * 1024 * 1024 + 1).unwrap();
+    let err = a.fail(&["new", "document", &format!("file={}", big.display())]);
+    assert!(err.contains("larger than 10 MiB"), "{err}");
+    file.set_len(10 * 1024 * 1024).unwrap();
+    std::fs::write(&big, vec![0xa5; 10 * 1024 * 1024]).unwrap();
+    new(
+        &a,
+        &[
+            "document",
+            &format!("file={}", big.display()),
+            "--name",
+            "Big",
+        ],
+    );
+
+    // It syncs: one entry carries it whole.
+    let b = Device::new();
+    pair(&a, &b, "beta", None);
+    eventually("b to receive the big document", || {
+        b.run(&["sync"]);
+        b.run(&["ls", "--type", "document"]).contains("\tBig\t")
+    });
+    let got = b.try_run(&["get", "big"]);
+    assert!(got.status.success());
+    assert_eq!(got.stdout.len(), 10 * 1024 * 1024);
+    assert!(got.stdout.iter().all(|b| *b == 0xa5));
+}
+
+/// A .1pux with a document and an attachment: the client reads the files
+/// export.data names, and the agent maps every category to its type.
+#[test]
+fn import_1pux_with_files() {
+    use zip::write::SimpleFileOptions;
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let data = r#"{"accounts": [{"attrs": {"uuid": "USER"}, "vaults": [{"attrs": {"uuid": "v1", "avatar": "v1.png"}, "items": [
+      {"uuid": "i1", "categoryUuid": "001", "overview": {"title": "Site", "url": "https://site.example"},
+       "details": {"loginFields": [{"value": "site-pw-1", "fieldType": "P", "designation": "password"}],
+         "sections": [{"fields": [{"title": "", "id": "f", "value": {"file": {"fileName": "codes.txt", "documentId": "docA"}}}]}]}},
+      {"uuid": "i2", "categoryUuid": "006", "overview": {"title": "Scan"},
+       "details": {"documentAttributes": {"fileName": "scan.pdf", "documentId": "docB"}}},
+      {"uuid": "i3", "categoryUuid": "112", "overview": {"title": "Stripe"},
+       "details": {"sections": [{"fields": [{"id": "credential", "value": {"concealed": "sk-live-2"}}]}]}},
+      {"uuid": "i4", "categoryUuid": "109", "overview": {"title": "Home"},
+       "details": {"sections": [{"fields": [{"id": "network_name", "value": {"string": "Home"}},
+         {"id": "wireless_password", "value": {"concealed": "wifi-pw-3"}}]}]}},
+      {"uuid": "i5", "categoryUuid": "102", "overview": {"title": "DB"},
+       "details": {"sections": [{"fields": [{"id": "password", "value": {"concealed": "db-pw-4"}}]}]}}
+    ]}]}]}"#;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in [
+        ("export.data", data.as_bytes()),
+        ("files/docA__codes.txt", b"1111 2222".as_slice()),
+        ("files/docB__scan.pdf", b"%PDF".as_slice()),
+        ("files/v1.png", b"avatar".as_slice()),
+    ] {
+        zip.start_file(name, SimpleFileOptions::default()).unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    let file = a.path("export.1pux");
+    std::fs::write(&file, zip.finish().unwrap().into_inner()).unwrap();
+    let output = a.try_run(&["import", file.to_str().unwrap()]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "imported 5 from 1Password (logins 1, cards 0, API credentials 1, databases 1, Wi-Fi networks 1, documents 1)\n"
+    );
+    for secret in ["site-pw-1", "sk-live-2", "wifi-pw-3", "db-pw-4", "1111"] {
+        assert!(!stdout.contains(secret));
+    }
+    assert_eq!(a.run(&["get", "stripe"]), "sk-live-2\n");
+    assert_eq!(a.run(&["get", "home"]), "wifi-pw-3\n");
+    assert_eq!(a.run(&["get", "db"]), "db-pw-4\n");
+    assert_eq!(a.try_run(&["get", "scan"]).stdout, b"%PDF");
+    assert_eq!(
+        a.try_run(&["get", "site", "-f", "codes"]).stdout,
+        b"1111 2222"
+    );
+    // Importing again changes nothing.
+    let again = a.run(&["import", file.to_str().unwrap()]);
+    assert!(
+        again.contains("imported 0") && again.contains("skipped 5 duplicates"),
+        "{again}"
+    );
 }

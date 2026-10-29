@@ -622,6 +622,29 @@ pub async fn inject(paths: &Paths, args: InjectArgs, from_stdin: bool) -> Result
         Purpose::Inject
     };
     let values = resolve(paths, refs, purpose, from_stdin).await?;
+    // A file field is written out whole and decoded, so it must be all of
+    // the template (whitespace around it aside).
+    if let Some(file) = values.values().find(|v| v.file) {
+        let alone: Vec<&Part> = parts
+            .iter()
+            .filter(|p| !matches!(p, Part::Text(t) if t.trim().is_empty()))
+            .collect();
+        let [Part::Reference(r)] = alone.as_slice() else {
+            bail!(
+                "{} › {} is a file: a template can hold it only as its one reference, {{{{ deadbolt://… }}}} and nothing else",
+                file.title,
+                file.field
+            );
+        };
+        let bytes = deadbolt_client::file::contents(values[r].value.expose())?;
+        match &args.output {
+            Some(path) if path.as_os_str() != "-" => {
+                write_output(paths, path, &bytes, args.force)?;
+            }
+            _ => bail!("a file is written only to -o FILE"),
+        }
+        return Ok(());
+    }
     let mut out = Zeroizing::new(String::with_capacity(text.len()));
     for part in &parts {
         match part {

@@ -105,6 +105,13 @@ pub enum Job {
         id: String,
         seq: u64,
     },
+    /// Writes an item's file field to `path`: the agent sends its contents
+    /// (`ItemGet` with `files`), written readable only by the owner.
+    SaveFile {
+        id: String,
+        field: String,
+        path: PathBuf,
+    },
     /// A password from the agent's generator.
     Generate {
         length: usize,
@@ -185,6 +192,8 @@ pub enum Done {
         seq: u64,
         result: Result<Zeroizing<String>, Failure>,
     },
+    /// A file saved (its name), or why not.
+    FileSaved(Result<String, Failure>),
     Activity {
         seq: u64,
         result: Result<Vec<ActivityEntry>, Failure>,
@@ -311,7 +320,7 @@ impl From<ExportError> for ImportFailure {
     }
 }
 
-fn error_chain(error: &dyn std::error::Error) -> String {
+pub(crate) fn error_chain(error: &dyn std::error::Error) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(e) = source {

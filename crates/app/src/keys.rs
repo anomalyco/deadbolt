@@ -369,7 +369,7 @@ impl App {
         if let Some(handled) = self.import_key(ev) {
             return Some(handled);
         }
-        self.edit_key(ev)
+        self.edit_key(ev, tx)
     }
 
     /// Keys in the search field (the vault's and the panel's), before its

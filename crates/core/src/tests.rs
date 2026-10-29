@@ -947,8 +947,8 @@ fn schema_is_enforced_at_commit() {
     };
     let cases = [
         (
-            create("wifi", vec![("password", secret("x"))]),
-            ItemError::UnknownType("wifi".into()),
+            create("hovercraft", vec![("password", secret("x"))]),
+            ItemError::UnknownType("hovercraft".into()),
         ),
         (
             create("ssh", vec![("public-key", text("ssh-ed25519 AAAA"))]),
@@ -1159,7 +1159,7 @@ fn invalid_ops_are_ignored_at_apply_in_any_order() {
         ),
     ]);
     let created = b.raw(vec![
-        DataOp::create("wifi", None, [("password".into(), secret("x"))]),
+        DataOp::create("hovercraft", None, [("password".into(), secret("x"))]),
         DataOp::create("card", None, [("cvv".into(), secret("123"))]),
         DataOp::create(
             "card",
@@ -1630,4 +1630,70 @@ fn invalid_sources_are_rejected() {
             .unwrap_err(),
         Error::Item(ItemError::InvalidSource)
     );
+}
+
+/// An item's files hold at most `MAX_FILE` together: a write that would
+/// take an item past it is refused, in one entry or over several, while a
+/// removal or a smaller file still goes. Two devices' concurrent files can
+/// go past it, since neither sees the other's, and every device keeps both.
+#[test]
+fn an_items_files_are_capped_together_when_written() {
+    use crate::item::{MAX_FILE, file_value};
+    let mut a = Dev::create();
+    let item = a.login("p");
+    let file = |n: usize| Field::new(FieldType::File, file_value("f.bin", &vec![7; n]).as_str());
+    let six = MAX_FILE * 6 / 10;
+    let refused =
+        |r: Result<Entry, Error>| matches!(r, Err(Error::Item(ItemError::InvalidValue { .. })));
+    // Two files that fit alone but not together, in one entry.
+    let both = vec![
+        DataOp::set(item, "one", file(six)),
+        DataOp::set(item, "two", file(six)),
+    ];
+    assert!(refused(a.vault.write(&a.secret, both)));
+    a.vault
+        .write(&a.secret, vec![DataOp::set(item, "one", file(six))])
+        .unwrap();
+    assert!(refused(
+        a.vault
+            .write(&a.secret, vec![DataOp::set(item, "two", file(six))])
+    ));
+    // Replacing a file counts the new one, not both.
+    a.vault
+        .write(&a.secret, vec![DataOp::set(item, "one", file(six + 1))])
+        .unwrap();
+    // A removal in the same entry makes room.
+    a.vault
+        .write(
+            &a.secret,
+            vec![
+                DataOp::remove(item, "one"),
+                DataOp::set(item, "two", file(six)),
+            ],
+        )
+        .unwrap();
+
+    // Concurrent files on two devices: each fits where it's written, and
+    // both are kept everywhere (applying never refuses).
+    let mut b = a.invite();
+    let mut c = a.invite();
+    sync_both(&mut b, &mut c);
+    b.vault
+        .write(
+            &b.secret,
+            vec![DataOp::set(item, "three", file(MAX_FILE / 3))],
+        )
+        .unwrap();
+    c.vault
+        .write(
+            &c.secret,
+            vec![DataOp::set(item, "four", file(MAX_FILE / 3))],
+        )
+        .unwrap();
+    sync_both(&mut b, &mut c);
+    for vault in [&b.vault, &c.vault] {
+        let fields = vault.item(&item).unwrap().fields;
+        assert!(fields.contains_key("three") && fields.contains_key("four"));
+        assert!(crate::item::files_size(fields.values()) > MAX_FILE);
+    }
 }

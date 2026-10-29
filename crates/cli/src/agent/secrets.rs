@@ -187,6 +187,7 @@ pub fn find(s: &Loaded, reference: &Reference, now: Duration) -> Result<Found> {
             title,
             field: reference.field.clone(),
             value: Secret::new(value.as_str()),
+            file: field.kind == FieldType::File,
         },
     })
 }
@@ -301,6 +302,14 @@ fn named(found: &Found) -> String {
     )
 }
 
+/// The reference that names `found`, by vault and title.
+fn reference_of(found: &Found) -> String {
+    format!(
+        "deadbolt://{}/{}/{}",
+        found.secret.vault, found.secret.title, found.secret.field
+    )
+}
+
 fn not_granted(missing: &[&Found], purpose: Purpose) -> anyhow::Error {
     let names: Vec<String> = missing.iter().map(|f| named(f)).collect();
     let mut items: Vec<String> = missing
@@ -394,6 +403,25 @@ impl Agent {
         // Locked, or a reference that names nothing, fails before anyone
         // is asked anything.
         let mut found = self.with(|s| lookup(s))?;
+        // A file goes only into a file `inject` writes; an environment
+        // variable or a printed value is text.
+        if purpose != Purpose::Inject
+            && let Some(file) = found.iter().find(|f| f.secret.file)
+        {
+            let use_ = if purpose == Purpose::Run {
+                "`deadbolt run` puts values in the environment, which can't hold a file"
+            } else {
+                "`deadbolt read` (and `inject` to stdout) print text"
+            };
+            return Err(fail(
+                ErrorCode::Failed,
+                format!(
+                    "{} is a file: {use_}. Write it out with `deadbolt inject -o FILE` from a template that is only {{{{ {} }}}}, or `deadbolt get -o FILE`",
+                    named(file),
+                    reference_of(file)
+                ),
+            ));
+        }
         if ai {
             match purpose {
                 Purpose::Read => {
