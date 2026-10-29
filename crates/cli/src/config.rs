@@ -17,6 +17,11 @@
 //! # An unpacked copy of the browser extension that `deadbolt update` keeps
 //! # current (`deadbolt browser install --extension-dir <dir>` sets it).
 //! extension_dir = "/Users/me/Deadbolt Extension"
+//!
+//! # Which build of the extension that directory gets: "native" (the
+//! # default, talking to `deadbolt browser-host`) or "standalone" (its own
+//! # vault in the browser). `deadbolt browser switch` changes it.
+//! extension_build = "standalone"
 //! ```
 
 use std::path::{Path, PathBuf};
@@ -102,6 +107,37 @@ pub struct Config {
     pub touch_id: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extension_dir: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_build: Option<ExtensionBuild>,
+}
+
+/// The two builds of the browser extension (`extension/scripts/build.ts`).
+/// Both have the same extension id, so one replaces the other in a profile.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExtensionBuild {
+    /// Fills from the agent through `deadbolt browser-host`.
+    #[default]
+    Native,
+    /// Its own vault in the browser, a device of its own.
+    Standalone,
+}
+
+impl ExtensionBuild {
+    /// The release service target of the `extension` artifact.
+    pub fn target(self) -> &'static str {
+        match self {
+            Self::Native => "chromium",
+            Self::Standalone => "chromium-standalone",
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Native => "native",
+            Self::Standalone => "standalone",
+        }
+    }
 }
 
 impl Config {
@@ -138,9 +174,13 @@ pub fn set_touch_id(path: &Path, enabled: bool) -> Result<()> {
     change(path, |cfg| cfg.touch_id = Some(enabled))
 }
 
-/// Records the extension directory `deadbolt update` keeps current.
-pub fn set_extension_dir(path: &Path, dir: &Path) -> Result<()> {
-    change(path, |cfg| cfg.extension_dir = Some(dir.to_path_buf()))
+/// Records the extension directory `deadbolt update` keeps current, and
+/// which build it gets.
+pub fn set_extension_dir(path: &Path, dir: &Path, build: ExtensionBuild) -> Result<()> {
+    change(path, |cfg| {
+        cfg.extension_dir = Some(dir.to_path_buf());
+        cfg.extension_build = Some(build);
+    })
 }
 
 /// Changes `path` (`config.toml`) with `edit`, preserving other settings.
