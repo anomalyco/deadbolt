@@ -39,7 +39,8 @@ async function copySecret(app: App, b: HTMLElement, value: string) {
   else app.announce("Couldn't copy.")
 }
 
-function row(app: App, a: Account, fill: boolean): HTMLElement {
+/** A login's row. `fill`: the popup's site, with Fill; `failed` shows why a fill didn't happen. */
+function row(app: App, a: Account, fill: boolean, failed: (message: string) => void = () => {}): HTMLElement {
   const link = url(a)
   const main = button("vrow-main", [avatarFor(a.title, link), h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
     app.go({ name: "item", ref: a.ref }),
@@ -61,12 +62,14 @@ function row(app: App, a: Account, fill: boolean): HTMLElement {
   if (!link) open.disabled = true
   const actions = h("span", { class: "vrow-actions" }, user, pass, open)
   if (fill && app.site) {
-    const f = button("btn primary fill", "Fill", async (b) => {
+    // With a save offer showing, its Save is the one primary button, as in the native popup.
+    const f = button(app.site.offer ? "btn fill" : "btn primary fill", "Fill", async (b) => {
       b.disabled = true
+      failed("")
       const reply = (await chrome.runtime.sendMessage({ type: "db:popup-fill", tabId: app.site!.tabId, ref: a.ref }).catch(() => null)) as PickReply | null
       if (reply?.ok) return window.close()
       b.disabled = false
-      say(reply?.message || "Couldn't fill.")
+      failed(reply?.message || "Couldn't fill.")
     })
     f.setAttribute("aria-label", `Fill ${a.title}`)
     actions.append(f)
@@ -114,10 +117,36 @@ export function listView(app: App): View {
   const body = h("div", { class: "list-body" })
   const el = h("section", { class: "view list-view" }, h("div", { class: "search-row" }, h("span", { class: "search-wrap" }, glyph("search"), search), add), body)
 
+  // Why the popup's Fill didn't fill, shown under this site's logins (and said), as the native popup shows it.
+  const fillError = h("p", { class: "error", id: "error", role: "alert" })
+  fillError.hidden = true
+  const failed = (message: string) => {
+    fillError.textContent = message
+    fillError.hidden = !message
+  }
+  // The save offer's card stays the same element while it's the same offer,
+  // and stays showing "Saved" until it puts itself away, though the save
+  // changed the list under it.
+  let offer: { id: string; el: HTMLElement } | null = null
+  const offerEl = (): HTMLElement | null => {
+    if (offer?.el.querySelector(".done")) return offer.el
+    const o = app.site?.offer
+    if (!o || !app.site) return (offer = null)
+    if (offer?.id !== o.id) {
+      offer = {
+        id: o.id,
+        el: offerCard(o, app.site.tabId, () => {
+          offer = null
+          void app.refresh()
+        }),
+      }
+    }
+    return offer.el
+  }
   const section = (label: string, aside: string | null, items: ItemSummary[], fill: boolean) => {
     const rows = h("div", { class: "rows" })
     slidingHighlight(rows)
-    rows.append(...items.map((a) => (a.kind === "login" ? row(app, a as Account, fill) : itemRow(app, a))))
+    rows.append(...items.map((a) => (a.kind === "login" ? row(app, a as Account, fill, failed) : itemRow(app, a))))
     return h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, label), aside ? h("span", { class: "mono muted" }, aside) : null), rows)
   }
 
@@ -125,7 +154,8 @@ export function listView(app: App): View {
     const q = app.query.trim().toLowerCase()
     const all = app.items
     const parts: Node[] = []
-    if (app.site?.offer && !q) parts.push(offerCard(app.site.offer, app.site.tabId, () => void app.refresh()))
+    const card = q ? null : offerEl()
+    if (card) parts.push(card)
     if (all === null) {
       parts.push(h("div", { class: "skeleton" }, ...[0, 1, 2].map(() => h("div", { class: "skeleton-row" }))))
     } else if (!all.length) {
@@ -146,7 +176,7 @@ export function listView(app: App): View {
         const found = [...site, ...all.filter((a) => !here.has(a.ref))].filter((a) => matches(a, q))
         parts.push(found.length ? section("Results", String(found.length), found, false) : h("div", { class: "empty" }, `Nothing matches “${app.query.trim()}”.`))
       } else {
-        if (site.length) parts.push(section("This site", app.site!.host, site, true))
+        if (site.length) parts.push(section("This site", app.site!.host, site, true), fillError)
         else if (app.site) parts.push(h("p", { class: "site-none" }, `Nothing saved for `, h("span", { class: "mono" }, app.site.host), ` yet.`))
         const rest = all.filter((a) => !here.has(a.ref))
         if (rest.length) parts.push(section(site.length ? "Everything else" : "All items", String(all.length), rest, false))
