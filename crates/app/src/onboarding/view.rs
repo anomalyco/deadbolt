@@ -7,8 +7,6 @@
 //! place under their fields. Reduced motion drops the travel and keeps the
 //! fades (Rune's runtime).
 
-mod ceremony;
-
 use rune::{
     Color, Cursor, El, Icon, ScrollSpec, Shadow, TextEdit, TextStyle, Transition, col, el, icon,
     row, text,
@@ -60,13 +58,15 @@ pub fn screen(s: &App, k: &Kit, dark: bool) -> Paged {
         Step::Welcome => welcome(s, k),
         Step::Create => form(s, k, Flow::Create),
         Step::Join => form(s, k, Flow::Join),
-        Step::Working(flow) | Step::Done { flow, .. } => ceremony::progress(s, k, dark, *flow),
-        Step::Ticket => ceremony::ticket(s, k),
+        Step::Working(flow) | Step::Done { flow, .. } => {
+            super::ceremony::progress(s, k, dark, *flow)
+        }
+        Step::Ticket => super::ceremony::ticket(s, k),
         Step::Confirm {
             code,
             vault,
             inviter,
-        } => ceremony::confirm(k, code, vault, inviter),
+        } => super::ceremony::confirm(k, code, vault, inviter),
     }
 }
 

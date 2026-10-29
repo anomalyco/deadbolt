@@ -1,24 +1,29 @@
 //! Synthetic scenes for headless snapshots, scripts and tests (`--scene`).
 
+mod fixtures;
+
+pub use fixtures::{LOOPBACK_COST, MANY};
+
 use deadbolt_client::protocol::{
-    AgentClientInfo, AgentGrantInfo, Code, DeviceInfo, FieldInfo, Fill, ImportReport, ImportSource,
-    ItemInfo, MirrorAction, MirrorItem, MirrorReport, Status, Tally, VaultInfo,
+    AgentClientInfo, AgentGrantInfo, Fill, ImportReport, MirrorAction, MirrorItem, MirrorReport,
+    Status,
 };
 use rune::{SecretCopy, Tx};
 
-use crate::agent::{self, Agent, Job};
+use crate::agent;
 use crate::model::{App, Screen};
 use crate::onboarding::worker::{Progress, Stage, Worker};
-use crate::onboarding::{self, Flow, Notice, Pairing, Severity, Step};
+use crate::onboarding::{self, Flow, Notice, Severity, Step};
 use crate::{import, install, settings, shortcut};
+use fixtures::{
+    FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault, fixture_ticket,
+    form, generated, import_preview, import_report, join_notice, kind_scene, locked, locked_error,
+    locked_touch_id, locked_touch_id_reset, mirrored, new_of, other_shortcut, pairing, panel_vault,
+    settings_touch_id, show_preview, status, typed, vault, vault_243, vault_info,
+    vault_with_offered_installer, welcome, working,
+};
 
 pub(crate) type Scene = (&'static str, fn(&mut App));
-
-/// How long the `vault-243` scene's agent takes over each request, about
-/// what a real one does with its connection and peer check.
-pub const LOOPBACK_COST: f64 = 0.03;
-/// Items in the `vault-243` scene.
-pub const MANY: usize = 243;
 
 /// Puts a copy in flight in a scene: the handler's write is never made, and
 /// Rune's pending copy stands in for it, so the countdown runs and clears nothing.
@@ -27,6 +32,10 @@ fn staged(s: &mut App, copy: fn(&mut App, &mut Tx)) {
     if let Some(c) = &mut s.copy {
         c.copied = Some(SecretCopy::pending());
     }
+}
+
+fn failed(s: &mut App) {
+    s.screen = Screen::Failed("connecting to the agent: Connection refused (os error 61)".into());
 }
 
 pub(crate) const SCENES: &[Scene] = &[
@@ -81,11 +90,11 @@ pub(crate) const SCENES: &[Scene] = &[
     }),
     ("create-failed", |s| {
         form(s, Flow::Create);
-        s.onboarding.notice = Some(Notice {
-            severity: Severity::Danger,
-            title: "Couldn't create the vault".into(),
-            body: "Connecting to the agent: connection refused. Try again.".into(),
-        });
+        s.onboarding.notice = Some(Notice::new(
+            Severity::Danger,
+            "Couldn't create the vault",
+            "Connecting to the agent: connection refused. Try again.",
+        ));
     }),
     // Creating, then created at 1.2 s: the moment, then the empty vault at 2.7 s.
     ("creating", |s| {
@@ -259,11 +268,11 @@ pub(crate) const SCENES: &[Scene] = &[
     }),
     ("import-error", |s| {
         empty_vault(s);
-        s.import.error = Some(Notice {
-            severity: Severity::Caution,
-            title: "Passwords.json isn't an export Deadbolt can read".into(),
-            body: "This is an encrypted export; export as unencrypted .json.".into(),
-        });
+        s.import.error = Some(Notice::new(
+            Severity::Caution,
+            "Passwords.json isn't an export Deadbolt can read",
+            "This is an encrypted export; export as unencrypted .json.",
+        ));
     }),
     // ⇧⌘I in a vault with items.
     ("import", |s| {
@@ -574,479 +583,3 @@ pub(crate) const PANEL_SCENES: &[Scene] = &[
     }),
     ("failed", failed),
 ];
-
-fn failed(s: &mut App) {
-    s.screen = Screen::Failed("connecting to the agent: Connection refused (os error 61)".into());
-}
-
-fn locked_error(s: &mut App) {
-    locked(s);
-    s.unlock_error = Some("That passphrase didn't unlock this device.".into());
-}
-
-fn locked_touch_id(s: &mut App) {
-    locked(s);
-    if let Some(st) = &mut s.status {
-        st.touch_id_available = true;
-        st.touch_id_enabled = true;
-        st.touch_id_ready = true;
-    }
-}
-
-fn locked_touch_id_reset(s: &mut App) {
-    locked(s);
-    if let Some(st) = &mut s.status {
-        st.touch_id_available = true;
-        st.touch_id_enabled = true;
-        st.touch_id_reset = true;
-    }
-}
-
-fn vault_with_offered_installer(s: &mut App) {
-    vault(s);
-    let mut i = install::Installer::fixture();
-    i.offered = true;
-    s.installer = Some(i);
-}
-
-fn settings_touch_id(s: &mut App) {
-    vault_with_offered_installer(s);
-    if let Some(st) = &mut s.status {
-        st.touch_id_available = true;
-        st.touch_id_enabled = true;
-    }
-    s.hotkey = shortcut::Hotkey::new(Some(shortcut::default()), Vec::new());
-    s.start_shortcut(false);
-    s.open_settings();
-}
-
-fn show_preview(s: &mut App, preview: import::Preview) {
-    s.import.open = true;
-    s.import.phase = import::Phase::Preview(preview);
-}
-
-fn new_of(s: &mut App, kind: &str, name: &str) {
-    vault(s);
-    s.new_item();
-    s.pick_kind(kind);
-    if let Some(form) = &mut s.edit.form {
-        form.name.replace_text(name);
-    }
-}
-
-/// The vault with github.com mirrored from 1Password, selected.
-fn mirrored(s: &mut App) {
-    vault(s);
-    for item in s.items.iter_mut().filter(|i| i.label == "github.com") {
-        item.source = Some("1Password".into());
-    }
-    detail_for_selection(s);
-}
-
-/// ⌥⌘Space, the scenes' other shortcut.
-#[expect(clippy::expect_used, reason = "a constant")]
-fn other_shortcut() -> rune::Shortcut {
-    "alt+super+space".parse().expect("parses")
-}
-
-/// The vault as the panel opens on it: no item's values until one is selected.
-fn panel_vault(s: &mut App) {
-    vault(s);
-    s.search = rune::TextEdit::new("");
-    s.search.focused = true;
-    s.selected = None;
-    s.set_detail(None);
-    s.keep_selection_visible();
-    detail_for_selection(s);
-}
-
-fn welcome(s: &mut App) {
-    s.screen = Screen::Onboarding;
-    s.onboarding.device = rune::TextEdit::new("Dax's MacBook Pro");
-}
-
-fn form(s: &mut App, flow: Flow) {
-    welcome(s);
-    s.choose(flow);
-}
-
-fn working(s: &mut App, flow: Flow, plan: Vec<Stage>) {
-    welcome(s);
-    s.status = Some(status(true));
-    s.onboarding.stage = plan.first().copied();
-    s.onboarding.plan = plan;
-    s.onboarding.step = Step::Working(flow);
-}
-
-fn join_notice(s: &mut App, severity: Severity, title: &str, body: &str) {
-    welcome(s);
-    s.onboarding.device_ready = true;
-    s.choose(Flow::Join);
-    s.onboarding.notice = Some(Notice {
-        severity,
-        title: title.into(),
-        body: body.into(),
-    });
-}
-
-fn pairing() -> Pairing {
-    Pairing {
-        vault: "personal".into(),
-        inviter: "studio".into(),
-    }
-}
-
-fn vault_info(name: &str) -> VaultInfo {
-    VaultInfo {
-        id: "v1".into(),
-        name: name.into(),
-        default: true,
-        members: 1,
-        member: true,
-    }
-}
-
-/// A ticket-shaped string: `DBPAIR` and 274 base32 characters, the length of
-/// a real ticket with a relay and a few direct addresses.
-fn fixture_ticket() -> String {
-    const BASE32: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut x: u32 = 0x2545_f491;
-    let body: String = (0..274)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            BASE32[(x % 32) as usize] as char
-        })
-        .collect();
-    format!("DBPAIR{body}")
-}
-
-fn status(unlocked: bool) -> Status {
-    Status {
-        pid: 1,
-        version: "fixture".into(),
-        protocol: deadbolt_client::protocol::PROTOCOL_VERSION,
-        program: None,
-        home: String::new(),
-        initialized: true,
-        unlocked,
-        locks_in_secs: None,
-        caller: deadbolt_client::protocol::CallerInfo::unverified("fixture"),
-        device: Some(DeviceInfo {
-            id: "d1".into(),
-            name: Some("studio".into()),
-            this: true,
-            connected: true,
-            last_seen: None,
-        }),
-        vaults: vec![VaultInfo {
-            id: "v1".into(),
-            name: "personal".into(),
-            default: true,
-            members: 2,
-            member: true,
-        }],
-        peers_online: 1,
-        peers: 1,
-        touch_id_available: false,
-        touch_id_enabled: false,
-        touch_id_ready: false,
-        touch_id_reset: false,
-    }
-}
-
-fn locked(s: &mut App) {
-    s.status = Some(status(false));
-    s.screen = Screen::Locked;
-    s.passphrase.focused = true;
-}
-
-const FIXTURE: &[(&str, &str, &str, Option<&str>)] = &[
-    ("3f9a1c", "login", "github.com", Some("dax")),
-    ("7b20e4", "login", "Linear", Some("dax@anoma.ly")),
-    ("a81d55", "card", "Visa •••• 4242", Some("08/29")),
-    ("c4e7f0", "login", "fly.io", Some("ops@anoma.ly")),
-    ("e01b9d", "login", "gitlab.com", Some("dax")),
-    ("f5c312", "login", "Cloudflare", Some("dax@anoma.ly")),
-    ("09ad7e", "login", "Hetzner", Some("billing@anoma.ly")),
-];
-
-fn empty_vault(s: &mut App) {
-    vault(s);
-    s.items.clear();
-    s.selected = None;
-    s.set_detail(None);
-}
-
-fn import_report() -> ImportReport {
-    let tally = |count, one: &str, many: &str| Tally {
-        count,
-        one: one.into(),
-        many: many.into(),
-    };
-    ImportReport {
-        source: ImportSource::OnePassword,
-        new: Default::default(),
-        duplicates: 0,
-        skipped: vec![tally(3, "document", "documents")],
-        warnings: vec![tally(2, "URL kept as text", "URLs kept as text")],
-        dropped: vec![
-            tally(9, "tag", "tags"),
-            tally(4, "attachment", "attachments"),
-        ],
-        sign_in: Default::default(),
-    }
-}
-
-fn import_preview(report: ImportReport) -> import::Preview {
-    import::Preview {
-        path: "/fixture/1PasswordExport-2026-10-25.1pux".into(),
-        name: "1PasswordExport-2026-10-25.1pux".into(),
-        report,
-        digest: blake3::hash(b"fixture"),
-        changed: false,
-    }
-}
-
-fn vault(s: &mut App) {
-    s.status = Some(status(true));
-    s.screen = Screen::Vault;
-    s.items = FIXTURE
-        .iter()
-        .map(|(id, kind, label, detail)| ItemInfo {
-            id: format!("{id}0000000000000000000000000000000000000000000000000000000000"),
-            short: id[..4].into(),
-            kind: (*kind).into(),
-            label: (*label).into(),
-            detail: detail.map(Into::into),
-            fields: Vec::new(),
-            source: None,
-        })
-        .collect();
-    s.items.sort_by_key(|i| i.label.to_lowercase());
-    s.loaded = true;
-    s.search.focused = true;
-    s.selected = s
-        .items
-        .iter()
-        .find(|i| i.label == "github.com")
-        .map(|i| i.id.clone());
-    detail_for_selection(s);
-}
-
-/// A vault of `MANY` logins with an agent that answers on the app's clock
-/// (`Agent::loopback`), for holding an arrow down the list.
-fn vault_243(s: &mut App) {
-    s.agent = Agent::loopback(many_answer, LOOPBACK_COST);
-    s.status = Some(status(true));
-    s.screen = Screen::Vault;
-    s.items = (0..MANY).map(many_item).collect();
-    s.loaded = true;
-    s.search.focused = true;
-    let first = s.items.first().map(|i| i.id.clone());
-    s.select(first);
-}
-
-/// The `vault-243` scene's item `i`, as listed.
-fn many_item(i: usize) -> ItemInfo {
-    const SITES: [&str; 9] = [
-        "acme",
-        "brightline",
-        "cobalt",
-        "driftwood",
-        "ember",
-        "fathom",
-        "granite",
-        "harbor",
-        "ironwood",
-    ];
-    ItemInfo {
-        id: format!("{i:04x}{}", "0".repeat(60)),
-        short: format!("{i:04x}"),
-        kind: "login".into(),
-        label: format!("{}-{i:03}.com", SITES[i * SITES.len() / MANY]),
-        detail: Some(format!("user{i}@anoma.ly")),
-        fields: Vec::new(),
-        source: None,
-    }
-}
-
-/// The `vault-243` scene's agent: items with their values.
-fn many_answer(job: Job) -> Option<agent::Done> {
-    let values = |id: &str| {
-        let i = usize::from_str_radix(id.get(..4)?, 16).ok()?;
-        let item = many_item(i);
-        let field = |name: &str, kind: &str, value: String| FieldInfo {
-            name: name.into(),
-            kind: kind.into(),
-            value,
-        };
-        let fields = vec![
-            field("password", "secret", format!("fixture-password-{i}")),
-            field("username", "text", item.detail.clone().unwrap_or_default()),
-            field("url", "url", format!("https://{}", item.label)),
-            field("notes", "note", format!("Fixture item {i} of {MANY}.")),
-        ];
-        Some(agent::Values::new(ItemInfo { fields, ..item }))
-    };
-    let missing = || agent::Failure {
-        code: None,
-        message: "no such item".into(),
-    };
-    Some(match job {
-        Job::Get { id, seq, .. } => agent::Done::Item {
-            seq,
-            result: values(&id).ok_or_else(missing),
-        },
-        Job::Peek { id, epoch, .. } => agent::Done::Peeked {
-            result: values(&id).ok_or_else(missing),
-            id,
-            epoch,
-        },
-        _ => return None,
-    })
-}
-
-/// The vault with a secure note, an SSH key, an identity and a passkey, one selected.
-fn kind_scene(s: &mut App, kind: &str) {
-    vault(s);
-    for (id, kind, label, detail) in [
-        ("b7c1e2", "note", "Alarm codes", None),
-        ("d2a9f0", "ssh", "Deploy key", Some("deploy@anoma.ly")),
-        ("5e8b31", "identity", "Dax Raad", Some("dax@anoma.ly")),
-        ("9c4f7a", "passkey", "github.com", Some("thdxr")),
-    ] {
-        s.items.push(ItemInfo {
-            id: format!("{id}0000000000000000000000000000000000000000000000000000000000"),
-            short: id[..4].into(),
-            kind: kind.into(),
-            label: label.into(),
-            detail: detail.map(Into::into),
-            fields: Vec::new(),
-            source: None,
-        });
-    }
-    s.items.sort_by_key(|i| i.label.to_lowercase());
-    s.selected = s
-        .items
-        .iter()
-        .find(|i| i.kind == kind)
-        .map(|i| i.id.clone());
-    detail_for_selection(s);
-}
-
-/// The scenes' SSH key, as a key file has it: one long base64 line, and a
-/// final line break.
-const FIXTURE_PRIVATE_KEY: &str = "-----BEGIN PRIVATE KEY-----\nMC4CAQAwBQYDK2VwBCIEIFixtureFixtureFixtureFixtureFixtureFixtureFixtureFixture00\n-----END PRIVATE KEY-----\n";
-const FIXTURE_PUBLIC_KEY: &str =
-    "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFixtureFixtureFixtureFixtureFixture deploy@anoma.ly";
-
-/// The open form's field `name`, typed into.
-fn typed(s: &mut App, name: &str, value: &str) {
-    if let Some(input) = s
-        .edit
-        .form
-        .as_mut()
-        .and_then(|f| f.fields.iter_mut().find(|i| i.name == name))
-    {
-        input.edit.replace_text(value);
-    }
-}
-
-/// The generator's answer to the open form, as the agent would give it.
-fn generated(s: &mut App) {
-    let Some(seq) = s.generating() else { return };
-    let password = zeroize::Zeroizing::new("Vq7#mRz2!pKx9@wLt4&nBe8".to_owned());
-    s.apply(
-        agent::Done::Generated {
-            seq,
-            result: Ok(password),
-        },
-        &mut Tx::default(),
-    );
-}
-
-fn detail_for_selection(s: &mut App) {
-    let Some(item) = s.selected_item().cloned() else {
-        return;
-    };
-    let field = |name: &str, kind: &str, value: &str| FieldInfo {
-        name: name.into(),
-        kind: kind.into(),
-        value: value.into(),
-    };
-    let mut fields = match item.kind.as_str() {
-        "card" => vec![
-            field("number", "secret", "4242424242424242"),
-            field("expiry", "month", "2029-08"),
-            field("cvv", "secret", "123"),
-            field("cardholder", "text", "Dax Raad"),
-        ],
-        "note" => vec![field(
-            "notes",
-            "secret",
-            "Front door: 4417\nGarage: 0932\nThe panel is behind the coats.",
-        )],
-        "ssh" => vec![
-            field("private-key", "secret", FIXTURE_PRIVATE_KEY),
-            field("public-key", "text", FIXTURE_PUBLIC_KEY),
-            field(
-                "fingerprint",
-                "text",
-                "SHA256:Fx7tQ2mVb9yLr4cWkP0sN8hJd3aZe6uGo1iTq5XwYnE",
-            ),
-            field("comment", "text", "deploy@anoma.ly"),
-        ],
-        // As the agent sends it: everything but the private key.
-        "passkey" => vec![
-            field("rp-id", "text", &item.label),
-            field("username", "text", item.detail.as_deref().unwrap_or("")),
-            field("credential-id", "text", "q5Zt0bJ8xW1cR4mN7pLs2A"),
-            field("user-handle", "text", "MTIzNDU2Nzg"),
-            field("created", "date", "2026-10-27"),
-        ],
-        "identity" => vec![
-            field("name", "text", "Dax Raad"),
-            field("email", "email", "dax@anoma.ly"),
-            field("phone", "text", "+1 555 0100"),
-            field(
-                "address",
-                "note",
-                "1 Main St\nApt 2\nSpringfield, IL 12345\nUS",
-            ),
-            field("birthday", "date", "1990-03-01"),
-            field("passport", "secret", "X1234567"),
-        ],
-        _ => vec![
-            field("password", "secret", "correct-horse-battery-staple"),
-            field("username", "text", item.detail.as_deref().unwrap_or("")),
-            field(
-                "url",
-                "url",
-                &format!("https://{}", item.label.to_lowercase()),
-            ),
-            field("notes", "note", "Recovery codes are in the safe."),
-        ],
-    };
-    let otp = item.kind == "login" && matches!(item.label.as_str(), "github.com" | "Cloudflare");
-    if otp {
-        // The app never holds the secret: the agent leaves it out.
-        fields.insert(3, field("otp", "otp", ""));
-    }
-    s.set_detail(Some(ItemInfo { fields, ..item }));
-    if otp {
-        s.on_code(Ok(fixture_code()), &mut Tx::default());
-    }
-}
-
-/// RFC 6238's SHA-1 secret ("12345678901234567890") at a fixed time,
-/// 1999999992: 18 s of the code's 30 left (`totp::tests::the_app_scenes_code`).
-fn fixture_code() -> Code {
-    Code {
-        code: "279037".to_owned().into(),
-        period: 30,
-        valid_until: 2_000_000_010,
-        remaining_ms: 18_000,
-    }
-}

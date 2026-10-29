@@ -64,13 +64,6 @@ impl Default for Edit {
     }
 }
 
-impl Edit {
-    fn scratch(&mut self) -> &mut TextEdit {
-        self.scratch.clear();
-        &mut self.scratch
-    }
-}
-
 pub struct Delete {
     pub id: String,
     pub label: String,
@@ -360,10 +353,10 @@ impl App {
     /// value is loaded to show, then edited like any other; hidden again
     /// unchanged, it's kept again. Either way the field is focused, alone.
     pub fn toggle_shown(&mut self, field: usize) {
-        let Some(form) = &mut self.edit.form else {
+        let Some(form) = self.edit.form.as_mut().filter(|f| !f.saving) else {
             return;
         };
-        if form.saving || !form.fields.get(field).is_some_and(Input::secret) {
+        if !form.fields.get(field).is_some_and(Input::secret) {
             return;
         }
         let saved = form
@@ -404,19 +397,29 @@ impl App {
     /// The field's edit, for its input's handlers. A field that's gone (the
     /// form closed, or changed type) or saving gets a scratch one.
     pub fn input_mut(&mut self, field: usize) -> &mut TextEdit {
-        if let Some(form) = self.edit.form.as_mut().filter(|f| !f.saving)
-            && let Some(input) = form.fields.get_mut(field)
+        let Edit { form, scratch, .. } = &mut self.edit;
+        match form
+            .as_mut()
+            .filter(|f| !f.saving)
+            .and_then(|f| f.fields.get_mut(field))
         {
-            return &mut input.edit;
+            Some(input) => &mut input.edit,
+            None => {
+                scratch.clear();
+                scratch
+            }
         }
-        self.edit.scratch()
     }
 
     pub fn name_mut(&mut self) -> &mut TextEdit {
-        if let Some(form) = self.edit.form.as_mut().filter(|f| !f.saving) {
-            return &mut form.name;
+        let Edit { form, scratch, .. } = &mut self.edit;
+        match form.as_mut().filter(|f| !f.saving) {
+            Some(form) => &mut form.name,
+            None => {
+                scratch.clear();
+                scratch
+            }
         }
-        self.edit.scratch()
     }
 
     // ---------------------------------------------------------------------------------------
@@ -462,12 +465,14 @@ impl App {
         result: Result<Zeroizing<String>, Failure>,
         tx: &mut Tx,
     ) {
-        let Some(form) = &mut self.edit.form else {
+        let Some(form) = self
+            .edit
+            .form
+            .as_mut()
+            .filter(|f| f.generating == Some(seq))
+        else {
             return;
         };
-        if form.generating != Some(seq) {
-            return;
-        }
         form.generating = None;
         let Some(at) = form.generates() else { return };
         match result {
@@ -502,14 +507,13 @@ impl App {
         let Some(item) = self.selected_item() else {
             return;
         };
-        let delete = Delete {
-            id: item.id.clone(),
-            label: item.label.clone(),
-            busy: false,
-            error: None,
-        };
-        if self.edit.delete.as_ref().is_none_or(|d| d.id != delete.id) {
-            self.edit.delete = Some(delete);
+        if self.edit.delete.as_ref().is_none_or(|d| d.id != item.id) {
+            self.edit.delete = Some(Delete {
+                id: item.id.clone(),
+                label: item.label.clone(),
+                busy: false,
+                error: None,
+            });
         }
     }
 
@@ -614,6 +618,12 @@ impl App {
         }
     }
 
+    fn close_landed(&mut self) {
+        self.edit.form = None;
+        self.search.focused = true;
+        self.keep_selection_visible();
+    }
+
     /// An item's values landed (`Done::Item`): a form waiting for them
     /// closes; one open on that item learns whether it changed elsewhere.
     pub(crate) fn edit_item_landed(&mut self, item: &ItemInfo) {
@@ -621,9 +631,7 @@ impl App {
             return;
         };
         if form.landing.as_deref() == Some(item.id.as_str()) {
-            self.edit.form = None;
-            self.search.focused = true;
-            self.keep_selection_visible();
+            self.close_landed();
             return;
         }
         if form.saving || form.id.as_deref() != Some(item.id.as_str()) {
@@ -638,9 +646,7 @@ impl App {
     /// rather than wait.
     pub(crate) fn edit_item_failed(&mut self) {
         if self.edit.form.as_ref().is_some_and(|f| f.landing.is_some()) {
-            self.edit.form = None;
-            self.search.focused = true;
-            self.keep_selection_visible();
+            self.close_landed();
         }
     }
 
@@ -667,10 +673,9 @@ impl App {
 
     /// Wipes the form and drops replies still on their way.
     pub(crate) fn forget_edit(&mut self) {
-        let seq = self.edit.seq + 1;
         self.edit.form = None;
         self.edit.delete = None;
-        self.edit.seq = seq;
+        self.edit.seq += 1;
         self.edit.scratch.clear();
     }
 
@@ -703,9 +708,9 @@ impl App {
                 // Every Enter is the form's: ⌘⏎ saves, and ⏎ does outside the
                 // search; other chords do nothing rather than reach the list.
                 Key::Enter => {
-                    let save = (ev.mods.cmd && plain)
-                        || (ev.mods == rune::Mods::default() && !self.search.focused);
-                    if save {
+                    if (ev.mods.cmd && plain)
+                        || (ev.mods == rune::Mods::default() && !self.search.focused)
+                    {
                         self.save();
                     }
                 }

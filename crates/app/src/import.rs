@@ -165,11 +165,11 @@ impl App {
         self.import.seq += 1;
         self.import.phase = Phase::Idle;
         self.enter_import();
-        self.import.error = Some(Notice {
-            severity: Severity::Caution,
-            title: format!("{} isn't an export Deadbolt can read", name(file)),
-            body: "Drop a .1pux, .csv or .json export.".into(),
-        });
+        self.import.error = Some(Notice::new(
+            Severity::Caution,
+            format!("{} isn't an export Deadbolt can read", name(file)),
+            "Drop a .1pux, .csv or .json export.",
+        ));
     }
 
     pub fn choose_file(&mut self, tx: &mut Tx) {
@@ -331,29 +331,24 @@ impl App {
             // Linux without a FileChooser portal lands here; dropping still works.
             Err(message) => {
                 self.enter_import();
-                self.import.error = Some(Notice {
-                    severity: Severity::Caution,
-                    title: "Couldn't show the file dialog".into(),
-                    body: format!(
+                self.import.error = Some(Notice::new(
+                    Severity::Caution,
+                    "Couldn't show the file dialog",
+                    format!(
                         "{} Drag the export onto this window instead.",
                         sentence(&message)
                     ),
-                })
+                ));
             }
         }
     }
 
     /// Ends "Imported 12 from 1Password" once its time is up. True when it went.
     pub(crate) fn tick_import(&mut self, now: f64) -> bool {
-        let gone = self
-            .import
+        self.import
             .imported
-            .as_ref()
-            .is_some_and(|(_, at)| now - at >= IMPORTED_FOR - 1e-3);
-        if gone {
-            self.import.imported = None;
-        }
-        gone
+            .take_if(|(_, at)| now - *at >= IMPORTED_FOR - 1e-3)
+            .is_some()
     }
 
     /// Keys while the import view shows: Return imports from a preview and
@@ -416,31 +411,33 @@ fn name(path: &Path) -> String {
 /// export (or one the agent can't map) is the person's to change; a read or
 /// agent failure is ours.
 fn problem(failure: ImportFailure, file: &str, apply: bool) -> Notice {
-    let not_export = |message: &str| Notice {
-        severity: Severity::Caution,
-        title: format!("{file} isn't an export Deadbolt can read"),
-        // The drop zone lists what it can read; the agent's own list would repeat it.
-        body: sentence(message.split("; import a ").next().unwrap_or(message)),
+    let not_export = |message: &str| {
+        Notice::new(
+            Severity::Caution,
+            format!("{file} isn't an export Deadbolt can read"),
+            // The drop zone lists what it can read; the agent's own list would repeat it.
+            sentence(message.split("; import a ").next().unwrap_or(message)),
+        )
     };
     match failure {
         ImportFailure::NotExport(message) => not_export(&message),
         ImportFailure::Agent(f) if !apply && f.code == Some(ErrorCode::Failed) => {
             not_export(&f.message)
         }
-        ImportFailure::Read(message) => Notice {
-            severity: Severity::Danger,
-            title: format!("Couldn't open {file}"),
-            body: sentence(&message),
-        },
-        ImportFailure::Agent(f) => Notice {
-            severity: Severity::Danger,
-            title: if apply {
+        ImportFailure::Read(message) => Notice::new(
+            Severity::Danger,
+            format!("Couldn't open {file}"),
+            sentence(&message),
+        ),
+        ImportFailure::Agent(f) => Notice::new(
+            Severity::Danger,
+            if apply {
                 format!("Couldn't import {file}")
             } else {
                 format!("Couldn't read {file}")
             },
-            body: sentence(&f.message),
-        },
+            sentence(&f.message),
+        ),
     }
 }
 
@@ -496,11 +493,11 @@ pub fn nothing_new(p: &Preview, vault: &str) -> String {
 
 /// Over a fresh preview when Import found the file changed since the last.
 pub fn changed(file: &str) -> Notice {
-    Notice {
-        severity: Severity::Caution,
-        title: format!("{file} changed since the preview"),
-        body: "Nothing was imported. This is what it holds now.".to_owned(),
-    }
+    Notice::new(
+        Severity::Caution,
+        format!("{file} changed since the preview"),
+        "Nothing was imported. This is what it holds now.",
+    )
 }
 
 /// The primary button: "Import 12 items".

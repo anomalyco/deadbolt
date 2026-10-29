@@ -6,6 +6,7 @@
 //! vault, after a cancelled join for example. Onboarding then skips the
 //! passphrase and asks only for what's left.
 
+mod ceremony;
 pub mod qr;
 pub mod view;
 pub mod worker;
@@ -99,6 +100,20 @@ pub struct Notice {
     pub body: String,
 }
 
+impl Notice {
+    pub(crate) fn new(
+        severity: Severity,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity,
+            title: title.into(),
+            body: body.into(),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Strength {
     TooShort,
@@ -185,8 +200,6 @@ impl Onboarding {
     /// through [`App::reset_onboarding`], which clears a copied ticket first.
     fn reset(&mut self, device_ready: bool) {
         let worker = std::mem::replace(&mut self.worker, Worker::offline());
-        self.passphrase.clear();
-        self.repeat.clear();
         *self = Onboarding {
             device_ready,
             ..Onboarding::new(worker)
@@ -245,9 +258,7 @@ impl Onboarding {
     /// (or, after submit, doesn't yet), `None` while it's still a prefix.
     pub fn repeat_matches(&self) -> Option<bool> {
         let (first, second) = (self.passphrase.text.as_str(), self.repeat.text.as_str());
-        if second.is_empty() && !self.attempted {
-            None
-        } else if first == second {
+        if first == second && (!second.is_empty() || self.attempted) {
             Some(true)
         } else if first.starts_with(second) && !self.attempted {
             None
@@ -261,26 +272,12 @@ impl Onboarding {
         !self.device_ready
     }
 
-    fn device_valid(&self) -> bool {
-        !self.needs_device()
+    pub(crate) fn can_submit(&self, flow: Flow) -> bool {
+        let device_ok = !self.needs_device()
             || (self.device_problem().is_none()
                 && self.passphrase_problem().is_none()
-                && self.repeat_matches() == Some(true))
-    }
-
-    pub fn can_create(&self) -> bool {
-        self.vault_problem().is_none() && self.device_valid()
-    }
-
-    pub fn can_join(&self) -> bool {
-        self.device_valid()
-    }
-
-    pub(crate) fn can_submit(&self, flow: Flow) -> bool {
-        match flow {
-            Flow::Create => self.can_create(),
-            Flow::Join => self.can_join(),
-        }
+                && self.repeat_matches() == Some(true));
+        device_ok && (flow != Flow::Create || self.vault_problem().is_none())
     }
 
     fn new_device(&mut self) -> Option<NewDevice> {
@@ -551,11 +548,7 @@ impl App {
         let o = &mut self.onboarding;
         match o.copied.as_ref().map(SecretCopy::state) {
             Some(SecretState::Failed(error)) => {
-                o.notice = Some(Notice {
-                    severity: Severity::Danger,
-                    title: "Couldn't copy".into(),
-                    body: error,
-                });
+                o.notice = Some(Notice::new(Severity::Danger, "Couldn't copy", error));
             }
             Some(SecretState::Replaced | SecretState::Cleared) => {}
             _ => return false,
@@ -567,15 +560,13 @@ impl App {
     /// Applies the requests' progress and runs the moment. True when anything changed.
     pub fn poll_onboarding(&mut self, now: f64, tx: &mut Tx) -> bool {
         let (progress, next) = self.onboarding.worker.drain(now);
-        let mut changed = self.check_ticket_copy() || !progress.is_empty();
-        if self
-            .onboarding
-            .copied_command
-            .is_some_and(|(_, at)| now - at >= COPIED_FOR - 1e-3)
-        {
-            self.onboarding.copied_command = None;
-            changed = true;
-        }
+        let mut changed = self.check_ticket_copy()
+            || !progress.is_empty()
+            || self
+                .onboarding
+                .copied_command
+                .take_if(|(_, at)| now - *at >= COPIED_FOR - 1e-3)
+                .is_some();
         for p in progress {
             self.on_progress(p, now);
         }
@@ -684,26 +675,21 @@ impl App {
         o.stage = None;
         o.pairing = None;
         let notice = if flow == Flow::Join && o.cancelled {
-            Notice {
-                severity: Severity::Neutral,
-                title: "Join cancelled".into(),
-                body: if o.set_up_now {
-                    "Nothing was shared. This device is set up now, with the passphrase you \
-                     chose. Make a new ticket when you're ready."
-                } else {
-                    "Nothing was shared. Make a new ticket when you're ready."
-                }
-                .into(),
-            }
+            let body = if o.set_up_now {
+                "Nothing was shared. This device is set up now, with the passphrase you \
+                 chose. Make a new ticket when you're ready."
+            } else {
+                "Nothing was shared. Make a new ticket when you're ready."
+            };
+            Notice::new(Severity::Neutral, "Join cancelled", body)
         } else if flow == Flow::Join && o.declined {
-            Notice {
-                severity: Severity::Caution,
-                title: "Stopped: the codes didn't match".into(),
-                body: "Nothing was shared and the ticket no longer works. Make a new one and \
-                       compare again. If you didn't start pairing on your other device, \
-                       someone else may have seen the ticket."
-                    .into(),
-            }
+            Notice::new(
+                Severity::Caution,
+                "Stopped: the codes didn't match",
+                "Nothing was shared and the ticket no longer works. Make a new one and \
+                 compare again. If you didn't start pairing on your other device, \
+                 someone else may have seen the ticket.",
+            )
         } else {
             failure_notice(flow, &failure)
         };
@@ -765,11 +751,7 @@ fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
         };
         (Severity::Danger, title, format!("{detail} Try again."))
     };
-    Notice {
-        severity,
-        title: title.into(),
-        body,
-    }
+    Notice::new(severity, title, body)
 }
 
 /// A message as a sentence: capitalised, with a full stop.

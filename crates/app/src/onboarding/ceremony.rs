@@ -7,9 +7,9 @@ use rune::{
 };
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
-use super::super::worker::Stage;
-use super::super::{Flow, Pairing, Step};
-use super::{PANEL_W, banner, bar, muted, page, title};
+use super::view::{PANEL_W, banner, bar, muted, page, title};
+use super::worker::Stage;
+use super::{Flow, Pairing, Step};
 use crate::model::App;
 use crate::view::Paged;
 

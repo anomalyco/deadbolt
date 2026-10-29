@@ -400,14 +400,10 @@ impl Installer {
 
     /// Applies finished work and lets a "Copied" lapse. True when anything changed.
     pub fn poll(&mut self, now: f64) -> bool {
-        let mut changed = false;
-        if self
+        let mut changed = self
             .copied
-            .is_some_and(|(_, at)| now - at >= COPIED_FOR - 1e-3)
-        {
-            self.copied = None;
-            changed = true;
-        }
+            .take_if(|(_, at)| now - *at >= COPIED_FOR - 1e-3)
+            .is_some();
         let outcomes = match &mut self.live {
             Some(live) => live.inbox.drain(),
             None => Vec::new(),
