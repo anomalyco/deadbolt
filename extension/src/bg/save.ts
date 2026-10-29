@@ -19,7 +19,7 @@
 // across tabs, and every other offer only badges.
 
 import type { ChooseReply, FieldRole, OfferChoice, SaveOffer, SurfaceKind } from "../messages"
-import type { PasswordValue, SaveReply } from "../protocol"
+import type { CheckReply, PasswordValue, SaveReply } from "../protocol"
 import { newToken, targetFor } from "./frames"
 import { HostError, type Host } from "./host"
 import { saveTitle, saveUrl, senderOrigin, siteOf } from "./site"
@@ -297,19 +297,29 @@ export class Saver {
   }
 
   private async saveOrUpdate(c: Capture, username: string, secret: PasswordValue): Promise<Pending | undefined> {
-    const check = await this.host.send({ type: "check", origin: c.origin, username, ...secret })
+    return this.offerFor(c, username, secret, await this.host.send({ type: "check", origin: c.origin, username, ...secret }))
+  }
+
+  private offerFor(c: Capture, username: string, secret: PasswordValue, check: CheckReply): Pending | undefined {
     if (check.status === "same") return undefined
     const ref = check.status === "update" ? check.matches[0] : undefined
     const entry = { title: c.title, url: c.url, username, ...secret }
     return { offer: { site: c.site, username, update: !!ref }, save: () => this.host.send({ type: "save", origin: c.origin, ref, entry }) }
   }
 
-  /** Changing a password: update the saved login that still has the old one. */
+  /**
+   * Changing a password: update the saved login that still has the old one.
+   * The host sees the same requests whether or not the current password
+   * matched, so neither its rate limit nor what follows tells the page.
+   */
   private async passwordChange(c: Capture, next: PasswordValue, current: string): Promise<Pending | undefined> {
+    if (next.password === current) return undefined
     let target: { ref: string; username: string } | undefined
     if (c.username) {
-      const check = await this.host.send({ type: "check", origin: c.origin, username: c.username, password: current })
-      if (check.status === "same" && check.matches[0]) target = { ref: check.matches[0], username: c.username }
+      const old = await this.host.send({ type: "check", origin: c.origin, username: c.username, password: current })
+      const fresh = await this.host.send({ type: "check", origin: c.origin, username: c.username, ...next })
+      if (old.status === "same" && old.matches[0]) target = { ref: old.matches[0], username: c.username }
+      else return this.offerFor(c, c.username, next, fresh)
     } else {
       // No username on the form: the one login here whose password is the
       // current one, else the only login here.
@@ -318,7 +328,7 @@ export class Saver {
       const match = check.status === "same" && check.matches.length === 1 ? saved.find((a) => a.ref === check.matches[0]) : saved.length === 1 ? saved[0] : undefined
       if (match) target = { ref: match.ref, username: match.username ?? "" }
     }
-    if (!target) return c.username ? this.saveOrUpdate(c, c.username, next) : undefined
+    if (!target) return undefined
     const { ref, username } = target
     const entry = { title: c.title, url: c.url, username, ...next }
     return { offer: { site: c.site, username: username || c.site, update: true }, save: () => this.host.send({ type: "save", origin: c.origin, ref, entry }) }

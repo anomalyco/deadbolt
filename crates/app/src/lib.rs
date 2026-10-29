@@ -5,6 +5,7 @@ pub mod activity;
 pub mod agent;
 pub mod binary;
 pub mod edit;
+mod enclave;
 pub mod import;
 pub mod install;
 pub mod keys;
