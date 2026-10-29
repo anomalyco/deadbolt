@@ -5,7 +5,7 @@
 // content script after the user submitted a login form.
 
 import type { LearnSession, LearnStep } from "./learn"
-import type { Account, FieldRules, FormCard, FormField as HostField, FormIdentity, FormKind, HostStatus } from "./protocol"
+import type { Account, Change, FieldRules, FormCard, FormField as HostField, FormIdentity, FormKind, HostStatus } from "./protocol"
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
@@ -331,6 +331,8 @@ export interface FillAck {
 export interface StatusChanged {
   type: "db:status"
   status: Status
+  /** What changed, when the host says (the vault's logins, say), not just that it answered. */
+  change?: Change
 }
 
 export interface QueryReply {
@@ -431,9 +433,10 @@ export type PasskeyPrompt = {
 export type PasskeyChoice = { action: "use"; ref: string } | { action: "save" } | { action: "fallback" } | { action: "cancel" }
 
 /**
- * What device.html asks of the standalone device: set it up, unlock, lock,
- * pair and sync it, and add or list logins by hand. The background takes
- * these only from the extension's own device.html.
+ * What the standalone device's own pages (device.html and the popup) ask of
+ * it: set it up, unlock, lock, pair and sync it, manage its devices and
+ * settings, and see, add and edit logins by hand. The background takes these
+ * only from those two pages of this extension.
  */
 export type DeviceCommand =
   | { type: "device-status" }
@@ -453,19 +456,47 @@ export type DeviceCommand =
   | { type: "device-join-status" }
   | { type: "device-join-finish"; passphrase: string }
   | { type: "device-join-cancel" }
-  | { type: "device-sync" }
+  /** `wait`: answer once a sync round has finished (at most 30 s), not as soon as it starts. */
+  | { type: "device-sync"; wait?: boolean }
   /** Every login in the vault, for the page's list: `{ type: "device-logins", accounts: Account[] }`. */
   | { type: "device-logins" }
   /** The vault's devices: `{ type: "device-devices", devices: VaultDevice[] }`. */
   | { type: "device-devices" }
+  /** One login without its password (LoginDetail), with its current one-time code. */
+  | { type: "device-item"; ref: string }
+  /** A login's password, to reveal or copy: `{ type: "device-secret", password }`. Strict asks for the passphrase every time. */
+  | { type: "device-secret"; ref: string; passphrase?: string }
+  /** Adds a login by hand, or edits `ref`; an edit with an empty password keeps the one it has. */
+  | { type: "device-save"; ref?: string; entry: { title: string; url: string; username: string; password: string } }
+  /** Removes another device from the vault. */
+  | { type: "device-remove"; id: string }
+  /** Renames the vault. */
+  | { type: "device-rename"; name: string }
+  /** This browser's settings: `{ type: "device-settings", preset }`. */
+  | { type: "device-settings" }
+  | { type: "device-preset"; preset: LockPreset }
   | { type: "list"; origin: string }
   | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
 
 /** device-join-status's reply: `code` while waiting (so a reloaded page shows it again), `vault` once admitted, `message` when it failed. */
 export type JoinStatus = { type: "device-join-status"; phase: "waiting" | "admitted" | "failed" | "idle"; code?: string; vault?: string; message?: string }
 
-/** A member of the vault; `current`: this browser. */
-export type VaultDevice = { id: string; name: string; current: boolean }
+/** A member of the vault; `current`: this browser. `lastSeen`: when it last synced with this browser (unix seconds). */
+export type VaultDevice = { id: string; name: string; current: boolean; lastSeen?: number | null }
+
+/** How soon the browser-only Deadbolt locks by itself (docs/extension-device.md, Lock presets). */
+export type LockPreset = "strict" | "comfortable" | "relaxed"
+
+/** device-item's reply: a login without its password. `totp.until`: when the code ends (unix seconds). */
+export interface LoginDetail {
+  ref: string
+  title: string
+  url: string
+  username: string
+  hasPassword: boolean
+  hasTotp: boolean
+  totp?: { code: string; period: number; until: number }
+}
 
 /** `reply`: the vault's answer as it gave it; `ms`: how long it took. */
 export type DeviceReply = { ok: true; reply: Record<string, unknown>; ms: number; status: Status } | { ok: false; message: string; status: Status }

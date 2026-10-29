@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test"
-import { deviceCommand, deviceName, fromDevicePage, StandaloneBackend } from "../src/bg/standalone"
+import { deviceCommand, deviceName, fromVaultPage, StandaloneBackend } from "../src/bg/standalone"
 import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultRequest } from "../src/bg/vault-messages"
 import { ID, installChrome, pageSender, POPUP_URL, settle, type FakeChrome } from "./chrome"
 
@@ -50,18 +50,18 @@ beforeEach(() => {
 afterEach(() => setSystemTime())
 
 describe("device page commands", () => {
-  test("only this extension's own device.html may send them", () => {
-    expect(fromDevicePage({ id: ID, url: DEVICE_URL })).toBe(true)
-    expect(fromDevicePage({ id: ID, url: `${DEVICE_URL}?from=popup#unlock`, tab: { id: 3 } as chrome.tabs.Tab, frameId: 0 })).toBe(true)
-    // The popup, the inline menu, a content script, another extension and look-alike paths may not.
-    expect(fromDevicePage({ id: ID, url: POPUP_URL })).toBe(false)
-    expect(fromDevicePage({ id: ID, url: `chrome-extension://${ID}/menu.html` })).toBe(false)
-    expect(fromDevicePage(pageSender())).toBe(false)
-    expect(fromDevicePage(pageSender({ url: DEVICE_URL, id: "someone-else" }))).toBe(false)
-    expect(fromDevicePage({ id: "other", url: DEVICE_URL })).toBe(false)
-    expect(fromDevicePage({ id: ID, url: `chrome-extension://${ID}/device.html.js` })).toBe(false)
-    expect(fromDevicePage({ id: ID, url: `chrome-extension://${ID}/sub/device.html` })).toBe(false)
-    expect(fromDevicePage({ id: ID })).toBe(false)
+  test("only this extension's own device.html and popup may send them", () => {
+    expect(fromVaultPage({ id: ID, url: DEVICE_URL })).toBe(true)
+    expect(fromVaultPage({ id: ID, url: `${DEVICE_URL}?from=popup#unlock`, tab: { id: 3 } as chrome.tabs.Tab, frameId: 0 })).toBe(true)
+    expect(fromVaultPage({ id: ID, url: POPUP_URL })).toBe(true)
+    // The inline menu, a content script, another extension and look-alike paths may not.
+    expect(fromVaultPage({ id: ID, url: `chrome-extension://${ID}/menu.html` })).toBe(false)
+    expect(fromVaultPage(pageSender())).toBe(false)
+    expect(fromVaultPage(pageSender({ url: DEVICE_URL, id: "someone-else" }))).toBe(false)
+    expect(fromVaultPage({ id: "other", url: DEVICE_URL })).toBe(false)
+    expect(fromVaultPage({ id: ID, url: `chrome-extension://${ID}/device.html.js` })).toBe(false)
+    expect(fromVaultPage({ id: ID, url: `chrome-extension://${ID}/sub/device.html` })).toBe(false)
+    expect(fromVaultPage({ id: ID })).toBe(false)
   })
 
   test("are rebuilt from their known fields only", () => {
@@ -85,6 +85,30 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-join-finish", passphrase: "p".repeat(1025) })).toBeNull()
     expect(deviceCommand({ type: "device-join" })).toBeNull()
     expect(deviceCommand({ type: "device-join-start" })).toEqual({ type: "device-join-start" })
+  })
+
+  test("the vault page's own commands are rebuilt from their known fields only", () => {
+    const id = "ab".repeat(32)
+    expect(deviceCommand({ type: "device-sync", wait: true, extra: 1 })).toEqual({ type: "device-sync", wait: true })
+    expect(deviceCommand({ type: "device-sync", wait: "yes" })).toEqual({ type: "device-sync" })
+    expect(deviceCommand({ type: "device-item", ref: "v:i", origin: "x" })).toEqual({ type: "device-item", ref: "v:i" })
+    expect(deviceCommand({ type: "device-item" })).toBeNull()
+    expect(deviceCommand({ type: "device-secret", ref: "v:i" })).toEqual({ type: "device-secret", ref: "v:i" })
+    expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "" })).toBeNull()
+    expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "p" })).toEqual({ type: "device-secret", ref: "v:i", passphrase: "p" })
+    const entry = { title: "Acme", url: "https://acme.test", username: "alex", password: "" }
+    expect(deviceCommand({ type: "device-save", entry: { ...entry, extra: 1 } })).toEqual({ type: "device-save", entry })
+    expect(deviceCommand({ type: "device-save", ref: "v:i", entry })).toEqual({ type: "device-save", ref: "v:i", entry })
+    expect(deviceCommand({ type: "device-save", ref: "", entry })).toBeNull()
+    expect(deviceCommand({ type: "device-save", entry: { ...entry, password: 7 } })).toBeNull()
+    expect(deviceCommand({ type: "device-remove", id })).toEqual({ type: "device-remove", id })
+    expect(deviceCommand({ type: "device-remove", id: "AB".repeat(32) })).toBeNull()
+    expect(deviceCommand({ type: "device-remove", id: "ab" })).toBeNull()
+    expect(deviceCommand({ type: "device-rename", name: "work" })).toEqual({ type: "device-rename", name: "work" })
+    expect(deviceCommand({ type: "device-rename", name: "Work" })).toBeNull()
+    expect(deviceCommand({ type: "device-preset", preset: "strict" })).toEqual({ type: "device-preset", preset: "strict" })
+    expect(deviceCommand({ type: "device-preset", preset: "toString" })).toBeNull()
+    expect(deviceCommand({ type: "device-settings", preset: "relaxed" })).toEqual({ type: "device-settings" })
   })
 
   test("a join starts and polls without counting as use or asking hello again", async () => {
@@ -206,6 +230,62 @@ describe("idle lock", () => {
     await settle()
     expect(locks()).toBe(1)
     expect(backend.status.state).toBe("locked")
+  })
+
+  test("Strict locks after five minutes; the preset is kept in local storage", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const reply = await backend.device({ type: "device-preset", preset: "strict" })
+    expect(reply.ok && reply.reply).toEqual({ type: "device-settings", preset: "strict" })
+    expect(fake.local["deadbolt.lockPreset"]).toBe("strict")
+    backend.used()
+    setSystemTime(new Date(start.getTime() + 5 * 60_000 - 1000))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(0)
+    setSystemTime(new Date(start.getTime() + 5 * 60_000))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(1)
+    // A restarted service worker reads it back.
+    const again = new StandaloneBackend()
+    const settings = await again.device({ type: "device-settings" })
+    expect(settings.ok && settings.reply.preset).toBe("strict")
+  })
+
+  test("Relaxed stays unlocked when the screen locks, and for longer than an hour", async () => {
+    fake.local["deadbolt.lockPreset"] = "relaxed"
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    backend.used()
+    fake.idleListeners.forEach((l) => l("locked"))
+    setSystemTime(new Date(start.getTime() + 11 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(0)
+    expect(backend.status.state).toBe("ready")
+    setSystemTime(new Date(start.getTime() + 12 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(1)
+  })
+
+  test("Strict asks for the passphrase before a password is shown", async () => {
+    fake.local["deadbolt.lockPreset"] = "strict"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    fake.sent.length = 0
+    const secrets = () => requests().filter((b) => b.type === "device-secret")
+    const refused = await backend.device({ type: "device-secret", ref: "v:i" })
+    expect(refused.ok).toBe(false)
+    expect(secrets()).toEqual([])
+    const asked = await backend.device({ type: "device-secret", ref: "v:i", passphrase: "p" })
+    expect(asked.ok).toBe(true)
+    expect(secrets()).toEqual([{ type: "device-secret", ref: "v:i", passphrase: "p" }])
   })
 
   test("a service worker restart doesn't start the alarms over", async () => {

@@ -10,7 +10,7 @@
 // in chrome.storage; closing the browser, a crash of the offscreen document or
 // its worker, and Lock all end that memory, so each leaves the vault locked.
 
-import type { DeviceCommand, DeviceReply, Status } from "../messages"
+import type { DeviceCommand, DeviceReply, LockPreset, Status } from "../messages"
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type SendOptions, type VaultBackend } from "./backend"
 import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
@@ -27,16 +27,27 @@ const SLOW_MS: Partial<Record<string, number>> = {
   // Starting a join waits up to 20 s for the relay; finishing runs the KDF.
   "device-join-start": 60_000,
   "device-join-finish": 120_000,
+  // Strict checks the passphrase (the KDF) before a password is shown.
+  "device-secret": 120_000,
 }
 
 /**
- * The Comfortable preset, the contract's default: lock after an hour without
- * use, when the screen locks, and when the browser quits. Strict (5 min) and
- * Relaxed (12 h, screen lock ignored) are a follow-up, as is keeping the key
- * in chrome.storage.session so an offscreen restart doesn't lock (a proposal
- * requiring its own security review).
+ * The lock presets (docs/extension-device.md): how long without use before
+ * the vault locks, whether the screen locking locks it, and whether showing a
+ * password asks for the passphrase again. Every preset locks when the browser
+ * quits, and the unwrapped key lives in the worker's memory only under all
+ * three: keeping it in chrome.storage.session, so an offscreen restart
+ * wouldn't lock, is a proposal that needs its own security review.
  */
-const IDLE_LOCK_MS = 60 * 60_000
+export const PRESETS: Record<LockPreset, { idleMs: number; screenLock: boolean; reauth: boolean }> = {
+  strict: { idleMs: 5 * 60_000, screenLock: true, reauth: true },
+  comfortable: { idleMs: 60 * 60_000, screenLock: true, reauth: false },
+  relaxed: { idleMs: 12 * 60 * 60_000, screenLock: false, reauth: false },
+}
+export const DEFAULT_PRESET: LockPreset = "comfortable"
+/** The chosen preset, in chrome.storage.local: a setting, nothing secret. */
+const PRESET_KEY = "deadbolt.lockPreset"
+const isPreset = (v: unknown): v is LockPreset => typeof v === "string" && Object.hasOwn(PRESETS, v)
 const SYNC_EVERY_MIN = 5
 /** A sync on wake (the popup opening, say) at most this often. */
 const SYNC_AFTER_MS = 30_000
@@ -54,13 +65,13 @@ const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save"])
 const USES = new Set<string>(["fill", "save"])
 
 /** device.html's commands that don't count as use. */
-const PAGE_READS = new Set<string>(["device-status", "device-lock", "device-logins", "device-devices", "list", "device-join-status", "device-join-cancel"])
+const PAGE_READS = new Set<string>(["device-status", "device-lock", "device-logins", "device-devices", "list", "device-join-status", "device-join-cancel", "device-settings"])
 /**
  * Commands that change nothing hello would report. Until a join finishes,
  * nothing is persisted and hello stays not-set-up, so starting and polling
  * one don't ask it again.
  */
-const QUIET = new Set<string>(["device-logins", "device-devices", "device-join-start", "device-join-status"])
+const QUIET = new Set<string>(["device-logins", "device-devices", "device-item", "device-secret", "device-join-start", "device-join-status"])
 /** Commands that name this browser to the vault's other devices. */
 const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-start", "device-join-finish"])
 
@@ -76,6 +87,7 @@ export class StandaloneBackend implements VaultBackend {
   /** The last use, read back after the service worker restarts. */
   private loaded: Promise<void>
   private lastSync = 0
+  preset: LockPreset = DEFAULT_PRESET
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -88,19 +100,29 @@ export class StandaloneBackend implements VaultBackend {
       if (alarm.name === SYNC_ALARM) void this.sync()
     })
     chrome.idle.onStateChanged.addListener((state) => {
-      if (state === "locked") void this.lock()
+      if (state === "locked") void this.loaded.then(() => {
+        if (PRESETS[this.preset].screenLock) return this.lock()
+      })
     })
     // Creating an alarm that exists starts its period over, and the service
     // worker starts far more often than once a minute: only make missing ones.
     void ensureAlarm(TICK_ALARM, 1)
     void ensureAlarm(SYNC_ALARM, SYNC_EVERY_MIN)
-    this.loaded = chrome.storage.session.get(LAST_USE_KEY).then(
-      (got) => {
-        const at = got[LAST_USE_KEY]
-        if (typeof at === "number") this.lastUse = Math.max(this.lastUse, at)
-      },
-      () => {},
-    )
+    this.loaded = Promise.all([
+      chrome.storage.session.get(LAST_USE_KEY).then(
+        (got) => {
+          const at = got[LAST_USE_KEY]
+          if (typeof at === "number") this.lastUse = Math.max(this.lastUse, at)
+        },
+        () => {},
+      ),
+      chrome.storage.local.get(PRESET_KEY).then(
+        (got) => {
+          if (isPreset(got[PRESET_KEY])) this.preset = got[PRESET_KEY]
+        },
+        () => {},
+      ),
+    ]).then(() => {})
   }
 
   onChange(listener: Listener): () => void {
@@ -160,7 +182,7 @@ export class StandaloneBackend implements VaultBackend {
     return reply as ReplyFor[T]
   }
 
-  /** device.html's commands (see DeviceCommand); the background checks the sender (fromDevicePage). */
+  /** device.html's commands (see DeviceCommand); the background checks the sender (fromVaultPage). */
   async device(command: DeviceCommand): Promise<DeviceReply> {
     const started = Date.now()
     const fail = (message: string): DeviceReply => ({ ok: false, message, status: this.status })
@@ -177,6 +199,19 @@ export class StandaloneBackend implements VaultBackend {
       // the pending join and everything it held in memory.
       await this.lock()
       return { ok: true, reply: { type: "device-join-cancel", ok: true }, ms: Date.now() - started, status: this.status }
+    }
+    if (command.type === "device-settings" || command.type === "device-preset") {
+      await this.loaded
+      if (command.type === "device-preset") {
+        this.preset = command.preset
+        await chrome.storage.local.set({ [PRESET_KEY]: command.preset }).catch(() => {})
+      }
+      return { ok: true, reply: { type: "device-settings", preset: this.preset }, ms: Date.now() - started, status: this.status }
+    }
+    if (command.type === "device-secret" && !command.passphrase) {
+      await this.loaded
+      // Strict: showing a password asks for the passphrase every time.
+      if (PRESETS[this.preset].reauth) return fail("Enter your passphrase to show this password.")
     }
     if (command.type === "device-status") {
       await this.hello()
@@ -238,7 +273,7 @@ export class StandaloneBackend implements VaultBackend {
     // Woken by the alarm, the service worker may not have heard from the vault yet.
     if (this.status.state === "connecting") await this.connect()
     if (this.status.state !== "ready") return
-    if (Date.now() - this.lastUse >= IDLE_LOCK_MS) await this.lock()
+    if (Date.now() - this.lastUse >= PRESETS[this.preset].idleMs) await this.lock()
   }
 
   private async sync() {
@@ -304,9 +339,16 @@ async function ensureAlarm(name: string, periodInMinutes: number) {
   if (existing?.periodInMinutes !== periodInMinutes) await chrome.alarms.create(name, { periodInMinutes })
 }
 
-/** Only this extension's own device.html (in any tab, with any query or hash) may manage the vault: never a content script, the inline menu or another page. */
-export function fromDevicePage(sender: chrome.runtime.MessageSender): boolean {
-  return sender.id === chrome.runtime.id && sender.url?.split(/[?#]/)[0] === chrome.runtime.getURL(DEVICE_PAGE)
+export const POPUP_PAGE = "popup.html"
+
+/**
+ * Only this extension's own device.html (in any tab, with any query or hash)
+ * and its toolbar popup may manage the vault: never a content script, the
+ * inline menu or another page. Neither page is web-accessible.
+ */
+export function fromVaultPage(sender: chrome.runtime.MessageSender): boolean {
+  const url = sender.url?.split(/[?#]/)[0]
+  return sender.id === chrome.runtime.id && (url === chrome.runtime.getURL(DEVICE_PAGE) || url === chrome.runtime.getURL(POPUP_PAGE))
 }
 
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max
@@ -327,10 +369,31 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
   switch (c.type) {
     case "device-status":
     case "device-lock":
-    case "device-sync":
     case "device-logins":
     case "device-devices":
+    case "device-settings":
       return { type: c.type }
+    case "device-sync":
+      return c.wait === true ? { type: "device-sync", wait: true } : { type: "device-sync" }
+    case "device-item":
+      return text(c.ref, 200) && c.ref ? { type: "device-item", ref: c.ref } : null
+    case "device-secret":
+      if (!text(c.ref, 200) || !c.ref) return null
+      if (c.passphrase === undefined) return { type: "device-secret", ref: c.ref }
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-secret", ref: c.ref, passphrase: c.passphrase } : null
+    case "device-save": {
+      const e = c.entry as Record<string, unknown> | undefined
+      if (!e || !text(e.title, 500) || !text(e.url, 2048) || !text(e.username, 500) || !text(e.password, 4096)) return null
+      const entry = { title: e.title, url: e.url, username: e.username, password: e.password }
+      if (c.ref === undefined) return { type: "device-save", entry }
+      return text(c.ref, 200) && c.ref ? { type: "device-save", ref: c.ref, entry } : null
+    }
+    case "device-remove":
+      return typeof c.id === "string" && /^[0-9a-f]{64}$/.test(c.id) ? { type: "device-remove", id: c.id } : null
+    case "device-rename":
+      return text(c.name, 64) && /^[a-z][a-z0-9_-]{0,63}$/.test(c.name) ? { type: "device-rename", name: c.name } : null
+    case "device-preset":
+      return isPreset(c.preset) ? { type: "device-preset", preset: c.preset } : null
     case "device-create":
       return text(c.passphrase, 1024) && c.passphrase && text(c.name, 200) ? { type: "device-create", passphrase: c.passphrase, name: c.name } : null
     case "device-unlock":

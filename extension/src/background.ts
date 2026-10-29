@@ -13,7 +13,7 @@ import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
-import { DEVICE_PAGE, deviceCommand, fromDevicePage, StandaloneBackend } from "./bg/standalone"
+import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
 import type { DeviceReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
 declare const DEADBOLT_NATIVE: boolean
@@ -48,8 +48,8 @@ function title(status: Status): string {
   }
 }
 
-host.onChange((status) => {
-  void chrome.runtime.sendMessage({ type: "db:status", status } satisfies StatusChanged).catch(() => {})
+host.onChange((status, change) => {
+  void chrome.runtime.sendMessage({ type: "db:status", status, ...(change ? { change } : {}) } satisfies StatusChanged).catch(() => {})
   void chrome.action.setTitle({ title: title(status) }).catch(() => {})
 })
 
@@ -136,9 +136,9 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
   }
 }
 
-/** device.html's commands: only from that exact page of this extension, never a content script or another page. */
+/** The vault's own commands: only from device.html or the popup of this extension, never a content script or another page. */
 async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promise<DeviceReply> {
-  if (!fromDevicePage(sender)) return { ok: false, message: "", status: host.status }
+  if (!fromVaultPage(sender)) return { ok: false, message: "", status: host.status }
   if (!standalone) return { ok: false, message: "This build talks to the Deadbolt app; set it up there.", status: host.status }
   const command = deviceCommand(raw)
   if (!command) return { ok: false, message: "Malformed request.", status: host.status }
