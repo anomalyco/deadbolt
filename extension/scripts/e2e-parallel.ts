@@ -17,7 +17,7 @@ if (!(jobs >= 1)) throw new Error("--jobs wants a positive number")
 
 // One e2e build for every shard (`e2e/run.ts --dist`).
 const dist = await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-"))
-const build = Bun.spawnSync(["bun", "scripts/build.ts", "--e2e", dist], { cwd: root, stdout: "inherit", stderr: "inherit" })
+const build = Bun.spawnSync(["bun", "scripts/build.ts", "--e2e", dist, "--native"], { cwd: root, stdout: "inherit", stderr: "inherit" })
 if (build.exitCode !== 0) process.exit(build.exitCode ?? 1)
 
 const started = Date.now()

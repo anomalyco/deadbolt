@@ -303,7 +303,8 @@ function b64Fields<K extends string>(raw: Record<string, unknown>, keys: readonl
   return out
 }
 
-function account(v: unknown): Account | null {
+/** A login as the vault describes it, checked; null if it isn't one. */
+export function account(v: unknown): Account | null {
   if (!isObject(v) || !isRef(v.ref)) return null
   const title = str(v.title, 500)
   if (title === undefined) return null
@@ -385,7 +386,7 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
   return reply ? { kind: "reply", id, reply } : null
 }
 
-function parseReply(raw: Record<string, unknown>): Reply | null {
+export function parseReply(raw: Record<string, unknown>): Reply | null {
   switch (raw.type) {
     case "hello": {
       const status = raw.status as HostStatus

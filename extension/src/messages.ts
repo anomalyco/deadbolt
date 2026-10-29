@@ -173,6 +173,8 @@ export type ToBackground =
   /** The user picked a "Sign in with …" row: point at the site's button for it (see SignInReply). */
   | { type: "db:menu-signin"; token: string; ref: string }
   | { type: "db:menu-dismiss"; token: string }
+  /** The locked row of a browser-only Deadbolt was clicked: open device.html to unlock it. Answers true if it opened. */
+  | { type: "db:menu-unlock"; token: string }
   /** The size the surface needs; with `mode`, the mode it's folding into (only ever "pill"). */
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
@@ -186,6 +188,10 @@ export type ToBackground =
   | { type: "db:popup-saving-on"; tabId: number }
   /** Start or stop learning the tab's site. Answers with a LearnReply. */
   | { type: "db:popup-learn"; tabId: number; on: boolean }
+  /** Lock the browser-only Deadbolt now (bg/standalone.ts). Answers with the Status after. */
+  | { type: "db:popup-lock" }
+  // device.html, the standalone device's own page (bg/standalone.ts): answers with a DeviceReply
+  | { type: "db:device"; command: DeviceCommand }
   // passkeys (bg/passkeys.ts): the content script relays the page's hook
   /** `request`: the hook's id for the call; `options`: the page's options, checked in the background. */
   | { type: "pk:get" | "pk:create"; request: number; options: unknown; allowed: boolean }
@@ -423,3 +429,43 @@ export type PasskeyPrompt = {
 
 /** `fallback`: the browser's own passkey flow, such as a phone or security key. */
 export type PasskeyChoice = { action: "use"; ref: string } | { action: "save" } | { action: "fallback" } | { action: "cancel" }
+
+/**
+ * What device.html asks of the standalone device: set it up, unlock, lock,
+ * pair and sync it, and add or list logins by hand. The background takes
+ * these only from the extension's own device.html.
+ */
+export type DeviceCommand =
+  | { type: "device-status" }
+  | { type: "device-create"; passphrase: string; name: string }
+  | { type: "device-unlock"; passphrase: string }
+  | { type: "device-lock" }
+  /** Admit the device that `deadbolt join` shows this code on. */
+  | { type: "device-pair"; code: string }
+  /**
+   * First run, joining a vault another device has: start waiting to be
+   * admitted (`{ type: "device-join-start", code, phase: "waiting" }`; the
+   * background names this browser), ask how it's going (JoinStatus), finish
+   * with this browser's own passphrase once admitted, or cancel. Cancel never
+   * reaches the vault: the background ends its worker, as Lock does.
+   */
+  | { type: "device-join-start" }
+  | { type: "device-join-status" }
+  | { type: "device-join-finish"; passphrase: string }
+  | { type: "device-join-cancel" }
+  | { type: "device-sync" }
+  /** Every login in the vault, for the page's list: `{ type: "device-logins", accounts: Account[] }`. */
+  | { type: "device-logins" }
+  /** The vault's devices: `{ type: "device-devices", devices: VaultDevice[] }`. */
+  | { type: "device-devices" }
+  | { type: "list"; origin: string }
+  | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
+
+/** device-join-status's reply: `code` while waiting (so a reloaded page shows it again), `vault` once admitted, `message` when it failed. */
+export type JoinStatus = { type: "device-join-status"; phase: "waiting" | "admitted" | "failed" | "idle"; code?: string; vault?: string; message?: string }
+
+/** A member of the vault; `current`: this browser. */
+export type VaultDevice = { id: string; name: string; current: boolean }
+
+/** `reply`: the vault's answer as it gave it; `ms`: how long it took. */
+export type DeviceReply = { ok: true; reply: Record<string, unknown>; ms: number; status: Status } | { ok: false; message: string; status: Status }

@@ -33,7 +33,7 @@ import type { ChooseReply, FieldRole, MenuLoadReply, OfferChoice, PageFacts, Sav
 import type { CheckReply, PasswordValue, SaveReply } from "../protocol"
 import { resizeMessage } from "./autofill"
 import { menuFrameOf, newToken, sendToFrame, targetFor, type FrameTarget } from "./frames"
-import { HostError, type Host } from "./host"
+import { HostError, type VaultBackend } from "./backend"
 import { saveTitle, saveUrl, senderOrigin, siteOf } from "./site"
 
 /** How long a submitted password is kept while the sign-in finishes. */
@@ -244,7 +244,7 @@ export class Saver {
   private ttl: { capture: number; offer: number; held: number; reprobe: number }
 
   constructor(
-    private host: Host,
+    private host: VaultBackend,
     ttl: { capture?: number; offer?: number; held?: number; reprobe?: number } = {},
     private now: () => number = Date.now,
   ) {

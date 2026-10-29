@@ -1,7 +1,7 @@
 // A small stand-in for the chrome.* APIs the background uses, and a fake host,
 // for testing the background classes without a browser.
 
-import { HostError, type Host } from "../src/bg/host"
+import { HostError, type VaultBackend } from "../src/bg/backend"
 import type { PageFacts, Status } from "../src/messages"
 import type { Account, RequestBody as Request } from "../src/protocol"
 
@@ -31,6 +31,33 @@ export interface FakeChrome {
   session: Record<string, unknown>
   local: Record<string, unknown>
   tabs: Record<number, { active: boolean; windowId: number }>
+  /** Everything sent with chrome.runtime.sendMessage, and what it's answered with (undefined: nobody listens). */
+  sent: unknown[]
+  runtimeAnswer: (message: unknown) => unknown
+  /** chrome.runtime.onMessage listeners; `deliver` calls them as Chrome would. */
+  listeners: Array<(message: unknown, sender: chrome.runtime.MessageSender, respond: (reply: unknown) => void) => unknown>
+  alarms: Record<string, { periodInMinutes?: number }>
+  /** How many times each alarm was created. */
+  alarmsCreated: Record<string, number>
+  alarmListeners: Array<(alarm: { name: string }) => void>
+  idleListeners: Array<(state: string) => void>
+  /** URLs opened with chrome.tabs.create. */
+  opened: string[]
+  offscreenOpen: boolean
+}
+
+/** A message to the extension from `sender`, answered by the first listener that responds (null if none does). */
+export function deliver(fake: FakeChrome, message: unknown, sender: chrome.runtime.MessageSender): Promise<unknown> {
+  return new Promise((resolve) => {
+    let waiting = false
+    for (const l of fake.listeners) if (l(message, sender, resolve) === true) waiting = true
+    if (!waiting) setTimeout(() => resolve(null), 0)
+  })
+}
+
+/** Lets pending promises and zero-delay timers run. */
+export async function settle(rounds = 10) {
+  for (let i = 0; i < rounds; i++) await new Promise((r) => setTimeout(r, 0))
 }
 
 export function installChrome(): FakeChrome {
@@ -53,9 +80,40 @@ export function installChrome(): FakeChrome {
     session: {},
     local: {},
     tabs: { 1: { active: true, windowId: 7 } },
+    sent: [],
+    runtimeAnswer: () => undefined,
+    listeners: [],
+    alarms: {},
+    alarmsCreated: {},
+    alarmListeners: [],
+    idleListeners: [],
+    opened: [],
+    offscreenOpen: true,
   }
   ;(globalThis as unknown as { chrome: unknown }).chrome = {
-    runtime: { id: ID },
+    runtime: {
+      id: ID,
+      getURL: (path: string) => `chrome-extension://${ID}/${path}`,
+      sendMessage: async (message: unknown) => {
+        fake.sent.push(message)
+        return fake.runtimeAnswer(message)
+      },
+      onMessage: { addListener: (l: FakeChrome["listeners"][number]) => void fake.listeners.push(l) },
+      getContexts: async () => (fake.offscreenOpen ? [{ contextType: "OFFSCREEN_DOCUMENT" }] : []),
+    },
+    offscreen: {
+      createDocument: async () => void (fake.offscreenOpen = true),
+      closeDocument: async () => void (fake.offscreenOpen = false),
+    },
+    alarms: {
+      get: async (name: string) => (fake.alarms[name] ? { name, ...fake.alarms[name] } : undefined),
+      create: async (name: string, info: { periodInMinutes?: number }) => {
+        fake.alarms[name] = info
+        fake.alarmsCreated[name] = (fake.alarmsCreated[name] ?? 0) + 1
+      },
+      onAlarm: { addListener: (l: (alarm: { name: string }) => void) => void fake.alarmListeners.push(l) },
+    },
+    idle: { onStateChanged: { addListener: (l: (state: string) => void) => void fake.idleListeners.push(l) } },
     webNavigation: {
       getFrame: async ({ tabId, frameId }: { tabId: number; frameId: number }) => fake.frames[`${tabId}:${frameId}`] ?? null,
       getAllFrames: async ({ tabId }: { tabId: number }) =>
@@ -69,6 +127,7 @@ export function installChrome(): FakeChrome {
         return message.type === "db:fill" ? fake.fillAck(message) : fake.answer(message, options.documentId)
       },
       get: async (tabId: number) => ({ id: tabId, ...fake.tabs[tabId] }),
+      create: async ({ url }: { url: string }) => void fake.opened.push(url),
     },
     storage: {
       session: {
@@ -99,7 +158,7 @@ export const ACCOUNTS: Account[] = [
 ]
 
 export interface FakeHost {
-  host: Host
+  host: VaultBackend
   requests: Request[]
   setStatus(status: Status): void
   /** Holds the host's fill replies until the returned function is called. */
@@ -149,7 +208,7 @@ export function fakeHost(): FakeHost {
     },
   }
   return {
-    host: host as unknown as Host,
+    host: host as unknown as VaultBackend,
     requests,
     setStatus(status) {
       host.status = status

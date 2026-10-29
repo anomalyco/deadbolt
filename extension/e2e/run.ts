@@ -40,7 +40,7 @@ const arg = (name: string) => {
 const prebuilt = arg("--dist")
 const dist = prebuilt ?? (await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-")))
 if (!prebuilt) {
-  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist], { stdout: "inherit", stderr: "inherit" })
+  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist, "--native"], { stdout: "inherit", stderr: "inherit" })
   if (!built.success) throw new Error("the e2e build failed")
 }
 const stills = arg("--stills")

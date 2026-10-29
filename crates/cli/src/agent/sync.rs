@@ -1,6 +1,6 @@
 //! Vault sync over deadbolt-net.
 //!
-//! The opaque heads blob is a JSON [`Hello`]: the sender's name and address,
+//! The opaque heads blob is a JSON [`application::Hello`]: the sender's name and address,
 //! hints about other members, and the core `Heads` of each vault it shares
 //! with the receiver. Entries are sent for vaults both sides list and the
 //! receiver is a member of, all membership entries first. Until the startup
@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use deadbolt_core::{DeviceId, Entry, Heads, Log, VaultId};
+use deadbolt_core::{DeviceId, VaultId};
+use deadbolt_net::application;
 use deadbolt_net::{Blob, HandlerError, PeerId, SyncHandler};
-use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use super::Agent;
-use super::session::{Addr, Hint, Loaded, hex, now, unhex};
+use super::session::{Addr, Loaded};
 use crate::protocol::PeerSync;
 
 pub const SYNC_INTERVAL: Duration = Duration::from_secs(30);
@@ -34,17 +34,6 @@ const STARTUP_RETRY: Duration = Duration::from_secs(1);
 // opened never gives up before we do.
 const _: () = assert!(deadbolt_core::MAX_ENTRY_LEN + 1 == deadbolt_net::DEFAULT_MAX_FRAME_LEN);
 const _: () = assert!(SYNC_TIMEOUT.as_secs() * 2 <= deadbolt_net::INBOUND_SYNC_TIMEOUT.as_secs());
-
-#[derive(Serialize, Deserialize)]
-struct Hello {
-    v: u32,
-    name: String,
-    addr: Option<Addr>,
-    #[serde(default)]
-    peers: BTreeMap<String, Hint>,
-    /// Vault id (hex) -> core heads (hex).
-    vaults: BTreeMap<String, String>,
-}
 
 pub struct Handler(pub Arc<Agent>);
 
@@ -94,19 +83,7 @@ impl SyncHandler for Handler {
 }
 
 pub(super) fn hello(s: &Loaded, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<u8>> {
-    let vaults = s
-        .vaults
-        .iter()
-        .filter(|(_, vault)| vault.is_member(peer))
-        .map(|(id, vault)| (id.to_string(), hex(&vault.heads().encode())))
-        .collect();
-    Ok(serde_json::to_vec(&Hello {
-        v: 1,
-        name: s.meta.device_name.clone(),
-        addr,
-        peers: s.hints_for(peer),
-        vaults,
-    })?)
+    Ok(application::hello(s, peer, addr)?)
 }
 
 pub(super) fn missing_for(
@@ -115,80 +92,16 @@ pub(super) fn missing_for(
     bytes: &[u8],
     ready: bool,
 ) -> Result<Vec<Blob>> {
-    let hello: Hello = serde_json::from_slice(bytes)?;
-    s.learn(peer, Some(&hello.name), hello.addr, hello.peers);
-    s.save_peers()?;
-    let mut membership = Vec::new();
-    let mut data = Vec::new();
-    for (vault, heads) in &hello.vaults {
-        let Ok(id) = unhex::<32>(vault).map(VaultId::from_bytes) else {
-            continue;
-        };
-        let Some(vault) = s.vaults.get(&id).filter(|v| v.is_member(peer)) else {
-            continue;
-        };
-        let heads = Heads::decode(&data_encoding::HEXLOWER.decode(heads.as_bytes())?)?;
-        for entry in vault.missing_for(&heads) {
-            match entry.log() {
-                Log::Membership => membership.push(entry.encode()),
-                Log::Data if ready => data.push(entry.encode()),
-                Log::Data => {}
-            }
-        }
-    }
-    membership.append(&mut data);
-    Ok(membership)
+    application::missing_for(s, peer, bytes, ready)
 }
 
-/// Applies entries from `peer`. Data entries are only taken from current
-/// members of their vault; signed membership entries from any member of a
-/// shared vault. Returns how many were new.
 pub(super) fn receive(
     s: &mut Loaded,
     peer: &DeviceId,
     entries: Vec<Blob>,
     ready: bool,
 ) -> Result<usize> {
-    let mut grouped: BTreeMap<VaultId, Vec<Entry>> = BTreeMap::new();
-    for bytes in entries {
-        let entry = match Entry::decode(&bytes) {
-            Ok(entry) => entry,
-            Err(error) => {
-                warn!(peer = %peer, "undecodable entry: {error}");
-                continue;
-            }
-        };
-        if !s.vaults.contains_key(&entry.vault()) {
-            continue;
-        }
-        if entry.log() == Log::Data && !ready {
-            continue;
-        }
-        grouped.entry(entry.vault()).or_default().push(entry);
-    }
-    let mut added = 0;
-    for (id, entries) in grouped {
-        added += s.update(id, |vault, _| {
-            let mut added = 0;
-            for entry in entries {
-                if entry.log() == Log::Data && !vault.is_member(peer) {
-                    continue;
-                }
-                match vault.apply(entry) {
-                    Ok(true) => added += 1,
-                    Ok(false) => {}
-                    Err(error) => debug!(peer = %peer, "rejected entry: {error}"),
-                }
-            }
-            Ok(added)
-        })?;
-    }
-    s.peer_mut(peer).last_seen = Some(now());
-    s.save_peers()?;
-    if added > 0 {
-        info!(peer = %peer, entries = added, "received");
-    }
-    Ok(added)
+    application::receive(s, peer, entries, ready)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -563,7 +476,7 @@ mod tests {
         let mut items: Vec<_> = (0..3000).map(login).collect();
         items.extend((0..4).map(|i| note(&format!("big {i}"), 1 << 20)));
         import(&mut a, items);
-        let offer_blob = super::super::pairing::offer(&a, vault, None).unwrap();
+        let offer_blob = super::super::pairing::offer(&a, vault, &b.id, None).unwrap();
         let (offer, _) = super::super::pairing::read_offer(&offer_blob).unwrap();
         let join = super::super::pairing::join_blob(&b.secret, "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
@@ -599,6 +512,111 @@ mod tests {
         let (a, b) = (a.0.into_inner().unwrap(), b.0.into_inner().unwrap());
         assert_eq!(b.vault(&vault).heads(), a.vault(&vault).heads());
         assert_eq!(b.vault(&vault).items().len(), 6005);
+    }
+
+    #[test]
+    fn rejected_entries_do_not_discard_removals_or_admit_removed_peer_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut target = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
+        let id = target.create_vault("personal").unwrap();
+        let peer = DeviceSecret::from_bytes(&[2; 32]);
+        let consent = peer.join_consent(&id, &target.id);
+        target
+            .update(id, |v, key| Ok(v.add(key, peer.device_id(), consent)?))
+            .unwrap();
+        let mut fork = target.vault(&id).clone();
+        target
+            .update(id, |v, _| {
+                Ok(v.create_item(&peer, "login", Some("original".into()), [])?)
+            })
+            .unwrap();
+        let (_, rejected) = fork
+            .create_item(&peer, "login", Some("fork".into()), [])
+            .unwrap();
+        let mut source = target.vault(&id).clone();
+        let removal = source.remove(&target.secret, peer.device_id()).unwrap();
+        let (private, data) = source
+            .create_item(&target.secret, "login", Some("private".into()), [])
+            .unwrap();
+        let added = receive(
+            &mut target,
+            &peer.device_id(),
+            vec![
+                Blob::new(vec![255]),
+                rejected.encode(),
+                removal.encode(),
+                data.encode(),
+            ],
+            true,
+        )
+        .unwrap();
+        assert_eq!(added, 1);
+        assert!(!target.vault(&id).is_member(&peer.device_id()));
+        assert!(
+            target
+                .vault(&id)
+                .items()
+                .iter()
+                .all(|item| item.id != private)
+        );
+        let heads = target.vault(&id).heads();
+        drop(target);
+        assert_eq!(
+            Loaded::open(dir.path(), b"test")
+                .unwrap()
+                .vault(&id)
+                .heads(),
+            heads
+        );
+    }
+
+    #[test]
+    fn shared_sync_sends_all_membership_before_any_data() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut source = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
+        let peer = DeviceSecret::from_bytes(&[2; 32]);
+        let mut vaults = BTreeMap::new();
+        for name in ["first", "second"] {
+            let id = source.create_vault(name).unwrap();
+            let consent = peer.join_consent(&id, &source.id);
+            source
+                .update(id, |v, key| {
+                    v.add(key, peer.device_id(), consent)?;
+                    Ok(v.create_item(key, "login", Some("secret".into()), [])?)
+                })
+                .unwrap();
+            vaults.insert(
+                id.to_string(),
+                data_encoding::HEXLOWER.encode(&deadbolt_core::Heads::default().encode()),
+            );
+        }
+        let hello = serde_json::to_vec(&application::Hello {
+            v: 1,
+            name: "beta".into(),
+            addr: None,
+            peers: BTreeMap::new(),
+            vaults,
+        })
+        .unwrap();
+        let logs = |blobs: Vec<Blob>| {
+            blobs
+                .into_iter()
+                .map(|bytes| deadbolt_core::Entry::decode(&bytes).unwrap().log())
+                .collect::<Vec<_>>()
+        };
+        let all = logs(missing_for(&mut source, &peer.device_id(), &hello, true).unwrap());
+        assert!(all.contains(&deadbolt_core::Log::Data));
+        let first_data = all
+            .iter()
+            .position(|log| *log == deadbolt_core::Log::Data)
+            .unwrap();
+        assert!(
+            all[first_data..]
+                .iter()
+                .all(|log| *log == deadbolt_core::Log::Data)
+        );
+        let startup = logs(missing_for(&mut source, &peer.device_id(), &hello, false).unwrap());
+        assert_eq!(startup, all[..first_data]);
     }
 
     #[test]

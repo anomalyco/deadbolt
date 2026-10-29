@@ -4,19 +4,11 @@
 // and turns `changed` pushes into a status that the popup and menus follow.
 
 import type { Status } from "../messages"
-import { NATIVE_HOST, parseHostMessage, PROTOCOL, REPLY_TYPE, type Change, type ErrorCode, type ErrorReply, type Reply, type ReplyFor, type RequestBody } from "../protocol"
+import { NATIVE_HOST, parseHostMessage, PROTOCOL, REPLY_TYPE, type Change, type ErrorReply, type Reply, type ReplyFor, type RequestBody } from "../protocol"
+import { cancelled, HostError, type Listener, type SendOptions, type VaultBackend } from "./backend"
 
 const TIMEOUT_MS = 30_000
 const BACKOFF_MS = [1_000, 2_000, 5_000, 10_000, 30_000, 60_000]
-
-export class HostError extends Error {
-  constructor(
-    readonly code: ErrorCode | "disconnected" | "timeout",
-    message: string,
-  ) {
-    super(message)
-  }
-}
 
 interface Pending {
   resolve: (reply: Reply) => void
@@ -24,20 +16,10 @@ interface Pending {
   timer: ReturnType<typeof setTimeout>
 }
 
-interface SendOptions {
-  timeout?: number
-  onId?: (id: number) => void
-  signal?: AbortSignal
-}
-
-const cancelled = () => new HostError("cancelled", "The request was cancelled.")
-
 /** The browser's message when no manifest for the host is installed. */
 const NOT_FOUND = /native messaging host not found/i
 
-type Listener = (status: Status, change?: Change) => void
-
-export class Host {
+export class Host implements VaultBackend {
   private port: chrome.runtime.Port | null = null
   private nextId = 1
   private pending = new Map<number, Pending>()

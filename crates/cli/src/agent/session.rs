@@ -1,7 +1,6 @@
 //! The unlocked state: store, device key, vaults and the local address book.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::net::SocketAddr;
 use std::path::Path;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -9,6 +8,8 @@ use data_encoding::HEXLOWER;
 use deadbolt_core::{
     DeviceId, DeviceSecret, Entry, MembershipOp, Payload, Vault, VaultId, valid_name,
 };
+use deadbolt_net::application::{self, State};
+pub use deadbolt_net::application::{Addr, Hint, clean_name};
 use deadbolt_net::{Node, PeerAddr, PeerId};
 use deadbolt_store::{KdfParams, Unlocked};
 use indexmap::IndexMap;
@@ -40,34 +41,6 @@ pub fn unhex<const N: usize>(text: &str) -> Result<[u8; N]> {
         .ok_or_else(|| anyhow!("invalid id {text}"))
 }
 
-/// Device names are free text shown to people: trimmed, no control
-/// characters, at most 64 characters.
-pub fn clean_name(name: &str) -> String {
-    name.trim()
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(64)
-        .collect()
-}
-
-/// How to reach a device.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Addr {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub relay: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub direct: Vec<SocketAddr>,
-}
-
-impl Addr {
-    pub fn from_peer(addr: &PeerAddr) -> Self {
-        Self {
-            relay: addr.relay_url.clone(),
-            direct: addr.direct_addrs.clone(),
-        }
-    }
-}
-
 /// What this device knows about another device. Names and addresses are
 /// local knowledge, learned at pairing and gossiped during sync; they are
 /// not part of the signed vault log.
@@ -83,17 +56,6 @@ pub struct Peer {
     /// Unix seconds of the last completed sync session with this device.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_seen: Option<u64>,
-}
-
-/// A peer hint as gossiped to other devices.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Hint {
-    #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
-    pub addr: Option<Addr>,
-    #[serde(default)]
-    pub addr_seen: u64,
 }
 
 #[derive(Debug, Default)]
@@ -263,6 +225,47 @@ impl Loaded {
     }
 }
 
+impl State for Loaded {
+    type Error = anyhow::Error;
+
+    fn device_id(&self) -> DeviceId {
+        self.id
+    }
+    fn device_name(&self) -> &str {
+        &self.meta.device_name
+    }
+    fn vaults(&self) -> impl Iterator<Item = &Vault> {
+        self.vaults.values()
+    }
+    fn hints_for(&self, peer: &DeviceId) -> BTreeMap<String, Hint> {
+        self.hints_for(peer)
+    }
+
+    fn update<T>(
+        &mut self,
+        id: VaultId,
+        change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T, application::Error>,
+    ) -> Result<T> {
+        self.update(id, |vault, secret| Ok(change(vault, secret)?))
+    }
+
+    fn learn(
+        &mut self,
+        peer: &DeviceId,
+        name: &str,
+        addr: Option<Addr>,
+        hints: BTreeMap<String, Hint>,
+    ) -> Result<()> {
+        self.learn(peer, Some(name), addr, hints);
+        self.save_peers()
+    }
+
+    fn received(&mut self, peer: &DeviceId) -> Result<()> {
+        self.peer_mut(peer).last_seen = Some(now());
+        self.save_peers()
+    }
+}
+
 fn save_meta(store: &Unlocked, meta: &Meta) -> Result<()> {
     set_json(store, META_DEVICE_NAME, &meta.device_name)?;
     set_json(
@@ -305,7 +308,7 @@ impl Session {
     }
 
     pub fn own_addr(&self) -> Addr {
-        Addr::from_peer(&self.node.addr())
+        Addr::from_peer(self.node.addr())
     }
 }
 

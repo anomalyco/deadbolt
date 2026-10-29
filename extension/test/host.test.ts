@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test"
 import { fillError, wantFor, menuAccounts } from "../src/bg/autofill"
-import { Host, HostError } from "../src/bg/host"
+import { HostError } from "../src/bg/backend"
+import { Host } from "../src/bg/host"
 import type { Status } from "../src/messages"
 import { PROTOCOL, type Account } from "../src/protocol"
 

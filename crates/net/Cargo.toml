@@ -17,21 +17,34 @@ path = "tests/net/main.rs"
 [features]
 # Exposes transport bypasses for deterministic simulations, never needed by the CLI runtime.
 sim = []
+# Shared vault envelopes and application rules for native and browser devices.
+application = ["dep:deadbolt-core", "dep:serde", "dep:serde_json"]
 
 [dependencies]
+deadbolt-core = { path = "../core", optional = true }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 data-encoding = "2.11.1"
 getrandom = "0.4"
 hmac = "0.13.0"
-iroh = "1.3.0"
+iroh = { version = "1.3.0", default-features = false, features = ["tls-ring"] }
 iroh-dns = "1.3.0"
+n0-future = "0.3.2"
 qrcode = { version = "0.14.1", default-features = false }
 sha2 = "0.11.1"
 spake2 = { version = "0.5.0-pre.0", default-features = false }
 thiserror = "2.0.21"
-tokio = { version = "1.53.3", features = ["full"] }
+tokio = { version = "1.53.3", features = ["io-util", "sync", "macros"] }
 tracing = "0.1.44"
 zeroize = "1.9"
+
+[target.'cfg(not(all(target_family = "wasm", target_os = "unknown")))'.dependencies]
+iroh = "1.3.0"
+tokio = { version = "1.53.3", features = ["full"] }
+
+[target.'cfg(all(target_family = "wasm", target_os = "unknown"))'.dependencies]
+getrandom = { version = "0.4", features = ["wasm_js"] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -203,9 +203,10 @@ struct Invitation<'a> {
     vault: VaultId,
 }
 impl Inviter for Invitation<'_> {
-    async fn offer(&self, _: &PairingContext) -> Result<Vec<u8>, HandlerError> {
+    async fn offer(&self, ctx: &PairingContext) -> Result<Vec<u8>, HandlerError> {
+        let device = DeviceId::from_bytes(ctx.remote);
         self.device
-            .with(|s| pairing::offer(s, self.vault, None))
+            .with(|s| pairing::offer(s, self.vault, &device, None))
             .map_err(|e| e.to_string().into())
     }
     async fn welcome(
@@ -881,6 +882,60 @@ fn exploration() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn pairing_offer_rejects_a_removed_inviter() {
+    let mut world = World::new().unwrap();
+    world.pair(1).unwrap();
+    let peer = DeviceId::from_bytes(world.devices[1].id);
+    let removal = world.devices[0]
+        .with(|s| s.update(world.vault, |v, key| Ok(v.remove(key, peer)?)))
+        .unwrap();
+    world.devices[1]
+        .with(|s| s.update(world.vault, |v, _| Ok(v.apply(removal)?)))
+        .unwrap();
+    let invite = Invitation {
+        device: &world.devices[1],
+        vault: world.vault,
+    };
+    let ctx = PairingContext {
+        local: world.devices[1].id,
+        remote: world.devices[2].id,
+    };
+    let error = invite.offer(&ctx).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "this device is no longer a member of sim"
+    );
+    world.check().unwrap();
+}
+
+#[tokio::test]
+async fn pairing_offer_rejects_a_removed_joiner() {
+    let mut world = World::new().unwrap();
+    world.pair(1).unwrap();
+    world.step(&Action::Remove(1)).unwrap();
+    let invite = Invitation {
+        device: &world.devices[0],
+        vault: world.vault,
+    };
+    let ctx = PairingContext {
+        local: world.devices[0].id,
+        remote: world.devices[1].id,
+    };
+    // Exercise the offer adapter directly: World::pair skips removed peers.
+    let error = invite.offer(&ctx).await.unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "that device was removed from sim and can't rejoin it"
+    );
+    let fresh = PairingContext {
+        remote: world.devices[2].id,
+        ..ctx
+    };
+    invite.offer(&fresh).await.unwrap();
+    world.check().unwrap();
 }
 
 #[test]
