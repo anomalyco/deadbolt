@@ -37,6 +37,7 @@ import { hideRing, showRing } from "./ring"
 import { provider } from "../signin"
 import { fillable, fillFields, ownValue } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
+import { learning } from "./learn"
 import { deepActiveElement } from "./shadow"
 
 export interface PageState {
@@ -537,7 +538,8 @@ const emptyUntil = new WeakMap<Element, number>()
 type Asked = "focus" | "click" | "again"
 
 async function maybeOpen(el: HTMLInputElement, how: Asked = "focus") {
-  if (!isTop || querying || dismissedFor === el || !recentGesture()) return
+  // While the tab learns its site, the user signs in by hand.
+  if (!isTop || querying || dismissedFor === el || !recentGesture() || learning()) return
   // The save offer stays until it's answered or its time runs out.
   if (host && mode === "save") return
   const explicit = how !== "focus"
@@ -681,6 +683,8 @@ function onKeyDown(event: KeyboardEvent) {
  * background's db:approve fixed for this fill. Answers with what was written.
  */
 async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Promise<FillAck> {
+  // A sign-in session's step (no pick) fills nothing while the tab learns: the user signs in by hand.
+  if (message.notice && learning()) return { filled: [] }
   // A pick from the menu folded it into a pill on the field, which stays to
   // say how the fill went and goes by itself. Any other fill (the popup's,
   // an email-first step) closes what's open.
