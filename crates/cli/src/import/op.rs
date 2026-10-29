@@ -436,7 +436,7 @@ pub(crate) mod tests {
             }
             mapped += 1;
         }
-        assert_eq!((mapped, same), (11, 9));
+        assert_eq!((mapped, same), (11, 10));
     }
 
     #[test]

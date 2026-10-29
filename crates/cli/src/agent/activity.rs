@@ -76,6 +76,8 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::SiteGenerateDrop { .. } => (T::Browser, "site-generate-drop"),
         C::SiteCheck { .. } => (T::Browser, "site-check"),
         C::SiteSave { .. } => (T::Browser, "site-save"),
+        C::FormItems { .. } => (T::Browser, "form-items"),
+        C::FormFill { .. } => (T::Browser, "form-fill"),
         C::PasskeyList { .. } => (T::Browser, "passkey-list"),
         C::PasskeyCreate { .. } => (T::Browser, "passkey-create"),
         C::PasskeyGet { .. } => (T::Browser, "passkey-get"),
@@ -109,6 +111,9 @@ pub struct Draft {
     fields: Vec<String>,
     /// The agent client's id, for agent sign-ins.
     client: Option<String>,
+    /// The browser filling a form: an entry only for a card, not for an
+    /// identity's address and contact details.
+    cards_only: bool,
 }
 
 fn named(vault: &Option<String>, query: &[String]) -> Vec<ActivityItem> {
@@ -144,7 +149,9 @@ fn fill_name(fill: &Fill) -> String {
 /// copies), a caller's `status` and `watch` (every command starts with a
 /// status) and `app-activate` (every `deadbolt app`), and the browser host's
 /// look-ups, which come with every page (and its generator checks and drops,
-/// asked before anyone chose a password). Anything else the browser host
+/// asked before anyone chose a password, and its form look-ups), and its
+/// form fills from an identity (a card fill is an entry; see
+/// [`Draft::recorded`]). Anything else the browser host
 /// asks is recorded as a caller's would be: its class rests on arguments a
 /// process can rewrite, so it never hides a request.
 /// Reading Activity is never an entry, so a client that reads it on every
@@ -177,6 +184,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
                         command,
                         Command::SiteLogins { .. }
                             | Command::SiteCheck { .. }
+                            | Command::FormItems { .. }
                             | Command::PasskeyList { .. }
                             | Command::SiteGenerateCheck { .. }
                             | Command::SiteGenerateDrop { .. }
@@ -243,6 +251,14 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::PasskeyGet {
             origin, passkey, ..
         } => (login(&passkey.vault, &passkey.item, origin), Vec::new()),
+        Command::FormItems { origin, .. } => {
+            (named(&None, std::slice::from_ref(origin)), Vec::new())
+        }
+        Command::FormFill {
+            origin,
+            item,
+            fields,
+        } => (login(&item.vault, &item.item, origin), fields.clone()),
         Command::PasskeyCreate { origin, .. } => {
             (named(&None, std::slice::from_ref(origin)), Vec::new())
         }
@@ -316,10 +332,18 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         items,
         fields,
         client,
+        cards_only: class == CallerClass::BrowserHost
+            && matches!(command, Command::FormFill { .. }),
     })
 }
 
 impl Draft {
+    /// Whether the request, answered with `result`, is an entry: all are
+    /// but the browser's form fills from an identity.
+    pub fn recorded(&self, result: &Result<Reply>) -> bool {
+        !(self.cards_only && matches!(result, Ok(Reply::FormFill { kind, .. }) if kind != "card"))
+    }
+
     /// The entry, with what the reply says about the item it found.
     pub fn finish(
         mut self,
@@ -383,6 +407,12 @@ impl Draft {
                     .map(|i| i.title.clone())
                     .unwrap_or_default();
                 self.items = login(&saved.vault, &saved.item, &title);
+            }
+            // Which card, on which page: "Visa •••• 4242 · https://shop.com".
+            Reply::FormFill { title, .. } => {
+                if let Some(item) = self.items.first_mut() {
+                    item.title = format!("{title} · {}", item.title);
+                }
             }
             Reply::PasskeyCreated { passkey, .. } => {
                 let title = self
@@ -471,7 +501,9 @@ impl Agent {
         if let Ok(Reply::Status(status)) = &mut result {
             status.caller = caller.clone();
         }
-        let mut entry = draft.map(|draft| draft.finish(caller, session::now(), &result));
+        let mut entry = draft
+            .filter(|draft| draft.recorded(&result))
+            .map(|draft| draft.finish(caller, session::now(), &result));
         if let Some(entry) = &mut entry {
             self.name_agent_entry(entry);
         }
@@ -597,7 +629,10 @@ mod tests {
 
     use super::super::tests::test_paths;
     use super::*;
-    use crate::protocol::{FieldInput, MAX_LINE, Message, PROTOCOL_VERSION, Request, SiteField};
+    use crate::protocol::{
+        FieldInput, FormKind, LoginRef, MAX_LINE, Message, PROTOCOL_VERSION, Request, Secret,
+        SiteField,
+    };
 
     const SECRET: &str = "correct-horse-battery-staple";
 
@@ -923,6 +958,54 @@ mod tests {
                 "{command:?}"
             );
         }
+    }
+
+    /// The browser's form fills are entries for a card, naming the card and
+    /// page and never a value, and not for an identity; its form look-ups
+    /// are never entries. A caller's form fill always is.
+    #[test]
+    fn card_fills_are_entries_and_identity_fills_are_not() {
+        let origin = "https://shop.example.com".to_string();
+        let item = LoginRef {
+            vault: "ab".repeat(32),
+            item: "cd".repeat(16),
+        };
+        let fill = Command::FormFill {
+            origin: origin.clone(),
+            item: item.clone(),
+            fields: vec!["number".into(), "cvv".into()],
+        };
+        let filled = |kind: &str| -> Result<Reply> {
+            Ok(Reply::FormFill {
+                kind: kind.into(),
+                title: "Visa •••• 4242".into(),
+                values: [("number".to_string(), Secret::new("4242424242424242"))].into(),
+                verified: true,
+            })
+        };
+        let browser = draft(&fill, CallerClass::BrowserHost).unwrap();
+        assert!(!browser.recorded(&filled("identity")));
+        assert!(browser.recorded(&filled("card")));
+        let failed: Result<Reply> = Err(anyhow::anyhow!("Touch ID was cancelled"));
+        assert!(browser.recorded(&failed), "a refused fill is an entry");
+        let entry = browser.finish(CallerInfo::unverified("Chrome"), 1, &filled("card"));
+        assert_eq!(entry.command, "form-fill");
+        assert_eq!(entry.fields, ["number", "cvv"]);
+        assert_eq!(entry.items[0].id.as_deref(), Some(item.item.as_str()));
+        assert_eq!(entry.items[0].title, format!("Visa •••• 4242 · {origin}"));
+        assert!(
+            !serde_json::to_string(&entry)
+                .unwrap()
+                .contains("4242424242")
+        );
+        let caller = draft(&fill, CallerClass::Caller).unwrap();
+        assert!(caller.recorded(&filled("identity")));
+        let items = Command::FormItems {
+            origin,
+            kinds: vec![FormKind::Card],
+        };
+        assert!(draft(&items, CallerClass::BrowserHost).is_none());
+        assert!(draft(&items, CallerClass::Caller).is_some());
     }
 
     /// The entry is written before the reply: a client that never reads

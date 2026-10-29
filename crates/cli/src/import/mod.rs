@@ -214,6 +214,10 @@ const BAD_BIRTHDAY: Reason = (
     "invalid birthday kept as text",
     "invalid birthdays kept as text",
 );
+const BAD_COUNTRY: Reason = (
+    "country that is not an ISO code kept as an extra field",
+    "countries that are not ISO codes kept as extra fields",
+);
 const URL_AS_TEXT: Reason = (
     "URL that is not an absolute URL kept as text",
     "URLs that are not absolute URLs kept as text",
@@ -544,6 +548,44 @@ impl Builder {
             };
         }
         self.fields.insert(name, field);
+    }
+
+    /// An identity's postal address in its parts: the street's lines (each
+    /// value may hold several) as `address-line1` to `address-line3`, the
+    /// fourth line on joined to the third, the country as its ISO code, or
+    /// kept as an extra field with a warning.
+    fn postal_address(
+        &mut self,
+        street: impl IntoIterator<Item = Option<String>>,
+        [city, region, postcode, country]: [Option<String>; 4],
+        summary: &mut Summary,
+    ) {
+        let lines: Vec<String> = street
+            .into_iter()
+            .flatten()
+            .flat_map(|s| s.lines().map(|l| l.trim().to_string()).collect::<Vec<_>>())
+            .filter(|l| !l.is_empty())
+            .collect();
+        for (i, name) in ["address-line1", "address-line2"].iter().enumerate() {
+            self.known(name, lines.get(i).cloned());
+        }
+        self.known(
+            "address-line3",
+            join(lines.iter().skip(2).cloned().map(Some), ", "),
+        );
+        self.known("city", city);
+        self.known("region", region);
+        self.known("postal-code", postcode);
+        let country = country.map(|c| deadbolt_core::item::country(&c).map_or(c, str::to_string));
+        self.known_or_extra("country", country, BAD_COUNTRY, summary);
+    }
+
+    /// An identity's phone, in E.164 form when it reads as international.
+    fn phone(&mut self, value: Option<String>) {
+        let value = value.map(|v| deadbolt_core::item::phone(&v).unwrap_or(v));
+        if !self.known("phone", value.clone()) {
+            self.extra("phone", FieldType::Text, value.unwrap_or_default());
+        }
     }
 
     /// The first absolute URL is `url`; the others are `url-2`, `url-3`,

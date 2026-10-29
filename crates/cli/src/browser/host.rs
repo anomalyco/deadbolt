@@ -28,13 +28,14 @@ use super::{EXTENSION_ID, extension_origin};
 use crate::client;
 use crate::paths::Paths;
 use crate::protocol::{
-    Change, Command, ErrorCode, Fill, LoginRef, PagePassword, Reply, Secret, SignIn, SiteField,
-    SiteStatus, SiteValues,
+    CARD_FORM_FIELDS, Change, Command, ErrorCode, Fill, FormCard, FormIdentity, FormKind,
+    IDENTITY_FORM_FIELDS, LoginRef, PagePassword, Reply, Secret, SignIn, SiteField, SiteStatus,
+    SiteValues,
 };
 use crate::site::Site;
 
 /// The version of this message set, in `hello`.
-pub const PROTOCOL: u32 = 2;
+pub const PROTOCOL: u32 = 3;
 /// The largest request read; anything bigger is skipped and refused.
 pub const MAX_REQUEST: usize = 64 * 1024;
 /// The browser's limit on a message from the host.
@@ -148,6 +149,18 @@ enum Request {
         #[serde(rename = "ref")]
         login: Option<String>,
     },
+    /// The identities and cards a form on the page can be filled from.
+    Forms {
+        origin: String,
+        kinds: Vec<FormKind>,
+    },
+    /// Some fields of one identity or card.
+    FillForm {
+        origin: String,
+        #[serde(rename = "ref")]
+        item: String,
+        fields: Vec<String>,
+    },
     PasskeyList(passkeys::List),
     PasskeyCreate(passkeys::Create),
     PasskeyGet(passkeys::Get),
@@ -223,7 +236,7 @@ pub(super) enum Body {
         status: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        capabilities: [&'static str; 7],
+        capabilities: [&'static str; 8],
     },
     List {
         site: String,
@@ -256,6 +269,17 @@ pub(super) enum Body {
     Changed {
         change: &'static str,
     },
+    #[serde(rename_all = "camelCase")]
+    Forms {
+        identities: Vec<IdentityEntry>,
+        cards: Vec<CardEntry>,
+        /// Whether filling a card's number or code now raises Touch ID.
+        can_verify: bool,
+    },
+    FillForm {
+        values: std::collections::BTreeMap<String, Secret>,
+        verified: bool,
+    },
     Passkeys(passkeys::Listed),
     PasskeyCreated(passkeys::Created),
     PasskeyAssertion(passkeys::Assertion),
@@ -280,6 +304,93 @@ pub(super) struct Account {
     /// `{provider, account?}` for a "Sign in with Google" login.
     #[serde(skip_serializing_if = "Option::is_none")]
     sign_in: Option<SignIn>,
+}
+
+/// An identity in the `forms` reply, without values.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct IdentityEntry {
+    #[serde(rename = "ref")]
+    item: String,
+    vault: String,
+    title: String,
+    summary: String,
+    fields: Vec<String>,
+}
+
+impl From<FormIdentity> for IdentityEntry {
+    fn from(i: FormIdentity) -> Self {
+        Self {
+            item: format_ref(&i.item),
+            vault: i.vault,
+            title: i.title,
+            summary: i.summary,
+            fields: i.fields,
+        }
+    }
+}
+
+/// A card in the `forms` reply: never its number or code.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct CardEntry {
+    #[serde(rename = "ref")]
+    item: String,
+    vault: String,
+    title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brand: Option<String>,
+    last4: String,
+    /// `YYYY-MM`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expiry: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cardholder: Option<String>,
+    /// The ref of the identity that is its billing address.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    billing: Option<String>,
+    fields: Vec<String>,
+}
+
+impl From<FormCard> for CardEntry {
+    fn from(c: FormCard) -> Self {
+        Self {
+            item: format_ref(&c.item),
+            vault: c.vault,
+            title: c.title,
+            brand: c.brand,
+            last4: c.last4,
+            expiry: c.expiry,
+            cardholder: c.cardholder,
+            billing: c.billing.as_ref().map(format_ref),
+            fields: c.fields,
+        }
+    }
+}
+
+/// The kinds a `forms` request asks for: one or both, once each.
+fn form_kinds(mut kinds: Vec<FormKind>) -> Result<Vec<FormKind>, Refusal> {
+    kinds.sort_unstable();
+    kinds.dedup();
+    if kinds.is_empty() {
+        return Err(Refusal::bad("kinds names identity and/or card"));
+    }
+    Ok(kinds)
+}
+
+/// The fields a `fill-form` request asks for: known form fields, once each.
+fn form_fields(mut fields: Vec<String>) -> Result<Vec<String>, Refusal> {
+    fields.sort_unstable();
+    fields.dedup();
+    let known = |f: &String| {
+        IDENTITY_FORM_FIELDS.contains(&f.as_str()) || CARD_FORM_FIELDS.contains(&f.as_str())
+    };
+    if fields.is_empty() || !fields.iter().all(known) {
+        return Err(Refusal::bad(
+            "fields names an identity's or a card's form fields",
+        ));
+    }
+    Ok(fields)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -844,6 +955,52 @@ impl Serial {
                     created,
                 })
             }
+            Request::Forms { origin, kinds } => {
+                site(&origin)?;
+                let kinds = form_kinds(kinds)?;
+                let Reply::FormItems {
+                    identities,
+                    cards,
+                    can_verify,
+                } = call(&self.paths, Command::FormItems { origin, kinds }).await?
+                else {
+                    return Err(unexpected());
+                };
+                Ok(Body::Forms {
+                    identities: identities.into_iter().map(Into::into).collect(),
+                    cards: cards.into_iter().map(Into::into).collect(),
+                    can_verify,
+                })
+            }
+            // A card's number or code may wait on Touch ID: requests behind
+            // it wait too, as the user is at the prompt.
+            Request::FillForm {
+                origin,
+                item,
+                fields,
+            } => {
+                site(&origin)?;
+                let item = parse_ref(&item)?;
+                let fields = form_fields(fields)?;
+                if !self.fills.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                let Reply::FormFill {
+                    values, verified, ..
+                } = call(
+                    &self.paths,
+                    Command::FormFill {
+                        origin,
+                        item,
+                        fields,
+                    },
+                )
+                .await?
+                else {
+                    return Err(unexpected());
+                };
+                Ok(Body::FillForm { values, verified })
+            }
             Request::PasskeyList(list) => {
                 if !self.passkey_lists.take(Instant::now()) {
                     return Err(Refusal::slow_down());
@@ -972,7 +1129,7 @@ async fn hello(paths: &Paths) -> (Body, bool) {
         status,
         detail,
         capabilities: [
-            "list", "fill", "check", "save", "generate", "passkeys", "learn",
+            "list", "fill", "check", "save", "generate", "passkeys", "learn", "forms",
         ],
     };
     (body, status != "unavailable")
@@ -1603,6 +1760,96 @@ mod tests {
         assert_eq!(answers[1]["code"], "cancelled");
         assert!(outbox.try_recv().is_err(), "the lists still wait");
         serving.abort();
+    }
+
+    /// `forms` lists metadata in the documented shape, and `fill-form`
+    /// passes on only well-formed requests and hands back the values.
+    #[tokio::test]
+    async fn forms_and_fill_form_have_the_documented_shapes() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let vault = "ab".repeat(32);
+        let at = |item: &str| LoginRef {
+            vault: vault.clone(),
+            item: item.repeat(16),
+        };
+        let items = Message::Ok {
+            reply: Reply::FormItems {
+                identities: vec![FormIdentity {
+                    item: at("cd"),
+                    vault: "personal".into(),
+                    title: "Home".into(),
+                    summary: "Kit Langton · 123 Main St, Brooklyn".into(),
+                    fields: vec!["given-name".into(), "city".into()],
+                }],
+                cards: vec![FormCard {
+                    item: at("ef"),
+                    vault: "personal".into(),
+                    title: "Visa •••• 4242".into(),
+                    brand: Some("Visa".into()),
+                    last4: "4242".into(),
+                    expiry: Some("2028-08".into()),
+                    cardholder: None,
+                    billing: Some(at("cd")),
+                    fields: vec!["number".into(), "expiry".into()],
+                }],
+                can_verify: true,
+            },
+        };
+        let filled = Message::Ok {
+            reply: Reply::FormFill {
+                kind: "card".into(),
+                title: "Visa •••• 4242".into(),
+                values: [("number".to_string(), Secret::new("4242424242424242"))].into(),
+                verified: true,
+            },
+        };
+        fake_agent(&paths, vec![vec![items], vec![filled]], false);
+        let mut host = Host::new(paths);
+        let (frames, _outbox) = mpsc::channel(16);
+        let mut ask = async |request: Value| {
+            let body = serde_json::to_vec(&request).unwrap();
+            json(&host.answer(&body, &frames).await.unwrap())
+        };
+        let origin = "https://shop.example.com";
+        let home = format!("{vault}:{}", "cd".repeat(16));
+        let visa = format!("{vault}:{}", "ef".repeat(16));
+        assert_eq!(
+            ask(
+                serde_json::json!({"id": 1, "type": "forms", "origin": origin,
+                                   "kinds": ["card", "identity", "card"]})
+            )
+            .await,
+            serde_json::json!({"id": 1, "type": "forms", "canVerify": true,
+                "identities": [{"ref": home, "vault": "personal", "title": "Home",
+                    "summary": "Kit Langton · 123 Main St, Brooklyn",
+                    "fields": ["given-name", "city"]}],
+                "cards": [{"ref": visa, "vault": "personal", "title": "Visa •••• 4242",
+                    "brand": "Visa", "last4": "4242", "expiry": "2028-08", "billing": home,
+                    "fields": ["number", "expiry"]}]})
+        );
+        // Refused before the agent hears of them.
+        for bad in [
+            serde_json::json!({"id": 2, "type": "forms", "origin": origin, "kinds": []}),
+            serde_json::json!({"id": 2, "type": "forms", "origin": origin, "kinds": ["login"]}),
+            serde_json::json!({"id": 2, "type": "forms", "origin": "null", "kinds": ["card"]}),
+            serde_json::json!({"id": 2, "type": "forms", "origin": "http://shop.example.com", "kinds": ["card"]}),
+            serde_json::json!({"id": 2, "type": "fill-form", "origin": origin, "ref": visa, "fields": []}),
+            serde_json::json!({"id": 2, "type": "fill-form", "origin": origin, "ref": visa, "fields": ["pin"]}),
+            serde_json::json!({"id": 2, "type": "fill-form", "origin": origin, "ref": visa, "fields": ["passport"]}),
+            serde_json::json!({"id": 2, "type": "fill-form", "origin": origin, "ref": "x", "fields": ["number"]}),
+        ] {
+            assert_eq!(ask(bad.clone()).await["code"], "bad_request", "{bad}");
+        }
+        assert_eq!(
+            ask(
+                serde_json::json!({"id": 3, "type": "fill-form", "origin": origin,
+                                   "ref": visa, "fields": ["number", "number"]})
+            )
+            .await,
+            serde_json::json!({"id": 3, "type": "fill-form", "verified": true,
+                               "values": {"number": "4242424242424242"}})
+        );
     }
 
     /// Listing comes before anyone is asked, so it's limited like checks.

@@ -3,7 +3,7 @@
 // u32 length, then UTF-8 JSON); this file is the JSON.
 
 export const NATIVE_HOST = "pw.deadbolt.browser"
-export const PROTOCOL = 2
+export const PROTOCOL = 3
 
 export type Want = "username" | "password" | "totp"
 export type HostStatus = "ready" | "locked" | "not-set-up" | "unavailable"
@@ -11,6 +11,18 @@ export type CheckStatus = "new" | "update" | "same"
 export type Change = "locked" | "unlocked" | "items" | "stopped" | "started"
 export type ErrorCode = "locked" | "not_found" | "domain_mismatch" | "bad_request" | "rate_limited" | "weak" | "exists" | "cancelled" | "failed"
 export type UserVerification = "required" | "preferred" | "discouraged"
+export type FormKind = "identity" | "card"
+
+/** An identity's fields a form may ask for, named after the HTML autocomplete tokens (`city` is `address-level2`, `region` `address-level1`). */
+export const IDENTITY_FIELDS = [
+  "honorific", "given-name", "additional-name", "family-name", "nickname", "organization", "job-title", "email", "phone",
+  "address-line1", "address-line2", "address-line3", "city", "region", "postal-code", "country", "birthday",
+] as const
+/** A card's fields a form may ask for. `number` and `cvv` raise Touch ID in the agent when it's on; `expiry` is `YYYY-MM`. */
+export const CARD_FIELDS = ["cardholder", "number", "expiry", "cvv", "brand"] as const
+export type IdentityField = (typeof IDENTITY_FIELDS)[number]
+export type CardField = (typeof CARD_FIELDS)[number]
+export type FormField = IdentityField | CardField
 
 /** A submitted password: as typed, or the one `generate` made, by its id (the agent holds it). */
 export type PasswordValue = { password: string; generated?: never } | { generated: string; password?: never }
@@ -39,6 +51,8 @@ export type Request =
       ref?: string
       entry: { title: string; url: string; username: string } & PasswordValue
     }
+  | { id: number; type: "forms"; origin: string; kinds: FormKind[] }
+  | { id: number; type: "fill-form"; origin: string; ref: string; fields: FormField[] }
   | { id: number; type: "passkey-list"; origin: string; rpId?: string }
   | {
       id: number
@@ -154,6 +168,43 @@ export interface PasskeyCancelledReply {
 export interface LearnedReply {
   type: "learned"
 }
+/** An identity a form can be filled from: no values, only which fields it has. */
+export interface FormIdentity {
+  ref: string
+  vault: string
+  title: string
+  /** "Kit Langton · 123 Main St, Brooklyn"; may be empty. */
+  summary: string
+  fields: IdentityField[]
+}
+/** A card a form can be filled from: never its number or code. */
+export interface FormCard {
+  ref: string
+  vault: string
+  title: string
+  brand?: string
+  last4: string
+  /** `YYYY-MM`. */
+  expiry?: string
+  cardholder?: string
+  /** The identity whose address is its billing address. */
+  billing?: string
+  fields: CardField[]
+}
+export interface FormsReply {
+  type: "forms"
+  identities: FormIdentity[]
+  cards: FormCard[]
+  /** Whether filling a card's number or code now raises Touch ID. */
+  canVerify: boolean
+}
+export interface FillFormReply {
+  type: "fill-form"
+  /** Only the fields asked for that the item has. */
+  values: Partial<Record<FormField, string>>
+  /** Whether Touch ID verified the user for this fill. */
+  verified: boolean
+}
 export interface ErrorReply {
   type: "error"
   code: ErrorCode
@@ -168,6 +219,8 @@ export type Reply =
   | DoneReply<"generate-check" | "generate-keep" | "generate-drop">
   | CheckReply
   | SaveReply
+  | FormsReply
+  | FillFormReply
   | PasskeysReply
   | PasskeyCreatedReply
   | PasskeyAssertionReply
@@ -186,6 +239,8 @@ export interface ReplyFor {
   "generate-drop": DoneReply<"generate-drop">
   check: CheckReply
   save: SaveReply
+  forms: FormsReply
+  "fill-form": FillFormReply
   "passkey-list": PasskeysReply
   "passkey-create": PasskeyCreatedReply
   "passkey-get": PasskeyAssertionReply
@@ -204,6 +259,8 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   "generate-drop": "generate-drop",
   check: "check",
   save: "save",
+  forms: "forms",
+  "fill-form": "fill-form",
   "passkey-list": "passkeys",
   "passkey-create": "passkey-created",
   "passkey-get": "passkey-assertion",
@@ -259,6 +316,35 @@ function account(v: unknown): Account | null {
     hasTotp: v.hasTotp === true,
     urls: strings(v.urls),
     ...signInOf(v.signIn),
+  }
+}
+
+const isIdentityField = (v: unknown): v is IdentityField => (IDENTITY_FIELDS as readonly unknown[]).includes(v)
+const isCardField = (v: unknown): v is CardField => (CARD_FIELDS as readonly unknown[]).includes(v)
+
+function formIdentity(v: unknown): FormIdentity | null {
+  if (!isObject(v) || !isRef(v.ref)) return null
+  const title = str(v.title, 500)
+  if (title === undefined) return null
+  return { ref: v.ref, vault: str(v.vault, 500) ?? "", title, summary: str(v.summary, 1000) ?? "", fields: strings(v.fields).filter(isIdentityField) }
+}
+
+function formCard(v: unknown): FormCard | null {
+  if (!isObject(v) || !isRef(v.ref)) return null
+  const title = str(v.title, 500)
+  const last4 = str(v.last4, 4)
+  if (title === undefined || last4 === undefined || !/^[0-9]*$/.test(last4)) return null
+  const expiry = str(v.expiry, 7)
+  return {
+    ref: v.ref,
+    vault: str(v.vault, 500) ?? "",
+    title,
+    brand: str(v.brand, 100),
+    last4,
+    expiry: expiry && /^[0-9]{4}-(0[1-9]|1[0-2])$/.test(expiry) ? expiry : undefined,
+    cardholder: str(v.cardholder, 500),
+    billing: isRef(v.billing) ? v.billing : undefined,
+    fields: strings(v.fields).filter(isCardField),
   }
 }
 
@@ -336,6 +422,24 @@ function parseReply(raw: Record<string, unknown>): Reply | null {
     }
     case "save":
       return isRef(raw.ref) ? { type: "save", ref: raw.ref, created: raw.created === true } : null
+    case "forms": {
+      if (!Array.isArray(raw.identities) || !Array.isArray(raw.cards)) return null
+      return {
+        type: "forms",
+        identities: raw.identities.map(formIdentity).filter((i): i is FormIdentity => i !== null),
+        cards: raw.cards.map(formCard).filter((c): c is FormCard => c !== null),
+        canVerify: raw.canVerify === true,
+      }
+    }
+    case "fill-form": {
+      if (!isObject(raw.values)) return null
+      const values: Partial<Record<FormField, string>> = {}
+      for (const [k, v] of Object.entries(raw.values)) {
+        const s = str(v, 1000)
+        if ((isIdentityField(k) || isCardField(k)) && s !== undefined) values[k] = s
+      }
+      return { type: "fill-form", values, verified: raw.verified === true }
+    }
     case "passkeys": {
       if (!Array.isArray(raw.passkeys) || typeof raw.rpId !== "string") return null
       const passkeys = raw.passkeys.map(passkey).filter((p): p is Passkey => p !== null)

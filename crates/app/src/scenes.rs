@@ -293,11 +293,14 @@ pub(crate) const SCENES: &[Scene] = &[
         typed(s, "number", "4242 4242 4242 4242");
         typed(s, "expiry", "08/29");
     }),
-    // A new identity, its address over two lines.
+    // A new identity: its name and address in parts.
     ("new-identity", |s| {
-        new_of(s, "identity", "Dax Raad");
+        new_of(s, "identity", "Home");
+        typed(s, "given-name", "Dax");
+        typed(s, "family-name", "Raad");
         typed(s, "email", "dax@anoma.ly");
-        typed(s, "address", "1 Main St\nSpringfield, IL 12345");
+        typed(s, "address-line1", "1 Main St");
+        typed(s, "city", "Springfield");
     }),
     // A new secure note, its body typed (hidden: one row of dots).
     ("new-note", |s| {

@@ -1854,11 +1854,11 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     let hello = host.ask(serde_json::json!({"type": "hello"}));
     assert_eq!(hello["type"], "hello", "{hello}");
     assert_eq!(hello["status"], "ready");
-    assert_eq!(hello["protocol"], 2);
+    assert_eq!(hello["protocol"], 3);
     assert_eq!(
         hello["capabilities"],
         serde_json::json!([
-            "list", "fill", "check", "save", "generate", "passkeys", "learn"
+            "list", "fill", "check", "save", "generate", "passkeys", "learn", "forms"
         ])
     );
 
@@ -3292,4 +3292,154 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
         std::fs::read_to_string(ext.join(".deadbolt-extension")).unwrap(),
         "manifest.json\n"
     );
+}
+
+/// The `export.data` of a `.1pux` with an identity and a card, as
+/// 1Password 8 writes them.
+const FORMS_1PUX: &str = r#"{"accounts": [{"attrs": {"uuid": "USERUSERUSERUSERUSERUSERUS"}, "vaults": [{
+  "attrs": {"uuid": "v1v1v1v1v1v1v1v1v1v1v1v1v1", "name": "Private"},
+  "items": [
+    {"uuid": "ident1ident1ident1ident1id", "state": "active", "categoryUuid": "004",
+     "details": {"notesPlain": "", "sections": [
+       {"title": "Identification", "name": "name", "fields": [
+         {"title": "first name", "id": "firstname", "value": {"string": "Kit"}},
+         {"title": "initial", "id": "initial", "value": {"string": "A"}},
+         {"title": "last name", "id": "lastname", "value": {"string": "Langton"}},
+         {"title": "birth date", "id": "birthdate", "value": {"date": 636249600}},
+         {"title": "company", "id": "company", "value": {"string": "Anomaly"}}]},
+       {"title": "Address", "name": "address", "fields": [
+         {"title": "address", "id": "address", "value": {"address": {"street": "123 Main St\nApt 4", "city": "Brooklyn", "state": "NY", "zip": "11201", "country": "us"}}},
+         {"title": "default phone", "id": "defphone", "value": {"phone": "+1 (718) 555-0100"}}]},
+       {"title": "Internet Details", "name": "internet", "fields": [
+         {"title": "email", "id": "email", "value": {"email": {"email_address": "kit@example.com"}}}]}]},
+     "overview": {"title": "Home"}},
+    {"uuid": "card1card1card1card1card1c", "state": "active", "categoryUuid": "002",
+     "details": {"sections": [{"title": "", "name": "", "fields": [
+       {"title": "cardholder name", "id": "cardholder", "value": {"string": "Kit Langton"}},
+       {"title": "type", "id": "type", "value": {"creditCardType": "visa"}},
+       {"title": "number", "id": "ccnum", "value": {"creditCardNumber": "4242 4242 4242 4242"}},
+       {"title": "verification number", "id": "cvv", "value": {"concealed": "737"}},
+       {"title": "expiry date", "id": "expiry", "value": {"monthYear": 202808}},
+       {"title": "PIN", "id": "pin", "value": {"concealed": "9876"}}]}]},
+     "overview": {"title": "Visa"}}
+  ]}]}]}"#;
+
+/// A `.1pux` import makes a structured identity and a card; the browser
+/// host lists them without values, fills only the fields asked, and
+/// Activity records the card fill but not the identity's.
+#[test]
+fn forms_fill_from_an_imported_identity_and_card() {
+    use std::io::Write as _;
+
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let file = a.path("export.1pux");
+    let mut zip = zip::ZipWriter::new(std::fs::File::create(&file).unwrap());
+    zip.start_file("export.data", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(FORMS_1PUX.as_bytes()).unwrap();
+    zip.finish().unwrap();
+    let output = a.try_run(&["import", file.to_str().unwrap()]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("imported 2 from 1Password (logins 0, cards 1, identities 1)"),
+        "{stdout}"
+    );
+    let show = a.run(&["show", "home"]);
+    for line in [
+        "given-name       Kit",
+        "additional-name  A",
+        "family-name      Langton",
+        "organization     Anomaly",
+        "phone            +17185550100",
+        "address-line1    123 Main St",
+        "address-line2    Apt 4",
+        "city             Brooklyn",
+        "region           NY",
+        "postal-code      11201",
+        "country          US",
+        "birthday         1990-03-01",
+    ] {
+        assert!(show.contains(line), "{line:?} in\n{show}");
+    }
+
+    let mut host = Host::start(&a);
+    let origin = "https://shop.example.com";
+    let forms = host.ask(serde_json::json!({
+        "type": "forms", "origin": origin, "kinds": ["identity", "card"],
+    }));
+    assert_eq!(forms["type"], "forms", "{forms}");
+    assert_eq!(forms["canVerify"], false, "no Touch ID here");
+    let identity = &forms["identities"][0];
+    assert_eq!(identity["title"], "Home");
+    assert_eq!(identity["summary"], "Kit Langton · 123 Main St, Brooklyn");
+    let card = &forms["cards"][0];
+    assert_eq!(
+        (&card["brand"], &card["last4"], &card["expiry"]),
+        (&"Visa".into(), &"4242".into(), &"2028-08".into())
+    );
+    // Refs are hex, so digits could appear by chance: look for the values.
+    let listed = forms.to_string();
+    assert!(
+        !listed.contains("\"737\"") && !listed.contains("4242424242"),
+        "{listed}"
+    );
+
+    let fill = |host: &mut Host, item: &serde_json::Value, fields: &[&str]| {
+        host.ask(serde_json::json!({
+            "type": "fill-form", "origin": origin, "ref": item["ref"], "fields": fields,
+        }))
+    };
+    let filled = fill(
+        &mut host,
+        identity,
+        &["given-name", "postal-code", "country"],
+    );
+    assert_eq!(
+        filled["values"],
+        serde_json::json!({"given-name": "Kit", "postal-code": "11201", "country": "US"})
+    );
+    let filled = fill(&mut host, card, &["number", "cvv", "expiry"]);
+    assert_eq!(
+        filled["values"],
+        serde_json::json!({"number": "4242424242424242", "cvv": "737", "expiry": "2028-08"})
+    );
+    assert_eq!(filled["verified"], false, "the pick is the user's say");
+    assert_error(&fill(&mut host, card, &["pin"]), "bad_request");
+    // Not on a page autofill takes.
+    let refused = host.ask(serde_json::json!({
+        "type": "fill-form", "origin": "http://shop.example.com", "ref": card["ref"], "fields": ["number"],
+    }));
+    assert_error(&refused, "bad_request");
+    host.close();
+
+    let activity = a.run(&["activity", "--since", "1h", "--json"]);
+    assert!(
+        !activity.contains("4242424242") && !activity.contains("737"),
+        "{activity}"
+    );
+    let entries: Vec<serde_json::Value> = activity
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .filter(|e: &serde_json::Value| e["command"].as_str().unwrap().starts_with("form-"))
+        .collect();
+    // The browser host is known by its signature (macOS); elsewhere it is
+    // an unverified caller, whose every request is an entry.
+    let card = entries
+        .iter()
+        .find(|e| e["items"][0]["title"] == format!("Visa · {origin}"))
+        .expect("the card fill is an entry");
+    assert_eq!(card["command"], "form-fill");
+    assert_eq!(
+        card["fields"],
+        serde_json::json!(["cvv", "expiry", "number"])
+    );
+    let browser = card["caller"]["class"] == "browser-host";
+    let identity = entries
+        .iter()
+        .any(|e| e["items"][0]["title"] == format!("Home · {origin}"));
+    let looked_up = entries.iter().any(|e| e["command"] == "form-items");
+    assert_eq!((identity, looked_up), (!browser, !browser), "{entries:?}");
+    assert_eq!(entries.len(), if browser { 1 } else { 3 });
 }

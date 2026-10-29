@@ -822,10 +822,10 @@ fn enter_chords_in_a_form_never_reach_the_list() {
     assert!(r.rt.state.copy.is_none() && r.rt.state.editing() && r.sent().is_empty());
 }
 
-/// Add offers an identity, laid out as the core's schema has it, and its
-/// address is a text area whose line breaks are saved as typed.
+/// Add offers an identity, laid out as the core's schema has it: its name
+/// and address in the parts forms ask for.
 #[test]
-fn add_offers_an_identity_with_a_multi_line_address() {
+fn add_offers_an_identity_in_parts() {
     let mut r = rig("vault");
     r.command('n');
     assert!(r.shows("Identity"), "the picker offers it");
@@ -836,10 +836,22 @@ fn add_offers_an_identity_with_a_multi_line_address() {
     assert_eq!(
         names,
         [
-            "name",
+            "honorific",
+            "given-name",
+            "additional-name",
+            "family-name",
+            "nickname",
+            "organization",
+            "job-title",
             "email",
             "phone",
-            "address",
+            "address-line1",
+            "address-line2",
+            "address-line3",
+            "city",
+            "region",
+            "postal-code",
+            "country",
             "birthday",
             "national-id",
             "passport",
@@ -848,26 +860,28 @@ fn add_offers_an_identity_with_a_multi_line_address() {
         ]
     );
     assert!(
-        r.height("field-address") > r.height("field-phone") + 10.0,
-        "the address is a text area"
+        (r.height("field-address-line1") - r.height("field-phone")).abs() < 1.0,
+        "an address line is one line"
     );
-    r.rt.update(|s, _| s.edit.form.as_mut().unwrap().name.replace_text("Dax Raad"));
-    r.fill("name", "Dax Raad");
-    r.fill("address", "1 Main St\nSpringfield");
+    r.rt.update(|s, _| s.edit.form.as_mut().unwrap().name.replace_text("Home"));
+    r.fill("given-name", "Dax");
+    r.fill("address-line1", "1 Main St");
+    r.fill("city", "Springfield");
     r.sent();
     r.command('s');
     let (_, kind, name, fields) = r.take_create();
-    assert_eq!(
-        (kind.as_str(), name.as_deref()),
-        ("identity", Some("Dax Raad"))
-    );
+    assert_eq!((kind.as_str(), name.as_deref()), ("identity", Some("Home")));
     assert_eq!(
         pairs(&fields),
-        [("name", "Dax Raad"), ("address", "1 Main St\nSpringfield")]
+        [
+            ("given-name", "Dax"),
+            ("address-line1", "1 Main St"),
+            ("city", "Springfield")
+        ]
     );
 }
 
-/// ⏎ in a text area that isn't secret (a login's notes, an address)
+/// ⏎ in a text area that isn't secret (a login's notes, an identity's)
 /// breaks the line, as in a secure note's body: Rune would submit it. ⌘⏎
 /// saves.
 #[test]
@@ -888,11 +902,11 @@ fn enter_breaks_the_line_in_notes() {
     let mut r = rig("vault");
     r.command('n');
     r.rt.update(|s, _| s.pick_kind("identity"));
-    r.focus("address");
+    r.focus("notes");
     r.type_text("1 Main St");
     r.tap(Key::Enter);
     r.type_text("Springfield");
-    assert_eq!(r.value("address"), "1 Main St\nSpringfield");
+    assert_eq!(r.value("notes"), "1 Main St\nSpringfield");
     assert!(r.rt.state.editing());
 }
 
