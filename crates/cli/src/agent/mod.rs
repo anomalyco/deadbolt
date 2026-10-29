@@ -1223,18 +1223,15 @@ impl Conversation {
 
 impl Agent {
     async fn handle(self: Arc<Self>, stream: UnixStream, max_line: usize) -> Result<()> {
-        let peer = deadbolt_client::peer::Peer::of(&stream);
         // The socket's directory keeps other users out; this holds even if
-        // it didn't.
-        match &peer {
-            Ok(peer) if peer.uid == rustix::process::getuid().as_raw() => {}
-            Ok(peer) => bail!(
-                "refused pid {} of uid {}: not this user",
-                peer.pid,
-                peer.uid
-            ),
+        // it didn't. (macOS keeps a peer's uid, but not its audit token, once
+        // it hangs up.)
+        match deadbolt_client::peer::uid(&stream) {
+            Ok(uid) if uid == rustix::process::getuid().as_raw() => {}
+            Ok(uid) => bail!("refused a connection from uid {uid}: not this user"),
             Err(error) => bail!("refused a connection: reading its credentials: {error}"),
         }
+        let peer = deadbolt_client::peer::Peer::of(&stream);
         let (read, write) = stream.into_split();
         let mut read = BufReader::new(read);
         let request =

@@ -66,6 +66,26 @@ impl Peer {
     }
 }
 
+/// The uid of `socket`'s peer, from the kernel. Unlike [`Peer::of`] on
+/// macOS (whose audit token is gone once the peer hangs up), it's there for
+/// as long as the socket is.
+#[cfg(target_os = "macos")]
+pub fn uid(socket: &impl AsFd) -> io::Result<u32> {
+    use nix::sys::socket::{getsockopt, sockopt::LocalPeerCred};
+    Ok(getsockopt(socket, LocalPeerCred)?.uid())
+}
+
+#[cfg(target_os = "linux")]
+pub fn uid(socket: &impl AsFd) -> io::Result<u32> {
+    use nix::sys::socket::{getsockopt, sockopt::PeerCredentials};
+    Ok(getsockopt(socket, PeerCredentials)?.uid())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+pub fn uid(_socket: &impl AsFd) -> io::Result<u32> {
+    Err(io::Error::other("peer credentials are not supported here"))
+}
+
 /// A code signature as the helper read it, from a running process or a file.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct CodeSignature {
