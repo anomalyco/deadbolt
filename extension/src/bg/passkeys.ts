@@ -309,7 +309,8 @@ export class Passkeys {
 
   private async create(p: Pending, o: CreateOptions, listed: PasskeysReply): Promise<HookReply> {
     const registered = listed.passkeys.some((k) => o.exclude.includes(k.credentialId))
-    const passphrase = o.userVerification !== "discouraged" && !!(await this.host.asksPassphrase?.())
+    // The worker's own preset, as it listed: the prompt's note is what the ceremony then asks.
+    const passphrase = o.userVerification !== "discouraged" && listed.asksPassphrase === true
     const choice = await this.ask(p, { id: newToken(), kind: "create", rpId: p.rpId, verify: listed.canVerify && o.userVerification !== "discouraged", passphrase, username: o.user.name, registered }, o.timeout)
     if (choice.action === "fallback") return FALLBACK
     if (registered && choice.action !== "cancel") return fail("InvalidStateError", "A passkey for this account is already saved.")
@@ -335,7 +336,7 @@ export class Passkeys {
       return new Promise<HookReply>(() => {})
     }
     const verify = listed.canVerify && o.userVerification !== "discouraged"
-    const passphrase = o.userVerification !== "discouraged" && !!(await this.host.asksPassphrase?.())
+    const passphrase = o.userVerification !== "discouraged" && listed.asksPassphrase === true
     const choice = await this.ask(p, { id: newToken(), kind: "get", rpId: p.rpId, verify, passphrase, passkeys: passkeys.map(({ ref, vault, username, created }) => ({ ref, vault, username, created })) }, o.timeout)
     if (choice.action === "fallback") return FALLBACK
     const passkey = choice.action === "use" ? passkeys.find((k) => k.ref === choice.ref) : undefined

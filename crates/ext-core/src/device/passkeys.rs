@@ -3,7 +3,11 @@
 use std::cell::{Cell, RefCell};
 use std::time::Duration;
 
-use deadbolt_core::{DataOp, Item, autofill::value, passkeys, webauthn};
+use deadbolt_core::{
+    DataOp, Item, ItemId,
+    autofill::{same_password, value},
+    passkeys, webauthn,
+};
 use n0_future::time::Instant;
 use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
@@ -45,7 +49,8 @@ pub(super) fn finish(body: &Value) -> Result<Value> {
     let (expected, mut ceremony, at) = AUTHORIZED
         .with(|slot| slot.borrow_mut().take())
         .ok_or(Error::Protocol("Passkey authorization expired"))?;
-    if token != expected || at.elapsed() > Duration::from_secs(120) {
+    // Reuse the core's constant-time hash comparison for secret strings.
+    if !same_password(Some(&expected), token) || at.elapsed() > Duration::from_secs(120) {
         return Err(Error::Protocol("Passkey authorization expired"));
     }
     // The token may not outlive a policy change; Strict still has a checked
@@ -105,7 +110,7 @@ fn rows(s: &super::Loaded, rp: Option<&str>) -> Vec<Value> {
 
 pub(super) fn list(body: &Value) -> Result<Value> {
     let rp = rp(body)?;
-    state().with(|s| Ok(json!({"type": "passkeys", "rpId": rp, "canVerify": false, "passkeys": rows(s, Some(&rp))})))
+    state().with(|s| Ok(json!({"type": "passkeys", "rpId": rp, "canVerify": false, "asksPassphrase": PRESET.with(Cell::get).reauth(), "passkeys": rows(s, Some(&rp))})))
 }
 
 pub(super) fn all() -> Result<Value> {
@@ -121,7 +126,8 @@ fn find(s: &super::Loaded, body: &Value) -> Result<Item> {
 }
 
 /// A trusted management-page action, never reachable from the page bridge.
-pub(super) fn delete(body: &Value) -> Result<Value> {
+pub(super) fn delete(body: &mut Value) -> Result<Value> {
+    reauthenticate(body, PRESET.with(Cell::get).reauth())?;
     let reply = state().with(|s| {
         let item = find(s, body)?;
         let mut staged = s.vault.clone();
@@ -173,7 +179,11 @@ fn create_inner(body: &mut Value, authorized: bool) -> Result<Value> {
         || exclude
             .iter()
             .any(|id| id.len() > 1364 || webauthn::unb64(id).is_err())
-        || text(user, "name")?.len() > 1024
+        || text(user, "name")?.len() > passkeys::MAX_USER_NAME * 4
+        || user
+            .get("displayName")
+            .and_then(Value::as_str)
+            .is_some_and(|name| name.len() > passkeys::MAX_USER_NAME * 4)
     {
         return Err(Error::Protocol("Invalid passkey account or exclusions"));
     }
@@ -198,14 +208,9 @@ fn create_inner(body: &mut Value, authorized: bool) -> Result<Value> {
         let items = s.vault.items();
         passkeys::check_excluded(&items, &rp, &exclude)?;
         let made = passkeys::register(&new, false, &passkey_date())?;
-        let same = items.iter().find(|item| passkeys::matches(item, &rp) && value(item, "user-handle") == Some(new.user_id.as_str()));
         let mut staged = s.vault.clone();
-        let id = if let Some(item) = same {
-            staged.write(&s.secret, passkeys::replace(item, &made.fields))?;
-            item.id
-        } else {
-            staged.create_item(&s.secret, "passkey", None, made.fields)?.0
-        };
+        let entry = staged.write(&s.secret, vec![made.create])?;
+        let id = ItemId::of_create(&entry.hash(), 0);
         s.commit(staged)?;
         Ok(json!({"type": "passkey-created", "ref": reference(&s.vault, id), "credentialId": made.credential_id,
             "clientDataJSON": made.client_data_json, "attestationObject": made.attestation_object,

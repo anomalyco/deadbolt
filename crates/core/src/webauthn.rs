@@ -42,7 +42,7 @@ const AT: u8 = 0x40;
 /// The longest challenge taken, in base64url characters.
 const MAX_CHALLENGE: usize = 1024;
 /// The longest user handle WebAuthn allows, in bytes.
-const MAX_USER_HANDLE: usize = 64;
+pub const MAX_USER_HANDLE: usize = 64;
 
 pub fn b64(bytes: &[u8]) -> String {
     BASE64URL_NOPAD.encode(bytes)
@@ -68,6 +68,9 @@ pub fn challenge(text: &str) -> Result<&str> {
 
 /// A user handle: 1 to 64 bytes of base64url.
 pub fn user_handle(text: &str) -> Result<Vec<u8>> {
+    if text.len() > MAX_USER_HANDLE.div_ceil(3) * 4 {
+        return Err(Error::Invalid("a user handle is 1 to 64 bytes"));
+    }
     let bytes = unb64(text)?;
     if bytes.is_empty() || bytes.len() > MAX_USER_HANDLE {
         return Err(Error::Invalid("a user handle is 1 to 64 bytes"));

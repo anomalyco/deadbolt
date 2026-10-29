@@ -286,7 +286,7 @@ impl Listing {
         }
     }
 
-    fn find(&self, query: &[String]) -> Result<&Item> {
+    pub(super) fn find(&self, query: &[String]) -> Result<&Item> {
         let found: Vec<&Item> = self.items.iter().filter(|i| matches(i, query)).collect();
         let query = query.join(" ");
         match found.as_slice() {
@@ -785,12 +785,28 @@ pub fn unset(
     Ok(info(s, vault, &item.id))
 }
 
+#[cfg(test)]
 pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;
     let info = listing.info(item, false, false);
     write(s, vault, vec![DataOp::delete(item.id)])?;
+    Ok(info)
+}
+
+/// Deletes the exact item selected before consent, never re-running a search.
+pub(super) fn remove_id(s: &mut Loaded, vault: VaultId, id: ItemId) -> Result<ItemInfo> {
+    let stored = s
+        .vaults
+        .get(&vault)
+        .ok_or_else(|| anyhow!("no such vault"))?;
+    let item = stored
+        .item(&id)
+        .filter(|item| !item.deleted)
+        .ok_or_else(|| anyhow!("no such item"))?;
+    let info = Listing::new(stored).info(&item, false, false);
+    write(s, vault, vec![DataOp::delete(id)])?;
     Ok(info)
 }
 

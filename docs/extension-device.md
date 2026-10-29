@@ -35,20 +35,29 @@ sync. Unsupported operations fail rather than silently delegating to a native ho
 
 The native agent and standalone worker call `deadbolt-core::passkeys` and
 `deadbolt-core::webauthn`: shared RP/origin validation, exclusion checks,
-registration fields and replacement planning, ES256 signing, canonical CBOR,
+registration fields and new-item planning, ES256 signing, canonical CBOR,
 client data and authenticator flags. A synced passkey has the same item schema
 and PKCS#8 key on either device. Sign counters remain zero (as native requires
 for multi-device passkeys); backup eligible/backed-up flags remain set.
 
 The existing page bridge, same-origin ancestor and Permissions Policy checks,
 toolbar confirmation/account chooser and conditional inline-menu visibility
-checks apply unchanged. A page cannot supply its own trusted origin or consent.
+checks apply to signed ceremonies. Same-site cross-origin login frames may hold
+conditional requests for login autofill only; they never sign cross-origin
+assertions. A page cannot supply its own trusted origin or consent.
 Standalone advertises `passkeys`; registration commits the encrypted item before
-returning attestation and wakes sync. Registering the same account replaces its
-credential in place; exclusions are checked again immediately before the write.
+returning attestation and wakes sync. Registering the same user handle creates a
+new item, keeping the old credential intact: the site might reject or never
+receive the new registration. Only `excludeCredentials` identifies duplicates;
+exclusions are checked again immediately before the write. There is no automatic
+retirement after signing, since producing an assertion does not prove the site
+accepted it. Delete unwanted credentials explicitly in Settings.
 Assertions re-read the selected account after consent. Settings lists only site,
 account and creation date and can delete a passkey; the signed tombstone syncs
-to CLI/app peers. No management or ceremony response contains the private key.
+to CLI/app peers. Strict deletion requires the local passphrase, enforced in
+Rust even if the UI is bypassed. Native item deletion likewise asks for Touch ID
+when enrolled and enabled; without it, native retains its explicit-delete rule.
+No management or ceremony response contains the private key.
 
 Strict asks for the local passphrase on every preferred-verification ceremony,
 where native with Touch ID would prompt. `discouraged` skips reauthentication as
@@ -65,9 +74,14 @@ the request is still live. As native, cancellation after the final write was
 sent can leave a saved passkey whose reply the page never received; it can be
 deleted in Settings. One Strict prompt waits at a time across tabs; a newer
 prompt cancels the older one, as for standalone card fills. Worker loss
-discards authorizations. Standalone also
+discards authorizations. Overlapping passkey confirmations are keyed by a
+prompt-salted SHA-256 hash of the passphrase: duplicates of the current check
+share its answer, while different inputs wait and are checked separately only
+if the request still waits and no backoff applies. Standalone also
 uses the host's ceremony token bucket (10 then one/second) and four-in-flight
-limit. Listing passkeys does not keep the vault unlocked.
+limit. Listing passkeys does not keep the vault unlocked. Page-provided reauth
+titles strip control and bidi characters and are capped at 64 Unicode characters;
+stored account labels use the same filtering with a 256-character limit.
 
 ### Shared autofill rules
 
@@ -381,6 +395,10 @@ checks required-UV fallback. Strict checks wrong/right passphrases for both
 registration and assertion and skips reauth for discouraged UV. Settings
 deletion exercises Cancel and Delete and removes that account from subsequent
 choosers; locking and restarting preserve the remaining passkeys and tombstones.
+Re-registering the same user handle preserves both keys, each verified against
+its own public key. Direct worker checks refuse Strict deletion without the
+passphrase or with a wrong one, and preserve other credentials on deletion.
+Settings deletion also exercises Strict's wrong/right passphrase flow.
 The online runs additionally sign with a browser-created passkey through the
 CLI's real browser host, register a CLI passkey and sign with it in the browser,
 and verify that deletion reaches the CLI. These use the same signed log and

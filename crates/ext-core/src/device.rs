@@ -906,7 +906,7 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "device-sync" => sync_now(&body).await,
         "device-logins" => all_logins(),
         "device-passkeys" => passkeys::all(),
-        "device-delete" => passkeys::delete(&body),
+        "device-delete" => passkeys::delete(&mut body),
         "device-item" => login_detail(&body),
         "device-secret" => login_secret(&mut body),
         "device-save" => edit_login(&body),
@@ -1027,7 +1027,7 @@ pub async fn request(body: JsValue) -> std::result::Result<JsValue, JsValue> {
         Err(error) => {
             let code = match error {
                 Error::Passkey(ref error) => match error {
-                    deadbolt_core::passkeys::Error::DomainMismatch => "domain_mismatch",
+                    deadbolt_core::passkeys::Error::DomainMismatch(_) => "domain_mismatch",
                     deadbolt_core::passkeys::Error::Exists => "exists",
                     deadbolt_core::passkeys::Error::NotFound => "not_found",
                     _ => "failed",

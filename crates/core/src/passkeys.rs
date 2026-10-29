@@ -14,8 +14,8 @@ use crate::{
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("this relying party id isn't this site's")]
-    DomainMismatch,
+    #[error("{0}")]
+    DomainMismatch(&'static str),
     #[error("this site already has a passkey here")]
     Exists,
     #[error("no such passkey")]
@@ -28,8 +28,11 @@ pub enum Error {
 
 type Result<T> = std::result::Result<T, Error>;
 
+/// The longest stored account label, in Unicode characters.
+pub const MAX_USER_NAME: usize = 256;
+
 pub fn rp_id(origin: &str, rp: Option<&str>) -> Result<String> {
-    site::rp_id(origin, rp).map_err(|_| Error::DomainMismatch)
+    site::rp_id(origin, rp).map_err(Error::DomainMismatch)
 }
 
 pub fn matches(item: &Item, rp: &str) -> bool {
@@ -88,18 +91,21 @@ pub fn check_create(
     })
 }
 
-/// Page-provided account labels: no controls, 256 characters, trimmed.
+/// Page-provided account labels: no controls or bidi overrides, bounded and trimmed.
 pub fn user_text(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_control())
-        .take(256)
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(c, '\u{061c}' | '\u{200e}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+        .take(MAX_USER_NAME)
         .collect::<String>()
         .trim()
         .into()
 }
 
 pub struct Registration {
-    pub fields: BTreeMap<String, Field>,
+    pub create: DataOp,
     pub credential_id: String,
     pub client_data_json: String,
     pub attestation_object: String,
@@ -108,7 +114,10 @@ pub struct Registration {
 }
 
 /// Prepare a registration without publishing it. No response may leave the
-/// adapter until its fields have been committed durably.
+/// adapter until its create operation has been committed durably. Always make a
+/// new item: the RP may reject or never receive this registration, so an existing
+/// credential for the same user handle must remain usable. Only the RP's exclude
+/// list establishes duplicates, not the user handle.
 pub fn register(new: &NewPasskey, verified: bool, created: &str) -> Result<Registration> {
     rp_id(&new.origin, Some(&new.rp_id))?;
     let key = webauthn::generate()?;
@@ -141,28 +150,13 @@ pub fn register(new: &NewPasskey, verified: bool, created: &str) -> Result<Regis
         }
     }
     Ok(Registration {
-        fields,
+        create: DataOp::create("passkey", None, fields),
         credential_id,
         client_data_json: webauthn::b64(&client),
         attestation_object: webauthn::b64(&made.attestation_object),
         authenticator_data: webauthn::b64(&made.authenticator_data),
         public_key: webauthn::b64(&made.public_key),
     })
-}
-
-/// Replacing an account preserves its identity, notes and other custom fields,
-/// but removes account labels that the new registration no longer supplies.
-pub fn replace(item: &Item, fields: &BTreeMap<String, Field>) -> Vec<DataOp> {
-    let mut ops: Vec<_> = fields
-        .iter()
-        .map(|(name, field)| DataOp::set(item.id, name, field.clone()))
-        .collect();
-    for name in ["username", "display-name"] {
-        if !fields.contains_key(name) && item.fields.contains_key(name) {
-            ops.push(DataOp::remove(item.id, name));
-        }
-    }
-    ops
 }
 
 pub struct Assertion {
@@ -178,7 +172,9 @@ pub fn validate(item: &Item, rp: &str) -> Result<()> {
         return Err(Error::NotFound);
     }
     if !matches(item, rp) {
-        return Err(Error::DomainMismatch);
+        return Err(Error::DomainMismatch(
+            "this passkey isn't for this relying party",
+        ));
     }
     Ok(())
 }

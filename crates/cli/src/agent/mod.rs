@@ -1621,7 +1621,23 @@ impl Agent {
                 field,
             } => self.item_write(|s| items::unset(s, vault.as_deref(), &query, &field)),
             Command::ItemRemove { vault, query } => {
-                self.item_write(|s| items::remove(s, vault.as_deref(), &query))
+                // Resolve once before consent: a renamed item, default-vault
+                // change or sync during Touch ID must not retarget the delete.
+                let (vault, id, passkey) = self.with(|s| {
+                    let vault = s.resolve(vault.as_deref())?;
+                    let listing = items::Listing::new(s.vault(&vault));
+                    let item = listing.find(&query)?;
+                    Ok((vault, item.id, item.kind == "passkey"))
+                })?;
+                if passkey {
+                    self.verify_user(
+                        conv,
+                        crate::protocol::Verify::Preferred,
+                        "delete a saved passkey",
+                    )
+                    .await?;
+                }
+                self.item_write(|s| items::remove_id(s, vault, id))
             }
             Command::Import {
                 vault,

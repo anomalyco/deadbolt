@@ -52,7 +52,11 @@ function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
   return row
 }
 
-/** A passkey: its account and site, and Delete (asked first). Its key never leaves the vault. */
+/**
+ * A passkey: its account and site, and Delete (asked first). Its key never
+ * leaves the vault. Strict asks for the passphrase to delete one, as the
+ * vault itself does (device-delete answers `passphrase_needed` without it).
+ */
 function passkeyRow(app: App, k: DevicePasskey, repaint: () => void): HTMLElement {
   const name = k.username || "Passkey"
   const created = k.created ? new Date(k.created) : null
@@ -62,32 +66,46 @@ function passkeyRow(app: App, k: DevicePasskey, repaint: () => void): HTMLElemen
     { class: "vrow device" },
     h("span", { class: "tile" }, icon("passkey")),
     h("span", { class: "text" }, h("span", { class: "title" }, name), h("span", { class: "sub" }, [k.rpId, when].filter(Boolean).join(" · "))),
-    h("span", { class: "vrow-actions" }, iconButton(glyph("trash"), `Delete passkey ${name} for ${k.rpId}`, () => askDelete())),
+    h("span", { class: "vrow-actions" }, iconButton(glyph("trash"), `Delete passkey ${name} for ${k.rpId}`, () => askDelete(app.preset === "strict"))),
   )
-  const askDelete = () => {
+  const askDelete = (strict: boolean) => {
     const no = button("btn", "Cancel", () => repaint())
     const label = h("span", { class: "roll-label" }, "Delete")
     label.dataset.text = "Delete"
+    const passphrase = strict ? h("input", { class: "input", type: "password", autocomplete: "current-password", placeholder: "Passphrase", "aria-label": "Passphrase", spellcheck: "false" }) : null
     const yes = button("btn danger", label, async (b) => {
+      const value = passphrase?.value ?? ""
+      if (passphrase && !value) return refuse(passphrase)
       b.disabled = true
+      if (passphrase) passphrase.value = ""
       rollLabel(label, "Deleting…")
-      const r = await app.run({ type: "device-delete", ref: k.ref })
+      const r = await app.run(value ? { type: "device-delete", ref: k.ref, passphrase: value } : { type: "device-delete", ref: k.ref })
       if (!r.ok) {
+        // The vault holds Strict even if this page didn't know: ask for the passphrase and try again.
+        if (r.code === "passphrase_needed" && !passphrase) return askDelete(true)
         b.disabled = false
         rollLabel(label, "Delete")
         app.announce(r.message)
-        row.querySelector(".confirm-text")!.textContent = r.message
+        row.querySelector(".confirm-text")!.textContent = r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.message
+        if (passphrase) {
+          refuse(passphrase)
+          passphrase.focus()
+        }
         return
       }
       await app.refresh()
       app.announce(`Deleted the passkey for ${k.rpId}.`)
     })
+    passphrase?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") yes.click()
+    })
+    const why = strict ? `Strict: enter your passphrase to delete it. You can't sign in to ${k.rpId} as ${name} with it again, on any device.` : `You can't sign in to ${k.rpId} as ${name} with it again, on any device.`
     row.classList.add("confirming")
     row.replaceChildren(
-      h("span", { class: "text" }, h("span", { class: "title" }, `Delete passkey for ${k.rpId}?`), h("span", { class: "sub confirm-text" }, `You can't sign in to ${k.rpId} as ${name} with it again, on any device.`)),
+      h("span", { class: "text" }, h("span", { class: "title" }, `Delete passkey for ${k.rpId}?`), h("span", { class: "sub confirm-text" }, why), passphrase),
       h("span", { class: "vrow-actions shown" }, no, yes),
     )
-    no.focus()
+    ;(passphrase ?? no).focus()
   }
   return row
 }
@@ -181,10 +199,11 @@ export function settingsView(app: App): View {
           // Strict clears copied passwords if Chrome allows it: ask now, from this click.
           const asking = info.reauth && !(await app.clears()) ? app.askClearing() : null
           const r = await app.run({ type: "device-preset", preset: p })
-          if (r.ok) app.preset = p
+          // What the vault answered, which keeps the preset it holds when the change didn't reach it.
+          if (r.ok && typeof r.reply.preset === "string") app.preset = r.reply.preset as LockPreset
           if (asking) clearing.checked = await asking
           paintPresets()
-          app.announce(`${info.name}.`)
+          app.announce(r.ok ? `${PRESETS[app.preset].name}.` : r.message)
         })
         return h("label", { class: `preset${p === app.preset ? " on" : ""}` }, input, h("span", { class: "text" }, h("span", { class: "title" }, info.name, p === "comfortable" ? h("span", { class: "faint" }, " · default") : null), h("span", { class: "sub" }, describePreset(p))))
       }),

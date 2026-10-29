@@ -736,9 +736,13 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   and go away independently. An item kind gets core's rules for free:
   required fields, and a secret field that listings, search and the app
   never show. The agent alone reads the private key, to sign. Registering again for
-  the same user on the same relying party replaces the item, unless the site
-  excluded it: the agent checks `excludeCredentials` again just before it
-  saves, so one that appeared while the user was asked is never replaced.
+  the same user on the same relying party creates a new item and preserves the
+  old key: the site may reject or never receive the new registration. The agent
+  checks `excludeCredentials` again just before saving, refusing duplicates the
+  site excluded even if they appeared while the user was asked. Neither a new
+  registration nor an assertion retires the old item automatically. Explicit
+  native passkey deletion asks for Touch ID when enabled and enrolled; standalone
+  Strict deletion requires the local passphrase.
 - **Algorithm:** ES256 (COSE -7) only. A registration whose
   `pubKeyCredParams` lacks it goes to the browser.
 - **Attestation:** `none`, with a fixed AAGUID
@@ -1468,8 +1472,8 @@ now. `username` and `created` are left out when the passkey has none.
   "authenticatorData": "<base64url>", "publicKey": "<base64url SPKI>", "verified": true }
 ```
 
-Makes an ES256 passkey in the default vault, replacing one there for the same
-`user.id` on that relying party, and fails if one of `exclude` is already
+Makes a new ES256 passkey item in the default vault, preserving any existing
+credential for the same `user.id` on that relying party, and fails if one of `exclude` is already
 saved for it (`exists`), checked again just before saving. `userVerification` is `required`, `preferred` or
 `discouraged`; `verified` says whether Touch ID verified the user (the UV
 flag). Binary values are base64url without padding: the challenge up to 1024

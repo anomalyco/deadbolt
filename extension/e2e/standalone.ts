@@ -864,9 +864,9 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
   check(response.id === credential.id, `${how}: signed with the expected passkey`)
 }
 /** A registration from the page, saved in the popup; under Strict, `reauth` answers the passphrase prompt that follows. */
-async function registerInPage(page: Page, device: Page, name: string, username: string, how: string, reauth = false) {
+async function registerInPage(page: Page, device: Page, name: string, username: string, how: string, reauth = false, userID?: Uint8Array<ArrayBuffer>) {
   const reg = await generateRegistrationOptions({
-    rpName: "Acme", rpID: "localhost", userName: username, attestationType: "none",
+    rpName: "Acme", rpID: "localhost", userName: username, userID, attestationType: "none",
     authenticatorSelection: { residentKey: "required", userVerification: "preferred" }, supportedAlgorithmIDs: [-7, -257],
   })
   await page.bringToFront()
@@ -1071,7 +1071,29 @@ async function passkeyFlows(device: Page, worker: Worker) {
     const multiple = await signInInPage(page, device, "multiple", "strict@acme.test", "multiple-account sign-in", { listed: ["kit@acme.test", "strict@acme.test", ...(cliCredential ? ["cli@acme.test"] : [])] })
     await verifyAssertion(multiple.response, multiple.challenge, strictMade, "multiple-account sign-in")
 
-    // Delete through Settings, including the confirmation, not a worker shortcut.
+    // The RP might discard a new registration. Reusing the user handle must
+    // leave the original credential usable with its original public key.
+    const again = await registerInPage(page, device, "same-user", "second@acme.test", "same-user registration", false, Uint8Array.from(Buffer.from(modal.response.response.userHandle, "base64url")))
+    const kept = await devicePasskeys(device)
+    const second = kept.find((k) => k.credentialId === again.id)!
+    check(again.id !== kit.id && second.ref !== saved!.ref && kept.some((k) => k.credentialId === kit.id), "same-user registration creates a separate item and preserves the old credential")
+    const original = await signInInPage(page, device, "original-again", "kit@acme.test", "original sign-in after same-user registration")
+    await verifyAssertion(original.response, original.challenge, kit, "original sign-in after same-user registration")
+    const repeated = await signInInPage(page, device, "second-sign-in", "second@acme.test", "new same-user sign-in")
+    await verifyAssertion(repeated.response, repeated.challenge, again, "new same-user sign-in")
+
+    // Rust enforces Strict even without the Settings UI or service-worker gate.
+    await request(device, { type: "device-preset", preset: "strict" })
+    for (const supplied of [undefined, "wrong fixture passphrase"]) {
+      const refused = await vault(worker, { type: "device-delete", ref: second.ref, ...(supplied === undefined ? {} : { passphrase: supplied }) })
+      check(refused.reply.type === "error" && refused.reply.code === (supplied === undefined ? "passphrase_needed" : "wrong_passphrase"), "Strict deletion refuses a missing or wrong passphrase in Rust")
+      check((await devicePasskeys(device)).some((k) => k.credentialId === again.id), "refused deletion leaves the new same-user credential intact")
+    }
+    const deleted = await vault(worker, { type: "device-delete", ref: second.ref, passphrase })
+    check(deleted.reply.type === "device-delete" && (await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Strict deletion with the right passphrase removes only the selected credential")
+    // Delete through Settings under Strict, including confirmation and reauth,
+    // not a worker shortcut. The page refreshes its preset from the service worker.
+    await device.reload()
     await device.bringToFront()
     const settings = device.getByRole("button", { name: "Settings", exact: true })
     if (await settings.getAttribute("aria-pressed") !== "true") await settings.click()
@@ -1081,8 +1103,14 @@ async function passkeyFlows(device: Page, worker: Worker) {
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click()
     check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "cancelling deletion keeps the passkey")
     await remove.click()
+    await confirmation.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
+    await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
+    await confirmation.getByText("That passphrase isn't right.", { exact: true }).waitFor()
+    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Settings keeps the passkey after a wrong Strict passphrase")
+    await confirmation.getByLabel("Passphrase", { exact: true }).fill(passphrase)
     await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
     await until("Settings deletes the passkey", async () => !(await devicePasskeys(device)).some((k) => k.credentialId === kit.id))
+    await request(device, { type: "device-preset", preset: "comfortable" })
     await settings.click()
     const left = (await devicePasskeys(device)).map((k) => k.credentialId)
     check(!left.includes(kit.id) && left.includes(strictMade.id) && (!cliCredential || left.includes(cliCredential.id)), "device-delete removes the passkey, and only it")

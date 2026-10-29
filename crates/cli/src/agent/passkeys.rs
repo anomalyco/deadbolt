@@ -20,7 +20,7 @@ pub use shared::{NewPasskey, private, user_text};
 
 fn shared_error(error: shared::Error) -> anyhow::Error {
     match error {
-        shared::Error::DomainMismatch => fail(ErrorCode::DomainMismatch, error.to_string()),
+        shared::Error::DomainMismatch(_) => fail(ErrorCode::DomainMismatch, error.to_string()),
         shared::Error::Exists => fail(ErrorCode::Exists, error.to_string()),
         shared::Error::NotFound => fail(ErrorCode::NotFound, error.to_string()),
         _ => error.into(),
@@ -122,11 +122,10 @@ pub struct Created {
     pub public_key: String,
 }
 
-/// Makes the passkey `new` describes, replacing the one for the same user
-/// on the same relying party if there is one, else in the default vault.
-/// One the site excluded is never replaced: the vault can have changed
-/// while the user was asked, so that's checked again here. `now` is Unix
-/// seconds, for its creation date.
+/// Makes the passkey `new` describes as a new item in the default vault,
+/// preserving any existing credential until the user explicitly deletes it.
+/// The vault can have changed while the user was asked, so exclusions are
+/// checked again here. `now` is Unix seconds, for its creation date.
 pub fn create_passkey(
     s: &mut Loaded,
     new: &NewPasskey,
@@ -137,19 +136,9 @@ pub fn create_passkey(
     let created = crate::import::onepassword::date(now);
     let made = shared::register(new, verified, &created).map_err(shared_error)?;
 
-    let same_user = passkeys(s, &new.rp_id)
-        .find(|(_, item)| value(item, "user-handle") == Some(new.user_id.as_str()));
-    let passkey = if let Some((vault, item)) = same_user {
-        let ops = shared::replace(&item, &made.fields);
-        s.update(vault, |v, secret| Ok(v.write(secret, ops)?))?;
-        passkey_ref(&vault, &item.id)
-    } else {
-        let vault = s.resolve(None)?;
-        let (id, _) = s.update(vault, |v, secret| {
-            Ok(v.create_item(secret, "passkey", None, made.fields)?)
-        })?;
-        passkey_ref(&vault, &id)
-    };
+    let vault = s.resolve(None)?;
+    let entry = s.update(vault, |v, secret| Ok(v.write(secret, vec![made.create])?))?;
+    let passkey = passkey_ref(&vault, &ItemId::of_create(&entry.hash(), 0));
     Ok(Created {
         passkey,
         credential_id: made.credential_id,
@@ -173,7 +162,7 @@ pub fn find(s: &Loaded, passkey: &LoginRef, rp: &str) -> Result<(VaultId, Item)>
         .filter(|item| !item.deleted && item.kind == "passkey")
         .ok_or_else(not_found)?;
     shared::validate(&item, rp).map_err(|error| match error {
-        shared::Error::DomainMismatch => fail(
+        shared::Error::DomainMismatch(_) => fail(
             ErrorCode::DomainMismatch,
             format!("this passkey isn't for {rp}"),
         ),
@@ -574,18 +563,61 @@ pub(super) mod tests {
     }
 
     #[test]
-    fn registering_the_same_user_again_replaces_the_passkey() {
+    fn account_labels_strip_controls_and_bidi_and_bound_unicode_characters() {
+        assert_eq!(user_text(" \u{061c}ki\n\u{202e}t\u{2069}\u{200f} "), "kit");
+        assert_eq!(
+            user_text(&"🔑".repeat(300)),
+            "🔑".repeat(shared::MAX_USER_NAME)
+        );
+        let reason = deadbolt_core::site::rp_id("http://example.com", None).unwrap_err();
+        assert_eq!(
+            shared::rp_id("http://example.com", None)
+                .unwrap_err()
+                .to_string(),
+            reason
+        );
+    }
+
+    #[test]
+    fn registering_the_same_user_again_preserves_both_passkeys() {
         let dir = tempfile::tempdir().unwrap();
         let mut s = loaded(dir.path());
         let first = register(&mut s, "https://example.com", None, "kit");
         let second = register(&mut s, "https://example.com", None, "kit");
-        assert_eq!(first.passkey, second.passkey);
+        assert_ne!(first.passkey, second.passkey);
         assert_ne!(first.credential_id, second.credential_id);
         let (_, found) = list(&s, "https://example.com", None).unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].credential_id, second.credential_id);
+        assert_eq!(found.len(), 2);
+        for made in [&first, &second] {
+            assert!(
+                found
+                    .iter()
+                    .any(|item| item.credential_id == made.credential_id)
+            );
+            // Even if the RP discards the second registration, the first key
+            // still signs with the public key the RP originally accepted.
+            let signed = sign(
+                &s,
+                "https://example.com",
+                "example.com",
+                &made.passkey,
+                &challenge(),
+                false,
+            )
+            .unwrap();
+            let key =
+                VerifyingKey::from_public_key_der(&webauthn::unb64(&made.public_key).unwrap())
+                    .unwrap();
+            let mut data = webauthn::unb64(&signed.authenticator_data).unwrap();
+            data.extend_from_slice(&Sha256::digest(
+                webauthn::unb64(&signed.client_data_json).unwrap(),
+            ));
+            let signature =
+                Signature::from_der(&webauthn::unb64(&signed.signature).unwrap()).unwrap();
+            assert!(key.verify(&data, &signature).is_ok());
+        }
         register(&mut s, "https://example.com", None, "bob");
-        assert_eq!(list(&s, "https://example.com", None).unwrap().1.len(), 2);
+        assert_eq!(list(&s, "https://example.com", None).unwrap().1.len(), 3);
     }
 
     pub(in crate::agent) mod agent {
@@ -794,6 +826,92 @@ pub(super) mod tests {
                 .unwrap();
             assert_eq!(flags(&made), (0x59, false));
             assert_eq!(count(&f.agent), 2);
+        }
+
+        #[tokio::test]
+        async fn deleting_a_passkey_requires_native_consent_when_available() {
+            let f = unlocked().await;
+            let (conv, _closed) = conversation();
+            let made = f
+                .agent
+                .with(|s| Ok(register(s, "https://example.com", None, "kit")))
+                .unwrap();
+            let remove = || Command::ItemRemove {
+                vault: Some(made.passkey.vault.clone()),
+                query: vec![made.passkey.item.clone()],
+            };
+            *f.agent.biometric_hook.lock().unwrap() =
+                Some(Arc::new(|_| Err(biometric::UnlockError::Cancelled)));
+            assert!(f.agent.clone().run(remove(), &conv).await.is_err());
+            assert_eq!(count(&f.agent), 1);
+            let key = f.key;
+            let calls = Arc::new(AtomicUsize::new(0));
+            let seen = calls.clone();
+            *f.agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Ok(Zeroizing::new(key))
+            }));
+            f.agent.clone().run(remove(), &conv).await.unwrap();
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(count(&f.agent), 0);
+        }
+
+        #[tokio::test]
+        async fn deletion_never_retargets_after_touch_id() {
+            for vanished in [false, true] {
+                let f = unlocked().await;
+                let (conv, _closed) = conversation();
+                let made = f
+                    .agent
+                    .with(|s| Ok(register(s, "https://example.com", None, "kit")))
+                    .unwrap();
+                let vault = VaultId::from_bytes(unhex(&made.passkey.vault).unwrap());
+                let id = ItemId::from_bytes(unhex(&made.passkey.item).unwrap());
+                let weak = Arc::downgrade(&f.agent);
+                let key = f.key;
+                *f.agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_| {
+                    let agent = weak.upgrade().unwrap();
+                    agent
+                        .with(|s| {
+                            if vanished {
+                                super::super::super::items::remove_id(s, vault, id)?;
+                            }
+                            // Both names collide with the strings the old delete
+                            // path would search again after consent.
+                            if deadbolt_core::valid_name(&vault.to_string()) {
+                                s.create_vault(&vault.to_string())?;
+                            }
+                            s.update(vault, |v, secret| {
+                                Ok(v.create_item(secret, "login", Some(id.to_string()), [])?)
+                            })?;
+                            Ok(())
+                        })
+                        .unwrap();
+                    Ok(Zeroizing::new(key))
+                }));
+                let removed = f
+                    .agent
+                    .clone()
+                    .run(
+                        Command::ItemRemove {
+                            vault: Some(made.passkey.vault),
+                            query: vec![made.passkey.item],
+                        },
+                        &conv,
+                    )
+                    .await;
+                assert_eq!(removed.is_err(), vanished);
+                f.agent
+                    .with(|s| {
+                        let items = s.vault(&vault).items();
+                        assert!(items.iter().any(|item| !item.deleted
+                            && item.kind == "login"
+                            && item.name.as_deref() == Some(id.to_string().as_str())));
+                        assert!(s.vault(&vault).item(&id).unwrap().deleted);
+                        Ok(())
+                    })
+                    .unwrap();
+            }
         }
 
         #[tokio::test]

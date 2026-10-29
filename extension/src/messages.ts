@@ -525,8 +525,12 @@ export type DeviceCommand =
   | { type: "device-reauth-cancel"; id: string }
   /** The vault's passkeys, never their keys: `{ type: "device-passkeys", passkeys: DevicePasskey[] }`. */
   | { type: "device-passkeys" }
-  /** Deletes passkey `ref` from the vault (passkeys only for now); the delete syncs to the other devices. */
-  | { type: "device-delete"; ref: string }
+  /**
+   * Deletes passkey `ref` from the vault (passkeys only for now); the delete
+   * syncs to the other devices. Strict asks for the passphrase every time,
+   * as device-secret does: without it the vault answers `passphrase_needed`.
+   */
+  | { type: "device-delete"; ref: string; passphrase?: string }
   | { type: "list"; origin: string }
   | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
 

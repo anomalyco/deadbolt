@@ -588,6 +588,9 @@ describe("host replies", () => {
       id: 1,
       reply: { type: "passkeys", rpId: "example.com", canVerify: true, passkeys: [{ ref: REF, vault: "P", credentialId: "Y3JlZA", username: undefined, created: undefined }] },
     })
+    // Only a worker's own true says its preset asks for the passphrase.
+    expect(parseHostMessage({ id: 1, type: "passkeys", rpId: "example.com", canVerify: false, asksPassphrase: true, passkeys: [] })).toMatchObject({ reply: { asksPassphrase: true } })
+    expect(parseHostMessage({ id: 1, type: "passkeys", rpId: "example.com", canVerify: false, asksPassphrase: "yes", passkeys: [] })).not.toHaveProperty("reply.asksPassphrase")
     expect(parseHostMessage({ id: 2, type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: "e30", authenticatorData: "YQ", signature: "c2ln", userHandle: "a2l0" })?.kind).toBe("reply")
     expect(parseHostMessage({ id: 2, type: "passkey-assertion", credentialId: "Y3JlZA", clientDataJSON: "{}", authenticatorData: "YQ", signature: "c2ln", userHandle: "a2l0" })).toBeNull()
     expect(parseHostMessage({ id: 3, type: "error", code: "cancelled", message: "x" })).toMatchObject({ reply: { code: "cancelled" } })

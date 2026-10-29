@@ -140,6 +140,12 @@ export interface PasskeysReply {
   type: "passkeys"
   rpId: string
   canVerify: boolean
+  /**
+   * The browser-only vault only: whether its lock preset (Strict) asks for the
+   * passphrase before a ceremony the site doesn't discourage verifying, as the
+   * worker holds it. The native agent leaves it out.
+   */
+  asksPassphrase?: boolean
   passkeys: Passkey[]
 }
 /** Binary fields are base64url, as the page gets them. */
@@ -445,7 +451,7 @@ export function parseReply(raw: Record<string, unknown>): Reply | null {
     case "passkeys": {
       if (!Array.isArray(raw.passkeys) || typeof raw.rpId !== "string") return null
       const passkeys = raw.passkeys.map(passkey).filter((p): p is Passkey => p !== null)
-      return { type: "passkeys", rpId: raw.rpId, canVerify: raw.canVerify === true, passkeys }
+      return { type: "passkeys", rpId: raw.rpId, canVerify: raw.canVerify === true, ...(raw.asksPassphrase === true ? { asksPassphrase: true } : {}), passkeys }
     }
     case "passkey-created": {
       const f = b64Fields(raw, ["credentialId", "clientDataJSON", "attestationObject", "authenticatorData", "publicKey"] as const)
