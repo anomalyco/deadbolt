@@ -169,7 +169,13 @@ not running without sending hello, which would start the agent again.
   changes until a fresh reading taken 400 ms after the press confirms it. A
   frame hears about changes the page makes to it only after a short delay,
   so a reading right at the press can predate them. Every change starts the
-  500 ms again. If it's covered, faded, clipped, shown only at the press or
+  500 ms again, with one exception: when the browser resizes the viewport
+  (an infobar such as "started debugging this browser" comes or goes, or
+  the window is resized) and the page reflows, a move of the menu in the
+  next frame that keeps its size and shifts it no further than the viewport
+  changed doesn't count. That needs a trusted `resize` event in a normal
+  tabbed window: a page can't resize a tab's viewport (only a popup's, so
+  popups get no exception), and any other move still counts. If it's covered, faded, clipped, shown only at the press or
   can't be measured, it fills nothing and says so. A page that covers the
   menu briefly between two readings can go unseen (see the threat model).
   The browser pauses these readings while anything animates inside the

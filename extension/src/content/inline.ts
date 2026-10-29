@@ -124,6 +124,14 @@ let near = false
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
 let lastRect = ""
+/**
+ * How much the browser resized the viewport since the frame was last placed
+ * (an infobar such as "started debugging this browser" came or went, or the
+ * window was resized). A page can't send a trusted resize event, nor resize a
+ * tab's viewport (only a popup's, with resizeTo).
+ */
+let resized: { dw: number; dh: number } | null = null
+let viewport = { w: innerWidth, h: innerHeight }
 /** The fields the last fill in this document wrote, and whether the user submitted since. */
 let lastFilled: HTMLInputElement[] = []
 let submittedSinceFill = false
@@ -313,13 +321,35 @@ function position() {
   if (frame) {
     const f = frame.getBoundingClientRect()
     const rect = [f.left, f.top, f.width, f.height].map(Math.round).join()
-    if (rect !== lastRect) tellMoved()
+    if (rect !== lastRect && !followedResize(lastRect, rect)) tellMoved()
+    resized = null
     lastRect = rect
   }
   // While it fades out it lets clicks through (and anything under it would
   // read as a cover): only a surface still in use goes back on top.
   if (!closing && covered(host)) raise()
   if (host) raf = requestAnimationFrame(position)
+}
+
+/**
+ * Whether the frame's move from `from` to `to` is only the page reflowing for
+ * a viewport resize the browser made: the same size, shifted no further than
+ * the viewport changed, in a normal tabbed window (whose size the page can't
+ * set). A centred login form moves by half an infobar when one comes or goes;
+ * that isn't the page moving the menu, so the dwell isn't restarted for it.
+ */
+function followedResize(from: string, to: string): boolean {
+  if (!resized || !from || !window.toolbar.visible) return false
+  const [fl, ft, fw, fh] = from.split(",").map(Number)
+  const [tl, tt, tw, th] = to.split(",").map(Number)
+  return fw === tw && fh === th && Math.abs(tl - fl) <= Math.abs(resized.dw) && Math.abs(tt - ft) <= Math.abs(resized.dh)
+}
+
+function onResize(event: Event) {
+  if (!event.isTrusted) return
+  const now = { w: innerWidth, h: innerHeight }
+  resized = { dw: (resized?.dw ?? 0) + now.w - viewport.w, dh: (resized?.dh ?? 0) + now.h - viewport.h }
+  viewport = now
 }
 
 function frameStyle(radius: number) {
@@ -836,6 +866,7 @@ export function initMenu(page: PageState) {
   state = page
   if (isTop) {
     document.addEventListener("beforetoggle", onBeforeToggle, true)
+    addEventListener("resize", onResize, true)
     document.addEventListener("fullscreenchange", onFullscreen)
     new MutationObserver(onDialogs).observe(document, { subtree: true, attributes: true, attributeFilter: ["open"] })
   }
