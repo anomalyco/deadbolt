@@ -1,8 +1,6 @@
 //! Motion on the app's own screens, headless and offline: nothing that
 //! appears or leaves pops, and what stays moves.
 
-#![cfg(test)]
-
 use deadbolt_app::model::App;
 use rune::{Env, Runtime};
 

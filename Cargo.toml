@@ -31,6 +31,11 @@ lto = true
 codegen-units = 1
 strip = true
 
+# Full debuginfo was ~90% of every test binary. Line tables keep file:line in
+# backtraces; for a debugger session, run with CARGO_PROFILE_DEV_DEBUG=full.
+[profile.dev]
+debug = "line-tables-only"
+
 # Signatures dominate debug test time; optimize the crypto crates in dev builds.
 [profile.dev.package.curve25519-dalek]
 opt-level = 3

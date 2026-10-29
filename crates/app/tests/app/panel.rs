@@ -4,8 +4,6 @@
 //! shares one clipboard with the main window, and its global shortcut brings
 //! it up from anywhere.
 
-#![cfg(test)]
-
 use deadbolt_app::agent::{Agent, Done, Job, Values};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::panel::window::Windows;
@@ -583,7 +581,7 @@ fn focus_loss_while_closing_keeps_the_copy() {
     assert_eq!(phase(&rt), Phase::Hidden);
 }
 
-/// The placement request itself; tests/place.rs checks where it lands.
+/// The placement request itself; place.rs checks where it lands.
 #[test]
 fn it_opens_under_the_pointer_near_the_top() {
     use rune::{Align, DisplayTarget, OverlayPlacement, ScreenEdge};

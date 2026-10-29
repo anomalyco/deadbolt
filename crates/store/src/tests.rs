@@ -210,19 +210,6 @@ fn wrong_passphrase() {
 }
 
 #[test]
-fn an_open_store_checks_its_passphrase() {
-    let tmp = TempDir::new().unwrap();
-    let store = init(tmp.path());
-    let check = store.passphrase_check().unwrap();
-    assert!(check.matches(PASS).unwrap());
-    assert!(!check.matches(b"wrong").unwrap());
-    store.change_passphrase(PASS, b"new one").unwrap();
-    let check = store.passphrase_check().unwrap();
-    assert!(!check.matches(PASS).unwrap());
-    assert!(check.matches(b"new one").unwrap());
-}
-
-#[test]
 fn missing_store() {
     let tmp = TempDir::new().unwrap();
     assert!(matches!(
@@ -270,6 +257,21 @@ fn second_open_is_in_use() {
     assert!(matches!(crate::unlock(tmp.path(), PASS), Err(Error::InUse)));
     drop(store);
     drop(unlock(tmp.path()));
+}
+
+/// An open store checks a passphrase against its key set on disk, and a
+/// changed passphrase is the one that matches.
+#[test]
+fn passphrase_check() {
+    let tmp = TempDir::new().unwrap();
+    let store = init(tmp.path());
+    let check = store.passphrase_check().unwrap();
+    assert!(check.matches(PASS));
+    assert!(!check.matches(b"not it"));
+    store.change_passphrase(PASS, b"new pass").unwrap();
+    let check = store.passphrase_check().unwrap();
+    assert!(check.matches(b"new pass"));
+    assert!(!check.matches(PASS));
 }
 
 #[test]

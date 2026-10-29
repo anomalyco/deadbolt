@@ -6,10 +6,6 @@ mod agents;
 mod app;
 mod browser;
 mod caller;
-#[expect(
-    clippy::disallowed_methods,
-    reason = "client version override awaits the separate client-crate extraction"
-)]
 mod client;
 mod config;
 mod desktop;

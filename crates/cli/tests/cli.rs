@@ -1,7 +1,10 @@
 //! End-to-end tests: each device is a separate set of directories with its
 //! own agent process, networking over localhost only.
 
+// The agent reads the test switches these set (`DEADBOLT_NET`,
+// `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
 #![cfg(test)]
+#![cfg(debug_assertions)]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::PathBuf;

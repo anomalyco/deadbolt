@@ -3,9 +3,9 @@
 //! runtime headless (no window, no GPU) and an in-memory clipboard. Builds
 //! the CLI from this repository for the agent.
 
-#![cfg(test)]
-
-mod support;
+// The agent reads the test switches these set (`DEADBOLT_NET`,
+// `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
+#![cfg(debug_assertions)]
 
 use std::time::{Duration, Instant};
 
@@ -15,7 +15,7 @@ use deadbolt_app::onboarding::worker::{ALREADY_SET_UP, NewDevice, Progress, Stag
 use deadbolt_app::onboarding::{Flow, Severity, Step};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use support::{Device, PASSPHRASE, key, shows, until};
+use crate::support::{Device, PASSPHRASE, key, shows, until};
 
 #[test]
 fn unlock_search_copy_lock() {

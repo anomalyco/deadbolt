@@ -23,10 +23,9 @@ name: Release
 # This file and .github/release/ are the security boundary for releases.
 #
 # Channels (.github/release/plan.sh):
-# - dev: every push to dev (except docs/site/Markdown-only) publishes
-#   0.0.0-dev-<run number> on the dev channel; a newer push cancels a dev run
-#   in progress. Without the Apple values it publishes the CLI unsigned and no
-#   app.
+# - dev: every push to dev (except docs/site/Markdown-only), or a dispatch
+#   from dev, publishes 0.0.0-dev-<run number> on the dev channel. Without the
+#   Apple values it publishes the CLI unsigned and no app.
 # - check: a dispatch from dev or production builds, signs, and verifies, and
 #   publishes nothing.
 # - stable: a push to production or of tag v<version>, or a dispatch from
@@ -51,8 +50,10 @@ permissions:
 
 concurrency:
   group: release-${{ github.event_name == 'workflow_dispatch' && inputs.channel || (github.ref_type == 'tag' || github.ref_name == 'production') && 'stable' || 'dev' }}
-  # Only the dev channel: a newer push supersedes a dev build in progress.
-  cancel-in-progress: ${{ (github.event_name == 'workflow_dispatch' && inputs.channel || (github.ref_type == 'tag' || github.ref_name == 'production') && 'stable' || 'dev') == 'dev' }}
+  # Releases never cancel each other (as Hex's): the running one finishes, and
+  # of the pushes that land meanwhile only the newest waits (GitHub replaces an
+  # older pending run in the group), so a busy dev branch still publishes.
+  cancel-in-progress: false
 
 defaults:
   run:

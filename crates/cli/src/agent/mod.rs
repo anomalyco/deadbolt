@@ -920,6 +920,91 @@ mod tests {
             "never-enrolled store must not report touch_id_reset"
         );
     }
+
+    /// Unlocking while unlocked may shorten the idle timeout as it is; a
+    /// longer one, or never, takes the right passphrase or a Touch ID prompt.
+    /// And a passphrase that doesn't open the store never cancels a prompt.
+    #[tokio::test]
+    async fn an_unverified_unlock_only_shortens_the_idle_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let fast = deadbolt_store::KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let loaded = Loaded::setup(dir.path(), b"test", "device", fast).unwrap();
+        let token = make_valid_biometric_token(session::now());
+        let bio_key = deadbolt_store::generate_biometric_key().unwrap();
+        loaded.store.set_biometric(&bio_key, &token).unwrap();
+        drop(loaded);
+        let agent = Agent::new(test_paths(dir.path()), true, fast);
+        *agent.touch_id_available_override.lock().unwrap() = Some(true);
+        crate::config::set_touch_id(&agent.paths.config, true).unwrap();
+
+        let prompts = Arc::new(AtomicUsize::new(0));
+        let finger = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let key = *bio_key;
+        let (counted, touched) = (prompts.clone(), finger.clone());
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_cancel| {
+            counted.fetch_add(1, Ordering::SeqCst);
+            if touched.load(Ordering::SeqCst) {
+                Ok(Zeroizing::new(key))
+            } else {
+                Err(biometric::UnlockError::Cancelled)
+            }
+        }));
+        let timeout = || agent.idle.lock().unwrap().timeout.map(|t| t.as_secs());
+        let pass = |text: &str| Zeroizing::new(text.to_string());
+
+        agent.unlock_biometric(Some(3600)).await.unwrap();
+        assert_eq!((prompts.load(Ordering::SeqCst), timeout()), (1, Some(3600)));
+
+        agent.unlock(pass("wrong"), Some(600)).await.unwrap();
+        assert_eq!(timeout(), Some(600));
+        for longer in [Some(7200), Some(0)] {
+            let error = agent.unlock(pass("wrong"), longer).await.unwrap_err();
+            assert!(error.to_string().contains("wrong passphrase"), "{error}");
+            assert_eq!(timeout(), Some(600));
+        }
+        agent.unlock(pass("test"), Some(7200)).await.unwrap();
+        assert_eq!(timeout(), Some(7200));
+        agent.unlock(pass("test"), Some(0)).await.unwrap();
+        assert_eq!(timeout(), None);
+
+        agent.unlock_biometric(Some(60)).await.unwrap();
+        assert_eq!((prompts.load(Ordering::SeqCst), timeout()), (1, Some(60)));
+        finger.store(false, Ordering::SeqCst);
+        assert!(agent.unlock_biometric(Some(0)).await.is_err());
+        assert_eq!((prompts.load(Ordering::SeqCst), timeout()), (2, Some(60)));
+        *agent.biometric_cooldown_until.lock().unwrap() = None;
+        finger.store(true, Ordering::SeqCst);
+        agent.unlock_biometric(Some(0)).await.unwrap();
+        assert_eq!((prompts.load(Ordering::SeqCst), timeout()), (3, None));
+        assert!(agent.status().unlocked);
+
+        agent.lock().await;
+        let release = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let released = release.clone();
+        *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |cancel| {
+            loop {
+                if cancel.is_cancelled() {
+                    return Err(biometric::UnlockError::Cancelled);
+                }
+                if released.load(Ordering::SeqCst) {
+                    return Ok(Zeroizing::new(key));
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }));
+        let bio_agent = agent.clone();
+        let bio_task = tokio::spawn(async move { bio_agent.unlock_biometric(None).await });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        assert!(agent.unlock(pass("wrong"), None).await.is_err());
+        release.store(true, Ordering::SeqCst);
+        bio_task.await.unwrap().unwrap();
+        assert!(agent.status().unlocked);
+        agent.lock().await;
+    }
 }
 
 #[derive(Default)]
@@ -945,7 +1030,9 @@ pub async fn serve(paths: Paths) -> Result<()> {
         .mode(0o700)
         .create(runtime)
         .with_context(|| format!("creating {}", runtime.display()))?;
-    fs::set_permissions(runtime, fs::Permissions::from_mode(0o700))?;
+    // Only this user can reach the socket, from the moment it's bound.
+    deadbolt_client::paths::secure_dir(runtime)
+        .with_context(|| format!("checking {}", runtime.display()))?;
     let lock = File::options()
         .create(true)
         .truncate(false)
@@ -1148,6 +1235,14 @@ impl Conversation {
 
 impl Agent {
     async fn handle(self: Arc<Self>, stream: UnixStream, max_line: usize) -> Result<()> {
+        // The socket's directory keeps other users out; this holds even if
+        // it didn't. (macOS keeps a peer's uid, but not its audit token, once
+        // it hangs up.)
+        match deadbolt_client::peer::uid(&stream) {
+            Ok(uid) if uid == rustix::process::getuid().as_raw() => {}
+            Ok(uid) => bail!("refused a connection from uid {uid}: not this user"),
+            Err(error) => bail!("refused a connection: reading its credentials: {error}"),
+        }
         let peer = deadbolt_client::peer::Peer::of(&stream);
         let (read, write) = stream.into_split();
         let mut read = BufReader::new(read);
@@ -1854,16 +1949,41 @@ impl Agent {
         }
     }
 
-    fn set_timeout(&self, timeout_secs: Option<u64>) -> Result<()> {
-        let timeout = match timeout_secs {
+    /// The idle timeout `timeout_secs` asks for: `Some(0)` is never, `None`
+    /// the configured one.
+    fn requested_timeout(&self, timeout_secs: Option<u64>) -> Result<Option<Duration>> {
+        Ok(match timeout_secs {
             Some(0) => None,
             Some(secs) => Some(Duration::from_secs(secs)),
             None => Config::load(&self.paths.config)?.unlock_timeout()?,
-        };
+        })
+    }
+
+    fn set_timeout(&self, timeout_secs: Option<u64>) -> Result<()> {
+        let timeout = self.requested_timeout(timeout_secs)?;
         let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
         idle.timeout = timeout;
         idle.deadline = timeout.map(|t| Instant::now() + t);
         Ok(())
+    }
+
+    /// Sets the idle timeout `timeout_secs` asks for if it's no longer than
+    /// the current one, returning whether it did. An unlock request while
+    /// unlocked may always shorten it; only a verified passphrase or finger
+    /// may lengthen it or make it never.
+    fn tighten_timeout(&self, timeout_secs: Option<u64>) -> Result<bool> {
+        let timeout = self.requested_timeout(timeout_secs)?;
+        let mut idle = self.idle.lock().unwrap_or_else(|e| e.into_inner());
+        let tighter = match (timeout, idle.timeout) {
+            (_, None) => true,
+            (Some(new), Some(current)) => new <= current,
+            (None, Some(_)) => false,
+        };
+        if tighter {
+            idle.timeout = timeout;
+            idle.deadline = timeout.map(|t| Instant::now() + t);
+        }
+        Ok(tighter)
     }
 
     async fn setup(
@@ -1902,24 +2022,37 @@ impl Agent {
         self.start(loaded, None).await
     }
 
+    /// Unlocks with `passphrase`. While unlocked, it changes the idle
+    /// timeout: to a shorter one at once, to a longer one (or never) only if
+    /// the passphrase is right. A Touch ID prompt in flight is cancelled only
+    /// once the passphrase has opened the store.
     async fn unlock(
         self: &Arc<Self>,
         passphrase: zeroize::Zeroizing<String>,
         timeout_secs: Option<u64>,
     ) -> Result<()> {
-        self.cancel_biometric_prompt();
         let _transition = self.transition.lock().await;
         self.settle_activity(true);
         *self
             .biometric_cooldown_until
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        if self
+        let open = self
             .session
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
+            .as_ref()
+            .map(|s| s.store.passphrase_check());
+        if let Some(check) = open {
+            if self.tighten_timeout(timeout_secs)? {
+                return Ok(());
+            }
+            let check = check?;
+            let right =
+                tokio::task::spawn_blocking(move || check.matches(passphrase.as_bytes())).await?;
+            if !right {
+                return Err(deadbolt_store::Error::WrongPassphrase.into());
+            }
             return self.set_timeout(timeout_secs);
         }
         if !deadbolt_store::is_initialized(&self.paths.data) {
@@ -1944,6 +2077,7 @@ impl Agent {
             Ok::<_, anyhow::Error>((loaded, meta))
         })
         .await??;
+        self.cancel_biometric_prompt();
         if slot_meta.is_some() {
             self.biometric_was_enrolled.store(true, Ordering::SeqCst);
         }
@@ -1954,16 +2088,19 @@ impl Agent {
         self.start(loaded, timeout_secs).await
     }
 
+    /// Unlocks with Touch ID. While unlocked, it changes the idle timeout:
+    /// to a shorter one at once, to a longer one (or never) only after a
+    /// Touch ID prompt succeeds.
     async fn unlock_biometric(self: &Arc<Self>, timeout_secs: Option<u64>) -> Result<()> {
-        if self
+        let unlocked = self
             .session
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .is_some()
-        {
-            return self.set_timeout(timeout_secs);
+            .is_some();
+        if unlocked && self.tighten_timeout(timeout_secs)? {
+            return Ok(());
         }
-        if !deadbolt_store::is_initialized(&self.paths.data) {
+        if !unlocked && !deadbolt_store::is_initialized(&self.paths.data) {
             return Err(fail(
                 ErrorCode::NotInitialized,
                 "this device is not set up; run `deadbolt init` or `deadbolt join`",
@@ -2009,8 +2146,10 @@ impl Agent {
                     .ok()
                     .and_then(|v| v.clone())
                     .unwrap_or_else(|| Err(biometric::UnlockError::Cancelled.to_string()));
+                // The finger was for the prompt's own request: this one may
+                // only shorten the timeout that request set.
                 return match outcome {
-                    Ok(()) => self.set_timeout(timeout_secs),
+                    Ok(()) => self.tighten_timeout(timeout_secs).map(drop),
                     Err(msg) => bail!("{msg}"),
                 };
             }
@@ -2075,59 +2214,74 @@ impl Agent {
         let now = session::now();
         let token = {
             let _transition = self.transition.lock().await;
-            if self
+            let open = self
                 .session
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
-                .is_some()
-            {
-                return self.set_timeout(timeout_secs);
-            }
-            let dir = self.paths.data.clone();
-            let raw =
-                tokio::task::spawn_blocking(move || deadbolt_store::biometric_token(&dir)).await?;
-            let token = match raw {
-                Ok(Some(token)) => token,
-                Ok(None) => {
-                    *self
-                        .biometric_slot
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner()) = None;
-                    bail!("{}", biometric::UnlockError::NotEnrolled);
+                .as_ref()
+                .map(|s| s.store.biometric_token());
+            if let Some(token) = open {
+                // Unlocked: the prompt only verifies a longer timeout.
+                if self.tighten_timeout(timeout_secs)? {
+                    return Ok(());
                 }
-                Err(ref err) if biometric::is_biometric_slot_error(err) => {
-                    let msg = err.to_string();
-                    let dir = self.paths.data.clone();
-                    drop(
-                        tokio::task::spawn_blocking(move || deadbolt_store::clear_biometric(&dir))
+                let Some(token) = token? else {
+                    bail!("{}", biometric::UnlockError::NotEnrolled);
+                };
+                if let Err(err) = biometric::validate_token(&token, true, now) {
+                    bail!("{err}");
+                }
+                token
+            } else {
+                let dir = self.paths.data.clone();
+                let raw =
+                    tokio::task::spawn_blocking(move || deadbolt_store::biometric_token(&dir))
+                        .await?;
+                let token = match raw {
+                    Ok(Some(token)) => token,
+                    Ok(None) => {
+                        *self
+                            .biometric_slot
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = None;
+                        bail!("{}", biometric::UnlockError::NotEnrolled);
+                    }
+                    Err(ref err) if biometric::is_biometric_slot_error(err) => {
+                        let msg = err.to_string();
+                        let dir = self.paths.data.clone();
+                        drop(
+                            tokio::task::spawn_blocking(move || {
+                                deadbolt_store::clear_biometric(&dir)
+                            })
                             .await,
+                        );
+                        self.biometric_was_enrolled.store(true, Ordering::SeqCst);
+                        *self
+                            .biometric_slot
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner()) = None;
+                        bail!("{}", biometric::UnlockError::Invalidated(msg));
+                    }
+                    Err(err) => return Err(err.into()),
+                };
+                if let Err(err) = biometric::validate_token(&token, true, now) {
+                    let dir = self.paths.data.clone();
+                    let expected = token.clone();
+                    drop(
+                        tokio::task::spawn_blocking(move || {
+                            biometric::clear_biometric_if_matches(&dir, &expected)
+                        })
+                        .await,
                     );
                     self.biometric_was_enrolled.store(true, Ordering::SeqCst);
                     *self
                         .biometric_slot
                         .lock()
                         .unwrap_or_else(|e| e.into_inner()) = None;
-                    bail!("{}", biometric::UnlockError::Invalidated(msg));
+                    bail!("{err}");
                 }
-                Err(err) => return Err(err.into()),
-            };
-            if let Err(err) = biometric::validate_token(&token, true, now) {
-                let dir = self.paths.data.clone();
-                let expected = token.clone();
-                drop(
-                    tokio::task::spawn_blocking(move || {
-                        biometric::clear_biometric_if_matches(&dir, &expected)
-                    })
-                    .await,
-                );
-                self.biometric_was_enrolled.store(true, Ordering::SeqCst);
-                *self
-                    .biometric_slot
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner()) = None;
-                bail!("{err}");
+                token
             }
-            token
         };
 
         // Run the interactive Touch ID unseal WITHOUT holding `self.transition`

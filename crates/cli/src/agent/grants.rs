@@ -864,7 +864,7 @@ impl Agent {
                 let check = self.with(|s| Ok(s.store.passphrase_check()?))?;
                 let right =
                     tokio::task::spawn_blocking(move || check.matches(passphrase.as_bytes()))
-                        .await??;
+                        .await?;
                 let mut backoff = self.proof_backoff.lock().unwrap_or_else(|e| e.into_inner());
                 if !right {
                     backoff.failed(std::time::Instant::now());

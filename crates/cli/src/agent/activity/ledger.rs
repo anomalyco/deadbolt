@@ -1,12 +1,18 @@
 //! What keeps Activity in budget: every string and list in an entry has a
-//! cap, each anchor a rate past which its entries fold into one, and the
-//! entries held while locked a count and a size past which they fold too.
-//! A folded entry says how many it stands for (`more`), so nothing goes
-//! silently.
+//! cap, each anchor and all anchors together a rate past which their entries
+//! fold into one, and the entries held while locked a count and a size past
+//! which they fold too. A folded entry says how many it stands for (`more`),
+//! so nothing goes silently.
+//!
+//! Past a rate, requests that read, change or remove (the Read, Write and
+//! Never tiers) never fold into one that drops what they named: the first
+//! of each kind stays an entry of its own, and only exact repeats of it
+//! (same caller, command, items, fields and outcome) fold, into an entry
+//! that names them too.
 
 use std::collections::HashMap;
 
-use crate::protocol::{ActivityEntry, CallerInfo, Claim};
+use crate::protocol::{ActivityEntry, CallerInfo, Claim, Tier};
 
 /// The longest string an entry keeps, in bytes, cut marker included.
 pub const MAX_TEXT: usize = 256;
@@ -19,6 +25,13 @@ pub const PER_ANCHOR: u32 = 60;
 pub const WINDOW_SECS: u64 = 60;
 /// Anchors tracked at once; past it new ones share one window.
 const MAX_ANCHORS: usize = 256;
+/// Entries all anchors together may add per window; past it they fold, so a
+/// caller that makes up a new anchor (a claimed session) for each request
+/// can't push the rest of the table out of the store's budget.
+pub const ALL_ANCHORS: u32 = 300;
+/// Kinds of sensitive request whose repeats are folded at once; past it
+/// each is an entry of its own.
+const MAX_KINDS: usize = 256;
 
 /// Entries held while locked, by count and by size; past either they fold.
 pub const MAX_HELD: usize = 1_000;
@@ -137,6 +150,34 @@ impl Fold {
         entry.more = self.count;
         entry
     }
+
+    /// One entry for repeats of one request, naming what it named: "N more
+    /// item-get personal/GitHub password".
+    fn repeats(self) -> ActivityEntry {
+        let mut entry = self.first;
+        entry.more = self.count;
+        entry
+    }
+}
+
+/// Whether requests of `tier` read, change or remove something, so their
+/// entries always say what. Agent sign-ins hand values to a client.
+fn sensitive(tier: Tier) -> bool {
+    matches!(tier, Tier::Read | Tier::Write | Tier::Never | Tier::Agent)
+}
+
+/// What makes two entries repeats of one request: everything they name.
+fn kind(entry: &ActivityEntry) -> String {
+    serde_json::to_string(&(
+        &entry.caller.label,
+        &entry.command,
+        entry.tier,
+        entry.outcome,
+        &entry.items,
+        &entry.fields,
+        &entry.client,
+    ))
+    .unwrap_or_default()
 }
 
 struct Window {
@@ -153,12 +194,17 @@ pub struct Ledger {
     held_bytes: usize,
     over: Option<Fold>,
     windows: HashMap<String, Window>,
+    /// Every anchor's entries together.
+    all: Option<Window>,
+    /// Sensitive requests past a limit, by [`kind`]: each window's first is
+    /// an entry of its own, and its repeats fold.
+    kinds: HashMap<String, Window>,
 }
 
 impl Ledger {
-    /// Takes `entry` (bounded) against its anchor's window, returning what
-    /// is due now: the entry, unless its anchor is past [`PER_ANCHOR`], and
-    /// any window's fold that has ended.
+    /// Takes `entry` (bounded) against its anchor's window and every
+    /// anchor's, returning what is due now: the entry, unless it is past a
+    /// limit (and, if sensitive, a repeat), and any fold whose window ended.
     pub fn admit(&mut self, mut entry: ActivityEntry) -> Vec<ActivityEntry> {
         bound(&mut entry);
         let now = entry.time;
@@ -172,14 +218,48 @@ impl Ledger {
             count: 0,
             fold: None,
         });
-        if window.count < PER_ANCHOR {
+        let all = self.all.get_or_insert(Window {
+            start: now,
+            count: 0,
+            fold: None,
+        });
+        if window.count < PER_ANCHOR && all.count < ALL_ANCHORS {
             window.count += 1;
+            all.count += 1;
             due.push(entry);
-        } else {
-            match &mut window.fold {
-                Some(fold) => fold.add(&entry),
-                None => window.fold = Some(Fold::new(entry)),
+            return due;
+        }
+        if sensitive(entry.tier) {
+            let kind = kind(&entry);
+            match self.kinds.get_mut(&kind) {
+                Some(Window {
+                    fold: Some(fold), ..
+                }) => fold.add(&entry),
+                Some(repeat) => repeat.fold = Some(Fold::new(entry)),
+                None => {
+                    if self.kinds.len() < MAX_KINDS {
+                        self.kinds.insert(
+                            kind,
+                            Window {
+                                start: now,
+                                count: 0,
+                                fold: None,
+                            },
+                        );
+                    }
+                    due.push(entry);
+                }
             }
+            return due;
+        }
+        let over = if window.count >= PER_ANCHOR {
+            window
+        } else {
+            all
+        };
+        match &mut over.fold {
+            Some(fold) => fold.add(&entry),
+            None => over.fold = Some(Fold::new(entry)),
         }
         due
     }
@@ -187,18 +267,25 @@ impl Ledger {
     /// The folds of windows ended by `now` (all of them if `all`), as
     /// entries, forgetting those windows.
     pub fn due(&mut self, now: u64, all: bool) -> Vec<ActivityEntry> {
-        let ended: Vec<String> = self
-            .windows
-            .iter()
-            .filter(|(_, w)| all || now >= w.start.saturating_add(WINDOW_SECS))
-            .map(|(key, _)| key.clone())
-            .collect();
+        let ended = |w: &Window| all || now >= w.start.saturating_add(WINDOW_SECS);
         let mut due = Vec::new();
-        for key in ended {
-            if let Some(fold) = self.windows.remove(&key).and_then(|w| w.fold) {
-                due.push(fold.entry(PAST_LIMIT));
+        self.windows.retain(|_, w| {
+            if !ended(w) {
+                return true;
             }
+            due.extend(w.fold.take().map(|fold| fold.entry(PAST_LIMIT)));
+            false
+        });
+        if let Some(window) = self.all.take_if(|w| ended(w)) {
+            due.extend(window.fold.map(|fold| fold.entry(PAST_LIMIT)));
         }
+        self.kinds.retain(|_, w| {
+            if !ended(w) {
+                return true;
+            }
+            due.extend(w.fold.take().map(Fold::repeats));
+            false
+        });
         due.sort_by_key(|e| e.time);
         due
     }
@@ -319,6 +406,15 @@ mod tests {
         assert_eq!(short, "github");
     }
 
+    fn look(time: u64, label: &str) -> ActivityEntry {
+        ActivityEntry {
+            tier: Tier::Look,
+            command: "item-list".into(),
+            fields: Vec::new(),
+            ..entry(time, label)
+        }
+    }
+
     /// Past `PER_ANCHOR` in a window, an anchor's entries fold into one
     /// that says how many it stands for, due when the window ends.
     #[test]
@@ -326,11 +422,11 @@ mod tests {
         let mut ledger = Ledger::default();
         let mut due = Vec::new();
         for _ in 0..PER_ANCHOR + 25 {
-            due.extend(ledger.admit(entry(100, "zsh › deadbolt")));
+            due.extend(ledger.admit(look(100, "zsh › deadbolt")));
         }
         assert_eq!(due.len(), PER_ANCHOR as usize);
         // Another terminal has its own window.
-        let mut other = entry(100, "zsh › deadbolt");
+        let mut other = look(100, "zsh › deadbolt");
         other.caller.tty = Some("/dev/ttys002".into());
         assert_eq!(ledger.admit(other).len(), 1);
         assert!(ledger.due(100 + WINDOW_SECS - 1, false).is_empty());
@@ -342,7 +438,113 @@ mod tests {
         assert_eq!(folded[0].caller.label, "zsh › deadbolt");
         assert!(folded[0].items.is_empty());
         // A new window starts afresh.
-        assert_eq!(ledger.admit(entry(200, "zsh › deadbolt")).len(), 1);
+        assert_eq!(ledger.admit(look(200, "zsh › deadbolt")).len(), 1);
+    }
+
+    /// Past the limit, a read, a change or a removal keeps what it named:
+    /// each kind's first is an entry of its own, at once, and only exact
+    /// repeats fold, into an entry naming the same items and fields.
+    #[test]
+    fn agent_fills_past_the_limit_keep_their_login_and_client() {
+        let mut ledger = Ledger::default();
+        for _ in 0..PER_ANCHOR {
+            assert_eq!(ledger.admit(look(100, "node")).len(), 1);
+        }
+        let fill = |client: &str| ActivityEntry {
+            tier: Tier::Agent,
+            command: "agent-fill".into(),
+            items: vec![ActivityItem {
+                vault: Some("v1".into()),
+                id: Some("i1".into()),
+                title: "GitHub (https://github.com)".into(),
+            }],
+            client: Some(client.into()),
+            ..entry(101, "node")
+        };
+        let due = ledger.admit(fill("browse"));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].client.as_deref(), Some("browse"));
+        assert_eq!(due[0].items[0].id.as_deref(), Some("i1"));
+        assert!(ledger.admit(fill("browse")).is_empty());
+        // Another client's fill of the same login is no repeat of it.
+        assert_eq!(ledger.admit(fill("other")).len(), 1);
+        let folded = ledger.due(101 + WINDOW_SECS, false);
+        let repeat = folded.iter().find(|e| e.command == "agent-fill").unwrap();
+        assert_eq!((repeat.more, repeat.client.as_deref()), (1, Some("browse")));
+        assert_eq!(repeat.items[0].id.as_deref(), Some("i1"));
+    }
+
+    #[test]
+    fn sensitive_entries_past_the_limit_keep_their_items() {
+        let mut ledger = Ledger::default();
+        for _ in 0..PER_ANCHOR {
+            assert_eq!(ledger.admit(look(100, "zsh › deadbolt")).len(), 1);
+        }
+        let item = |id: &str, title: &str| ActivityItem {
+            vault: Some("personal".into()),
+            id: Some(id.into()),
+            title: title.into(),
+        };
+        let get = |id: &str, title: &str| ActivityEntry {
+            items: vec![item(id, title)],
+            ..entry(101, "zsh › deadbolt")
+        };
+        let remove = ActivityEntry {
+            tier: Tier::Never,
+            command: "device-remove".into(),
+            items: vec![item("d2", "laptop")],
+            fields: Vec::new(),
+            ..entry(102, "zsh › deadbolt")
+        };
+        let due = ledger.admit(get("i1", "GitHub"));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].items[0].id.as_deref(), Some("i1"));
+        assert_eq!(due[0].fields, ["password"]);
+        for _ in 0..5 {
+            assert!(ledger.admit(get("i1", "GitHub")).is_empty());
+        }
+        assert_eq!(ledger.admit(get("i2", "AWS")).len(), 1);
+        assert_eq!(ledger.admit(remove.clone()).len(), 1);
+        assert!(ledger.admit(remove).is_empty());
+
+        let mut folded = ledger.due(102 + WINDOW_SECS, false);
+        folded.sort_by_key(|e| e.command.clone());
+        let named: Vec<_> = folded
+            .iter()
+            .map(|e| (e.command.as_str(), e.items[0].id.as_deref(), e.more))
+            .collect();
+        assert_eq!(
+            named,
+            [
+                ("device-remove", Some("d2"), 1),
+                ("item-get", Some("i1"), 5)
+            ]
+        );
+        assert_eq!(folded[1].fields, ["password"]);
+        assert!(folded.iter().all(|e| e.command != PAST_LIMIT));
+    }
+
+    /// A caller making up a new anchor for each request (a new claimed
+    /// session) still fills only `ALL_ANCHORS` entries a window: the rest
+    /// fold into one, so it can't push older entries out of the store.
+    #[test]
+    fn new_anchors_share_one_limit() {
+        let mut ledger = Ledger::default();
+        let mut due = Vec::new();
+        for n in 0..ALL_ANCHORS + 1_000 {
+            let mut entry = look(100, "OpenCode › zsh › deadbolt");
+            entry.caller.tty = None;
+            entry.caller.claimed = Some(Claim {
+                caller: None,
+                opencode_session: Some(format!("ses_{n}")),
+            });
+            due.extend(ledger.admit(entry));
+        }
+        assert_eq!(due.len(), ALL_ANCHORS as usize);
+        let folded = ledger.due(100 + WINDOW_SECS, false);
+        assert_eq!(folded.len(), 1);
+        assert_eq!(folded[0].command, PAST_LIMIT);
+        assert_eq!(folded[0].more, 1_000);
     }
 
     /// Held entries keep to a count and a size; past either, the rest fold

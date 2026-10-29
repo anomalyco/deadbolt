@@ -17,7 +17,9 @@ released and moves only by fast-forward from `dev`.
 | `check` | dispatch (`channel: check`) from `dev` or `production` | as `dev` from `dev`, as `stable` from `production` | nothing: builds, signs and verifies only |
 | `stable` | push to `production`, push of tag `v<version>`, dispatch from `production` | `[workspace.package] version` | release service `stable`, GitHub release `v<version>` (Latest), Homebrew |
 
-A newer push to `dev` cancels a dev run in progress; other channels queue.
+Releases never cancel each other, as in Hex: the running one finishes, and of
+the pushes that land meanwhile only the newest waits (GitHub replaces an older
+pending run), so a busy `dev` still publishes, about once per release run.
 `.github/release/plan.sh` decides all of this from the event and ref. Versions
 are display text: each channel has one current release, and installs follow it.
 Release builds stamp the version into `Cargo.toml` (`scripts/set-crate-version.sh`,

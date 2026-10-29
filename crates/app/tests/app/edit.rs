@@ -2,8 +2,6 @@
 //! scripted agent, so each test sees the jobs the app sends and answers them
 //! as the agent would. `agent.rs` runs the same against a real agent.
 
-#![cfg(test)]
-
 use std::sync::mpsc::{Receiver, Sender};
 
 use deadbolt_app::agent::{Agent, Done, Failure, Job, Values};

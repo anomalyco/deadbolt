@@ -8,18 +8,18 @@ pub use deadbolt_client::{AgentError, running, simple, status, stop};
 use crate::paths::Paths;
 use crate::protocol::{Command, ErrorCode, Event, PROTOCOL_VERSION, Reply, Status};
 
-/// This binary's version. `DEADBOLT_TEST_VERSION` overrides it so tests can
-/// run an agent of another build.
+/// This binary's version. `DEADBOLT_TEST_VERSION` overrides it in a debug
+/// build so tests can run an agent of another build.
 pub fn version() -> String {
-    std::env::var("DEADBOLT_TEST_VERSION")
-        .unwrap_or_else(|_| concat!(env!("CARGO_PKG_VERSION"), "+", env!("DEADBOLT_BUILD")).into())
+    crate::config::test_env("DEADBOLT_TEST_VERSION")
+        .unwrap_or_else(|| concat!(env!("CARGO_PKG_VERSION"), "+", env!("DEADBOLT_BUILD")).into())
 }
 
 /// The protocol this binary's agent speaks. `DEADBOLT_TEST_PROTOCOL`
-/// overrides it so tests can run an agent that looks older or newer.
+/// overrides it in a debug build so tests can run an agent that looks older
+/// or newer.
 pub fn protocol() -> u32 {
-    std::env::var("DEADBOLT_TEST_PROTOCOL")
-        .ok()
+    crate::config::test_env("DEADBOLT_TEST_PROTOCOL")
         .and_then(|v| v.parse().ok())
         .unwrap_or(PROTOCOL_VERSION)
 }
