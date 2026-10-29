@@ -56,6 +56,20 @@ export function sameSite(frame: URL, top: URL): boolean {
   return site !== null && site === siteOf(top.hostname)
 }
 
+/**
+ * Whether a login field in a frame may open the inline menu: `chain` is the
+ * frame, then each frame above it, ending with the top page. Every one has
+ * to be on the frame's site and https (http only on local development hosts,
+ * see fillableOrigin): a cross-site page anywhere on the way could place,
+ * size and cover the frame to steer the user's pick (docs/autofill.md,
+ * Frames).
+ */
+export function sameSiteChain(chain: URL[]): boolean {
+  if (chain.length < 2) return false
+  const site = siteOf(chain[0].hostname)
+  return site !== null && chain.every((url) => fillableOrigin(url) && siteOf(url.hostname) === site)
+}
+
 const MAX_TITLE = 128
 const MAX_URL_BYTES = 2048
 

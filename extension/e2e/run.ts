@@ -488,6 +488,86 @@ const cardFrame = (host: string, port: string) => `<h1>Payment</h1>
   <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
   <iframe id="pay" src="http://${host}:${port}/forms/card-frame" style="width:100%;height:220px;border:0;margin-top:12px"></iframe>`
 
+/**
+ * Apple's sign-in widget as appstoreconnect.apple.com embeds it
+ * (idmsa.apple.com/appleauth/auth/signin, checked in October 2026): no
+ * <form>, a text box for the account (autocomplete=off) with its label
+ * floating over it, and a password box collapsed to zero height until
+ * Continue, all in the one frame document.
+ * The second Continue tells the page around it, which goes on to the
+ * signed-in page.
+ */
+const APPLE_WIDGET = `<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title><style>
+  body{margin:0;font:15px/1.4 system-ui,sans-serif;background:#fff;color:#1d1d1f}
+  .signin{max-width:340px;margin:16px auto}h1{font-size:19px;margin:0 0 14px}
+  .form-cell-wrapper{position:relative;overflow:hidden}.hide-password .password .form-cell-wrapper{height:0}
+  input{display:block;width:100%;box-sizing:border-box;height:52px;padding:18px 12px 0;margin:0 0 8px;font:inherit;border:1px solid #d2d2d7;border-radius:10px}
+  .form-textbox-label{position:absolute;left:13px;top:7px;font-size:12px;color:#6e6e73;pointer-events:none}
+  button{width:100%;height:40px;border:0;border-radius:10px;background:#0071e3;color:#fff;font:inherit}button:disabled{opacity:.5}
+</style></head><body><div id="content" class="si-body"><div class="signin"><div id="sign_in_form" class="signin-form hide-password">
+  <h1>Sign in with Apple Account</h1>
+  <div class="signin-content">
+    <div class="account-name"><div class="form-cell-wrapper form-textbox"><input type="text" id="account_name_text_field" enterkeyhint="done" can-field="accountName" aria-labelledby="apple_id_field_label" autocorrect="off" autocapitalize="off" aria-required="true" required spellcheck="false" class="force-ltr form-textbox-input" autocomplete="off"><span aria-hidden="true" id="apple_id_field_label" class="form-textbox-label">Email or Phone Number</span></div></div>
+    <div class="password" aria-hidden="true"><div class="form-cell-wrapper form-textbox"><input type="password" id="password_text_field" aria-labelledby="password_field_label" aria-required="true" required can-field="password" class="form-textbox-input" autocomplete="current-password" tabindex="-1"><span id="password_field_label" aria-hidden="true" class="form-textbox-label">Password</span></div></div>
+  </div>
+  <button id="sign-in" class="button button-rounded-rectangle" disabled><span>Continue</span></button>
+</div></div></div><script>
+  const form = document.getElementById("sign_in_form"), account = document.getElementById("account_name_text_field"), password = document.getElementById("password_text_field"), go = document.getElementById("sign-in")
+  const step = () => form.classList.contains("hide-password")
+  const update = () => (go.disabled = !(step() ? account.value : password.value))
+  account.addEventListener("input", update)
+  password.addEventListener("input", update)
+  go.addEventListener("click", () => {
+    if (!step()) return parent.postMessage({ type: "signed-in", account: account.value }, "*")
+    setTimeout(() => {
+      form.classList.remove("hide-password")
+      password.tabIndex = 0
+      password.closest(".password").removeAttribute("aria-hidden")
+      update()
+    }, 200)
+  })
+</script></body></html>`
+/**
+ * The page around it: App Store Connect's sign-in page, with the widget from
+ * `frame` (or through a frame on `via`), maybe under a sheet that lets clicks
+ * through, maybe with `sandbox` flags on its iframe, maybe (`tall`) taller
+ * than the viewport. `csp`: the frame on `via` is sandboxed by its
+ * Content-Security-Policy header instead, without allow-same-origin.
+ */
+const appleLogin = (port: string, frame: string, via?: string, cover = false, sandbox?: string, tall = false, csp = false) => {
+  const widget = `http://${frame}:${port}/appleauth/auth/signin?widgetKey=e2e&language=en_US`
+  const src = via ? `http://${via}:${port}/apple/shell?inner=${encodeURIComponent(widget)}${csp ? "&csp" : ""}` : widget
+  const flags = sandbox === undefined ? "" : ` sandbox="${sandbox.replace(/[^a-z -]/g, "")}"`
+  return `<h1>App Store Connect</h1><iframe id="aid-auth-widget-iFrame" name="aid-auth-widget"${flags} src="${src}" style="width:100%;height:${tall ? 1400 : 330}px;border:0"></iframe>
+    ${cover ? `<section style="position:fixed;inset:0;z-index:9;pointer-events:none;background:rgb(244 244 245 / 97%)"></section>` : ""}
+    <script>addEventListener("message", (e) => { if (e.data?.type === "signed-in") location.assign("/apple/apps?u=" + encodeURIComponent(e.data.account)) })</script>`
+}
+
+/**
+ * Schwab's sign-in bar as www.schwab.com shows it (issue #88): a 630×65
+ * frame in the header (`#schwablmslogin`, "log in form") from
+ * sws-gateway-nr.schwab.com, holding a Login ID box (type text, no name, no
+ * autocomplete), a password box (autocomplete=off) and a "Log in" button,
+ * with no form. Too small to hold a menu: it has to open in the page.
+ */
+const SCHWAB_BAR = `<!doctype html><html><head><meta charset="utf-8"><title>Log in</title><style>
+  body{margin:0;font:13px system-ui,sans-serif;background:#fff}
+  .bar{display:flex;gap:8px;align-items:center;height:65px;padding:0 10px;box-sizing:border-box}
+  input{width:200px;height:34px;box-sizing:border-box;padding:0 8px;border:1px solid #9ca3af;border-radius:4px;font:inherit}
+  button{height:34px;padding:0 16px;border:0;border-radius:4px;background:#00a0df;color:#fff;font:inherit}
+  .sr{position:absolute;left:-9999px}
+</style></head><body><div class="bar">
+  <label class="sr" for="loginIdInput">Login ID</label><input type="text" id="loginIdInput" placeholder="Login ID" maxlength="40">
+  <label class="sr" for="passwordInput">Password</label><input type="password" id="passwordInput" placeholder="Password" autocomplete="off">
+  <button type="button" id="btnLogin">Log in</button>
+</div></body></html>`
+const SCHWAB_HOME = (port: string) => `<!doctype html><html><head><meta charset="utf-8"><title>Charles Schwab | A modern approach to investing &amp; retirement</title><style>
+  body{margin:0;font:15px system-ui,sans-serif;background:#f4f4f5}header{display:flex;justify-content:space-between;align-items:center;height:80px;padding:0 20px;background:#fff;border-bottom:1px solid #e4e4e7}
+  main{padding:40px}
+</style></head><body><header><strong>charles SCHWAB</strong>
+  <iframe id="schwablmslogin" title="log in form" src="http://sws-gateway-nr.schwab.test:${port}/ui/host/?clientId=schwab-prospect&startInSetId=1&redirectUri=https%3A%2F%2Fclient.schwab.test%2F&enableappd=false" width="630" height="65" style="border:0"></iframe>
+</header><main><h1>Own your tomorrow</h1><p>Invest, trade and plan with Schwab.</p></main></body></html>`
+
 const changeForm = `<h1>Change your password</h1><form method="post" action="/home" novalidate>
   <label for="current">Current password</label><input id="current" name="current" type="password" autocomplete="current-password">
   <label for="new">New password</label><input id="new" name="new" type="password" autocomplete="new-password">
@@ -537,6 +617,25 @@ const server = Bun.serve({
       }
     }
     switch (url.pathname) {
+      // Apple's sign-in (see APPLE_WIDGET): ?frame=<host> serves the widget from another host, ?via=<host> through a frame there.
+      case "/apple/login":
+        return html("App Store Connect", appleLogin(url.port, url.searchParams.get("frame") ?? "idmsa.apple.test", url.searchParams.get("via") ?? undefined, url.searchParams.has("cover"), url.searchParams.get("sandbox") ?? undefined, url.searchParams.has("tall"), url.searchParams.has("csp")))
+      case "/appleauth/auth/signin":
+        return new Response(APPLE_WIDGET, { headers: { "content-type": "text/html; charset=utf-8" } })
+      case "/apple/shell": {
+        const inner = url.searchParams.get("inner") ?? ""
+        const src = /^http:\/\/[a-z.]+\.test:\d+\/appleauth\//.test(inner) ? inner.replace(/"/g, "") : "about:blank"
+        // ?csp: sandboxed by its own header, so its URL keeps the site's origin while its real one is opaque.
+        const csp: Record<string, string> = url.searchParams.has("csp") ? { "content-security-policy": "sandbox allow-scripts allow-forms" } : {}
+        return new Response(`<!doctype html><body style="margin:0"><iframe src="${src}" style="width:100%;height:320px;border:0"></iframe></body>`, { headers: { "content-type": "text/html; charset=utf-8", ...csp } })
+      }
+      // Schwab's homepage (see SCHWAB_BAR): the sign-in bar is a 65 px frame from another host of the site.
+      case "/schwab/":
+        return new Response(SCHWAB_HOME(url.port), { headers: { "content-type": "text/html; charset=utf-8" } })
+      case "/ui/host/":
+        return new Response(SCHWAB_BAR, { headers: { "content-type": "text/html; charset=utf-8" } })
+      case "/apple/apps":
+        return html("App Store Connect", `<h1>Apps</h1><p>Signed in as <strong>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</strong>.</p><a href="/apple/login">Sign out</a>`)
       // Step one, the username alone. With ?accounts, the next step is on
       // another origin of the same site (accounts.acme.test).
       case "/flow/nav": {
@@ -872,8 +971,8 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     colorScheme: options.scheme ?? "light",
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
-    // *.acme.test is one site on this machine: two origins of it for the sign-in session runs.
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1"],
+    // *.acme.test is one site on this machine: two origins of it for the sign-in session runs; *.apple.test for Apple's sign-in frame.
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1"],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -1822,12 +1921,13 @@ async function securityPage() {
       await p.close()
     }
 
-    // A same-site login page in a frame: no menu inside it, and the popup
-    // fills it only if the user can see it through every frame above.
+    // A same-site login page in a frame: the menu opens in the top page (see
+    // frameLogins), never inside the frame, and the popup fills it only if
+    // the user can see it through every frame above.
     for (const how of Object.keys(FRAMED)) {
       await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
       await page.goto(`${site}/framed/${how}`)
-      const inner = await until(`the framed login page loads (${how})`, () => page.frames().find((f) => f.url().includes("/login?next=home")) ?? null)
+      let inner = await until(`the framed login page loads (${how})`, () => page.frames().find((f) => f.url().includes("/login?next=home")) ?? null)
       if (!inner) {
         await diagnose(run, page, `framed/${how}`)
         continue
@@ -1835,11 +1935,38 @@ async function securityPage() {
       await until("the frame's form is found", () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen.some((s) => /^db:page@[1-9]/.test(s) && s.endsWith("/login"))), 15_000)
       if (how === "visible") {
         await inner.click("#email")
-        await Bun.sleep(1500)
-        check(!page.frames().some((f) => f.url().includes("/menu.html")), "a frame's field gets no menu")
-        await page.keyboard.press("ArrowDown")
-        await Bun.sleep(1000)
-        check(!page.frames().some((f) => f.url().includes("/menu.html")), "nor on ↓")
+        const menu = await until("a same-site frame's field opens the menu", () => extensionFrame(page, "menu.html"), 15_000)
+        check(!!menu && menu.parentFrame() === page.mainFrame(), "a same-site frame's field opens the menu in the top page, not in the frame")
+        // Esc in the frame's field closes it, before the popup's turn.
+        await page.keyboard.press("Escape")
+        check(!!(await until("esc in the frame closes the menu", () => !extensionFrame(page, "menu.html"), 5000)), "esc in the frame's field closes the menu")
+      } else if (how !== "nested") {
+        // Every other way of making the frame hard to see: no menu, or one
+        // whose pick fills nothing and never asks the host.
+        const before = await fillCount(run)
+        await inner.click("#email", { force: true, timeout: 3000 }).catch(() => {})
+        let menu: Frame | null = null
+        for (let i = 0; i < 25 && !menu; i++) {
+          const f = extensionFrame(page, "menu.html")
+          if (f && (await f.locator("button.row").count().catch(() => 0)) > 0) menu = f
+          else await Bun.sleep(100)
+        }
+        if (menu) {
+          await settled(menu)
+          await menu.locator("button.row", { hasText: "kit@acme.test" }).click({ timeout: 3000 }).catch(() => {})
+          await until(`the pick on a frame made ${how} answers`, async () => !extensionFrame(page, "menu.html") || (await menu!.locator(".pill.failed").count().catch(() => 0)) > 0, 8000)
+        }
+        const values = [await inner.inputValue("#email"), await inner.inputValue("#password")]
+        check(values.every((v) => v === "") && (await fillCount(run)) === before, `a frame made ${how} gets ${menu ? "a menu whose pick fills nothing and doesn't ask the host" : "no menu"} (${JSON.stringify(values)})`)
+        await until("the menu goes before the popup's turn", () => !extensionFrame(page, "menu.html"), 8000)
+      }
+      // Focusing its email box enabled the password box: the popup's run starts from a fresh page.
+      if (how === "enabled-on-focus") {
+        await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
+        await page.goto(`${site}/framed/${how}`)
+        inner = await until(`the framed login page loads again (${how})`, () => page.frames().find((f) => f.url().includes("/login?next=home")) ?? null)
+        if (!inner) continue
+        await until("the frame's form is found again", () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen.some((s) => /^db:page@[1-9]/.test(s) && s.endsWith("/login"))), 15_000)
       }
       const before = await fillCount(run)
       const p = await popup(run, `${site}/framed/${how}`)
@@ -2435,6 +2562,173 @@ async function signInSessions() {
   } catch (err) {
     check(false, `sign-in sessions threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "sessions")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * A sign-in in a frame of the page's own site, as Apple's: App Store Connect
+ * (appstoreconnect.apple.test) embeds its sign-in widget from
+ * idmsa.apple.test, with no <form> and the password in the same frame after
+ * Continue. The menu opens in the top page under the frame's field, the pick
+ * fills only the frame, and the password step fills from the same login
+ * with its pill on the field. A username typed by hand narrows the password
+ * step's menu. A cross-site frame, or a same-site one inside a cross-site
+ * frame, gets no menu.
+ */
+async function frameLogins() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  const top = `http://appstoreconnect.apple.test:${server.port}`
+  const seen = () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)
+  const widget = () => page.frames().find((f) => f.url().includes("/appleauth/auth/signin")) ?? null
+  /** The widget, once its frame reported the form. */
+  const open = async (query = "", reported = true) => {
+    await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
+    await page.goto(`${top}/apple/login${query}`)
+    const inner = await until(`the sign-in frame loads${query ? ` (${query})` : ""}`, widget)
+    const found = async () => (await seen()).some((s) => /^db:page@[1-9]\d*:\/appleauth\/auth\/signin$/.test(s))
+    // A sandboxed frame may never report: wait a while, without failing.
+    if (inner && reported) await until("the frame's form is found", found, 15_000)
+    else if (inner) for (let i = 0; i < 30 && !(await found()); i++) await Bun.sleep(100)
+    return inner
+  }
+  const menuNow = async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator("button.row").count()) > 0 ? f : null
+  }
+  const pillOn = async (label: string) =>
+    until(`a pill says ${label}`, async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && ((await f.locator(".pill.ok .pill-label").textContent().catch(() => "")) ?? "").includes(label) ? f : null
+    })
+  const wants = async () => (await hostLog(run)).filter((r) => r.type === "fill").map((r) => `${(r.want as string[]).join("+")}@${r.origin}`)
+  const fieldBox = () => page.locator("#aid-auth-widget-iFrame").boundingBox()
+  try {
+    const inner = await open()
+    if (!inner) return
+    await inner.click("#account_name_text_field")
+    const menu = await until("the menu opens for the frame's field", menuNow, 15_000)
+    if (!menu) return void (await diagnose(run, page, "frameLogins"))
+    check(menu.parentFrame() === page.mainFrame(), "a login field in a same-site frame opens the menu in the top page")
+    const box = await (await menu.frameElement()).boundingBox()
+    const field = await inner.locator("#account_name_text_field").boundingBox()
+    check(!!box && !!field && box.y >= field.y + field.height && box.y < field.y + field.height + 24 && Math.abs(box.x - field.x) < 8, `under where the field shows (${JSON.stringify(box)} vs ${JSON.stringify(field)})`)
+    await shotAround(page, "frame-login-menu", menu, "#aid-auth-widget-iFrame")
+    await settled(menu)
+    await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+    check(!!(await until("the frame's username fills", async () => (await inner.inputValue("#account_name_text_field")) === "kit@acme.test")), "picking a login fills the frame's username box")
+    check((await inner.inputValue("#password_text_field")) === "", "and not its collapsed password box")
+    const pill = await pillOn("Filled")
+    const pillBox = pill ? await (await pill.frameElement()).boundingBox() : null
+    check(!!pillBox && !!field && pillBox.y >= field.y - 2 && pillBox.y + pillBox.height <= field.y + field.height + 2, `its pill sits on the frame's field in the top page (${JSON.stringify(pillBox)})`)
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    // Esc in the frame's field once the pick has filled it says nothing of the sign-in.
+    await inner.focus("#account_name_text_field")
+    await page.keyboard.press("Escape")
+    // The user clicks Continue in the frame; its password box opens in the same document.
+    await inner.click("#sign-in")
+    check(!!(await until("the password step fills", async () => (await inner.inputValue("#password_text_field")) === "correct horse")), "the password step in the same frame fills from the login picked on the first")
+    const stepPill = await pillOn("Password filled")
+    check(!!stepPill && stepPill.parentFrame() === page.mainFrame(), "and its pill, in the top page, says Password filled")
+    const password = await inner.locator("#password_text_field").boundingBox()
+    const stepBox = stepPill ? await (await stepPill.frameElement()).boundingBox() : null
+    check(!!stepBox && !!password && stepBox.y >= password.y - 2 && stepBox.y + stepBox.height <= password.y + password.height + 2, `on the frame's password box (${JSON.stringify(stepBox)} vs ${JSON.stringify(password)})`)
+    await shotAround(page, "frame-login-pill", stepPill ?? menu, "#aid-auth-widget-iFrame")
+    const frameOrigin = `http://idmsa.apple.test:${server.port}`
+    check(JSON.stringify(await wants()) === JSON.stringify([`username@${frameOrigin}`, `password@${frameOrigin}`]), `one fill per step, each for the frame's own origin (${await wants()})`)
+    check(!!(await fieldBox()), "the page around the frame keeps its frame")
+
+    // Typed by hand: the username narrows the password step's menu to its login.
+    const typed = await open()
+    if (typed) {
+      await typed.click("#account_name_text_field")
+      await until("the menu opens", menuNow, 15_000)
+      await typed.locator("#account_name_text_field").pressSequentially("admin", { delay: 30 })
+      check(!!(await until("typing in the frame puts the menu away", () => !extensionFrame(page, "menu.html"), 5000)), "typing in the frame's field puts the top page's menu away")
+      await typed.click("#sign-in")
+      await until("the password box opens", async () => ((await typed.locator("#password_text_field").boundingBox())?.height ?? 0) > 20)
+      await Bun.sleep(400)
+      await typed.click("#password_text_field")
+      const narrowed = await until("the password menu opens", menuNow, 15_000)
+      check(!!narrowed && (await narrowed.locator("button.row").count()) === 1 && ((await narrowed.locator(".row .sub").textContent()) ?? "") === "admin", "a username typed by hand narrows the frame's password step to its login")
+      if (narrowed) {
+        await settled(narrowed)
+        await narrowed.locator("button.row").click()
+        check(!!(await until("admin's password fills", async () => (await typed.inputValue("#password_text_field")) === "hunter2")), "and picking it fills the frame's password")
+      }
+    }
+
+    // A sheet over the frame that lets clicks through: the pick fills nothing.
+    const covered = await open("?cover")
+    if (covered) {
+      const before = (await wants()).length
+      await covered.click("#account_name_text_field")
+      const coveredMenu = await until("the menu opens over the sheet", menuNow, 15_000)
+      if (coveredMenu) {
+        await settled(coveredMenu)
+        await coveredMenu.locator("button.row", { hasText: "kit@acme.test" }).click()
+        await until("the pill says it didn't fill", async () => (await coveredMenu.locator(".pill.failed").count().catch(() => 0)) > 0)
+      }
+      check((await covered.inputValue("#account_name_text_field")) === "" && (await wants()).length === before, "a frame under a sheet that lets clicks through gets nothing, and the host isn't asked")
+    }
+
+    // A login frame taller than the viewport: only part of it shows, and its field fills.
+    const tall = await open("?tall")
+    if (tall) {
+      check(((await page.locator("#aid-auth-widget-iFrame").boundingBox())?.height ?? 0) > (page.viewportSize()?.height ?? 0), "the frame is taller than the viewport")
+      await tall.click("#account_name_text_field")
+      const tallMenu = await until("the menu opens for the tall frame's field", menuNow, 15_000)
+      if (tallMenu) {
+        await settled(tallMenu)
+        await tallMenu.locator("button.row", { hasText: "admin" }).click()
+        check(!!(await until("the tall frame's field fills", async () => (await tall.inputValue("#account_name_text_field")) === "admin")), "a login frame taller than the viewport fills")
+      }
+    }
+
+    // Schwab's homepage: a 65 px sign-in bar frame from another host of the
+    // site. The menu opens in the page, below the bar, and fills both boxes.
+    await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
+    await page.goto(`http://www.schwab.test:${server.port}/schwab/`)
+    const bar = await until("Schwab's sign-in bar loads", () => page.frames().find((f) => f.url().includes("/ui/host/")) ?? null)
+    if (bar) {
+      await until("the bar's form is found", async () => (await seen()).some((s) => /^db:page@[1-9]\d*:\/ui\/host\/$/.test(s)), 15_000)
+      await bar.click("#loginIdInput")
+      const schwab = await until("the menu opens for the bar's Login ID", menuNow, 15_000)
+      if (schwab) {
+        check(schwab.parentFrame() === page.mainFrame(), "Schwab's 65 px sign-in bar opens the menu in the top page")
+        const m = await (await schwab.frameElement()).boundingBox()
+        const frame = await page.locator("#schwablmslogin").boundingBox()
+        check(!!m && !!frame && m.y >= frame.y + frame.height - 20 && m.height > frame.height, `below the bar, taller than the frame could hold (${JSON.stringify(m)} vs ${JSON.stringify(frame)})`)
+        await shotAround(page, "frame-login-schwab", schwab, "#schwablmslogin")
+        await settled(schwab)
+        await schwab.locator("button.row", { hasText: "admin" }).click()
+        const both = await until("both boxes fill", async () => (await bar.inputValue("#loginIdInput")) === "admin" && (await bar.inputValue("#passwordInput")) === "hunter2")
+        check(!!both, "the pick fills the bar's Login ID and password")
+      }
+    }
+
+    // A frame on another site, one of the site inside a frame on another
+    // site, and sandboxed frames (keeping their origin or not, or inside a
+    // sandboxed frame of the site): no menu.
+    for (const [query, what] of [
+      ["?frame=idmsa.evilpay.test", "a cross-site frame"],
+      ["?via=shell.evilpay.test", "a same-site frame inside a cross-site frame"],
+      ["?sandbox=allow-scripts allow-same-origin allow-forms", "a sandboxed same-site frame that keeps its origin"],
+      ["?sandbox=allow-scripts allow-forms", "a sandboxed same-site frame with an opaque origin"],
+      ["?via=shell.apple.test&sandbox=allow-scripts allow-same-origin", "a same-site frame inside a sandboxed same-site frame"],
+      ["?via=shell.apple.test&csp", "a same-site frame inside a same-site frame its CSP header sandboxes"],
+    ]) {
+      const other = await open(query, false)
+      if (!other) continue
+      await other.click("#account_name_text_field")
+      await Bun.sleep(2500)
+      check(!extensionFrame(page, "menu.html"), `${what} gets no menu`)
+    }
+  } catch (err) {
+    check(false, `frameLogins threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "frameLogins")
   } finally {
     await close(run)
   }
@@ -3442,6 +3736,7 @@ const once: Record<string, () => Promise<void>> = {
   googleAccount,
   corner,
   signInSessions,
+  frameLogins,
   rateLimited,
   securityPage,
   keyboardEntry,
@@ -3465,7 +3760,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // rough run times in seconds (per scheme; unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12,

@@ -143,11 +143,12 @@ export function hiddenByStyle(el: Element): boolean {
 
 /**
  * The part of the element that's on screen: its box cut by every scrolling or
- * clipping ancestor and the viewport, if at least MIN_SIDE each way. A fixed
+ * clipping ancestor and (`viewport`) the viewport, if at least MIN_SIDE each
+ * way. A fixed
  * element escapes the ancestors above it; the root's overflow belongs to the
  * viewport.
  */
-export function clippedBox(el: Element): Box | null {
+export function clippedBox(el: Element, viewport = true): Box | null {
   const r = el.getBoundingClientRect()
   let box: Box = { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
   let fixed = getComputedStyle(el).position === "fixed"
@@ -160,11 +161,23 @@ export function clippedBox(el: Element): Box | null {
     }
     if (style.position === "fixed") fixed = true
   }
-  box = { left: Math.max(box.left, 0), top: Math.max(box.top, 0), right: Math.min(box.right, innerWidth), bottom: Math.min(box.bottom, innerHeight) }
+  if (viewport) box = { left: Math.max(box.left, 0), top: Math.max(box.top, 0), right: Math.min(box.right, innerWidth), bottom: Math.min(box.bottom, innerHeight) }
   return box.right - box.left < MIN_SIDE || box.bottom - box.top < MIN_SIDE ? null : box
 }
 
 const area = (b: Box) => (b.right - b.left) * (b.bottom - b.top)
+
+/**
+ * Whether the element is drawn at a usable size, wherever the page is
+ * scrolled to: not hidden by style, and most of it not cut off by a
+ * scrolling or clipping ancestor (a box collapsed to zero height, say).
+ */
+export function rendered(el: Element): boolean {
+  const r = el.getBoundingClientRect()
+  if (r.width < MIN_SIDE || r.height < MIN_SIDE || hiddenByStyle(el)) return false
+  const box = clippedBox(el, false)
+  return !!box && area(box) >= 0.5 * r.width * r.height
+}
 
 /** The part of the element on screen, if most of it is: not a sliver at a clipped edge. */
 export function visibleBox(el: Element): Box | null {
@@ -209,9 +222,12 @@ export function fillable(el: FormControl, ours?: Element | null): boolean {
  * embedding the frame gets the checks a field gets (style up the rendered
  * tree, size, clipping, on screen), has to sit as laid out (no scaling,
  * rotation or skew) and has to be what's under the middle of each field.
+ * With `unsandboxed`, a frame element with a `sandbox` attribute doesn't show
+ * anything either: a login menu never serves a sandboxed frame (see
+ * sameSiteTop).
  */
-export function throughFrame(el: HTMLElement, boxes: Box[]): Box[] | null {
-  if (!el.isConnected) return null
+export function throughFrame(el: HTMLElement, boxes: Box[], unsandboxed = false): Box[] | null {
+  if (!el.isConnected || (unsandboxed && el.hasAttribute("sandbox"))) return null
   const r = el.getBoundingClientRect()
   if (r.width < MIN_SIDE || r.height < MIN_SIDE || hiddenByStyle(el)) return null
   if (Math.abs(r.width - el.offsetWidth) > 1 || Math.abs(r.height - el.offsetHeight) > 1) return null

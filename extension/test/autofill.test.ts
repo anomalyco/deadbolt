@@ -288,11 +288,11 @@ describe("generated passwords", () => {
 })
 
 /**
- * Frames get no inline menu: a frame can't watch how the page around it shows
- * it. The popup fills a frame's form only when it and every frame above it
- * say it shows.
+ * The popup fills a frame's form only when it and every frame above it say
+ * it shows. A login field in a frame gets the inline menu, in the top page,
+ * only when every frame up to the top page is on its site.
  */
-describe("filling a frame's form from the popup", () => {
+describe("filling a frame's form", () => {
   const NOT_SHOWN = { ok: false, message: "That login form isn't fully visible. Nothing was filled." }
   const BOX = { left: 10, top: 20, right: 210, bottom: 50 }
   const LOW = { left: 40, top: 300, right: 240, bottom: 330 }
@@ -311,6 +311,8 @@ describe("filling a frame's form from the popup", () => {
       "mid-doc db:frame-child": { boxes: [LOW] },
       "mid-doc db:frame-announce": true,
       "top-doc db:frame-child": { boxes: [LOW] },
+      // Nothing of Deadbolt's shows in the top page, or only the login pill it puts away.
+      "top-doc db:hold": true,
     }
     fake.answer = (message, documentId) => {
       const key = `${documentId} ${message.type}`
@@ -322,7 +324,7 @@ describe("filling a frame's form from the popup", () => {
   })
 
   test("fills once the frame and every frame above it say it shows", async () => {
-    // An email-first form: the top page's would arm the password step.
+    // An email-first form: as in the top page, it arms the password step.
     fake.fillAck = () => ({ filled: ["email"] })
     expect(await autofill.popupFill(1, ACCOUNTS[1].ref)).toEqual({ ok: true })
     expect(delivered("db:fill")).toMatchObject([{ options: { documentId: "frame-doc" }, message: { form: 2 } }])
@@ -334,8 +336,8 @@ describe("filling a frame's form from the popup", () => {
     const [midNamed] = asked("mid-doc").filter((m) => m.type === "db:frame-announce")
     expect(top).toMatchObject({ boxes: [LOW], nonce: midNamed.nonce })
     expect(top.nonce).not.toBe(mid.nonce)
-    // No email-first continuation from a frame.
-    expect(fake.session).toEqual({})
+    // Every frame up to the top page is on the site: the session goes on in the frame.
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
   })
 
   test("asks only for the fields that showed, and checks those same fields again", async () => {
@@ -440,9 +442,152 @@ describe("filling a frame's form from the popup", () => {
     expect(fake.delivered.filter((d) => d.message.type.startsWith("db:frame-") || d.message.type === "db:approve")).toEqual([])
   })
 
-  test("a frame gets no inline menu", async () => {
-    const sender = pageSender({ frameId: 3, url: "https://www.example.com/embed", documentId: "frame-doc" })
-    expect(await autofill.query(sender, ["email", "password"], "email", 2)).toEqual({ rows: 0 })
+  const frameSender = () => pageSender({ frameId: 3, url: "https://www.example.com/embed", documentId: "frame-doc" })
+  /** The menu for the frame's email field: opened in the top page, its token as the top page got it. */
+  async function frameMenu(roles = ["email", "password"]): Promise<string | undefined> {
+    Object.assign(scripts, { "top-doc db:open-at": true, "top-doc db:hold": true })
+    const reply = await autofill.query(frameSender(), roles, "email", 2, true, undefined, false, "login", undefined, undefined, BOX)
+    expect(reply.token).toBeUndefined()
+    return delivered("db:open-at").at(-1)?.message.token as string | undefined
+  }
+
+  test("a same-site frame's field opens the menu in the top page, under where it shows there", async () => {
+    const token = await frameMenu()
+    expect(delivered("db:open-at")).toMatchObject([{ options: { documentId: "top-doc" }, message: { rows: 2, box: LOW } }])
+    // The menu frame is the top page's child, handed the token by the top page.
+    expect((await autofill.menuLoad(token!, menuSender(), SITE))?.kind).toBe("accounts")
+    expect(await autofill.menuPick(token!, ACCOUNTS[1].ref, menuSender())).toEqual({ ok: true })
+    // Only the frame fills, after its fields were checked through every frame above, with the top page's pill put away.
+    expect(delivered("db:fill")).toMatchObject([{ options: { documentId: "frame-doc" }, message: { form: 2, approval: "framed" } }])
+    // A same-site frame's fields get a top page's checks; each frame above reads the frame's own visibility.
+    expect(asked("frame-doc").filter((m) => m.type === "db:approve")).toEqual([{ type: "db:approve", form: 2, measure: true, sameSite: true }])
+    expect(asked("frame-doc").filter((m) => m.type === "db:approved")).toEqual([{ type: "db:approved", approval: "framed", sameSite: true }])
+    const checks = delivered("db:frame-child").map((d) => d.message)
+    // The menu's opening (no reading), then the pick's two checks (with one).
+    expect(checks.map((m) => m.track === true)).toEqual([false, false, true, true, true, true])
+    // Every frame up is asked to refuse a sandboxed frame element.
+    expect(checks.every((m) => m.unsandboxed === true)).toBe(true)
+    expect(delivered("db:hold").map((d) => d.message.hold)).toEqual([true, false, true, false])
+    expect(fills()).toMatchObject([{ origin: SITE, want: ["username", "password"] }])
+  })
+
+  test("not when the frame's field doesn't show, or doesn't say where", async () => {
+    Object.assign(scripts, { "top-doc db:open-at": true })
+    expect(await autofill.query(frameSender(), ["email", "password"], "email", 2)).toEqual({ rows: 0 })
+    scripts["top-doc db:frame-child"] = null
+    expect(await autofill.query(frameSender(), ["email", "password"], "email", 2, true, undefined, false, "login", undefined, undefined, BOX)).toEqual({ rows: 0 })
+    expect(delivered("db:open-at")).toEqual([])
+  })
+
+  test("not a sandboxed frame: one with an opaque origin, or one a frame above says is sandboxed", async () => {
+    Object.assign(scripts, { "top-doc db:open-at": true })
+    const opaque = pageSender({ frameId: 3, url: "https://www.example.com/embed", origin: "null", documentId: "frame-doc" })
+    expect(await autofill.query(opaque, ["email", "password"], "email", 2, true, undefined, false, "login", undefined, undefined, BOX)).toEqual({ rows: 0 })
+    // The middle frame's content script finds the frame element sandboxed: no boxes.
+    scripts["mid-doc db:frame-child"] = (m: { unsandboxed?: boolean }) => (m.unsandboxed ? null : { boxes: [LOW] })
+    expect(await frameMenu()).toBeUndefined()
+    expect(delivered("db:open-at")).toEqual([])
+  })
+
+  test("not under a cross-site frame, even when the frame is on the top page's site", async () => {
+    fake.frames["1:2"] = { url: "https://ads.example.net/shell", documentId: "mid-doc", parentFrameId: 0 }
+    expect(await frameMenu()).toBeUndefined()
+    expect(fake.delivered.filter((d) => d.message.type.startsWith("db:frame-"))).toEqual([])
+  })
+
+  test("typing, clicking elsewhere or esc in the frame closes its menu in the top page", async () => {
+    const token = await frameMenu()
+    // From another frame, nothing.
+    await autofill.menuAway(pageSender({ frameId: 2, url: "https://www.example.com/shell", documentId: "mid-doc" }), false)
+    expect(delivered("db:close-menu")).toEqual([])
+    await autofill.menuAway(frameSender(), false)
+    expect(delivered("db:close-menu")).toMatchObject([{ options: { documentId: "top-doc" }, message: { token } }])
+    expect(await autofill.menuLoad(token!, menuSender(), SITE)).toBeNull()
+  })
+
+  test("a pick that no longer shows through every frame above fills nothing", async () => {
+    const token = await frameMenu()
+    await autofill.menuLoad(token!, menuSender(), SITE)
+    scripts["mid-doc db:frame-child"] = null
+    expect(await autofill.menuPick(token!, ACCOUNTS[1].ref, menuSender())).toEqual(NOT_SHOWN)
+    expect(fills()).toEqual([])
+  })
+
+  test("the next step in the same frame fills from the login picked, with its pill in the top page", async () => {
+    fake.fillAck = () => ({ filled: ["email"] })
+    const token = await frameMenu(["email"])
+    await autofill.menuLoad(token!, menuSender(), SITE)
+    expect(await autofill.menuPick(token!, ACCOUNTS[1].ref, menuSender())).toEqual({ ok: true })
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
+    // The user clicks Continue in the frame, and its password box shows.
+    fake.fillAck = () => ({ filled: ["password"], box: BOX })
+    await autofill.submitted(frameSender())
+    // Its password box is still collapsed (Apple's opens it in place): not the step yet, and not used up.
+    scripts["frame-doc db:approve"] = { approval: "framed", roles: ["email"], boxes: [BOX] }
+    await autofill.page(frameSender(), "login", ["email", "password"], 3, true)
+    expect(fills()).toHaveLength(1)
+    scripts["frame-doc db:approve"] = { approval: "framed", roles: ["email", "password"], boxes: [BOX, BOX] }
+    await autofill.page(frameSender(), "login", ["email", "password"], 3, true)
+    expect(fills().map((r) => (r as { want: string[] }).want)).toEqual([["username"], ["password"]])
+    expect(delivered("db:fill").at(-1)).toMatchObject({ options: { documentId: "frame-doc" }, message: { form: 3 } })
+    const pill = delivered("db:fill").at(-1)!.message.notice
+    expect(delivered("db:open-at").at(-1)).toMatchObject({ options: { documentId: "top-doc" }, message: { token: pill, rows: 0, box: LOW, mode: "pill" } })
+    // The pill frame is the top page's.
+    expect(await autofill.menuLoad(String(pill), menuSender({ documentId: "pill-doc" }), SITE)).toEqual({ kind: "notice", label: "Password filled", title: ACCOUNTS[1].title })
+  })
+
+  test("esc in the frame after the pick doesn't end the sign-in: the password step still fills", async () => {
+    fake.fillAck = () => ({ filled: ["email"] })
+    const token = await frameMenu(["email"])
+    await autofill.menuLoad(token!, menuSender(), SITE)
+    expect(await autofill.menuPick(token!, ACCOUNTS[1].ref, menuSender())).toEqual({ ok: true })
+    await autofill.menuAway(frameSender(), true)
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
+    fake.fillAck = () => ({ filled: ["password"], box: BOX })
+    await autofill.submitted(frameSender())
+    await autofill.page(frameSender(), "login", ["email", "password"], 3, true)
+    expect(fills().map((r) => (r as { want: string[] }).want)).toEqual([["username"], ["password"]])
+    // Esc on a menu still open does end it, as in the top page.
+    const open = await frameMenu()
+    await autofill.menuAway(frameSender(), true)
+    expect(fake.session).toEqual({})
+    expect(await autofill.menuLoad(open!, menuSender(), SITE)).toBeNull()
+  })
+
+  test("only the login pill is put away to measure: with another surface showing, nothing is measured or filled", async () => {
+    const token = await frameMenu()
+    await autofill.menuLoad(token!, menuSender(), SITE)
+    // The top page says something not ours (a card's pill) shows.
+    scripts["top-doc db:hold"] = false
+    expect(await autofill.menuPick(token!, ACCOUNTS[1].ref, menuSender())).toEqual(NOT_SHOWN)
+    expect(asked("frame-doc").filter((m) => m.type === "db:approve")).toEqual([])
+    expect(fills()).toEqual([])
+    // It was asked to put away this pick's own pill, by its token.
+    expect(delivered("db:hold")[0].message).toEqual({ type: "db:hold", token, hold: true })
+  })
+
+  test("the frame hears when the top page closes its menu", async () => {
+    const token = await frameMenu()
+    await autofill.menuClose(token!, false, pageSender())
+    expect(delivered("db:menu-gone")).toMatchObject([{ options: { documentId: "frame-doc" } }])
+  })
+
+  test("a sign-in's shape is learned from one frame's steps, not the top page's and a frame's mixed", async () => {
+    // The top page shows a username box of its own; the frame shows the sign-in.
+    await autofill.page(pageSender(), "login", ["email"], 1)
+    await autofill.page(frameSender(), "login", ["email", "password"], 2)
+    await autofill.learnFlow(1, "example.com")
+    expect(Object.values(fake.local[FLOWS_KEY] as Record<string, object>)).toMatchObject([{ identifierFirst: false, navigates: false }])
+  })
+
+  test("not when a frame above it is on another site", async () => {
+    fake.fillAck = () => ({ filled: ["email"] })
+    const token = await frameMenu(["email"])
+    await autofill.menuLoad(token!, menuSender(), SITE)
+    await autofill.menuPick(token!, ACCOUNTS[1].ref, menuSender())
+    fake.frames["1:2"] = { url: "https://ads.example.net/shell", documentId: "mid-doc", parentFrameId: 0 }
+    await autofill.page(frameSender(), "login", ["email", "password"], 3, true)
+    expect(fills()).toHaveLength(1)
   })
 })
 
@@ -553,11 +698,13 @@ describe("sign-in sessions", () => {
     expect(fills()).toHaveLength(2)
   })
 
-  test("a frame never continues", async () => {
+  test("a same-site frame's form is a step only if its fields show through every frame above", async () => {
     await fillEmail(["email"])
     fake.frames["1:3"] = { url: "https://www.example.com/embed", documentId: "frame-doc", parentFrameId: 0 }
+    // fillEmail's submit in the top page, but the default content script measures no boxes: not shown to be visible.
     await autofill.page(pageSender({ frameId: 3, url: "https://www.example.com/embed", documentId: "frame-doc" }), "login", ["password"], 1, true)
     expect(fills()).toHaveLength(1)
+    expect(fake.delivered.filter((d) => d.message.type === "db:approve").at(-1)).toMatchObject({ options: { documentId: "frame-doc" }, message: { measure: true } })
   })
 
   test("a pick cancelled while the host is answering fills nothing", async () => {

@@ -1,0 +1,10 @@
+# Sign-ins whose form is in a frame of the page's own site (issue #88). Every
+# one should have such a frame with a login the inline menu serves, and no
+# login form in the top page. Crawl them, then check:
+#
+#   bun corpus/crawl.ts --urls corpus/frame-logins.txt --out <dir>
+#   bun corpus/frames.ts --out <dir>
+https://www.schwab.com/
+https://client.schwab.com/Areas/Access/Login
+https://account.apple.com/sign-in
+https://appstoreconnect.apple.com/login
