@@ -185,7 +185,8 @@ touch_id = true
 - **Concurrency, timeout, and cancellation (`crates/cli/src/agent`):**
   - Interactive `unseal` runs outside `Agent::transition` with `store.redb` closed and a 60 s deadline (`PROMPT_TIMEOUT`).
   - Concurrent `UnlockBiometric` requests coalesce onto the single in-flight prompt, and the in-flight entry is cleared before broadcasting the outcome to waiters.
-  - A passphrase `Unlock`, `Lock`, `TouchIdSet`, `Stop`, or `Agent` drop cancels any in-flight Touch ID prompt immediately, killing and reaping `deadbolt-enclave` to dismiss the macOS sheet.
+  - A passphrase `Unlock` (once the passphrase has opened the store; a wrong one leaves the prompt up), `Lock`, `TouchIdSet`, `Stop`, or `Agent` drop cancels any in-flight Touch ID prompt immediately, killing and reaping `deadbolt-enclave` to dismiss the macOS sheet.
+  - While unlocked, `Unlock` and `UnlockBiometric` set a shorter idle timeout at once; a longer one, or never, only with the right passphrase or after a Touch ID prompt succeeds. A request joining another's prompt may only shorten the timeout that request set.
   - After a user-cancelled prompt, a 2 s cooldown prevents rapid window-focus or summon events from immediately re-prompting; programmatic cancellations do not arm the cooldown.
 - **CLI (`crates/cli`):**
   - `deadbolt touchid on` / `deadbolt touchid off` / `deadbolt touchid status`.

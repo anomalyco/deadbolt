@@ -13,7 +13,7 @@ use std::os::fd::{AsFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::PathBuf;
 use std::process::{Command as Process, Stdio};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -23,21 +23,26 @@ use zeroize::Zeroizing;
 
 pub use paths::Paths;
 use protocol::{
-    Answer, Change, Claim, Command, ErrorCode, Event, Message, PROTOCOL_VERSION, Reply, Request,
-    Status,
+    Answer, Change, Claim, Command, ErrorCode, Event, MAX_LINE, Message, PROTOCOL_VERSION, Reply,
+    Request, Status,
 };
 
 const STATUS_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Checks who holds the other end of a connection (a duplicate of its
-/// socket), before the client sends it the passphrase. `Err` says why not.
+/// socket), before the client talks to it. `Err` says why not.
 pub type AgentCheck = Box<dyn Fn(OwnedFd) -> Result<(), String> + Send + Sync>;
 
 static AGENT_CHECK: OnceLock<AgentCheck> = OnceLock::new();
 static CLAIM: OnceLock<Claim> = OnceLock::new();
+/// The agent process that last passed the [`AgentCheck`], as the kernel
+/// names it (on macOS its audit token, pid version included), so each
+/// connection to it doesn't run the check again.
+static CHECKED: Mutex<Option<peer::Peer>> = Mutex::new(None);
 
-/// Sets how this client checks the agent before sending a passphrase
-/// (`setup`, `unlock`). Without one, those requests fail. The first call wins.
+/// Sets how this client checks the agent, on every connection. Without
+/// one, requests that carry a passphrase (`setup`, `unlock`) fail, and the
+/// rest only check that the agent runs as this user. The first call wins.
 pub fn set_agent_check(check: AgentCheck) {
     drop(AGENT_CHECK.set(check));
 }
@@ -58,18 +63,54 @@ fn request(command: Command) -> Request {
     }
 }
 
-/// Runs the [`AgentCheck`] on `stream`'s peer.
-async fn check_agent(stream: &UnixStream) -> Result<(), Error> {
-    let Some(check) = AGENT_CHECK.get() else {
-        return Err(Error::UncheckedAgent(
-            "this client has no way to check the agent".into(),
+/// Checks `stream`'s peer before anything goes to it: that it runs as this
+/// user, then the [`AgentCheck`], unless that very process passed it
+/// already. Without a check, `required` (a passphrase would follow) fails.
+async fn check_agent(stream: &UnixStream, required: bool) -> Result<(), String> {
+    let agent =
+        peer::Peer::of(stream).map_err(|e| format!("reading the agent's credentials: {e}"))?;
+    if agent.uid != rustix::process::getuid().as_raw() {
+        return Err(format!(
+            "the agent (pid {}) runs as another user",
+            agent.pid
         ));
+    }
+    if *CHECKED.lock().unwrap_or_else(|e| e.into_inner()) == Some(agent) {
+        return Ok(());
+    }
+    let Some(check) = AGENT_CHECK.get() else {
+        return if required {
+            Err("this client has no way to check the agent".into())
+        } else {
+            Ok(())
+        };
     };
-    let socket = stream.as_fd().try_clone_to_owned()?;
+    let socket = stream
+        .as_fd()
+        .try_clone_to_owned()
+        .map_err(|e| e.to_string())?;
     tokio::task::spawn_blocking(move || check(socket))
         .await
-        .map_err(|e| Error::UncheckedAgent(e.to_string()))?
-        .map_err(Error::UncheckedAgent)
+        .map_err(|e| e.to_string())??;
+    *CHECKED.lock().unwrap_or_else(|e| e.into_inner()) = Some(agent);
+    Ok(())
+}
+
+/// [`check_agent`] for `command`, as the error to report. `stop` goes to
+/// whatever holds the socket: it sends nothing and asks nothing back, and it
+/// is how an agent that fails the check is stopped.
+async fn check_for(stream: &UnixStream, command: &Command) -> Result<(), Error> {
+    if matches!(command, Command::Stop) {
+        return Ok(());
+    }
+    let passphrase = command.carries_passphrase();
+    check_agent(stream, passphrase).await.map_err(|why| {
+        if passphrase {
+            Error::UncheckedAgent(why)
+        } else {
+            Error::UnverifiedAgent(why)
+        }
+    })
 }
 
 /// An error reported by the agent.
@@ -121,6 +162,12 @@ pub enum Error {
     /// The agent failed the [`AgentCheck`], so the passphrase wasn't sent.
     #[error("not sending the passphrase: {0}")]
     UncheckedAgent(String),
+    /// The agent failed the [`AgentCheck`], so nothing was sent to it.
+    #[error("not talking to the agent: {0}")]
+    UnverifiedAgent(String),
+    /// A line from the agent was longer than the protocol allows.
+    #[error("the agent sent a line longer than {MAX_LINE} bytes")]
+    LineTooLong,
     #[error(
         "a newer Deadbolt agent is running ({}, version {}, pid {}): it speaks protocol {}, and this copy speaks {}. Update this copy of Deadbolt, or stop that agent with `deadbolt agent stop` and try again",
         .0.program.as_deref().unwrap_or("unknown program"),
@@ -197,9 +244,7 @@ where
     let stream = UnixStream::connect(&paths.socket)
         .await
         .map_err(Error::Connect)?;
-    if command.carries_passphrase() {
-        check_agent(&stream).await?;
-    }
+    check_for(&stream, &command).await?;
     let (read, mut write) = stream.into_split();
     let mut lines = LineReader::new(BufReader::new(read));
     let body = encode_line(&request(command))?;
@@ -240,30 +285,43 @@ where
 }
 
 async fn read_message(lines: &mut LineReader<BufReader<OwnedReadHalf>>) -> Result<Message, Error> {
-    let Some(line) = lines.next_line().await? else {
+    let Some(line) = lines.line().await? else {
         return Err(Error::Closed);
     };
     serde_json::from_slice::<Message>(&line).map_err(Error::InvalidReply)
 }
 
+/// A line past [`LineReader`]'s limit.
+#[derive(Debug, thiserror::Error)]
+#[error("line too long")]
+struct TooLong;
+
 /// Reads the agent's lines, which carry values, into buffers that are wiped
-/// on drop and grow without leaving copies behind (`export::append`).
+/// on drop and grow without leaving copies behind (`export::append`), up to
+/// [`MAX_LINE`] bytes each.
 struct LineReader<R> {
     reader: R,
     /// The line so far, kept across a cancelled read.
     line: Zeroizing<Vec<u8>>,
+    max: usize,
 }
 
 impl<R: AsyncBufRead + Unpin> LineReader<R> {
     fn new(reader: R) -> Self {
+        Self::with_max(reader, MAX_LINE)
+    }
+
+    fn with_max(reader: R, max: usize) -> Self {
         Self {
             reader,
             line: Zeroizing::new(Vec::new()),
+            max,
         }
     }
 
     /// The next line without its `\n` (or `\r\n`), or `None` at the end.
-    /// Cancel-safe.
+    /// A line longer than the limit is an [`io::ErrorKind::InvalidData`]
+    /// error. Cancel-safe.
     async fn next_line(&mut self) -> std::io::Result<Option<Zeroizing<Vec<u8>>>> {
         loop {
             let available = self.reader.fill_buf().await?;
@@ -277,19 +335,43 @@ impl<R: AsyncBufRead + Unpin> LineReader<R> {
                 Some(at) => (Some(at), at + 1),
                 None => (None, available.len()),
             };
-            export::append(
-                &mut self.line,
-                &available[..end.unwrap_or(used)],
-                usize::MAX,
-            );
+            let bytes = &available[..end.unwrap_or(used)];
+            // Room for a `\r` before the `\n`, dropped below.
+            if self.line.len() + bytes.len() > self.max + 1 {
+                self.line = Zeroizing::new(Vec::new());
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    TooLong,
+                ));
+            }
+            export::append(&mut self.line, bytes, self.max + 1);
             self.reader.consume(used);
             if end.is_some() {
                 if self.line.last() == Some(&b'\r') {
                     self.line.pop();
                 }
+                if self.line.len() > self.max {
+                    self.line = Zeroizing::new(Vec::new());
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        TooLong,
+                    ));
+                }
                 return Ok(Some(std::mem::take(&mut self.line)));
             }
         }
+    }
+
+    /// [`LineReader::next_line`], with a line too long as
+    /// [`Error::LineTooLong`].
+    async fn line(&mut self) -> Result<Option<Zeroizing<Vec<u8>>>, Error> {
+        self.next_line().await.map_err(|error| {
+            if error.get_ref().is_some_and(|e| e.is::<TooLong>()) {
+                Error::LineTooLong
+            } else {
+                Error::Io(error)
+            }
+        })
     }
 }
 
@@ -341,7 +423,7 @@ impl Watch {
     /// The next change, or `None` once the agent ended the stream (after
     /// [`Change::Stopping`]). Cancel-safe.
     pub async fn next(&mut self) -> Result<Option<Change>, Error> {
-        let Some(line) = self.lines.next_line().await? else {
+        let Some(line) = self.lines.line().await? else {
             return Err(Error::Closed);
         };
         match serde_json::from_slice::<Message>(&line).map_err(Error::InvalidReply)? {
@@ -361,8 +443,10 @@ pub async fn watch(paths: &Paths, app: bool) -> Result<Watch, Error> {
     let stream = UnixStream::connect(&paths.socket)
         .await
         .map_err(Error::Connect)?;
+    let command = Command::Watch { app };
+    check_for(&stream, &command).await?;
     let (read, mut write) = stream.into_split();
-    let body = encode_line(&request(Command::Watch { app }))?;
+    let body = encode_line(&request(command))?;
     write.write_all(&body).await?;
     Ok(Watch {
         lines: LineReader::new(BufReader::new(read)),
@@ -370,51 +454,69 @@ pub async fn watch(paths: &Paths, app: bool) -> Result<Watch, Error> {
     })
 }
 
-/// The running agent's status, or `None` when none is running or it speaks
-/// a protocol whose status this copy can't read.
+/// The running agent's status, or `None` when none is running, it fails
+/// this client's [`AgentCheck`], or it speaks a protocol whose status this
+/// copy can't read.
 pub async fn status(paths: &Paths) -> Option<Status> {
-    probe(paths).await.and_then(|(_, status)| status)
+    let probe = probe(paths).await?;
+    probe.checked.ok().and(probe.status)
 }
 
 /// Which agent is running, whatever its protocol, or `None` when none is.
+/// What it says isn't checked: this only names it.
 pub async fn running(paths: &Paths) -> Option<AgentId> {
-    probe(paths).await.map(|(agent, _)| agent)
+    probe(paths).await.map(|probe| probe.agent)
+}
+
+/// What one `status` asked of the running agent found.
+struct Probe {
+    agent: AgentId,
+    status: Option<Status>,
+    /// Whether it passed this client's [`AgentCheck`], and if not, why.
+    checked: Result<(), String>,
 }
 
 /// Asks the running agent for its status once. Every agent answers `status`
 /// whatever the request's protocol, but a status of another protocol may not
 /// decode as ours, so its identity is read on its own.
-async fn probe(paths: &Paths) -> Option<(AgentId, Option<Status>)> {
+async fn probe(paths: &Paths) -> Option<Probe> {
     #[derive(serde::Deserialize)]
     struct Head {
         reply: AgentId,
     }
-    let line = tokio::time::timeout(STATUS_TIMEOUT, status_line(paths))
+    let (line, checked) = tokio::time::timeout(STATUS_TIMEOUT, status_line(paths))
         .await
         .ok()?
         .ok()?;
-    let agent = serde_json::from_str::<Head>(&line).ok()?.reply;
-    let status = match serde_json::from_str::<Message>(&line) {
+    let agent = serde_json::from_slice::<Head>(&line).ok()?.reply;
+    let status = match serde_json::from_slice::<Message>(&line) {
         Ok(Message::Ok {
             reply: Reply::Status(status),
         }) => Some(*status),
         _ => None,
     };
-    Some((agent, status))
+    Some(Probe {
+        agent,
+        status,
+        checked,
+    })
 }
 
-async fn status_line(paths: &Paths) -> Result<String, Error> {
+async fn status_line(paths: &Paths) -> Result<(Zeroizing<Vec<u8>>, Result<(), String>), Error> {
     let stream = UnixStream::connect(&paths.socket)
         .await
         .map_err(Error::Connect)?;
+    // A status carries nothing secret either way, and naming an agent that
+    // fails the check is how a client says which one to stop.
+    let checked = check_agent(&stream, false).await;
     let (read, mut write) = stream.into_split();
     let body = encode_line(&request(Command::Status))?;
     write.write_all(&body).await?;
-    BufReader::new(read)
-        .lines()
-        .next_line()
+    let line = LineReader::new(BufReader::new(read))
+        .line()
         .await?
-        .ok_or(Error::Closed)
+        .ok_or(Error::Closed)?;
+    Ok((line, checked))
 }
 
 /// Starts the agent unless one that speaks [`PROTOCOL_VERSION`] is running.
@@ -429,9 +531,15 @@ async fn status_line(paths: &Paths) -> Result<String, Error> {
 /// A rebuilt agent of the same protocol is only picked up once the running
 /// one stops (`deadbolt agent stop`).
 pub async fn ensure_running(paths: &Paths, launch: &Launch) -> Result<Status, Error> {
-    if let Some((agent, status)) = probe(paths).await {
+    if let Some(Probe {
+        agent,
+        status,
+        checked,
+    }) = probe(paths).await
+    {
         match agent.protocol.cmp(&PROTOCOL_VERSION) {
             std::cmp::Ordering::Equal => {
+                checked.map_err(Error::UnverifiedAgent)?;
                 return status.ok_or_else(|| Error::MismatchedAgent(Box::new(agent)));
             }
             std::cmp::Ordering::Greater => return Err(Error::NewerAgent(Box::new(agent))),
@@ -589,6 +697,28 @@ mod tests {
             .block_on(test);
     }
 
+    fn status_of(protocol: u32) -> Status {
+        Status {
+            pid: 41,
+            version: "another-build".into(),
+            protocol,
+            program: Some("/opt/homebrew/bin/deadbolt".into()),
+            home: String::new(),
+            initialized: true,
+            unlocked: false,
+            locks_in_secs: None,
+            device: None,
+            vaults: vec![],
+            peers_online: 0,
+            peers: 0,
+            touch_id_available: false,
+            touch_id_enabled: false,
+            touch_id_ready: false,
+            touch_id_reset: false,
+            caller: protocol::CallerInfo::unverified("test"),
+        }
+    }
+
     /// A running agent of `protocol` that answers `status` and `stop`, and
     /// records what it was asked. It goes away on `stop`, like a real one.
     /// Of another protocol, its status has another shape, as a real one's does.
@@ -605,25 +735,7 @@ mod tests {
                 let request: Request =
                     serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
                 let reply = match request.command {
-                    Command::Status => Reply::Status(Box::new(Status {
-                        pid: 41,
-                        version: "another-build".into(),
-                        protocol,
-                        program: Some("/opt/homebrew/bin/deadbolt".into()),
-                        home: String::new(),
-                        initialized: true,
-                        unlocked: false,
-                        locks_in_secs: None,
-                        device: None,
-                        vaults: vec![],
-                        peers_online: 0,
-                        peers: 0,
-                        touch_id_available: false,
-                        touch_id_enabled: false,
-                        touch_id_ready: false,
-                        touch_id_reset: false,
-                        caller: protocol::CallerInfo::unverified("test"),
-                    })),
+                    Command::Status => Reply::Status(Box::new(status_of(protocol))),
                     Command::Stop => Reply::Done,
                     other => panic!("an agent of another build was sent {other:?}"),
                 };
@@ -735,10 +847,57 @@ mod tests {
         });
     }
 
-    /// The passphrase goes only to an agent that passes the client's check,
-    /// and the check sees the very connection the passphrase would travel on.
+    /// The process an impostor test runs in, re-run from this test binary:
+    /// it holds the socket at `DEADBOLT_TEST_IMPOSTOR`, answers every line
+    /// with a status of this protocol, and appends what it was sent to
+    /// `<socket>.sent`.
     #[test]
-    fn a_passphrase_waits_for_the_agent_check() {
+    #[ignore = "run by every_connection_waits_for_the_agent_check"]
+    fn impostor() {
+        let Some(socket) = std::env::var_os("DEADBOLT_TEST_IMPOSTOR") else {
+            return;
+        };
+        let socket = PathBuf::from(socket);
+        let sent = socket.with_extension("sent");
+        run(async move {
+            let listener = UnixListener::bind(&socket).unwrap();
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                let sent = sent.clone();
+                tokio::spawn(async move {
+                    let (read, mut write) = stream.into_split();
+                    let mut lines = BufReader::new(read).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let mut log = fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(&sent)
+                            .unwrap();
+                        std::io::Write::write_all(&mut log, format!("{line}\n").as_bytes())
+                            .unwrap();
+                        let reply = Message::Ok {
+                            reply: Reply::Status(Box::new(status_of(PROTOCOL_VERSION))),
+                        };
+                        if write
+                            .write_all(&encode_line(&reply).unwrap())
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    /// Every connection waits for the client's check, which sees the very
+    /// connection the request would travel on, and runs once per agent
+    /// process. Something else holding the socket gets nothing: not a
+    /// passphrase, not a request, not a watcher, and its status isn't taken.
+    #[test]
+    fn every_connection_waits_for_the_agent_check() {
+        static CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         run(async {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
@@ -760,26 +919,97 @@ mod tests {
                 refused.0
             );
             assert_eq!(refused.1, "");
+            drop(listener);
+            fs::remove_file(&paths.socket).unwrap();
 
+            // The other tests' agents run in this process, and pass.
             set_agent_check(Box::new(|socket| {
-                let peer = std::os::unix::net::UnixStream::from(socket);
-                Err(format!(
-                    "peer is {:?}",
-                    peer.peer_addr().map(|_| "a socket")
-                ))
+                CHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let agent = peer::Peer::of(&socket).map_err(|e| e.to_string())?;
+                if agent.pid == std::process::id() {
+                    Ok(())
+                } else {
+                    Err(format!("pid {} is an impostor", agent.pid))
+                }
             }));
-            let refused = tokio::join!(simple(&paths, unlock()), async {
-                let (stream, _) = listener.accept().await.unwrap();
-                let mut line = String::new();
-                BufReader::new(stream).read_line(&mut line).await.unwrap();
-                line
-            });
-            let error = refused.0.unwrap_err();
-            assert!(
-                error.to_string().contains("peer is Ok(\"a socket\")"),
-                "{error}"
+
+            let impostor = Paths {
+                socket: dir.path().join("impostor.sock"),
+                ..paths.clone()
+            };
+            struct Killed(std::process::Child);
+            impl Drop for Killed {
+                fn drop(&mut self) {
+                    drop(self.0.kill());
+                    drop(self.0.wait());
+                }
+            }
+            let child = Killed(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "tests::impostor",
+                        "--ignored",
+                        "--test-threads=1",
+                    ])
+                    .env("DEADBOLT_TEST_IMPOSTOR", &impostor.socket)
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
             );
-            assert_eq!(refused.1, "");
+            for _ in 0..500 {
+                if impostor.socket.exists() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            let impostor_said = |error: Error| {
+                let message = error.to_string();
+                assert!(message.contains("is an impostor"), "{message}");
+                error
+            };
+            let error = impostor_said(simple(&impostor, unlock()).await.unwrap_err());
+            assert!(matches!(error, Error::UncheckedAgent(_)), "{error:?}");
+            let error = impostor_said(simple(&impostor, Command::VaultList).await.unwrap_err());
+            assert!(matches!(error, Error::UnverifiedAgent(_)), "{error:?}");
+            let Err(error) = watch(&impostor, true).await else {
+                panic!("an impostor's watch was taken");
+            };
+            assert!(matches!(impostor_said(error), Error::UnverifiedAgent(_)));
+            assert!(status(&impostor).await.is_none());
+            assert_eq!(running(&impostor).await.map(|a| a.pid), Some(41));
+            let error = ensure_running(&impostor, &launch(dir.path()))
+                .await
+                .unwrap_err();
+            assert!(matches!(impostor_said(error), Error::UnverifiedAgent(_)));
+            let sent = fs::read_to_string(impostor.socket.with_extension("sent")).unwrap();
+            assert!(!sent.is_empty());
+            for line in sent.lines() {
+                let request: Request = serde_json::from_str(line).unwrap();
+                assert!(matches!(request.command, Command::Status), "{line}");
+            }
+            drop(child);
+
+            // An agent that passes is checked once, however often it's asked.
+            let before = CHECKS.load(std::sync::atomic::Ordering::SeqCst);
+            fake_agent(&paths, PROTOCOL_VERSION);
+            for _ in 0..5 {
+                assert!(status(&paths).await.is_some());
+            }
+            assert!(CHECKS.load(std::sync::atomic::Ordering::SeqCst) - before <= 1);
+        });
+    }
+
+    /// A reply line longer than the protocol allows ends the read.
+    #[test]
+    fn reply_lines_are_capped() {
+        run(async {
+            let bytes = b"0123456789\nabc\r\n0123456789a\n".as_slice();
+            let mut lines = LineReader::with_max(BufReader::with_capacity(4, bytes), 10);
+            assert_eq!(&**lines.next_line().await.unwrap().unwrap(), b"0123456789");
+            assert_eq!(&**lines.next_line().await.unwrap().unwrap(), b"abc");
+            assert!(matches!(lines.line().await, Err(Error::LineTooLong)));
         });
     }
 

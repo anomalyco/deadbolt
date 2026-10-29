@@ -14,10 +14,15 @@
 //! `$TMPDIR/deadbolt<suffix>-<uid>`.
 //! `<suffix>` is empty by default and `-<hash of DEADBOLT_HOME>` when
 //! `DEADBOLT_HOME` is set, so every store gets its own agent.
+//!
+//! The agent takes the runtime dir only if it is a directory of this user's,
+//! not a symlink, and makes it 0700 ([`secure_dir`]): the fallback in a shared
+//! `$TMPDIR` could have been made by someone else first.
 
 use std::env;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub struct Paths {
@@ -90,4 +95,75 @@ fn user_runtime_dir(uid: u32) -> Option<PathBuf> {
 
 fn user_id() -> u32 {
     rustix::process::getuid().as_raw()
+}
+
+/// Checks that `dir` is a directory of this user's, not a symlink, and
+/// makes it 0700 if it isn't. The checks and the change are on one open
+/// handle, so the path can't be swapped in between.
+pub fn secure_dir(dir: &Path) -> io::Result<()> {
+    use rustix::fs::{FileType, Mode, OFlags};
+    let refuse = |why: &str| {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!("{} {why}", dir.display()),
+        )
+    };
+    let handle = rustix::fs::open(
+        dir,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|error| match error {
+        rustix::io::Errno::LOOP | rustix::io::Errno::NOTDIR => {
+            refuse("is not a directory (a symlink?)")
+        }
+        error => io::Error::from(error),
+    })?;
+    let stat = rustix::fs::fstat(&handle)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Directory {
+        return Err(refuse("is not a directory"));
+    }
+    if stat.st_uid != user_id() {
+        return Err(refuse(&format!(
+            "belongs to uid {}, not this user ({})",
+            stat.st_uid,
+            user_id()
+        )));
+    }
+    if Mode::from_raw_mode(stat.st_mode).bits() & 0o7777 != 0o700 {
+        rustix::fs::fchmod(&handle, Mode::from_raw_mode(0o700))?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_runtime_dir_is_ours_and_private() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("deadbolt");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        secure_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o7777, 0o700);
+
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        let refused = secure_dir(&link).unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::PermissionDenied, "{refused}");
+
+        let file = root.path().join("file");
+        std::fs::write(&file, b"").unwrap();
+        assert!(secure_dir(&file).is_err());
+
+        // Someone else's directory, as `/` is.
+        if user_id() != 0 {
+            let refused = secure_dir(Path::new("/")).unwrap_err();
+            assert!(refused.to_string().contains("belongs to uid"), "{refused}");
+        }
+    }
 }

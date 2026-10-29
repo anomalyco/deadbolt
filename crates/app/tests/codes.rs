@@ -3,7 +3,10 @@
 //! secret, ⌥⏎ copies it, and locking drops it. Headless, against the scenes'
 //! fixed code (RFC 6238's secret, 18 s of 30 left) or a real agent.
 
+// The agent reads the test switches these set (`DEADBOLT_NET`,
+// `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
 #![cfg(test)]
+#![cfg(debug_assertions)]
 
 mod support;
 

@@ -25,7 +25,8 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-/// Runtime switches are read once when the agent starts.
+/// Runtime switches are read once when the agent starts. Both are for
+/// tests and development only ([`test_env`]).
 pub struct Environment {
     pub local_net: bool,
     pub kdf: deadbolt_store::KdfParams,
@@ -34,8 +35,8 @@ pub struct Environment {
 impl Environment {
     pub fn load() -> Self {
         Self {
-            local_net: env("DEADBOLT_NET").as_deref() == Ok("local"),
-            kdf: if env("DEADBOLT_KDF").as_deref() == Ok("fast") {
+            local_net: test_env("DEADBOLT_NET").as_deref() == Some("local"),
+            kdf: if test_env("DEADBOLT_KDF").as_deref() == Some("fast") {
                 deadbolt_store::KdfParams {
                     m_cost_kib: 64,
                     t_cost: 1,
@@ -54,6 +55,19 @@ impl Environment {
 )]
 pub fn env(name: &str) -> Result<String, std::env::VarError> {
     std::env::var(name)
+}
+
+/// A switch for tests and development (`DEADBOLT_NET`, `DEADBOLT_KDF`,
+/// `DEADBOLT_TEST_*`): read only in debug builds, so nothing in a release
+/// build's environment, which a caller can set for the agent it starts,
+/// weakens the store's KDF, cuts it off the network or makes it claim
+/// another build. Release builds always act as if it's unset.
+pub fn test_env(name: &str) -> Option<String> {
+    if cfg!(any(debug_assertions, test)) {
+        env(name).ok()
+    } else {
+        None
+    }
 }
 
 #[expect(

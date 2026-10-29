@@ -259,6 +259,21 @@ fn second_open_is_in_use() {
     drop(unlock(tmp.path()));
 }
 
+/// An open store checks a passphrase against its key set on disk, and a
+/// changed passphrase is the one that matches.
+#[test]
+fn passphrase_check() {
+    let tmp = TempDir::new().unwrap();
+    let store = init(tmp.path());
+    let check = store.passphrase_check().unwrap();
+    assert!(check.matches(PASS));
+    assert!(!check.matches(b"not it"));
+    store.change_passphrase(PASS, b"new pass").unwrap();
+    let check = store.passphrase_check().unwrap();
+    assert!(check.matches(b"new pass"));
+    assert!(!check.matches(PASS));
+}
+
 #[test]
 fn change_passphrase() {
     let tmp = TempDir::new().unwrap();

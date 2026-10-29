@@ -356,6 +356,19 @@ impl Unlocked {
         Ok(())
     }
 
+    /// What checks a passphrase against this store's key set
+    /// ([`PassphraseCheck::matches`]), without holding the store while the
+    /// KDF runs.
+    pub fn passphrase_check(&self) -> Result<PassphraseCheck> {
+        let txn = self.db.begin_read()?;
+        let header = Header::read(&txn.open_table(HEADER)?)?;
+        Ok(PassphraseCheck {
+            kdf: header.kdf,
+            wrapped: header.keyset,
+            keyset: self.keys.keyset.encode(),
+        })
+    }
+
     /// Stores a second copy of the key set wrapped under `key`, bound to the
     /// opaque platform `token` (such as a Secure Enclave sealed key envelope).
     pub fn set_biometric(&self, key: &[u8; KEY_LEN], token: &[u8]) -> Result<()> {
@@ -446,6 +459,22 @@ impl Iterator for LogIter<'_> {
             self.done = true;
         }
         Some(item)
+    }
+}
+
+/// The passphrase-wrapped key set of an open store, from
+/// [`Unlocked::passphrase_check`].
+pub struct PassphraseCheck {
+    kdf: KdfHeader,
+    wrapped: Vec<u8>,
+    keyset: Zeroizing<[u8; 64]>,
+}
+
+impl PassphraseCheck {
+    /// Whether `passphrase` unwraps the open store's key set. Runs the KDF.
+    pub fn matches(&self, passphrase: &[u8]) -> bool {
+        KeySet::unwrap(&self.kdf, &self.wrapped, passphrase)
+            .is_ok_and(|keyset| keyset.encode() == self.keyset)
     }
 }
 
