@@ -1085,6 +1085,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "deadbolt-ext-core"
+version = "0.0.0"
+dependencies = [
+ "data-encoding",
+ "deadbolt-core",
+ "deadbolt-net",
+ "deadbolt-store",
+ "getrandom 0.4.3",
+ "n0-future",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "thiserror 2.0.21",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "zeroize",
+]
+
+[[package]]
 name = "deadbolt-net"
 version = "0.0.0"
 dependencies = [
@@ -1094,6 +1114,7 @@ dependencies = [
  "hmac",
  "iroh",
  "iroh-dns",
+ "n0-future",
  "qrcode",
  "sha2",
  "spake2",
@@ -1147,6 +1168,7 @@ dependencies = [
  "redb",
  "tempfile",
  "thiserror 2.0.21",
+ "wasm-bindgen",
  "zeroize",
 ]
 

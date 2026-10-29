@@ -8,7 +8,9 @@
 //! key, so there is no public nameplate. When the code is used or the wait ends, the
 //! record is replaced with one saying so.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use std::path::PathBuf;
+use std::{sync::Arc, time::Duration};
 
 use iroh::{
     Endpoint, RelayUrl, SecretKey,
@@ -36,6 +38,7 @@ pub enum Rendezvous {
     /// n0's public pkarr relay.
     N0,
     /// Files in a directory, one per record: for tests on one machine without n0.
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     Dir(PathBuf),
 }
 
@@ -55,10 +58,18 @@ impl Lookup {
     }
 
     pub(crate) async fn derive_async(code: &PairingCode) -> Result<Self> {
-        let code = code.clone();
-        tokio::task::spawn_blocking(move || Self::derive(&code))
-            .await
-            .map_err(|e| Error::InvalidCode(e.to_string()))?
+        #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+        {
+            let code = code.clone();
+            tokio::task::spawn_blocking(move || Self::derive(&code))
+                .await
+                .map_err(|e| Error::InvalidCode(e.to_string()))?
+        }
+        #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+        {
+            // No blocking pool in the browser: callers should run pairing in a worker.
+            Self::derive(code)
+        }
     }
 }
 
@@ -130,6 +141,7 @@ impl Record {
 #[derive(Clone)]
 pub(crate) enum Client {
     N0(Arc<PkarrRelayClient>),
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     Dir(PathBuf),
 }
 
@@ -140,16 +152,21 @@ impl Client {
                 let url = N0_DNS_PKARR_RELAY_PROD
                     .parse()
                     .map_err(|e| Error::Rendezvous(format!("relay url: {e}")))?;
+                #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
                 let dns = endpoint
                     .dns_resolver()
                     .map_err(|e| Error::Rendezvous(e.to_string()))?
                     .clone();
-                Self::N0(Arc::new(PkarrRelayClient::new(
-                    url,
-                    endpoint.tls_config().clone(),
-                    dns,
-                )))
+                #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+                let client = PkarrRelayClient::new(url, endpoint.tls_config().clone(), dns);
+                #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+                let client = {
+                    let _ = endpoint;
+                    PkarrRelayClient::new(url)
+                };
+                Self::N0(Arc::new(client))
             }
+            #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
             Rendezvous::Dir(dir) => Self::Dir(dir.clone()),
         })
     }
@@ -161,6 +178,7 @@ impl Client {
                 .publish(&packet)
                 .await
                 .map_err(|e| Error::Rendezvous(format!("publishing: {e}"))),
+            #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
             Self::Dir(dir) => {
                 tokio::fs::create_dir_all(dir).await?;
                 let path = dir.join(crate::fmt_id(&lookup.public));
@@ -184,6 +202,7 @@ impl Client {
                     return Ok(None);
                 }
             },
+            #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
             Self::Dir(dir) => match tokio::fs::read(dir.join(crate::fmt_id(key))).await {
                 Ok(bytes) => SignedPacket::from_bytes(&bytes)
                     .map_err(|e| Error::Rendezvous(format!("bad record: {e}")))?,

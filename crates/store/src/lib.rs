@@ -71,7 +71,7 @@
 //! Two layers:
 //!
 //! 1. On open, redb verifies every page checksum (`check_integrity`). A
-//!    flipped byte anywhere in live data makes [`unlock`] fail with
+//!    flipped byte anywhere in live data makes unlocking fail with
 //!    [`Error::Corrupt`]. redb can panic on some structurally damaged files;
 //!    opening runs under `catch_unwind` and turns that into
 //!    [`Error::Corrupt`] too (the panic message still goes to stderr).
@@ -97,6 +97,15 @@
 //! ciphertext and keyed hashes reach redb, so its page cache never holds
 //! plaintext.
 //!
+//! On wasm, use [`init_with_backend`] and [`unlock_with_backend`] with an
+//! `OpfsBackend` owning an exclusive OPFS sync access handle in a dedicated
+//! worker. The encrypted format and transactions are identical; OPFS `flush`
+//! supplies the durability barrier and the access handle supplies the lock.
+//! The caller publishes a newly initialized file only after creation succeeds.
+//! Native path-based functions are not exported on wasm. Structurally damaged
+//! databases can trap the wasm worker: wasm's default panic-abort build cannot
+//! recover a redb panic with `catch_unwind`.
+//!
 //! # Memory
 //!
 //! Keys, the device secret, and decrypted values are kept in
@@ -109,8 +118,14 @@
 //! (`"keyset.biometric"`) alongside an opaque platform token
 //! (`"biometric.token"`), sealed with a random 256-bit key
 //! ([`generate_biometric_key`]) that the caller wraps in the Secure Enclave.
-//! [`unlock_biometric`] opens the store with that key; changing the passphrase
-//! or calling [`clear_biometric`] removes the slot.
+//! On native, `unlock_biometric` opens the store with that key; changing the passphrase
+//! or calling [`Unlocked::clear_biometric`] removes the slot.
+
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+mod opfs;
+
+#[cfg(all(target_family = "wasm", target_os = "unknown"))]
+pub use opfs::OpfsBackend;
 
 mod crypto;
 mod error;
@@ -124,7 +139,11 @@ pub use error::{Error, Result};
 pub use kdf::KdfParams;
 pub use store::{
     ActivityPage, ActivityRow, Budget, DB_FILE, Dropped, FORMAT_VERSION, LogIter, PassphraseCheck,
-    Unlocked, biometric_token, clear_biometric, generate_biometric_key, init, init_with_params,
-    is_initialized, unlock, unlock_biometric,
+    Unlocked, generate_biometric_key, init_with_backend, unlock_with_backend,
+};
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+pub use store::{
+    biometric_token, clear_biometric, init, init_with_params, is_initialized, unlock,
+    unlock_biometric,
 };
 pub use zeroize::Zeroizing;

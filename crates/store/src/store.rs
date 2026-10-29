@@ -1,10 +1,17 @@
 use std::fmt;
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 use std::fs::{self, File, OpenOptions};
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 use std::io;
-use std::path::{Path, PathBuf};
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use std::path::Path;
+use std::path::PathBuf;
 
 use chacha20poly1305::XChaCha20Poly1305;
-use redb::{Database, ReadableDatabase, ReadableTable, Table, TableDefinition, WriteTransaction};
+use redb::{
+    Database, ReadableDatabase, ReadableTable, StorageBackend, Table, TableDefinition,
+    WriteTransaction,
+};
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, KEY_LEN, SecretKey};
@@ -48,12 +55,14 @@ const CTX_META_INDEX: &str = "deadbolt-store v1 2026-10-15 meta key blinding";
 const CACHE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Returns true if `dir` contains a store.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn is_initialized(dir: &Path) -> bool {
     dir.join(DB_FILE).is_file()
 }
 
 /// Creates a new store in `dir` with [`KdfParams::DEFAULT`] and returns it
 /// unlocked. See [`init_with_params`].
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn init(dir: &Path, passphrase: &[u8], device_secret: [u8; 32]) -> Result<Unlocked> {
     init_with_params(dir, passphrase, device_secret, KdfParams::DEFAULT)
 }
@@ -67,6 +76,7 @@ pub fn init(dir: &Path, passphrase: &[u8], device_secret: [u8; 32]) -> Result<Un
 ///
 /// The store is built in a temporary file and linked into place only once
 /// fully written, so a crash during init leaves no half-initialized store.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn init_with_params(
     dir: &Path,
     passphrase: &[u8],
@@ -94,18 +104,7 @@ pub fn init_with_params(
         let db = redb::Builder::new()
             .set_cache_size(CACHE_BYTES)
             .create_file(create_private_file(&tmp.0)?)?;
-        let txn = begin_write(&db)?;
-        {
-            let mut header = txn.open_table(HEADER)?;
-            header.insert(H_FORMAT, FORMAT_VERSION.to_le_bytes().as_slice())?;
-            header.insert(H_KDF, kdf.encode().as_slice())?;
-            header.insert(H_KEYSET, wrapped.as_slice())?;
-            write_log_len(&keys, &mut header, 0)?;
-            txn.open_table(LOG)?;
-            txn.open_table(META)?;
-            txn.open_table(activity::ACTIVITY)?;
-        }
-        txn.commit()?;
+        initialize_db(&db, &keys, &kdf, &wrapped)?;
         File::open(&tmp.0)?.sync_all()?;
     }
 
@@ -128,6 +127,7 @@ pub fn init_with_params(
 /// Returns [`Error::WrongPassphrase`] if the AEAD check on the key set fails,
 /// [`Error::NotInitialized`] if there is no store, and [`Error::InUse`] if it
 /// is already open.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn unlock(dir: &Path, passphrase: &[u8]) -> Result<Unlocked> {
     let db_path = dir.join(DB_FILE);
     if !db_path.is_file() {
@@ -147,6 +147,87 @@ pub fn unlock(dir: &Path, passphrase: &[u8]) -> Result<Unlocked> {
     })
 }
 
+/// Creates a store on an empty, exclusively owned backend using the same
+/// encrypted records and transactions as the native file store.
+///
+/// A nonempty backend is never overwritten. The caller must publish the store
+/// only after success; if creation fails or is interrupted, discard that new
+/// backend rather than treating it as initialized. For OPFS, keep the pending
+/// file separate from the committed store (or publish its name in IndexedDB).
+/// The backend must release its resources on drop, including preflight errors.
+pub fn init_with_backend(
+    backend: impl StorageBackend,
+    passphrase: &[u8],
+    device_secret: [u8; 32],
+    params: KdfParams,
+) -> Result<Unlocked> {
+    let device_secret = Zeroizing::new(device_secret);
+    params.validate()?;
+    if backend.len()? != 0 {
+        return Err(Error::AlreadyExists(PathBuf::from(DB_FILE)));
+    }
+    let keyset = KeySet {
+        data_key: crypto::random_key()?,
+        device_secret,
+    };
+    let kdf = KdfHeader::generate(params)?;
+    let wrapped = keyset.wrap(&kdf, passphrase)?;
+    let keys = Keys::new(keyset);
+    let db = redb::Builder::new()
+        .set_cache_size(CACHE_BYTES)
+        .create_with_backend(backend)?;
+    initialize_db(&db, &keys, &kdf, &wrapped)?;
+    Ok(Unlocked {
+        db,
+        dir: PathBuf::from(DB_FILE),
+        keys,
+    })
+}
+
+/// Opens an existing, exclusively owned backend and decrypts the key set.
+/// Dropping the result wipes its keys and closes the backend. An empty backend
+/// is rejected without creating a database. As on native, all live redb page
+/// checksums are checked before unwrapping the key set.
+pub fn unlock_with_backend(backend: impl StorageBackend, passphrase: &[u8]) -> Result<Unlocked> {
+    if backend.len()? == 0 {
+        return Err(Error::NotInitialized(PathBuf::from(DB_FILE)));
+    }
+    let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Database> {
+        let mut db = redb::Builder::new()
+            .set_cache_size(CACHE_BYTES)
+            .create_with_backend(backend)?;
+        db.check_integrity()?;
+        Ok(db)
+    }));
+    let db = opened.unwrap_or_else(|_| Err(Error::corrupt("database file is damaged")))?;
+    let header = {
+        let txn = db.begin_read()?;
+        Header::read(&txn.open_table(HEADER)?)?
+    };
+    let keyset = KeySet::unwrap(&header.kdf, &header.keyset, passphrase)?;
+    Ok(Unlocked {
+        db,
+        dir: PathBuf::from(DB_FILE),
+        keys: Keys::new(keyset),
+    })
+}
+
+fn initialize_db(db: &Database, keys: &Keys, kdf: &KdfHeader, wrapped: &[u8]) -> Result<()> {
+    let txn = begin_write(db)?;
+    {
+        let mut header = txn.open_table(HEADER)?;
+        header.insert(H_FORMAT, FORMAT_VERSION.to_le_bytes().as_slice())?;
+        header.insert(H_KDF, kdf.encode().as_slice())?;
+        header.insert(H_KEYSET, wrapped)?;
+        write_log_len(keys, &mut header, 0)?;
+        txn.open_table(LOG)?;
+        txn.open_table(META)?;
+        txn.open_table(activity::ACTIVITY)?;
+    }
+    txn.commit()?;
+    Ok(())
+}
+
 /// Generates a fresh 256-bit wrapping key for [`Unlocked::set_biometric`].
 pub fn generate_biometric_key() -> Result<Zeroizing<[u8; KEY_LEN]>> {
     crypto::random_key()
@@ -154,6 +235,7 @@ pub fn generate_biometric_key() -> Result<Zeroizing<[u8; KEY_LEN]>> {
 
 /// Reads the opaque biometric token enrolled in `dir` without unlocking the
 /// store. Returns `Ok(None)` if no biometric key set is enrolled.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn biometric_token(dir: &Path) -> Result<Option<Vec<u8>>> {
     let db_path = dir.join(DB_FILE);
     if !db_path.is_file() {
@@ -170,6 +252,7 @@ pub fn biometric_token(dir: &Path) -> Result<Option<Vec<u8>>> {
 ///
 /// Returns [`Error::InvalidBiometric`] if no biometric key set is enrolled or
 /// `key` fails the AEAD check.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn unlock_biometric(dir: &Path, key: &[u8; KEY_LEN]) -> Result<Unlocked> {
     let db_path = dir.join(DB_FILE);
     if !db_path.is_file() {
@@ -192,6 +275,7 @@ pub fn unlock_biometric(dir: &Path, key: &[u8; KEY_LEN]) -> Result<Unlocked> {
 
 /// Removes the enrolled biometric key set and token from `dir` while the store
 /// is locked. Returns whether a slot was present.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 pub fn clear_biometric(dir: &Path) -> Result<bool> {
     let db_path = dir.join(DB_FILE);
     if !db_path.is_file() {
@@ -230,7 +314,7 @@ impl fmt::Debug for Unlocked {
 }
 
 impl Unlocked {
-    /// The 32-byte device secret (Ed25519 seed) given to [`init`].
+    /// The 32-byte device secret (Ed25519 seed) given at creation.
     pub fn device_secret(&self) -> &[u8; 32] {
         &self.keys.keyset.device_secret
     }
@@ -394,7 +478,7 @@ impl Unlocked {
     }
 
     /// Whether `key` opens the enrolled biometric key set, as
-    /// [`unlock_biometric`] would, while the store stays open: a key fresh
+    /// native `unlock_biometric` would, while the store stays open: a key fresh
     /// from Touch ID proves the user is here now.
     pub fn check_biometric(&self, key: &[u8; KEY_LEN]) -> Result<bool> {
         let txn = self.db.begin_read()?;
@@ -660,6 +744,7 @@ fn meta_aad(blinded: &[u8; 32]) -> Vec<u8> {
 /// redb can panic on structurally damaged files instead of returning an
 /// error, so opening and checking run under `catch_unwind`; after a clean
 /// check, damage below the B-tree level can only surface as an AEAD failure.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 fn open_db(path: &Path) -> Result<Database> {
     let opened = std::panic::catch_unwind(|| -> Result<Database> {
         let mut db = redb::Builder::new()
@@ -681,6 +766,7 @@ fn begin_write(db: &Database) -> Result<WriteTransaction> {
     Ok(txn)
 }
 
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 fn create_private_dir(dir: &Path) -> io::Result<()> {
     if dir.is_dir() {
         return Ok(());
@@ -692,6 +778,7 @@ fn create_private_dir(dir: &Path) -> io::Result<()> {
     builder.create(dir)
 }
 
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 fn create_private_file(path: &Path) -> io::Result<File> {
     let mut options = OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -702,6 +789,7 @@ fn create_private_file(path: &Path) -> io::Result<File> {
 
 /// Moves `from` to `to`, failing with `AlreadyExists` instead of replacing
 /// an existing `to`.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 fn link_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     match fs::hard_link(from, to) {
         Err(e) if e.kind() != io::ErrorKind::AlreadyExists && !to.exists() => {
@@ -715,6 +803,7 @@ fn link_no_clobber(from: &Path, to: &Path) -> io::Result<()> {
     }
 }
 
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 fn sync_dir(dir: &Path) -> io::Result<()> {
     #[cfg(unix)]
     File::open(dir)?.sync_all()?;
@@ -723,13 +812,16 @@ fn sync_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Removes the file on drop.
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 struct TempFile(PathBuf);
 
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
 impl Drop for TempFile {
     fn drop(&mut self) {
         #[expect(

@@ -81,7 +81,8 @@ pub(crate) async fn settle(conn: &Connection, err: Error) -> Error {
             clippy::let_underscore_must_use,
             reason = "best-effort settling ends on either peer close or its deadline"
         )]
-        let _ = tokio::time::timeout(std::time::Duration::from_millis(500), conn.closed()).await;
+        let _ =
+            n0_future::time::timeout(std::time::Duration::from_millis(500), conn.closed()).await;
     }
     from_conn(conn, err)
 }
