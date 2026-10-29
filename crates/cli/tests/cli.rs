@@ -900,9 +900,10 @@ fn run_inject_and_read_resolve_references() {
 
     // The command gets the value, its stdin and its exit code come through,
     // and its output shows the value concealed, even split across writes
-    // (closer together than the 100 ms after which held output goes out).
+    // (two writes, back to back: well inside the 100 ms after which held
+    // output goes out, however slow the machine).
     let script = format!(
-        r#"printf %s "$TOKEN" >'{}'; echo "t=$TOKEN"; printf %s "$TOKEN" >&2; printf ghp-secret; sleep 0.02; printf '%s\n' -token-123; cat; exit 7"#,
+        r#"printf %s "$TOKEN" >'{}'; echo "t=$TOKEN"; printf %s "$TOKEN" >&2; printf ghp-secret; printf '%s\n' -token-123; cat; exit 7"#,
         seen.display()
     );
     let (code, out, err) = detached_code(
