@@ -145,8 +145,9 @@ enum Commands {
     },
     #[command(flatten)]
     Item(items::ItemCommand),
-    /// Import logins, cards, secure notes, SSH keys and identities from
-    /// 1Password, Apple Passwords, Bitwarden or CSV.
+    /// Import logins, cards, secure notes, SSH keys, identities, API
+    /// credentials, documents and the rest from 1Password, Apple Passwords,
+    /// Bitwarden or CSV.
     ///
     /// The format is detected from the file. To export:
     ///
@@ -158,11 +159,13 @@ enum Commands {
     ///   Bitwarden: Tools › Export vault › .json
     ///
     /// Any other CSV with a password column also works (title, url,
-    /// username, password, notes, otpauth). 1Password categories without a
-    /// closer type (software licenses, bank accounts, ...) become secure
-    /// notes with their fields kept. Documents, other item types, tags,
-    /// folders, favorites, attachments and password history are skipped and
-    /// counted.
+    /// username, password, notes, otpauth). 1Password categories map to
+    /// their types (API credentials, databases, servers, Wi-Fi, software
+    /// licenses, bank accounts, documents, passports, driver's licenses,
+    /// memberships, crypto wallets, social security numbers); the others
+    /// become secure notes with their fields kept. A .1pux's documents and
+    /// attachments come along, up to 10 MiB each. Other item types, tags,
+    /// folders, favorites and password history are skipped and counted.
     /// Items already in the vault are skipped, so importing again changes
     /// nothing. Delete the export file afterwards: it is not encrypted.
     #[command(verbatim_doc_comment)]
@@ -437,7 +440,8 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             client::ensure_running(&paths).await?;
             let command = Command::Import {
                 vault,
-                export,
+                export: export.text,
+                files: export.files,
                 apply: !dry_run,
             };
             let Reply::Import { report } = request(&paths, command, from_stdin).await? else {

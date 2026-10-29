@@ -385,6 +385,7 @@ async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
         vault: None,
         query: vec![id.clone()],
         otp: false,
+        files: false,
     };
     let got = item(paths, command).await?;
     if code_field(&got.fields).is_some() {
@@ -413,12 +414,13 @@ async fn import(
     applied: &mut bool,
 ) -> Result<Imported, ImportFailure> {
     let export = export::read(path)?;
-    let digest = blake3::hash(export.as_bytes());
+    let digest = export.digest();
     let changed = apply.is_some_and(|previewed| previewed != digest);
     *applied = apply.is_some() && !changed;
     let command = Command::Import {
         vault: None,
-        export,
+        export: export.text,
+        files: export.files,
         apply: *applied,
     };
     let report = call(paths, command, |r| match r {

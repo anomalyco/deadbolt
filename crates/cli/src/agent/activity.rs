@@ -657,6 +657,7 @@ mod tests {
             vault: None,
             query: vec!["github".into()],
             otp: false,
+            files: false,
         }
     }
 
@@ -1049,6 +1050,7 @@ mod tests {
                 vault: None,
                 query: vec!["big".into()],
                 otp: false,
+                files: false,
             },
         })
         .unwrap();

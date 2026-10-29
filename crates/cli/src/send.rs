@@ -555,6 +555,7 @@ async fn find_item(
         vault,
         query: vec![id],
         otp: true,
+        files: false,
     };
     let Reply::Item { item } = crate::request(paths, command, from_stdin).await? else {
         bail!("unexpected reply");

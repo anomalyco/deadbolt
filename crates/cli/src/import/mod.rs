@@ -21,7 +21,7 @@ use deadbolt_core::{Field, FieldType, Schema, Source, schema};
 use serde_json::Value;
 
 use crate::items::with_scheme;
-use crate::protocol::{ImportReport, ImportSource, Tally};
+use crate::protocol::{ExportFile, ImportReport, ImportSource, Tally};
 
 /// What every "not an export" error ends with.
 const SUPPORTED: &str = "import a 1Password .1pux or .csv, an Apple Passwords or browser .csv, or a Bitwarden .json export";
@@ -140,7 +140,14 @@ pub fn digest(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) 
 }
 
 /// Maps an export to items to create, and what was left out.
+#[cfg(test)]
 pub fn parse(text: &str) -> Result<(Vec<Imported>, ImportReport)> {
+    parse_with(text, &[])
+}
+
+/// Maps an export, with the attachments that came beside its text (a
+/// `.1pux`'s, see `deadbolt_client::export`).
+pub fn parse_with(text: &str, files: &[ExportFile]) -> Result<(Vec<Imported>, ImportReport)> {
     let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     let start = text.trim_start();
     if start.is_empty() {
@@ -156,7 +163,7 @@ pub fn parse(text: &str) -> Result<(Vec<Imported>, ImportReport)> {
             )
         })?;
         if export.get("accounts").is_some() {
-            onepassword::export(&export)?
+            onepassword::export(&export, files)?
         } else if export.get("items").is_some() || export.get("encrypted").is_some() {
             bitwarden::export(&export)?
         } else {
@@ -231,6 +238,18 @@ const COLLECTION: Reason = ("collection", "collections");
 const FAVORITE: Reason = ("favorite", "favorites");
 const TAG: Reason = ("tag", "tags");
 const ATTACHMENT: Reason = ("attachment", "attachments");
+const BIG_ATTACHMENT: Reason = (
+    "attachment missing from the export or too large (over 10 MiB)",
+    "attachments missing from the export or too large (over 10 MiB)",
+);
+const NO_FILE: Reason = (
+    "document whose file is missing from the export or too large (over 10 MiB)",
+    "documents whose files are missing from the export or too large (over 10 MiB)",
+);
+const BAD_VALUE: Reason = (
+    "value that doesn't fit its field kept as an extra field",
+    "values that don't fit their fields kept as extra fields",
+);
 const PASSWORD_HISTORY: Reason = ("item's password history", "items' password history");
 const PASSKEYS: Reason = ("item's passkeys", "items' passkeys");
 const LINKED_FIELD: Reason = ("linked field", "linked fields");
@@ -469,6 +488,25 @@ impl Builder {
     )]
     fn kind(&self, name: &str) -> FieldType {
         self.schema.field(name).expect("known field").kind.clone()
+    }
+
+    /// Whether every required field of the type has a value.
+    fn has_required(&self) -> bool {
+        self.schema
+            .fields
+            .iter()
+            .filter(|f| f.required)
+            .all(|f| self.fields.contains_key(f.name))
+    }
+
+    /// The bytes the item's files hold so far.
+    fn file_bytes(&self) -> usize {
+        self.fields
+            .values()
+            .filter(|f| f.kind == FieldType::File)
+            .filter_map(|f| deadbolt_core::item::file_parts(&f.value).1)
+            .filter_map(deadbolt_core::item::file_size)
+            .sum()
     }
 
     /// Sets a known field; `false` if the value is invalid for it. If the
