@@ -96,7 +96,8 @@ function passkeyHost(canVerify = false) {
   let ceremony: { resolve: () => void; reject: (e: Error) => void } | null = null
   let hold = false
   const gates: { connect?: Promise<void>; list?: Promise<void> } = {}
-  const answers: { crossOrigin?: boolean; createError?: HostError } = {}
+  /** `logins`: how many logins the site has; `passkeys`: whether it has the passkey. */
+  const answers: { crossOrigin?: boolean; createError?: HostError; logins?: number; passkeys?: boolean } = {}
   const host = {
     status: { state: "ready", version: "0.0.0" },
     capabilities: ["list", "fill", "check", "save", "passkeys"],
@@ -110,7 +111,9 @@ function passkeyHost(canVerify = false) {
         case "passkey-list":
           await gates.list
           if (req.rpId === "elsewhere.com") throw new HostError("domain_mismatch", "no")
-          return { type: "passkeys", rpId: req.rpId ?? "www.example.com", canVerify, passkeys: [{ ref: REF, vault: "Personal", credentialId: "Y3JlZA", username: "kit" }] }
+          return { type: "passkeys", rpId: req.rpId ?? "www.example.com", canVerify, passkeys: answers.passkeys === false ? [] : [{ ref: REF, vault: "Personal", credentialId: "Y3JlZA", username: "kit" }] }
+        case "list":
+          return { type: "list", site: "example.com", accounts: Array.from({ length: answers.logins ?? 0 }, (_, i) => ({ ref: `${"b".repeat(64)}:${i}`, username: "kit", hasPassword: true })) }
         case "passkey-create":
           if (answers.createError) throw answers.createError
           return { type: "passkey-created", ref: OTHER, credentialId: "bmV3", clientDataJSON: clientData("webauthn.create", req.origin, answers.crossOrigin), attestationObject: "YW8", authenticatorData: "YWQ", publicKey: "cGs", verified: false }
@@ -557,9 +560,112 @@ describe("autofill sign-in (conditional mediation)", () => {
     expect(await passkeys.menuPick(target, REF)).toBeNull()
   })
 
-  test("frames get the browser's own autofill", async () => {
-    const sender = pageSender({ frameId: 3, url: "https://www.example.com/frame", documentId: "frame-doc" })
-    expect(await call("get", sender, 5, get({ mediation: "conditional" }))).toEqual({ fallback: true })
+  const conditional = get({ mediation: "conditional" })
+  /** Apple's sign-in frame in App Store Connect: another origin of the top page's site. */
+  const LOGIN_FRAME = { frameId: 8, url: "https://idmsa.example.com/signin", origin: "https://idmsa.example.com", documentId: "idmsa-doc" }
+  const loginFrame = { tabId: 1, frameId: 8, documentId: "idmsa-doc", origin: "https://idmsa.example.com" }
+  beforeEach(() => {
+    fake.frames["1:8"] = { url: LOGIN_FRAME.url, documentId: LOGIN_FRAME.documentId, parentFrameId: 0 }
+  })
+
+  /** The call's answer so far: null while it's held. */
+  function watch(sender: chrome.runtime.MessageSender, request = 5) {
+    const seen: { reply: HookReply | null } = { reply: null }
+    void call("get", sender, request, conditional).then((r) => (seen.reply = r))
+    return seen
+  }
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) await tick()
+  }
+
+  // Where Deadbolt's menu opens, it holds the call (the browser's dropdown
+  // would cover the menu) whenever it has logins or passkeys for the site.
+  const cases: Array<[string, chrome.runtime.MessageSender, { logins: number; passkeys: boolean; locked?: boolean }, "held" | "fallback"]> = [
+    ["top page, passkeys", pageSender(), { logins: 0, passkeys: true }, "held"],
+    ["top page, logins only", pageSender(), { logins: 2, passkeys: false }, "held"],
+    ["top page, neither", pageSender(), { logins: 0, passkeys: false }, "fallback"],
+    ["top page, locked", pageSender(), { logins: 2, passkeys: true, locked: true }, "fallback"],
+    ["same-origin frame, passkeys", pageSender({ frameId: 3, documentId: "frame-doc" }), { logins: 0, passkeys: true }, "held"],
+    ["same-origin frame, neither", pageSender({ frameId: 3, documentId: "frame-doc" }), { logins: 0, passkeys: false }, "fallback"],
+    ["same-site frame, logins", pageSender(LOGIN_FRAME), { logins: 1, passkeys: true }, "held"],
+    ["same-site frame, passkeys only", pageSender(LOGIN_FRAME), { logins: 0, passkeys: true }, "fallback"],
+    ["same-site frame, neither", pageSender(LOGIN_FRAME), { logins: 0, passkeys: false }, "fallback"],
+    ["same-site frame, locked", pageSender(LOGIN_FRAME), { logins: 1, passkeys: true, locked: true }, "fallback"],
+    ["cross-site frame, logins", pageSender({ frameId: 4, url: "https://ads.example.net/frame", origin: "https://ads.example.net", documentId: "ads-doc" }), { logins: 1, passkeys: true }, "fallback"],
+  ]
+  for (const [name, sender, has, expected] of cases)
+    test(`${name}: ${expected}`, async () => {
+      h.answers.logins = has.logins
+      h.answers.passkeys = has.passkeys
+      if (has.locked) (h.host as { status: { state: string } }).status = { state: "locked", version: "0.0.0" } as never
+      const seen = watch(sender)
+      await settle()
+      expect(seen.reply).toEqual(expected === "held" ? null : { fallback: true })
+      expect(passkeys.prompt(1)).toBeUndefined()
+      // Only a frame on one origin all the way up lists passkeys: elsewhere the agent's client data wouldn't be true.
+      if (sender.origin !== "https://www.example.com") expect(kinds()).not.toContain("passkey-list")
+    })
+
+  test("a held call in a same-site login frame offers its logins only, and a picked login leaves it waiting", async () => {
+    h.answers.logins = 1
+    const seen = watch(pageSender(LOGIN_FRAME))
+    await settle()
+    expect(passkeys.menuPasskeys(loginFrame, "username")).toEqual([])
+    expect(await passkeys.menuPick(loginFrame, REF)).toBeNull()
+    expect(seen.reply).toBeNull()
+    // Another frame's navigation leaves it; the page's AbortSignal ends it.
+    passkeys.navigated({ tabId: 1, frameId: 3, documentId: "new-frame-doc" })
+    await settle()
+    expect(seen.reply).toBeNull()
+    expect(passkeys.cancelFrom(pageSender(LOGIN_FRAME), 5)).toBe(true)
+    await settle()
+    expect(seen.reply).toEqual({ error: { name: "AbortError", message: expect.any(String) } })
+  })
+
+  test("a held login frame's call ends when its frame or the top page navigates", async () => {
+    h.answers.logins = 1
+    const frameGone = watch(pageSender(LOGIN_FRAME), 5)
+    await settle()
+    fake.frames["1:8"] = { ...fake.frames["1:8"], documentId: "idmsa-next" }
+    passkeys.navigated({ tabId: 1, frameId: 8, documentId: "idmsa-next" })
+    await settle()
+    expect(frameGone.reply).toMatchObject({ error: { name: "NotAllowedError" } })
+    fake.frames["1:8"] = { ...fake.frames["1:8"], documentId: LOGIN_FRAME.documentId }
+    const topGone = watch(pageSender(LOGIN_FRAME), 6)
+    await settle()
+    passkeys.navigated({ tabId: 1, frameId: 0, documentId: "next-doc" })
+    await settle()
+    expect(topGone.reply).toMatchObject({ error: { name: "NotAllowedError" } })
+  })
+
+  test("a same-origin frame's held call offers its passkeys and signs with the pick", async () => {
+    const frame = { tabId: 1, frameId: 3, documentId: "frame-doc", origin: "https://www.example.com" }
+    const seen = watch(pageSender({ frameId: 3, documentId: "frame-doc" }))
+    await settle()
+    expect(passkeys.menuPasskeys(frame, "password")).toEqual([{ ref: REF, vault: "Personal", username: "kit" }])
+    expect(passkeys.menuPasskeys(target, "username")).toEqual([])
+    expect(await passkeys.menuPick(frame, REF)).toEqual({ ok: true })
+    await settle()
+    expect(seen.reply).toMatchObject({ credential: { credentialId: "Y3JlZA" } })
+  })
+
+  test("a top page with logins but no passkeys is held without passkey rows, until aborted", async () => {
+    h.answers.logins = 1
+    h.answers.passkeys = false
+    const seen = watch(pageSender())
+    await settle()
+    expect(passkeys.menuPasskeys(target, "username")).toEqual([])
+    expect(seen.reply).toBeNull()
+    expect(passkeys.cancelFrom(pageSender(), 5)).toBe(true)
+    await settle()
+    expect(seen.reply).toEqual({ error: { name: "AbortError", message: expect.any(String) } })
+  })
+
+  test("modal sign-in is unchanged: with logins but no passkeys, the browser's sheet", async () => {
+    h.answers.logins = 1
+    h.answers.passkeys = false
+    expect(await call("get", pageSender(), 1, get())).toEqual({ fallback: true })
+    expect(await call("get", pageSender(LOGIN_FRAME), 2, get())).toEqual({ fallback: true })
   })
 })
 
