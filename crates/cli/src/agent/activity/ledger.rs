@@ -105,7 +105,7 @@ pub fn bound(entry: &mut ActivityEntry) {
 /// What a grant would be tied to (`docs/agent-control.md`): the terminal
 /// and its session's start, else who it looks like and the session it
 /// claims. Only for limits: nothing here is trusted.
-fn anchor(caller: &CallerInfo) -> String {
+pub fn anchor(caller: &CallerInfo) -> String {
     match &caller.tty {
         Some(tty) => format!("tty {tty} {:?}", caller.session_started),
         None => {

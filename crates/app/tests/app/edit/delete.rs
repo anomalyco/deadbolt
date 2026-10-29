@@ -247,9 +247,9 @@ fn the_menus_add_edit_and_delete() {
     let Some(keys) = main_after("vault", serde_json::json!([menu(NEW)])) else {
         return;
     };
-    assert!(shows(&keys, "kinds"));
+    assert!(shows(&keys, "type-row") && shows(&keys, "type-list"));
     let keys = main_after("vault", serde_json::json!([menu(EDIT)])).unwrap();
-    assert!(shows(&keys, "form") && !shows(&keys, "kinds"));
+    assert!(shows(&keys, "form") && !shows(&keys, "type-row"));
     let keys = main_after("vault", serde_json::json!([menu(DELETE)])).unwrap();
     assert!(shows(&keys, "delete-confirm"));
 

@@ -51,7 +51,7 @@ fn a_shown_password_never_lingers_in_plain_text() {
     };
     let mut r = rig("vault");
     r.sent();
-    r.command('n');
+    r.new_item();
     generate(&mut r, "first-Generated-1");
     assert!(r.plaintext("first-Generated-1").is_empty(), "shown");
     let form = r.rt.state.edit.form.as_ref().unwrap();
@@ -75,7 +75,7 @@ fn a_shown_password_never_lingers_in_plain_text() {
     r.rt.frame(FRAME);
     assert!(r.plaintext("second-Generated-2").is_empty(), "cancelled");
 
-    r.command('n');
+    r.new_item();
     generate(&mut r, "third-Generated-3");
     let revealed = |r: &Rig| r.input("password").edit.is_revealed();
     r.rt.update(|s, _| s.toggle_shown(1));
@@ -157,8 +157,8 @@ fn copying_from_a_saved_password_field_is_reported() {
 fn add_offers_a_secure_note_whose_body_keeps_its_lines() {
     let mut r = rig("vault");
     r.command('n');
-    assert!(r.shows("Note") && r.shows("SSH key"));
-    r.rt.update(|s, _| s.pick_kind("note"));
+    assert!(r.shows("Secure note") && r.shows("SSH key"));
+    r.rt.update(|s, _| s.choose_type("note"));
     r.settle(0.05);
     let form = r.rt.state.edit.form.as_ref().unwrap();
     assert_eq!(form.kind, "note");
@@ -193,20 +193,20 @@ fn add_offers_a_secure_note_whose_body_keeps_its_lines() {
 #[test]
 fn picking_a_type_never_moves_a_secret_into_plain_text() {
     let mut r = rig("vault");
-    r.command('n');
+    r.new_item();
     r.fill("notes", "plain words");
     assert!(!r.plaintext("plain words").is_empty());
-    r.rt.update(|s, _| s.pick_kind("note"));
+    r.rt.update(|s, _| s.choose_type("note"));
     r.settle(0.5);
     assert_eq!(r.value("notes"), "plain words");
     assert!(r.input("notes").edit.is_secure() && r.plaintext("plain words").is_empty());
 
     r.fill("notes", "Front door: 4417");
-    r.rt.update(|s, _| s.pick_kind("card"));
+    r.rt.update(|s, _| s.choose_type("card"));
     r.settle(0.5);
     assert_eq!(r.value("notes"), "", "the secret stays behind");
     assert!(!r.input("notes").edit.is_secure() && r.plaintext("4417").is_empty());
-    r.rt.update(|s, _| s.pick_kind("login"));
+    r.rt.update(|s, _| s.choose_type("login"));
     r.settle(0.5);
     assert!(r.plaintext("4417").is_empty());
 }
@@ -249,8 +249,8 @@ fn an_ssh_keys_private_key_is_edited_in_place() {
 #[test]
 fn keys_in_a_secret_text_area() {
     let mut r = rig("vault");
-    r.command('n');
-    r.rt.update(|s, _| s.pick_kind("ssh"));
+    r.new_item();
+    r.rt.update(|s, _| s.choose_type("ssh"));
     r.focus("private-key");
     r.sent();
     r.type_text("a");
@@ -278,8 +278,8 @@ fn keys_in_a_secret_text_area() {
     assert_eq!(pairs(&fields), [("private-key", "a\n\n\nb")]);
 
     let mut r = rig("vault");
-    r.command('n');
-    r.rt.update(|s, _| s.pick_kind("note"));
+    r.new_item();
+    r.rt.update(|s, _| s.choose_type("note"));
     r.focus("notes");
     r.type_text("x");
     r.tap(Key::Escape);
@@ -419,8 +419,8 @@ fn selecting_in_a_kept_key_changes_nothing() {
 #[test]
 fn a_new_key_keeps_every_character_typed() {
     let mut r = rig("vault");
-    r.command('n');
-    r.rt.update(|s, _| s.pick_kind("ssh"));
+    r.new_item();
+    r.rt.update(|s, _| s.choose_type("ssh"));
     r.settle(0.1);
     r.click_at("field-private-key/value");
     for c in "abcdef".chars() {

@@ -39,7 +39,7 @@ pub fn view(s: &App, k: &Kit, inset: f32, reduced_motion: bool, layer: &mut Vec<
     let main = if s.settings_open {
         crate::settings::page(s, k)
     } else {
-        page::pane(s, k)
+        page::pane(s, k, layer)
     }
     .transition(instant());
     let mut toolbar = Toolbar::new();

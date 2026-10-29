@@ -1,6 +1,15 @@
 //! 1Password's 1PUX export: the `export.data` JSON inside the `.1pux` zip
 //! (`{accounts: [{vaults: [{attrs, items: [...]}]}]}`). Items from every
-//! account and vault go into the one target vault.
+//! account and vault go into the one target vault. Its documents and the
+//! files attached to other items come from the zip's `files/`, read by the
+//! client beside the text (`deadbolt_client::export`).
+//!
+//! Categories map to the type closest to them: API credentials, databases,
+//! servers, Wi-Fi routers, software licenses, bank accounts, documents,
+//! passports, driver's licenses, memberships, crypto wallets and social
+//! security numbers have types of their own; outdoor licenses, reward
+//! programs, email accounts and medical records become secure notes that
+//! keep every field.
 
 use std::collections::BTreeSet;
 
@@ -10,18 +19,102 @@ use deadbolt_core::{FieldType, Source};
 use serde_json::Value;
 
 use super::{
-    ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, Builder, FAVORITE,
-    Imported, LINKED_FIELD, MirrorVersion, NO_NUMBER, NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY,
-    Reason, Summary, TAG, UNKNOWN_TYPE, address, array, field_name, item_name, month, number,
-    scalar, text,
+    ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, BAD_VALUE,
+    BIG_ATTACHMENT, BIG_FILE, Builder, FAVORITE, Imported, LINKED_FIELD, MISSING_ATTACHMENT,
+    MISSING_FILE, MirrorVersion, NO_NUMBER, NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY, Summary, TAG,
+    UNKNOWN_TYPE, address, array, field_name, item_name, month, number, scalar, text,
 };
-use crate::protocol::{ImportSource, sign_in_provider};
+use crate::items::with_scheme;
+use crate::protocol::{ExportFile, ImportSource, sign_in_provider};
 
-/// Item categories that are skipped, by `categoryUuid`.
-fn skipped(category: &str) -> Reason {
-    match category {
-        "006" => ("document", "documents"),
-        _ => UNKNOWN_TYPE,
+/// A `.1pux`'s attachments, as the client read them from `files/`; `None`
+/// for the `op` CLI's items, which come without their files.
+#[derive(Clone, Copy)]
+pub(super) struct Files<'a>(Option<&'a [ExportFile]>);
+
+impl<'a> Files<'a> {
+    pub(super) const NONE: Files<'static> = Files(None);
+
+    /// The file with `documentId` `id` (named `<id>__<fileName>` in the
+    /// archive, or `<id>`), in base64.
+    fn get(&self, id: &str) -> Result<&'a str, Missing> {
+        let file = self
+            .0
+            .ok_or(Missing::Gone)?
+            .iter()
+            .find(|f| {
+                f.name
+                    .strip_prefix(id)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("__"))
+            })
+            .ok_or(Missing::Gone)?;
+        if file.too_large {
+            return Err(Missing::TooLarge);
+        }
+        Ok(file.data.as_str())
+    }
+}
+
+/// Why a file an item names isn't imported.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Missing {
+    /// Not in the export (or, from the `op` CLI, not fetched).
+    Gone,
+    /// Over 10 MiB, alone or with the item's other files.
+    TooLarge,
+}
+
+/// A file a 1Password item names: an attachment or a document's file.
+struct Attachment {
+    title: String,
+    file_name: String,
+    /// Its `documentId`; `None` where the item doesn't say (the `op` CLI's).
+    id: Option<String>,
+}
+
+impl Attachment {
+    fn new(title: String, value: &Value) -> Self {
+        Self {
+            title,
+            file_name: text(value, "fileName").unwrap_or_else(|| "attachment".into()),
+            id: text(value, "documentId"),
+        }
+    }
+
+    /// The file field's value, if its contents came and `budget` (the
+    /// bytes the item may still hold in files) has room; the budget shrinks
+    /// by what it takes.
+    fn value(&self, files: Files, budget: &mut usize) -> Result<String, Missing> {
+        let data = files.get(self.id.as_deref().ok_or(Missing::Gone)?)?;
+        let size = deadbolt_core::item::file_size(data).ok_or(Missing::Gone)?;
+        if size > *budget {
+            return Err(Missing::TooLarge);
+        }
+        *budget -= size;
+        Ok(format!("{}\n{data}", file_name(&self.file_name)))
+    }
+}
+
+/// A file name another app gave, as a valid one: separators (`/`, `\`,
+/// `:`) and control characters become `_`, at most 255 characters.
+fn file_name(name: &str) -> String {
+    let name: String = name
+        .trim()
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') || c.is_control() {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(deadbolt_core::item::MAX_FILE_NAME)
+        .collect();
+    let name = name.trim().to_string();
+    if deadbolt_core::item::valid_file_name(&name) {
+        name
+    } else {
+        "attachment".into()
     }
 }
 
@@ -58,12 +151,12 @@ impl Entry {
     }
 }
 
-/// An item's fields, and how many fields were references to other items
-/// and files, which are not imported.
+/// An item's fields, its attachments, and how many fields were references
+/// to other items, which are not imported.
 struct Entries {
     entries: Vec<Entry>,
     references: usize,
-    files: usize,
+    attachments: Vec<Attachment>,
     /// A "Sign in with" field (`ssoLogin`): the provider, and the vault and
     /// item ids of the login it signs in with, if it names one.
     sign_in: Option<(String, Option<(String, String)>)>,
@@ -74,7 +167,7 @@ impl Entries {
         let mut out = Self {
             entries: Vec::new(),
             references: 0,
-            files: 0,
+            attachments: Vec::new(),
             sign_in: None,
         };
         for field in array(details, "loginFields") {
@@ -102,7 +195,11 @@ impl Entries {
                 };
                 match key.as_str() {
                     "reference" => out.references += 1,
-                    "file" => out.files += 1,
+                    "file" => {
+                        let title = text(field, "title").unwrap_or_default();
+                        out.attachments.push(Attachment::new(title, value));
+                        continue;
+                    }
                     "ssoLogin" => {
                         if out.sign_in.is_none()
                             && let Some(provider) = text(value, "provider")
@@ -137,8 +234,37 @@ impl Entries {
         Some(self.entries.remove(at).value)
     }
 
-    /// The rest become extra fields, named by their titles.
-    fn extras(self, b: &mut Builder, summary: &mut Summary) {
+    /// The rest become extra fields, named by their titles, and the
+    /// attachments file fields, named by their titles or file names. An
+    /// item's files hold at most `MAX_FILE` bytes in all, so its create
+    /// fits in one entry; the rest are dropped and counted.
+    fn extras(self, b: &mut Builder, files: Files, summary: &mut Summary) {
+        let mut budget = deadbolt_core::item::MAX_FILE.saturating_sub(b.file_bytes());
+        for attachment in &self.attachments {
+            let value = match attachment.value(files, &mut budget) {
+                Ok(value) => value,
+                Err(_) if files.0.is_none() => {
+                    summary.drop_some(ATTACHMENT, 1);
+                    continue;
+                }
+                Err(Missing::Gone) => {
+                    summary.drop_some(MISSING_ATTACHMENT, 1);
+                    continue;
+                }
+                Err(Missing::TooLarge) => {
+                    summary.drop_some(BIG_ATTACHMENT, 1);
+                    continue;
+                }
+            };
+            let base = if attachment.title.trim().is_empty() {
+                let name = attachment.file_name.as_str();
+                let stem = name.rsplit_once('.').map_or(name, |(stem, _)| stem);
+                field_name(stem)
+            } else {
+                field_name(&attachment.title)
+            };
+            b.extra(&base, FieldType::File, value);
+        }
         for entry in self.entries {
             let kind = entry.kind();
             let base = field_name(if entry.title.is_empty() {
@@ -153,14 +279,13 @@ impl Entries {
             }
         }
         summary.drop_some(LINKED_FIELD, self.references);
-        summary.drop_some(ATTACHMENT, self.files);
     }
 }
 
 /// A section field's value as text. Files and references have none.
 fn section_value(key: &str, value: &Value) -> Option<String> {
     match key {
-        "file" | "reference" => None,
+        "file" | "reference" | "ssoLogin" => None,
         "email" if value.is_object() => text(value, "email_address"),
         // The top-level key's format varies; the metadata's is PKCS#8 PEM.
         "sshKey" if value.is_object() => value
@@ -237,7 +362,7 @@ fn urls(overview: &Value) -> impl Iterator<Item = String> + '_ {
     )
 }
 
-fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
+fn login(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut entries = Entries::new(details);
@@ -263,13 +388,13 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
     {
         link = to;
     }
-    entries.extras(&mut b, summary);
+    entries.extras(&mut b, files, summary);
     let mut item = b.finish("login", item_name(text(overview, "title")), summary)?;
     item.sign_in_link = link;
     Some(item)
 }
 
-fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
+fn card(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut entries = Entries::new(details);
@@ -301,33 +426,224 @@ fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
     b.known("pin", entries.take(|e| e.id == "pin"));
     b.known("notes", text(details, "notesPlain"));
     b.urls(urls(overview), summary);
-    entries.extras(&mut b, summary);
+    entries.extras(&mut b, files, summary);
     b.finish("card", item_name(text(overview, "title")), summary)
 }
 
-/// A secure note, and every category with no closer type here (software
-/// licenses, bank accounts, passports, memberships, ...): the notes are the
-/// body and every field is kept, secret where 1Password conceals it.
-fn note(item: &Value, category: &str, summary: &mut Summary) -> Option<Imported> {
+/// A secure note, and every category with no closer type here (outdoor
+/// licenses, reward programs, email accounts, medical records): the notes
+/// are the body and every field is kept, secret where 1Password conceals it.
+fn note(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut b = Builder::new("note");
     b.known("notes", text(details, "notesPlain"));
     b.urls(urls(overview), summary);
-    let mut entries = Entries::new(details);
-    // ID and account numbers 1Password leaves in plain text are secret here.
-    let secret: &[&str] = match category {
-        "101" => &["accountNo", "iban"],
-        "103" | "106" | "108" => &["number"],
-        _ => &[],
-    };
-    for entry in &mut entries.entries {
-        if secret.contains(&entry.id.as_str()) {
-            entry.key = "concealed".into();
-        }
-    }
-    entries.extras(&mut b, summary);
+    Entries::new(details).extras(&mut b, files, summary);
     b.finish("note", item_name(text(overview, "title")), summary)
+}
+
+/// Which of a 1Password category's fields (by id, else title, any case)
+/// fill a type's known fields here, in the order taken.
+type FieldMap = &'static [(&'static str, &'static [&'static str])];
+
+/// The types of their own a category maps to, with their fields.
+fn typed_kind(category: &str) -> Option<(&'static str, FieldMap)> {
+    Some(match category {
+        "112" => (
+            "api",
+            &[
+                ("credential", &["credential"]),
+                ("username", &["username"]),
+                ("type", &["type"]),
+                ("host", &["hostname"]),
+                ("expires", &["expires"]),
+            ],
+        ),
+        "102" => (
+            "database",
+            &[
+                ("type", &["database_type", "type"]),
+                ("host", &["hostname", "server"]),
+                ("port", &["port"]),
+                ("database", &["database"]),
+                ("username", &["username"]),
+                ("password", &["password"]),
+                (
+                    "connection-string",
+                    &["connection_string", "connection string"],
+                ),
+            ],
+        ),
+        "110" => (
+            "server",
+            &[
+                ("url", &["url"]),
+                ("username", &["username"]),
+                ("password", &["password"]),
+                ("admin-console", &["admin_console_url", "admin console url"]),
+            ],
+        ),
+        "109" => (
+            "wifi",
+            &[
+                ("ssid", &["network_name", "network name"]),
+                (
+                    "password",
+                    &["wireless_password", "wireless network password"],
+                ),
+                ("security", &["wireless_security", "security"]),
+            ],
+        ),
+        "100" => (
+            "license",
+            &[
+                ("version", &["product_version", "version"]),
+                ("license-key", &["reg_code", "license key"]),
+                ("licensed-to", &["reg_name", "licensed to"]),
+                ("email", &["reg_email", "registered email"]),
+                ("order-number", &["order_number", "order number"]),
+                ("purchased", &["order_date", "purchase date"]),
+            ],
+        ),
+        "101" => (
+            "bank",
+            &[
+                ("bank", &["bankName", "bank name"]),
+                ("account-holder", &["owner", "name on account"]),
+                ("account-number", &["accountNo", "account number"]),
+                ("routing-number", &["routingNo", "routing number"]),
+                ("iban", &["iban"]),
+                ("swift", &["swift"]),
+                ("pin", &["telephonePin", "pin"]),
+            ],
+        ),
+        "106" => (
+            "passport",
+            &[
+                ("full-name", &["fullname", "full name"]),
+                ("number", &["number"]),
+                ("type", &["type"]),
+                ("issuing-country", &["issuing_country", "issuing country"]),
+                (
+                    "issuing-authority",
+                    &["issuing_authority", "issuing authority"],
+                ),
+                ("nationality", &["nationality"]),
+                ("sex", &["sex"]),
+                ("birthday", &["birthdate", "date of birth"]),
+                ("birthplace", &["birthplace", "place of birth"]),
+                ("issued", &["issue_date", "issued on"]),
+                ("expires", &["expiry_date", "expiry date"]),
+            ],
+        ),
+        "103" => (
+            "driver-license",
+            &[
+                ("full-name", &["fullname", "full name"]),
+                ("number", &["number"]),
+                ("class", &["class"]),
+                ("conditions", &["conditions"]),
+                ("state", &["state"]),
+                ("country", &["country"]),
+                ("address", &["address"]),
+                ("birthday", &["birthdate", "date of birth"]),
+                ("sex", &["sex"]),
+                ("height", &["height"]),
+                ("expires", &["expiry_date", "expiry date"]),
+            ],
+        ),
+        "105" => (
+            "membership",
+            &[
+                ("organization", &["org_name", "group"]),
+                ("member-name", &["member_name", "member name"]),
+                ("member-id", &["membership_no", "member id"]),
+                ("pin", &["pin"]),
+                ("url", &["website"]),
+                ("phone", &["phone", "telephone"]),
+                ("member-since", &["member_since", "member since"]),
+                ("expires", &["expiry_date", "expiry date"]),
+            ],
+        ),
+        "115" => (
+            "crypto",
+            &[
+                (
+                    "recovery-phrase",
+                    &["recoveryPhrase", "recovery phrase", "seed phrase"],
+                ),
+                ("password", &["password"]),
+                ("address", &["walletAddress", "wallet address", "address"]),
+            ],
+        ),
+        "108" => (
+            "id-document",
+            &[("full-name", &["name"]), ("number", &["number"])],
+        ),
+        _ => return None,
+    })
+}
+
+/// A category with a type of its own here: the fields its map names fill
+/// the known fields (a value that doesn't fit stays as an extra field, with
+/// a warning), the rest stay as extra fields. `None`, counting nothing, if
+/// a required field has no value (an API credential without a credential),
+/// so it can be kept as a secure note instead.
+fn typed(
+    item: &Value,
+    (kind, map): (&'static str, FieldMap),
+    files: Files,
+    summary: &mut Summary,
+) -> Option<Imported> {
+    let details = item.get("details").unwrap_or(&Value::Null);
+    let overview = item.get("overview").unwrap_or(&Value::Null);
+    let mut entries = Entries::new(details);
+    let mut b = Builder::new(kind);
+    let mut warnings = Summary::new(ImportSource::OnePassword);
+    for (field, names) in map {
+        let value = entries.take(|e| names.iter().any(|n| e.is(n)));
+        let value = match b.kind(field) {
+            FieldType::Url => value.map(with_scheme),
+            _ if *field == "phone" => value.map(|v| deadbolt_core::item::phone(&v).unwrap_or(v)),
+            _ => value,
+        };
+        b.known_or_extra(field, value, BAD_VALUE, &mut warnings);
+    }
+    if !b.has_required() {
+        return None;
+    }
+    summary.merge(warnings);
+    b.known("notes", text(details, "notesPlain"));
+    b.urls(urls(overview), summary);
+    entries.extras(&mut b, files, summary);
+    b.finish(kind, item_name(text(overview, "title")), summary)
+}
+
+/// A document: its file, from the export's `files/`, and its notes. One
+/// whose file didn't come (too large, or missing) is skipped and counted.
+fn document(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
+    let details = item.get("details").unwrap_or(&Value::Null);
+    let overview = item.get("overview").unwrap_or(&Value::Null);
+    let mut budget = deadbolt_core::item::MAX_FILE;
+    let file = details
+        .get("documentAttributes")
+        .map_or(Err(Missing::Gone), |a| {
+            Attachment::new(String::new(), a).value(files, &mut budget)
+        });
+    let mut b = Builder::new("document");
+    let reason = match &file {
+        Err(Missing::TooLarge) => BIG_FILE,
+        _ => MISSING_FILE,
+    };
+    if !b.known("file", file.ok()) || !b.has_required() {
+        summary.skip(reason);
+        return None;
+    }
+    b.known("notes", text(details, "notesPlain"));
+    b.urls(urls(overview), summary);
+    Entries::new(details).extras(&mut b, files, summary);
+    b.finish("document", item_name(text(overview, "title")), summary)
 }
 
 /// The `sshKey` value's metadata: the public key and fingerprint.
@@ -339,7 +655,7 @@ fn ssh_metadata(details: &Value) -> &Value {
         .unwrap_or(&Value::Null)
 }
 
-fn ssh(item: &Value, summary: &mut Summary) -> Option<Imported> {
+fn ssh(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut entries = Entries::new(details);
@@ -364,7 +680,7 @@ fn ssh(item: &Value, summary: &mut Summary) -> Option<Imported> {
     b.known("comment", comment);
     b.known("notes", text(details, "notesPlain"));
     b.urls(urls(overview), summary);
-    entries.extras(&mut b, summary);
+    entries.extras(&mut b, files, summary);
     b.finish("ssh", item_name(text(overview, "title")), summary)
 }
 
@@ -422,7 +738,7 @@ fn identity_address(details: &Value) -> Option<&Value> {
         .find_map(|field| field.get("value")?.get("address"))
 }
 
-fn identity(item: &Value, summary: &mut Summary) -> Option<Imported> {
+fn identity(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     let details = item.get("details").unwrap_or(&Value::Null);
     let overview = item.get("overview").unwrap_or(&Value::Null);
     let mut entries = Entries::new(details);
@@ -450,30 +766,32 @@ fn identity(item: &Value, summary: &mut Summary) -> Option<Imported> {
     }
     b.known("notes", text(details, "notesPlain"));
     b.urls(urls(overview), summary);
-    entries.extras(&mut b, summary);
+    entries.extras(&mut b, files, summary);
     b.finish("identity", item_name(text(overview, "title")), summary)
 }
 
 /// Maps one 1PUX item, or says why it is skipped. The `op` CLI's items are
 /// mapped through here too (see [`super::op`]), so both agree.
-pub(super) fn item(item: &Value, summary: &mut Summary) -> Option<Imported> {
+pub(super) fn item(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
     if text(item, "state").as_deref() == Some("archived") {
         summary.skip(ARCHIVED);
         return None;
     }
     let category = text(item, "categoryUuid").unwrap_or_default();
     let mapped = match category.as_str() {
-        "001" | "005" | "102" | "109" | "110" | "112" => login(item, summary),
-        "002" => card(item, summary),
-        "004" => identity(item, summary),
-        "114" => ssh(item, summary),
-        "003" | "100" | "101" | "103" | "104" | "105" | "106" | "107" | "108" | "111" | "113" => {
-            note(item, &category, summary)
-        }
-        other => {
-            summary.skip(skipped(other));
-            return None;
-        }
+        "001" | "005" => login(item, files, summary),
+        "002" => card(item, files, summary),
+        "004" => identity(item, files, summary),
+        "114" => ssh(item, files, summary),
+        "006" => document(item, files, summary),
+        "003" | "104" | "107" | "111" | "113" => note(item, files, summary),
+        other => match typed_kind(other) {
+            Some(kind) => typed(item, kind, files, summary).or_else(|| note(item, files, summary)),
+            None => {
+                summary.skip(UNKNOWN_TYPE);
+                return None;
+            }
+        },
     }?;
     let details = item.get("details").unwrap_or(&Value::Null);
     if number(item, "favIndex").is_some_and(|i| i > 0) {
@@ -512,7 +830,8 @@ pub fn source_key(id: &str) -> Option<(&str, &str, &str)> {
 
 /// Maps a 1PUX `export.data`. Each item records where it came from, so a
 /// later sync from 1Password takes it over rather than adding it again.
-pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
+pub fn export(export: &Value, files: &[ExportFile]) -> Result<(Vec<Imported>, Summary)> {
+    let files = Files(Some(files));
     let Some(accounts) = export.get("accounts").and_then(Value::as_array) else {
         bail!("not a 1Password export: no \"accounts\" list");
     };
@@ -529,7 +848,7 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
         for vault in array(account, "vaults") {
             let vault_id = vault.get("attrs").and_then(|a| text(a, "uuid"));
             for entry in array(vault, "items") {
-                let Some(mut mapped) = item(entry, &mut summary) else {
+                let Some(mut mapped) = item(entry, files, &mut summary) else {
                     continue;
                 };
                 let overview = entry.get("overview").unwrap_or(&Value::Null);
@@ -848,14 +1167,14 @@ pub(crate) mod tests {
                 ("login", "Garage door"),
                 ("note", "A note"),
                 ("card", "Visa"),
-                ("login", "Deploy API"),
+                ("api", "Deploy API"),
                 ("login", "No password"),
                 ("identity", "Me"),
                 ("ssh", "CI key"),
                 ("ssh", "Old key"),
-                ("note", "Editor"),
-                ("note", "Checking"),
-                ("note", "Passport"),
+                ("license", "Editor"),
+                ("bank", "Checking"),
+                ("passport", "Passport"),
             ]
         );
         let github = &items[0];
@@ -923,11 +1242,12 @@ pub(crate) mod tests {
                 ("valid-from", "month", "2022-04"),
             ]
         );
+        // An API credential is a type of its own.
         assert_eq!(
             fields(&items[4]),
             [
-                ("hostname", "text", "api.example.com"),
-                ("password", "secret", "op-api-key"),
+                ("credential", "secret", "op-api-key"),
+                ("host", "text", "api.example.com"),
                 ("username", "text", "deploy-bot"),
             ]
         );
@@ -979,23 +1299,24 @@ pub(crate) mod tests {
                 ("public-key", "text", "ssh-rsa AAAAB3 old"),
             ]
         );
-        // Other categories are notes that keep every field.
+        // Licenses, bank accounts and passports have types of their own; a
+        // field their type doesn't know stays an extra field. License keys,
+        // ID and account numbers are secret, though 1Password exports them
+        // as plain strings.
         assert_eq!(
             fields(&items[9]),
             [
-                ("license-key", "text", "ABCD-1234"),
-                ("notes", "secret", "bought 2024"),
+                ("license-key", "secret", "ABCD-1234"),
+                ("notes", "note", "bought 2024"),
                 ("password", "secret", "op-license-pw"),
                 ("version", "text", "5"),
             ]
         );
-        // ID and account numbers are secret, though 1Password exports them
-        // as plain strings.
         assert_eq!(
             fields(&items[10]),
             [
                 ("account-number", "secret", "op-account-12345678"),
-                ("bank-name", "text", "Example Bank"),
+                ("bank", "text", "Example Bank"),
                 ("iban", "secret", "op-iban-DE00"),
                 ("pin", "secret", "op-phone-pin"),
             ]
@@ -1010,14 +1331,293 @@ pub(crate) mod tests {
         assert_eq!(
             lines(&report),
             [
-                "imported 12 from 1Password (logins 4, cards 1, secure notes 4, SSH keys 2, identities 1)",
+                "imported 12 from 1Password (logins 3, cards 1, secure notes 1, SSH keys 2, identities 1, API credentials 1, software licenses 1, bank accounts 1, passports 1)",
                 "skipped 1 SSH key without a private key",
                 "skipped 1 archived item",
-                "skipped 1 document",
+                "skipped 1 document whose file is missing from the export",
                 "skipped 1 item of unknown type",
                 "warning: 1 invalid email address kept as text",
-                "dropped: 1 attachment, 2 favorites, 1 item's password history, 1 linked field, 3 tags",
+                "dropped: 1 attachment missing from the export, 2 favorites, 1 item's password history, 1 linked field, 3 tags",
             ]
+        );
+    }
+
+    /// One item of each 1Password category, as `export.data` has them.
+    const CATEGORIES: &str = r#"{"accounts": [{"attrs": {"uuid": "USER"}, "vaults": [{"attrs": {"uuid": "v1"}, "items": [
+      {"uuid": "c001", "categoryUuid": "001", "overview": {"title": "Site", "url": "https://site.example"},
+       "details": {"loginFields": [{"value": "pw", "fieldType": "P", "designation": "password"}],
+         "sections": [{"title": "", "fields": [
+           {"title": "", "id": "f1", "value": {"file": {"fileName": "recovery codes.txt", "documentId": "doc1", "decryptedSize": 5}}},
+           {"title": "contract", "id": "f2", "value": {"file": {"fileName": "big.bin", "documentId": "doc9", "decryptedSize": 99}}}]}]}},
+      {"uuid": "c002", "categoryUuid": "002", "overview": {"title": "Visa"},
+       "details": {"sections": [{"fields": [{"id": "ccnum", "value": {"creditCardNumber": "4242424242424242"}}]}]}},
+      {"uuid": "c003", "categoryUuid": "003", "overview": {"title": "Note"}, "details": {"notesPlain": "body"}},
+      {"uuid": "c004", "categoryUuid": "004", "overview": {"title": "Me"},
+       "details": {"sections": [{"fields": [{"id": "firstname", "value": {"string": "Dax"}}]}]}},
+      {"uuid": "c005", "categoryUuid": "005", "overview": {"title": "Door"}, "details": {"password": "door-pw"}},
+      {"uuid": "c006", "categoryUuid": "006", "overview": {"title": "Scan"},
+       "details": {"notesPlain": "front page", "documentAttributes": {"fileName": "scan.pdf", "documentId": "doc2", "decryptedSize": 4}}},
+      {"uuid": "c100", "categoryUuid": "100", "overview": {"title": "Editor"},
+       "details": {"sections": [{"fields": [
+         {"id": "reg_code", "value": {"string": "KEY-1"}}, {"id": "reg_name", "value": {"string": "Dax"}},
+         {"id": "order_date", "value": {"date": 1704067200}}]}]}},
+      {"uuid": "c101", "categoryUuid": "101", "overview": {"title": "Checking"},
+       "details": {"sections": [{"fields": [
+         {"id": "bankName", "value": {"string": "Example Bank"}}, {"id": "accountNo", "value": {"string": "12345678"}},
+         {"id": "routingNo", "value": {"string": "021000021"}}]}]}},
+      {"uuid": "c102", "categoryUuid": "102", "overview": {"title": "Prod DB"},
+       "details": {"sections": [{"fields": [
+         {"id": "database_type", "value": {"menu": "postgresql"}}, {"id": "hostname", "value": {"string": "db.example"}},
+         {"id": "port", "value": {"string": "5432"}}, {"id": "database", "value": {"string": "app"}},
+         {"id": "username", "value": {"string": "app"}}, {"id": "password", "value": {"concealed": "db-pw"}},
+         {"id": "sid", "value": {"string": "ORCL"}}]}]}},
+      {"uuid": "c103", "categoryUuid": "103", "overview": {"title": "License"},
+       "details": {"sections": [{"fields": [
+         {"id": "fullname", "value": {"string": "Dax Raad"}}, {"id": "number", "value": {"string": "D123"}},
+         {"id": "state", "value": {"string": "IL"}}, {"id": "expiry_date", "value": {"monthYear": 203006}}]}]}},
+      {"uuid": "c104", "categoryUuid": "104", "overview": {"title": "Fishing"},
+       "details": {"sections": [{"fields": [{"id": "name", "value": {"string": "Dax"}}]}]}},
+      {"uuid": "c105", "categoryUuid": "105", "overview": {"title": "Gym"},
+       "details": {"sections": [{"fields": [
+         {"id": "org_name", "value": {"string": "Gym Co"}}, {"id": "membership_no", "value": {"string": "M-77"}},
+         {"id": "member_since", "value": {"monthYear": 202001}}, {"id": "phone", "value": {"phone": "+1 555 0100"}}]}]}},
+      {"uuid": "c106", "categoryUuid": "106", "overview": {"title": "Passport"},
+       "details": {"sections": [{"fields": [
+         {"id": "number", "value": {"string": "X123"}}, {"id": "issuing_country", "value": {"string": "United States"}},
+         {"id": "expiry_date", "value": {"date": 1893456000}}]}]}},
+      {"uuid": "c107", "categoryUuid": "107", "overview": {"title": "Miles"},
+       "details": {"sections": [{"fields": [{"id": "membership_no", "value": {"string": "R-1"}}]}]}},
+      {"uuid": "c108", "categoryUuid": "108", "overview": {"title": "SSN"},
+       "details": {"sections": [{"fields": [
+         {"id": "name", "value": {"string": "Dax Raad"}}, {"id": "number", "value": {"concealed": "078-05-1120"}}]}]}},
+      {"uuid": "c109", "categoryUuid": "109", "overview": {"title": "Home Wi-Fi"},
+       "details": {"sections": [{"fields": [
+         {"id": "network_name", "value": {"string": "Home"}}, {"id": "wireless_password", "value": {"concealed": "wifi-pw"}},
+         {"id": "wireless_security", "value": {"menu": "wpa2p"}}, {"id": "password", "value": {"concealed": "router-pw"}}]}]}},
+      {"uuid": "c110", "categoryUuid": "110", "overview": {"title": "Box"},
+       "details": {"sections": [{"fields": [
+         {"id": "url", "value": {"string": "box.example"}}, {"id": "username", "value": {"string": "root"}},
+         {"id": "password", "value": {"concealed": "root-pw"}}]}]}},
+      {"uuid": "c111", "categoryUuid": "111", "overview": {"title": "Mail"},
+       "details": {"sections": [{"fields": [{"id": "pop_username", "value": {"string": "dax"}}]}]}},
+      {"uuid": "c112", "categoryUuid": "112", "overview": {"title": "Stripe"},
+       "details": {"sections": [{"fields": [
+         {"id": "credential", "value": {"concealed": "sk_live_1"}}, {"id": "type", "value": {"menu": "bearer"}},
+         {"id": "expires", "value": {"date": 1893456000}}]}]}},
+      {"uuid": "c112b", "categoryUuid": "112", "overview": {"title": "Half API"},
+       "details": {"sections": [{"fields": [{"id": "username", "value": {"string": "bot"}}]}]}},
+      {"uuid": "c113", "categoryUuid": "113", "overview": {"title": "Doctor"},
+       "details": {"sections": [{"fields": [{"id": "healthcareprofessional", "value": {"string": "Dr. Who"}}]}]}},
+      {"uuid": "c114", "categoryUuid": "114", "overview": {"title": "Key"},
+       "details": {"sections": [{"fields": [{"id": "private_key", "value": {"sshKey": {"privateKey": "-----BEGIN-----"}}}]}]}},
+      {"uuid": "c115", "categoryUuid": "115", "overview": {"title": "Wallet"},
+       "details": {"sections": [{"fields": [
+         {"title": "Recovery Phrase", "id": "x1", "value": {"concealed": "abandon ability able"}},
+         {"title": "Wallet Address", "id": "x2", "value": {"string": "bc1qxy"}}]}]}},
+      {"uuid": "c006b", "categoryUuid": "006", "overview": {"title": "Missing"},
+       "details": {"documentAttributes": {"fileName": "gone.pdf", "documentId": "doc404"}}}
+    ]}]}]}"#;
+
+    #[test]
+    fn maps_every_category_and_its_files() {
+        let files = [
+            ExportFile {
+                name: "doc1__recovery codes.txt".into(),
+                data: "Y29kZXM=".into(),
+                too_large: false,
+            },
+            ExportFile {
+                name: "doc2__scan.pdf".into(),
+                data: "JVBERg==".into(),
+                too_large: false,
+            },
+            // Left out by the client as over the cap.
+            ExportFile {
+                name: "doc9__big.bin".into(),
+                data: String::new(),
+                too_large: true,
+            },
+        ];
+        let (items, report) = crate::import::parse_with(CATEGORIES, &files).unwrap();
+        let kinds: Vec<(&str, &str)> = items
+            .iter()
+            .map(|i| (i.name.as_deref().unwrap(), i.kind))
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                ("Site", "login"),
+                ("Visa", "card"),
+                ("Note", "note"),
+                ("Me", "identity"),
+                ("Door", "login"),
+                ("Scan", "document"),
+                ("Editor", "license"),
+                ("Checking", "bank"),
+                ("Prod DB", "database"),
+                ("License", "driver-license"),
+                ("Fishing", "note"),
+                ("Gym", "membership"),
+                ("Passport", "passport"),
+                ("Miles", "note"),
+                ("SSN", "id-document"),
+                ("Home Wi-Fi", "wifi"),
+                ("Box", "server"),
+                ("Mail", "note"),
+                ("Stripe", "api"),
+                ("Half API", "note"),
+                ("Doctor", "note"),
+                ("Key", "ssh"),
+                ("Wallet", "crypto"),
+            ]
+        );
+        let by = |name: &str| {
+            items
+                .iter()
+                .find(|i| i.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        // An attachment is a file field, named by its file; one that didn't
+        // come is dropped and counted.
+        assert_eq!(
+            fields(by("Site")),
+            [
+                ("password", "secret", "pw"),
+                ("recovery-codes", "file", "recovery codes.txt\nY29kZXM="),
+                ("url", "url", "https://site.example"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Scan")),
+            [
+                ("file", "file", "scan.pdf\nJVBERg=="),
+                ("notes", "note", "front page"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Editor")),
+            [
+                ("license-key", "secret", "KEY-1"),
+                ("licensed-to", "text", "Dax"),
+                ("purchased", "date", "2024-01-01"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Checking")),
+            [
+                ("account-number", "secret", "12345678"),
+                ("bank", "text", "Example Bank"),
+                ("routing-number", "text", "021000021"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Prod DB")),
+            [
+                ("database", "text", "app"),
+                ("host", "text", "db.example"),
+                ("password", "secret", "db-pw"),
+                ("port", "text", "5432"),
+                ("sid", "text", "ORCL"),
+                ("type", "text", "postgresql"),
+                ("username", "text", "app"),
+            ]
+        );
+        assert_eq!(
+            fields(by("License")),
+            [
+                ("expires", "month", "2030-06"),
+                ("full-name", "text", "Dax Raad"),
+                ("number", "secret", "D123"),
+                ("state", "text", "IL"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Gym")),
+            [
+                ("member-id", "secret", "M-77"),
+                ("member-since", "month", "2020-01"),
+                ("organization", "text", "Gym Co"),
+                ("phone", "text", "+15550100"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Passport")),
+            [
+                ("expires", "date", "2030-01-01"),
+                ("issuing-country", "text", "United States"),
+                ("number", "secret", "X123"),
+            ]
+        );
+        assert_eq!(
+            fields(by("SSN")),
+            [
+                ("full-name", "text", "Dax Raad"),
+                ("number", "secret", "078-05-1120"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Home Wi-Fi")),
+            [
+                ("password", "secret", "wifi-pw"),
+                ("password-2", "secret", "router-pw"),
+                ("security", "text", "wpa2p"),
+                ("ssid", "text", "Home"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Box")),
+            [
+                ("password", "secret", "root-pw"),
+                ("url", "url", "https://box.example"),
+                ("username", "text", "root"),
+            ]
+        );
+        assert_eq!(
+            fields(by("Stripe")),
+            [
+                ("credential", "secret", "sk_live_1"),
+                ("expires", "date", "2030-01-01"),
+                ("type", "text", "bearer"),
+            ]
+        );
+        // Without a credential, an API credential is kept as a note.
+        assert_eq!(fields(by("Half API")), [("username", "text", "bot")]);
+        assert_eq!(
+            fields(by("Wallet")),
+            [
+                ("address", "text", "bc1qxy"),
+                ("recovery-phrase", "secret", "abandon ability able"),
+            ]
+        );
+        assert_eq!(
+            lines(&report)[1..],
+            [
+                "skipped 1 document whose file is missing from the export",
+                "dropped: 1 attachment over the 10 MiB an item's files hold",
+            ]
+        );
+    }
+
+    /// An item's files hold at most `MAX_FILE` bytes in all: past that,
+    /// attachments are dropped, so its create fits in one entry.
+    #[test]
+    fn an_items_files_fit_in_one_entry() {
+        let data = data_encoding::BASE64.encode(&vec![7; 6 * 1024 * 1024]);
+        let export = r#"{"accounts": [{"vaults": [{"items": [{"categoryUuid": "003", "overview": {"title": "Big"},
+            "details": {"sections": [{"fields": [
+              {"id": "a", "value": {"file": {"fileName": "a.bin", "documentId": "da"}}},
+              {"id": "b", "value": {"file": {"fileName": "b.bin", "documentId": "db"}}}]}]}}]}]}]}"#;
+        let files = ["da__a.bin", "db__b.bin"].map(|name| ExportFile {
+            name: name.into(),
+            data: data.clone(),
+            too_large: false,
+        });
+        let (items, report) = crate::import::parse_with(export, &files).unwrap();
+        let names: Vec<&str> = items[0].fields.keys().map(String::as_str).collect();
+        assert_eq!(names, ["a"]);
+        assert_eq!(
+            lines(&report)[1..],
+            ["dropped: 1 attachment over the 10 MiB an item's files hold"]
         );
     }
 

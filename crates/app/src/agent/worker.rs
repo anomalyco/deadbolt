@@ -306,6 +306,9 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 result: item(paths, command).await,
             }
         }
+        Job::SaveFile { id, field, path } => {
+            Done::FileSaved(save_file(paths, id, &field, &path).await)
+        }
         Job::Remove { id, seq } => {
             let command = Command::ItemRemove {
                 vault: None,
@@ -385,6 +388,7 @@ async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
         vault: None,
         query: vec![id.clone()],
         otp: false,
+        files: Vec::new(),
     };
     let got = item(paths, command).await?;
     if code_field(&got.fields).is_some() {
@@ -392,6 +396,32 @@ async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
     } else {
         Ok(Values::new(got))
     }
+}
+
+/// Writes the item's file field `field` to `path`, and says its name.
+async fn save_file(paths: &Paths, id: String, field: &str, path: &Path) -> Result<String, Failure> {
+    let command = Command::ItemGet {
+        vault: None,
+        query: vec![id],
+        otp: false,
+        files: vec![field.to_owned()],
+    };
+    let mut got = item(paths, command).await?;
+    let file = got
+        .fields
+        .iter()
+        .find(|f| f.name == field && f.kind == "file")
+        .ok_or_else(|| Failure {
+            code: None,
+            message: format!("{} has no file {field}", got.label),
+        })?;
+    let written = deadbolt_client::file::write(&file.value, path).map_err(|e| Failure {
+        code: None,
+        message: crate::agent::error_chain(&e),
+    });
+    let name = deadbolt_client::file::name(&file.value).to_owned();
+    crate::model::forget(&mut got);
+    written.map(|()| name)
 }
 
 /// A write or read that replies with `Reply::Item`.
@@ -413,12 +443,13 @@ async fn import(
     applied: &mut bool,
 ) -> Result<Imported, ImportFailure> {
     let export = export::read(path)?;
-    let digest = blake3::hash(export.as_bytes());
+    let digest = export.digest();
     let changed = apply.is_some_and(|previewed| previewed != digest);
     *applied = apply.is_some() && !changed;
     let command = Command::Import {
         vault: None,
-        export,
+        export: export.text,
+        files: export.files,
         apply: *applied,
     };
     let report = call(paths, command, |r| match r {

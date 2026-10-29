@@ -87,10 +87,48 @@ impl App {
                     });
                     return;
                 };
+                // A file isn't copied but saved, through a dialog.
+                if info.kind == "file" {
+                    let field = field.to_owned();
+                    self.save_file(&field, tx);
+                    return;
+                }
                 (field.to_owned(), info.value.clone())
             }
         };
         self.put_on_clipboard(field, value, tx);
+    }
+
+    /// Saves the shown item's file field `field` where a Save dialog says:
+    /// the agent sends its contents and the worker writes them, readable
+    /// only by the owner (`Job::SaveFile`), and Activity hears of it as a
+    /// reveal. The quick panel saves nothing: it hides on the dialog.
+    pub fn save_file(&mut self, field: &str, tx: &mut Tx) {
+        if self.panel.is_some() {
+            self.notice = Some("Save files from Deadbolt's main window".into());
+            return;
+        }
+        let Some(item) = &self.detail else { return };
+        let Some(info) = item
+            .fields
+            .iter()
+            .find(|f| f.name == field && f.kind == "file")
+        else {
+            return;
+        };
+        let options = rune::FileDialogOptions {
+            title: "Save File".into(),
+            file_name: Some(deadbolt_client::file::name(&info.value).to_owned()),
+            ..rune::FileDialogOptions::default()
+        };
+        let (id, title, field) = (item.id.clone(), item.label.clone(), field.to_owned());
+        tx.save_file(options, move |s: &mut App, result, _| {
+            if let Ok(Some(path)) = result {
+                s.report_item(AppAction::Reveal, &id, &title, &field);
+                s.agent
+                    .send(crate::agent::Job::SaveFile { id, field, path });
+            }
+        });
     }
 
     /// Copies `value`, the shown item's `field`, and starts its countdown.

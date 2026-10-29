@@ -14,7 +14,10 @@ use serde_json::{Map, Value, json};
 
 use deadbolt_core::Source;
 
-use super::{Imported, MirrorVersion, Origin, PASSKEYS, Summary, onepassword, text};
+use super::{Imported, MirrorVersion, Origin, PASSKEYS, Reason, Summary, onepassword, text};
+
+/// Why a document isn't mirrored: `op` lists it without its file.
+const DOCUMENT: Reason = ("document", "documents");
 use crate::protocol::{ImportReport, ImportSource};
 
 /// The 1PUX `categoryUuid` of an `op` category.
@@ -41,6 +44,7 @@ pub fn category(name: &str) -> Option<&'static str> {
         "API_CREDENTIAL" => "112",
         "MEDICAL_RECORD" => "113",
         "SSH_KEY" => "114",
+        "CRYPTO_WALLET" => "115",
         _ => return None,
     })
 }
@@ -128,7 +132,17 @@ impl Mapping {
             return Err("item without an id");
         };
         let mut summary = Summary::new(ImportSource::OnePassword);
-        let mapped = onepassword::item(&to_1pux(item, &mut summary), &mut summary);
+        // `op` gives a document without its file, which a sync doesn't fetch.
+        if text(item, "category").as_deref() == Some("DOCUMENT") {
+            summary.skip(DOCUMENT);
+            self.summary.merge(summary);
+            return Err(DOCUMENT.0);
+        }
+        let mapped = onepassword::item(
+            &to_1pux(item, &mut summary),
+            onepassword::Files::NONE,
+            &mut summary,
+        );
         let reason = summary.skip_reason();
         self.summary.merge(summary);
         let item = mapped.ok_or(reason.unwrap_or("item that could not be imported"))?;
@@ -467,10 +481,12 @@ pub(crate) mod tests {
     fn categories_match_the_export_codes() {
         assert_eq!(category("LOGIN"), Some("001"));
         assert_eq!(category("SSH_KEY"), Some("114"));
-        assert_eq!(category("CRYPTO_WALLET"), None);
+        assert_eq!(category("CRYPTO_WALLET"), Some("115"));
+        assert_eq!(category("FUTURE_THING"), None);
         assert!(mirrored("API_CREDENTIAL"));
         assert!(!mirrored("DOCUMENT"));
-        assert!(!mirrored("CRYPTO_WALLET"));
+        assert!(mirrored("CRYPTO_WALLET"));
+        assert!(!mirrored("FUTURE_THING"));
     }
 
     #[test]

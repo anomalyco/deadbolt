@@ -4,8 +4,13 @@
 //! of the item's name, URL host, a login's username, a card's cardholder,
 //! brand field or last four digits, an SSH key's comment, an identity's
 //! name parts, organization, email or phone, or a passkey's relying party
-//! or username; a word of 4+ hex digits also matches an id prefix. Secret values (a secure note's body
-//! among them) and the derived label are never searched.
+//! or username, and the other types' plain identifying fields (see
+//! `searchable`); a word of 4+ hex digits also matches an id prefix. Secret
+//! values (a secure note's body among them) and the derived label are never
+//! searched.
+//!
+//! A file field's contents leave only when asked for (`get` with `files`):
+//! otherwise it comes back as its file name alone.
 //!
 //! A passkey's private key never leaves the agent: items come back without
 //! it (see `passkeys`).
@@ -74,6 +79,31 @@ pub fn label(item: &Item) -> String {
             .or_else(|| value(item, "email").map(str::to_string))
             .unwrap_or_else(|| "identity".into()),
         "passkey" => value(item, "rp-id").unwrap_or("passkey").into(),
+        "api" => value(item, "url")
+            .map(host)
+            .filter(|h| !h.is_empty())
+            .or_else(|| value(item, "host").map(str::to_string))
+            .unwrap_or_else(|| "API credential".into()),
+        "database" => match (value(item, "database"), value(item, "host")) {
+            (Some(db), Some(host)) => format!("{db} on {host}"),
+            (db, host) => db.or(host).unwrap_or("database").into(),
+        },
+        "server" => value(item, "url")
+            .map(host)
+            .filter(|h| !h.is_empty())
+            .unwrap_or_else(|| "server".into()),
+        "wifi" => value(item, "ssid").unwrap_or("Wi-Fi network").into(),
+        "license" => value(item, "product").unwrap_or("software license").into(),
+        "bank" => value(item, "bank").unwrap_or("bank account").into(),
+        "document" => value(item, "file")
+            .map(|f| deadbolt_core::item::file_parts(f).0)
+            .unwrap_or("document")
+            .into(),
+        "passport" | "driver-license" | "id-document" => value(item, "full-name")
+            .map(str::to_string)
+            .unwrap_or_else(|| crate::protocol::noun(&item.kind, 1).into()),
+        "membership" => value(item, "organization").unwrap_or("membership").into(),
+        "crypto" => value(item, "network").unwrap_or("crypto wallet").into(),
         // A secure note's body is secret: never a label.
         kind => kind.into(),
     }
@@ -98,7 +128,9 @@ pub fn person(item: &Item) -> Option<String> {
 
 /// A login's username (else how it signs in: "Sign in with Google"), a
 /// card's expiry (`MM/YY`), an SSH key's comment or fingerprint, an
-/// identity's email, a passkey's username. A secure note has none.
+/// identity's email, a passkey's username, and for the other types the
+/// first plain field that tells one from another (an API credential's
+/// username or type, a database's username, ...). A secure note has none.
 fn detail(item: &Item) -> Option<String> {
     let first = |fields: &[&str]| {
         fields
@@ -115,8 +147,30 @@ fn detail(item: &Item) -> Option<String> {
             .map(|(year, month)| format!("{month}/{}", &year[year.len().saturating_sub(2)..])),
         "ssh" => first(&["comment", "fingerprint"]),
         "identity" => first(&["email", "phone"]),
-        "passkey" => first(&["username"]),
+        "passkey" | "server" => first(&["username"]),
+        "api" => first(&["username", "type", "environment"]),
+        "database" => first(&["username", "type"]),
+        "wifi" => first(&["security"]),
+        "license" => first(&["licensed-to", "version"]),
+        "bank" => first(&["account-holder"]),
+        "document" => value(item, "file")
+            .and_then(|f| deadbolt_core::item::file_parts(f).1)
+            .and_then(deadbolt_core::item::file_size)
+            .map(file_size),
+        "passport" | "id-document" => first(&["type", "issuing-country", "country"]),
+        "driver-license" => first(&["state", "country"]),
+        "membership" => first(&["member-name"]),
+        "crypto" => first(&["address"]),
         _ => None,
+    }
+}
+
+/// A file's size as people read it: "812 bytes", "1.2 MB".
+pub fn file_size(bytes: usize) -> String {
+    match bytes {
+        0..1_000 => format!("{bytes} bytes"),
+        1_000..1_000_000 => format!("{:.1} KB", bytes as f64 / 1e3),
+        _ => format!("{:.1} MB", bytes as f64 / 1e6),
     }
 }
 
@@ -138,6 +192,15 @@ fn searchable(item: &Item) -> Vec<String> {
             "name",
         ],
         "passkey" => &["rp-id", "username"],
+        "api" => &["username", "type", "host", "environment"],
+        "database" => &["type", "host", "database", "username"],
+        "server" => &["username"],
+        "wifi" => &["ssid"],
+        "license" => &["product", "licensed-to", "email"],
+        "bank" => &["bank", "account-holder"],
+        "passport" | "driver-license" | "id-document" => &["full-name", "type"],
+        "membership" => &["organization", "member-name"],
+        "crypto" => &["network", "address"],
         _ => &[],
     };
     texts.extend(
@@ -149,6 +212,13 @@ fn searchable(item: &Item) -> Vec<String> {
     if item.kind == "card" {
         texts.extend(last_four(item).map(str::to_string));
     }
+    // Every file's name, on any item.
+    texts.extend(
+        item.fields
+            .values()
+            .filter(|f| f.kind == FieldType::File)
+            .map(|f| deadbolt_core::item::file_parts(&f.value).0.to_string()),
+    );
     texts.into_iter().map(|t| t.to_lowercase()).collect()
 }
 
@@ -201,7 +271,8 @@ impl Listing {
     }
 
     /// The item, without field values unless `with_fields`, and without
-    /// one-time password secrets unless `with_otp` too.
+    /// one-time password secrets unless `with_otp` too. Files come as their
+    /// names alone.
     pub(super) fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
         let id = item.id.to_string();
         let mut fields = Vec::new();
@@ -226,6 +297,11 @@ impl Listing {
                     kind: item.fields[name].kind.to_string(),
                     value: match item.fields[name].kind {
                         FieldType::Otp if !with_otp => String::new(),
+                        FieldType::File => {
+                            deadbolt_core::item::file_parts(&item.fields[name].value)
+                                .0
+                                .to_string()
+                        }
                         _ => item.fields[name].value.clone(),
                     },
                 })
@@ -266,8 +342,8 @@ impl Listing {
 
 /// Normalizes common input forms: card numbers without spaces or dashes,
 /// `MM/YY` and `MM/YYYY` months, URLs without a scheme (https), an
-/// identity's international phone number in E.164 form and its country
-/// code in upper case.
+/// identity's or membership's international phone number in E.164 form and
+/// an identity's country code in upper case.
 fn normalize(kind: &str, name: &str, field: &FieldType, value: String) -> String {
     match (kind, name) {
         ("card", "number") => {
@@ -276,7 +352,9 @@ fn normalize(kind: &str, name: &str, field: &FieldType, value: String) -> String
                 .filter(|c| !c.is_whitespace() && *c != '-')
                 .collect();
         }
-        ("identity", "phone") => return deadbolt_core::item::phone(&value).unwrap_or(value),
+        ("identity" | "membership", "phone") => {
+            return deadbolt_core::item::phone(&value).unwrap_or(value);
+        }
         ("identity", "country") => {
             return deadbolt_core::item::country(&value).map_or(value, str::to_string);
         }
@@ -338,10 +416,28 @@ fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     Listing::new(vault).info(&item, false, false)
 }
 
-/// One item with its values; one-time password secrets only with `otp`.
-pub fn get(s: &Loaded, vault: Option<&str>, query: &[String], otp: bool) -> Result<ItemInfo> {
+/// One item with its values; one-time password secrets only with `otp`,
+/// and the contents only of the file fields `files` names.
+pub fn get(
+    s: &Loaded,
+    vault: Option<&str>,
+    query: &[String],
+    otp: bool,
+    files: &[String],
+) -> Result<ItemInfo> {
     let listing = Listing::new(s.vault(&s.resolve(vault)?));
-    Ok(listing.info(listing.find(query)?, true, otp))
+    let item = listing.find(query)?;
+    let mut info = listing.info(item, true, otp);
+    if !files.is_empty() {
+        let named = |f: &&mut FieldInfo| f.kind == "file" && files.contains(&f.name);
+        for field in info.fields.iter_mut().filter(named) {
+            if let Some(file) = item.fields.get(&field.name) {
+                field.value.zeroize();
+                field.value = file.value.clone();
+            }
+        }
+    }
+    Ok(info)
 }
 
 /// The current one-time code of the item's `otp` field, else of its first
@@ -504,7 +600,10 @@ fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Opti
         "ssh" => Some(Key::Ssh {
             private_key: value("private-key").trim().to_string(),
         }),
-        "note" | "identity" => Some(whole()),
+        "note" | "identity" | "api" | "database" | "server" | "wifi" | "license" | "bank"
+        | "document" | "passport" | "driver-license" | "membership" | "crypto" | "id-document" => {
+            Some(whole())
+        }
         _ => None,
     }
 }
@@ -825,7 +924,7 @@ mod tests {
         ];
         create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
         let values = |otp| {
-            let item = get(&s, None, &words("site"), otp).unwrap();
+            let item = get(&s, None, &words("site"), otp, &[]).unwrap();
             item.fields
                 .into_iter()
                 .map(|f| (f.name.clone(), f.value.clone()))
@@ -844,6 +943,55 @@ mod tests {
                 pair("backup", "KRSXG5CTMVRXEZLU")
             ]
         );
+    }
+
+    /// Asking for one file sends that file alone: an item with five files
+    /// near the item's cap between them still reads one at a time.
+    #[test]
+    fn a_get_carries_only_the_files_it_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let each = deadbolt_core::item::MAX_FILE / 5 - 1024;
+        let fields: Vec<FieldInput> = (0..5u8)
+            .map(|i| FieldInput {
+                name: format!("part-{i}"),
+                kind: Some("file".into()),
+                value: deadbolt_core::item::file_value(&format!("{i}.bin"), &vec![i; each])
+                    .to_string(),
+            })
+            .collect();
+        create(&mut s, None, "note", Some("Parts".into()), fields).unwrap();
+        // A sixth would take the item past the cap.
+        let sixth = FieldInput {
+            name: "part-5".into(),
+            kind: Some("file".into()),
+            value: deadbolt_core::item::file_value("5.bin", &vec![5; each]).to_string(),
+        };
+        let error = set(&mut s, None, &words("parts"), vec![sixth], None, &[]).unwrap_err();
+        assert!(
+            error.to_string().contains("at most 10 MiB together"),
+            "{error}"
+        );
+
+        let item = get(&s, None, &words("parts"), false, &["part-3".to_string()]).unwrap();
+        for field in &item.fields {
+            let (name, contents) = deadbolt_core::item::file_parts(&field.value);
+            if field.name == "part-3" {
+                let decoded = data_encoding::BASE64.decode(contents.unwrap().as_bytes());
+                assert_eq!(decoded.unwrap(), vec![3; each]);
+            } else {
+                assert_eq!(contents, None, "{}", field.name);
+                assert!(name.ends_with(".bin"));
+            }
+        }
+        let reply = serde_json::to_string(&item).unwrap();
+        assert!(
+            reply.len() < each * 4 / 3 + 4096,
+            "one file's worth: {}",
+            reply.len()
+        );
+        let none = get(&s, None, &words("parts"), false, &[]).unwrap();
+        assert!(none.fields.iter().all(|f| !f.value.contains('\n')));
     }
 
     #[test]
@@ -1069,7 +1217,7 @@ mod tests {
         let item = set(&mut s, None, &query, fields, name, &unset).unwrap();
         assert_eq!(s.vault(&vault).entries().len(), before + 1);
         assert_eq!(item.label, "GitHub");
-        let item = get(&s, None, &query, false).unwrap();
+        let item = get(&s, None, &query, false, &[]).unwrap();
         let fields: Vec<(&str, &str)> = item
             .fields
             .iter()
@@ -1126,7 +1274,7 @@ mod tests {
         );
         assert!(item.is_ok(), "{item:?}");
         assert_eq!(s.vault(&vault).entries().len(), before + 1);
-        let item = get(&s, None, &query, false).unwrap();
+        let item = get(&s, None, &query, false, &[]).unwrap();
         let names: Vec<&str> = item.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["password"]);
 

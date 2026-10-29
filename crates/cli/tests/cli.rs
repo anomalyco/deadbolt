@@ -718,6 +718,12 @@ fn whoami_and_activity_name_the_caller_never_values() {
 /// process tree, as from a person's own terminal: the tests may run under
 /// an AI host such as OpenCode, whom the agent refuses pairing and grants.
 fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, String) {
+    let (code, out, err) = detached_code(device, args, input);
+    (code == 0, out, err)
+}
+
+/// [`detached`], with the exit code.
+fn detached_code(device: &Device, args: &[&str], input: &str) -> (i32, String, String) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let n = RUNS.fetch_add(1, Ordering::SeqCst);
@@ -737,7 +743,7 @@ fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, Strin
     let read = |what| std::fs::read_to_string(file(what)).unwrap();
     let (out, err) = (read("out"), read("err"));
     eprintln!("$ (detached) {args:?}\n{out}{err}");
-    (read("code").trim() == "0", out, err)
+    (read("code").trim().parse().unwrap(), out, err)
 }
 
 /// One request to the agent, as an agent client sends it.
@@ -1005,6 +1011,358 @@ fn agents_sign_in_unattended_only_where_allowed() {
     assert_eq!(a.run(&["agents", "grants"]), "");
 }
 
+const CONCEALED: &str = "<concealed by deadbolt>";
+const TOKEN: &str = "ghp-secret-token-123";
+
+/// Runs deadbolt as an AI would: claiming an OpenCode session.
+fn as_ai(device: &Device, args: &[&str]) -> Output {
+    let mut cmd = device.cmd(args);
+    cmd.env("OPENCODE_SESSION_ID", "ses_test")
+        .env_remove("DEADBOLT_CALLER");
+    device.output(&mut cmd)
+}
+
+fn activity(device: &Device) -> Vec<serde_json::Value> {
+    device
+        .run(&["activity", "--json"])
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn run_inject_and_read_resolve_references() {
+    let a = Device::new();
+    a.run(&["init"]);
+    let github = new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            "password=hunter2-hunter2",
+        ],
+    );
+    new(&a, &["login", "--name", "Dup", "password=one-one-one"]);
+    new(&a, &["login", "--name", "Dup", "password=two-two-two"]);
+    let seen = a.path("seen");
+
+    // The command gets the value, its stdin and its exit code come through,
+    // and its output shows the value concealed, even split across writes
+    // (two writes, back to back: well inside the 100 ms after which held
+    // output goes out, however slow the machine).
+    let script = format!(
+        r#"printf %s "$TOKEN" >'{}'; echo "t=$TOKEN"; printf %s "$TOKEN" >&2; printf ghp-secret; printf '%s\n' -token-123; cat; exit 7"#,
+        seen.display()
+    );
+    let (code, out, err) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env",
+            "TOKEN=deadbolt://personal/GitHub/token",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ],
+        "from stdin",
+    );
+    assert_eq!(code, 7, "{err}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), TOKEN);
+    assert_eq!(out, format!("t={CONCEALED}\n{CONCEALED}\nfrom stdin"));
+    assert_eq!(err, CONCEALED);
+
+    // By short id, from an env file, unmasked on request; plain values pass.
+    let env_file = a.path("env.tpl");
+    std::fs::write(
+        &env_file,
+        format!("# for tests\nexport PW=\"deadbolt://{github}/password\"\nPLAIN=just text\n"),
+    )
+    .unwrap();
+    let (code, out, _) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env-file",
+            env_file.to_str().unwrap(),
+            "--no-mask",
+            "--",
+            "sh",
+            "-c",
+            r#"echo "$PW $PLAIN""#,
+        ],
+        "",
+    );
+    assert_eq!((code, out.as_str()), (0, "hunter2-hunter2 just text\n"));
+
+    // A title two items share is an error naming both; nothing runs.
+    let (code, _, err) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env",
+            "X=deadbolt://Dup/password",
+            "--",
+            "sh",
+            "-c",
+            "echo ran",
+        ],
+        "",
+    );
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("names 2 items") && !err.contains("one-one-one"),
+        "{err}"
+    );
+    // A value that isn't a reference is never echoed.
+    let (code, _, err) = detached_code(&a, &["run", "--env", "X=hunter2-pasted", "--", "true"], "");
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("--env X: the value isn't a deadbolt:// reference")
+            && !err.contains("hunter2"),
+        "{err}"
+    );
+    let (code, _, err) = detached_code(
+        &a,
+        &["run", "--env", "X=deadbolt://GitHub", "--", "true"],
+        "",
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("deadbolt://[vault/]item/field"), "{err}");
+
+    // inject writes 0600, and replaces only its own, unchanged output.
+    let template = a.path("config.tpl");
+    std::fs::write(
+        &template,
+        "token: {{ deadbolt://GitHub/token }}\nkeep: {{ other }}\n",
+    )
+    .unwrap();
+    let out_file = a.path("config.yml");
+    let inject = |extra: &[&str]| {
+        let mut args = vec![
+            "inject",
+            "-i",
+            template.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        detached_code(&a, &args, "")
+    };
+    std::fs::write(&out_file, "mine").unwrap();
+    let (code, _, err) = inject(&[]);
+    assert_ne!(code, 0);
+    assert!(err.contains("--force"), "{err}");
+    assert_eq!(std::fs::read_to_string(&out_file).unwrap(), "mine");
+    assert_eq!(inject(&["--force"]).0, 0);
+    let expected = format!("token: {TOKEN}\nkeep: {{{{ other }}}}\n");
+    assert_eq!(std::fs::read_to_string(&out_file).unwrap(), expected);
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&out_file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(inject(&[]).0, 0, "its own output is replaced");
+    std::fs::write(&out_file, "edited").unwrap();
+    assert_ne!(inject(&[]).0, 0, "an edited output is not");
+
+    // read prints one value.
+    let (code, out, _) = detached_code(&a, &["read", "deadbolt://personal/GitHub/token"], "");
+    assert_eq!((code, out), (0, format!("{TOKEN}\n")));
+
+    // Each resolve is an entry naming the item, field and purpose, never a
+    // value.
+    let raw = a.run(&["activity", "--json"]);
+    assert!(
+        !raw.contains(TOKEN) && !raw.contains("hunter2-hunter2"),
+        "{raw}"
+    );
+    let entries = activity(&a);
+    for (command, tier) in [
+        ("resolve-run", "use"),
+        ("resolve-inject", "use"),
+        ("resolve-read", "read"),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|e| {
+                e["command"] == command
+                    && e["outcome"] == "allowed"
+                    && e["fields"] == serde_json::json!(["token"])
+            })
+            .unwrap_or_else(|| panic!("no {command} in {raw}"));
+        assert_eq!(entry["tier"], tier);
+        assert_eq!(entry["items"][0]["title"], "GitHub");
+        assert!(
+            entry["items"][0]["id"]
+                .as_str()
+                .unwrap()
+                .starts_with(&github)
+        );
+    }
+}
+
+#[test]
+fn ai_agents_use_secrets_only_with_a_grant() {
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            "password=hunter2-hunter2",
+        ],
+    );
+    let template = a.path("t.tpl");
+    std::fs::write(&template, "{{ deadbolt://GitHub/token }}").unwrap();
+    let run_token = [
+        "run",
+        "--env",
+        "T=deadbolt://GitHub/token",
+        "--",
+        "sh",
+        "-c",
+        r#"echo "t=$T""#,
+    ];
+    let injected = a.path("t.out");
+    let inject = [
+        "inject",
+        "-i",
+        template.to_str().unwrap(),
+        "-o",
+        injected.to_str().unwrap(),
+    ];
+    // To stdout, the values reach the AI itself: that's a read.
+    let inject_stdout = ["inject", "-i", template.to_str().unwrap()];
+    let read = ["read", "deadbolt://GitHub/token"];
+    let refused = |out: &Output, says: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(4), "{err}");
+        assert!(err.contains(says), "{err}");
+        assert!(!err.contains(TOKEN) && out.stdout.is_empty(), "{err}");
+    };
+
+    // No grant: refused, saying what to allow.
+    refused(&as_ai(&a, &run_token), "deadbolt agents allow-secrets");
+    refused(&as_ai(&a, &inject), "--purpose inject");
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
+    refused(&as_ai(&a, &read), "Touch ID");
+
+    // An AI can't allow itself, passphrase or not.
+    let mut cmd = a.cmd(&["--passphrase-stdin", "agents", "allow-secrets", "GitHub"]);
+    cmd.env("OPENCODE_SESSION_ID", "ses_test");
+    let out = a.with_stdin(cmd, &format!("{PASSPHRASE}\n"));
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI can't"));
+
+    // The user allows the token for run.
+    let (ok, out, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow-secrets",
+            "github",
+            "--fields",
+            "token",
+            "--purpose",
+            "run",
+            "--expires",
+            "1h",
+        ],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(
+        ok && out.contains("AI agents\tpersonal › GitHub\ttoken\trun\texpires in"),
+        "{out}"
+    );
+    let ran = as_ai(&a, &run_token);
+    assert!(ran.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        format!("t={CONCEALED}\n")
+    );
+    // Still not another field, not inject, and never read without Touch ID.
+    refused(
+        &as_ai(
+            &a,
+            &["run", "--env", "P=deadbolt://GitHub/password", "--", "true"],
+        ),
+        "--fields password",
+    );
+    refused(&as_ai(&a, &inject), "--purpose inject");
+    refused(&as_ai(&a, &read), "Touch ID");
+
+    // Allowed inject too, it writes the file, but stdout is still a read.
+    let (ok, _, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow-secrets",
+            "GitHub",
+            "--fields",
+            "token",
+        ],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(ok);
+    assert!(as_ai(&a, &inject).status.success());
+    assert_eq!(std::fs::read_to_string(&injected).unwrap(), TOKEN);
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
+
+    // Revoking takes effect at once.
+    let grants = a.run(&["agents", "grants"]);
+    let id = grants
+        .lines()
+        .find(|l| l.contains("AI agents"))
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        a.run(&["agents", "revoke", &id]).trim(),
+        format!("revoked {id}")
+    );
+    refused(&as_ai(&a, &run_token), "allow-secrets");
+    assert_eq!(a.run(&["agents", "grants"]), "");
+
+    // Activity has each resolve, allowed or refused, with the AI's claim
+    // and never a value.
+    let raw = a.run(&["activity", "--json"]);
+    assert!(!raw.contains(TOKEN), "{raw}");
+    let runs: Vec<serde_json::Value> = activity(&a)
+        .into_iter()
+        .filter(|e| e["command"] == "resolve-run")
+        .collect();
+    assert_eq!(runs.len(), 4, "{raw}");
+    assert_eq!(runs.iter().filter(|e| e["outcome"] == "allowed").count(), 1);
+    assert!(
+        runs.iter()
+            .all(|e| e["caller"]["claimed"]["opencode_session"] == "ses_test")
+    );
+    let entries = activity(&a);
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["command"] == "secret-grant-set" && e["outcome"] == "allowed")
+    );
+    let reads: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| e["command"] == "resolve-read")
+        .collect();
+    assert_eq!(reads.len(), 4, "{raw}");
+    assert!(
+        reads
+            .iter()
+            .all(|e| e["outcome"] == "refused" && e["tier"] == "read")
+    );
+}
+
 #[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();
@@ -1252,7 +1610,10 @@ fn items() {
 
     // Schema rejection.
     for (args, error) in [
-        (&["new", "wifi", "password=x"][..], "unknown item type"),
+        (
+            &["new", "hovercraft", "password=x"][..],
+            "unknown item type",
+        ),
         (&["new", "note"], "needs a name or a field"),
         (&["new", "card", "cvv=123"], "missing required field number"),
         (
@@ -3474,6 +3835,18 @@ const FORMS_1PUX: &str = r#"{"accounts": [{"attrs": {"uuid": "USERUSERUSERUSERUS
      "overview": {"title": "Visa"}}
   ]}]}]}"#;
 
+/// Whether a string in `value` is `FORMS_1PUX`'s card number or CVV. Ids,
+/// refs, pids and times are full of digits, so a substring of the whole
+/// text could match by chance: only a whole value counts.
+fn holds_card_values(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s == "737" || s.contains("4242424242"),
+        serde_json::Value::Array(values) => values.iter().any(holds_card_values),
+        serde_json::Value::Object(map) => map.values().any(holds_card_values),
+        _ => false,
+    }
+}
+
 /// A `.1pux` import makes a structured identity and a card; the browser
 /// host lists them without values, fills only the fields asked, and
 /// Activity records the card fill but not the identity's.
@@ -3529,12 +3902,7 @@ fn forms_fill_from_an_imported_identity_and_card() {
         (&card["brand"], &card["last4"], &card["expiry"]),
         (&"Visa".into(), &"4242".into(), &"2028-08".into())
     );
-    // Refs are hex, so digits could appear by chance: look for the values.
-    let listed = forms.to_string();
-    assert!(
-        !listed.contains("\"737\"") && !listed.contains("4242424242"),
-        "{listed}"
-    );
+    assert!(!holds_card_values(&forms), "{forms}");
 
     let fill = |host: &mut Host, item: &serde_json::Value, fields: &[&str]| {
         host.ask(serde_json::json!({
@@ -3565,10 +3933,10 @@ fn forms_fill_from_an_imported_identity_and_card() {
     host.close();
 
     let activity = a.run(&["activity", "--since", "1h", "--json"]);
-    assert!(
-        !activity.contains("4242424242") && !activity.contains("737"),
-        "{activity}"
-    );
+    for line in activity.lines() {
+        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(!holds_card_values(&entry), "{line}");
+    }
     let entries: Vec<serde_json::Value> = activity
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
@@ -3592,4 +3960,358 @@ fn forms_fill_from_an_imported_identity_and_card() {
     let looked_up = entries.iter().any(|e| e["command"] == "form-items");
     assert_eq!((identity, looked_up), (!browser, !browser), "{entries:?}");
     assert_eq!(entries.len(), if browser { 1 } else { 3 });
+}
+
+/// Every item type: its fields checked by its schema, `get` printing the
+/// field it's for, `ls` naming it.
+#[test]
+fn item_types() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let cases: [(&[&str], &str, &str); 12] = [
+        (
+            &[
+                "api",
+                "credential=sk_test_1",
+                "username=deploy-bot",
+                "type=bearer",
+                "--name",
+                "Stripe",
+            ],
+            "sk_test_1",
+            "Stripe\tdeploy-bot",
+        ),
+        (
+            &[
+                "database",
+                "type=postgres",
+                "host=db.example",
+                "port=5432",
+                "database=app",
+                "username=app",
+                "password=pg-pw",
+            ],
+            "pg-pw",
+            "app on db.example\tapp",
+        ),
+        (
+            &[
+                "server",
+                "url=box.example",
+                "username=root",
+                "password=root-pw",
+            ],
+            "root-pw",
+            "box.example\troot",
+        ),
+        (
+            &["wifi", "ssid=Home", "password=wifi-pw", "security=WPA2"],
+            "wifi-pw",
+            "Home\tWPA2",
+        ),
+        (
+            &[
+                "license",
+                "product=Editor",
+                "license-key=KEY-1",
+                "licensed-to=Dax",
+            ],
+            "KEY-1",
+            "Editor\tDax",
+        ),
+        (
+            &[
+                "bank",
+                "bank=Example Bank",
+                "account-number=12345678",
+                "account-holder=Dax",
+            ],
+            "12345678",
+            "Example Bank\tDax",
+        ),
+        (
+            &[
+                "passport",
+                "full-name=Dax Raad",
+                "number=X123",
+                "issuing-country=United States",
+            ],
+            "X123",
+            "Dax Raad\tUnited States",
+        ),
+        (
+            &[
+                "driver-license",
+                "number=D123",
+                "state=IL",
+                "expires=06/30",
+                "--name",
+                "Driving",
+            ],
+            "D123",
+            "Driving\tIL",
+        ),
+        (
+            &[
+                "membership",
+                "organization=Gym Co",
+                "member-id=M-7",
+                "phone=+1 555 0100",
+            ],
+            "M-7",
+            "Gym Co",
+        ),
+        (
+            &[
+                "crypto",
+                "recovery-phrase=abandon ability able",
+                "address=bc1qxy",
+            ],
+            "abandon ability able",
+            "crypto wallet\tbc1qxy",
+        ),
+        (
+            &[
+                "id-document",
+                "type=SSN",
+                "number=078-05-1120",
+                "full-name=Kit",
+            ],
+            "078-05-1120",
+            "Kit\tSSN",
+        ),
+        (
+            &["note", "notes=alarm 4417", "--name", "Codes"],
+            "alarm 4417",
+            "Codes",
+        ),
+    ];
+    for (args, primary, listed) in cases {
+        let id = new(&a, args);
+        assert_eq!(a.run(&["get", &id]), format!("{primary}\n"), "{args:?}");
+        let ls = a.run(&["ls", "--type", args[0]]);
+        let row = ls
+            .lines()
+            .map(|l| l.split_once('\t').unwrap().1)
+            .collect::<Vec<_>>();
+        assert_eq!(row, [listed], "{args:?}");
+    }
+    // Inputs are normalized and checked against each type's schema.
+    let show = a.run(&["show", "driving"]);
+    assert!(show.contains("expires  2030-06\n"), "{show}");
+    assert!(a.run(&["show", "gym"]).contains("+15550100"));
+    assert!(a.run(&["show", "box"]).contains("https://box.example"));
+    assert_eq!(a.run(&["get", "home", "-f", "ssid"]), "Home\n");
+    // Lookup searches the plain identifying fields, never secrets.
+    assert_eq!(a.run(&["get", "deploy-bot"]), "sk_test_1\n");
+    assert!(a.fail(&["get", "alarm"]).contains("no item matches"));
+    for (args, err) in [
+        (
+            &["new", "api", "username=x"][..],
+            "missing required field credential",
+        ),
+        (
+            &["new", "database", "port=postgres"][..],
+            "invalid value for port",
+        ),
+        (
+            &["new", "api", "credential=x", "expires=2027-02-30"][..],
+            "not a date",
+        ),
+        (
+            &["new", "passport", "number:text=X1"][..],
+            "field number must be of type secret",
+        ),
+    ] {
+        let out = a.fail(args);
+        assert!(out.contains(err), "{args:?}: {out}");
+    }
+    // Secrets stay masked in show.
+    let show = a.run(&["show", "stripe"]);
+    assert!(
+        !show.contains("sk_test_1") && show.contains("credential"),
+        "{show}"
+    );
+}
+
+/// Documents and attachments: a file field takes a path, `get` writes the
+/// file, files over 10 MiB are refused, and one at the cap travels to
+/// another device in one entry.
+#[test]
+fn documents_and_attachments() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let scan = a.path("scan.pdf");
+    std::fs::write(&scan, b"%PDF-1.7 scan").unwrap();
+    let scan = scan.to_str().unwrap();
+    new(
+        &a,
+        &[
+            "document",
+            &format!("file={scan}"),
+            "--name",
+            "Passport scan",
+        ],
+    );
+    let ls = a.run(&["ls", "--type", "document"]);
+    assert!(ls.ends_with("\tPassport scan\t13 bytes\n"), "{ls}");
+    let show = a.run(&["show", "passport"]);
+    assert!(show.contains("file   scan.pdf\n"), "{show}");
+    assert!(!show.contains("JVBER"), "{show}");
+    // To a file (0600), or to stdout when it isn't a terminal.
+    let out = a.path("out.pdf");
+    a.run(&["get", "passport", "-o", out.to_str().unwrap()]);
+    assert_eq!(std::fs::read(&out).unwrap(), b"%PDF-1.7 scan");
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&out).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    let piped = a.try_run(&["get", "passport"]);
+    assert!(piped.status.success());
+    assert_eq!(piped.stdout, b"%PDF-1.7 scan");
+    // Searchable by its file name.
+    assert_eq!(a.try_run(&["get", "scan.pdf"]).stdout, b"%PDF-1.7 scan");
+
+    // A file on any item: `name:file=PATH`, or a file field its type knows.
+    new(&a, &["login", "url=github.com", "password=pw"]);
+    let codes = a.path("codes.txt");
+    std::fs::write(&codes, b"1111 2222").unwrap();
+    a.run(&[
+        "set",
+        "github",
+        &format!("recovery:file={}", codes.display()),
+    ]);
+    assert_eq!(
+        a.try_run(&["get", "github", "-f", "recovery"]).stdout,
+        b"1111 2222"
+    );
+    assert_eq!(a.run(&["get", "github"]), "pw\n");
+    a.run(&["set", "passport", &format!("file={}", codes.display())]);
+    assert_eq!(a.try_run(&["get", "passport"]).stdout, b"1111 2222");
+    assert!(a.run(&["show", "passport"]).contains("file   codes.txt\n"));
+    let err = a.fail(&["get", "github", "-o", out.to_str().unwrap()]);
+    assert!(err.contains("--output is for file fields"), "{err}");
+
+    // References: a file goes only into a file inject writes, decoded, as
+    // the template's one reference.
+    let template = a.path("file.tpl");
+    std::fs::write(&template, "{{ deadbolt://personal/Passport scan/file }}\n").unwrap();
+    let injected = a.path("injected.txt");
+    let (tpl, inj) = (template.to_str().unwrap(), injected.to_str().unwrap());
+    a.run(&["inject", "-i", tpl, "-o", inj]);
+    assert_eq!(std::fs::read(&injected).unwrap(), b"1111 2222");
+    std::fs::write(
+        &template,
+        "codes: {{ deadbolt://personal/Passport scan/file }}\n",
+    )
+    .unwrap();
+    let err = a.fail(&["inject", "-i", tpl, "-o", inj, "--force"]);
+    assert!(
+        err.contains("is a file") && err.contains("one reference"),
+        "{err}"
+    );
+    let err = a.fail(&["read", "deadbolt://personal/Passport scan/file"]);
+    assert!(
+        err.contains("is a file") && err.contains("inject -o"),
+        "{err}"
+    );
+    let err = a.fail(&[
+        "run",
+        "--env",
+        "CODES=deadbolt://personal/Passport scan/file",
+        "--",
+        "true",
+    ]);
+    assert!(
+        err.contains("is a file") && err.contains("environment"),
+        "{err}"
+    );
+
+    // The size cap: 10 MiB.
+    let big = a.path("big.bin");
+    let file = std::fs::File::create(&big).unwrap();
+    file.set_len(10 * 1024 * 1024 + 1).unwrap();
+    let err = a.fail(&["new", "document", &format!("file={}", big.display())]);
+    assert!(err.contains("larger than 10 MiB"), "{err}");
+    file.set_len(10 * 1024 * 1024).unwrap();
+    std::fs::write(&big, vec![0xa5; 10 * 1024 * 1024]).unwrap();
+    new(
+        &a,
+        &[
+            "document",
+            &format!("file={}", big.display()),
+            "--name",
+            "Big",
+        ],
+    );
+
+    // It syncs: one entry carries it whole.
+    let b = Device::new();
+    pair(&a, &b, "beta", None);
+    eventually("b to receive the big document", || {
+        b.run(&["sync"]);
+        b.run(&["ls", "--type", "document"]).contains("\tBig\t")
+    });
+    let got = b.try_run(&["get", "big"]);
+    assert!(got.status.success());
+    assert_eq!(got.stdout.len(), 10 * 1024 * 1024);
+    assert!(got.stdout.iter().all(|b| *b == 0xa5));
+}
+
+/// A .1pux with a document and an attachment: the client reads the files
+/// export.data names, and the agent maps every category to its type.
+#[test]
+fn import_1pux_with_files() {
+    use zip::write::SimpleFileOptions;
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let data = r#"{"accounts": [{"attrs": {"uuid": "USER"}, "vaults": [{"attrs": {"uuid": "v1", "avatar": "v1.png"}, "items": [
+      {"uuid": "i1", "categoryUuid": "001", "overview": {"title": "Site", "url": "https://site.example"},
+       "details": {"loginFields": [{"value": "site-pw-1", "fieldType": "P", "designation": "password"}],
+         "sections": [{"fields": [{"title": "", "id": "f", "value": {"file": {"fileName": "codes.txt", "documentId": "docA"}}}]}]}},
+      {"uuid": "i2", "categoryUuid": "006", "overview": {"title": "Scan"},
+       "details": {"documentAttributes": {"fileName": "scan.pdf", "documentId": "docB"}}},
+      {"uuid": "i3", "categoryUuid": "112", "overview": {"title": "Stripe"},
+       "details": {"sections": [{"fields": [{"id": "credential", "value": {"concealed": "sk-live-2"}}]}]}},
+      {"uuid": "i4", "categoryUuid": "109", "overview": {"title": "Home"},
+       "details": {"sections": [{"fields": [{"id": "network_name", "value": {"string": "Home"}},
+         {"id": "wireless_password", "value": {"concealed": "wifi-pw-3"}}]}]}},
+      {"uuid": "i5", "categoryUuid": "102", "overview": {"title": "DB"},
+       "details": {"sections": [{"fields": [{"id": "password", "value": {"concealed": "db-pw-4"}}]}]}}
+    ]}]}]}"#;
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, bytes) in [
+        ("export.data", data.as_bytes()),
+        ("files/docA__codes.txt", b"1111 2222".as_slice()),
+        ("files/docB__scan.pdf", b"%PDF".as_slice()),
+        ("files/v1.png", b"avatar".as_slice()),
+    ] {
+        zip.start_file(name, SimpleFileOptions::default()).unwrap();
+        zip.write_all(bytes).unwrap();
+    }
+    let file = a.path("export.1pux");
+    std::fs::write(&file, zip.finish().unwrap().into_inner()).unwrap();
+    let output = a.try_run(&["import", file.to_str().unwrap()]);
+    assert!(output.status.success());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(
+        stdout,
+        "imported 5 from 1Password (logins 1, cards 0, API credentials 1, databases 1, Wi-Fi networks 1, documents 1)\n"
+    );
+    for secret in ["site-pw-1", "sk-live-2", "wifi-pw-3", "db-pw-4", "1111"] {
+        assert!(!stdout.contains(secret));
+    }
+    assert_eq!(a.run(&["get", "stripe"]), "sk-live-2\n");
+    assert_eq!(a.run(&["get", "home"]), "wifi-pw-3\n");
+    assert_eq!(a.run(&["get", "db"]), "db-pw-4\n");
+    assert_eq!(a.try_run(&["get", "scan"]).stdout, b"%PDF");
+    assert_eq!(
+        a.try_run(&["get", "site", "-f", "codes"]).stdout,
+        b"1111 2222"
+    );
+    // Importing again changes nothing.
+    let again = a.run(&["import", file.to_str().unwrap()]);
+    assert!(
+        again.contains("imported 0") && again.contains("skipped 5 duplicates"),
+        "{again}"
+    );
 }

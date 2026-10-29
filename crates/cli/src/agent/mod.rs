@@ -13,6 +13,7 @@ mod items;
 mod mirror;
 mod pairing;
 mod passkeys;
+mod secrets;
 mod send;
 mod session;
 #[cfg(test)]
@@ -134,6 +135,8 @@ pub struct Agent {
     activity: Mutex<activity::Ledger>,
     /// Each paired agent client's rate limit, by client id.
     agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
+    /// AI callers' `resolve` rate limits, by anchor, and one for them all.
+    resolve_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
     /// Every passphrase check: one at a time, wrong ones backed off.
     guesses: guesses::Guesses,
     /// Deadbolt Send's endpoint, started by the first send.
@@ -176,10 +179,18 @@ impl Agent {
             callers: caller::Callers::new(),
             activity: Mutex::default(),
             agent_rates: Mutex::default(),
+            resolve_rates: Mutex::default(),
             guesses: guesses::Guesses::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
         })
+    }
+
+    /// Holds off the idle lock until dropped: for a request waiting on the
+    /// user (a Touch ID prompt, a passphrase check).
+    fn busy(&self) -> Busy<'_> {
+        self.busy.fetch_add(1, Ordering::SeqCst);
+        Busy(&self.busy)
     }
 
     fn interrupt_op(&self) {
@@ -216,6 +227,15 @@ impl Agent {
         {
             prompt.cancel();
         }
+    }
+}
+
+/// See [`Agent::busy`].
+struct Busy<'a>(&'a AtomicUsize);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -556,6 +576,7 @@ mod tests {
                 vault: None,
                 query: vec!["offline-login".into()],
                 otp: false,
+                files: Vec::new(),
             },
             Command::ItemList {
                 vault: None,
@@ -579,6 +600,7 @@ mod tests {
                 export: "name,password\nimported,offline-import\n"
                     .to_string()
                     .into(),
+                files: Vec::new(),
                 apply: true,
             },
             Command::ItemRemove {
@@ -648,7 +670,7 @@ mod tests {
         (agent, pid)
     }
 
-    fn conversation() -> (Conversation, UnixStream, watch::Sender<bool>) {
+    pub(super) fn conversation() -> (Conversation, UnixStream, watch::Sender<bool>) {
         let (socket, client) = UnixStream::pair().unwrap();
         let (_, write) = socket.into_split();
         let (closed, closed_rx) = watch::channel(false);
@@ -1564,8 +1586,13 @@ impl Agent {
                 passphrase,
             } => pairing::join(&self, conv, device_name, passphrase).await,
             Command::Pair { code, vault } => pairing::pair(&self, conv, code, vault).await,
-            Command::ItemGet { vault, query, otp } => Ok(Reply::Item {
-                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp))?,
+            Command::ItemGet {
+                vault,
+                query,
+                otp,
+                files,
+            } => Ok(Reply::Item {
+                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp, &files))?,
             }),
             Command::ItemCode { vault, query } => Ok(Reply::Code {
                 code: self.with(|s| {
@@ -1599,11 +1626,12 @@ impl Agent {
             Command::Import {
                 vault,
                 export,
+                files,
                 apply,
             } => {
                 // Mapping needs no session: it runs before taking the lock.
-                let parsed = crate::import::parse(&export)?;
-                drop(export);
+                let parsed = crate::import::parse_with(&export, &files)?;
+                drop((export, files));
                 let report = self.with(|s| items::import(s, vault.as_deref(), parsed, apply))?;
                 if apply {
                     self.sync_now.notify_one();
@@ -1748,8 +1776,11 @@ impl Agent {
             command @ (Command::PasskeyList { .. }
             | Command::PasskeyCreate { .. }
             | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,
-            Command::AgentClientAdd { .. } | Command::AgentGrantSet { .. } => {
-                bail!("pairing and grants are answered with the caller")
+            Command::AgentClientAdd { .. }
+            | Command::AgentGrantSet { .. }
+            | Command::SecretGrantSet { .. }
+            | Command::Resolve { .. } => {
+                bail!("pairing, grants and references are answered with the caller")
             }
             Command::AgentClientList => Ok(Reply::AgentClients {
                 clients: self.with(|s| grants::list_clients(s))?,
@@ -1763,9 +1794,18 @@ impl Agent {
                 grants: self.with(|s| grants::list_grants(s, session::now()))?,
             }),
             Command::AgentGrantRemove { id } => {
-                self.with(|s| grants::remove_grant(s, &id))?;
+                // Either kind of grant: a sign-in grant, else a secret grant.
+                self.with(|s| match grants::remove_grant(s, &id) {
+                    Err(error) if crate::client::code(&error) == Some(ErrorCode::NotFound) => {
+                        secrets::remove_grant(s, &id)
+                    }
+                    removed => removed.map(drop),
+                })?;
                 Ok(Reply::Done)
             }
+            Command::SecretGrantList => Ok(Reply::SecretGrants {
+                grants: self.with(|s| secrets::list_grants(s, session::now()))?,
+            }),
             command @ (Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }) => self.agent_client(command),

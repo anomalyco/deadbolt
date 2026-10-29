@@ -23,12 +23,12 @@ const BLEED: f32 = 12.0;
 const BUTTON_W: f32 = 30.0;
 
 /// The page and its foot of key hints.
-pub fn pane(s: &App, k: &Kit) -> El {
+pub fn pane(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     col()
         .key("vault")
         .w_full()
         .min_h(0.0)
-        .child(detail(s, k))
+        .child(detail(s, k, layer))
         .child(foot(s, k))
 }
 
@@ -48,7 +48,7 @@ pub fn toolbar(s: &App, k: &Kit) -> El {
         .child(crate::edit::view::toolbar_new(s, k))
 }
 
-fn detail(s: &App, k: &Kit) -> El {
+fn detail(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let offer = s.loaded.then(|| crate::install::offer(s, k)).flatten();
     let notices = [
         crate::shortcut::notice(s, k),
@@ -69,7 +69,7 @@ fn detail(s: &App, k: &Kit) -> El {
             crate::import::view::pane(s, k)
         }
     } else if let Some(form) = &s.edit.form {
-        crate::edit::view::form(s, k, form)
+        crate::edit::view::form(s, k, form, layer)
     } else {
         // One element, item or not, so leaving for the import view and coming
         // back swap whole, while a new selection (or none) replaces what's in
@@ -350,7 +350,36 @@ fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit, on: bool) -> El {
     )
 }
 
+/// A file: its name, and Save… (a dialog, then the agent sends its
+/// contents to write there).
+fn file_row(item: &str, field: &FieldInfo, k: &Kit, on: bool) -> El {
+    let name = &field.name;
+    let (id, n) = (item.to_owned(), name.clone());
+    let save = IconButton::new(&crate::view::theme::DOWNLOAD)
+        .variant(IconButtonVariant::GhostMuted)
+        .label(format!("Save {}…", field_words(name)))
+        .help("Save…")
+        .on_press_tx(move |s: &mut App, tx| {
+            if s.selected.as_deref() == Some(id.as_str()) {
+                s.save_file(&n, tx);
+            }
+        })
+        .build(k)
+        .key("save");
+    let value = text(deadbolt_client::file::name(&field.value).to_owned())
+        .wrap_anywhere()
+        .min_w(0.0)
+        .key("value")
+        .font(k.ty.ui.lh(VALUE_LINE))
+        .color(k.c.text_base);
+    let actions = row().key("actions").gap(2.0).center_y().child(save);
+    field_frame(k, name, title_case(name), value, (actions, 1), on)
+}
+
 fn field_row(s: &App, item: &str, kind: &str, field: &FieldInfo, k: &Kit, on: bool) -> El {
+    if field.kind == "file" {
+        return file_row(item, field, k, on);
+    }
     let secret = is_secret(&field.kind);
     // The agent leaves one-time password secrets out (only the code field
     // gives a code), so there's nothing here to show or copy.
@@ -513,7 +542,8 @@ fn key_hints(s: &App, k: &Kit) -> Vec<El> {
     }
     if !(s.import.showing() || s.drop_hovering()) {
         if let Some(f) = s.focused_field() {
-            let mut hints = vec![h("h-field-copy", &["⏎"], "Copy")];
+            let copy = if f.kind == "file" { "Save…" } else { "Copy" };
+            let mut hints = vec![h("h-field-copy", &["⏎"], copy)];
             if is_secret(&f.kind) && f.kind != "otp" {
                 let label = if s.revealed.iter().any(|r| r == &f.name) {
                     "Hide"
