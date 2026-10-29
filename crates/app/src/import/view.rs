@@ -2,25 +2,17 @@
 //! 1Password".
 //!
 //! Motion: the pane's states (drop zone, preview, nothing new) swap with the
-//! app's whole-state replacement at .3 in and .25 out. A drag over the window
-//! highlights the drop zone at once, and labels that change in place roll.
-//! Nothing animates on first paint; reduced motion keeps only the fades
-//! (Rune's runtime).
+//! app's whole-state replacement. A drag over the window highlights the drop
+//! zone at once, and labels that change in place roll. Nothing animates on
+//! first paint; reduced motion keeps only the fades (Rune's runtime).
 
-use rune::{El, Icon, Spring, SpringPair, TextStyle, Transition, col, icon, row, text};
+use rune::{El, col, icon, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, RollingText};
 
 use super::{Phase, Preview, changed, details, import_label, new_items, nothing_new};
 use crate::model::App;
-
-pub static IMPORT: Icon = Icon {
-    name: "deadbolt-import",
-    view: 16.0,
-    body: r#"<path d="M8 2.25v7.5M4.75 6.5 8 9.75l3.25-3.25" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.25 10.5v1.75c0 .69.56 1.25 1.25 1.25h9c.69 0 1.25-.56 1.25-1.25V10.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
-};
-
-/// Counts line up digit for digit.
-const TNUM: &str = "'tnum' 1";
+use crate::view::theme::{IMPORT, SUBHEADING};
+use crate::view::{replace, status_pill, tnum, vault_name};
 
 /// Where each app's export is.
 const SOURCES: &[(&str, &str)] = &[
@@ -28,14 +20,6 @@ const SOURCES: &[(&str, &str)] = &[
     ("Apple Passwords", "File › Export All Passwords…"),
     ("Bitwarden", "Tools › Export vault › .json"),
 ];
-
-/// Whole-state swaps in the pane.
-pub(crate) fn swap() -> Transition {
-    Transition::blur_replace().springs(SpringPair::new(
-        Spring::new(0.3, 0.0),
-        Spring::new(0.25, 0.0),
-    ))
-}
 
 /// The detail pane of a vault with items, while importing.
 pub fn pane(s: &App, k: &Kit) -> El {
@@ -46,11 +30,11 @@ pub fn pane(s: &App, k: &Kit) -> El {
         .key("import")
         .w_full()
         .gap(20.0)
-        .transition(swap())
+        .transition(replace())
         .child(
             text("Import passwords")
                 .key("title")
-                .font(TextStyle::new(20.0, 500.0).lh(26.0))
+                .font(SUBHEADING)
                 .color(k.c.text_strong),
         )
         .child(drop_zone(s, k))
@@ -162,20 +146,20 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
         counts = counts.child(
             text(new_items(report))
                 .key("new")
-                .font(k.ty.body_medium.features(TNUM))
+                .font(tnum(k.ty.body_medium))
                 .color(k.c.text_strong),
         );
         if report.duplicates > 0 {
             counts = counts.child(
                 text(format!("{} already in Deadbolt", report.duplicates))
                     .key("duplicates")
-                    .font(k.ty.text_small.features(TNUM))
+                    .font(tnum(k.ty.text_small))
                     .color(k.c.text_muted),
             );
         }
     } else {
         counts = counts.child(
-            text(nothing_new(p, &vault_name(s)))
+            text(nothing_new(p, vault_name(s, "your vault")))
                 .key("nothing-new")
                 .font(k.ty.body_medium)
                 .color(k.c.text_strong)
@@ -190,7 +174,7 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
             quiet = quiet.child(
                 text(line)
                     .key(format!("detail-{i}"))
-                    .font(k.ty.text_small.features(TNUM))
+                    .font(tnum(k.ty.text_small))
                     .color(k.c.text_faint)
                     .wrap()
                     .w_full(),
@@ -246,7 +230,7 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
         })
         .w_full()
         .gap(20.0)
-        .transition(swap())
+        .transition(replace())
         .child(
             col()
                 .key("head")
@@ -255,7 +239,7 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
                 .child(
                     text(format!("Import from {}", report.source))
                         .key("title")
-                        .font(TextStyle::new(20.0, 500.0).lh(26.0))
+                        .font(SUBHEADING)
                         .color(k.c.text_strong),
                 )
                 .child(
@@ -279,22 +263,10 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
 /// "Imported 12 from 1Password", in the copy notice's place and style.
 pub fn imported(s: &App, k: &Kit) -> Option<El> {
     let (message, _) = s.import.imported.as_ref()?;
-    let mut pill = row()
-        .key("imported")
-        .role("status")
-        .w(crate::view::NOTICE_W)
-        .self_center()
-        .padding(12.0)
+    let pill = row()
         .gap(8.0)
         .center_y()
-        .radius(k.radius.lg)
-        .fill(k.c.layer_01)
-        .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
-    for shadow in k.shadow_layers(&k.elevation.floating) {
-        pill = pill.box_shadow(shadow);
-    }
-    Some(
-        pill.child(
+        .child(
             icon(k.glyph.check_small, 16.0)
                 .key("check")
                 .color(k.c.icon_base),
@@ -304,13 +276,6 @@ pub fn imported(s: &App, k: &Kit) -> Option<El> {
                 .key("message")
                 .font(k.ty.small)
                 .color(k.c.text_base),
-        ),
-    )
-}
-
-fn vault_name(s: &App) -> String {
-    s.status
-        .as_ref()
-        .and_then(|st| st.vaults.iter().find(|v| v.default).or(st.vaults.first()))
-        .map_or_else(|| "your vault".to_owned(), |v| v.name.clone())
+        );
+    Some(status_pill(k, "imported", pill))
 }

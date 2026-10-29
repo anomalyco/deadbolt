@@ -8,8 +8,8 @@ use rune::{Color, El, Key, KeyEvent, Transition, Tx, col, el, row, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, Switch};
 
 use crate::model::App;
-use crate::vault::FACT;
-use crate::vault::page::{PAGE_W, TITLE};
+use crate::view::theme::{FACT, PAGE_W, TITLE};
+use crate::view::{LIST_EDGE, device_name, scroll_col, tnum};
 
 /// How long a copied secret may stay on the clipboard, in seconds.
 const CLEAR_STEPS: [f64; 6] = [10.0, 20.0, 30.0, 60.0, 90.0, 120.0];
@@ -26,6 +26,20 @@ pub enum Row {
     Activity,
 }
 
+impl Row {
+    fn key(self) -> &'static str {
+        match self {
+            Row::TouchId => "touch-id",
+            Row::Clear => "clear",
+            Row::Shortcut => "shortcut",
+            Row::Command => "command",
+            Row::Sync => "op-sync",
+            Row::Agents => "agents-row",
+            Row::Activity => "activity-row",
+        }
+    }
+}
+
 /// The rows the page shows, in order.
 pub fn rows(s: &App) -> Vec<Row> {
     let mut rows = Vec::new();
@@ -37,9 +51,7 @@ pub fn rows(s: &App) -> Vec<Row> {
     if s.installer.is_some() {
         rows.push(Row::Command);
     }
-    rows.push(Row::Sync);
-    rows.push(Row::Agents);
-    rows.push(Row::Activity);
+    rows.extend([Row::Sync, Row::Agents, Row::Activity]);
     rows
 }
 
@@ -54,18 +66,30 @@ impl App {
             return true;
         }
         let rows = rows(self);
-        let at = self.nav.row.min(rows.len().saturating_sub(1));
+        let last = rows.len().saturating_sub(1);
+        let at = self.nav.row.min(last);
         let plain = !ev.mods.cmd && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
         let letter = |c: &str| plain && matches!(&ev.key, Key::Text(t) if t == c);
+        let step_row = match &ev.key {
+            Key::Up => Some(at.saturating_sub(1)),
+            Key::Down => Some((at + 1).min(last)),
+            _ if letter("k") => Some(at.saturating_sub(1)),
+            _ if letter("j") => Some((at + 1).min(last)),
+            _ => None,
+        };
+        if let Some(next) = step_row {
+            self.nav.row = next;
+            if let Some(r) = rows.get(next) {
+                tx.scroll_into_view(format!("set-{}", r.key()));
+            }
+            return true;
+        }
         match &ev.key {
             Key::Escape => {
+                tx.instant();
                 self.close_settings();
                 self.search.focused = true;
             }
-            Key::Up => self.nav.row = at.saturating_sub(1),
-            Key::Down => self.nav.row = (at + 1).min(rows.len().saturating_sub(1)),
-            _ if letter("k") => self.nav.row = at.saturating_sub(1),
-            _ if letter("j") => self.nav.row = (at + 1).min(rows.len().saturating_sub(1)),
             Key::Left if rows.get(at) == Some(&Row::Clear) => self.step_clear_after(-1),
             Key::Right if rows.get(at) == Some(&Row::Clear) => self.step_clear_after(1),
             Key::Enter if plain => self.act(rows.get(at).copied(), tx),
@@ -110,9 +134,12 @@ impl App {
 pub fn page(s: &App, k: &Kit) -> El {
     let rows = rows(s);
     let on = |r: Row| rows.get(s.nav.row) == Some(&r);
+    let row_el = |r: Row, label: &str, desc: El, control: El| {
+        setting(k, r.key(), on(r), label, desc, control)
+    };
     let mut security = Vec::new();
     if s.touch_id_available() {
-        let about = match &s.touch_id_error {
+        let desc = match &s.touch_id_error {
             Some(error) => problem(k, "touch-id-error", error),
             None => about(
                 k,
@@ -126,19 +153,10 @@ pub fn page(s: &App, k: &Kit) -> El {
             .on_toggle(|s: &mut App| s.toggle_touch_id())
             .build(k)
             .key("touch-id-switch");
-        security.push(setting(
-            k,
-            "touch-id",
-            on(Row::TouchId),
-            "Unlock with Touch ID",
-            about,
-            switch,
-        ));
+        security.push(row_el(Row::TouchId, "Unlock with Touch ID", desc, switch));
     }
-    security.push(setting(
-        k,
-        "clear",
-        on(Row::Clear),
+    security.push(row_el(
+        Row::Clear,
         "Clear copied secrets",
         about(k, "How long a copied password stays on the clipboard"),
         stepper(k, &clear_after(s.clear_after), on(Row::Clear)),
@@ -149,10 +167,8 @@ pub fn page(s: &App, k: &Kit) -> El {
     } else {
         col().key("problems").w_full().gap(2.0).children(problems)
     };
-    let mut getting = vec![setting(
-        k,
-        "shortcut",
-        on(Row::Shortcut),
+    let mut getting = vec![row_el(
+        Row::Shortcut,
         "Quick panel",
         shortcut_about,
         recorder,
@@ -162,10 +178,8 @@ pub fn page(s: &App, k: &Kit) -> El {
             .installer
             .as_ref()
             .is_some_and(crate::install::Installer::installed);
-        getting.push(setting(
-            k,
-            "command",
-            on(Row::Command),
+        getting.push(row_el(
+            Row::Command,
             "deadbolt command",
             about(
                 k,
@@ -179,19 +193,10 @@ pub fn page(s: &App, k: &Kit) -> El {
         ));
     }
     let (synced, sync) = crate::mirror::setting(s, k);
-    let sync = setting(
-        k,
-        "op-sync",
-        on(Row::Sync),
-        "Sync from 1Password",
-        synced,
-        sync,
-    );
+    let sync = row_el(Row::Sync, "Sync from 1Password", synced, sync);
     let (show_agents, agent_list) = crate::agents::setting(s, k);
-    let mut agents = vec![setting(
-        k,
-        "agents-row",
-        on(Row::Agents),
+    let mut agents = vec![row_el(
+        Row::Agents,
         "Agent sign-ins",
         about(
             k,
@@ -201,10 +206,8 @@ pub fn page(s: &App, k: &Kit) -> El {
     )];
     agents.extend(agent_list);
     let (show, entries) = crate::activity::setting(s, k);
-    let mut activity = vec![setting(
-        k,
-        "activity-row",
-        on(Row::Activity),
+    let mut activity = vec![row_el(
+        Row::Activity,
         "Recent activity",
         about(k, "What apps and commands asked the agent for"),
         show,
@@ -241,15 +244,11 @@ pub fn page(s: &App, k: &Kit) -> El {
                 )
                 .child(crate::sheet::columns(k)),
         );
-    col()
-        .key("settings")
+    scroll_col("settings")
         .w_full()
         .grow(1.0)
         .min_h(0.0)
-        .scroll(rune::ScrollSpec {
-            stick_bottom: false,
-        })
-        .scroll_edge_fade(crate::view::LIST_EDGE)
+        .scroll_margin(LIST_EDGE)
         .child(
             col()
                 .key("settings-page")
@@ -331,12 +330,7 @@ fn setting(k: &Kit, key: &str, on: bool, label: &str, about: El, control: El) ->
 
 /// This device and how many others share the vault.
 fn devices(s: &App, k: &Kit) -> El {
-    let device = s
-        .status
-        .as_ref()
-        .and_then(|st| st.device.as_ref())
-        .and_then(|d| d.name.clone())
-        .unwrap_or_else(|| "This device".to_owned());
+    let device = device_name(s).unwrap_or("This device");
     let peers = s.status.as_ref().map_or(0, |st| st.peers);
     let online = s.status.as_ref().map_or(0, |st| st.peers_online);
     let shares = match peers {
@@ -344,7 +338,7 @@ fn devices(s: &App, k: &Kit) -> El {
         1 => format!("Shares with 1 other device, {online} online"),
         n => format!("Shares with {n} other devices, {online} online"),
     };
-    setting(k, "devices", false, &device, about(k, &shares), el())
+    setting(k, "devices", false, device, about(k, &shares), el())
 }
 
 /// A value ←→ steps through, its arrows showing while the keys are on it.
@@ -368,7 +362,7 @@ fn stepper(k: &Kit, value: &str, on: bool) -> El {
         .child(
             text(value.to_owned())
                 .key("clear-after")
-                .font(k.ty.ui_medium.features("'tnum' 1"))
+                .font(tnum(k.ty.ui_medium))
                 .color(k.c.text_base)
                 .on_press(|s: &mut App| s.step_clear_after(1)),
         )

@@ -11,93 +11,20 @@
 pub mod page;
 
 use deadbolt_client::protocol::{ItemInfo, noun};
-use rune::{Anim, El, Icon, ScrollSpec, TextStyle, Transition, col, el, icon, row, text};
+use rune::{El, GrowthSpec, Transition, col, el, icon, row, text};
 use rune_kit::shell::{SplitView, Toolbar};
 use rune_kit::{IconButton, IconButtonVariant, Keybind, Kit, TextInput};
 
 use crate::model::App;
-use crate::view::LIST_EDGE;
+use crate::view::theme::{SLIDERS, kind_icon};
+use crate::view::{LIST_EDGE, device_name, instant, scroll_col, tnum, vault_name};
+
+pub(crate) use crate::view::theme::{FACT, glyph_tile, kind_name};
 
 /// A list row: the item's label over its detail.
 const ROW_H: f32 = 46.0;
 const ROW_GAP: f32 = 2.0;
 const ROWS_PAD: f32 = 6.0;
-/// The 11.5/440 second line Seer's rows use.
-pub(crate) const FACT: TextStyle = TextStyle::new(11.5, 440.0).lh(14.0);
-
-macro_rules! glyph {
-    ($name:literal, $body:literal) => {
-        Icon {
-            name: $name,
-            view: 16.0,
-            body: $body,
-        }
-    };
-}
-
-static LOGIN: Icon = glyph!(
-    "kind-login",
-    r#"<circle cx="5.25" cy="10.75" r="2.75" stroke="currentColor" stroke-width="1.25"/><path d="M7.2 8.8L13 3M10.6 5.4l1.6 1.6M12.1 3.9l1.15 1.15" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#
-);
-static CARD: Icon = glyph!(
-    "kind-card",
-    r#"<rect x="2.25" y="3.75" width="11.5" height="8.5" rx="1.75" stroke="currentColor" stroke-width="1.25"/><path d="M2.25 6.75h11.5M4.75 9.75h2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#
-);
-static NOTE: Icon = glyph!(
-    "kind-note",
-    r#"<path d="M4 2.75h5.25l2.75 2.75v7.75H4z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M6.25 8.25h3.5M6.25 10.5h2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#
-);
-static SSH: Icon = glyph!(
-    "kind-ssh",
-    r#"<rect x="2.25" y="3" width="11.5" height="10" rx="1.75" stroke="currentColor" stroke-width="1.25"/><path d="M5 6.5l1.75 1.5L5 9.5M8.5 10h2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
-);
-static IDENTITY: Icon = glyph!(
-    "kind-identity",
-    r#"<circle cx="8" cy="5.75" r="2.5" stroke="currentColor" stroke-width="1.25"/><path d="M3.5 13.25c.6-2.3 2.4-3.5 4.5-3.5s3.9 1.2 4.5 3.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#
-);
-static PASSKEY: Icon = glyph!(
-    "kind-passkey",
-    r#"<circle cx="6" cy="5.5" r="2.25" stroke="currentColor" stroke-width="1.25"/><path d="M2.5 12.75c.4-2 1.8-3.25 3.5-3.25.8 0 1.5.25 2.1.7" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><circle cx="11.25" cy="9" r="1.75" stroke="currentColor" stroke-width="1.25"/><path d="M11.25 10.75v2.75M11.25 12.25h1.25" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#
-);
-pub(crate) static SLIDERS: Icon = glyph!(
-    "sliders",
-    r#"<path d="M2.75 5h6M11.75 5h1.5M2.75 11h1.5M7.25 11h6" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><circle cx="10.25" cy="5" r="1.5" stroke="currentColor" stroke-width="1.25"/><circle cx="5.75" cy="11" r="1.5" stroke="currentColor" stroke-width="1.25"/>"#
-);
-
-pub(crate) fn kind_icon(kind: &str) -> &'static Icon {
-    match kind {
-        "card" => &CARD,
-        "note" => &NOTE,
-        "ssh" => &SSH,
-        "identity" => &IDENTITY,
-        "passkey" => &PASSKEY,
-        _ => &LOGIN,
-    }
-}
-
-/// "Login", "Card", "Secure note", "SSH key"…
-pub(crate) fn kind_name(kind: &str) -> &'static str {
-    match kind {
-        "card" => "Card",
-        "note" => "Secure note",
-        "ssh" => "SSH key",
-        "identity" => "Identity",
-        "passkey" => "Passkey",
-        _ => "Login",
-    }
-}
-
-/// A tile with the item's kind glyph: quiet, one tone, as Seer's glyphs.
-pub(crate) fn glyph_tile(k: &Kit, kind: &str, size: f32, radius: f32) -> El {
-    row()
-        .key("tile")
-        .size(size, size)
-        .center()
-        .radius(radius)
-        .continuous_corners()
-        .fill(k.c.layer_02)
-        .child(icon(kind_icon(kind), (size * 0.5).round()).color(k.c.icon_base))
-}
 
 /// What a row says under its label: the item's detail, else its kind.
 pub(crate) fn fact(item: &ItemInfo) -> String {
@@ -108,36 +35,40 @@ pub(crate) fn fact(item: &ItemInfo) -> String {
 
 /// The vault: the sidebar and the page, with ⌘K's actions and the ? sheet
 /// over it in `layer`.
-pub fn view(s: &App, k: &Kit, inset: f32, layer: &mut Vec<El>) -> El {
+pub fn view(s: &App, k: &Kit, inset: f32, reduced_motion: bool, layer: &mut Vec<El>) -> El {
     let main = if s.settings_open {
         crate::settings::page(s, k)
     } else {
         page::pane(s, k)
-    };
+    }
+    .transition(instant());
     let mut toolbar = Toolbar::new();
     if !s.settings_open {
-        toolbar = toolbar.trailing(page::toolbar(s, k));
+        toolbar = toolbar.trailing(page::toolbar(s, k).transition(instant()));
     }
-    layer.extend(crate::palette::view(s, k).map(|card| over(card, 72.0)));
-    layer.extend(crate::sheet::view(s, k).map(|card| over(card, 96.0)));
+    layer.extend(crate::palette::view(s, k).map(|card| over("palette-over", card, 72.0)));
+    layer.extend(crate::sheet::view(s, k).map(|card| over("sheet-over", card, 96.0)));
     SplitView::new(main)
         .sidebar(&s.sidebar, |s: &mut App| &mut s.sidebar, sidebar(s, k))
         .toolbar(toolbar)
         .toolbar_in_panel()
         .hide_sidebar_toggle()
         .titlebar_inset(inset)
+        .reduced_motion(reduced_motion)
         .build(k)
 }
 
-/// A card over the whole window, `top` from its top; a press beside it
-/// closes it, as Esc does.
-fn over(card: El, top: f32) -> El {
+/// A card over the whole window, `top` from its top; appears and leaves at
+/// once, and a press beside it closes it, as Esc does.
+fn over(key: &str, card: El, top: f32) -> El {
     col()
-        .key("over")
+        .key(key)
         .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
         .items_center()
         .pt(top)
-        .on_press(|s: &mut App| {
+        .transition(instant())
+        .on_press_tx(|s: &mut App, tx| {
+            tx.instant();
             s.close_palette();
             s.nav.sheet = false;
         })
@@ -145,16 +76,7 @@ fn over(card: El, top: f32) -> El {
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
-    let vault = s
-        .status
-        .as_ref()
-        .and_then(|st| st.vaults.iter().find(|v| v.default).or(st.vaults.first()))
-        .map_or_else(|| "Personal".to_owned(), |v| v.name.clone());
-    let count = if s.search.text.trim().is_empty() {
-        s.items.len()
-    } else {
-        s.visible().len()
-    };
+    let visible = s.visible();
     col()
         .key("side")
         .w_full()
@@ -176,33 +98,28 @@ fn sidebar(s: &App, k: &Kit) -> El {
                 .pb(4.0)
                 .center_y()
                 .child(
-                    text(vault)
+                    text(vault_name(s, "Personal").to_owned())
                         .font(k.ty.small_medium)
                         .color(k.c.text_muted)
                         .grow(1.0)
                         .truncate(),
                 )
                 .children(s.loaded.then(|| {
-                    text(count.to_string())
+                    text(visible.len().to_string())
                         .key("count")
-                        .font(k.ty.small.features("'tnum' 1"))
+                        .font(tnum(k.ty.small))
                         .color(k.c.text_faint)
                 })),
         )
-        .child(
-            col()
-                .key("list")
-                .w_full()
-                .grow(1.0)
-                .min_h(0.0)
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .scroll_edge_fade(LIST_EDGE)
-                .scroll_margin(LIST_EDGE)
-                .child(rows(s, k)),
-        )
+        .child(item_list(s, k, &visible).w_full().grow(1.0).min_h(0.0))
         .child(foot(s, k))
+}
+
+/// Scrollable virtualized item list shared by the vault sidebar and the quick panel.
+pub(crate) fn item_list(s: &App, k: &Kit, visible: &[&ItemInfo]) -> El {
+    scroll_col("list")
+        .scroll_margin(LIST_EDGE)
+        .child(rows_of(s, k, visible))
 }
 
 /// The search, quiet until typed in: no ring, ⌘F at its end. It keeps the
@@ -230,9 +147,8 @@ fn search(s: &App, k: &Kit) -> El {
         .child(input.build(k).key("search").label("Search items"))
 }
 
-/// The visible items as rows, or why there are none.
-pub(crate) fn rows(s: &App, k: &Kit) -> El {
-    let visible = s.visible();
+/// The visible items as virtualized rows, or why there are none.
+fn rows_of(s: &App, k: &Kit, visible: &[&ItemInfo]) -> El {
     let mut rows = col()
         .key("rows")
         .role("listbox")
@@ -240,18 +156,25 @@ pub(crate) fn rows(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(ROW_GAP)
         .px(ROWS_PAD)
-        .py(ROWS_PAD);
+        .py(ROWS_PAD)
+        .growth(GrowthSpec {
+            spring: rune::tok::motion::REFLOW,
+            edge: rune::edge::NO_MASK,
+        })
+        .virtualize(ROW_H);
     if !s.loaded {
-        // The list arrives within a frame or two of unlocking; show nothing rather than a flash.
-    } else if s.items.is_empty() {
-        rows = rows.child(empty(
+        return rows;
+    }
+    if s.items.is_empty() {
+        return rows.child(empty(
             k,
             "empty",
             "No items yet",
             "What you add shows up here and on your other devices.",
         ));
-    } else if visible.is_empty() {
-        rows = rows.child(empty(
+    }
+    if visible.is_empty() {
+        return rows.child(empty(
             k,
             "no-match",
             "No matches",
@@ -263,21 +186,14 @@ pub(crate) fn rows(s: &App, k: &Kit) -> El {
         .as_deref()
         .and_then(|id| visible.iter().position(|i| i.id == id))
         .filter(|_| !s.settings_open);
-    if let Some(at) = at {
-        // One highlight for the list, under the rows, on the selection at once.
-        rows = rows.child(
-            el().key("highlight")
-                .pin(Some(ROWS_PAD), Some(ROWS_PAD), Some(ROWS_PAD), None)
-                .h(ROW_H)
-                .radius(8.0)
-                .continuous_corners()
-                .fill(k.c.pressed)
-                .offset(0.0, at as f32 * (ROW_H + ROW_GAP))
-                .offset_motion(Anim::INSTANT),
-        );
-    }
     for (i, item) in visible.iter().enumerate() {
-        rows = rows.child(list_row(k, item, i, at == Some(i)));
+        let on = at == Some(i);
+        let jump = if i < 9 && on { i + 1 } else { 0 };
+        rows = rows.child(rune::memo(
+            format!("item-{}", item.id),
+            (&item.label, &item.detail, &item.kind, on, jump),
+            || list_row(k, item, i, on),
+        ));
     }
     rows
 }
@@ -289,6 +205,7 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
         .px(10.0)
         .py(24.0)
         .gap(4.0)
+        .arrives_whole()
         .transition(Transition::opacity())
         .child(text(title).font(k.ty.ui_medium).color(k.c.text_base))
         .child(
@@ -305,7 +222,6 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
 /// the search, and a press selects while the search keeps focus.
 fn list_row(k: &Kit, item: &ItemInfo, i: usize, on: bool) -> El {
     let id = item.id.clone();
-    let sub = fact(item);
     let lines = col()
         .key("lines")
         .gap(1.0)
@@ -320,7 +236,7 @@ fn list_row(k: &Kit, item: &ItemInfo, i: usize, on: bool) -> El {
                 .truncate(),
         )
         .child(
-            text(sub.clone())
+            text(fact(item))
                 .key("subtitle")
                 .font(FACT)
                 .color(k.c.text_faint)
@@ -340,6 +256,15 @@ fn list_row(k: &Kit, item: &ItemInfo, i: usize, on: bool) -> El {
         .focusable(false)
         .focus_selected(on)
         .preserve_focus_on_press(true)
+        .arrives_whole()
+        .children(on.then(|| {
+            el().key("highlight")
+                .pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))
+                .radius(8.0)
+                .continuous_corners()
+                .fill(k.c.pressed)
+                .transition(instant())
+        }))
         .child(icon(kind_icon(&item.kind), 16.0).key("icon").color(if on {
             k.c.icon_base
         } else {
@@ -399,15 +324,9 @@ impl App {
 /// Where the vault lives and who's here, then Settings and Lock.
 fn foot(s: &App, k: &Kit) -> El {
     let peers = s.status.as_ref().map_or(0, |st| st.peers_online);
-    let device = s
-        .status
-        .as_ref()
-        .and_then(|st| st.device.as_ref())
-        .and_then(|d| d.name.clone())
-        .unwrap_or_else(|| "This device".to_owned());
+    let device = device_name(s).unwrap_or("This device");
     let about = match peers {
-        0 => device,
-        1 => format!("{device} · 1 online"),
+        0 => device.to_owned(),
         n => format!("{device} · {n} online"),
     };
     let settings = IconButton::new(&SLIDERS)
@@ -415,7 +334,8 @@ fn foot(s: &App, k: &Kit) -> El {
         .label("Settings")
         .help("Settings")
         .shortcut("⌘,")
-        .on_press(|s: &mut App| {
+        .on_press_tx(|s: &mut App, tx| {
+            tx.instant();
             if s.settings_open {
                 s.close_settings();
                 s.search.focused = true;
