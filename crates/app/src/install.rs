@@ -262,8 +262,9 @@ pub struct Installer {
     /// A scan or install is running.
     pub busy: bool,
     pub error: Option<String>,
-    /// Which command was copied, and when on the app's clock.
-    pub copied: Option<(Copied, f64)>,
+    /// Which command was copied, and when on the app's clock (stamped by the
+    /// first `poll` after, since the clock is stale after idle).
+    pub copied: Option<(Copied, Option<f64>)>,
     seq: u64,
     marker: Option<PathBuf>,
     live: Option<Live>,
@@ -398,11 +399,19 @@ impl Installer {
         }
     }
 
+    /// Stamps a fresh copy with this frame's time and wakes for its lapse.
+    pub fn stamp_copy(&mut self, now: f64, tx: &mut Tx) {
+        if let Some((_, at @ None)) = &mut self.copied {
+            *at = Some(now);
+            tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
+        }
+    }
+
     /// Applies finished work and lets a "Copied" lapse. True when anything changed.
     pub fn poll(&mut self, now: f64) -> bool {
         let mut changed = self
             .copied
-            .take_if(|(_, at)| now - *at >= COPIED_FOR - 1e-3)
+            .take_if(|(_, at)| at.is_some_and(|at| now - at >= COPIED_FOR - 1e-3))
             .is_some();
         let outcomes = match &mut self.live {
             Some(live) => live.inbox.drain(),
@@ -423,19 +432,18 @@ impl Installer {
         changed
     }
 
-    pub fn copy(&mut self, which: Copied, now: f64, tx: &mut Tx) {
+    pub fn copy(&mut self, which: Copied, tx: &mut Tx) {
         let command = match which {
             Copied::Command => self.command(),
             Copied::Path => self.path_command(),
         };
         tx.copy(command);
-        self.copied = Some((which, now));
-        tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
+        self.copied = Some((which, None));
     }
 
     pub fn copied(&self, which: Copied, now: f64) -> bool {
         self.copied
-            .is_some_and(|(c, at)| c == which && now - at < COPIED_FOR)
+            .is_some_and(|(c, at)| c == which && at.is_none_or(|at| now - at < COPIED_FOR))
     }
 
     /// Opens the install page with a fresh scan, answering the vault's offer.

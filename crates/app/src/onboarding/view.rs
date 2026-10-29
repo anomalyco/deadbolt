@@ -11,13 +11,11 @@ use rune::{
     Color, Cursor, El, Icon, ScrollSpec, Shadow, TextEdit, TextStyle, Transition, col, el, icon,
     row, text,
 };
-use rune_kit::{
-    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, StateColors, TextInput,
-};
+use rune_kit::{Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, TextInput};
 
-use super::{Flow, Notice, Severity, Step, Strength};
+use super::{Flow, Step, Strength};
 use crate::model::App;
-use crate::view::Paged;
+use crate::view::{Paged, banner};
 
 pub(crate) const PANEL_W: f32 = 400.0;
 
@@ -41,17 +39,6 @@ pub static DEVICES: Icon = Icon {
     view: 16.0,
     body: r#"<rect x="1.75" y="3" width="9" height="6.5" rx="1" stroke="currentColor" stroke-width="1.25"/><path d="M4 12.5h4.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><rect x="11.5" y="5.5" width="3" height="7.5" rx=".75" stroke="currentColor" stroke-width="1.25"/>"#,
 };
-pub static CAUTION: Icon = Icon {
-    name: "deadbolt-caution",
-    view: 16.0,
-    body: r#"<path d="M8 2.25L14.25 13.25H1.75Z" stroke="currentColor" stroke-width="1.25" stroke-linejoin="round"/><path d="M8 6.5v3" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><circle cx="8" cy="11.4" r=".8" fill="currentColor"/>"#,
-};
-pub static INFO: Icon = Icon {
-    name: "deadbolt-info",
-    view: 16.0,
-    body: r#"<circle cx="8" cy="8" r="6.25" stroke="currentColor" stroke-width="1.25"/><path d="M8 7.25v4" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><circle cx="8" cy="4.9" r=".8" fill="currentColor"/>"#,
-};
-
 pub fn screen(s: &App, k: &Kit, dark: bool) -> Paged {
     let o = &s.onboarding;
     match &o.step {
@@ -124,19 +111,7 @@ pub(crate) fn offer_card(
     (action_key, action_label, on_action): (&str, &str, fn(&mut App)),
     on_dismiss: fn(&mut App),
 ) -> El {
-    let mut card = col()
-        .key(key)
-        .role("status")
-        .w(crate::view::NOTICE_W)
-        .self_center()
-        .padding(12.0)
-        .gap(10.0)
-        .radius(k.radius.lg)
-        .fill(k.c.layer_01)
-        .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
-    for shadow in k.shadow_layers(&k.elevation.floating) {
-        card = card.box_shadow(shadow);
-    }
+    let card = crate::view::status_pill(k, key, col().gap(10.0));
     card.child(
         col()
             .key("text")
@@ -283,53 +258,6 @@ fn choice(k: &Kit, key: &str, glyph: &'static Icon, label: &str, sub: &str, flow
         card = card.box_shadow(s);
     }
     card
-}
-
-/// A notice in place, coloured by how serious it is: a dim tint and border,
-/// with full colour kept for the icon and title.
-pub fn banner(k: &Kit, n: &Notice) -> El {
-    let neutral = StateColors {
-        bg: k.c.layer_01,
-        fg: k.c.text_strong,
-        border: k.c.border_base,
-        icon: k.c.icon_muted,
-    };
-    let (tone, glyph) = match n.severity {
-        Severity::Neutral => (neutral, &INFO),
-        Severity::Caution => (k.c.warning, &CAUTION),
-        Severity::Danger => (k.c.danger, k.glyph.circle_x),
-    };
-    row()
-        .key("notice")
-        .role("alert")
-        .w_full()
-        .padding(12.0)
-        .gap(10.0)
-        .radius(k.radius.md)
-        .fill(tone.bg)
-        .box_shadow(Shadow {
-            spread: 1.0,
-            color: tone.border,
-            ..Shadow::default()
-        })
-        .transition(Transition::opacity())
-        .child(icon(glyph, 16.0).key("icon").color(tone.icon).mt(2.0))
-        .child(
-            col()
-                .key("words")
-                .grow(1.0)
-                .shrink()
-                .gap(2.0)
-                .child(
-                    text(n.title.clone())
-                        .key("title")
-                        .font(k.ty.ui_medium)
-                        .color(tone.fg)
-                        .wrap()
-                        .w_full(),
-                )
-                .child(muted(k, "body", n.body.clone())),
-        )
 }
 
 // -------------------------------------------------------------------------------------------
@@ -646,11 +574,10 @@ pub fn empty_vault(s: &App, k: &Kit) -> El {
 }
 
 fn command(s: &App, k: &Kit, key: &str, label: &str, line: &'static str, note: Option<&str>) -> El {
-    let copied = s
-        .onboarding
-        .copied_command
-        .as_ref()
-        .is_some_and(|(c, at)| *c == line && s.clock - at < super::COPIED_FOR);
+    let copied =
+        s.onboarding.copied_command.as_ref().is_some_and(|(c, at)| {
+            *c == line && at.is_none_or(|at| s.clock - at < super::COPIED_FOR)
+        });
     let mut block = col()
         .key(key)
         .w_full()

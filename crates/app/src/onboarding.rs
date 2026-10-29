@@ -19,6 +19,7 @@ use zeroize::Zeroizing;
 
 use crate::agent::{Failure, Job};
 use crate::model::{App, Screen};
+use crate::view::{Notice, Severity};
 use worker::{NewDevice, Progress, Stage, Worker};
 
 /// Shortest passphrase the form accepts.
@@ -82,38 +83,6 @@ pub enum Step {
     },
 }
 
-/// How serious a notice is, which sets its colour.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Severity {
-    /// Nothing went wrong: the person changed their mind, a ticket ran out.
-    Neutral,
-    /// Stopped for safety: the codes didn't match.
-    Caution,
-    /// Something failed.
-    Danger,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct Notice {
-    pub severity: Severity,
-    pub title: String,
-    pub body: String,
-}
-
-impl Notice {
-    pub(crate) fn new(
-        severity: Severity,
-        title: impl Into<String>,
-        body: impl Into<String>,
-    ) -> Self {
-        Self {
-            severity,
-            title: title.into(),
-            body: body.into(),
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Strength {
     TooShort,
@@ -154,7 +123,7 @@ pub struct Onboarding {
     /// The copied ticket, while it's still on the clipboard.
     pub copied: Option<SecretCopy>,
     /// A command copied from the empty vault's guide, and when.
-    pub copied_command: Option<(&'static str, f64)>,
+    pub copied_command: Option<(&'static str, Option<f64>)>,
     /// The vault being joined and the device inviting this one, once the code shows.
     pub pairing: Option<Pairing>,
     /// When the vault was created or joined, on the app's clock.
@@ -529,8 +498,7 @@ impl App {
     /// Copies a command from the empty vault's guide.
     pub fn copy_command(&mut self, command: &'static str, tx: &mut Tx) {
         tx.copy(command);
-        self.onboarding.copied_command = Some((command, self.clock));
-        tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
+        self.onboarding.copied_command = Some((command, None));
     }
 
     /// Takes the copied ticket off the clipboard if it's still there, and
@@ -560,12 +528,17 @@ impl App {
     /// Applies the requests' progress and runs the moment. True when anything changed.
     pub fn poll_onboarding(&mut self, now: f64, tx: &mut Tx) -> bool {
         let (progress, next) = self.onboarding.worker.drain(now);
+        // The first frame after a copy stamps it: `clock` is stale after idle.
+        if let Some((_, at @ None)) = &mut self.onboarding.copied_command {
+            *at = Some(now);
+            tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
+        }
         let mut changed = self.check_ticket_copy()
             || !progress.is_empty()
             || self
                 .onboarding
                 .copied_command
-                .take_if(|(_, at)| now - *at >= COPIED_FOR - 1e-3)
+                .take_if(|(_, at)| at.is_some_and(|at| now - at >= COPIED_FOR - 1e-3))
                 .is_some();
         for p in progress {
             self.on_progress(p, now);

@@ -45,9 +45,8 @@ fn command(i: &Installer, k: &Kit, now: f64, which: Copied) -> El {
                     k.glyph.copy
                 })
                 .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
-                    let now = s.clock;
                     if let Some(i) = installer(s) {
-                        i.copy(which, now, tx);
+                        i.copy(which, tx);
                     }
                 })
                 .build(k)

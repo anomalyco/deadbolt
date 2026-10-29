@@ -44,7 +44,7 @@ pub fn pane(s: &App, k: &Kit) -> El {
 /// Why the last file wasn't previewed or imported, under the drop zone.
 pub fn error(s: &App, k: &Kit) -> Option<El> {
     let notice = s.import.error.as_ref()?;
-    Some(crate::onboarding::view::banner(k, notice).key("import-error"))
+    Some(crate::view::banner(k, notice).key("import-error"))
 }
 
 /// Where each app's export is, and Choose File…. A file dragged over the
@@ -251,9 +251,8 @@ fn preview(s: &App, k: &Kit, p: &Preview, importing: bool) -> El {
                 ),
         )
         .children(
-            p.changed.then(|| {
-                crate::onboarding::view::banner(k, &changed(&p.name)).key("import-changed")
-            }),
+            p.changed
+                .then(|| crate::view::banner(k, &changed(&p.name)).key("import-changed")),
         )
         .child(counts)
         .children(quiet)

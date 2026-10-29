@@ -7,11 +7,12 @@ use rune::{
 };
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
-use super::view::{PANEL_W, banner, bar, muted, page, title};
+use super::view::{PANEL_W, bar, muted, page, title};
 use super::worker::Stage;
 use super::{Flow, Pairing, Step};
 use crate::model::App;
 use crate::view::Paged;
+use crate::view::banner;
 
 /// The bolt's throw: the one sanctioned flourish (Kit's "playful", .3 / .3).
 const THROW: Spring = Spring::new(0.3, 0.3);

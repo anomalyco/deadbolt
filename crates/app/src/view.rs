@@ -7,6 +7,7 @@
 //! a click) replaces the item's title and fields at once. Nothing animates on
 //! first paint, and reduced motion keeps only fades (Rune's runtime does both).
 
+mod notice;
 pub(crate) mod theme;
 
 use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field};
@@ -21,6 +22,8 @@ use crate::keys::shown;
 use crate::model::{App, Copy, Screen, has_code};
 use theme::CARD_TITLE;
 
+pub(crate) use notice::banner;
+pub use notice::{Notice, Severity};
 pub use theme::CHROME;
 pub(crate) use theme::{LIST_EDGE, NOTICE_W, instant, replace, rise, tnum};
 

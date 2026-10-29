@@ -12,7 +12,8 @@ use std::time::{Duration, Instant};
 use deadbolt_app::agent::{Agent, Job, Window};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::worker::{ALREADY_SET_UP, NewDevice, Progress, Stage, Worker};
-use deadbolt_app::onboarding::{Flow, Severity, Step};
+use deadbolt_app::onboarding::{Flow, Step};
+use deadbolt_app::view::Severity;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
 use crate::support::{Device, PASSPHRASE, key, shows, until};
