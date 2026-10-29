@@ -1,12 +1,89 @@
 //! Unlocking (passphrase and Touch ID), locking, and reconnecting.
 
+use deadbolt_client::protocol::Status;
 use rune::Tx;
 
 use crate::agent::{Failure, Job};
 
 use super::{App, Screen, take_secret};
 
+type BiometricResult = Result<Status, (Failure, Option<Box<Status>>)>;
+
 impl App {
+    pub(super) fn on_unlocked(&mut self, result: Result<Status, Failure>, tx: &mut Tx) {
+        self.unlocking = false;
+        match result {
+            // The status says where to go: the vault, or onboarding if it has none.
+            Ok(status) => {
+                self.unlock_error = None;
+                self.on_status(status, tx);
+            }
+            Err(failure) if self.screen == Screen::Locked => {
+                self.unlock_error = Some(unlock_message(&failure));
+                self.passphrase.focused = true;
+            }
+            Err(_) => {}
+        }
+    }
+
+    pub(super) fn on_unlocked_biometric(&mut self, result: BiometricResult, tx: &mut Tx) {
+        self.touch_id_unlocking = false;
+        if self.screen != Screen::Locked {
+            return;
+        }
+        match result {
+            Ok(status) => {
+                self.unlock_error = None;
+                self.on_status(status, tx);
+                if self.panel_phase() == Some(crate::panel::Phase::Open) {
+                    self.window_focused = true;
+                    if let Some(windows) = &self.windows {
+                        windows.focus_panel();
+                    }
+                }
+            }
+            Err((failure, status)) => {
+                if let Some(st) = status {
+                    self.status = Some(*st);
+                } else if failure.message.contains("Touch ID was reset")
+                    && let Some(st) = &mut self.status
+                {
+                    st.touch_id_ready = false;
+                    st.touch_id_reset = true;
+                }
+                self.unlock_error = biometric_unlock_message(&failure, self.touch_id_reset());
+                self.passphrase.focused = true;
+                if self.panel.is_some() && !self.window_focused {
+                    self.dismiss(tx);
+                }
+            }
+        }
+    }
+
+    pub(super) fn on_touch_id_set(&mut self, enabled: bool, result: BiometricResult, tx: &mut Tx) {
+        self.touch_id_busy = false;
+        match result {
+            Ok(status) => {
+                self.touch_id_error = None;
+                self.on_status(status, tx);
+            }
+            Err((failure, status)) => {
+                if let Some(st) = status {
+                    self.on_status(*st, tx);
+                } else if let Some(st) = &mut self.status {
+                    st.touch_id_enabled = !enabled;
+                }
+                if failure.locked() {
+                    if self.screen != Screen::Locked {
+                        self.on_locked(tx);
+                    }
+                } else {
+                    self.touch_id_error = Some(failure.message);
+                }
+            }
+        }
+    }
+
     pub fn touch_id_available(&self) -> bool {
         self.status.as_ref().is_some_and(|s| s.touch_id_available)
     }

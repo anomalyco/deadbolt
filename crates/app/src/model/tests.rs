@@ -438,8 +438,184 @@ fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
         );
     });
     assert!(
-        !rt.state.touch_id_enabled(),
+        rt.state.touch_id_enabled(),
         "restored from fresh Status on failure"
     );
     assert_eq!(rt.state.touch_id_error.as_deref(), Some("Touch ID failed"));
+}
+
+#[test]
+fn leaving_locked_clears_a_stale_unlock_error_and_ignores_late_failures() {
+    use deadbolt_client::protocol::ErrorCode;
+
+    let mut rt = main("locked-error");
+    assert!(rt.state.unlock_error.is_some());
+    let mut unlocked = rt.state.status.clone().unwrap();
+    unlocked.unlocked = true;
+
+    // Unlocked from the CLI or the other window: the error goes with Locked.
+    rt.update(|s, tx| s.apply(Done::Status(Some(unlocked)), tx));
+    assert_eq!(rt.state.screen, Screen::Vault);
+    assert_eq!(rt.state.unlock_error, None);
+
+    // A late failed passphrase attempt from before the unlock doesn't set an error
+    // or pull focus away from the vault.
+    rt.update(|s, tx| {
+        s.apply(
+            Done::Unlocked(Err(Failure {
+                code: Some(ErrorCode::Failed),
+                message: "wrong passphrase".into(),
+            })),
+            tx,
+        );
+    });
+    assert_eq!(rt.state.unlock_error, None);
+    assert!(!rt.state.passphrase.focused);
+
+    // Locking later starts with a clean passphrase field.
+    rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
+    assert_eq!(rt.state.screen, Screen::Locked);
+    assert_eq!(rt.state.unlock_error, None);
+}
+
+#[test]
+fn an_idle_stretch_before_a_copy_or_selection_keeps_its_full_window() {
+    let idle = |rt: &mut Runtime<App>, secs: f64| {
+        let poll = rt.poll.take();
+        rt.frame(secs);
+        rt.poll = poll;
+    };
+    let board = rune::clipboard::memory();
+    let mut rt = vault();
+    rt.use_clipboard(&board);
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.frame(1.0);
+
+    // Sitting idle for 40 s (longer than CLEAR_AFTER = 30 s) before copying
+    // must start the 30 s countdown on the frame after the copy, not clear at once.
+    idle(&mut rt, 40.0);
+    rt.update(|s, tx| s.copy_field("password", tx));
+    rt.frame(1.0 / 60.0);
+    assert_eq!(
+        board.text().map(|t| t.as_str().to_owned()).as_deref(),
+        Some("correct-horse-battery-staple")
+    );
+    assert_eq!(rt.state.copy.as_ref().map(|c| c.shown), Some(30));
+
+    // Likewise, clicking an uncached row after a pause still holds the cached
+    // page before it for `HOLD`.
+    let current = rt.state.detail.clone().unwrap();
+    rt.update(|s, _| s.cache.insert(&current, None, s.clock));
+    let other = rt
+        .state
+        .items
+        .iter()
+        .find(|i| i.id != current.id)
+        .unwrap()
+        .id
+        .clone();
+    idle(&mut rt, 10.0);
+    rt.update(|s, _| s.select(Some(other)));
+    rt.frame(1.0 / 60.0);
+    let (head, full) = rt.state.page_view().unwrap();
+    assert_eq!(head.id, current.id);
+    assert!(full.is_some());
+}
+
+#[test]
+fn a_pre_refresh_item_reply_never_repopulates_the_cleared_cache() {
+    let mut rt = vault();
+    let other = rt
+        .state
+        .items
+        .iter()
+        .find(|i| Some(&i.id) != rt.state.selected.as_ref())
+        .cloned()
+        .unwrap();
+    rt.update(|s, _| s.select(Some(other.id.clone())));
+    let seq = rt.state.seq();
+
+    // Another device updates the vault while `Get(seq)` is in flight.
+    rt.update(|s, tx| {
+        s.apply(Done::Changed(Change::Items { vault: "v1".into() }), tx);
+    });
+    assert!(rt.state.cache.is_empty());
+
+    // The in-flight pre-refresh `Get(seq)` lands before the new list: it shows
+    // for now, but must not re-enter the cleared cache.
+    rt.update(|s, tx| {
+        s.apply(
+            Done::Item {
+                seq,
+                result: Ok(Values::new(other.clone())),
+            },
+            tx,
+        );
+    });
+    assert!(!rt.state.cache.contains(&other.id));
+}
+
+#[test]
+fn reveal_on_a_cached_page_reports_only_once_its_values_land() {
+    use crate::agent::{Agent, Job};
+    use deadbolt_client::protocol::AppAction;
+
+    let mut rt = vault();
+    let (agent, jobs, _) = Agent::scripted();
+    rt.state.agent = agent;
+    let first = rt.state.detail.clone().unwrap();
+    let second_head = rt
+        .state
+        .items
+        .iter()
+        .find(|i| i.id != first.id)
+        .unwrap()
+        .clone();
+    let mut second = first.clone();
+    second.id = second_head.id.clone();
+    second.label = second_head.label;
+    rt.state.cache.insert(&first, None, 0.0);
+    rt.state.cache.insert(&second, None, 0.0);
+
+    // Move to a cached page (`detail` is None) and press Show, then move away
+    // before its values arrive: nothing was ever revealed, so nothing is reported.
+    rt.update(|s, _| {
+        s.select(Some(second.id.clone()));
+        s.toggle_reveal("password");
+        s.select(Some(first.id.clone()));
+    });
+    assert!(
+        !jobs.try_iter().any(|j| matches!(j, Job::Report { .. })),
+        "leaving before values land reports no reveal"
+    );
+
+    // Staying until the values land reports the reveal once they are actually here.
+    rt.update(|s, _| {
+        s.select(Some(second.id.clone()));
+        s.toggle_reveal("password");
+    });
+    let sent: Vec<Job> = jobs.try_iter().collect();
+    assert!(!sent.iter().any(|j| matches!(j, Job::Report { .. })));
+    assert!(
+        sent.iter()
+            .any(|j| matches!(j, Job::Get { cached: false, .. }))
+    );
+    let seq = rt.state.seq();
+    rt.update(|s, tx| {
+        s.apply(
+            Done::Item {
+                seq,
+                result: Ok(Values::new(second.clone())),
+            },
+            tx,
+        );
+    });
+    let reports: Vec<_> = jobs
+        .try_iter()
+        .filter_map(|j| match j {
+            Job::Report { action, field, .. } => Some((action, field)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(reports, [(AppAction::Reveal, "password".into())]);
 }

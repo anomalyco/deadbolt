@@ -71,8 +71,8 @@ pub struct App {
     /// Pages ready before their values land (`cache`).
     pub cache: crate::cache::Cache,
     /// The page shown before a selection with nothing to show yet, and
-    /// since when, kept whole for `HOLD`.
-    held: Option<(String, f64)>,
+    /// since when on the frame clock, kept whole for `HOLD`.
+    held: Option<(String, Option<f64>)>,
     /// Tells the newest batch of `Job::Peek`s from older ones.
     peeks: u64,
     /// `seq` when the cache was last cleared: an item asked for before is
@@ -202,77 +202,9 @@ impl App {
             Done::Status(Some(status)) => self.on_status(status, tx),
             Done::Connected(Err(failure)) => self.show(Screen::Failed(failure.message)),
             Done::Status(None) => self.fail("The agent stopped.".into(), tx),
-            Done::Unlocked(result) => {
-                self.unlocking = false;
-                match result {
-                    // The status says where to go: the vault, or onboarding if it has none.
-                    Ok(status) => {
-                        self.unlock_error = None;
-                        self.on_status(status, tx);
-                    }
-                    Err(failure) => {
-                        self.unlock_error = Some(unlock::unlock_message(&failure));
-                        self.passphrase.focused = true;
-                    }
-                }
-            }
-            Done::UnlockedBiometric(result) => {
-                self.touch_id_unlocking = false;
-                if self.screen != Screen::Locked {
-                    return;
-                }
-                match result {
-                    Ok(status) => {
-                        self.unlock_error = None;
-                        self.on_status(status, tx);
-                        if self.panel_phase() == Some(crate::panel::Phase::Open) {
-                            self.window_focused = true;
-                            if let Some(windows) = &self.windows {
-                                windows.focus_panel();
-                            }
-                        }
-                    }
-                    Err((failure, status)) => {
-                        if let Some(st) = status {
-                            self.status = Some(*st);
-                        } else if failure.message.contains("Touch ID was reset")
-                            && let Some(st) = &mut self.status
-                        {
-                            st.touch_id_ready = false;
-                            st.touch_id_reset = true;
-                        }
-                        self.unlock_error =
-                            unlock::biometric_unlock_message(&failure, self.touch_id_reset());
-                        self.passphrase.focused = true;
-                        if self.panel.is_some() && !self.window_focused {
-                            self.dismiss(tx);
-                        }
-                    }
-                }
-            }
-            Done::TouchIdSet { enabled, result } => {
-                self.touch_id_busy = false;
-                match result {
-                    Ok(status) => {
-                        self.touch_id_error = None;
-                        self.on_status(status, tx);
-                    }
-                    Err((failure, status)) => {
-                        if let Some(st) = status {
-                            self.on_status(*st, tx);
-                        } else if let Some(st) = &mut self.status {
-                            st.touch_id_enabled = !enabled;
-                        }
-                        if failure.locked() {
-                            if self.screen != Screen::Locked {
-                                self.on_locked(tx);
-                            }
-                        } else {
-                            self.touch_id_error = Some(failure.message);
-                        }
-                    }
-                }
-            }
+            Done::Unlocked(result) => self.on_unlocked(result, tx),
+            Done::UnlockedBiometric(result) => self.on_unlocked_biometric(result, tx),
+            Done::TouchIdSet { enabled, result } => self.on_touch_id_set(enabled, result, tx),
             Done::Locked(result) => match result {
                 Ok(()) => {
                     self.on_locked(tx);
@@ -301,64 +233,8 @@ impl App {
                     Err(failure) => self.on_failure(failure, tx),
                 }
             }
-            // Dropping a stale item wipes its values (`agent::Values`); its
-            // page is kept for going back to it, unless the vault changed since.
-            Done::Item { seq, result } => {
-                if self.screen != Screen::Vault || self.panel_inert() {
-                    return;
-                }
-                if seq != self.seq {
-                    if seq > self.cleared_seq
-                        && let Ok(values) = result
-                    {
-                        self.keep_page(values);
-                    }
-                    return;
-                }
-                match result {
-                    Ok(values) => {
-                        let (item, code) = values.take();
-                        let landed = code.as_ref().and_then(|c| c.as_ref().ok());
-                        self.cache.insert(&item, landed, self.clock);
-                        self.held = None;
-                        // A new selection's fields land in place, not animated: the
-                        // selection moved under the user's own hand. A refresh of the
-                        // shown item animates what changed, and so does a saved form
-                        // giving way to what it saved.
-                        let saved = self.editing();
-                        if !saved && self.detail.as_ref().is_none_or(|d| d.id != item.id) {
-                            tx.instant();
-                        }
-                        self.edit_item_landed(&item);
-                        self.set_detail(Some(item));
-                        if let Some(code) = code {
-                            self.on_code(code, tx);
-                        }
-                        if let Some((pending, field)) = self.pending_copy.take()
-                            && pending == seq
-                        {
-                            self.copy_field(&field, tx);
-                        }
-                    }
-                    Err(failure) => {
-                        self.edit_item_failed();
-                        self.on_failure(failure, tx);
-                    }
-                }
-            }
-            Done::Peeked { id, epoch, result } => {
-                if epoch != self.cache.epoch() || self.screen != Screen::Vault || self.panel_inert()
-                {
-                    return;
-                }
-                let Ok(values) = result else { return };
-                self.keep_page(values);
-                // The selection was waiting on it: its page shows at once.
-                if self.selected.as_deref() == Some(id.as_str()) && self.detail.is_none() {
-                    tx.instant();
-                    self.show_cached(&id);
-                }
-            }
+            Done::Item { seq, result } => self.on_item(seq, result, tx),
+            Done::Peeked { id, epoch, result } => self.on_peeked(id, epoch, result, tx),
             Done::Code { seq, result } => {
                 if seq != self.seq || self.screen != Screen::Vault || self.panel_inert() {
                     return;
@@ -550,11 +426,15 @@ impl App {
     }
 
     /// Every screen change after start-up comes through here. Leaving Locked
-    /// wipes a part-typed passphrase, however it was left: an unlock from the
-    /// other window or the CLI, the agent stopping, onboarding.
+    /// wipes a part-typed passphrase and any stale unlock error, however it
+    /// was left: an unlock from the other window or the CLI, the agent
+    /// stopping, onboarding.
     pub(crate) fn show(&mut self, screen: Screen) {
         if screen != Screen::Locked {
             self.passphrase.clear();
+            self.passphrase.focused = false;
+            self.unlock_error = None;
+            self.unlocking = false;
         }
         if screen != self.screen {
             self.import.hover = false;
@@ -568,7 +448,7 @@ impl App {
         self.search.focused = true;
     }
 
-    fn on_failure(&mut self, failure: Failure, tx: &mut Tx) {
+    pub(super) fn on_failure(&mut self, failure: Failure, tx: &mut Tx) {
         if failure.locked() {
             self.on_locked(tx);
         } else {
@@ -591,6 +471,8 @@ impl App {
                 status.touch_id_ready = false;
             }
         }
+        self.unlocking = false;
+        self.unlock_error = None;
         self.touch_id_unlocking = false;
         // A lock while the main window is frontmost (⌘L, Lock button, or idle
         // timeout) stays at rest until the user asks for Touch ID or leaves and

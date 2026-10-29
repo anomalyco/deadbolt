@@ -4,6 +4,7 @@ use std::time::Duration;
 
 use deadbolt_client::protocol::AppAction;
 use rune::{SecretCopy, SecretState, Tx};
+use zeroize::Zeroize;
 
 use super::App;
 
@@ -34,6 +35,9 @@ pub struct Copy {
     /// The countdown bar's rect, emptying linearly on the render clock.
     pub bar: rune::Tween<[f32; 4]>,
     pub error: Option<String>,
+    /// `at` is stamped from the first frame's clock after the copy, so an
+    /// idle stretch before pressing ⏎ never shortens or wipes the countdown.
+    started: bool,
 }
 
 impl Copy {
@@ -90,8 +94,11 @@ impl App {
     }
 
     /// Copies `value`, the shown item's `field`, and starts its countdown.
-    pub(super) fn put_on_clipboard(&mut self, field: String, value: String, tx: &mut Tx) {
-        let Some(item) = &self.detail else { return };
+    pub(super) fn put_on_clipboard(&mut self, field: String, mut value: String, tx: &mut Tx) {
+        let Some(item) = self.detail.as_ref().or_else(|| self.selected_item()) else {
+            value.zeroize();
+            return;
+        };
         let saved = (item.id.clone(), item.label.clone());
         self.copy_value(Some(saved), field, value, tx);
     }
@@ -124,6 +131,7 @@ impl App {
             bar: rune::Tween::linear([0.0, 0.0, BAR_W, 2.0], [0.0, 0.0, 0.0, 2.0], lasts),
             copied: Some(copied),
             error: None,
+            started: false,
         });
         self.panel_copied(tx);
         tx.wake_after(self.next_tick(self.clear_after));
@@ -157,6 +165,9 @@ impl App {
                 return true;
             }
             return false;
+        }
+        if !std::mem::replace(&mut copy.started, true) {
+            copy.at = now;
         }
         let mut remaining = copy.remaining(now);
         match copy.copied.as_ref().map(SecretCopy::state) {
@@ -215,7 +226,9 @@ impl App {
                 self.revealed.remove(i);
             }
             None => {
-                self.report(AppAction::Reveal, field);
+                if self.detail.is_some() {
+                    self.report(AppAction::Reveal, field);
+                }
                 self.revealed.push(field.into());
                 self.hurry();
             }

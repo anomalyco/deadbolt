@@ -2,13 +2,13 @@
 
 use std::time::Duration;
 
-use deadbolt_client::protocol::{ItemInfo, code_field, noun, primary_field};
+use deadbolt_client::protocol::{AppAction, Code, ItemInfo, code_field, noun, primary_field};
 use rune::Tx;
 
-use crate::agent::Job;
+use crate::agent::{Failure, Job, Values};
 
 use super::otp::Otp;
-use super::{App, copy_label, forget};
+use super::{App, Screen, copy_label, forget, is_secret};
 
 /// How long the page before stays, whole, when a new selection has nothing
 /// to show yet, before the page gives way to its title alone.
@@ -19,6 +19,105 @@ const AHEAD: isize = 4;
 const BEHIND: isize = 2;
 
 impl App {
+    /// Dropping a stale item wipes its values (`agent::Values`); its page is
+    /// kept for going back to it, unless the vault changed since.
+    pub(super) fn on_item(&mut self, seq: u64, result: Result<Values, Failure>, tx: &mut Tx) {
+        if self.screen != Screen::Vault || self.panel_inert() {
+            return;
+        }
+        if seq != self.seq {
+            if seq > self.cleared_seq
+                && let Ok(values) = result
+            {
+                self.keep_page(values);
+            }
+            return;
+        }
+        match result {
+            Ok(values) => {
+                let (item, code) = values.take();
+                if seq > self.cleared_seq {
+                    self.cache_page(&item, code.as_ref());
+                }
+                self.held = None;
+                let was_unloaded = self.detail.is_none();
+                // A new selection's fields land in place, not animated: the
+                // selection moved under the user's own hand. A refresh of the
+                // shown item animates what changed, and so does a saved form
+                // giving way to what it saved.
+                let saved = self.editing();
+                if !saved && self.detail.as_ref().is_none_or(|d| d.id != item.id) {
+                    tx.instant();
+                }
+                self.edit_item_landed(&item);
+                self.set_detail(Some(item));
+                // A Show pressed on the cached page before its values landed
+                // reveals the secret only now.
+                if was_unloaded
+                    && !self.revealed.is_empty()
+                    && let Some(shown) = &self.detail
+                {
+                    for field in &self.revealed {
+                        if shown
+                            .fields
+                            .iter()
+                            .any(|f| &f.name == field && is_secret(&f.kind) && f.kind != "otp")
+                        {
+                            self.report_item(AppAction::Reveal, &shown.id, &shown.label, field);
+                        }
+                    }
+                }
+                let pending_field = self
+                    .pending_copy
+                    .take()
+                    .filter(|(pending, _)| *pending == seq)
+                    .map(|(_, field)| field);
+                let copy_code = code.is_some()
+                    && pending_field.as_deref().is_some_and(|field| {
+                        self.otp
+                            .as_ref()
+                            .is_some_and(|o| field == "otp" || field == o.field)
+                    });
+                if copy_code && let Some(otp) = &mut self.otp {
+                    otp.copy_next = true;
+                }
+                if let Some(code) = code {
+                    self.on_code(code, tx);
+                }
+                if let Some(field) = pending_field.filter(|_| !copy_code) {
+                    self.copy_field(&field, tx);
+                }
+            }
+            Err(failure) => {
+                self.edit_item_failed();
+                self.on_failure(failure, tx);
+            }
+        }
+    }
+
+    pub(super) fn on_peeked(
+        &mut self,
+        id: String,
+        epoch: u64,
+        result: Result<Values, Failure>,
+        tx: &mut Tx,
+    ) {
+        if epoch != self.cache.epoch() || self.screen != Screen::Vault || self.panel_inert() {
+            return;
+        }
+        let values = match result {
+            Ok(values) => values,
+            Err(failure) if failure.locked() => return self.on_locked(tx),
+            Err(_) => return,
+        };
+        self.keep_page(values);
+        // The selection was waiting on it: its page shows at once.
+        if self.selected.as_deref() == Some(id.as_str()) && self.detail.is_none() {
+            tx.instant();
+            self.show_cached(&id);
+        }
+    }
+
     /// The items matching the search: every word must appear in the label,
     /// the detail (username, expiry, SSH key comment, identity email), the
     /// type ("ssh", "SSH key") or the short id.
@@ -39,11 +138,9 @@ impl App {
                     Some(noun(&item.kind, 1)),
                     Some(item.short.as_str()),
                 ];
-                words.iter().all(|w| {
-                    hay.iter()
-                        .flatten()
-                        .any(|h| h.to_lowercase().contains(w.as_str()))
-                })
+                words
+                    .iter()
+                    .all(|w| hay.iter().flatten().any(|h| contains_folded(h, w)))
             })
             .collect()
     }
@@ -96,9 +193,7 @@ impl App {
             self.show_cached(&id);
         } else if !self.holding() {
             // A page already held stays for the rest of its moment.
-            self.held = shown
-                .filter(|s| self.cache.contains(s))
-                .map(|s| (s, self.clock));
+            self.held = shown.filter(|s| self.cache.contains(s)).map(|s| (s, None));
         }
         self.agent.send(Job::Get {
             id,
@@ -189,11 +284,17 @@ impl App {
         }
     }
 
+    fn cache_page(&mut self, item: &ItemInfo, code: Option<&Result<Code, Failure>>) {
+        if self.items.iter().any(|i| i.id == item.id) {
+            let landed = code.and_then(|c| c.as_ref().ok());
+            self.cache.insert(item, landed, self.clock);
+        }
+    }
+
     /// Keeps an item's page from its values, then wipes them.
-    pub(super) fn keep_page(&mut self, values: crate::agent::Values) {
+    pub(super) fn keep_page(&mut self, values: Values) {
         let (mut item, code) = values.take();
-        let landed = code.as_ref().and_then(|c| c.as_ref().ok());
-        self.cache.insert(&item, landed, self.clock);
+        self.cache_page(&item, code.as_ref());
         forget(&mut item);
     }
 
@@ -233,16 +334,18 @@ impl App {
     fn holding(&self) -> bool {
         self.held
             .as_ref()
-            .is_some_and(|(_, since)| self.clock < since + HOLD)
+            .is_some_and(|(_, since)| since.is_none_or(|s| self.clock < s + HOLD))
     }
 
     /// Lets a held page go once its moment is up, at once like any change
-    /// of selection.
+    /// of selection. `since` is stamped from the first frame's clock after
+    /// the event, so an idle stretch before a click never eats into `HOLD`.
     pub(super) fn tick_held(&mut self, now: f64, tx: &mut Tx) -> bool {
-        let Some((_, since)) = self.held else {
+        let Some((_, since)) = &mut self.held else {
             return false;
         };
-        if now < since + HOLD {
+        let since = *since.get_or_insert(now);
+        if now < since + HOLD - 1e-9 {
             tx.wake_after(Duration::from_secs_f64(since + HOLD - now));
             return false;
         }
@@ -298,15 +401,14 @@ impl App {
         self.search.set_selection(0, self.search.text.len());
     }
 
-    /// What ⏎ copies, as a key hint: none once the item's values are in and
-    /// it has no such field.
+    /// What ⏎ copies, as a key hint: none once the item's page or values are
+    /// in and it has no such field.
     pub fn enter_hint(&self) -> Option<&'static str> {
         let item = self.selected_item()?;
         let field = self.primary_field();
         let lacks = self
-            .detail
-            .as_ref()
-            .is_some_and(|d| d.id == item.id && !d.fields.iter().any(|f| f.name == field));
+            .page()
+            .is_some_and(|p| !p.fields.iter().any(|f| f.name == field));
         (!lacks).then(|| copy_label(&item.kind))
     }
 
@@ -321,5 +423,20 @@ impl App {
         self.selected_item()
             .and_then(|i| primary_field(&i.kind))
             .unwrap_or("password")
+    }
+}
+
+fn contains_folded(haystack: &str, lower_needle: &str) -> bool {
+    if lower_needle.is_empty() {
+        return true;
+    }
+    if haystack.is_ascii() && lower_needle.is_ascii() {
+        let n = lower_needle.as_bytes();
+        haystack
+            .as_bytes()
+            .windows(n.len())
+            .any(|w| w.eq_ignore_ascii_case(n))
+    } else {
+        haystack.to_lowercase().contains(lower_needle)
     }
 }
