@@ -129,30 +129,35 @@ fn fill_name(fill: &Fill) -> String {
 /// The draft of an entry for `command` from a `class` peer, or `None` when
 /// it isn't recorded: the app's own requests (it reports its reveals and
 /// copies), a caller's `status` and `watch` (every command starts with a
-/// status) and `app-activate` (every `deadbolt app`), and the browser host's look-ups, which come with every page
-/// (and its generator checks and drops, asked before anyone chose a
-/// password).
+/// status) and `app-activate` (every `deadbolt app`), and the browser host's
+/// look-ups, which come with every page (and its generator checks and drops,
+/// asked before anyone chose a password). Anything else the browser host
+/// asks is recorded as a caller's would be: its class rests on arguments a
+/// process can rewrite, so it never hides a request.
 /// Reading Activity is never an entry, so a client that reads it on every
 /// change can't feed itself.
 pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
     if matches!(command, Command::ActivityList { .. }) {
         return None;
     }
+    let always = matches!(
+        command,
+        Command::Status | Command::Watch { .. } | Command::AppActivate { .. }
+    );
     let recorded = match class {
         CallerClass::App => false,
-        CallerClass::BrowserHost => matches!(
-            command,
-            Command::SiteFill { .. }
-                | Command::SiteGenerate { .. }
-                | Command::SiteGenerateKeep { .. }
-                | Command::SiteSave { .. }
-                | Command::PasskeyCreate { .. }
-                | Command::PasskeyGet { .. }
-        ),
-        CallerClass::Caller => !matches!(
-            command,
-            Command::Status | Command::Watch { .. } | Command::AppActivate { .. }
-        ),
+        CallerClass::BrowserHost => {
+            !always
+                && !matches!(
+                    command,
+                    Command::SiteLogins { .. }
+                        | Command::SiteCheck { .. }
+                        | Command::PasskeyList { .. }
+                        | Command::SiteGenerateCheck { .. }
+                        | Command::SiteGenerateDrop { .. }
+                )
+        }
+        CallerClass::Caller => !always,
     };
     if !recorded {
         return None;
@@ -784,6 +789,45 @@ mod tests {
         assert!(draft(&list, CallerClass::BrowserHost).is_none());
     }
 
+    /// The browser host's class rests on its arguments, which a process can
+    /// rewrite, so only its page look-ups go unrecorded: anything else it
+    /// asks is an entry, as a caller's would be.
+    #[test]
+    fn the_browser_host_hides_only_its_look_ups() {
+        let origin = "https://example.com".to_string();
+        for command in [
+            get(),
+            Command::ItemRemove {
+                vault: None,
+                query: vec!["github".into()],
+            },
+            Command::DeviceRemove {
+                vault: None,
+                device: "d2".into(),
+            },
+        ] {
+            assert!(
+                draft(&command, CallerClass::BrowserHost).is_some(),
+                "{command:?}"
+            );
+        }
+        for command in [
+            Command::Status,
+            Command::SiteLogins {
+                origin: origin.clone(),
+            },
+            Command::PasskeyList {
+                origin,
+                rp_id: None,
+            },
+        ] {
+            assert!(
+                draft(&command, CallerClass::BrowserHost).is_none(),
+                "{command:?}"
+            );
+        }
+    }
+
     /// The entry is written before the reply: a client that never reads
     /// it, and the agent cancelling the connection as it stops, lose
     /// nothing.
@@ -847,10 +891,11 @@ mod tests {
         drop((read, write));
     }
 
-    /// Past its limit, a caller's requests come back as one entry saying
-    /// how many, once its window ends, or as the agent locks.
+    /// Past its limit, a caller's repeated reads come back as one entry
+    /// naming the item and saying how many, once its window ends, or as the
+    /// agent locks. The first past the limit is still an entry of its own.
     #[tokio::test]
-    async fn a_flood_of_requests_folds_into_one_entry() {
+    async fn a_flood_of_reads_folds_into_one_entry_naming_the_item() {
         let dir = tempfile::tempdir().unwrap();
         let agent = set_up(dir.path()).await;
         let before = stored(&agent).len();
@@ -859,6 +904,41 @@ mod tests {
             assert!(matches!(read, Message::Ok { .. }), "{read:?}");
         }
         // The setup's own requests count against the same anchor.
+        let listed = stored(&agent).len() - before;
+        assert_eq!(listed + before, ledger::PER_ANCHOR as usize + 1);
+        agent.lock().await;
+        agent
+            .unlock(Zeroizing::new("test".into()), None)
+            .await
+            .unwrap();
+        let entries = stored(&agent);
+        assert_eq!(entries[0].command, "item-get");
+        assert_eq!(entries[0].items, entries[1].items);
+        assert!(entries[0].items[0].id.is_some());
+        assert_eq!(entries[0].fields, entries[1].fields);
+        assert_eq!(
+            entries[0].more as usize,
+            ledger::PER_ANCHOR as usize + 40 - listed
+        );
+        assert_eq!(entries.len(), ledger::PER_ANCHOR as usize + 2);
+    }
+
+    /// Past its limit, a caller's look-ups fold into one entry saying how
+    /// many.
+    #[tokio::test]
+    async fn a_flood_of_look_ups_folds_into_one_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = set_up(dir.path()).await;
+        let before = stored(&agent).len();
+        let list = || Command::ItemList {
+            vault: None,
+            query: Vec::new(),
+            kind: None,
+        };
+        for _ in 0..ledger::PER_ANCHOR + 40 {
+            let listed = ask(&agent, list()).await;
+            assert!(matches!(listed, Message::Ok { .. }), "{listed:?}");
+        }
         let listed = stored(&agent).len() - before;
         assert_eq!(listed + before, ledger::PER_ANCHOR as usize);
         agent.lock().await;
@@ -872,7 +952,6 @@ mod tests {
             entries[0].more as usize,
             ledger::PER_ANCHOR as usize + 40 - listed
         );
-        assert_eq!(entries.len(), ledger::PER_ANCHOR as usize + 1);
     }
 
     /// A list is clamped to `MAX_LIMIT` entries, and pages back by id.

@@ -177,16 +177,22 @@ shows are, as an unverified caller's.
   gate. Anything that would (later: standing grants) lives in `store.redb`
   and changes in the app with a tap. Restarting the agent leaves it locked,
   with no grants.
-- It can't fake the agent: before sending a passphrase, the app and the CLI
+- It can't fake the agent: on every connection, before sending anything
+  (a passphrase, a request, a watch), the app and the CLI
   check that the socket's owner runs from the exact `deadbolt` they expect
   (the CLI's own binary, the app's bundled helper), by real path, and is
   that code: by team and the `deadbolt` identifier for a Developer ID build,
   by the cdhash of that file for an ad-hoc one. A copy elsewhere is refused.
   A process that stops the agent and binds the socket gets nothing. The
-  check is `deadbolt_client::set_agent_check`; a client that sets none can't
-  send `setup` or `unlock` at all. The CLI runs its hash-pinned helper; the
-  app runs the `deadbolt-enclave` in its own bundle, which the bundle's
-  signature covers.
+  check is `deadbolt_client::set_agent_check`, run once per agent process
+  (known by its audit token); a client that sets none can't send `setup` or
+  `unlock` at all, and checks only the owner's user for the rest. `stop`
+  goes to whatever holds the socket, so a stale or foreign one can be
+  stopped. The CLI runs its hash-pinned helper; the app runs the
+  `deadbolt-enclave` in its own bundle, which the bundle's signature covers.
+  - So after rebuilding an ad-hoc build, the new binary won't talk to the
+    agent the old one started until `deadbolt agent stop`, as it already
+    wouldn't unlock it.
   - Every macOS distribution ships `deadbolt-enclave` beside `deadbolt`
     (the release tarballs, Homebrew, `deadbolt.pw/install`). Without it,
     `setup` and `unlock` fail and name the missing file; there is no
@@ -194,6 +200,9 @@ shows are, as an unverified caller's.
   - On Linux the check is only that the socket's owner runs as this user.
     The socket's 0700 directory keeps other users out; that isn't
     authentication, and any process of Kit's could stand in for the agent.
+  - The agent, for its part, takes its runtime directory only if it's a
+    real directory of this user's (not a symlink), makes it 0700 before
+    binding, and drops any connection from another user.
 - What it can still do: use what was granted, from inside the anchor,
   until it expires. And an approved command can send the value anywhere.
   That is why the panel shows the command.
@@ -314,8 +323,13 @@ touched, from a helper it hash-checks before running.
   - **Bounded.** Each string in an entry (the claim, labels, paths, titles,
     field names) keeps at most 256 bytes, marked "…(cut)", and each list 16
     items. Past 60 entries a minute from one anchor (the tty and its
-    session, else the label and claimed session), the rest fold into one
-    `more-past-limit` entry saying how many. While locked, at most 1,000
+    session, else the label and claimed session), or 300 a minute from all
+    anchors together (so making up a claimed session per request doesn't
+    help), the rest fold into one `more-past-limit` entry saying how many.
+    Reads, writes and removals (the Read, Write and Never tiers) never fold
+    into it: past a limit, the first of each kind is still its own entry,
+    and only exact repeats of it (same caller, command, items, fields and
+    outcome) fold, into one entry naming them too. While locked, at most 1,000
     entries or 1 MiB wait; past that they fold into one `more-while-locked`
     entry naming who made them. The store keeps at most 100,000 entries or
     64 MiB; past that the oldest go, and the listing ends with one

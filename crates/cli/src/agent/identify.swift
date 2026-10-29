@@ -7,7 +7,8 @@
 //   {"code": Signature, "process": Process, "files": [Signature | null, ...]}
 // with `code` and `process` only for a token. Files are read for this
 // helper's own architecture, the one Deadbolt's binaries run as.
-// where Signature is {"path", "signing_id", "team_id", "cdhash", "valid"} and
+// where Signature is {"path", "signing_id", "team_id", "cdhash", "valid"}
+// (`path` is the main executable, inside the bundle for an app) and
 // Process is {"ppid", "started", "tty", "session_started", "args", "ancestry"}.
 //
 // The process facts are read by pid first, and the code is looked up by the
@@ -15,9 +16,9 @@
 // succeeds, the pid still belonged to the token's process throughout: a
 // reused pid can't lend its facts to a dead caller.
 //
-// `team_id` is only reported when the signature chains to Apple's
-// Developer ID roots for that team, so a self-signed certificate naming a
-// team can't claim one. `valid` is SecCodeCheckValidity for the running code
+// `team_id` is only reported when it is 10 ASCII letters or digits and the
+// signature chains to Apple's Developer ID roots for that team, so a
+// self-signed certificate naming a team can't claim one. `valid` is SecCodeCheckValidity for the running code
 // (the kernel's view of its pages and the code directory's signature).
 //
 // Exits 15 when the token's process is gone, 13 on malformed input.
@@ -63,8 +64,9 @@ private func processName(_ info: proc_bsdinfo) -> String {
     return name.isEmpty ? cString(info.pbi_comm) : name
 }
 
-/// The process's arguments from `KERN_PROCARGS2`: argc, the exec path,
-/// padding, then argv.
+/// The process's arguments from `KERN_PROCARGS2`: argc, the exec path and
+/// its NUL, padded with NULs to a multiple of 8 bytes, then argc strings of
+/// argv (any of them may be empty), then the environment.
 private func arguments(_ pid: pid_t) -> [String] {
     var mib: [Int32] = [CTL_KERN, KERN_PROCARGS2, pid]
     var size = 0
@@ -78,7 +80,13 @@ private func arguments(_ pid: pid_t) -> [String] {
     let argc = buffer.withUnsafeBytes { $0.loadUnaligned(as: Int32.self) }
     var i = 4
     while i < size && buffer[i] != 0 { i += 1 }
-    while i < size && buffer[i] == 0 { i += 1 }
+    // Only the padding is skipped: skipping every NUL would take empty
+    // arguments for padding and the environment for arguments.
+    let argv = 4 + (i - 4 + 1 + 7) / 8 * 8
+    guard argv <= size, buffer[i ..< argv].allSatisfy({ $0 == 0 }) else {
+        return []
+    }
+    i = argv
     var args: [String] = []
     while args.count < Int(argc) && i < size {
         let start = i
@@ -123,7 +131,20 @@ private func hex(_ data: Data) -> String {
     data.map { String(format: "%02x", $0) }.joined()
 }
 
+/// Whether `team` has a team identifier's shape: 10 ASCII letters or digits.
+/// Anything else is never put into a requirement's text.
+private func isTeamIdentifier(_ team: String) -> Bool {
+    team.utf8.count == 10 && team.utf8.allSatisfy { byte in
+        (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(byte)
+            || (UInt8(ascii: "A") ... UInt8(ascii: "Z")).contains(byte)
+            || (UInt8(ascii: "a") ... UInt8(ascii: "z")).contains(byte)
+    }
+}
+
 private func requirement(team: String) -> SecRequirement? {
+    guard isTeamIdentifier(team) else {
+        return nil
+    }
     let text = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
     var req: SecRequirement?
     guard SecRequirementCreateWithString(text as CFString, [], &req) == errSecSuccess else {
@@ -140,6 +161,7 @@ private func signature(
     check: (SecRequirement?) -> Bool
 ) -> [String: Any] {
     var out: [String: Any] = [:]
+    // The bundle, for an app; its main executable is what it runs.
     var url: CFURL?
     if SecCodeCopyPath(staticCode, [], &url) == errSecSuccess, let url = url as URL? {
         out["path"] = url.path
@@ -154,6 +176,9 @@ private func signature(
     else {
         out["valid"] = false
         return out
+    }
+    if let main = dict[kSecCodeInfoMainExecutable as String] as? URL {
+        out["path"] = main.path
     }
     if let id = dict[kSecCodeInfoIdentifier as String] as? String {
         out["signing_id"] = id

@@ -354,18 +354,26 @@ pub mod linux {
         }
     }
 
+    /// `/proc/<pid>/cmdline`'s arguments: each ends in a NUL (unless the
+    /// process rewrote them), and any of them may be empty.
+    pub fn args(raw: &[u8]) -> Vec<String> {
+        if raw.is_empty() {
+            return Vec::new();
+        }
+        raw.strip_suffix(&[0])
+            .unwrap_or(raw)
+            .split(|b| *b == 0)
+            .map(|a| String::from_utf8_lossy(a).into_owned())
+            .collect()
+    }
+
     pub fn process(pid: u32) -> Process {
         let Some(me) = stat(pid) else {
             return Process::default();
         };
         let boot = boot_time();
         let args = std::fs::read(format!("/proc/{pid}/cmdline"))
-            .map(|raw| {
-                raw.split(|b| *b == 0)
-                    .filter(|a| !a.is_empty())
-                    .map(|a| String::from_utf8_lossy(a).into_owned())
-                    .collect()
-            })
+            .map(|raw| args(&raw))
             .unwrap_or_default();
         let mut ancestry = Vec::new();
         let mut next = me.ppid;
@@ -409,6 +417,19 @@ mod tests {
             cdhash: Some(cdhash.into()),
             valid,
         }
+    }
+
+    /// Empty arguments are arguments: none is dropped, so nothing after
+    /// them moves up a place.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn empty_arguments_keep_their_place() {
+        assert_eq!(
+            super::linux::args(b"\0browser-host\0chrome-extension://x/\0"),
+            ["", "browser-host", "chrome-extension://x/"]
+        );
+        assert_eq!(super::linux::args(b"ls\0\0"), ["ls", ""]);
+        assert!(super::linux::args(b"").is_empty());
     }
 
     #[test]
