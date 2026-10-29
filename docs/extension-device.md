@@ -303,8 +303,8 @@ bun e2e/standalone.ts --deadbolt "${CARGO_TARGET_DIR:-../target}/debug/deadbolt"
 bun e2e/standalone.ts --join --deadbolt "${CARGO_TARGET_DIR:-../target}/debug/deadbolt"
 ```
 
-The smoke (`--smoke`, run in CI) needs no CLI and no network: Chromium resolves no
-names and reaches nothing beyond loopback. It creates a vault through the device
+The smoke (`--smoke`, run in CI) needs no CLI and no network: Chromium resolves
+only the loopback fixtures and reaches nothing beyond loopback. It creates a vault through the device
 page, saves a login there and sees it listed without a click, checks hello, list
 and fill answer within the latency limit, fills it through the real inline menu,
 locks, checks OPFS holds no plaintext markers, rejects reads while locked and a
@@ -370,7 +370,10 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 
 - One vault per browser device; no native-host discovery or automatic migration.
 - No passkey registration/assertion capability and no biometric/PRF unlock.
-  WebAuthn falls back to the browser. This is a separate extraction across
+  WebAuthn falls back to the browser. A headless check with an unlocked standalone
+  vault verified browser-owned ES256 resident-key registration and assertion with
+  required user verification, no advertised passkey capability and no native
+  messaging. Standalone passkey storage is a separate extraction across
   `cli/src/webauthn.rs` (ES256/CBOR/client data), `agent/passkeys.rs` (RP and
   exclusion checks, listing, signing and mutation planning) and the browser host's
   ceremony adapter. Move the pure crypto and validation into core, then add
