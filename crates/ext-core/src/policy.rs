@@ -30,10 +30,13 @@ impl Preset {
     }
 }
 
-/// Whether a password may be shown under `preset`. Under Strict only with a
-/// passphrase, which the caller then checks against the open store.
-pub fn may_reveal(preset: Preset, passphrase_given: bool) -> bool {
-    !preset.reauth() || passphrase_given
+/// Only an explicit preset change or a command that opens the vault may
+/// change the worker's policy. Other payloads cannot downgrade Strict.
+pub fn accepts_preset(command: &str) -> bool {
+    matches!(
+        command,
+        "device-preset" | "device-create" | "device-unlock" | "device-join-finish"
+    )
 }
 
 /// Whether this form fill needs a passphrase. Comfortable and Relaxed follow
@@ -57,10 +60,9 @@ mod tests {
 
     #[test]
     fn strict_needs_a_passphrase_to_reveal() {
-        assert!(!may_reveal(Preset::Strict, false));
-        assert!(may_reveal(Preset::Strict, true));
-        assert!(may_reveal(Preset::Comfortable, false));
-        assert!(may_reveal(Preset::Relaxed, false));
+        assert!(Preset::Strict.reauth());
+        assert!(!Preset::Comfortable.reauth());
+        assert!(!Preset::Relaxed.reauth());
     }
 
     #[test]
@@ -75,11 +77,31 @@ mod tests {
     #[test]
     fn an_untold_worker_is_strict() {
         assert_eq!(Preset::default(), Preset::Strict);
-        assert!(!may_reveal(Preset::default(), false));
+        assert!(Preset::default().reauth());
     }
 
     #[test]
     fn presets_parse_by_name_only() {
+        for command in [
+            "device-preset",
+            "device-create",
+            "device-unlock",
+            "device-join-finish",
+        ] {
+            assert!(accepts_preset(command), "{command}");
+        }
+        for command in [
+            "device-secret",
+            "fill-form",
+            "fill",
+            "save",
+            "check",
+            "device-join-start",
+            "device-status",
+            "unknown",
+        ] {
+            assert!(!accepts_preset(command), "{command}");
+        }
         assert_eq!(Preset::parse("strict"), Some(Preset::Strict));
         assert_eq!(Preset::parse("comfortable"), Some(Preset::Comfortable));
         assert_eq!(Preset::parse("relaxed"), Some(Preset::Relaxed));

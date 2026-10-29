@@ -17,7 +17,7 @@ thread_local! {
 }
 
 /// The candidate queue uses elapsed time, not the adjustable wall clock.
-pub(super) fn now() -> Duration {
+fn now() -> Duration {
     EPOCH.with(Instant::elapsed)
 }
 
@@ -59,7 +59,7 @@ fn origin(body: &Value) -> Result<&str> {
     Ok(origin)
 }
 
-pub(super) fn generated_id(body: &Value) -> Result<&str> {
+fn generated_id(body: &Value) -> Result<&str> {
     let id = text(body, "generated")?;
     if id.is_empty() || id.len() > 64 {
         return Err(Error::Protocol("generated is 1 to 64 bytes"));

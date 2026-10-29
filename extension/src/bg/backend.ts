@@ -44,6 +44,8 @@ export interface VaultBackend {
    * aborts (the page navigated) or nobody answers in time.
    */
   reauth?(body: Extract<RequestBody, { type: "fill-form" }>, ask: ReauthAsk, signal: AbortSignal): Promise<ReplyFor["fill-form"]>
+  /** The browser-only vault only: whether a card's number or code asks for the passphrase (Strict), so the menu can say so. */
+  asksPassphrase?(): Promise<boolean>
 }
 
 /** What a passphrase prompt for a fill says, and the tab it's for. */

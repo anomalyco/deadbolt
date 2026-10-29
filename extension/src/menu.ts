@@ -670,7 +670,8 @@ function show(reply: MenuLoadReply) {
  * An identity or card field's menu: the identities ("Home · 123 Main St")
  * or cards ("Visa ••4242 · 08/28") to fill the whole section with. A card
  * says where it goes when that's a payment provider's frame ("Into Stripe
- * on shop.com"), and that Deadbolt may ask for Touch ID first.
+ * on shop.com"), and that Deadbolt may ask for Touch ID first (or, in the
+ * browser-only Deadbolt under Strict, for the passphrase).
  */
 /** For each identity listed, what of the section it fills (see fillsWords). */
 let fills: Record<string, string[]> = {}
@@ -689,7 +690,7 @@ function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
   rowsEl.replaceChildren(...accounts.map(row))
   // Where a pick goes, always: a payment provider's frames on the site, or the site itself.
   setCaption(reply.into ? `Into ${reply.into} on ${reply.site}` : `On ${reply.site}`)
-  say(reply.verify ? "Deadbolt may ask for Touch ID." : "")
+  say(reply.passphrase ? "Deadbolt asks for your passphrase first." : reply.verify ? "Deadbolt may ask for Touch ID." : "")
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]

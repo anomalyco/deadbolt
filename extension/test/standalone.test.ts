@@ -601,6 +601,126 @@ describe("a fill waiting on the passphrase", () => {
     expect(log).toEqual([])
   })
 
+  /**
+   * A clock for timers of a second or more, moved by hand; shorter ones
+   * (settle's) run for real.
+   */
+  const clock = () => {
+    const g = globalThis as unknown as { setTimeout: (...a: unknown[]) => unknown; clearTimeout: (id: unknown) => void }
+    const realSet = g.setTimeout
+    const realClear = g.clearTimeout
+    const timers = new Map<number, { at: number; run: () => void }>()
+    let now = 0
+    let next = 1
+    g.setTimeout = (fn: unknown, ms = 0, ...args: unknown[]) => {
+      if ((ms as number) < 1000) return realSet(fn, ms, ...args)
+      const id = next++
+      timers.set(id, { at: now + (ms as number), run: () => (fn as (...a: unknown[]) => void)(...args) })
+      return id
+    }
+    g.clearTimeout = (id: unknown) => void (typeof id === "number" && timers.delete(id) ? null : realClear(id))
+    return {
+      advance(ms: number) {
+        now += ms
+        for (const [id, t] of [...timers]) if (t.at <= now && timers.delete(id)) t.run()
+      },
+      restore() {
+        g.setTimeout = realSet
+        g.clearTimeout = realClear
+      },
+    }
+  }
+
+  test("a slow passphrase check isn't dropped by the time left to answer, and a wrong one gets the time again", async () => {
+    const time = clock()
+    try {
+      // The KDF answers "slow" only when the test lets it.
+      let release!: () => void
+      const answered = fake.runtimeAnswer
+      fake.runtimeAnswer = (message) => {
+        const m = message as VaultRequest
+        if (m.type === VAULT_REQUEST && m.body.type === "fill-form" && m.body.passphrase === "slow") {
+          return new Promise((resolve) => (release = () => resolve(answered({ ...m, body: { ...m.body, passphrase: "right" } }))))
+        }
+        return answered(message)
+      }
+      const backend = new StandaloneBackend()
+      await backend.connect()
+      const fill = backend.reauth(body, ask, new AbortController().signal)
+      let ended: string | null = null
+      fill.then(
+        () => (ended = "filled"),
+        (err) => (ended = err.code),
+      )
+      await settle()
+      const id = (await waiting(backend))!.id
+      // 90 s at the prompt, then a passphrase whose check takes 60 s: past the 2 minutes.
+      time.advance(90_000)
+      const confirm = backend.device({ type: "device-reauth-confirm", id, passphrase: "slow" })
+      await settle()
+      time.advance(60_000)
+      await settle()
+      expect(ended).toBeNull()
+      release()
+      expect((await confirm).ok).toBe(true)
+      expect(await fill).toMatchObject({ values: { number: "4242424242424242" } })
+
+      // A wrong passphrase leaves the next fill waiting with the full 2 minutes again, then it's dropped.
+      const next = backend.reauth(body, ask, new AbortController().signal)
+      next.catch(() => {})
+      await settle()
+      const again = (await waiting(backend))!.id
+      time.advance(100_000)
+      expect(await backend.device({ type: "device-reauth-confirm", id: again, passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
+      time.advance(100_000)
+      expect(await waiting(backend)).not.toBeNull()
+      time.advance(20_000)
+      await expect(next).rejects.toMatchObject({ code: "cancelled" })
+      expect(await waiting(backend)).toBeNull()
+    } finally {
+      time.restore()
+    }
+  })
+
+  test("a fill cancelled or replaced while its passphrase is checked gets nothing", async () => {
+    let release!: () => void
+    const answered = fake.runtimeAnswer
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "fill-form" && m.body.passphrase === "slow") {
+        return new Promise((resolve) => (release = () => resolve(answered({ ...m, body: { ...m.body, passphrase: "right" } }))))
+      }
+      return answered(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const first = backend.reauth(body, ask, new AbortController().signal)
+    first.catch(() => {})
+    await settle()
+    const confirm = backend.device({ type: "device-reauth-confirm", id: (await waiting(backend))!.id, passphrase: "slow" })
+    await settle()
+    await backend.device({ type: "device-reauth-cancel", id: (await waiting(backend))!.id })
+    await expect(first).rejects.toMatchObject({ code: "cancelled" })
+    release()
+    expect(await confirm).toMatchObject({ ok: false, code: "expired" })
+
+    const older = backend.reauth(body, ask, new AbortController().signal)
+    older.catch(() => {})
+    await settle()
+    const replaced = backend.device({ type: "device-reauth-confirm", id: (await waiting(backend))!.id, passphrase: "slow" })
+    await settle()
+    const newer = backend.reauth(body, ask, new AbortController().signal)
+    newer.catch(() => {})
+    await expect(older).rejects.toMatchObject({ code: "cancelled" })
+    release()
+    expect(await replaced).toMatchObject({ ok: false, code: "expired" })
+    // The newer fill still waits, untouched by the older one's answer.
+    const left = await waiting(backend)
+    expect(left).not.toBeNull()
+    await backend.device({ type: "device-reauth-cancel", id: left!.id })
+    await expect(newer).rejects.toMatchObject({ code: "cancelled" })
+  })
+
   test("ends on cancel, on lock and when the page navigates", async () => {
     const backend = new StandaloneBackend()
     await backend.connect()
@@ -623,6 +743,104 @@ describe("a fill waiting on the passphrase", () => {
     expect(requests().filter((b) => b.type === "fill-form")).toHaveLength(0)
     const late = await backend.device({ type: "device-reauth-confirm", id, passphrase: "right" })
     expect(late.ok).toBe(false)
+  })
+})
+
+describe("rate limits, as the native host's", () => {
+  const origin = "https://shop.test"
+  const ref = `${"a".repeat(64)}:${"1".repeat(32)}`
+  const check = { type: "check" as const, origin, username: "kit", password: "pw" }
+  const generateCheck = { type: "generate-check" as const, origin }
+  const fill = { type: "fill" as const, origin, ref, want: ["password" as const] }
+  const generate = { type: "generate" as const, origin }
+  const fillForm = { type: "fill-form" as const, origin, ref, fields: ["given-name" as const] }
+  const sentOf = (type: string) => requests().filter((b) => b.type === type).length
+  const outcome = (p: Promise<unknown>) =>
+    p.then(
+      () => "ok",
+      (err) => err.code,
+    )
+
+  beforeEach(() => {
+    const answered = fake.runtimeAnswer
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type !== VAULT_REQUEST) return answered(message)
+      if (m.body.type === "check") return { reply: { type: "check", status: "new", matches: [] } }
+      if (m.body.type === "generate") return { reply: { type: "generate", password: "generated", generated: "g1" } }
+      if (m.body.type === "fill-form") return { reply: { type: "fill-form", values: { "given-name": "Kit" }, verified: false } }
+      return answered(message)
+    }
+  })
+
+  test("checks: 20 at once, then one a second, refused before the vault sees them", async () => {
+    const start = new Date("2026-10-29T12:00:00Z").getTime()
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    // Checks and generate-checks share one bucket.
+    for (let i = 0; i < 20; i++) expect(await outcome(backend.send(i % 2 ? check : generateCheck))).toBe("ok")
+    await expect(backend.send(check)).rejects.toMatchObject({ code: "rate_limited", message: "too many requests; try again in a moment" })
+    expect(await outcome(backend.send(generateCheck))).toBe("rate_limited")
+    expect(sentOf("check") + sentOf("generate-check")).toBe(20)
+    // Fills have their own.
+    expect(await outcome(backend.send(fill))).toBe("ok")
+    setSystemTime(start + 999)
+    expect(await outcome(backend.send(check))).toBe("rate_limited")
+    setSystemTime(start + 1000)
+    expect(await outcome(backend.send(check))).toBe("ok")
+    expect(await outcome(backend.send(check))).toBe("rate_limited")
+    // A long rest refills no more than the burst.
+    setSystemTime(start + HOUR)
+    for (let i = 0; i < 20; i++) expect(await outcome(backend.send(check))).toBe("ok")
+    expect(await outcome(backend.send(check))).toBe("rate_limited")
+  })
+
+  test("fills: 60 at once, then four a second, and a refused one isn't use", async () => {
+    const start = new Date("2026-10-29T12:00:00Z").getTime()
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    // Fills, generated passwords and form fills share one bucket.
+    const kinds = [fill, generate, fillForm]
+    for (let i = 0; i < 60; i++) expect(await outcome(backend.send(kinds[i % 3] as typeof fill))).toBe("ok")
+    for (const body of kinds) expect(await outcome(backend.send(body as typeof fill))).toBe("rate_limited")
+    expect(sentOf("fill") + sentOf("generate") + sentOf("fill-form")).toBe(60)
+    expect(await outcome(backend.send(check))).toBe("ok")
+    setSystemTime(start + 249)
+    expect(await outcome(backend.send(fill))).toBe("rate_limited")
+    setSystemTime(start + 250)
+    expect(await outcome(backend.send(fill))).toBe("ok")
+    expect(await outcome(backend.send(fill))).toBe("rate_limited")
+    // A refused fill doesn't keep the vault unlocked.
+    await settle()
+    delete fake.session["deadbolt.lastUse"]
+    expect(await outcome(backend.send(fillForm))).toBe("rate_limited")
+    await settle()
+    expect(fake.session["deadbolt.lastUse"]).toBeUndefined()
+    // A minute refills the whole burst, and no more.
+    setSystemTime(start + 250 + 60_000)
+    for (let i = 0; i < 60; i++) expect(await outcome(backend.send(fill))).toBe("ok")
+    expect(await outcome(backend.send(fill))).toBe("rate_limited")
+  })
+})
+
+describe("the card menu's passphrase hint", () => {
+  test("only Strict says the passphrase is asked for", async () => {
+    for (const [preset, asks] of [
+      ["strict", true],
+      ["comfortable", false],
+      ["relaxed", false],
+    ] as const) {
+      fake.local["deadbolt.lockPreset"] = preset
+      expect(await new StandaloneBackend().asksPassphrase()).toBe(asks)
+    }
+    // Changing the preset changes it at once.
+    fake.local["deadbolt.lockPreset"] = "comfortable"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    await backend.device({ type: "device-preset", preset: "strict" })
+    expect(await backend.asksPassphrase()).toBe(true)
   })
 })
 

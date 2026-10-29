@@ -213,6 +213,8 @@ export class Forms {
       // Every destination of a pick is the source's party (see targets): a provider's frames, or the site's own.
       const into = (t.source as Placed).provider
       const items = usable(reply, t.kind, t.needs)
+      // Only the browser-only vault under Strict, and only when the section takes a number or code.
+      const passphrase = t.kind === "card" && t.needs.some((f) => (VERIFIED_FIELDS as string[]).includes(f)) && (await this.host.asksPassphrase?.()) === true
       return {
         kind: "forms",
         form: t.kind,
@@ -220,6 +222,7 @@ export class Forms {
         identities: t.kind === "identity" ? (items as FormIdentity[]) : [],
         cards: t.kind === "card" ? (items as FormCard[]) : [],
         verify: t.kind === "card" && reply.canVerify,
+        ...(passphrase ? { passphrase } : {}),
         ...(t.kind === "identity" ? { fills: Object.fromEntries(items.map((i) => [i.ref, fillsWords(t.roles, i.fields)])) } : {}),
         ...(into ? { into } : {}),
       }

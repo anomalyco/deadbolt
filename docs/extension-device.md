@@ -40,7 +40,9 @@ shared policy gates list, fill, credential checks and saves. The existing
 background frame, user-gesture, navigation and menu clickjacking checks still run;
 a frame asks for its own origin, never its parent's credentials.
 
-Save offers use the existing `bg/save.ts` flow. Checks use shared trimmed,
+Save offers use the existing `bg/save.ts` flow. Both adapters call core’s login
+check, ranking and title helpers, so native tests exercise the wasm rules too.
+Checks use shared trimmed,
 case-insensitive username comparison and constant-time password hash comparison;
 without a username they match by password alone. A confirmed update changes only
 the existing login's password, preserving its title, username and saved URLs.
@@ -56,10 +58,21 @@ kept passwords fifteen minutes, are bound to the requesting origin, and are
 forgotten on save, drop or lock. The existing signup/change-password menu and
 post-submit save flow use these commands unchanged.
 
+The standalone backend applies the native host’s token buckets before forwarding
+requests: `check`/`generate-check` share 20 tokens, refilling one per second;
+`fill`/`generate`/`fill-form` share 60, refilling four per second. Exhaustion returns
+`rate_limited` without asking the vault. The buckets last for the service worker’s
+lifetime, like the native host’s buckets last for its connection.
+
 `forms` and `fill-form` use shared Rust identity/card field allowlists and labels.
 Only requested fields leave the vault; identity ID numbers, notes and card PINs
 never fill. Strict requires the local passphrase for every card-number/CVV fill,
-enforced in Rust's `policy.rs`, not just the extension UI. Comfortable and Relaxed
+enforced in Rust's `policy.rs`, not just the extension UI. The card menu says it
+will ask for the passphrase. The two-minute prompt timer stops when confirmation
+starts, so a slow KDF is not mistaken for an unanswered prompt; cancellation,
+locking and replacement still end the fill. Only `device-preset` and opening
+commands may change the worker’s preset; extra `preset` fields on ordinary
+requests cannot weaken it. Comfortable and Relaxed
 follow the native Touch-ID-off rule: the explicit menu pick is sufficient. There
 is no standalone Activity log, so card fills are **not** recorded as Activity.
 Identities and cards can be synced from another device; the standalone editor
@@ -292,7 +305,11 @@ standalone build also needs the `wasm32-unknown-unknown` Rust target and
 `wasm-bindgen-cli` at the exact version `crates/ext-core/Cargo.toml` pins; the
 shared `scripts/wasm.sh <crate dir> <out dir>` checks the pin, builds the crate
 and finds it in cargo's target directory (`CARGO_TARGET_DIR` included). The
-site's `site/scripts/wasm.sh` uses the same script for `crates/send-web`.
+site's `site/scripts/wasm.sh` uses the same script for `crates/send-web`. Both
+generated wasm directories are ignored, not checked into Git. The shared script
+uses release LTO and `opt-level="z"` for browser downloads without changing native
+release optimization. CI builds standalone wasm for its smoke run; published
+extension releases still build the default native-host extension (no wasm).
 
 ```sh
 bun run check
