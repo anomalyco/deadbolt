@@ -44,7 +44,9 @@ async function build() {
     // Readable identifiers for debugging; whitespace stripped (content.js runs on every page).
     minify: { whitespace: true, syntax: true, identifiers: false },
     sourcemap: "none",
-    define: { DEADBOLT_E2E: e2e ? "true" : "false", DEADBOLT_NATIVE: native ? "true" : "false" },
+    // A release build's channel (DEADBOLT_BUILD_CHANNEL, as the CLI's): the
+    // standalone build's settings check that channel's feed for a newer build.
+    define: { DEADBOLT_E2E: e2e ? "true" : "false", DEADBOLT_NATIVE: native ? "true" : "false", DEADBOLT_RELEASE_CHANNEL: JSON.stringify(process.env.DEADBOLT_BUILD_CHANNEL ?? "") },
   })
   if (!result.success) {
     for (const log of result.logs) console.error(log)
