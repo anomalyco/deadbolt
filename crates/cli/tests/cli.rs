@@ -180,10 +180,11 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
     }
 }
 
-/// `new` runs `deadbolt join`, `inviter` runs `deadbolt pair <ticket>`.
-fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) {
+/// Starts `deadbolt join` on `new`: the process, its stdout lines after the
+/// code, and the code.
+fn start_join(new: &Device, device_name: &str) -> (Child, mpsc::Receiver<String>, String) {
     let mut child = new
-        .cmd(&["join", "--yes", "--device-name", device_name])
+        .cmd(&["join", "--device-name", device_name])
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -197,17 +198,17 @@ fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) 
             }
         }
     });
-    let ticket = rx.recv_timeout(Duration::from_secs(30)).expect("no ticket");
-    assert!(ticket.starts_with("DBPAIR"), "{ticket}");
-    let mut args = vec!["pair", &ticket];
-    if let Some(vault) = vault {
-        args.extend(["--vault", vault]);
-    }
-    let out = inviter.run(&args);
-    assert!(
-        out.starts_with(&format!("added {device_name} to ")),
-        "{out}"
-    );
+    let line = rx.recv_timeout(Duration::from_secs(30)).expect("no code");
+    let code = line
+        .strip_prefix("Code: ")
+        .expect("a code line")
+        .to_string();
+    assert_eq!(code.split('-').count(), 4, "{code}");
+    (child, rx, code)
+}
+
+/// Waits for `join` to finish and returns its stderr.
+fn finish_join(mut child: Child) -> (std::process::ExitStatus, String) {
     let status = wait(&mut child, Duration::from_secs(30));
     let mut err = String::new();
     child
@@ -217,9 +218,26 @@ fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) 
         .read_to_string(&mut err)
         .unwrap();
     eprintln!("join stderr:\n{err}");
+    (status, err)
+}
+
+/// `new` runs `deadbolt join`, `inviter` runs `deadbolt pair <code>`.
+fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) {
+    let (child, rx, code) = start_join(new, device_name);
+    let mut args = vec!["pair", &code];
+    if let Some(vault) = vault {
+        args.extend(["--vault", vault]);
+    }
+    let out = inviter.run(&args);
+    assert!(
+        out.starts_with(&format!("✓ added \"{device_name}\" to ")),
+        "{out}"
+    );
+    let (status, err) = finish_join(child);
     assert!(status.success(), "join failed");
+    assert!(err.contains(&format!("run: deadbolt pair {code}")), "{err}");
     let joined = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert!(joined.starts_with("joined vault "), "{joined}");
+    assert!(joined.starts_with("✓ joined \""), "{joined}");
 }
 
 #[test]
@@ -300,7 +318,7 @@ fn pairing_membership_and_removal() {
     a.run(&["init", "--device-name", "alpha"]);
     a.run(&["init", "other"]);
 
-    pair(&a, &b, "beta", None);
+    pair(&a, &b, "beta", Some("personal"));
     assert_eq!(a.devices(), ["alpha", "beta"]);
     assert_eq!(b.devices(), ["alpha", "beta"]);
     let ls = b.run(&["vault", "ls"]);
@@ -353,34 +371,23 @@ fn pairing_membership_and_removal() {
     let out = b.run(&["sync"]);
     assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
 
-    // Re-pairing gamma into family (from which it was removed) is refused before
-    // dialing, while pairing that same ticket into a's other vault succeeds.
-    let mut child = c
-        .cmd(&["join", "--yes", "--device-name", "gamma"])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let stdout = child.stdout.take().unwrap();
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        for line in BufReader::new(stdout).lines() {
-            if tx.send(line.unwrap()).is_err() {
-                break;
-            }
-        }
-    });
-    let ticket = rx.recv_timeout(Duration::from_secs(30)).expect("no ticket");
-    let err = a.fail(&["pair", &ticket, "--vault", "family"]);
+    // Re-pairing gamma into family (from which it was removed) is refused, and
+    // that spends the code; gamma's next code into a's other vault works.
+    let (child, _rx, code) = start_join(&c, "gamma");
+    let err = a.fail(&["pair", &code, "--vault", "family"]);
     assert!(
         err.contains("that device was removed from family and can't rejoin it"),
         "{err}"
     );
-    let out = a.run(&["pair", &ticket, "--vault", "other"]);
-    assert!(out.starts_with("added gamma to other"), "{out}");
-    assert!(wait(&mut child, Duration::from_secs(30)).success());
+    let (status, err) = finish_join(child);
+    assert!(!status.success());
+    assert!(err.contains("can't rejoin"), "{err}");
+    let (child, rx, code) = start_join(&c, "gamma");
+    let out = a.run(&["pair", &code, "--vault", "other"]);
+    assert_eq!(out, "✓ added \"gamma\" to other\n");
+    assert!(finish_join(child).0.success());
     let joined = rx.recv_timeout(Duration::from_secs(5)).unwrap();
-    assert_eq!(joined, "joined vault other");
+    assert_eq!(joined, "✓ joined \"other\" from alpha");
     let out = c.run(&["sync", "--vault", "other"]);
     assert!(out.starts_with("alpha\t") && out.contains("\tok "), "{out}");
 
@@ -402,11 +409,154 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
     // Joining another vault on an existing device.
     pair(&a, &b, "beta", Some("personal"));
     assert_eq!(b.run(&["vault", "ls"]).lines().count(), 2);
-    assert!(
-        !a.try_run(&["pair", "DBPAIRAAAA", "--vault", "nope"])
-            .status
-            .success()
-    );
+    let err = a.fail(&["pair", "violin-garden-tiger-lamp", "--vault", "nope"]);
+    assert!(err.contains("no vault named nope"), "{err}");
+    let err = a.fail(&["pair", "DBPAIRAAAA"]);
+    assert!(err.contains("invalid pairing code"), "{err}");
+    // Several vaults and no terminal to choose on: name one.
+    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp"]);
+    assert!(err.contains("several vaults (personal, work)"), "{err}");
+}
+
+/// A code works once: someone else using it is loud on the device that comes
+/// second. A mistyped code finds no device.
+#[test]
+fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
+    let a = Device::new();
+    let b = Device::new();
+    let c = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    c.run(&["init", "--device-name", "gamma"]);
+    let (child, _rx, code) = start_join(&b, "beta");
+
+    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp"]);
+    wrong.env("DEADBOLT_TEST_PAIR_FIND_SECS", "1");
+    let out = c.output(&mut wrong);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("no device is waiting for that code"), "{err}");
+
+    // c gets there first; a, the legitimate device, hears it was used.
+    assert_eq!(c.run(&["pair", &code]), "✓ added \"beta\" to personal\n");
+    assert!(finish_join(child).0.success());
+    let err = a.fail(&["pair", &code]);
+    assert!(err.contains("that code was already used"), "{err}");
+    assert!(err.contains("someone else may have used it"), "{err}");
+    assert_eq!(a.devices(), ["alpha"]);
+}
+
+/// The agent's side of `join` on a device that isn't set up, as a client
+/// without a passphrase up front sees it: the code, then `joined` asking for
+/// the passphrase, and nothing on disk before the answer. Hanging up instead
+/// discards the join; the inviter then lists a device never seen, which
+/// `devices remove` takes out.
+#[test]
+fn a_new_device_asks_for_its_passphrase_last() {
+    use std::os::unix::net::UnixStream;
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    for answer in [false, true] {
+        let b = Device::new();
+        b.run(&["status"]);
+        let paths = deadbolt_client::Paths::from_vars(|name| match name {
+            "DEADBOLT_HOME" => Some(b.path("home").into()),
+            "XDG_RUNTIME_DIR" => Some(b.path("run").into()),
+            "XDG_STATE_HOME" => Some(b.path("state").into()),
+            "XDG_CONFIG_HOME" => Some(b.path("config").into()),
+            _ => None,
+        });
+        let mut socket = UnixStream::connect(&paths.socket).unwrap();
+        let request = serde_json::json!({
+            "v": deadbolt_client::protocol::PROTOCOL_VERSION,
+            "cmd": "join",
+            "device_name": "beta",
+            "passphrase": null,
+        });
+        socket.write_all(format!("{request}\n").as_bytes()).unwrap();
+        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        let mut next = || -> serde_json::Value {
+            serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
+        };
+        let code = next();
+        assert_eq!(code["event"]["event"], "code", "{code}");
+        let code = code["event"]["code"].as_str().unwrap().to_string();
+        assert_eq!(a.run(&["pair", &code]), "✓ added \"beta\" to personal\n");
+        let joined = next();
+        assert_eq!(joined["event"]["event"], "joined", "{joined}");
+        assert_eq!(joined["event"]["vault"], "personal");
+        assert_eq!(joined["event"]["inviter"]["name"], "alpha");
+        assert_eq!(joined["event"]["passphrase"], true);
+        assert!(b.run(&["status"]).contains("state\tnot set up\n"));
+        assert!(!b.path("home").join("store.redb").exists());
+        if answer {
+            socket
+                .write_all(b"{\"answer\":true,\"passphrase\":\"chosen late\"}\n")
+                .unwrap();
+            let reply = next();
+            assert_eq!(reply["type"], "ok", "{reply}");
+            assert_eq!(reply["reply"]["vault"]["name"], "personal");
+            assert_eq!(b.devices(), ["alpha", "beta"]);
+            b.run(&["lock"]);
+            let out = b.try_run_stdin(&["unlock", "--passphrase-stdin"], "chosen late\n");
+            assert!(out.status.success());
+            eventually("a to see beta", || {
+                a.run(&["sync"]);
+                a.run(&["devices"]).contains("beta\t")
+                    && !a.run(&["devices"]).contains("never seen")
+            });
+        } else {
+            drop(lines);
+            drop(socket);
+            std::thread::sleep(Duration::from_millis(500));
+            assert!(b.run(&["status"]).contains("state\tnot set up\n"));
+            assert!(!b.path("home").join("store.redb").exists());
+            let devices = a.run(&["devices"]);
+            assert!(
+                devices.contains("beta\t") && devices.contains("never seen"),
+                "{devices}"
+            );
+            a.run(&["devices", "remove", "beta"]);
+            assert_eq!(a.devices(), ["alpha"]);
+        }
+    }
+}
+
+/// Without a passphrase from the env, stdin or a terminal, a new device's
+/// join fails before showing a code; with one on stdin it joins.
+#[test]
+fn a_new_device_join_needs_a_passphrase_source() {
+    let a = Device::new();
+    let b = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    let mut cmd = b.cmd(&["join"]);
+    cmd.env_remove("DEADBOLT_PASSPHRASE");
+    let out = b.output(&mut cmd);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).is_empty());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("--passphrase-stdin"));
+
+    let mut cmd = b.cmd(&["join", "--passphrase-stdin", "--device-name", "beta"]);
+    cmd.env_remove("DEADBOLT_PASSPHRASE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"from stdin\n")
+        .unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let code = line.trim().strip_prefix("Code: ").unwrap().to_string();
+    a.run(&["pair", &code]);
+    let (status, _) = finish_join(child);
+    assert!(status.success());
+    b.run(&["lock"]);
+    let out = b.try_run_stdin(&["unlock", "--passphrase-stdin"], "from stdin\n");
+    assert!(out.status.success());
 }
 
 /// `deadbolt app` beside a stand-in `deadbolt-ui` that records each start
@@ -568,6 +718,12 @@ fn whoami_and_activity_name_the_caller_never_values() {
 /// process tree, as from a person's own terminal: the tests may run under
 /// an AI host such as OpenCode, whom the agent refuses pairing and grants.
 fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, String) {
+    let (code, out, err) = detached_code(device, args, input);
+    (code == 0, out, err)
+}
+
+/// [`detached`], with the exit code.
+fn detached_code(device: &Device, args: &[&str], input: &str) -> (i32, String, String) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let n = RUNS.fetch_add(1, Ordering::SeqCst);
@@ -587,7 +743,7 @@ fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, Strin
     let read = |what| std::fs::read_to_string(file(what)).unwrap();
     let (out, err) = (read("out"), read("err"));
     eprintln!("$ (detached) {args:?}\n{out}{err}");
-    (read("code").trim() == "0", out, err)
+    (read("code").trim().parse().unwrap(), out, err)
 }
 
 /// One request to the agent, as an agent client sends it.
@@ -853,6 +1009,358 @@ fn agents_sign_in_unattended_only_where_allowed() {
     a.run(&["agents", "remove-client", "browse"]);
     agent_error(&fill("https://github.com", &github, &["totp"]), "forbidden");
     assert_eq!(a.run(&["agents", "grants"]), "");
+}
+
+const CONCEALED: &str = "<concealed by deadbolt>";
+const TOKEN: &str = "ghp-secret-token-123";
+
+/// Runs deadbolt as an AI would: claiming an OpenCode session.
+fn as_ai(device: &Device, args: &[&str]) -> Output {
+    let mut cmd = device.cmd(args);
+    cmd.env("OPENCODE_SESSION_ID", "ses_test")
+        .env_remove("DEADBOLT_CALLER");
+    device.output(&mut cmd)
+}
+
+fn activity(device: &Device) -> Vec<serde_json::Value> {
+    device
+        .run(&["activity", "--json"])
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn run_inject_and_read_resolve_references() {
+    let a = Device::new();
+    a.run(&["init"]);
+    let github = new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            "password=hunter2-hunter2",
+        ],
+    );
+    new(&a, &["login", "--name", "Dup", "password=one-one-one"]);
+    new(&a, &["login", "--name", "Dup", "password=two-two-two"]);
+    let seen = a.path("seen");
+
+    // The command gets the value, its stdin and its exit code come through,
+    // and its output shows the value concealed, even split across writes
+    // (two writes, back to back: well inside the 100 ms after which held
+    // output goes out, however slow the machine).
+    let script = format!(
+        r#"printf %s "$TOKEN" >'{}'; echo "t=$TOKEN"; printf %s "$TOKEN" >&2; printf ghp-secret; printf '%s\n' -token-123; cat; exit 7"#,
+        seen.display()
+    );
+    let (code, out, err) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env",
+            "TOKEN=deadbolt://personal/GitHub/token",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ],
+        "from stdin",
+    );
+    assert_eq!(code, 7, "{err}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), TOKEN);
+    assert_eq!(out, format!("t={CONCEALED}\n{CONCEALED}\nfrom stdin"));
+    assert_eq!(err, CONCEALED);
+
+    // By short id, from an env file, unmasked on request; plain values pass.
+    let env_file = a.path("env.tpl");
+    std::fs::write(
+        &env_file,
+        format!("# for tests\nexport PW=\"deadbolt://{github}/password\"\nPLAIN=just text\n"),
+    )
+    .unwrap();
+    let (code, out, _) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env-file",
+            env_file.to_str().unwrap(),
+            "--no-mask",
+            "--",
+            "sh",
+            "-c",
+            r#"echo "$PW $PLAIN""#,
+        ],
+        "",
+    );
+    assert_eq!((code, out.as_str()), (0, "hunter2-hunter2 just text\n"));
+
+    // A title two items share is an error naming both; nothing runs.
+    let (code, _, err) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env",
+            "X=deadbolt://Dup/password",
+            "--",
+            "sh",
+            "-c",
+            "echo ran",
+        ],
+        "",
+    );
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("names 2 items") && !err.contains("one-one-one"),
+        "{err}"
+    );
+    // A value that isn't a reference is never echoed.
+    let (code, _, err) = detached_code(&a, &["run", "--env", "X=hunter2-pasted", "--", "true"], "");
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("--env X: the value isn't a deadbolt:// reference")
+            && !err.contains("hunter2"),
+        "{err}"
+    );
+    let (code, _, err) = detached_code(
+        &a,
+        &["run", "--env", "X=deadbolt://GitHub", "--", "true"],
+        "",
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("deadbolt://[vault/]item/field"), "{err}");
+
+    // inject writes 0600, and replaces only its own, unchanged output.
+    let template = a.path("config.tpl");
+    std::fs::write(
+        &template,
+        "token: {{ deadbolt://GitHub/token }}\nkeep: {{ other }}\n",
+    )
+    .unwrap();
+    let out_file = a.path("config.yml");
+    let inject = |extra: &[&str]| {
+        let mut args = vec![
+            "inject",
+            "-i",
+            template.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        detached_code(&a, &args, "")
+    };
+    std::fs::write(&out_file, "mine").unwrap();
+    let (code, _, err) = inject(&[]);
+    assert_ne!(code, 0);
+    assert!(err.contains("--force"), "{err}");
+    assert_eq!(std::fs::read_to_string(&out_file).unwrap(), "mine");
+    assert_eq!(inject(&["--force"]).0, 0);
+    let expected = format!("token: {TOKEN}\nkeep: {{{{ other }}}}\n");
+    assert_eq!(std::fs::read_to_string(&out_file).unwrap(), expected);
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&out_file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(inject(&[]).0, 0, "its own output is replaced");
+    std::fs::write(&out_file, "edited").unwrap();
+    assert_ne!(inject(&[]).0, 0, "an edited output is not");
+
+    // read prints one value.
+    let (code, out, _) = detached_code(&a, &["read", "deadbolt://personal/GitHub/token"], "");
+    assert_eq!((code, out), (0, format!("{TOKEN}\n")));
+
+    // Each resolve is an entry naming the item, field and purpose, never a
+    // value.
+    let raw = a.run(&["activity", "--json"]);
+    assert!(
+        !raw.contains(TOKEN) && !raw.contains("hunter2-hunter2"),
+        "{raw}"
+    );
+    let entries = activity(&a);
+    for (command, tier) in [
+        ("resolve-run", "use"),
+        ("resolve-inject", "use"),
+        ("resolve-read", "read"),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|e| {
+                e["command"] == command
+                    && e["outcome"] == "allowed"
+                    && e["fields"] == serde_json::json!(["token"])
+            })
+            .unwrap_or_else(|| panic!("no {command} in {raw}"));
+        assert_eq!(entry["tier"], tier);
+        assert_eq!(entry["items"][0]["title"], "GitHub");
+        assert!(
+            entry["items"][0]["id"]
+                .as_str()
+                .unwrap()
+                .starts_with(&github)
+        );
+    }
+}
+
+#[test]
+fn ai_agents_use_secrets_only_with_a_grant() {
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            "password=hunter2-hunter2",
+        ],
+    );
+    let template = a.path("t.tpl");
+    std::fs::write(&template, "{{ deadbolt://GitHub/token }}").unwrap();
+    let run_token = [
+        "run",
+        "--env",
+        "T=deadbolt://GitHub/token",
+        "--",
+        "sh",
+        "-c",
+        r#"echo "t=$T""#,
+    ];
+    let injected = a.path("t.out");
+    let inject = [
+        "inject",
+        "-i",
+        template.to_str().unwrap(),
+        "-o",
+        injected.to_str().unwrap(),
+    ];
+    // To stdout, the values reach the AI itself: that's a read.
+    let inject_stdout = ["inject", "-i", template.to_str().unwrap()];
+    let read = ["read", "deadbolt://GitHub/token"];
+    let refused = |out: &Output, says: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(4), "{err}");
+        assert!(err.contains(says), "{err}");
+        assert!(!err.contains(TOKEN) && out.stdout.is_empty(), "{err}");
+    };
+
+    // No grant: refused, saying what to allow.
+    refused(&as_ai(&a, &run_token), "deadbolt agents allow-secrets");
+    refused(&as_ai(&a, &inject), "--purpose inject");
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
+    refused(&as_ai(&a, &read), "Touch ID");
+
+    // An AI can't allow itself, passphrase or not.
+    let mut cmd = a.cmd(&["--passphrase-stdin", "agents", "allow-secrets", "GitHub"]);
+    cmd.env("OPENCODE_SESSION_ID", "ses_test");
+    let out = a.with_stdin(cmd, &format!("{PASSPHRASE}\n"));
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI can't"));
+
+    // The user allows the token for run.
+    let (ok, out, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow-secrets",
+            "github",
+            "--fields",
+            "token",
+            "--purpose",
+            "run",
+            "--expires",
+            "1h",
+        ],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(
+        ok && out.contains("AI agents\tpersonal › GitHub\ttoken\trun\texpires in"),
+        "{out}"
+    );
+    let ran = as_ai(&a, &run_token);
+    assert!(ran.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        format!("t={CONCEALED}\n")
+    );
+    // Still not another field, not inject, and never read without Touch ID.
+    refused(
+        &as_ai(
+            &a,
+            &["run", "--env", "P=deadbolt://GitHub/password", "--", "true"],
+        ),
+        "--fields password",
+    );
+    refused(&as_ai(&a, &inject), "--purpose inject");
+    refused(&as_ai(&a, &read), "Touch ID");
+
+    // Allowed inject too, it writes the file, but stdout is still a read.
+    let (ok, _, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow-secrets",
+            "GitHub",
+            "--fields",
+            "token",
+        ],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(ok);
+    assert!(as_ai(&a, &inject).status.success());
+    assert_eq!(std::fs::read_to_string(&injected).unwrap(), TOKEN);
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
+
+    // Revoking takes effect at once.
+    let grants = a.run(&["agents", "grants"]);
+    let id = grants
+        .lines()
+        .find(|l| l.contains("AI agents"))
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        a.run(&["agents", "revoke", &id]).trim(),
+        format!("revoked {id}")
+    );
+    refused(&as_ai(&a, &run_token), "allow-secrets");
+    assert_eq!(a.run(&["agents", "grants"]), "");
+
+    // Activity has each resolve, allowed or refused, with the AI's claim
+    // and never a value.
+    let raw = a.run(&["activity", "--json"]);
+    assert!(!raw.contains(TOKEN), "{raw}");
+    let runs: Vec<serde_json::Value> = activity(&a)
+        .into_iter()
+        .filter(|e| e["command"] == "resolve-run")
+        .collect();
+    assert_eq!(runs.len(), 4, "{raw}");
+    assert_eq!(runs.iter().filter(|e| e["outcome"] == "allowed").count(), 1);
+    assert!(
+        runs.iter()
+            .all(|e| e["caller"]["claimed"]["opencode_session"] == "ses_test")
+    );
+    let entries = activity(&a);
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["command"] == "secret-grant-set" && e["outcome"] == "allowed")
+    );
+    let reads: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| e["command"] == "resolve-read")
+        .collect();
+    assert_eq!(reads.len(), 4, "{raw}");
+    assert!(
+        reads
+            .iter()
+            .all(|e| e["outcome"] == "refused" && e["tier"] == "read")
+    );
 }
 
 #[test]

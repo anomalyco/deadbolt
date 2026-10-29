@@ -5,8 +5,9 @@ The browser passes its environment through: DEADBOLT_FAKE_STATUS picks the
 hello status, DEADBOLT_FAKE_LOG gets one JSON line per request, and
 DEADBOLT_FAKE_RATE_LIMIT=fill,generate-keep answers those with rate_limited,
 DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds, and
-DEADBOLT_FAKE_SIGNIN adds "Sign in with Google" logins. Saves are checked
-against the spec's title and URL rules. Generated passwords are held per
+DEADBOLT_FAKE_SIGNIN adds "Sign in with Google" logins, and
+DEADBOLT_FAKE_GOOGLE lists three Google logins instead of its own. Saves
+are checked against the spec's title and URL rules. Generated passwords are held per
 origin, as the agent holds them: candidates until generate-keep, then
 pending, and check and save resolve only pending ones. Fields that allow
 under 60 bits are weak, as the agent's floor.
@@ -55,6 +56,12 @@ if os.environ.get("DEADBOLT_FAKE_SIGNIN"):
     ACCOUNTS.append({"ref": REF4, "vault": "Personal", "title": "Google", "username": "kit@gmail.com", "hasPassword": True, "hasTotp": False, "urls": ["https://accounts.google.com"]})
     VALUES[REF3] = {}
     VALUES[REF4] = {"username": "kit@gmail.com", "password": "google password"}
+# DEADBOLT_FAKE_GOOGLE=1: three google.com logins, for Google's password step.
+if os.environ.get("DEADBOLT_FAKE_GOOGLE"):
+    ACCOUNTS = [
+        {"ref": "b" * 64 + ":" + str(i) * 32, "vault": "Personal", "title": "Google", "username": u, "hasPassword": True, "hasTotp": False, "urls": ["https://accounts.google.com"]}
+        for i, u in enumerate(["ryan@gmail.com", "ryan@anoma.ly", "kit@gmail.com"], 1)
+    ]
 
 
 def read():

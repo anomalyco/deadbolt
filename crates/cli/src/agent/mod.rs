@@ -13,6 +13,7 @@ mod items;
 mod mirror;
 mod pairing;
 mod passkeys;
+mod secrets;
 mod send;
 mod session;
 #[cfg(test)]
@@ -92,6 +93,8 @@ pub struct Agent {
     sync_now: Notify,
     /// Serializes setup, unlock and lock.
     transition: tokio::sync::Mutex<()>,
+    /// Held by the one join or pair running.
+    pairing: tokio::sync::Mutex<()>,
     /// Held by the one sync from 1Password running.
     syncing_op: tokio::sync::Mutex<()>,
     /// Bumped by a lock and at shutdown: a sync from 1Password running
@@ -132,6 +135,8 @@ pub struct Agent {
     activity: Mutex<activity::Ledger>,
     /// Each paired agent client's rate limit, by client id.
     agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
+    /// AI callers' `resolve` rate limits, by anchor, and one for them all.
+    resolve_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
     /// Every passphrase check: one at a time, wrong ones backed off.
     guesses: guesses::Guesses,
     /// Deadbolt Send's endpoint, started by the first send.
@@ -153,6 +158,7 @@ impl Agent {
             ready: watch::channel(false).0,
             sync_now: Notify::new(),
             transition: tokio::sync::Mutex::new(()),
+            pairing: tokio::sync::Mutex::new(()),
             syncing_op: tokio::sync::Mutex::new(()),
             interrupts: watch::channel(0).0,
             #[cfg(test)]
@@ -173,10 +179,18 @@ impl Agent {
             callers: caller::Callers::new(),
             activity: Mutex::default(),
             agent_rates: Mutex::default(),
+            resolve_rates: Mutex::default(),
             guesses: guesses::Guesses::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
         })
+    }
+
+    /// Holds off the idle lock until dropped: for a request waiting on the
+    /// user (a Touch ID prompt, a passphrase check).
+    fn busy(&self) -> Busy<'_> {
+        self.busy.fetch_add(1, Ordering::SeqCst);
+        Busy(&self.busy)
     }
 
     fn interrupt_op(&self) {
@@ -213,6 +227,15 @@ impl Agent {
         {
             prompt.cancel();
         }
+    }
+}
+
+/// See [`Agent::busy`].
+struct Busy<'a>(&'a AtomicUsize);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -647,7 +670,7 @@ mod tests {
         (agent, pid)
     }
 
-    fn conversation() -> (Conversation, UnixStream, watch::Sender<bool>) {
+    pub(super) fn conversation() -> (Conversation, UnixStream, watch::Sender<bool>) {
         let (socket, client) = UnixStream::pair().unwrap();
         let (_, write) = socket.into_split();
         let (closed, closed_rx) = watch::channel(false);
@@ -1245,7 +1268,7 @@ fn invalid_request(error: &serde_json::Error) -> anyhow::Error {
 /// One control connection: sends events and reads answers.
 pub struct Conversation {
     write: tokio::sync::Mutex<OwnedWriteHalf>,
-    answers: tokio::sync::Mutex<mpsc::Receiver<bool>>,
+    answers: tokio::sync::Mutex<mpsc::Receiver<Answer>>,
     closed: watch::Receiver<bool>,
 }
 
@@ -1264,12 +1287,10 @@ impl Conversation {
         self.send(&Message::Event { event }).await
     }
 
-    /// Sends an event and waits for the client's answer; `false` if it hangs up.
-    pub async fn ask(&self, event: Event) -> bool {
-        if self.event(event).await.is_err() {
-            return false;
-        }
-        self.answers.lock().await.recv().await.unwrap_or(false)
+    /// Sends an event and waits for the client's answer; `None` if it hangs up.
+    pub async fn ask(&self, event: Event) -> Option<Answer> {
+        self.event(event).await.ok()?;
+        self.answers.lock().await.recv().await
     }
 
     /// Resolves once the client hangs up.
@@ -1311,7 +1332,7 @@ impl Agent {
                 let Ok(answer) = serde_json::from_str::<Answer>(&line) else {
                     break;
                 };
-                if answers_tx.send(answer.answer).await.is_err() {
+                if answers_tx.send(answer).await.is_err() {
                     break;
                 }
             }
@@ -1560,12 +1581,11 @@ impl Agent {
                     peers: sync::sync_all(&self, only).await?,
                 })
             }
-            Command::Join { confirm } => pairing::join(&self, conv, confirm).await,
-            Command::Pair {
-                ticket,
-                vault,
-                confirm,
-            } => pairing::pair(&self, conv, ticket, vault, confirm).await,
+            Command::Join {
+                device_name,
+                passphrase,
+            } => pairing::join(&self, conv, device_name, passphrase).await,
+            Command::Pair { code, vault } => pairing::pair(&self, conv, code, vault).await,
             Command::ItemGet {
                 vault,
                 query,
@@ -1756,8 +1776,11 @@ impl Agent {
             command @ (Command::PasskeyList { .. }
             | Command::PasskeyCreate { .. }
             | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,
-            Command::AgentClientAdd { .. } | Command::AgentGrantSet { .. } => {
-                bail!("pairing and grants are answered with the caller")
+            Command::AgentClientAdd { .. }
+            | Command::AgentGrantSet { .. }
+            | Command::SecretGrantSet { .. }
+            | Command::Resolve { .. } => {
+                bail!("pairing, grants and references are answered with the caller")
             }
             Command::AgentClientList => Ok(Reply::AgentClients {
                 clients: self.with(|s| grants::list_clients(s))?,
@@ -1771,9 +1794,18 @@ impl Agent {
                 grants: self.with(|s| grants::list_grants(s, session::now()))?,
             }),
             Command::AgentGrantRemove { id } => {
-                self.with(|s| grants::remove_grant(s, &id))?;
+                // Either kind of grant: a sign-in grant, else a secret grant.
+                self.with(|s| match grants::remove_grant(s, &id) {
+                    Err(error) if crate::client::code(&error) == Some(ErrorCode::NotFound) => {
+                        secrets::remove_grant(s, &id)
+                    }
+                    removed => removed.map(drop),
+                })?;
                 Ok(Reply::Done)
             }
+            Command::SecretGrantList => Ok(Reply::SecretGrants {
+                grants: self.with(|s| secrets::list_grants(s, session::now()))?,
+            }),
             command @ (Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }) => self.agent_client(command),
@@ -2083,6 +2115,40 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         self.start(loaded, None).await
+    }
+
+    /// First run through a join: creates the store with the device key that
+    /// joined and stores the vault it received, then unlocks.
+    async fn setup_joined(
+        self: &Arc<Self>,
+        joined: pairing::Fresh,
+        passphrase: crate::protocol::Secret,
+    ) -> Result<crate::protocol::VaultInfo> {
+        self.cancel_biometric_prompt();
+        let _transition = self.transition.lock().await;
+        self.settle_activity(true);
+        *self
+            .biometric_cooldown_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        if deadbolt_store::is_initialized(&self.paths.data) {
+            bail!("this device was set up meanwhile; nothing from the join was saved");
+        }
+        if passphrase.expose().is_empty() {
+            bail!("the passphrase cannot be empty");
+        }
+        let dir = self.paths.data.clone();
+        let params = self.kdf;
+        let (loaded, vault) =
+            tokio::task::spawn_blocking(move || joined.persist(&dir, &passphrase, params))
+                .await??;
+        self.biometric_was_enrolled.store(false, Ordering::SeqCst);
+        *self
+            .biometric_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        self.start(loaded, None).await?;
+        Ok(vault)
     }
 
     /// Unlocks with `passphrase`. While unlocked, it changes the idle

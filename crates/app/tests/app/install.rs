@@ -69,7 +69,6 @@ fn the_offer_and_settings_live_in_the_vault_only() {
         "connecting",
         "welcome",
         "create-typing",
-        "ticket",
         "code",
         "creating",
         "locked",

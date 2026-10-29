@@ -5,14 +5,14 @@
 //!
 //! ```text
 //! client -> agent   Request   {"v":1,"cmd":"...",...}
-//! agent  -> client  Message*  {"type":"event",...}         pairing only
-//! client -> agent   Answer    {"answer":true}               after an event that asks
+//! agent  -> client  Message*  {"type":"event",...}         join only
+//! client -> agent   Answer    {"answer":true,"passphrase":"…"}   after an event that asks
 //! agent  -> client  Message   {"type":"ok",...} | {"type":"error",...}   final
 //! ```
 //!
-//! Pairing events ask for an answer only when the request set `confirm`;
-//! otherwise the code is accepted automatically. A client hanging up cancels
-//! a pending `join`/`pair`.
+//! Only `joined` with `passphrase` set asks for an answer: the passphrase for a
+//! device that isn't set up yet. A client hanging up cancels a pending
+//! `join`/`pair`, and discards a joined vault still waiting for its passphrase.
 //!
 //! `watch` keeps the connection open and streams what changed:
 //!
@@ -39,6 +39,7 @@
 //! status request reads the same to every agent.
 
 mod caller;
+mod reference;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -50,8 +51,9 @@ pub use caller::{
     ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Claim,
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
+pub use reference::{Reference, SCHEME};
 
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 19;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -127,15 +129,19 @@ pub enum Command {
     Sync {
         vault: Option<String>,
     },
-    /// Emits `ticket`, then `joining` (answered if `confirm`), then replies `vault`.
+    /// Emits `code`, then `joined` once paired, then replies `vault`. On a
+    /// device that isn't set up, the device key and the vault stay in memory
+    /// until the passphrase arrives: `passphrase` here, else the answer to
+    /// `joined`. A `false` answer or hanging up discards them. `device_name`
+    /// (default: the agent's hostname) applies only then.
     Join {
-        confirm: bool,
+        device_name: Option<String>,
+        passphrase: Option<Secret>,
     },
-    /// Emits `pairing` (answered if `confirm`), then replies `device`.
+    /// Admits the device showing `code` into `vault`; replies `device`.
     Pair {
-        ticket: String,
+        code: String,
         vault: Option<String>,
-        confirm: bool,
     },
     /// Creates an item; replies `item`.
     ItemNew {
@@ -435,7 +441,7 @@ pub enum Command {
     },
     /// Every grant, expired ones too; replies `agent-grants`.
     AgentGrantList,
-    /// Removes a grant; replies `done`.
+    /// Removes a grant, a sign-in or a secret grant; replies `done`.
     AgentGrantRemove {
         id: String,
     },
@@ -478,6 +484,35 @@ pub enum Command {
         allow_credentials: Vec<String>,
         user_verification: Verify,
     },
+    /// Secrets for commands (`docs/agent-control.md`, "Use, don't read"):
+    /// the values `refs` name (`deadbolt://[vault/]item/field`, see
+    /// [`Reference`]), for `purpose`. Each item is a title or short id that
+    /// must match exactly one item; a one-time password field gives its
+    /// current code. A caller Deadbolt takes for an AI needs a live
+    /// `secret-grant-set` grant covering every item, field and purpose for
+    /// `run` and `inject` (else `not-granted`), and Touch ID each time for
+    /// `read` (else `forbidden`). Replies `secrets`, in reference order.
+    Resolve {
+        refs: Vec<String>,
+        purpose: Purpose,
+    },
+    /// Lets AI callers resolve `fields` (every field when empty) of the
+    /// items `items` (titles or short ids in `vault`) for `purposes` (run,
+    /// inject; never read) without asking, until `expires_at` (Unix seconds;
+    /// `None` never). Setting the same item again replaces its grant. Needs
+    /// the user as `AgentClientAdd` does, and refuses AIs the same way.
+    /// Replies `secret-grants` with the grants made.
+    SecretGrantSet {
+        vault: Option<String>,
+        items: Vec<String>,
+        fields: Vec<String>,
+        purposes: Vec<Purpose>,
+        expires_at: Option<u64>,
+        passphrase: Option<Zeroizing<String>>,
+    },
+    /// Every secret grant, expired ones too; replies `secret-grants`.
+    /// `agent-grant-remove` removes them.
+    SecretGrantList,
 }
 
 impl Command {
@@ -485,13 +520,65 @@ impl Command {
     /// check who it is talking to before sending it.
     pub fn carries_passphrase(&self) -> bool {
         match self {
-            Self::Setup { .. } | Self::Unlock { .. } => true,
-            Self::AgentClientAdd { passphrase, .. } | Self::AgentGrantSet { passphrase, .. } => {
-                passphrase.is_some()
-            }
+            // A join asks for one if the device isn't set up.
+            Self::Setup { .. } | Self::Unlock { .. } | Self::Join { .. } => true,
+            Self::AgentClientAdd { passphrase, .. }
+            | Self::AgentGrantSet { passphrase, .. }
+            | Self::SecretGrantSet { passphrase, .. } => passphrase.is_some(),
             _ => false,
         }
     }
+}
+
+/// What resolved secrets are for: a command's environment (`deadbolt
+/// run`), a file (`deadbolt inject`) or printing (`deadbolt read`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Purpose {
+    Run,
+    Inject,
+    Read,
+}
+
+impl Purpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Inject => "inject",
+            Self::Read => "read",
+        }
+    }
+}
+
+/// One resolved reference: which item and field it found, and the value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSecret {
+    /// The vault's name.
+    pub vault: String,
+    /// The item's id.
+    pub item: String,
+    pub title: String,
+    pub field: String,
+    pub value: Secret,
+}
+
+/// A standing grant letting AI callers resolve one item's fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretGrantInfo {
+    pub id: String,
+    /// The vault's name, when the grant was made.
+    pub vault: String,
+    /// The item's id.
+    pub item: String,
+    /// The item's title, when the grant was made.
+    pub title: String,
+    /// Every field when empty.
+    pub fields: Vec<String>,
+    pub purposes: Vec<Purpose>,
+    /// Unix seconds.
+    pub created: u64,
+    pub expires_at: Option<u64>,
+    pub expired: bool,
 }
 
 /// A paired agent client's credentials, on every request it makes: its id
@@ -968,21 +1055,45 @@ pub enum ErrorCode {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
-    /// The new device's pairing ticket.
-    Ticket { ticket: String },
-    /// The joining side's confirmation code and the vault it is joining.
-    Joining {
-        code: String,
+    /// The code to type on a device that holds the vault.
+    Code { code: String },
+    /// Paired into `vault` by `inviter`. With `passphrase`, the device isn't
+    /// set up and the answer must carry its new passphrase.
+    Joined {
         vault: String,
         inviter: DeviceInfo,
+        passphrase: bool,
     },
-    /// The inviting side's confirmation code.
-    Pairing { code: String, device: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Answer {
     pub answer: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<Secret>,
+}
+
+impl Answer {
+    pub fn yes() -> Self {
+        Self {
+            answer: true,
+            passphrase: None,
+        }
+    }
+
+    pub fn no() -> Self {
+        Self {
+            answer: false,
+            passphrase: None,
+        }
+    }
+
+    pub fn passphrase(passphrase: Secret) -> Self {
+        Self {
+            answer: true,
+            passphrase: Some(passphrase),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1121,6 +1232,13 @@ pub enum Reply {
     },
     AgentGrants {
         grants: Vec<AgentGrantInfo>,
+    },
+    /// What `resolve` found, in reference order.
+    Secrets {
+        secrets: Vec<ResolvedSecret>,
+    },
+    SecretGrants {
+        grants: Vec<SecretGrantInfo>,
     },
     AgentLogins {
         /// The page's site: its registrable domain.

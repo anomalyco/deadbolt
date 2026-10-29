@@ -1,6 +1,7 @@
 //! `deadbolt agents`: the agent clients (such as Browse's relay) that may
-//! sign AI agents in to sites unattended, and the standing grants saying
-//! where (`docs/agent-control.md`, "Standing grants").
+//! sign AI agents in to sites unattended, the standing grants saying where
+//! (`docs/agent-control.md`, "Standing grants"), and the grants letting AI
+//! agents use secrets in commands (`deadbolt run`, `inject`).
 
 use std::io::IsTerminal;
 
@@ -9,7 +10,9 @@ use clap::Subcommand;
 use zeroize::Zeroizing;
 
 use crate::paths::Paths;
-use crate::protocol::{AgentClientInfo, AgentGrantInfo, Command, ErrorCode, Fill, Reply};
+use crate::protocol::{
+    AgentClientInfo, AgentGrantInfo, Command, ErrorCode, Fill, Purpose, Reply, SecretGrantInfo,
+};
 use crate::{client, config, prompt, request};
 
 #[derive(Subcommand)]
@@ -60,16 +63,50 @@ pub enum AgentsCommand {
         #[arg(long)]
         client: Option<String>,
     },
-    /// List the standing grants.
+    /// Let AI agents use ITEMs (titles or short ids, in --vault) in
+    /// `deadbolt run` and `deadbolt inject -o FILE` without asking. Using a
+    /// value means being able to learn it (a command can print it, a file
+    /// can be read): masking guards against accidents only, so allow only
+    /// what you would hand that agent. Printing a value (`deadbolt read`,
+    /// `inject` to stdout) still needs Touch ID each time. Asks for Touch
+    /// ID or your passphrase; refused to AI agents.
+    AllowSecrets {
+        #[arg(required = true, value_name = "ITEM")]
+        items: Vec<String>,
+        /// Only these fields, comma separated (default: every field).
+        #[arg(long)]
+        fields: Option<String>,
+        /// What for: run, inject; repeat for both (default: both).
+        #[arg(long, value_enum)]
+        purpose: Vec<GrantPurpose>,
+        /// Expire after this long (30m, 8h, 30d; default never).
+        #[arg(long)]
+        expires: Option<String>,
+    },
+    /// List the standing grants: sign-ins and secrets.
     Grants {
         #[arg(long)]
         json: bool,
     },
-    /// Remove a standing grant by id.
+    /// Remove a standing grant (either kind) by id.
     Revoke { id: String },
 }
 
-pub async fn run(paths: &Paths, command: AgentsCommand, from_stdin: bool) -> Result<()> {
+#[derive(Clone, Copy, clap::ValueEnum)]
+pub enum GrantPurpose {
+    Run,
+    Inject,
+}
+
+pub async fn run(
+    paths: &Paths,
+    command: AgentsCommand,
+    vault: Option<String>,
+    from_stdin: bool,
+) -> Result<()> {
+    if vault.is_some() && !matches!(command, AgentsCommand::AllowSecrets { .. }) {
+        bail!("--vault does not apply to this command");
+    }
     client::ensure_running(paths).await?;
     match command {
         AgentsCommand::AddClient { name, json } => {
@@ -148,9 +185,55 @@ pub async fn run(paths: &Paths, command: AgentsCommand, from_stdin: bool) -> Res
             };
             println!("allowed\t{}", grant_line(&grant));
         }
+        AgentsCommand::AllowSecrets {
+            items,
+            fields,
+            purpose,
+            expires,
+        } => {
+            let fields: Vec<String> = match fields {
+                Some(text) => text.split(',').map(|f| f.trim().to_string()).collect(),
+                None => Vec::new(),
+            };
+            let purposes: Vec<Purpose> = if purpose.is_empty() {
+                vec![Purpose::Run, Purpose::Inject]
+            } else {
+                purpose
+                    .iter()
+                    .map(|p| match p {
+                        GrantPurpose::Run => Purpose::Run,
+                        GrantPurpose::Inject => Purpose::Inject,
+                    })
+                    .collect()
+            };
+            let expires_at = match expires {
+                Some(text) => config::parse_timeout(&text)?.map(|d| config::now() + d.as_secs()),
+                None => None,
+            };
+            let reply = with_proof(paths, from_stdin, |passphrase| Command::SecretGrantSet {
+                vault: vault.clone(),
+                items: items.clone(),
+                fields: fields.clone(),
+                purposes: purposes.clone(),
+                expires_at,
+                passphrase,
+            })
+            .await?;
+            let Reply::SecretGrants { grants } = reply else {
+                bail!("unexpected reply");
+            };
+            for grant in &grants {
+                println!("allowed\t{}", secret_grant_line(grant));
+            }
+        }
         AgentsCommand::Grants { json } => {
             let Reply::AgentGrants { grants } =
                 request(paths, Command::AgentGrantList, from_stdin).await?
+            else {
+                bail!("unexpected reply");
+            };
+            let Reply::SecretGrants { grants: secrets } =
+                request(paths, Command::SecretGrantList, from_stdin).await?
             else {
                 bail!("unexpected reply");
             };
@@ -159,6 +242,13 @@ pub async fn run(paths: &Paths, command: AgentsCommand, from_stdin: bool) -> Res
                     println!("{}", serde_json::to_string(grant)?);
                 } else {
                     println!("{}", grant_line(grant));
+                }
+            }
+            for grant in &secrets {
+                if json {
+                    println!("{}", serde_json::to_string(grant)?);
+                } else {
+                    println!("{}", secret_grant_line(grant));
                 }
             }
         }
@@ -279,8 +369,21 @@ fn grant_line(grant: &AgentGrantInfo) -> String {
     if grant.passkeys {
         what.push("passkeys");
     }
-    let expires = match grant.expires_at {
-        _ if grant.expired => "expired".to_string(),
+    let expires = expiry(grant.expires_at, grant.expired);
+    format!(
+        "{}\t{}\t{}\t{}\t{}\t{expires}",
+        grant.id,
+        grant.client_name.as_deref().unwrap_or(&grant.client_id),
+        grant.site.as_deref().unwrap_or("every site"),
+        grant.login_label.as_deref().unwrap_or("every login"),
+        what.join(",")
+    )
+}
+
+/// "expires in 29d", "expired", "never expires".
+fn expiry(expires_at: Option<u64>, expired: bool) -> String {
+    match expires_at {
+        _ if expired => "expired".to_string(),
         Some(at) => {
             let left = at.saturating_sub(config::now());
             match left {
@@ -290,14 +393,24 @@ fn grant_line(grant: &AgentGrantInfo) -> String {
             }
         }
         None => "never expires".into(),
+    }
+}
+
+/// "c3d4…  AI agents  personal › GitHub  token  run,inject  never expires".
+fn secret_grant_line(grant: &SecretGrantInfo) -> String {
+    let fields = if grant.fields.is_empty() {
+        "every field".to_string()
+    } else {
+        grant.fields.join(",")
     };
+    let purposes: Vec<&str> = grant.purposes.iter().map(|p| p.as_str()).collect();
     format!(
-        "{}\t{}\t{}\t{}\t{}\t{expires}",
+        "{}\tAI agents\t{} › {}\t{fields}\t{}\t{}",
         grant.id,
-        grant.client_name.as_deref().unwrap_or(&grant.client_id),
-        grant.site.as_deref().unwrap_or("every site"),
-        grant.login_label.as_deref().unwrap_or("every login"),
-        what.join(",")
+        grant.vault,
+        grant.title,
+        purposes.join(","),
+        expiry(grant.expires_at, grant.expired)
     )
 }
 

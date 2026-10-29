@@ -13,15 +13,15 @@ use rune::{SecretCopy, Tx};
 use crate::agent;
 use crate::model::{App, Screen};
 use crate::onboarding::worker::{Progress, Stage, Worker};
-use crate::onboarding::{self, Flow, Step};
+use crate::onboarding::{Flow, Step};
 use crate::view::{Notice, Severity};
 use crate::{import, install, settings, shortcut};
 use fixtures::{
-    FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault, fixture_ticket,
-    form, generated, import_preview, import_report, join_notice, kind_scene, locked, locked_error,
-    locked_touch_id, locked_touch_id_reset, mirrored, new_of, other_shortcut, pairing, panel_vault,
-    settings_touch_id, show_preview, status, typed, vault, vault_243, vault_info,
-    vault_with_offered_installer, welcome, working,
+    FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault,
+    fixture_pairing_code, form, generated, import_preview, import_report, inviter, join_notice,
+    kind_scene, locked, locked_error, locked_touch_id, locked_touch_id_reset, mirrored, new_of,
+    other_shortcut, panel_vault, settings_touch_id, show_preview, status, typed, vault, vault_243,
+    vault_info, vault_with_offered_installer, welcome, working,
 };
 
 pub(crate) type Scene = (&'static str, fn(&mut App));
@@ -110,40 +110,35 @@ pub(crate) const SCENES: &[Scene] = &[
         ]);
     }),
     ("join", |s| form(s, Flow::Join)),
-    ("ticket", |s| {
-        welcome(s);
-        s.onboarding.device_ready = true;
-        s.onboarding.step = Step::Ticket;
-        let text = zeroize::Zeroizing::new(fixture_ticket());
-        s.onboarding.ticket = Some(onboarding::Ticket {
-            qr: onboarding::qr::Matrix::new(&text),
-            text,
-        });
-    }),
     ("code", |s| {
         welcome(s);
         s.onboarding.device_ready = true;
-        s.onboarding.pairing = Some(pairing());
-        s.onboarding.step = Step::Confirm {
-            code: "482913".into(),
-            vault: "personal".into(),
-            inviter: "studio".into(),
-        };
+        s.onboarding.step = Step::Code;
+        s.onboarding.code = Some(zeroize::Zeroizing::new(fixture_pairing_code()));
     }),
-    // Codes confirmed, then joined at 0.6 s.
+    // The other device paired at 0.4 s; the vault arrives at 0.6 s.
     ("joining", |s| {
-        working(s, Flow::Join, vec![Stage::Joining]);
+        welcome(s);
         s.onboarding.device_ready = true;
-        s.onboarding.pairing = Some(pairing());
-        s.onboarding.worker =
-            Worker::scripted(vec![(0.6, Progress::Joined(Ok(vault_info("personal"))))]);
+        s.onboarding.step = Step::Code;
+        s.onboarding.code = Some(zeroize::Zeroizing::new(fixture_pairing_code()));
+        s.onboarding.worker = Worker::scripted(vec![
+            (
+                0.4,
+                Progress::Paired {
+                    vault: "personal".into(),
+                    inviter: inviter(),
+                },
+            ),
+            (0.6, Progress::Joined(Ok(vault_info("personal")))),
+        ]);
     }),
-    ("join-declined", |s| {
+    ("join-wrong-code", |s| {
         join_notice(
             s,
             Severity::Caution,
-            "Stopped: the codes didn't match",
-            "Nothing was shared and the ticket no longer works. Make a new one and compare again. If you didn't start pairing on your other device, someone else may have seen the ticket.",
+            "Someone tried a wrong code",
+            "Nothing was shared, and that code no longer works. Make a new one. If you didn't try one yourself, someone may be trying to get in.",
         );
     }),
     ("join-cancelled", |s| {
@@ -151,7 +146,7 @@ pub(crate) const SCENES: &[Scene] = &[
             s,
             Severity::Neutral,
             "Join cancelled",
-            "Nothing was shared. Make a new ticket when you're ready.",
+            "Nothing was shared. Make a new code when you're ready.",
         );
     }),
     ("join-failed", |s| {

@@ -4,13 +4,12 @@
 //! screen. Progress lands in an inbox the UI drains each frame; the thread
 //! wakes the window when it sends.
 
-use std::sync::Arc;
 use std::thread::JoinHandle;
 
-use deadbolt_client::protocol::{Command, DeviceInfo, Event, Reply, Status, VaultInfo};
+use deadbolt_client::protocol::{Answer, Command, DeviceInfo, Event, Reply, Status, VaultInfo};
 use deadbolt_client::{Launch, Paths};
 use rune::Waker;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 use zeroize::Zeroizing;
 
 use crate::agent::Failure;
@@ -24,10 +23,8 @@ pub enum Stage {
     /// Deriving the store key from the passphrase (Argon2): the slow part.
     Protecting,
     CreatingVault,
-    /// Waiting for a relay, so the ticket carries an address.
-    MakingTicket,
-    /// Codes confirmed; receiving the vault.
-    Joining,
+    /// Making a code and publishing where the other device can find it.
+    MakingCode,
 }
 
 #[derive(Debug)]
@@ -37,11 +34,10 @@ pub enum Progress {
     DeviceReady {
         set_up: bool,
     },
-    /// This device's pairing ticket.
-    Ticket(Zeroizing<String>),
-    /// The confirmation code; waits for [`Worker::answer`].
-    Code {
-        code: String,
+    /// The code to type on the other device.
+    Code(Zeroizing<String>),
+    /// The other device paired this one into `vault`.
+    Paired {
         vault: String,
         inviter: DeviceInfo,
     },
@@ -58,7 +54,6 @@ pub struct NewDevice {
 pub struct Worker {
     agent: Option<(Paths, Launch)>,
     inbox: Inbox<Progress>,
-    answer: Option<mpsc::UnboundedSender<bool>>,
     cancel: Option<oneshot::Sender<()>>,
     /// The running request's thread, so one runs at a time and close can wait for it.
     thread: Option<JoinHandle<()>>,
@@ -79,7 +74,6 @@ impl Worker {
         Worker {
             agent: None,
             inbox: Inbox::new(),
-            answer: None,
             cancel: None,
             thread: None,
             script: Vec::new(),
@@ -115,30 +109,20 @@ impl Worker {
         });
     }
 
-    /// Sets up this device if `device` is given, then shows a ticket and waits
+    /// Sets up this device if `device` is given, then shows a code and waits
     /// for another device to pair.
     pub fn join(&mut self, device: Option<NewDevice>) {
-        let (answer, answers) = mpsc::unbounded_channel();
         let (cancel, cancelled) = oneshot::channel();
-        self.answer = Some(answer);
         self.cancel = Some(cancel);
         self.start(Progress::Joined, move |paths, launch, post| async move {
-            let result = join(&paths, &launch, device, answers, cancelled, &post).await;
+            let result = join(&paths, &launch, device, cancelled, &post).await;
             post.send(Progress::Joined(result));
         });
-    }
-
-    /// The person's answer to the confirmation code.
-    pub fn answer(&mut self, matches: bool) {
-        if let Some(answer) = &self.answer {
-            answer.send(matches).ok();
-        }
     }
 
     /// Hangs up a pending join. A device setup already sent finishes first:
     /// the agent completes it either way, so the join stops after it.
     pub fn cancel(&mut self) {
-        self.answer = None;
         if let Some(cancel) = self.cancel.take() {
             cancel.send(()).ok();
         }
@@ -252,15 +236,14 @@ async fn create(
     }
 }
 
-/// Sets up the device if needed, then joins until the other device finishes,
-/// the person answers no, or `cancelled` fires (or its sender drops). A cancel
-/// during setup waits for it: the agent finishes a setup it has started even
-/// if this hangs up, and the screen must know the device is set up.
+/// Sets up the device if needed, then joins until the other device finishes
+/// or `cancelled` fires (or its sender drops). A cancel during setup waits for
+/// it: the agent finishes a setup it has started even if this hangs up, and
+/// the screen must know the device is set up.
 async fn join(
     paths: &Paths,
     launch: &Launch,
     device: Option<NewDevice>,
-    answers: mpsc::UnboundedReceiver<bool>,
     mut cancelled: oneshot::Receiver<()>,
     post: &Poster<Progress>,
 ) -> Result<VaultInfo, Failure> {
@@ -277,47 +260,34 @@ async fn join(
         biased;
         // Dropping the request hangs up, which cancels the join in the agent.
         _ = &mut cancelled => Err(cancel()),
-        result = pair(paths, answers, post) => result,
+        result = pair(paths, post) => result,
     }
 }
 
-/// Shows a ticket, waits for the code and its answer, and receives the vault.
-async fn pair(
-    paths: &Paths,
-    answers: mpsc::UnboundedReceiver<bool>,
-    post: &Poster<Progress>,
-) -> Result<VaultInfo, Failure> {
-    post.send(Progress::Stage(Stage::MakingTicket));
-    let answers = Arc::new(tokio::sync::Mutex::new(answers));
-    let reply = deadbolt_client::converse(paths, Command::Join { confirm: true }, |event| {
-        let answers = answers.clone();
-        let post = post.clone();
-        async move {
-            Ok::<_, std::convert::Infallible>(match event {
-                Event::Ticket { ticket } => {
-                    post.send(Progress::Ticket(Zeroizing::new(ticket)));
-                    None
-                }
-                Event::Joining {
-                    code,
-                    vault,
-                    inviter,
-                } => {
-                    post.send(Progress::Code {
-                        code,
-                        vault,
-                        inviter,
-                    });
-                    let matches = answers.lock().await.recv().await.unwrap_or(false);
-                    if matches {
-                        post.send(Progress::Stage(Stage::Joining));
-                    }
-                    Some(matches)
-                }
-                // Only the inviting side sees `pairing`.
-                Event::Pairing { .. } => None,
-            })
-        }
+/// Shows a code and receives the vault once the other device pairs. The
+/// device is set up already, so the agent never asks for a passphrase.
+async fn pair(paths: &Paths, post: &Poster<Progress>) -> Result<VaultInfo, Failure> {
+    post.send(Progress::Stage(Stage::MakingCode));
+    let command = Command::Join {
+        device_name: None,
+        passphrase: None,
+    };
+    let reply = deadbolt_client::call(paths, command, |event| {
+        Ok::<_, std::convert::Infallible>(match event {
+            Event::Code { code } => {
+                post.send(Progress::Code(Zeroizing::new(code)));
+                None
+            }
+            Event::Joined {
+                vault,
+                inviter,
+                passphrase,
+            } => {
+                post.send(Progress::Paired { vault, inviter });
+                // Set up elsewhere and then reset under us: never send one blind.
+                passphrase.then(Answer::no)
+            }
+        })
     })
     .await?;
     match reply {

@@ -435,33 +435,26 @@ fn create_a_vault_in_the_app() {
     assert!(device.output(&["status"]).contains("alpha"));
 }
 
-/// Shows a ticket on `device`'s app and pairs it from `inviter`; returns the
-/// inviter's `deadbolt pair` once the code is up.
-fn pair_to_code(rt: &mut Runtime<App>, inviter: &Device, form: bool) -> std::process::Child {
+/// Shows a code on `device`'s app and pairs it from `inviter`; returns the
+/// inviter's `deadbolt pair`.
+fn pair_from(rt: &mut Runtime<App>, inviter: &Device, form: bool) -> std::process::Child {
     if form {
         fill_form(rt, Flow::Join, "beta");
     } else {
         rt.update(|s, _| s.submit_join());
     }
-    until(rt, "the ticket", |s| s.onboarding.ticket.is_some());
+    until(rt, "the code", |s| s.onboarding.code.is_some());
     assert!(shows(rt, "Pair from your other device"));
-    let ticket = rt.state.onboarding.ticket.as_ref().unwrap().text.clone();
-    let pair = inviter.spawn(&["pair", &ticket, "--yes"]);
-    until(rt, "the code", |s| {
-        matches!(s.onboarding.step, Step::Confirm { .. })
-    });
-    let Step::Confirm { code, vault, .. } = &rt.state.onboarding.step else {
-        unreachable!()
-    };
-    assert!(code.len() == 6 && code.chars().all(|c| c.is_ascii_digit()));
-    assert_eq!(vault, "personal");
-    pair
+    let code = rt.state.onboarding.code.as_ref().unwrap().clone();
+    assert_eq!(code.split('-').count(), 4, "{}", code.as_str());
+    assert!(shows(rt, &format!("deadbolt pair {}", code.as_str())));
+    inviter.spawn(&["pair", &code])
 }
 
 #[test]
 fn join_from_another_device_in_the_app() {
     let inviter = Device::new();
-    inviter.run(&["init"]);
+    inviter.run(&["init", "--device-name", "studio"]);
     inviter.run(&[
         "new",
         "login",
@@ -471,12 +464,17 @@ fn join_from_another_device_in_the_app() {
     ]);
     let device = Device::new();
     let mut rt = app(&device);
-    let mut pair = pair_to_code(&mut rt, &inviter, true);
-    rt.update(|s, _| s.answer_code(true));
+    let mut pair = pair_from(&mut rt, &inviter, true);
     until(&mut rt, "joined", |s| {
         matches!(s.onboarding.step, Step::Done { .. })
     });
     assert!(shows(&rt, "Joined personal"));
+    assert!(
+        matches!(&rt.state.onboarding.step, Step::Done { from: Some(from), .. } if from == "studio"),
+        "{:?}",
+        rt.state.onboarding.step
+    );
+    assert!(rt.state.onboarding.code.is_none(), "the code is wiped");
     until(&mut rt, "the synced vault", |s| {
         s.screen == Screen::Vault && s.items.len() == 1
     });
@@ -488,36 +486,36 @@ fn join_from_another_device_in_the_app() {
 }
 
 #[test]
-fn declining_or_cancelling_a_join_keeps_the_device_set_up() {
+fn cancelling_a_join_keeps_the_device_set_up_and_ends_the_code() {
     let inviter = Device::new();
     inviter.run(&["init"]);
     let device = Device::new();
     let mut rt = app(&device);
-
-    // The codes "don't match": nothing is shared and both sides stop.
-    let mut pair = pair_to_code(&mut rt, &inviter, true);
-    rt.update(|s, _| s.answer_code(false));
-    until(&mut rt, "the caution notice", |s| {
-        s.onboarding.step == Step::Join && s.onboarding.notice.is_some()
-    });
-    let notice = rt.state.onboarding.notice.clone().unwrap();
-    assert_eq!(notice.severity, Severity::Caution, "{notice:?}");
-    assert!(!pair.wait().unwrap().success(), "the inviter stopped too");
-    until(&mut rt, "the device set up", |s| s.onboarding.device_ready);
-
-    // A second try needs no passphrase; cancelling it hangs up.
-    rt.update(|s, _| s.submit_join());
-    until(&mut rt, "the ticket", |s| s.onboarding.ticket.is_some());
-    rt.key(key(Key::Escape));
-    until(&mut rt, "the neutral notice", |s| {
-        s.onboarding.step == Step::Join
-            && s.onboarding
-                .notice
-                .as_ref()
-                .is_some_and(|n| n.severity == Severity::Neutral)
-    });
-    assert!(shows(&rt, "Join cancelled"));
-    assert!(rt.state.onboarding.ticket.is_none());
+    for form in [true, false] {
+        // The second try needs no passphrase.
+        if form {
+            fill_form(&mut rt, Flow::Join, "beta");
+        } else {
+            rt.update(|s, _| s.submit_join());
+        }
+        until(&mut rt, "the code", |s| s.onboarding.code.is_some());
+        let code = rt.state.onboarding.code.as_ref().unwrap().clone();
+        rt.key(key(Key::Escape));
+        until(&mut rt, "the neutral notice", |s| {
+            s.onboarding.step == Step::Join
+                && s.onboarding
+                    .notice
+                    .as_ref()
+                    .is_some_and(|n| n.severity == Severity::Neutral)
+        });
+        assert!(shows(&rt, "Join cancelled"));
+        assert!(rt.state.onboarding.code.is_none());
+        until(&mut rt, "the device set up", |s| s.onboarding.device_ready);
+        // The cancelled code no longer works.
+        let mut pair =
+            inviter.spawn_with(&["pair", &code], &[("DEADBOLT_TEST_PAIR_FIND_SECS", "2")]);
+        assert!(!pair.wait().unwrap().success());
+    }
     assert!(device.output(&["vault", "ls"]).trim().is_empty());
 }
 
@@ -546,7 +544,7 @@ fn cancelling_a_join_during_setup_waits_for_it() {
     let notice = o.notice.clone().unwrap();
     assert_eq!(notice.severity, Severity::Neutral, "{notice:?}");
     assert!(notice.body.contains("set up now"), "{notice:?}");
-    assert!(o.ticket.is_none(), "no ticket after the cancel");
+    assert!(o.code.is_none(), "no code after the cancel");
     assert!(device.output(&["status"]).contains("beta"));
 }
 
@@ -595,7 +593,7 @@ fn a_device_set_up_meanwhile_refuses_the_new_passphrase() {
         matches!(seen.last(), Some(Progress::Joined(Err(f))) if f.message == ALREADY_SET_UP),
         "{seen:?}"
     );
-    assert!(!seen.iter().any(|p| matches!(p, Progress::Ticket(_))));
+    assert!(!seen.iter().any(|p| matches!(p, Progress::Code(_))));
     assert!(!device.output(&["vault", "ls"]).contains("work"));
     // The passphrase it was set up with still unlocks it.
     device.run(&["lock"]);

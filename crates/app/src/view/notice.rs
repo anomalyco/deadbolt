@@ -20,7 +20,7 @@ static INFO: Icon = Icon {
 /// How serious a notice is, which sets its colour.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Severity {
-    /// Nothing went wrong: the person changed their mind, a ticket ran out.
+    /// Nothing went wrong: the person changed their mind, a code ran out.
     Neutral,
     /// Stopped for safety: the codes didn't match.
     Caution,

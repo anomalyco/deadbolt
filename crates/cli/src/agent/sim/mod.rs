@@ -11,14 +11,15 @@ use deadbolt_core::{
     DeviceId, DeviceSecret, Entry, Hash, Log, MembershipOp, Payload, Vault, VaultId,
 };
 use deadbolt_net::{
-    Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PairingStream, PeerId,
-    SyncHandler, run_sync_session,
+    Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingCode, PairingContext,
+    PairingStream, PeerId, SyncHandler, run_sync_session,
 };
 use deadbolt_store::KdfParams;
 use network::{Rng, drive, link};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, BTreeSet},
+    str::FromStr,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering},
@@ -199,9 +200,6 @@ struct Invitation<'a> {
     vault: VaultId,
 }
 impl Inviter for Invitation<'_> {
-    async fn confirm(&self, _: &PairingContext) -> bool {
-        true
-    }
     async fn offer(&self, _: &PairingContext) -> Result<Vec<u8>, HandlerError> {
         self.device
             .with(|s| pairing::offer(s, self.vault, None))
@@ -221,14 +219,15 @@ impl Inviter for Invitation<'_> {
     }
 }
 impl Joiner for Device {
-    async fn confirm(&self, _: &PairingContext, _: &[u8]) -> bool {
-        true
-    }
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
-        let offer: pairing::Offer = serde_json::from_slice(&offer)?;
         let inviter = DeviceId::from_bytes(ctx.remote);
+        let (offer, vault) =
+            pairing::read_offer(&offer).map_err(|e| -> HandlerError { e.to_string().into() })?;
         let join = self
-            .with(|s| pairing::join_blob(s, inviter, &offer, None))
+            .with(|s| {
+                anyhow::ensure!(!s.vaults.contains_key(&vault), "already held");
+                pairing::join_blob(&s.secret, &s.meta.device_name, inviter, &vault, None)
+            })
             .map_err(|e| -> HandlerError { e.to_string().into() })?;
         *self.offer.lock().unwrap() = Some(offer);
         Ok(join)
@@ -236,7 +235,7 @@ impl Joiner for Device {
     async fn receive(&self, ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
         let offer = self.offer.lock().unwrap().take().ok_or("no offer")?;
         self.with(|s| {
-            pairing::apply_welcome(s, DeviceId::from_bytes(ctx.remote), &offer, welcome).map(|_| ())
+            pairing::apply_welcome(s, DeviceId::from_bytes(ctx.remote), offer, welcome).map(|_| ())
         })
         .map_err(|e| e.to_string().into())
     }
@@ -329,23 +328,29 @@ impl World {
             device: &self.devices[0],
             vault: self.vault,
         };
+        // Fixed code and scalar seeds: the PAKE replays byte for byte.
+        let code = PairingCode::from_str("violin-garden-tiger-lamp")?;
         let dial = PairingStream::new(
             self.devices[0].id,
             self.devices[to].id,
+            &code,
             [7; 32],
             [9; 32],
             false,
+            [to as u8; 32],
         );
         let listen = PairingStream::new(
             self.devices[to].id,
             self.devices[0].id,
+            &code,
             [7; 32],
             [9; 32],
             true,
+            [to as u8 + 100; 32],
         );
         let join = async {
             listen
-                .prove(&mut br)
+                .prove(&mut bt, &mut br)
                 .await?
                 .complete(&mut bt, &mut br, MAX, &self.devices[to])
                 .await
@@ -365,7 +370,10 @@ impl World {
             return Ok(());
         }
         let (a, b) = result.ok_or_else(|| anyhow::anyhow!("pair protocol stalled"))?;
-        ensure!(a?.code == b?.code, "confirmation code mismatch");
+        ensure!(
+            a?.peer == self.devices[to].id && b?.peer == self.devices[0].id,
+            "paired with the wrong device"
+        );
         Ok(())
     }
 
@@ -853,6 +861,38 @@ fn pairing_cuts_preserve_committed_state() {
         world.check().unwrap();
         world.step(&Action::Crash(0)).unwrap();
         world.step(&Action::Crash(1)).unwrap();
+    }
+}
+
+/// A cut after the inviter committed the `Add` leaves a member that never got
+/// its welcome. Pairing it again completes without a second `Add`, and the
+/// devices converge.
+#[test]
+fn pairing_again_after_a_cut_finishes_the_join() {
+    for cut in [1, 20, 60, 120, 240] {
+        let mut world = World::new().unwrap();
+        world.pair_with_cut(1, Some(cut)).unwrap();
+        world.step(&Action::Startup(0)).unwrap();
+        world.step(&Action::Pair(1)).unwrap();
+        assert!(
+            world.devices[1]
+                .with(|s| Ok(s.vaults.contains_key(&world.vault)))
+                .unwrap()
+        );
+        let adds = world.devices[0]
+            .with(|s| {
+                Ok(s.vault(&world.vault)
+                    .entries()
+                    .into_iter()
+                    .filter(|e| {
+                        matches!(e.payload(), Payload::Membership(MembershipOp::Add { .. }))
+                    })
+                    .count())
+            })
+            .unwrap();
+        assert_eq!(adds, 1, "cut {cut}");
+        world.step(&Action::Add(1, 7)).unwrap();
+        world.converge().unwrap();
     }
 }
 

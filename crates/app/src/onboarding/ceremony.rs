@@ -1,15 +1,15 @@
 //! Running first-run ceremonies: honest stage progress, the deadbolt throw
-//! moment when a vault is ready, the QR pairing ticket, and code comparison.
+//! moment when a vault is ready, and the pairing code.
 
 use rune::{
-    Color, Curve, Cycle, Easing, El, Shadow, Spring, TextStyle, Transition, canvas, col, el, icon,
-    row, text,
+    Color, Curve, Cycle, Easing, El, Shadow, Spring, TextStyle, Transition, col, el, icon, row,
+    text,
 };
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
 
 use super::view::{PANEL_W, bar, muted, page, title};
 use super::worker::Stage;
-use super::{Flow, Pairing, Step};
+use super::{Flow, Step};
 use crate::model::App;
 use crate::view::Paged;
 use crate::view::banner;
@@ -63,7 +63,7 @@ pub(super) fn progress(s: &App, k: &Kit, dark: bool, flow: Flow) -> Paged {
             ),
             None => (
                 "Getting ready to pair".to_owned(),
-                "Then you'll see a ticket to use on your other device.".to_owned(),
+                "Then you'll see a code to type on your other device.".to_owned(),
             ),
         },
     };
@@ -80,7 +80,7 @@ pub(super) fn progress(s: &App, k: &Kit, dark: bool, flow: Flow) -> Paged {
         } else {
             Mark::Pending
         };
-        steps = steps.child(step_row(k, *stage, state, vault, o.pairing.as_ref()));
+        steps = steps.child(step_row(k, *stage, state, vault));
     }
     let panel = col()
         .key("panel")
@@ -107,7 +107,7 @@ pub(super) fn progress(s: &App, k: &Kit, dark: bool, flow: Flow) -> Paged {
         Flow::Create => "progress-create",
         Flow::Join => "progress-join",
     };
-    // Getting a ticket can wait on a relay; until the codes match, a join can stop.
+    // Until the other device pairs, a join can stop.
     let cancel = (flow == Flow::Join && !done && o.pairing.is_none() && !o.stopping())
         .then(|| bar(k, "Cancel", k.glyph.close, |s| s.cancel_join()));
     page(key, cancel, panel)
@@ -120,7 +120,7 @@ enum Mark {
     Done,
 }
 
-fn step_row(k: &Kit, stage: Stage, mark: Mark, vault: &str, pairing: Option<&Pairing>) -> El {
+fn step_row(k: &Kit, stage: Stage, mark: Mark, vault: &str) -> El {
     let (label, detail) = match stage {
         Stage::Starting => ("Starting Deadbolt".to_owned(), None),
         Stage::Protecting => (
@@ -128,16 +128,9 @@ fn step_row(k: &Kit, stage: Stage, mark: Mark, vault: &str, pairing: Option<&Pai
             Some("Argon2 makes it slow to guess, so this takes a moment."),
         ),
         Stage::CreatingVault => (format!("Creating {vault}"), None),
-        Stage::MakingTicket => (
-            "Making a pairing ticket".to_owned(),
-            Some("Reaching a relay so your other device can find this one."),
-        ),
-        Stage::Joining => (
-            match pairing {
-                Some(p) => format!("Receiving {}", p.vault),
-                None => "Receiving the vault".to_owned(),
-            },
-            None,
+        Stage::MakingCode => (
+            "Making a pairing code".to_owned(),
+            Some("So your other device can find this one with it."),
         ),
     };
     let glyph = match mark {
@@ -331,60 +324,37 @@ fn bolt(k: &Kit, dark: bool, done: bool, phase: usize) -> El {
         )
 }
 
-pub(super) fn ticket(s: &App, k: &Kit) -> Paged {
+pub(super) fn code(s: &App, k: &Kit) -> Paged {
     let o = &s.onboarding;
-    let Some(t) = &o.ticket else {
-        return page("ticket", None, col());
+    let Some(code) = &o.code else {
+        return page("code", None, col());
     };
     let copied = o.copied.is_some();
-    let grouped = t
-        .text
-        .as_bytes()
-        .chunks(4)
-        .map(|c| String::from_utf8_lossy(c).into_owned())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let mut pair = row().key("pair").gap(36.0).center_y();
-    if let Some(qr) = &t.qr {
-        // Whole points per module, about 232 points across, with the quiet
-        // zone (4 modules) as the tile's padding. Dark on paper in both
-        // appearances: scanners want dark modules on light.
-        let module = (232.0 / qr.width as f32).floor().clamp(2.0, 6.0);
-        let side = module * qr.width as f32;
-        pair = pair.child(
-            col()
-                .key("qr")
-                .role("img")
-                .label("Pairing ticket as a QR code")
-                .padding(module * 4.0)
-                .radius(k.radius.lg)
-                .fill(k.c.white)
-                .box_shadow(Shadow {
-                    spread: 0.5,
-                    color: k.c.border_base,
-                    ..Shadow::default()
-                })
-                .child(canvas(qr.shape(module, Color::BLACK)).size(side, side)),
-        );
-    }
-    let mut how = col()
-        .key("how")
-        .w(320.0)
-        .shrink()
+    let command = format!("deadbolt pair {}", code.as_str());
+    let mut panel = col()
+        .key("panel")
+        .w(PANEL_W)
         .gap(14.0)
         .items_start()
         .child(title(k, "title", "Pair from your other device"))
-        .child(muted(
-            k,
-            "run",
-            "On a device that already has your vault, run this command or scan the code.",
-        ))
+        .child(
+            // Spaces, so it wraps between words; the command keeps the hyphens.
+            text(code.replace('-', " "))
+                .key("code")
+                .role("status")
+                .font(TextStyle::new(30.0, 500.0).lh(38.0))
+                .color(k.c.text_strong)
+                .wrap()
+                .w_full()
+                .mt(2.0)
+                .mb(2.0),
+        )
+        .child(muted(k, "run", "On a device with your vault, run:"))
         .child(
             col()
                 .key("command")
                 .w_full()
                 .padding(12.0)
-                .gap(4.0)
                 .radius(k.radius.md)
                 .fill(k.c.layer_01)
                 .box_shadow(Shadow {
@@ -393,16 +363,10 @@ pub(super) fn ticket(s: &App, k: &Kit) -> Paged {
                     ..Shadow::default()
                 })
                 .child(
-                    text("deadbolt pair")
+                    text(command)
                         .key("cmd")
                         .font(k.ty.text_small_medium.lh(20.0))
-                        .color(k.c.text_strong),
-                )
-                .child(
-                    text(grouped)
-                        .key("ticket")
-                        .font(k.ty.text_small.lh(20.0))
-                        .color(k.c.text_base)
+                        .color(k.c.text_strong)
                         .wrap()
                         .w_full(),
                 ),
@@ -416,88 +380,35 @@ pub(super) fn ticket(s: &App, k: &Kit) -> Paged {
                 } else {
                     k.glyph.copy
                 })
-                .on_press_tx(|s: &mut App, tx| s.copy_ticket(tx))
+                .on_press_tx(|s: &mut App, tx| s.copy_code(tx))
                 .build(k)
                 .key("copy"),
         );
     // A failed copy.
     if let Some(n) = &o.notice {
-        how = how.child(banner(k, n));
+        panel = panel.child(banner(k, n));
     }
-    how = how.child(
-        row()
-            .key("waiting")
-            .gap(10.0)
-            .center_y()
-            .mt(4.0)
-            .child(waiting(k))
-            .child(
-                text("Waiting for your other device")
-                    .font(k.ty.text_small)
-                    .color(k.c.text_muted),
-            ),
-    );
-    page(
-        "ticket",
-        Some(bar(k, "Cancel", k.glyph.close, |s| s.cancel_join())),
-        pair.child(how),
-    )
-}
-
-pub(super) fn confirm(k: &Kit, code: &str, vault: &str, inviter: &str) -> Paged {
-    let spaced = if code.len() == 6 {
-        format!("{} {}", &code[..3], &code[3..])
-    } else {
-        code.to_owned()
-    };
-    let panel = col()
-        .key("panel")
-        .w(PANEL_W)
-        .gap(16.0)
-        .items_start()
-        .child(title(k, "title", "Do the codes match?"))
+    panel = panel
         .child(muted(
             k,
-            "about",
-            format!("{inviter} is adding this device to {vault}. Check it shows this code."),
+            "once",
+            "The code works once, for 5 minutes. Whoever types it first pairs with this device, so share it only with yourself.",
         ))
         .child(
-            text(spaced)
-                .key("code")
-                .role("status")
-                .font(TextStyle::new(56.0, 500.0).lh(64.0).tracking(2.0))
-                .color(k.c.text_strong)
-                .mt(4.0)
-                .mb(4.0),
-        )
-        .child(
             row()
-                .key("answers")
-                .gap(8.0)
+                .key("waiting")
+                .gap(10.0)
+                .center_y()
+                .mt(4.0)
+                .child(waiting(k))
                 .child(
-                    Button::new("They match")
-                        .variant(ButtonVariant::Contrast)
-                        .control_size(ControlSize::Large)
-                        .on_press(|s: &mut App| s.answer_code(true))
-                        .build(k)
-                        .key("match"),
-                )
-                .child(
-                    Button::new("They don't match")
-                        .variant(ButtonVariant::Neutral)
-                        .control_size(ControlSize::Large)
-                        .on_press(|s: &mut App| s.answer_code(false))
-                        .build(k)
-                        .key("mismatch"),
+                    text("Waiting for your other device")
+                        .font(k.ty.text_small)
+                        .color(k.c.text_muted),
                 ),
-        )
-        .child(muted(
-            k,
-            "why",
-            "Matching codes mean you're talking to your own device, not someone who saw the ticket.",
-        ));
+        );
     page(
-        "confirm",
+        "code",
         Some(bar(k, "Cancel", k.glyph.close, |s| s.cancel_join())),
         panel,
     )

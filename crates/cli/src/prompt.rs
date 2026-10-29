@@ -35,9 +35,9 @@ pub fn fill<T>(
     }
 }
 
-/// The passphrase: one line of stdin with `--passphrase-stdin`, else
-/// `DEADBOLT_PASSPHRASE`, else asked (twice with `confirm`) on a terminal.
-pub fn passphrase(from_stdin: bool, confirm: bool) -> Result<Zeroizing<String>> {
+/// The passphrase given without asking: one line of stdin with
+/// `--passphrase-stdin`, else `DEADBOLT_PASSPHRASE`. An empty one is refused.
+pub fn supplied_passphrase(from_stdin: bool) -> Result<Option<Zeroizing<String>>> {
     let supplied = if from_stdin {
         let mut line = Zeroizing::new(String::new());
         std::io::stdin()
@@ -50,8 +50,17 @@ pub fn passphrase(from_stdin: bool, confirm: bool) -> Result<Zeroizing<String>> 
             .ok()
             .map(Zeroizing::new)
     };
+    if supplied.as_ref().is_some_and(|p| p.is_empty()) {
+        bail!("the passphrase cannot be empty");
+    }
+    Ok(supplied)
+}
+
+/// The passphrase: [`supplied_passphrase`], else asked (twice with
+/// `confirm`) on a terminal.
+pub fn passphrase(from_stdin: bool, confirm: bool) -> Result<Zeroizing<String>> {
     let passphrase = fill(
-        supplied,
+        supplied_passphrase(from_stdin)?,
         interactive(),
         || ask_passphrase(confirm),
         || anyhow!("a passphrase is needed: set DEADBOLT_PASSPHRASE or pass --passphrase-stdin"),
@@ -71,6 +80,54 @@ fn ask_passphrase(confirm: bool) -> Result<Zeroizing<String>> {
         }
     }
     Ok(first)
+}
+
+/// Asks for a new passphrase on the terminal, typed twice, until it is not
+/// empty and both match (three tries).
+pub fn new_passphrase(label: &str, again: &str) -> Result<Zeroizing<String>> {
+    for _ in 0..3 {
+        let first = Zeroizing::new(rpassword::prompt_password(format!("{label}: "))?);
+        if first.is_empty() {
+            eprintln!("The passphrase cannot be empty.");
+            continue;
+        }
+        let second = Zeroizing::new(rpassword::prompt_password(format!("{again}: "))?);
+        if first == second {
+            return Ok(first);
+        }
+        eprintln!("They don't match; try again.");
+    }
+    bail!("no passphrase was set; nothing was saved on this device")
+}
+
+/// Asks to choose one of `options` on the terminal, by number or name;
+/// Enter takes the first.
+pub fn choose(question: &str, options: &[&str]) -> Result<String> {
+    for (i, option) in options.iter().enumerate() {
+        eprintln!("  {}) {option}", i + 1);
+    }
+    let first = options.first().context("nothing to choose from")?;
+    let answer = read_line(&format!("{question} [{first}] "))?.unwrap_or_default();
+    pick(answer.trim(), options)
+}
+
+fn pick(answer: &str, options: &[&str]) -> Result<String> {
+    if answer.is_empty() {
+        return options
+            .first()
+            .map(|o| o.to_string())
+            .context("nothing to choose from");
+    }
+    if let Ok(n) = answer.parse::<usize>()
+        && let Some(option) = n.checked_sub(1).and_then(|i| options.get(i))
+    {
+        return Ok(option.to_string());
+    }
+    options
+        .iter()
+        .find(|o| **o == answer)
+        .map(|o| o.to_string())
+        .ok_or_else(|| anyhow!("no vault {answer}"))
 }
 
 fn strip_newline(text: &str) -> &str {
@@ -170,6 +227,16 @@ mod tests {
         assert_eq!(fill(None, true, || Ok(2), missing).unwrap(), 2);
         let err = fill(None, false, || -> Result<u8> { panic!("asked") }, missing);
         assert_eq!(err.unwrap_err().to_string(), "missing");
+    }
+
+    #[test]
+    fn picks_by_number_name_or_default() {
+        let options = ["personal", "work"];
+        assert_eq!(pick("", &options).unwrap(), "personal");
+        assert_eq!(pick("2", &options).unwrap(), "work");
+        assert_eq!(pick("work", &options).unwrap(), "work");
+        assert!(pick("3", &options).is_err());
+        assert!(pick("home", &options).is_err());
     }
 
     #[test]

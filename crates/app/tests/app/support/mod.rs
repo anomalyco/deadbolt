@@ -121,9 +121,15 @@ impl Device {
     }
 
     pub fn spawn(&self, args: &[&str]) -> std::process::Child {
+        self.spawn_with(args, &[])
+    }
+
+    /// [`Device::spawn`] with extra environment variables.
+    pub fn spawn_with(&self, args: &[&str], vars: &[(&str, &str)]) -> std::process::Child {
         Command::new(&self.bin)
             .args(args)
             .envs(&self.vars)
+            .envs(vars.iter().copied())
             .env_remove("RUST_LOG")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

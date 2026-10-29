@@ -53,6 +53,9 @@ if (video) await mkdir(video, { recursive: true })
 
 // ---- Test pages ---------------------------------------------------------------
 
+/** Google's password step, the real page's markup (see the /v3/signin/challenge/pwd route). */
+const GOOGLE_PWD = await readFile(join(import.meta.dir, "google-pwd-step.html"), "utf8")
+
 const html = (title: string, body: string, headers: Record<string, string> = {}) =>
   new Response(
     `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
@@ -579,6 +582,20 @@ const server = Bun.serve({
         )
       case "/social/done":
         return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("as") ?? "").replace(/[<>&"]/g, "")}</strong> with Google.</p>`)
+      // Google's password step: a cleaned copy of the real page's <main>
+      // (google-pwd-step.html, no <form>). The page itself sets the account:
+      // the chip's text (?as; ?nochip takes the chip out) and the hidden
+      // username boxes' values (?hidden, else ?as).
+      case "/v3/signin/challenge/pwd": {
+        const clean = (v: string | null) => (v ?? "").replace(/[<>&"']/g, "")
+        const as = clean(url.searchParams.get("as"))
+        const hidden = url.searchParams.has("hidden") ? clean(url.searchParams.get("hidden")) : as
+        let page = GOOGLE_PWD.replaceAll("person@example.com", as)
+          .replace('id="hiddenEmail">', `id="hiddenEmail" value="${hidden}">`)
+          .replace('id="identifierId">', `id="identifierId" value="${hidden}">`)
+        if (url.searchParams.has("nochip")) page = page.replace(/<div jsname="bQIQze"[^>]*data-profile-identifier[^>]*>[^<]*<\/div>/, "")
+        return new Response(page, { headers: { "content-type": "text/html; charset=utf-8" } })
+      }
       case "/o/oauth2/chooser": {
         const back = url.searchParams.get("return") ?? "/"
         const tile = (name: string, email: string) =>
@@ -827,6 +844,8 @@ interface LaunchOptions {
   scale?: number
   /** The fake host adds "Sign in with Google" logins. */
   signIn?: boolean
+  /** The fake host lists three Google logins instead of its own. */
+  google?: boolean
   /** "deny": the fake host turns down Touch ID for a card's number. */
   touchId?: string
 }
@@ -864,6 +883,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
+      DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
       DEADBOLT_FAKE_TOUCHID: options.touchId ?? "",
       ...options.realHost,
     },
@@ -2514,6 +2534,41 @@ async function narrowing() {
 }
 
 /**
+ * Google's password step names the account it's for itself: the menu on its
+ * password field narrows to that login, only on accounts.google.com (here
+ * its e2e alias), and shows the whole list when no login matches. The same
+ * page anywhere else narrows nothing.
+ */
+async function googleAccount() {
+  const run = await launch({ google: true })
+  const page = await run.context.newPage()
+  const rows = async (path: string) => {
+    await page.goto(path)
+    const menu = await menuOn(page, 'input[name="Passwd"]')
+    return menu ? ((await menu.locator("button.row .sub").allTextContents()) ?? []).map((t) => t.trim()) : null
+  }
+  try {
+    const google = `http://accounts.google.test:${server.port}/v3/signin/challenge/pwd`
+    const chip = await rows(`${google}?as=ryan@anoma.ly&hidden=`)
+    check(JSON.stringify(chip) === JSON.stringify(["ryan@anoma.ly"]), `on Google's password step, the menu lists only the login for the account shown (${JSON.stringify(chip)})`)
+    const first = await rows(`${google}?as=ryan@anoma.ly&hidden=kit@gmail.com`)
+    check(JSON.stringify(first) === JSON.stringify(["ryan@anoma.ly"]), `the chip the user sees comes before the hidden box (${JSON.stringify(first)})`)
+    const hidden = await rows(`${google}?as=ryan@anoma.ly&hidden=kit@gmail.com&nochip`)
+    check(JSON.stringify(hidden) === JSON.stringify(["kit@gmail.com"]), `with no chip, the hidden username box names it, with no <form> around it (${JSON.stringify(hidden)})`)
+    const none = await rows(`${google}?as=nobody@anoma.ly`)
+    check(none?.length === 3, `an account no login has shows the whole list (${JSON.stringify(none)})`)
+    const elsewhere = await rows(`http://www.acme.test:${server.port}/v3/signin/challenge/pwd?as=ryan@anoma.ly`)
+    check(elsewhere?.length === 3, `the same page on another host narrows nothing (${JSON.stringify(elsewhere)})`)
+    check((await fillCount(run)) === 0, "and nothing was filled")
+  } catch (err) {
+    check(false, `google account threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "google account")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
  * The save offer sits in the top right corner as a small pill, even over a
  * site's own header; it opens on approach and closes after, and a click in
  * the page shrinks it to a dot that reopens it.
@@ -3384,6 +3439,7 @@ const once: Record<string, () => Promise<void>> = {
   signInShapes,
   signInOutcomes,
   narrowing,
+  googleAccount,
   corner,
   signInSessions,
   rateLimited,
@@ -3411,7 +3467,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 const cost: Record<string, number> = {
   detection: 108, occlusionSweep: 55, signInSessions: 52, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
-  coldSave: 8, backForward: 7, narrowing: 6, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
+  coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12,
 }
 const units = [

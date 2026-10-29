@@ -13,13 +13,13 @@ use deadbolt_client::peer::Peer;
 use deadbolt_store::{Budget, Dropped};
 use tracing::warn;
 
-pub use ledger::Ledger;
+pub use ledger::{Ledger, anchor};
 
 use super::{Agent, Conversation, caller, fail, session};
 use crate::client::code;
 use crate::protocol::{
     ActivityEntry, ActivityItem, AppAction, CallerClass, CallerInfo, Command, ErrorCode, Fill,
-    Outcome, Reply, Request, Tier,
+    Outcome, Purpose, Reference, Reply, Request, Tier,
 };
 
 /// How long entries are kept.
@@ -100,6 +100,13 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::AgentLogins { .. } => (T::Agent, "agent-logins"),
         C::AgentFill { .. } => (T::Agent, "agent-fill"),
         C::AgentPasskeyGet { .. } => (T::Agent, "agent-passkey-get"),
+        C::Resolve { purpose, .. } => match purpose {
+            Purpose::Run => (T::Use, "resolve-run"),
+            Purpose::Inject => (T::Use, "resolve-inject"),
+            Purpose::Read => (T::Read, "resolve-read"),
+        },
+        C::SecretGrantSet { .. } => (T::Never, "secret-grant-set"),
+        C::SecretGrantList => (T::Look, "secret-grant-list"),
     }
 }
 
@@ -170,6 +177,8 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             | Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }
+            | Command::Resolve { .. }
+            | Command::SecretGrantSet { .. }
     );
     let always = matches!(
         command,
@@ -309,6 +318,45 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             },
             vec!["passkey".into()],
         ),
+        // The items and fields named, as given; the reply names what was
+        // found. Never a value.
+        Command::Resolve { refs, .. } => {
+            let mut items: Vec<ActivityItem> = Vec::new();
+            let mut fields: Vec<String> = Vec::new();
+            for reference in refs {
+                let Ok(reference) = Reference::parse(reference) else {
+                    continue;
+                };
+                let item = ActivityItem {
+                    vault: reference.vault.clone(),
+                    id: None,
+                    title: reference.item.clone(),
+                };
+                if !items.contains(&item) {
+                    items.push(item);
+                }
+                if !fields.contains(&reference.field) {
+                    fields.push(reference.field);
+                }
+            }
+            (items, fields)
+        }
+        Command::SecretGrantSet {
+            vault,
+            items,
+            fields,
+            ..
+        } => (
+            items
+                .iter()
+                .map(|item| ActivityItem {
+                    vault: vault.clone(),
+                    id: None,
+                    title: item.clone(),
+                })
+                .collect(),
+            fields.clone(),
+        ),
         // The page, and that a password was made for it: never the password
         // or its id.
         Command::SiteGenerate { origin, .. }
@@ -414,6 +462,33 @@ impl Draft {
                     item.title = format!("{title} · {}", item.title);
                 }
             }
+            Reply::Secrets { secrets } => {
+                self.items.clear();
+                self.fields.clear();
+                for secret in secrets {
+                    let item = ActivityItem {
+                        vault: Some(secret.vault.clone()),
+                        id: Some(secret.item.clone()),
+                        title: secret.title.clone(),
+                    };
+                    if !self.items.contains(&item) {
+                        self.items.push(item);
+                    }
+                    if !self.fields.contains(&secret.field) {
+                        self.fields.push(secret.field.clone());
+                    }
+                }
+            }
+            Reply::SecretGrants { grants } => {
+                self.items = grants
+                    .iter()
+                    .map(|g| ActivityItem {
+                        vault: Some(g.vault.clone()),
+                        id: Some(g.item.clone()),
+                        title: g.title.clone(),
+                    })
+                    .collect();
+            }
             Reply::PasskeyCreated { passkey, .. } => {
                 let title = self
                     .items
@@ -493,9 +568,10 @@ impl Agent {
         let draft = draft(&request.command, caller.class);
         let mut result = match request.command {
             command @ Command::ActivityReport { .. } => self.report(&caller, command),
-            command @ (Command::AgentClientAdd { .. } | Command::AgentGrantSet { .. }) => {
-                self.agents_admin(&caller, command, conv).await
-            }
+            command @ (Command::AgentClientAdd { .. }
+            | Command::AgentGrantSet { .. }
+            | Command::SecretGrantSet { .. }) => self.agents_admin(&caller, command, conv).await,
+            Command::Resolve { refs, purpose } => self.resolve(&caller, &refs, purpose, conv).await,
             command => self.clone().dispatch(command, conv).await,
         };
         if let Ok(Reply::Status(status)) = &mut result {

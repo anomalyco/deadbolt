@@ -564,11 +564,11 @@ mod tests {
         items.extend((0..4).map(|i| note(&format!("big {i}"), 1 << 20)));
         import(&mut a, items);
         let offer_blob = super::super::pairing::offer(&a, vault, None).unwrap();
-        let offer: super::super::pairing::Offer = serde_json::from_slice(&offer_blob).unwrap();
-        let join = super::super::pairing::join_blob(&b, a.id, &offer, None).unwrap();
+        let (offer, _) = super::super::pairing::read_offer(&offer_blob).unwrap();
+        let join = super::super::pairing::join_blob(&b.secret, "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
             super::super::pairing::welcome(&mut a, vault, b.id, &join, None).unwrap();
-        super::super::pairing::apply_welcome(&mut b, a.id, &offer, welcome).unwrap();
+        super::super::pairing::apply_welcome(&mut b, a.id, offer, welcome).unwrap();
         assert_eq!(b.vault(&vault).items().len(), 3004);
 
         // Then sync a second import, one item near the limit and single edits.

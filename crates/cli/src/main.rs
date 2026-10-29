@@ -12,6 +12,7 @@ mod desktop;
 mod import;
 mod items;
 mod prompt;
+mod secrets;
 mod send;
 mod site;
 mod update;
@@ -24,10 +25,12 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use deadbolt_client::{export, paths, protocol};
-use deadbolt_net::{PairingTicket, QrStyle};
+use deadbolt_net::PairingCode;
 
 use crate::paths::Paths;
-use crate::protocol::{Command, DeviceInfo, ErrorCode, Event, Reply, Status, VaultInfo};
+use crate::protocol::{
+    Answer, Command, DeviceInfo, ErrorCode, Event, Reply, Secret, Status, VaultInfo,
+};
 
 #[derive(Parser)]
 #[command(
@@ -38,7 +41,8 @@ use crate::protocol::{Command, DeviceInfo, ErrorCode, Event, Reply, Status, Vaul
     long_about = "A decentralized password manager.\n\nEverything can be driven with \
 flags, env and stdin. The passphrase comes from DEADBOLT_PASSPHRASE or \
 --passphrase-stdin. Only when stdin and stderr are terminals does deadbolt ask for \
-what is missing; otherwise it fails, with exit code 3 if the store is locked."
+what is missing; otherwise it fails, with exit code 3 if the store is locked and 4 \
+if the agent refused the request."
 )]
 struct Cli {
     /// Read the passphrase from the first line of stdin instead of
@@ -54,6 +58,8 @@ struct Cli {
 
 /// Exit code when the store is locked.
 const EXIT_LOCKED: u8 = 3;
+/// Exit code when the agent refused the request (not granted, forbidden).
+const EXIT_DENIED: u8 = 4;
 
 #[derive(Subcommand)]
 enum Commands {
@@ -66,22 +72,24 @@ enum Commands {
         #[arg(long)]
         device_name: Option<String>,
     },
-    /// Join a vault from one of your other devices: prints a ticket, then
-    /// waits until `deadbolt pair <ticket>` runs on a member device.
+    /// Join a vault from one of your other devices: shows a code, then
+    /// waits until `deadbolt pair <code>` runs on a device with the vault.
+    ///
+    /// Codes work once, for 5 minutes. On a device that isn't set up yet,
+    /// the passphrase for this device is asked once it has joined (or taken
+    /// from DEADBOLT_PASSPHRASE or --passphrase-stdin), and nothing is saved
+    /// before then.
     Join {
         /// This device's name, shown to your other devices (default: hostname).
         #[arg(long)]
         device_name: Option<String>,
-        /// Accept the confirmation code without asking, even on a terminal.
-        #[arg(short, long)]
-        yes: bool,
     },
-    /// Admit a new device into a vault, using the ticket `deadbolt join` shows.
+    /// Add the device showing a code from `deadbolt join` to a vault (the
+    /// default vault, or --vault).
     Pair {
-        ticket: String,
-        /// Accept the confirmation code without asking, even on a terminal.
-        #[arg(short, long)]
-        yes: bool,
+        /// The code, such as violin-garden-tiger-lamp.
+        #[arg(required = true, num_args = 1.., value_name = "CODE")]
+        code: Vec<String>,
     },
     /// List the devices in a vault.
     Devices(DevicesArgs),
@@ -128,8 +136,9 @@ enum Commands {
         json: bool,
     },
     /// Let AI agents sign in to sites without asking: pair an agent client
-    /// (such as Browse) and allow it logins, site by site. Values never
-    /// reach the AI; every fill is in `deadbolt activity`.
+    /// (such as Browse) and allow it logins, site by site; or let them use
+    /// secrets in `deadbolt run` and `inject` (`allow-secrets`). Every use
+    /// is in `deadbolt activity`.
     #[command(subcommand)]
     Agents(agents::AgentsCommand),
     /// Run the background agent in the foreground, or manage it.
@@ -145,6 +154,42 @@ enum Commands {
     },
     #[command(flatten)]
     Item(items::ItemCommand),
+    /// Run a command with secrets in its environment, concealed in its
+    /// output.
+    ///
+    ///   deadbolt run --env GH_TOKEN=deadbolt://personal/GitHub/token -- gh release create v1
+    ///   deadbolt run --env-file .env.tpl -- bun run dev
+    ///
+    /// A reference is deadbolt://[vault/]item/field: the item by its title
+    /// or short id (exactly one must match), the vault optional (default:
+    /// the default vault). Inherited variables whose value is a reference
+    /// are resolved too. The command's stdin passes through, its stdout and
+    /// stderr have each value (and its URL and base64 forms) replaced with
+    /// <concealed by deadbolt>, signals go on to it, and deadbolt exits with
+    /// its code. Masking makes its stdout and stderr pipes: it sees no
+    /// terminal (no colors or full-screen UIs; its pager may change), and
+    /// output held back as a possible value goes out after 100 ms of quiet.
+    /// --no-mask keeps the terminal. Masking stops accidents, not a
+    /// command that means to show a value.
+    ///
+    /// AI agents need `deadbolt agents allow-secrets` first; refused,
+    /// deadbolt exits 4.
+    #[command(verbatim_doc_comment)]
+    Run(secrets::RunArgs),
+    /// Fill a template's {{ deadbolt://… }} references and write it 0600.
+    ///
+    ///   deadbolt inject -i config.tpl -o config.json
+    ///
+    /// Replaces an existing output file only if `deadbolt inject` wrote it
+    /// and it hasn't changed since, or with --force. AI agents need
+    /// `deadbolt agents allow-secrets --purpose inject` first, and Touch ID
+    /// each time to write to stdout, which is reading the values.
+    #[command(verbatim_doc_comment)]
+    Inject(secrets::InjectArgs),
+    /// Print the value a reference names (deadbolt://[vault/]item/field).
+    /// Prefer `deadbolt run` or `inject`: an AI agent reading a value needs
+    /// Touch ID every time, and is refused without it.
+    Read(secrets::ReadArgs),
     /// Import logins, cards, secure notes, SSH keys, identities, API
     /// credentials, documents and the rest from 1Password, Apple Passwords,
     /// Bitwarden or CSV.
@@ -370,10 +415,10 @@ fn main() -> ExitCode {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error:#}");
-            if client::code(&error) == Some(ErrorCode::Locked) {
-                ExitCode::from(EXIT_LOCKED)
-            } else {
-                ExitCode::FAILURE
+            match client::code(&error) {
+                Some(ErrorCode::Locked) => ExitCode::from(EXIT_LOCKED),
+                Some(ErrorCode::Forbidden | ErrorCode::NotGranted) => ExitCode::from(EXIT_DENIED),
+                _ => ExitCode::FAILURE,
             }
         }
     }
@@ -403,8 +448,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Whoami { .. }
                 | Commands::Activity { .. }
                 | Commands::Agent { .. }
-                | Commands::Agents(_)
                 | Commands::TouchId { .. }
+                | Commands::Run(_)
+                | Commands::Inject(_)
+                | Commands::Read(_)
                 | Commands::Vault(_)
                 | Commands::App
                 | Commands::Desktop(_)
@@ -452,7 +499,10 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
-        Commands::Agents(command) => agents::run(&paths, command, from_stdin).await?,
+        Commands::Agents(command) => agents::run(&paths, command, vault, from_stdin).await?,
+        Commands::Run(args) => return secrets::run(&paths, args, from_stdin).await,
+        Commands::Inject(args) => secrets::inject(&paths, args, from_stdin).await?,
+        Commands::Read(args) => secrets::read(&paths, args, from_stdin).await?,
         Commands::App => app::open(&paths).await?,
         Commands::Desktop(DesktopCommand::Install) => desktop::install()?,
         Commands::Desktop(DesktopCommand::Uninstall) => desktop::uninstall()?,
@@ -527,31 +577,43 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let default = if vault.default { " (default)" } else { "" };
             println!("created vault {}{default}", vault.name);
         }
-        Commands::Join { device_name, yes } => {
+        Commands::Join { device_name } => {
             let status = client::ensure_running(&paths).await?;
-            if !status.initialized {
-                setup(&paths, device_name, from_stdin).await?;
-            }
-            let confirm = !yes && prompt::interactive();
-            let reply = pairing(&paths, Command::Join { confirm }, from_stdin).await?;
-            let Reply::Vault { vault } = reply else {
+            // A new device gets its passphrase last, once it has joined. One
+            // supplied up front goes with the request; without one and without
+            // a terminal to ask on, fail before a code is spent.
+            let passphrase = if status.initialized {
+                None
+            } else {
+                let supplied = prompt::supplied_passphrase(from_stdin)?;
+                if supplied.is_none() && !prompt::interactive() {
+                    bail!(
+                        "a passphrase is needed for this device: set DEADBOLT_PASSPHRASE or pass --passphrase-stdin"
+                    );
+                }
+                supplied.map(|p| Secret::new(p.as_str()))
+            };
+            let command = Command::Join {
+                device_name: Some(prompt::device_name(device_name)),
+                passphrase,
+            };
+            let Reply::Vault { .. } = join(&paths, command, from_stdin).await? else {
                 bail!("unexpected reply");
             };
-            println!("joined vault {}", vault.name);
         }
-        Commands::Pair { ticket, yes } => {
+        Commands::Pair { code } => {
+            let code = code.join(" ");
+            code.parse::<PairingCode>()?;
             client::ensure_running(&paths).await?;
-            let confirm = !yes && prompt::interactive();
-            let command = Command::Pair {
-                ticket,
-                vault,
-                confirm,
+            let vault = match vault {
+                Some(vault) => Some(vault),
+                None => choose_vault(&paths, from_stdin).await?,
             };
-            let reply = pairing(&paths, command, from_stdin).await?;
+            let reply = request(&paths, Command::Pair { code, vault }, from_stdin).await?;
             let Reply::Device { vault, device } = reply else {
                 bail!("unexpected reply");
             };
-            println!("added {} to {}", device_name(&device), vault.name);
+            println!("✓ added \"{}\" to {}", device_name(&device), vault.name);
         }
         Commands::Devices(args) => {
             client::ensure_running(&paths).await?;
@@ -783,7 +845,7 @@ async fn request_with(
     paths: &Paths,
     command: Command,
     from_stdin: bool,
-    on_event: &mut impl FnMut(Event) -> Result<Option<bool>>,
+    on_event: &mut impl FnMut(Event) -> Result<Option<Answer>>,
 ) -> Result<Reply> {
     match client::call(paths, command.clone(), &mut *on_event).await {
         Err(error) if client::code(&error) == Some(ErrorCode::Locked) && prompt::interactive() => {
@@ -794,49 +856,55 @@ async fn request_with(
     }
 }
 
-/// Runs a pairing request: the ticket goes to stdout, the QR code and the
-/// confirmation code to stderr. The code is asked about only if the request
-/// set `confirm`.
-async fn pairing(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply> {
-    let confirm =
-        |code: &str| prompt::confirm(&format!("confirm code {code} matches the other device?"));
-    request_with(paths, command.clone(), from_stdin, &mut |event| {
-        let ask = matches!(
-            command,
-            Command::Join { confirm: true } | Command::Pair { confirm: true, .. }
-        );
+/// Runs `join`: the code and the outcome go to stdout, what to do with the
+/// code to stderr. A device that isn't set up is asked for its passphrase
+/// once it has joined, unless the request carries one.
+async fn join(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply> {
+    request_with(paths, command, from_stdin, &mut |event| {
         Ok(match event {
-            Event::Ticket { ticket } => {
-                if let Ok(qr) = ticket
-                    .parse::<PairingTicket>()
-                    .and_then(|t| t.to_qr(QrStyle::LightOnDark))
-                {
-                    eprintln!("{qr}");
-                }
-                eprintln!("On a device that is already set up, run: deadbolt pair <ticket>");
-                println!("{ticket}");
-                eprintln!("waiting...");
+            Event::Code { code } => {
+                println!("Code: {code}");
+                eprintln!("On a device with your vault, run: deadbolt pair {code}");
+                eprintln!("waiting…");
                 None
             }
-            Event::Joining {
-                code,
+            Event::Joined {
                 vault,
                 inviter,
+                passphrase,
             } => {
-                eprintln!(
-                    "code {code}: joining vault {vault} from {} {}",
-                    device_name(&inviter),
-                    short(&inviter.id)
-                );
-                if ask { Some(confirm(&code)?) } else { None }
-            }
-            Event::Pairing { code, device } => {
-                eprintln!("code {code}: adding device {device}");
-                if ask { Some(confirm(&code)?) } else { None }
+                println!("✓ joined \"{vault}\" from {}", device_name(&inviter));
+                if passphrase {
+                    let passphrase = prompt::new_passphrase("Passphrase for this device", "Again")?;
+                    Some(Answer::passphrase(Secret::new(passphrase.as_str())))
+                } else {
+                    None
+                }
             }
         })
     })
     .await
+}
+
+/// The vault `pair` adds to when `--vault` isn't given: the only one, else
+/// asked on a terminal (the default first), else an error.
+async fn choose_vault(paths: &Paths, from_stdin: bool) -> Result<Option<String>> {
+    let Reply::Vaults { vaults } = request(paths, Command::VaultList, from_stdin).await? else {
+        bail!("unexpected reply");
+    };
+    let mut vaults: Vec<VaultInfo> = vaults.into_iter().filter(|v| v.member).collect();
+    if vaults.len() < 2 {
+        return Ok(None);
+    }
+    vaults.sort_by_key(|v| !v.default);
+    let names: Vec<&str> = vaults.iter().map(|v| v.name.as_str()).collect();
+    if !prompt::interactive() {
+        bail!(
+            "this device holds several vaults ({}); choose one with --vault",
+            names.join(", ")
+        );
+    }
+    prompt::choose("Add to which vault?", &names).map(Some)
 }
 
 fn short(id: &str) -> &str {

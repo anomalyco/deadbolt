@@ -128,12 +128,17 @@ export type ToBackground =
    * `explicit`: the user clicked into the field or pressed ↓ in it, rather
    * than just focusing it. `identifier`: on a password or code field, what
    * the form's username or email box holds, so the menu can narrow to the
-   * login it names (see Autofill.query). It stays in the extension. `again`:
-   * the user pressed ↓ or clicked the field a second time, asking for the
-   * whole list. `rules`: on a new-password box, what the page asks of the
-   * password.
+   * login it names (see Autofill.query). It stays in the extension. Only a
+   * username the user typed (or Deadbolt filled) is sent as it.
+   * `pageAccount`: on a password or code field with no `identifier`, the
+   * account a provider's own sign-in page shows (accounts.google.com's chip
+   * or hidden username, see isAccountPage). The background takes it only
+   * from such a page's exact https origin, and it only narrows the menu,
+   * never hides it. `again`: the user pressed ↓ or clicked the field a
+   * second time, asking for the whole list. `rules`: on a new-password box,
+   * what the page asks of the password.
    */
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string }
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean }
