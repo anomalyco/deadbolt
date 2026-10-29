@@ -7,6 +7,7 @@ import type { ItemDetail, ItemSummary, PickReply } from "../messages"
 import type { Account } from "../protocol"
 import { avatar, h, icon } from "../ui/dom"
 import { offerCard } from "../ui/offer"
+import { learnLine, learningCard, savingOffLine } from "../ui/site-notes"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { deleteButton, kindAvatar, kindName, secretOf } from "./items"
@@ -155,6 +156,7 @@ export function listView(app: App): View {
     const all = app.items
     const parts: Node[] = []
     const card = q ? null : offerEl()
+    if (app.site?.learning && !q) parts.push(learningCard(app.site.learning, app.site.tabId, () => void app.refresh()))
     if (card) parts.push(card)
     if (all === null) {
       parts.push(h("div", { class: "skeleton" }, ...[0, 1, 2].map(() => h("div", { class: "skeleton-row" }))))
@@ -181,6 +183,11 @@ export function listView(app: App): View {
         const rest = all.filter((a) => !here.has(a.ref))
         if (rest.length) parts.push(section(site.length ? "Everything else" : "All items", String(all.length), rest, false))
       }
+    }
+    // Under the list, as in the native popup: undoing Never for this site, and Learn this site.
+    if (app.site && !q) {
+      if (app.site.savingOff && !app.site.offer) parts.push(savingOffLine(app.site.savingOff, app.site.tabId, () => void app.refresh()))
+      if (!app.site.learning) parts.push(learnLine(app.site.tabId, () => void app.refresh()))
     }
     body.replaceChildren(...parts)
   }

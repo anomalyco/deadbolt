@@ -329,14 +329,14 @@ scenario named.
 
 | Request | Standalone | Notes |
 | --- | --- | --- |
-| `hello` | Same | Capabilities: `list fill check save generate forms` (no `passkeys`, `learn`) |
+| `hello` | Same | Capabilities: `list fill check save generate forms learn` (no `passkeys`) |
 | `list` | Same | Shared `deadbolt-core::site` rules and ranking; `signIn` with the linked account |
 | `fill` (`username`, `password`, `totp`) | Same | Current TOTP from core |
 | `generate`, `generate-check`, `generate-keep`, `generate-drop` | Same | Shared page-rule planning and candidate lifetime |
 | `check`, `save` | Same | Shared login check and password-only update |
 | `forms`, `fill-form` | Same, except Touch ID | Strict asks for the passphrase in Deadbolt's own popup instead |
 | `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Missing | The browser's own passkey flow runs; separate work |
-| `learn` | Missing | "Learn this site" says this Deadbolt can't keep a log |
+| `learn` | Same, kept in the browser | See "Learning logs" below |
 | Rate limits | Same | The host's token buckets, in the service worker |
 
 ### Background and page features
@@ -355,8 +355,8 @@ scenario named.
 | Clickjacking, occlusion, bfcache, navigation checks | Same | the `security` group, `midFill`, `coveredPill`, `corner` |
 | Toolbar popup: this site's logins and Fill, fill errors, the offer | Same (the vault's own popup) | `fillAndTotp`, `rateLimited`, `securityPage`, `savePrompt` |
 | Locked and not set up | The menu and popup offer to unlock or set up here | `locked`, `notInstalled` |
-| "Learn this site" (#65) | Missing | |
-| "Never for this site" | Same preference; no list to undo it in either build | |
+| "Learn this site" (#65), in the popup | Same | `learnAndNever` |
+| "Never for this site", and "Saving is off… Turn on" in the popup | Same; Settings also lists every such site | `learnAndNever` |
 | Passkeys | Missing (separate work) | `passkeys` is native only |
 | Touch ID for card numbers | Strict passphrase instead | `formsTouchId` is native only; e2e/standalone.ts covers Strict |
 
@@ -371,6 +371,21 @@ scenario named.
 | Import from other password managers | Missing: import on a native device and sync |
 | Export | Neither build has one |
 | Activity | Missing: no standalone Activity log |
+
+### Learning logs
+
+"Learn this site" works as in the native build: the background's `Learner`
+(bg/learn.ts) turns each step into a line with no values, and `learn` writes
+it. The native host appends to `~/.local/state/deadbolt/learn/<session>.jsonl`.
+The standalone build keeps the same lines in this extension's IndexedDB
+(bg/learn-log.ts), with the host's session-id rule and limits: at most 4 MiB
+a log, the newest 50 logs, none past 30 days, and 100 lines at once, then
+10 a second. Like the host's log, it lives outside the vault, works while it's
+locked, and never reaches the wasm worker. Settings › Learning logs downloads
+every session as one JSONL file, each line with its `session`, for
+`bun corpus/learned.ts --file <download>`, or deletes them. Settings › Saving
+lists the sites "Never for this site" turned off (the same
+`chrome.storage.local` preference as the native build), each with Turn on.
 
 ### The parity run
 
@@ -492,7 +507,7 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
   and durable-save/exclusion-race checks. Initially report `canVerify=false` and
   UV=false, handing required-UV ceremonies to the browser; passphrase card
   reauthentication must not silently claim native Touch ID verification.
-- No standalone Activity log or learning log. Neither capability is advertised.
+- No standalone Activity log.
 - No automatic save/update offers for identities or cards. Item-to-item links
   (a card's billing identity, a login's sign-in account) are kept but not
   edited on the vault page.
