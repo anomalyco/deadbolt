@@ -36,7 +36,7 @@ import { findAccountTile, findProviderButton, type Field, type FormControl } fro
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
-import { provider } from "../signin"
+import { isAccountPage, pageAccountOf, provider } from "../signin"
 import { fillable, fillFields, ownValue, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { learning } from "./learn"
@@ -636,16 +636,35 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     const later = t.role === "password" || t.role === "otp"
     const box = later ? state.targets().find((x) => IDENTIFIER_ROLES.includes(x.role))?.el : undefined
     const named = box ? (await ownValue(box, box.value))?.slice(0, 500) : undefined
+    // On a provider's own password step (accounts.google.com), the account
+    // it shows narrows the menu too; the background checks the host again
+    // and never hides the menu for it.
+    const onPage = later && !named ? pageAccount(el) : undefined
     // A pattern outside what generate.ts reads, or lengths that can't meet: no generated password.
     const rules = generating ? fieldRules(state.targets()) : undefined
     const reply =
       rules === null
         ? null
-        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}) })
+        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}) })
     if (reply?.token && reply.rows > 0) {
       if (deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
     } else emptyUntil.set(el, Date.now() + 15_000)
   })().finally(() => (querying = null))
+}
+
+/**
+ * The account a provider's own password step shows, on a provider host whose
+ * page-set account is trusted (see isAccountPage): its visible account chip,
+ * else the hidden username its form carries. Google's: a chip with
+ * `data-profile-identifier`, and `<input name="identifier" id="hiddenEmail">`.
+ */
+function pageAccount(field: HTMLInputElement): string | undefined {
+  if (!isAccountPage(location.href)) return undefined
+  const chip = [...document.querySelectorAll("[data-profile-identifier]")].find((c) => c.getClientRects().length > 0)
+  const shown = pageAccountOf(chip?.textContent?.slice(0, 501))
+  if (shown) return shown
+  const hidden = (field.form ?? document).querySelector<HTMLInputElement>('input[name="identifier"], input#hiddenEmail')
+  return pageAccountOf(hidden?.value)
 }
 
 /**

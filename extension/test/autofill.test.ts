@@ -881,6 +881,29 @@ describe("sign in with a provider", () => {
     expect((await autofill.query(sender, ["password"], "password", 1, false, "admin")).rows).toBe(2)
   })
 
+  test("on Google's own password step, the account the page shows narrows the menu, and never hides it", async () => {
+    const GOOGLE = "https://accounts.google.com"
+    const sender = pageSender({ url: `${GOOGLE}/v3/signin/challenge/pwd`, origin: GOOGLE, documentId: "g-doc" })
+    fake.frames["1:0"] = { url: `${GOOGLE}/v3/signin/challenge/pwd`, documentId: "g-doc" }
+    const ask = (pageAccount: unknown, s = sender, identifier?: string) => autofill.query(s, ["password"], "password", 1, false, identifier, false, undefined, undefined, pageAccount)
+    const named = await ask(" Kit@Gmail.com ")
+    expect(named.rows).toBe(1)
+    const reply = await autofill.menuLoad(named.token!, menuSender(), GOOGLE)
+    expect(reply?.kind === "accounts" && reply.accounts.map((a) => a.ref)).toEqual([providerLogin.ref])
+    expect(await autofill.menuPick(named.token!, ACCOUNTS[0].ref, menuSender())).toMatchObject({ ok: false })
+    // Naming no login, or not an account at all: the whole list, as if it weren't sent.
+    expect((await ask("nobody@gmail.com")).rows).toBe(5)
+    expect((await ask("<b>kit@gmail.com</b>")).rows).toBe(5)
+    expect((await ask(`${"k".repeat(500)}@gmail.com`)).rows).toBe(5)
+    // The username the user typed comes first.
+    expect((await ask("kit@gmail.com", sender, "admin")).rows).toBe(2)
+    // Anywhere but Google's sign-in host, a page-set account is ignored.
+    expect((await ask("kit@gmail.com", pageSender())).rows).toBe(5)
+    expect((await ask("kit@gmail.com", pageSender({ url: "https://github.com/login", origin: "https://github.com" }))).rows).toBe(5)
+    // Only on a later step's field.
+    expect((await autofill.query(sender, ["email", "password"], "email", 1, false, undefined, false, undefined, undefined, "kit@gmail.com")).rows).toBe(5)
+  })
+
   test("on the provider's chooser, only its top page gets the account; the menu there narrows to its login", async () => {
     withs.start(1, google.signIn, "example.com")
     withs.navigated(1, "https://accounts.google.com/signin")
