@@ -13,7 +13,7 @@
 import type { FieldRole, HookReply, MenuPasskey, PasskeyChoice, PasskeyPrompt, PickReply, ToBackground } from "../messages"
 import { IDENTIFIER_ROLES } from "../messages"
 import { isB64url, isRef, type Passkey, type PasskeysReply, type UserVerification } from "../protocol"
-import { frameChain, fromExtensionPage, newToken, type FrameTarget } from "./frames"
+import { frameChain, fromExtensionPage, newToken, sameSiteTop, type FrameTarget } from "./frames"
 import { HostError, type VaultBackend } from "./backend"
 import { openPopupFor } from "./save"
 import { fillableOrigin, senderOrigin, siteOf } from "./site"
@@ -80,6 +80,8 @@ interface Pending extends FrameTarget {
   choose?: (choice: PasskeyChoice) => void
   /** An autofill sign-in: the passkeys the inline menu may offer. */
   conditional?: { passkeys: Passkey[]; challenge: string; rpId?: string; userVerification: UserVerification }
+  /** An autofill sign-in held in a login frame on another origin of the top page's site (see conditional). */
+  framed?: boolean
 }
 
 const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/
@@ -139,11 +141,11 @@ export interface PasskeyOptions {
   now?: () => number
 }
 
-/** One document's passkey listing: a token bucket, and the lists in flight by rpId. */
+/** One document's listings: a token bucket, and the lists in flight by rpId (or its logins). */
 interface Lister {
   tokens: number
   at: number
-  inflight: Map<string, Promise<PasskeysReply>>
+  inflight: Map<string, Promise<unknown>>
 }
 
 export class Passkeys {
@@ -236,20 +238,38 @@ export class Passkeys {
   }
 
   private async start(p: Pending, kind: "get" | "create", raw: unknown): Promise<HookReply> {
-    if (!(await this.sameOrigin(p))) return FALLBACK
+    const same = await this.sameOrigin(p)
     this.live(p)
     const options = parseOptions(kind, raw)
     if (!options) return FALLBACK
+    const conditional = options.kind === "get" && options.mediation === "conditional"
+    // Off one origin all the way up, only a login frame's autofill sign-in is Deadbolt's (see conditional).
+    if (!same && !(conditional && (await sameSiteTop(p)))) return FALLBACK
+    this.live(p)
+    p.framed = !same
     if (!rpIdFor(new URL(p.origin), options.rpId)) return fail("SecurityError", "This relying party ID isn't this site's.")
     if (options.kind === "create") {
       // The agent makes ES256 passkeys only, and is a platform authenticator.
       if ((options.algorithms.length && !options.algorithms.includes(ES256)) || options.attachment === "cross-platform") return FALLBACK
-    } else if (options.mediation === "silent" || (options.mediation === "conditional" && p.frameId !== 0)) return FALLBACK
+    } else if (options.mediation === "silent") return FALLBACK
 
     await this.host.connect()
     this.live(p)
-    if (this.host.status.state !== "ready" || !this.host.capabilities.includes("passkeys")) return FALLBACK
-    const listing = this.list(p, options.rpId)
+    // Locked or not running: Deadbolt has no menu to offer, and the browser's dropdown covers nothing.
+    if (this.host.status.state !== "ready") return FALLBACK
+    if (options.kind === "get" && conditional) return this.conditional(p, options)
+    if (!this.host.capabilities.includes("passkeys")) return FALLBACK
+    const listed = await this.passkeysFor(p, options.rpId)
+    if (!("passkeys" in listed)) return listed
+    // Without Touch ID the agent can't verify the user; the browser may.
+    if (options.userVerification === "required" && !listed.canVerify) return FALLBACK
+    p.rpId = listed.rpId
+    return options.kind === "create" ? this.create(p, options, listed) : this.get(p, options, listed)
+  }
+
+  /** The site's passkeys for `p`, or how its call ends without them. */
+  private async passkeysFor(p: Pending, rpId: string | undefined): Promise<PasskeysReply | HookReply> {
+    const listing = this.list(p, rpId ?? "", () => this.host.send({ type: "passkey-list", origin: p.origin, rpId }))
     if (!listing) return fail("NotAllowedError")
     let listed: PasskeysReply
     try {
@@ -260,25 +280,64 @@ export class Passkeys {
       return FALLBACK
     }
     this.live(p)
-    // Without Touch ID the agent can't verify the user; the browser may.
-    if (options.userVerification === "required" && !listed.canVerify) return FALLBACK
-    p.rpId = listed.rpId
-    return options.kind === "create" ? this.create(p, options, listed) : this.get(p, options, listed)
+    return listed
   }
 
   /**
-   * The site's passkeys for `p`'s document. Calls for the same rpId while
-   * one is listing share it; past the document's burst, null.
+   * An autofill sign-in (mediation "conditional"), on the top page or in a
+   * login frame (see sameSiteTop): where Deadbolt's inline menu opens on the
+   * page's login fields. The browser draws its own autofill dropdown (other
+   * providers' passkeys, such as Apple Passwords') in browser UI, above
+   * anything a page or an extension shows, so whenever Deadbolt has
+   * something for the site it holds the call and the browser never gets it.
+   * The menu offers its passkeys beside the logins: picking a passkey
+   * answers the call, picking a login fills and leaves it waiting, as the
+   * browser's own does. With neither, the browser's dropdown shows instead.
+   * The site's modal sign-in (its "Sign in with a passkey" button) still
+   * reaches the browser's sheet and every other provider whenever Deadbolt
+   * has no passkey for it (docs/autofill.md, Passkeys).
+   *
+   * In a login frame on another origin of the site (Apple's sign-in frame
+   * in App Store Connect), the client data the agent signs, never
+   * crossOrigin, wouldn't be true: the call is held for the logins alone.
    */
-  private list(p: Pending, rpId: string | undefined): Promise<PasskeysReply> | null {
+  private async conditional(p: Pending, o: GetOptions): Promise<HookReply> {
+    let passkeys: Passkey[] = []
+    if (!p.framed && this.host.capabilities.includes("passkeys")) {
+      const listed = await this.passkeysFor(p, o.rpId)
+      if (!("passkeys" in listed)) return listed
+      p.rpId = listed.rpId
+      // Without Touch ID the agent can't verify the user. A nonempty allow list names the only passkeys the site takes.
+      if (o.userVerification !== "required" || listed.canVerify) passkeys = o.allow.length ? listed.passkeys.filter((k) => o.allow.includes(k.credentialId)) : listed.passkeys
+    }
+    if (!passkeys.length && !(await this.hasLogins(p))) return FALLBACK
+    // One autofill sign-in per document; a newer one replaces it.
+    for (const other of this.pending.values()) if (other !== p && other.conditional && other.documentId === p.documentId) this.finish(other, fail("NotAllowedError"))
+    p.conditional = { passkeys, challenge: o.challenge, rpId: o.rpId, userVerification: o.userVerification }
+    // Answered by menuPick, or ended by a cancel or navigation.
+    return new Promise<HookReply>(() => {})
+  }
+
+  /** Whether Deadbolt has logins for `p`'s origin, which its inline menu offers. */
+  private async hasLogins(p: Pending): Promise<boolean> {
+    const listed = await this.list(p, " logins", () => this.host.send({ type: "list", origin: p.origin }))?.catch(() => null)
+    this.live(p)
+    return !!listed?.accounts.length
+  }
+
+  /**
+   * One listing for `p`'s document. Calls for the same `key` (an rpId, or
+   * " logins", which no rpId is) while one is listing share it; past the
+   * document's burst, null.
+   */
+  private list<T>(p: Pending, key: string, send: () => Promise<T>): Promise<T> | null {
     const now = this.now()
     for (const [doc, l] of this.lists) if (!l.inflight.size && now - l.at >= LIST_BURST * LIST_EVERY_MS) this.lists.delete(doc)
     let l = this.lists.get(p.documentId)
     if (!l) this.lists.set(p.documentId, (l = { tokens: LIST_BURST, at: now, inflight: new Map() }))
     const lister = l
-    const key = rpId ?? ""
     const shared = lister.inflight.get(key)
-    if (shared) return shared
+    if (shared) return shared as Promise<T>
     const earned = Math.floor((now - lister.at) / LIST_EVERY_MS)
     if (earned > 0) {
       lister.tokens = Math.min(LIST_BURST, lister.tokens + earned)
@@ -286,7 +345,7 @@ export class Passkeys {
     }
     if (lister.tokens === 0) return null
     lister.tokens--
-    const listing = this.host.send({ type: "passkey-list", origin: p.origin, rpId }).finally(() => lister.inflight.delete(key))
+    const listing = send().finally(() => lister.inflight.delete(key))
     lister.inflight.set(key, listing)
     return listing
   }
@@ -326,13 +385,6 @@ export class Passkeys {
     // A nonempty allow list names the only passkeys the site takes.
     const passkeys = o.allow.length ? listed.passkeys.filter((k) => o.allow.includes(k.credentialId)) : listed.passkeys
     if (!passkeys.length) return FALLBACK
-    if (o.mediation === "conditional") {
-      // One autofill sign-in per document; a newer one replaces it.
-      for (const other of this.pending.values()) if (other !== p && other.conditional && other.documentId === p.documentId) this.finish(other, fail("NotAllowedError"))
-      p.conditional = { passkeys, challenge: o.challenge, rpId: o.rpId, userVerification: o.userVerification }
-      // Answered by menuPick, or ended by a cancel or navigation.
-      return new Promise<HookReply>(() => {})
-    }
     const verify = listed.canVerify && o.userVerification !== "discouraged"
     const choice = await this.ask(p, { id: newToken(), kind: "get", rpId: p.rpId, verify, passkeys: passkeys.map(({ ref, vault, username, created }) => ({ ref, vault, username, created })) }, o.timeout)
     if (choice.action === "fallback") return FALLBACK
@@ -430,8 +482,13 @@ export class Passkeys {
     for (const p of [...this.pending.values()]) {
       if (p.tabId !== d.tabId) continue
       if ((d.frameId === 0 || p.frameId === d.frameId) && p.documentId !== d.documentId) this.finish(p, fail("NotAllowedError"))
-      else void this.sameOrigin(p).then((same) => same || this.finish(p, fail("NotAllowedError")))
+      else void this.stillPlaced(p).then((ok) => ok || this.finish(p, fail("NotAllowedError")))
     }
+  }
+
+  /** Whether `p`'s frame is still where its call may be Deadbolt's: one origin all the way up, or, held in a login frame, one site. */
+  private stillPlaced(p: Pending): Promise<boolean> {
+    return p.framed ? sameSiteTop(p).then(Boolean) : this.sameOrigin(p)
   }
 
   forgetTab(tabId: number) {
@@ -455,7 +512,7 @@ export class Passkeys {
 
   /** Passkeys the inline menu on `focused` in this document may offer, for its waiting autofill sign-in. */
   menuPasskeys(target: FrameTarget, focused: FieldRole): MenuPasskey[] {
-    if (target.frameId !== 0 || !(IDENTIFIER_ROLES.includes(focused) || focused === "password")) return []
+    if (!(IDENTIFIER_ROLES.includes(focused) || focused === "password")) return []
     const p = this.conditionalFor(target)
     return p?.conditional?.passkeys.map(({ ref, vault, username }) => ({ ref, vault, username })) ?? []
   }
