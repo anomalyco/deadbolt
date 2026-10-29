@@ -78,6 +78,10 @@ const SAVING_READS_MS = 520
 
 document.head.append(h("style", {}, ROLL_CSS))
 
+declare const DEADBOLT_NATIVE: boolean | undefined
+/** A `--native` build unlocks in the Deadbolt app; the default unlocks on device.html. */
+const native = typeof DEADBOLT_NATIVE !== "undefined" && DEADBOLT_NATIVE === true
+
 function send<T>(message: ToBackground): Promise<T | null> {
   return chrome.runtime.sendMessage(message).catch(() => null) as Promise<T | null>
 }
@@ -172,6 +176,32 @@ function providerMark(id: string): HTMLElement {
 
 function notice(glyph: Element, title: string, sub: string): HTMLElement {
   return h("div", { class: "row notice" }, avatar("", glyph), h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)))
+}
+
+/**
+ * The browser-only Deadbolt unlocks on its own page (device.html), never in
+ * the page or this frame: the row opens that page in a new tab. Like a pick,
+ * it waits for the menu to have been visible and still (see pick).
+ */
+function unlockRow(): HTMLElement {
+  const r = h(
+    "button",
+    { class: "row", type: "button" },
+    avatar("", icon("lock")),
+    h("span", { class: "text" }, h("span", { class: "title" }, "Unlock Deadbolt"), h("span", { class: "sub" }, "Opens Deadbolt in a new tab")),
+  )
+  r.addEventListener("click", async (e) => {
+    if (!e.isTrusted || e.detail === 0 || busy) return
+    if (!dwell.settled(pressedAt)) return say(dwell.visible ? "Click again in a moment." : "This menu is covered.")
+    busy = true
+    try {
+      if (!(await confirmPick(dwell, pressedAt))) return say("This menu is covered.")
+      await send<boolean>({ type: "db:menu-unlock", token })
+    } finally {
+      busy = false
+    }
+  })
+  return r
 }
 
 /** Says something under the list, or (empty) nothing at all. */
@@ -327,7 +357,10 @@ function narrow(text: string) {
 function showStatus(status: Status) {
   accounts = []
   highlightEl.hidden = true
-  if (status.state === "locked") {
+  if (status.state === "locked" && !native) {
+    rowsEl.replaceChildren(unlockRow())
+    say("")
+  } else if (status.state === "locked") {
     rowsEl.replaceChildren(notice(icon("lock"), "Deadbolt is locked", "Unlock it in the app, then come back"))
     say("")
   } else {

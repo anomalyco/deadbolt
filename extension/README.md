@@ -25,6 +25,12 @@ Load `dist/` with **Load unpacked** on `brave://extensions` (or
 writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 `jhocodkhpifjndffenppfmdkmiolngal`.
 
+For the opt-in standalone proof, use `bun run build:standalone`. It owns a
+separate encrypted vault in this browser; it does not open your native vault.
+`bun run e2e:standalone:smoke` exercises it offline, without a CLI or public relay.
+See [the device design](../docs/extension-device.md) for setup, limits and the
+migration required before changing the release default.
+
 ## Layout
 
 | Path                     | What                                                                         |

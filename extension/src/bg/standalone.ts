@@ -16,6 +16,7 @@ import { cancelled, HostError, type Listener, type SendOptions, type VaultBacken
 import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
 
 export const OFFSCREEN_PAGE = "offscreen.html"
+export const DEVICE_PAGE = "device.html"
 const TIMEOUT_MS = 30_000
 /** Creating or unlocking runs the passphrase KDF; pairing waits for the other device. */
 const SLOW_MS: Partial<Record<string, number>> = { "device-create": 120_000, "device-unlock": 120_000, "device-pair": 300_000, "device-sync": 120_000 }
@@ -24,7 +25,8 @@ const SLOW_MS: Partial<Record<string, number>> = { "device-create": 120_000, "de
  * The Comfortable preset, the contract's default: lock after an hour without
  * use, when the screen locks, and when the browser quits. Strict (5 min) and
  * Relaxed (12 h, screen lock ignored) are a follow-up, as is keeping the key
- * in chrome.storage.session so an offscreen restart doesn't lock.
+ * in chrome.storage.session so an offscreen restart doesn't lock (a proposal
+ * requiring its own security review).
  */
 const IDLE_LOCK_MS = 60 * 60_000
 const SYNC_EVERY_MIN = 5
@@ -37,11 +39,14 @@ const LAST_USE_KEY = "deadbolt.lastUse"
 /**
  * What this device does today. Anything else is refused here, before the
  * vault sees it, and no capability is claimed for it: generated passwords,
- * one-time codes, passkeys, forms and the learning log are follow-ups.
+ * passkeys, forms and the learning log are follow-ups.
  */
 const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save"])
 /** Requests that count as use for the idle lock. Listing a page's logins doesn't (docs/autofill.md). */
 const USES = new Set<string>(["fill", "save"])
+
+/** device.html's commands that don't count as use. */
+const PAGE_READS = new Set<string>(["device-status", "device-lock", "device-logins", "device-devices", "list"])
 
 const unsupported = () => new HostError("failed", "The browser-only Deadbolt can't do this yet.")
 
@@ -69,8 +74,10 @@ export class StandaloneBackend implements VaultBackend {
     chrome.idle.onStateChanged.addListener((state) => {
       if (state === "locked") void this.lock()
     })
-    void chrome.alarms.create(TICK_ALARM, { periodInMinutes: 1 })
-    void chrome.alarms.create(SYNC_ALARM, { periodInMinutes: SYNC_EVERY_MIN })
+    // Creating an alarm that exists starts its period over, and the service
+    // worker starts far more often than once a minute: only make missing ones.
+    void ensureAlarm(TICK_ALARM, 1)
+    void ensureAlarm(SYNC_ALARM, SYNC_EVERY_MIN)
     this.loaded = chrome.storage.session.get(LAST_USE_KEY).then(
       (got) => {
         const at = got[LAST_USE_KEY]
@@ -137,10 +144,14 @@ export class StandaloneBackend implements VaultBackend {
     return reply as ReplyFor[T]
   }
 
-  /** device.html's commands (see DeviceCommand); the background checks the sender. */
+  /** device.html's commands (see DeviceCommand); the background checks the sender (fromDevicePage). */
   async device(command: DeviceCommand): Promise<DeviceReply> {
     const started = Date.now()
     const fail = (message: string): DeviceReply => ({ ok: false, message, status: this.status })
+    // The user working on the vault's own page is use. The page reading the
+    // vault (its status, logins and devices, which it does again on every
+    // change) isn't, so an open page never keeps the vault unlocked; nor is Lock.
+    if (!PAGE_READS.has(command.type)) this.used()
     if (command.type === "device-lock") {
       await this.lock()
       return { ok: true, reply: { type: "device-lock", ok: true }, ms: Date.now() - started, status: this.status }
@@ -157,9 +168,11 @@ export class StandaloneBackend implements VaultBackend {
         return fail((err as Error).message)
       }
     }
+    // The vault names this device to the others it pairs with: "Chrome on macOS".
+    const body = command.type === "device-create" || command.type === "device-unlock" ? { ...command, deviceName: deviceName() } : command
     let raw: Record<string, unknown>
     try {
-      raw = await this.raw(command, SLOW_MS[command.type] ?? TIMEOUT_MS)
+      raw = await this.raw(body, SLOW_MS[command.type] ?? TIMEOUT_MS)
     } catch (err) {
       return fail((err as Error).message)
     }
@@ -171,10 +184,12 @@ export class StandaloneBackend implements VaultBackend {
     if (command.type === "device-unlock" || command.type === "device-create") {
       this.used()
       await this.hello("unlocked")
+      // Catch up with the other devices now, not at the next sync alarm.
+      void this.sync()
     } else if (command.type === "device-pair" || command.type === "device-sync") {
       this.lastSync = Date.now()
       await this.hello("items")
-    } else await this.hello()
+    } else if (command.type !== "device-logins" && command.type !== "device-devices") await this.hello()
     return { ok: true, reply: raw, ms, status: this.status }
   }
 
@@ -193,6 +208,8 @@ export class StandaloneBackend implements VaultBackend {
 
   private async tick() {
     await this.loaded
+    // Woken by the alarm, the service worker may not have heard from the vault yet.
+    if (this.status.state === "connecting") await this.connect()
     if (this.status.state !== "ready") return
     if (Date.now() - this.lastUse >= IDLE_LOCK_MS) await this.lock()
   }
@@ -253,4 +270,90 @@ export class StandaloneBackend implements VaultBackend {
 
 function fromOffscreen(sender: chrome.runtime.MessageSender): boolean {
   return sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL(OFFSCREEN_PAGE)
+}
+
+async function ensureAlarm(name: string, periodInMinutes: number) {
+  const existing = await chrome.alarms.get(name).catch(() => undefined)
+  if (!existing) await chrome.alarms.create(name, { periodInMinutes })
+}
+
+/** Only this extension's own device.html (in any tab, with any query or hash) may manage the vault: never a content script, the inline menu or another page. */
+export function fromDevicePage(sender: chrome.runtime.MessageSender): boolean {
+  return sender.id === chrome.runtime.id && sender.url?.split(/[?#]/)[0] === chrome.runtime.getURL(DEVICE_PAGE)
+}
+
+const text = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max
+const origin = (v: unknown): v is string => {
+  if (!text(v, 2048)) return false
+  try {
+    const u = new URL(v)
+    return (u.protocol === "https:" || u.protocol === "http:") && u.origin === v
+  } catch {
+    return false
+  }
+}
+
+/** A DeviceCommand rebuilt from the page's message with only its known fields, or null. */
+export function deviceCommand(raw: unknown): DeviceCommand | null {
+  if (typeof raw !== "object" || raw === null) return null
+  const c = raw as Record<string, unknown>
+  switch (c.type) {
+    case "device-status":
+    case "device-lock":
+    case "device-sync":
+    case "device-logins":
+    case "device-devices":
+      return { type: c.type }
+    case "device-create":
+      return text(c.passphrase, 1024) && c.passphrase && text(c.name, 200) ? { type: "device-create", passphrase: c.passphrase, name: c.name } : null
+    case "device-unlock":
+      return text(c.passphrase, 1024) ? { type: "device-unlock", passphrase: c.passphrase } : null
+    case "device-pair":
+      return text(c.code, 200) && c.code ? { type: "device-pair", code: c.code } : null
+    case "list":
+      return origin(c.origin) ? { type: "list", origin: c.origin } : null
+    case "save": {
+      const e = c.entry as Record<string, unknown> | undefined
+      if (!origin(c.origin) || !e || !text(e.title, 500) || !text(e.url, 2048) || !text(e.username, 500) || !text(e.password, 4096) || !e.password) return null
+      return { type: "save", origin: c.origin, entry: { title: e.title, url: e.url, username: e.username, password: e.password } }
+    }
+  }
+  return null
+}
+
+interface Brand {
+  brand: string
+}
+/** What `navigator` says about the browser (Chromium's User-Agent Client Hints, then the user agent). */
+export interface Nav {
+  userAgent?: string
+  userAgentData?: { brands?: Brand[]; platform?: string }
+}
+
+/** Brands as Client Hints name them ("Google Chrome", "Microsoft Edge"), else as the user agent does ("Edg/", "OPR/"). */
+const BROWSERS: Array<[RegExp, string]> = [
+  [/edge|\bedg\//i, "Edge"],
+  [/opera|\bopr\//i, "Opera"],
+  [/brave/i, "Brave"],
+  [/vivaldi/i, "Vivaldi"],
+  [/chrome/i, "Chrome"],
+]
+const SYSTEMS: Array<[RegExp, string]> = [
+  [/android/i, "Android"],
+  [/cros|chrome ?os/i, "ChromeOS"],
+  [/mac/i, "macOS"],
+  [/win/i, "Windows"],
+  [/linux|x11/i, "Linux"],
+]
+
+const named = (table: Array<[RegExp, string]>, values: string[]) => table.find(([re]) => values.some((v) => re.test(v)))?.[1]
+
+/** This browser as the other devices see it: "Chrome on macOS", "Edge on Windows", "Chromium on Linux". */
+export function deviceName(nav: Nav = navigator as unknown as Nav): string {
+  const hints = nav.userAgentData
+  const brands = (hints?.brands ?? []).map((b) => b.brand)
+  // With Client Hints, a browser that names no brand of its own is Chromium (the user agent says Chrome for all of them).
+  const browser = named(BROWSERS, brands.length ? brands : [nav.userAgent ?? ""]) ?? "Chromium"
+  const system = named(SYSTEMS, [hints?.platform || nav.userAgent || ""])
+  return system ? `${browser} on ${system}` : browser
 }

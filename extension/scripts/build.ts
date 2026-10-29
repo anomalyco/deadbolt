@@ -13,18 +13,23 @@ const root = join(import.meta.dir, "..")
 const e2eArg = process.argv.indexOf("--e2e")
 const e2e = e2eArg > 0 ? process.argv[e2eArg + 1] : undefined
 const outdir = e2e ?? join(root, "dist")
-// `--native` builds the extension that talks to `deadbolt browser-host`
-// (bg/host.ts), as the e2e runs against e2e/fake-host.py do. Without it the
-// extension is a Deadbolt device of its own (bg/standalone.ts), with the Rust
-// vault from wasm/ (scripts/wasm.sh) in an offscreen worker.
-const native = process.argv.includes("--native")
+// The default build is the extension that talks to `deadbolt browser-host`
+// (bg/host.ts), the one releases ship and the e2e runs against
+// e2e/fake-host.py use; `--native` names it explicitly. `--standalone` opts in
+// to the browser-only device (bg/standalone.ts), with the Rust vault
+// (crates/ext-core, built into wasm/ by the shared scripts/wasm.sh) in an
+// offscreen worker. Only that build needs Rust's wasm32 target and
+// wasm-bindgen-cli.
+const standalone = process.argv.includes("--standalone")
+if (standalone && process.argv.includes("--native")) throw new Error("--native and --standalone are different builds; pass one")
+const native = !standalone
 const wasm = join(root, "wasm")
 
 const entries = ["background", "content", "passkey-hook", "popup", "menu", "device", "offscreen", "vault-worker"].map((name) => join(root, "src", `${name}.ts`))
 
 async function build() {
   if (!native) {
-    const compiled = Bun.spawn(["sh", join(root, "scripts", "wasm.sh")], { stdout: "inherit", stderr: "inherit" })
+    const compiled = Bun.spawn(["sh", join(root, "..", "scripts", "wasm.sh"), "crates/ext-core", "extension/wasm"], { stdout: "inherit", stderr: "inherit" })
     if (await compiled.exited !== 0) throw new Error("standalone wasm build failed")
   }
   await rm(outdir, { recursive: true, force: true })
@@ -63,7 +68,7 @@ async function build() {
   const release = process.env.DEADBOLT_VERSION
   if (release) Object.assign(manifest, releaseVersion(release))
   await writeFile(join(outdir, "manifest.json"), JSON.stringify(manifest, null, 2) + "\n")
-  console.log(`built ${entries.length} entries -> ${e2e ? outdir : "dist/"}${e2e ? " (e2e)" : ""}${native ? " (native host)" : ""}`)
+  console.log(`built ${entries.length} entries -> ${e2e ? outdir : "dist/"}${e2e ? " (e2e)" : ""}${native ? "" : " (standalone)"}`)
 }
 
 // Release builds (docs/releasing.md) stamp the release version. Chrome wants

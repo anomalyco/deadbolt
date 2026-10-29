@@ -303,7 +303,8 @@ function b64Fields<K extends string>(raw: Record<string, unknown>, keys: readonl
   return out
 }
 
-function account(v: unknown): Account | null {
+/** A login as the vault describes it, checked; null if it isn't one. */
+export function account(v: unknown): Account | null {
   if (!isObject(v) || !isRef(v.ref)) return null
   const title = str(v.title, 500)
   if (title === undefined) return null

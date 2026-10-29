@@ -830,6 +830,23 @@ describe("while Deadbolt is locked", () => {
     fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc", parentFrameId: -1 }
     expect((await ask()).rows).toBe(1)
   })
+
+  test("the locked row's unlock is taken only from its own menu frame, only while locked, and closes the menu", async () => {
+    host.setStatus({ state: "locked" })
+    const token = (await autofill.query(pageSender(), ["email", "password"], "email", 1, true)).token!
+    expect((await autofill.menuLoad(token, menuSender(), SITE))?.kind).toBe("status")
+    // Not the page, another tab or another extension page.
+    expect(await autofill.menuUnlock(token, pageSender())).toBe(false)
+    expect(await autofill.menuUnlock(token, menuSender({ tab: { id: 2 } as chrome.tabs.Tab }))).toBe(false)
+    expect(await autofill.menuUnlock(token, menuSender({ documentId: "other-menu" }))).toBe(false)
+    expect(await autofill.menuUnlock("made-up", menuSender())).toBe(false)
+    host.setStatus({ state: "ready", version: "0" })
+    expect(await autofill.menuUnlock(token, menuSender())).toBe(false)
+    host.setStatus({ state: "locked" })
+    expect(await autofill.menuUnlock(token, menuSender())).toBe(true)
+    expect(delivered("db:close-menu").at(-1)?.message).toEqual({ type: "db:close-menu", token })
+    expect(host.requests).toEqual([])
+  })
 })
 
 describe("surface sizes", () => {

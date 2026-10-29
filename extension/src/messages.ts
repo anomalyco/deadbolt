@@ -173,6 +173,8 @@ export type ToBackground =
   /** The user picked a "Sign in with …" row: point at the site's button for it (see SignInReply). */
   | { type: "db:menu-signin"; token: string; ref: string }
   | { type: "db:menu-dismiss"; token: string }
+  /** The locked row of a browser-only Deadbolt was clicked: open device.html to unlock it. Answers true if it opened. */
+  | { type: "db:menu-unlock"; token: string }
   /** The size the surface needs; with `mode`, the mode it's folding into (only ever "pill"). */
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
@@ -186,6 +188,8 @@ export type ToBackground =
   | { type: "db:popup-saving-on"; tabId: number }
   /** Start or stop learning the tab's site. Answers with a LearnReply. */
   | { type: "db:popup-learn"; tabId: number; on: boolean }
+  /** Lock the browser-only Deadbolt now (bg/standalone.ts). Answers with the Status after. */
+  | { type: "db:popup-lock" }
   // device.html, the standalone device's own page (bg/standalone.ts): answers with a DeviceReply
   | { type: "db:device"; command: DeviceCommand }
   // passkeys (bg/passkeys.ts): the content script relays the page's hook
@@ -439,8 +443,15 @@ export type DeviceCommand =
   /** Admit the device that `deadbolt join` shows this code on. */
   | { type: "device-pair"; code: string }
   | { type: "device-sync" }
+  /** Every login in the vault, for the page's list: `{ type: "device-logins", accounts: Account[] }`. */
+  | { type: "device-logins" }
+  /** The vault's devices: `{ type: "device-devices", devices: VaultDevice[] }`. */
+  | { type: "device-devices" }
   | { type: "list"; origin: string }
   | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
+
+/** A member of the vault; `current`: this browser. */
+export type VaultDevice = { id: string; name: string; current: boolean }
 
 /** `reply`: the vault's answer as it gave it; `ms`: how long it took. */
 export type DeviceReply = { ok: true; reply: Record<string, unknown>; ms: number; status: Status } | { ok: false; message: string; status: Status }

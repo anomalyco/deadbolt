@@ -10,7 +10,7 @@ import { h, icon, ICONS, monogram, svg } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, timing } from "./ui/motion"
 
 declare const DEADBOLT_NATIVE: boolean | undefined
-/** A `--native` build talks to `deadbolt browser-host`; the default is the browser-only device, set up on device.html. */
+/** Native builds use `deadbolt browser-host`; `--standalone` uses the browser-only device on device.html. */
 const native = typeof DEADBOLT_NATIVE !== "undefined" && DEADBOLT_NATIVE === true
 
 const root = document.getElementById("app")!
@@ -389,10 +389,25 @@ function siteBody(reply: PopupReply): HTMLElement {
   )
 }
 
+/** A lock button for the browser-only Deadbolt, which has no app to lock it from. */
+function lockButton(): HTMLElement {
+  const b = h("button", { class: "link", type: "button" }, icon("lock"), "Lock")
+  b.addEventListener("click", async () => {
+    b.setAttribute("disabled", "")
+    await send<Status>({ type: "db:popup-lock" })
+    void render(true)
+  })
+  return b
+}
+
 async function render(changed = false) {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true })
   tabId = tab?.id
   const reply = tabId === undefined ? null : await send<PopupReply>({ type: "db:popup-load", tabId })
+  paint(reply, changed)
+}
+
+function paint(reply: PopupReply | null, changed: boolean) {
   const status: Status = reply?.status ?? { state: "disconnected", message: "The extension's background worker didn't answer." }
   const body = statusBody(status) ?? (reply ? siteBody(reply) : null)
 
@@ -426,7 +441,7 @@ async function render(changed = false) {
   root.replaceChildren(
     h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill(status)),
     body2,
-    h("footer", { class: "bottom" }, open ?? h("span"), status.state === "ready" ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : null),
+    h("footer", { class: "bottom" }, open ?? h("span"), status.state === "ready" ? (native ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : lockButton()) : null),
   )
   // The first paint is at rest. After that, a whole new state is softened:
   // the old one blurs, shrinks and fades out over the new one as it comes in,
@@ -453,4 +468,6 @@ setInterval(() => {
   if (learningShown) void render()
 }, 1000)
 
-void render()
+// A vault that's slow to answer shows that it's connecting, never an empty popup.
+const slow = setTimeout(() => rendered === "" && paint({ status: { state: "connecting" }, accounts: [] }, false), 300)
+void render().finally(() => clearTimeout(slow))

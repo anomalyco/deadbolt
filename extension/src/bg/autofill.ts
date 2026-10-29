@@ -421,6 +421,15 @@ export class Autofill {
     await sendToFrame(t, { type: "db:close-menu", token })
   }
 
+  /** The locked row was clicked in the menu `token` was made for: true if it was, and Deadbolt is still locked. The menu closes. */
+  async menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
+    const t = await this.token(token, sender)
+    if (!t || this.host.status.state !== "locked") return false
+    await this.cancel(t.tabId)
+    await sendToFrame(t, { type: "db:close-menu", token })
+    return true
+  }
+
   async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender, width?: unknown, mode?: unknown) {
     const t = await this.token(token, sender, undefined, true)
     if (t) await sendToFrame(t, resizeMessage(token, height, width, mode))

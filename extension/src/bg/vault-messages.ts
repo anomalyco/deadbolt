@@ -32,4 +32,9 @@ export interface WorkerRequest {
   id: number
   body: Record<string, unknown>
 }
-export type WorkerResponse = { id: number; reply: unknown } | { id: number; error: string }
+/**
+ * `fatal`: the vault engine itself failed (a WebAssembly trap, such as a Rust
+ * panic), so its memory can't be trusted; the offscreen document ends the
+ * worker and starts a fresh, locked one on the next request.
+ */
+export type WorkerResponse = { id: number; reply: unknown } | { id?: number; error: string; fatal?: true } | { change: "items" }

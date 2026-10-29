@@ -61,10 +61,33 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bun run check
+      - run: bun run build
+
+  # The browser-only device (`scripts/build.ts --standalone`: the Rust vault
+  # in wasm, in an offscreen worker) in headless Chromium, with no native host
+  # and nothing reachable beyond loopback: create, save, list, actual fill,
+  # lock, wrong passphrase, unlock and restart (`e2e/standalone.ts --smoke`).
+  # The full run pairs a real CLI over n0's public relays, so it isn't here.
+  extension-standalone:
+    name: Browser extension standalone smoke
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v6
       - uses: Swatinem/rust-cache@v2
       - run: rustup target add wasm32-unknown-unknown --toolchain stable
-      - run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
-      - run: bun run build
+      # The exact wasm-bindgen crates/ext-core pins (scripts/wasm.sh checks it).
+      - run: cargo install wasm-bindgen-cli --version "$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' ../crates/ext-core/Cargo.toml)" --locked
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bunx playwright-core install --with-deps chromium
+      - run: bun e2e/standalone.ts --smoke
 
   # Hidden and covered fields, form swaps, opaque origins, value swaps,
   # navigating mid-fill and the back/forward cache, in headless Chromium with

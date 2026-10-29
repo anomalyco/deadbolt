@@ -1,13 +1,18 @@
 // The offscreen document: it only owns the vault's worker (vault-worker.ts),
 // which holds the unlocked vault and runs its sync, and passes the service
-// worker's requests to it one at a time, so a create, an unlock and a sync
-// never overlap. Lock ends the worker at once, even mid-KDF or mid-pairing,
-// and the next request starts a fresh, locked one. Only the service worker
-// may ask (checked by its exact URL).
+// worker's requests to it as they come, so a list never waits behind a sync
+// or a pairing. Only a create or an unlock waits for the one before it:
+// they set the vault up, and two at once would race. Lock ends the worker at
+// once, even mid-KDF or mid-pairing, fails everything in flight or waiting,
+// and the next request starts a fresh, locked one. So does the engine
+// failing (a WebAssembly trap), which also gives up its storage lock. Only
+// the service worker may ask (checked by its exact URL).
 
 import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultRequest, type VaultResponse, type WorkerResponse } from "./bg/vault-messages"
 
 const BACKGROUND = chrome.runtime.getURL("background.js")
+/** The requests that set the vault up, run one at a time. */
+const SETUP = new Set(["device-create", "device-unlock"])
 
 interface Pending {
   resolve: (response: VaultResponse) => void
@@ -16,52 +21,67 @@ interface Pending {
 let worker: Worker | null = null
 let nextId = 1
 const pending = new Map<number, Pending>()
-/** The tail of the queue: each request starts once the one before it is answered. */
-let queue: Promise<unknown> = Promise.resolve()
-/** Bumped by every stop, so requests queued before it don't reach a new worker. */
+/** The tail of the setup queue: each create or unlock starts once the one before it is answered. */
+let setup: Promise<unknown> = Promise.resolve()
+/** Bumped by every stop, so a setup queued before it never reaches the new worker. */
 let generation = 0
 
 function start(): Worker {
   const w = new Worker(chrome.runtime.getURL("vault-worker.js"))
   w.onmessage = (event: MessageEvent<WorkerResponse>) => {
+    if (w !== worker) return
     const m = event.data
-    const p = pending.get(m?.id)
-    if (!p) return
+    if ("change" in m) {
+      if (m.change === "items") void chrome.runtime.sendMessage({ type: VAULT_CHANGED, change: "items" } satisfies VaultChanged).catch(() => {})
+      return
+    }
+    // Background tasks can trap without a request id. Stop before looking up
+    // a pending request, so their OPFS handle is released too.
+    if ("error" in m && m.fatal) return fail(String(m.error))
+    const p = m.id === undefined ? undefined : pending.get(m.id)
+    if (!p || m.id === undefined) return
     pending.delete(m.id)
     p.resolve("error" in m ? { error: String(m.error) } : { reply: m.reply })
   }
   // A worker that fails has lost its unlocked vault; say so.
   w.onerror = (event) => {
     event.preventDefault()
-    stop(`Deadbolt's vault stopped: ${event.message || "it failed"}.`)
-    void chrome.runtime.sendMessage({ type: VAULT_CHANGED, change: "locked" } satisfies VaultChanged).catch(() => {})
+    if (w === worker) fail(`Deadbolt's vault stopped: ${event.message || "it failed"}.`)
   }
   return w
 }
 
-/** Ends the worker and fails everything in flight or queued. */
+/** Ends the worker and fails everything in flight or waiting. */
 function stop(message: string) {
   generation++
   worker?.terminate()
   worker = null
   for (const p of pending.values()) p.resolve({ error: message, locked: true })
   pending.clear()
-  queue = Promise.resolve()
+  setup = Promise.resolve()
+}
+
+/** The worker failed under the vault: end it and tell the service worker it's locked. */
+function fail(message: string) {
+  stop(message)
+  void chrome.runtime.sendMessage({ type: VAULT_CHANGED, change: "locked" } satisfies VaultChanged).catch(() => {})
+}
+
+function post(body: VaultRequest["body"]): Promise<VaultResponse> {
+  worker ??= start()
+  const id = nextId++
+  const w = worker
+  return new Promise<VaultResponse>((resolve) => {
+    pending.set(id, { resolve })
+    w.postMessage({ id, body })
+  })
 }
 
 function request(body: VaultRequest["body"]): Promise<VaultResponse> {
+  if (!SETUP.has(body.type)) return post(body)
   const at = generation
-  const run = queue.then(() => {
-    if (at !== generation) return { error: "Deadbolt locked.", locked: true } satisfies VaultResponse
-    worker ??= start()
-    const id = nextId++
-    const w = worker
-    return new Promise<VaultResponse>((resolve) => {
-      pending.set(id, { resolve })
-      w.postMessage({ id, body })
-    })
-  })
-  queue = run
+  const run = setup.then(() => (at === generation ? post(body) : ({ error: "Deadbolt locked.", locked: true } satisfies VaultResponse)))
+  setup = run
   return run
 }
 

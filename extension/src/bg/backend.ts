@@ -1,7 +1,7 @@
 // What the background's autofill, save, forms, passkey and learning code asks
 // of Deadbolt. Two implementations: the native host (bg/host.ts, `deadbolt
-// browser-host`, built with `scripts/build.ts --native`) and the standalone
-// device (bg/standalone.ts, the default), where the extension is a Deadbolt
+// browser-host`, the default build) and the standalone
+// device (bg/standalone.ts, built with `scripts/build.ts --standalone`), where the extension is a Deadbolt
 // device of its own with the Rust vault running in an offscreen worker.
 
 import type { Status } from "../messages"

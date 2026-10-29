@@ -1,11 +1,11 @@
 // device.html: the browser-only Deadbolt's own page (bg/standalone.ts). Set
-// up a vault, unlock and lock it, pair another device, sync, and add or list
-// logins by hand. It's also the extension's options page. Passphrases and
+// up a vault, unlock and lock it, pair another device and see the vault's
+// devices, sync, add logins by hand and list them all. It's also the extension's options page. Passphrases and
 // passwords go to the background in one message and are never kept here or
 // in storage.
 
-import type { DeviceCommand, DeviceReply, Status, StatusChanged } from "./messages"
-import type { Account } from "./protocol"
+import type { DeviceCommand, DeviceReply, Status, StatusChanged, VaultDevice } from "./messages"
+import { account, type Account } from "./protocol"
 import { h, icon, ICONS, svg } from "./ui/dom"
 
 declare const DEADBOLT_NATIVE: boolean | undefined
@@ -13,7 +13,14 @@ const native = typeof DEADBOLT_NATIVE !== "undefined" && DEADBOLT_NATIVE === tru
 
 const root = document.getElementById("app")!
 let status: Status = { state: "connecting" }
-let listing: { origin: string; accounts: Account[] } | null = null
+/**
+ * The vault's logins and devices, filled in place (so a refresh never throws
+ * away what's being typed in a form): null until the vault first answers.
+ */
+let logins: Account[] | null = null
+let devices: VaultDevice[] | null = null
+const loginsEl = h("div", { class: "list" })
+const devicesEl = h("div", { class: "list" })
 /** A line under the header after a command: what happened and how long it took. */
 let note: { text: string; error: boolean } | null = null
 
@@ -51,6 +58,7 @@ function form(title: string, inputs: HTMLInputElement[], label: string, act: () 
       for (const i of inputs) if (i.type === "password") i.value = ""
       button.disabled = false
       render()
+      if (status.state === "ready") void refresh()
     }
   })
   return f
@@ -91,7 +99,12 @@ function pairForm(): HTMLElement {
     "Pair another device",
     [code],
     "Pair",
-    async () => done("Paired", await run({ type: "device-pair", code: code.value.trim() })),
+    async () => {
+      const r = await run({ type: "device-pair", code: code.value.trim() })
+      // What changed is the device list (refreshed below), not how long it took.
+      if (r.ok) note = { text: "Paired.", error: false }
+      return r
+    },
     para("On the other device, run ", h("code", {}, "deadbolt join"), " and type the code it shows here."),
   )
 }
@@ -121,40 +134,43 @@ function saveForm(): HTMLElement {
   })
 }
 
-function listForm(): HTMLElement {
-  const url = field("Website", { type: "url", value: listing?.origin ?? "https://" })
-  const out = h("div", { class: "list" })
-  if (listing) out.append(
-    ...(listing.accounts.length
-      ? listing.accounts.map((a) => h("div", { class: "row" }, h("span", {}, a.title), h("span", { class: "mono muted" }, a.username ?? "")))
-      : [h("p", { class: "muted" }, `No logins for ${new URL(listing.origin).host}.`)]),
-  )
-  return form(
-    "Logins for a site",
-    [url],
-    "Show",
-    async () => {
-      const origin = originOf(url.value.trim())
-      if (!origin) {
-        note = { text: "Enter the site's address.", error: true }
-        return
-      }
-      const r = await run({ type: "list", origin })
-      if (r.ok) listing = { origin, accounts: (r.reply.accounts as Account[] | undefined) ?? [] }
-      return r
-    },
-    out,
-  )
+const row = (title: string, sub: string) => h("div", { class: "row" }, h("span", {}, title), h("span", { class: "mono muted" }, sub))
+
+function showLogins() {
+  if (!logins) return loginsEl.replaceChildren(para("Loading…"))
+  loginsEl.replaceChildren(...(logins.length ? logins.map((a) => row(a.title, a.username ?? "")) : [para("No logins yet.")]))
+}
+
+function showDevices() {
+  if (!devices) return devicesEl.replaceChildren(para("Loading…"))
+  devicesEl.replaceChildren(...devices.map((d) => row(d.name, d.current ? "This browser" : d.id.slice(0, 8))))
+}
+
+function vaultDevice(v: unknown): VaultDevice | null {
+  const d = v as Partial<VaultDevice> | null
+  return d && typeof d.id === "string" && typeof d.name === "string" ? { id: d.id, name: d.name, current: d.current === true } : null
+}
+
+/** Reads the vault's logins and devices again, into their lists in place. */
+async function refresh() {
+  const [l, d] = await Promise.all([run({ type: "device-logins" }), run({ type: "device-devices" })])
+  if (status.state !== "ready") return
+  if (l.ok && Array.isArray(l.reply.accounts)) logins = l.reply.accounts.map(account).filter((a): a is Account => a !== null)
+  if (d.ok && Array.isArray(d.reply.devices)) devices = d.reply.devices.map(vaultDevice).filter((x): x is VaultDevice => x !== null)
+  showLogins()
+  showDevices()
 }
 
 function readyBody(): HTMLElement[] {
   const sync = h("button", { class: "btn", type: "button" }, "Sync now")
   sync.addEventListener("click", async () => {
     sync.disabled = true
-    const r = done("Synced", await run({ type: "device-sync" }))
+    const r = await run({ type: "device-sync" })
     status = r.status
-    if (!r.ok) note = { text: r.message, error: true }
+    // The vault syncs in the background; the lists follow as it does.
+    note = r.ok ? { text: "Sync requested.", error: false } : { text: r.message, error: true }
     render()
+    if (status.state === "ready") void refresh()
   })
   const lock = h("button", { class: "btn", type: "button" }, icon("lock"), "Lock")
   lock.addEventListener("click", async () => {
@@ -163,7 +179,13 @@ function readyBody(): HTMLElement[] {
     note = null
     render()
   })
-  return [h("div", { class: "buttons" }, sync, lock), pairForm(), saveForm(), listForm()]
+  return [
+    h("div", { class: "buttons" }, sync, lock),
+    h("section", { class: "card" }, h("h2", {}, "Devices"), devicesEl),
+    pairForm(),
+    saveForm(),
+    h("section", { class: "card" }, h("h2", {}, "Logins"), loginsEl),
+  ]
 }
 
 function settings(): HTMLElement {
@@ -199,7 +221,12 @@ function pill(): HTMLElement {
 }
 
 function render() {
-  if (status.state !== "ready") listing = null
+  if (status.state !== "ready") {
+    logins = null
+    devices = null
+  }
+  showLogins()
+  showDevices()
   root.replaceChildren(
     h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill()),
     note ? h("p", { class: note.error ? "error" : "muted", role: "status", id: "note" }, note.text) : h("span"),
@@ -211,12 +238,15 @@ chrome.runtime.onMessage.addListener((message: StatusChanged) => {
   if (message?.type !== "db:status") return
   const key = JSON.stringify(status)
   status = message.status
-  // Don't throw away what's being typed for a push that changes nothing.
+  // Don't throw away what's being typed for a push that changes nothing;
+  // a push while unlocked (a sync, a save) may still have changed the lists.
   if (JSON.stringify(status) !== key) render()
+  if (status.state === "ready") void refresh()
 })
 
 render()
 if (!native) void run({ type: "device-status" }).then((r) => {
   status = r.status
   render()
+  if (status.state === "ready") void refresh()
 })
