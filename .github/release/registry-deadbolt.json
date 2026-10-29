@@ -1,6 +1,6 @@
 {
   "app": "deadbolt",
-  "description": "Deadbolt, the local-first password manager (anomalyco/deadbolt): its CLI, macOS app and browser extension. Its Release workflow runs in one environment, release (no approval): the dev channel when someone dispatches it from dev, and stable from production or v* tags.",
+  "description": "Deadbolt, the local-first password manager (anomalyco/deadbolt): its CLI, macOS app and browser extension. Its Release workflow runs in one environment, release (no approval): the dev channel from every push to dev, and stable from production or v* tags.",
   "stages": [
     "production"
   ],

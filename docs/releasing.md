@@ -13,14 +13,13 @@ released and moves only by fast-forward from `dev`.
 
 | Channel | Runs on | Version | Publishes |
 | --- | --- | --- | --- |
-| `dev` | dispatch (`channel: dev`) from `dev`: `gh workflow run release.yml --ref dev -f channel=dev` | `0.0.0-dev-<run>` (`.<attempt>` on a full rerun) | release service `dev` channel |
+| `dev` | every push to `dev` (not docs/site/Markdown-only); dispatch from `dev` | `0.0.0-dev-<run>` (`.<attempt>` on a full rerun) | release service `dev` channel |
 | `check` | dispatch (`channel: check`) from `dev` or `production` | as `dev` from `dev`, as `stable` from `production` | nothing: builds, signs and verifies only |
 | `stable` | push to `production`, push of tag `v<version>`, dispatch from `production` | `[workspace.package] version` | release service `stable`, GitHub release `v<version>` (Latest), Homebrew |
 
-Pushes to `dev` release nothing; we trigger dev builds when we want one. No
-release run is ever cancelled: a newer dispatch waits for the one in progress
-(macOS signing and notarization take a while), and only the newest waiting one
-runs.
+Releases never cancel each other, as in Hex: the running one finishes, and of
+the pushes that land meanwhile only the newest waits (GitHub replaces an older
+pending run), so a busy `dev` still publishes, about once per release run.
 `.github/release/plan.sh` decides all of this from the event and ref. Versions
 are display text: each channel has one current release, and installs follow it.
 Release builds stamp the version into `Cargo.toml` (`scripts/set-crate-version.sh`,
@@ -236,7 +235,7 @@ Both live in `anomalyco/homebrew-tap`, rendered from `packaging/homebrew/` by
   throwaway keychain and prints nothing secret.
 - Homebrew: secret `HOMEBREW_TAP_KEY`, a write deploy key on
   `anomalyco/homebrew-tap`. Keep it in the environment, not the repository.
-- The environment has no required reviewer (a dev build publishes when someone dispatches it);
+- The environment has no required reviewer (every push to `dev` publishes);
   its deployment policy admits `dev`, `production` and `v*` tags.
 - Publishing needs no secret: the service authorizes the `publish` and
   `record-brew` jobs by their OIDC token.
