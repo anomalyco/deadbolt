@@ -10,6 +10,7 @@ import { h, icon, ICONS, svg } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { button, copied, field, glyph, para, refuse, toolbar } from "./kit"
+import { fromCli } from "./about"
 
 type Join =
   | { step: "choose" }
@@ -146,6 +147,18 @@ export class Setup {
     const choice = (glyphEl: Element, title: string, sub: string, act: () => void, primary = false) =>
       button(`choice${primary ? " primary" : ""}`, [h("span", { class: "tile" }, glyphEl), h("span", { class: "choice-text" }, h("span", { class: "choice-title" }, title), h("span", { class: "choice-sub" }, sub)), h("span", { class: "chevron" }, glyph("chevron"))], act, { "aria-label": title, "aria-description": sub })
     const pair = choice(glyph("link"), "Pair with an existing device", "Use the vault you already have on your Mac, phone or another browser", () => void this.start(), true)
+    // The Deadbolt CLI installed this copy, so Deadbolt is on this computer:
+    // offer it by name. Pairing is the same either way (a code it admits).
+    void fromCli().then(async (cli) => {
+      if (!cli) return
+      const mac = (await chrome.runtime.getPlatformInfo().catch(() => null))?.os === "mac"
+      const title = `Pair with Deadbolt on this ${mac ? "Mac" : "computer"}`
+      const sub = "Use the vault you already have here: this browser shows a code to run deadbolt pair with"
+      pair.querySelector(".choice-title")!.textContent = title
+      pair.querySelector(".choice-sub")!.textContent = sub
+      pair.setAttribute("aria-label", title)
+      pair.setAttribute("aria-description", sub)
+    })
     const create = choice(glyph("plus"), "Create a new vault", "Start fresh, with this browser as its first device", () => this.to({ step: "create" }, 1))
     return {
       el: h(
@@ -161,6 +174,9 @@ export class Setup {
   private code(code: string | null): View {
     const copy = button("btn", [icon("copy"), "Copy"], (b) => code && void copied(b, code, (m) => this.app.announce(m), "Copied the code"))
     if (!code) copy.disabled = true
+    // The whole command, for a terminal on the other device (or this one).
+    const command = code ? `deadbolt pair ${code}` : ""
+    const copyCommand = button("link", "Copy the command", (b) => command && void copied(b, command, (m) => this.app.announce(m), "Copied the command"))
     // Long codes wrap between words, never inside one.
     const words = code ? code.split("-").flatMap((w, i) => (i ? ["-", h("wbr"), w] : [w])) : ["Getting a code…"]
     const shown = h("span", { class: `code${code ? "" : " pending"}`, id: "join-code" })
@@ -171,8 +187,9 @@ export class Setup {
         "section",
         { class: "view" },
         toolbar("Pair with a device", () => void this.cancel()),
-        para("On a device that has your vault, run ", h("code", {}, "deadbolt pair"), " with this code, or choose Pair in the Deadbolt app."),
+        para("On a device that has your vault, run ", h("code", {}, code ? command : "deadbolt pair"), code ? "" : " with this code", ", or choose Pair in the Deadbolt app."),
         h("div", { class: "code-box" }, shown, copy),
+        code ? h("p", { class: "small" }, copyCommand) : null,
         h("div", { class: "waiting" }, h("span", { class: "sync-dot busy", "aria-hidden": "true" }), h("span", {}, code ? "Waiting for the other device…" : "Connecting to Deadbolt's sync service…")),
         h("p", { class: "faint small" }, "The code works once, for five minutes. Keep this open, or come back to it: it waits either way."),
         h("div", { class: "buttons end" }, button("btn", "Cancel", () => void this.cancel())),

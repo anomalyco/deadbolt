@@ -125,16 +125,19 @@ describe("first run", () => {
     await flush()
     expect(commands().at(-1)).toEqual({ type: "device-join-start" })
     expect(app().querySelector("#join-code")!.textContent).toBe(CODE)
-    expect(app().textContent).toContain("On a device that has your vault, run deadbolt pair with this code, or choose Pair in the Deadbolt app.")
-    expect(app().querySelector("code")!.textContent).toBe("deadbolt pair")
-    expect(buttons()).toEqual(["Back", "Copy", "Cancel"])
+    expect(app().textContent).toContain(`On a device that has your vault, run deadbolt pair ${CODE}, or choose Pair in the Deadbolt app.`)
+    expect(app().querySelector("code")!.textContent).toBe(`deadbolt pair ${CODE}`)
+    expect(buttons()).toEqual(["Back", "Copy", "Copy the command", "Cancel"])
 
     const writes: string[] = []
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (t: string) => void writes.push(t) } })
     buttonNamed("Copy").click()
     await flush()
     expect(writes).toEqual([CODE])
-    expect(buttons()).toEqual(["Back", "Copied", "Cancel"])
+    expect(buttons()).toEqual(["Back", "Copied", "Copy the command", "Cancel"])
+    buttonNamed("Copy the command").click()
+    await flush()
+    expect(writes).toEqual([CODE, `deadbolt pair ${CODE}`])
   })
 
   test("a poll that changes nothing redraws nothing; admission asks this browser's passphrase", async () => {

@@ -21,9 +21,9 @@ The path is content script / popup → background `VaultBackend` → offscreen d
 and the native e2e suite runs against it. The standalone device is an explicit
 opt-in build, `bun scripts/build.ts --standalone` (`bun run build:standalone`);
 `--native` still names the default, and passing both is an error. The intended
-later flip makes the standalone device the default, with a first run that detects
-an installed native host and offers "Pair with Deadbolt on this Mac" instead of
-creating a separate vault; neither the flip nor that first run is in this proof.
+later flip makes the standalone device the default. Releases publish both
+builds, and a first run whose copy the CLI keeps offers "Pair with Deadbolt on
+this Mac" first ([installing and updating](#installing-and-updating-the-standalone-build)).
 
 The device supports a single vault, login create/update/list/fill, save/update
 offers after sign-in, generated passwords, identity/card fills, passphrase
@@ -328,8 +328,10 @@ and finds it in cargo's target directory (`CARGO_TARGET_DIR` included). The
 site's `site/scripts/wasm.sh` uses the same script for `crates/send-web`. Both
 generated wasm directories are ignored, not checked into Git. The shared script
 uses release LTO and `opt-level="z"` for browser downloads without changing native
-release optimization. CI builds standalone wasm for its smoke run; published
-extension releases still build the default native-host extension (no wasm).
+release optimization. CI builds standalone wasm for its smoke run. Releases publish both builds
+as targets of the `extension` artifact: `chromium` (native host, no wasm) and
+`chromium-standalone`, made by its own release job, the only one with the
+wasm toolchain ([releasing.md](releasing.md)).
 
 ```sh
 bun run check
@@ -385,11 +387,91 @@ use only synthetic credentials; the profile and CLI store are deleted at the end
 The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 `--native` as before.
 
+## Installing and updating the standalone build
+
+Every dev release publishes the standalone build at
+`https://anoma.ly/release/deadbolt/extension/dev/chromium-standalone` (the
+`extension` artifact's `chromium-standalone` target, beside the native
+`chromium`, with the same version, size and SHA-256 in
+`https://anoma.ly/release/deadbolt/extension/dev.json`). It isn't in the Chrome
+Web Store, so it's loaded unpacked, and an unpacked extension can't update
+itself. The Deadbolt CLI keeps a copy current:
+
+```sh
+deadbolt browser install --standalone --extension-dir ~/Deadbolt\ Extension
+deadbolt update        # fetches it now, and every later release
+```
+
+Load that folder with **Load unpacked** (`chrome://extensions`, Developer mode)
+once; after each `deadbolt update`, reload Deadbolt there. Without the CLI,
+download the zip and unpack it in place of the old folder.
+
+Settings shows this build's version and channel. A release build knows its
+channel (`DEADBOLT_BUILD_CHANNEL` at build time) and reads that channel's feed
+when Settings opens: only the release's version string is taken from it, shown
+as text, and the download link is fixed in the extension, never the feed's.
+When a newer build is out it says so, with `deadbolt update` (for a copy the CLI
+keeps, recognised by the `.deadbolt-extension` file `deadbolt update` writes) or
+the command that registers one, and the download link. A build from source
+checks nothing. **Report an issue** opens a new issue on `anomalyco/deadbolt`,
+labelled `standalone`, prefilled with the version, channel, browser and OS
+(`chrome.runtime.getPlatformInfo`, `navigator.userAgentData`), and no vault data:
+no item, site, username, device name or setting.
+
+### Switching from the native build in the same profile
+
+Both builds have the extension id the manifest key fixes, so one replaces the
+other in place: the profile keeps its pinned icon and site access, and
+`chrome.storage.local` (the native build's preferences, the standalone build's
+lock preset) carries over. The standalone vault itself is in the extension's
+OPFS, so switching back and forth keeps it.
+
+1. Have an unpacked copy registered: `deadbolt browser install --extension-dir
+   <dir>` (the native one, loaded from `<dir>`). A Web Store or hand-loaded copy
+   at another path: remove it in `chrome://extensions` first, then register a
+   new empty directory and load it from there.
+2. `deadbolt browser switch --standalone` puts the channel's standalone build
+   in that directory (`--native` puts the native one back).
+3. Reload Deadbolt in `chrome://extensions`.
+4. First run offers **Pair with Deadbolt on this Mac** (on this computer
+   elsewhere) when the CLI keeps this copy. It shows a pairing code; run
+   `deadbolt pair <code>` (copyable from the page) or choose Pair in the app,
+   then choose this browser's passphrase.
+
+The native host's manifest stays installed: the standalone build doesn't ask
+for `nativeMessaging`, so it can't reach it, and switching back needs nothing
+more than step 2 with `--native`.
+
+### Why pairing doesn't go through the native host
+
+The first run could ask the native host to run `deadbolt pair <code>` itself.
+It doesn't, for three reasons:
+
+- Pairing admits a device to the vault: whoever holds the code's other end
+  gets every item. The CLI's `pair` runs on an unlocked agent without asking
+  again, so a native message that triggers it would turn any compromise of the
+  extension (the threat this document already accepts for the standalone
+  vault) into silent admission of an attacker's device into the native vault,
+  which the extension never otherwise reaches.
+- The standalone build has no `nativeMessaging` permission, and adding it
+  would give the standalone build a channel to the native agent's whole host
+  protocol (`docs/autofill.md`), contradicting "no native-host fallback" above.
+- The user's terminal (or the app's Pair) is the confirmation the code
+  exchange needs anyway: it proves the person at this browser also controls the
+  native device.
+
+So the extension only starts the join and shows the code and the command. An
+automated path needs an admit step in the agent that requires the user every
+time (Touch ID or the passphrase in the app or CLI, not in the extension) and
+a host message that can do nothing else; that is follow-up work and needs its
+own security review. The `.deadbolt-extension` marker that makes the offer
+name "this Mac" grants nothing: it only changes the wording.
+
 ## Follow-up PRs
 
-1. Make the standalone device the default build, with a first run that detects an
-   installed native host and offers "Pair with Deadbolt on this Mac". Complete
-   native-host discovery, QR presentation, multi-vault selection and
+1. Make the standalone device the default build. First run already offers
+   "Pair with Deadbolt on this Mac" for a copy the CLI keeps; complete
+   native-host discovery (without native messaging), QR presentation, multi-vault selection and
    error UX, and run the full CLI e2e in CI against a local relay.
 2. Extend the shared application protocol's simulator coverage to browser-client
    storage/lifetime adapters, and exercise
@@ -405,7 +487,8 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 
 ## Remaining limitations
 
-- One vault per browser device; no native-host discovery or automatic migration.
+- One vault per browser device; no automatic migration from the native build.
+  "On this Mac" is known only for a copy the CLI keeps, not by asking the host.
 - No passkey registration/assertion capability and no biometric/PRF unlock.
   WebAuthn falls back to the browser. A headless check with an unlocked standalone
   vault verified browser-owned ES256 resident-key registration and assertion with
