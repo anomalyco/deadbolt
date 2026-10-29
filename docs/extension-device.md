@@ -175,10 +175,11 @@ JS strings, structured-clone copies and browser process memory cannot be reliabl
 wiped. Lock terminates the worker and closes its network endpoint; it does not
 promise forensic erasure from RAM. No key is persisted unencrypted in this proof.
 
-The management command route accepts only the exact extension device page; content
+The management command route accepts only the exact extension device page and the
+toolbar popup, which show the same vault UI (`extension/src/vault`); content
 scripts and web pages cannot create/unlock/pair a device or invoke arbitrary worker
 commands. The offscreen route accepts only the extension service worker. Neither
-the device page, offscreen document, worker nor wasm module is web-accessible.
+the pages, offscreen document, worker nor wasm module is web-accessible.
 There is no externally-connectable API and no native-host fallback. Extension CSP
 allows local wasm execution, not remotely hosted executable code. Passphrases and
 vault contents must never enter logs or telemetry.
@@ -204,11 +205,14 @@ security review before anything implements it.
 | Reveal/copy password; card number/CVV | re-auth every time | re-auth card number/CVV | no re-auth |
 
 Use means a pick, fill, save, opening the popup, or reveal. Passive listing for a
-page menu is not use. Phase 1 implements passphrase locking, a one-hour idle limit
-and screen-lock handling, without exposing the unimplemented preset selector or
-biometric promises. The unwrapped key stays in worker memory only under every
-preset. Session-key restoration and passkey PRF wrapping need their own security
-review and browser capability handling.
+page menu is not use. The standalone build implements the three presets' idle
+limits and screen-lock handling, and Strict's passphrase check before a password is
+shown or copied (the Rust core checks it against the open store's key set); the
+choice is a setting in `chrome.storage.local`, never a key. Card fields and
+Touch ID/passkey unlock don't exist in this build yet. The unwrapped key stays in
+worker memory only under every preset: session-key restoration and passkey PRF
+wrapping need their own security review and browser capability handling, so an
+offscreen restart still locks under Comfortable and Relaxed.
 
 ## Verification
 
@@ -270,8 +274,8 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
    storage/lifetime adapters, and exercise
    suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
    startup contacts (the proof dials sequentially within the same 30-second budget).
-3. Finish the three lock presets, trusted-use accounting, offscreen session-key
-   restoration, browser-quit semantics and re-authentication gates.
+3. Trusted-use accounting, offscreen session-key restoration (security review
+   first), browser-quit semantics and the card re-authentication gate.
 4. Add WebAuthn PRF/passkey unlock with capability detection; review key wrapping,
    extension origin binding and memory/permission boundaries.
 5. Reach native autofill feature parity (PSL policy, OTP editing, generation, passkeys,
