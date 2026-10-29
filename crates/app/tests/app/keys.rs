@@ -2,8 +2,6 @@
 //! is, a clicked row hands focus back to the search, ⌘F goes to the search,
 //! and esc clears it. `keymap.rs` has the rest of the keyboard.
 
-#![cfg(test)]
-
 use deadbolt_app::agent::Done;
 use deadbolt_app::import::Phase;
 use deadbolt_app::model::{App, Screen};

@@ -5,10 +5,7 @@
 
 // The agent reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
-#![cfg(test)]
 #![cfg(debug_assertions)]
-
-mod support;
 
 use std::time::{Duration, Instant};
 
@@ -18,7 +15,7 @@ use deadbolt_app::onboarding::worker::{ALREADY_SET_UP, NewDevice, Progress, Stag
 use deadbolt_app::onboarding::{Flow, Severity, Step};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
-use support::{Device, PASSPHRASE, key, shows, until};
+use crate::support::{Device, PASSPHRASE, key, shows, until};
 
 #[test]
 fn unlock_search_copy_lock() {

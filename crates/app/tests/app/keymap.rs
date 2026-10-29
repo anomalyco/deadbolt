@@ -2,8 +2,6 @@
 //! the fields and back, O, ⌘K's actions, the ? sheet, ⌘, Settings and the
 //! new item's type, all without a mouse.
 
-#![cfg(test)]
-
 use deadbolt_app::model::App;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 

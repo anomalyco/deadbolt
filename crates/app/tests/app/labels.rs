@@ -1,7 +1,5 @@
 //! What the main controls say to assistive tech, headless and offline.
 
-#![cfg(test)]
-
 use deadbolt_app::model::App;
 use deadbolt_app::panel;
 use rune::{Env, Runtime};
