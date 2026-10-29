@@ -169,8 +169,12 @@ impl Inviter for Handler {
     async fn offer(&self, ctx: &PairingContext) -> std::result::Result<Vec<u8>, HandlerError> {
         self.with(|s| {
             s.require_ready()?;
-            application::can_invite(&s.vault, &s.device_id(), &DeviceId::from_bytes(ctx.remote))?;
-            Ok(application::offer(s, s.vault.id(), s.addr.clone())?)
+            Ok(application::offer(
+                s,
+                s.vault.id(),
+                &DeviceId::from_bytes(ctx.remote),
+                s.addr.clone(),
+            )?)
         })
         .map_err(failure)
     }

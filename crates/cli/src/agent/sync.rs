@@ -476,7 +476,7 @@ mod tests {
         let mut items: Vec<_> = (0..3000).map(login).collect();
         items.extend((0..4).map(|i| note(&format!("big {i}"), 1 << 20)));
         import(&mut a, items);
-        let offer_blob = super::super::pairing::offer(&a, vault, None).unwrap();
+        let offer_blob = super::super::pairing::offer(&a, vault, &b.id, None).unwrap();
         let (offer, _) = super::super::pairing::read_offer(&offer_blob).unwrap();
         let join = super::super::pairing::join_blob(&b.secret, "b", a.id, &vault, None).unwrap();
         let (welcome, _) =

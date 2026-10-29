@@ -37,8 +37,13 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
 }
 
-pub(super) fn offer(s: &Loaded, vault: VaultId, addr: Option<Addr>) -> Result<Vec<u8>> {
-    Ok(application::offer(s, vault, addr)?)
+pub(super) fn offer(
+    s: &Loaded,
+    vault: VaultId,
+    device: &DeviceId,
+    addr: Option<Addr>,
+) -> Result<Vec<u8>> {
+    Ok(application::offer(s, vault, device, addr)?)
 }
 
 pub(super) fn read_offer(offer: &[u8]) -> Result<(Offer, VaultId)> {
@@ -427,11 +432,7 @@ impl Inviter for ExistingDevice<'_> {
     async fn offer(&self, ctx: &PairingContext) -> Result<Vec<u8>, HandlerError> {
         let device = DeviceId::from_bytes(ctx.remote);
         self.agent
-            .with_data(|s| {
-                let held = s.vault(&self.vault);
-                application::can_invite(held, &s.id, &device)?;
-                offer(s, self.vault, Some(s.own_addr()))
-            })
+            .with_data(|s| offer(s, self.vault, &device, Some(s.own_addr())))
             .map_err(handler_error)
     }
 

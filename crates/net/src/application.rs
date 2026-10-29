@@ -243,11 +243,17 @@ pub fn receive<S: State>(
     Ok(added)
 }
 
-pub fn offer(s: &impl State, vault: VaultId, addr: Option<Addr>) -> Result<Vec<u8>, Error> {
+pub fn offer(
+    s: &impl State,
+    vault: VaultId,
+    device: &DeviceId,
+    addr: Option<Addr>,
+) -> Result<Vec<u8>, Error> {
     let held = s
         .vaults()
         .find(|v| v.id() == vault)
         .ok_or(Error::VaultNotHeld)?;
+    can_invite(held, &s.device_id(), device)?;
     Ok(serde_json::to_vec(&Offer {
         v: 2,
         vault: vault.to_string(),
