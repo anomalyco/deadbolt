@@ -14,7 +14,7 @@ use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
 use crate::agent::{ImportFailure, Imported, Job};
 use crate::model::{App, Screen};
-use crate::onboarding::{Notice, Severity};
+use crate::onboarding::{Notice, Severity, sentence};
 
 /// What the window takes from a drag, and Choose File… offers.
 pub const EXTENSIONS: &[&str] = &["1pux", "csv", "json"];
@@ -114,17 +114,27 @@ impl App {
         if self.screen != Screen::Vault || self.panel.is_some() || !self.leave_edit() {
             return;
         }
+        self.enter_import();
+    }
+
+    /// Clears overlays that share the detail pane so the import view shows cleanly.
+    fn enter_import(&mut self) {
         self.edit.delete = None;
         if let Some(installer) = self.installer.as_mut().filter(|i| i.open) {
             installer.close();
         }
         self.close_settings();
+        self.nav = crate::keys::Nav::default();
         self.import.open = true;
     }
 
-    /// The window takes dropped files: the vault is showing, not the install page.
+    /// The window takes dropped files: the main window's vault, not the install page.
     pub fn accepts_drops(&self) -> bool {
-        self.screen == Screen::Vault && !self.installing() && !self.editing() && !self.deleting()
+        self.screen == Screen::Vault
+            && self.panel.is_none()
+            && !self.installing()
+            && !self.editing()
+            && !self.deleting()
     }
 
     /// An export is being dragged over the window, which would take it.
@@ -154,12 +164,12 @@ impl App {
         }
         self.import.seq += 1;
         self.import.phase = Phase::Idle;
-        self.import.open = true;
-        self.import.error = Some(Notice {
-            severity: Severity::Caution,
-            title: format!("{} isn't an export Deadbolt can read", name(file)),
-            body: "Drop a .1pux, .csv or .json export.".into(),
-        });
+        self.enter_import();
+        self.import.error = Some(Notice::new(
+            Severity::Caution,
+            format!("{} isn't an export Deadbolt can read", name(file)),
+            "Drop a .1pux, .csv or .json export.",
+        ));
     }
 
     pub fn choose_file(&mut self, tx: &mut Tx) {
@@ -195,7 +205,7 @@ impl App {
             path: path.clone(),
         };
         self.import.error = None;
-        self.import.open = true;
+        self.enter_import();
         self.agent.send(Job::Import {
             path,
             apply: None,
@@ -320,30 +330,25 @@ impl App {
             Ok(None) => {}
             // Linux without a FileChooser portal lands here; dropping still works.
             Err(message) => {
-                self.import.open = true;
-                self.import.error = Some(Notice {
-                    severity: Severity::Caution,
-                    title: "Couldn't show the file dialog".into(),
-                    body: format!(
+                self.enter_import();
+                self.import.error = Some(Notice::new(
+                    Severity::Caution,
+                    "Couldn't show the file dialog",
+                    format!(
                         "{} Drag the export onto this window instead.",
                         sentence(&message)
                     ),
-                })
+                ));
             }
         }
     }
 
     /// Ends "Imported 12 from 1Password" once its time is up. True when it went.
     pub(crate) fn tick_import(&mut self, now: f64) -> bool {
-        let gone = self
-            .import
+        self.import
             .imported
-            .as_ref()
-            .is_some_and(|(_, at)| now - at >= IMPORTED_FOR - 1e-3);
-        if gone {
-            self.import.imported = None;
-        }
-        gone
+            .take_if(|(_, at)| now - *at >= IMPORTED_FOR - 1e-3)
+            .is_some()
     }
 
     /// Keys while the import view shows: Return imports from a preview and
@@ -406,49 +411,34 @@ fn name(path: &Path) -> String {
 /// export (or one the agent can't map) is the person's to change; a read or
 /// agent failure is ours.
 fn problem(failure: ImportFailure, file: &str, apply: bool) -> Notice {
-    let not_export = |message: &str| Notice {
-        severity: Severity::Caution,
-        title: format!("{file} isn't an export Deadbolt can read"),
-        // The drop zone lists what it can read; the agent's own list would repeat it.
-        body: sentence(message.split("; import a ").next().unwrap_or(message)),
+    let not_export = |message: &str| {
+        Notice::new(
+            Severity::Caution,
+            format!("{file} isn't an export Deadbolt can read"),
+            // The drop zone lists what it can read; the agent's own list would repeat it.
+            sentence(message.split("; import a ").next().unwrap_or(message)),
+        )
     };
     match failure {
         ImportFailure::NotExport(message) => not_export(&message),
         ImportFailure::Agent(f) if !apply && f.code == Some(ErrorCode::Failed) => {
             not_export(&f.message)
         }
-        ImportFailure::Read(message) => Notice {
-            severity: Severity::Danger,
-            title: format!("Couldn't open {file}"),
-            body: sentence(&message),
-        },
-        ImportFailure::Agent(f) => Notice {
-            severity: Severity::Danger,
-            title: if apply {
+        ImportFailure::Read(message) => Notice::new(
+            Severity::Danger,
+            format!("Couldn't open {file}"),
+            sentence(&message),
+        ),
+        ImportFailure::Agent(f) => Notice::new(
+            Severity::Danger,
+            if apply {
                 format!("Couldn't import {file}")
             } else {
                 format!("Couldn't read {file}")
             },
-            body: sentence(&f.message),
-        },
+            sentence(&f.message),
+        ),
     }
-}
-
-/// A message as a sentence: capitalised, with a full stop.
-fn sentence(message: &str) -> String {
-    let mut chars = message.trim().chars();
-    let mut out: String = match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => return String::new(),
-    };
-    if !out.ends_with(['.', '!', '?']) {
-        out.push('.');
-    }
-    out
-}
-
-pub fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
 }
 
 /// "12 new logins · 3 cards · 2 secure notes", "1 new login", "2 new SSH keys".
@@ -503,16 +493,16 @@ pub fn nothing_new(p: &Preview, vault: &str) -> String {
 
 /// Over a fresh preview when Import found the file changed since the last.
 pub fn changed(file: &str) -> Notice {
-    Notice {
-        severity: Severity::Caution,
-        title: format!("{file} changed since the preview"),
-        body: "Nothing was imported. This is what it holds now.".to_owned(),
-    }
+    Notice::new(
+        Severity::Caution,
+        format!("{file} changed since the preview"),
+        "Nothing was imported. This is what it holds now.",
+    )
 }
 
 /// The primary button: "Import 12 items".
 pub fn import_label(n: usize) -> String {
-    format!("Import {}", plural(n, "item", "items"))
+    format!("Import {n} {}", if n == 1 { "item" } else { "items" })
 }
 
 #[cfg(test)]

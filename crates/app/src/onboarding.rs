@@ -6,6 +6,7 @@
 //! vault, after a cancelled join for example. Onboarding then skips the
 //! passphrase and asks only for what's left.
 
+mod ceremony;
 pub mod qr;
 pub mod view;
 pub mod worker;
@@ -28,7 +29,7 @@ pub const COPIED_FOR: f64 = 1.6;
 const TICKET_LIFETIME: Duration = Duration::from_secs(10 * 60);
 
 /// The moment a vault is created or joined, from the bolt throwing to the vault
-/// opening. See `view::bolt` for what happens when.
+/// opening. See `onboarding/ceremony.rs` for what happens when.
 pub mod moment {
     /// The bolt reaches the strike.
     pub const CONTACT: f64 = 0.11;
@@ -45,6 +46,15 @@ pub mod moment {
 pub enum Flow {
     Create,
     Join,
+}
+
+impl Flow {
+    pub(crate) fn step(self) -> Step {
+        match self {
+            Flow::Create => Step::Create,
+            Flow::Join => Step::Join,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +98,20 @@ pub struct Notice {
     pub severity: Severity,
     pub title: String,
     pub body: String,
+}
+
+impl Notice {
+    pub(crate) fn new(
+        severity: Severity,
+        title: impl Into<String>,
+        body: impl Into<String>,
+    ) -> Self {
+        Self {
+            severity,
+            title: title.into(),
+            body: body.into(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -176,8 +200,6 @@ impl Onboarding {
     /// through [`App::reset_onboarding`], which clears a copied ticket first.
     fn reset(&mut self, device_ready: bool) {
         let worker = std::mem::replace(&mut self.worker, Worker::offline());
-        self.passphrase.clear();
-        self.repeat.clear();
         *self = Onboarding {
             device_ready,
             ..Onboarding::new(worker)
@@ -236,9 +258,7 @@ impl Onboarding {
     /// (or, after submit, doesn't yet), `None` while it's still a prefix.
     pub fn repeat_matches(&self) -> Option<bool> {
         let (first, second) = (self.passphrase.text.as_str(), self.repeat.text.as_str());
-        if second.is_empty() && !self.attempted {
-            None
-        } else if first == second {
+        if first == second && (!second.is_empty() || self.attempted) {
             Some(true)
         } else if first.starts_with(second) && !self.attempted {
             None
@@ -252,20 +272,12 @@ impl Onboarding {
         !self.device_ready
     }
 
-    fn device_valid(&self) -> bool {
-        !self.needs_device()
+    pub(crate) fn can_submit(&self, flow: Flow) -> bool {
+        let device_ok = !self.needs_device()
             || (self.device_problem().is_none()
                 && self.passphrase_problem().is_none()
-                && self.repeat_matches() == Some(true)
-                && !self.passphrase.text.is_empty())
-    }
-
-    pub fn can_create(&self) -> bool {
-        self.vault_problem().is_none() && self.device_valid()
-    }
-
-    pub fn can_join(&self) -> bool {
-        self.device_valid()
+                && self.repeat_matches() == Some(true));
+        device_ok && (flow != Flow::Create || self.vault_problem().is_none())
     }
 
     fn new_device(&mut self) -> Option<NewDevice> {
@@ -279,14 +291,11 @@ impl Onboarding {
     fn focus_first(&mut self, flow: Flow) {
         self.blur();
         let device = self.needs_device();
-        if flow == Flow::Create && device && self.device_problem().is_some() {
+        if device && self.device_problem().is_some() {
             self.device.focused = true;
         } else if flow == Flow::Create && self.vault_problem().is_some() {
             self.vault.focused = true;
-        } else if device && self.device_problem().is_some() {
-            self.device.focused = true;
-        } else if device && (self.passphrase_problem().is_some() || self.passphrase.text.is_empty())
-        {
+        } else if device && self.passphrase_problem().is_some() {
             self.passphrase.focused = true;
         } else if device && self.repeat_matches() != Some(true) {
             self.repeat.focused = true;
@@ -295,7 +304,7 @@ impl Onboarding {
         }
     }
 
-    fn blur(&mut self) {
+    pub fn blur(&mut self) {
         self.device.focused = false;
         self.vault.focused = false;
         self.passphrase.focused = false;
@@ -399,10 +408,7 @@ impl App {
         if o.device.text.is_empty() && o.needs_device() {
             o.device = TextEdit::new(default_device_name());
         }
-        o.step = match flow {
-            Flow::Create => Step::Create,
-            Flow::Join => Step::Join,
-        };
+        o.step = flow.step();
         o.blur();
         if o.needs_device() {
             o.passphrase.focused = true;
@@ -423,41 +429,39 @@ impl App {
         o.step = Step::Welcome;
     }
 
-    pub fn submit_create(&mut self) {
+    /// Enter in a name field: submits once the passphrase is ready (or none is
+    /// needed), else moves cleanly to the next passphrase field.
+    pub(crate) fn advance_onboarding(&mut self, flow: Flow) {
         let o = &mut self.onboarding;
-        if o.step != Step::Create {
-            return;
-        }
-        if !o.can_create() {
-            o.attempted = true;
-            o.focus_first(Flow::Create);
-            return;
-        }
-        o.notice = None;
-        o.blur();
-        o.set_up_now = false;
-        o.plan = if o.needs_device() {
-            vec![Stage::Protecting, Stage::CreatingVault]
+        if !o.needs_device()
+            || (o.passphrase_problem().is_none() && o.repeat_matches() == Some(true))
+        {
+            self.submit_onboarding(flow);
+        } else if o.passphrase_problem().is_none() {
+            o.blur();
+            o.repeat.focused = true;
         } else {
-            vec![Stage::CreatingVault]
-        };
-        // Until the worker reports a stage the first shows as active.
-        o.stage = None;
-        o.step = Step::Working(Flow::Create);
-        let device = o.new_device();
-        o.repeat.clear();
-        let vault = o.vault.text.trim().to_owned();
-        o.worker.create(device, vault);
+            o.blur();
+            o.passphrase.focused = true;
+        }
+    }
+
+    pub fn submit_create(&mut self) {
+        self.submit_onboarding(Flow::Create);
     }
 
     pub fn submit_join(&mut self) {
+        self.submit_onboarding(Flow::Join);
+    }
+
+    pub(crate) fn submit_onboarding(&mut self, flow: Flow) {
         let o = &mut self.onboarding;
-        if o.step != Step::Join {
+        if o.step != flow.step() {
             return;
         }
-        if !o.can_join() {
+        if !o.can_submit(flow) {
             o.attempted = true;
-            o.focus_first(Flow::Join);
+            o.focus_first(flow);
             return;
         }
         o.notice = None;
@@ -465,17 +469,24 @@ impl App {
         o.declined = false;
         o.cancelled = false;
         o.set_up_now = false;
+        let next = match flow {
+            Flow::Create => Stage::CreatingVault,
+            Flow::Join => Stage::MakingTicket,
+        };
         o.plan = if o.needs_device() {
-            vec![Stage::Protecting, Stage::MakingTicket]
+            vec![Stage::Protecting, next]
         } else {
-            vec![Stage::MakingTicket]
+            vec![next]
         };
         // Until the worker reports a stage the first shows as active.
         o.stage = None;
-        o.step = Step::Working(Flow::Join);
+        o.step = Step::Working(flow);
         let device = o.new_device();
         o.repeat.clear();
-        o.worker.join(device);
+        match flow {
+            Flow::Create => o.worker.create(device, o.vault.text.trim().to_owned()),
+            Flow::Join => o.worker.join(device),
+        }
     }
 
     /// The person compared the codes.
@@ -537,11 +548,7 @@ impl App {
         let o = &mut self.onboarding;
         match o.copied.as_ref().map(SecretCopy::state) {
             Some(SecretState::Failed(error)) => {
-                o.notice = Some(Notice {
-                    severity: Severity::Danger,
-                    title: "Couldn't copy".into(),
-                    body: error,
-                });
+                o.notice = Some(Notice::new(Severity::Danger, "Couldn't copy", error));
             }
             Some(SecretState::Replaced | SecretState::Cleared) => {}
             _ => return false,
@@ -553,15 +560,13 @@ impl App {
     /// Applies the requests' progress and runs the moment. True when anything changed.
     pub fn poll_onboarding(&mut self, now: f64, tx: &mut Tx) -> bool {
         let (progress, next) = self.onboarding.worker.drain(now);
-        let mut changed = self.check_ticket_copy() || !progress.is_empty();
-        if self
-            .onboarding
-            .copied_command
-            .is_some_and(|(_, at)| now - at >= COPIED_FOR - 1e-3)
-        {
-            self.onboarding.copied_command = None;
-            changed = true;
-        }
+        let mut changed = self.check_ticket_copy()
+            || !progress.is_empty()
+            || self
+                .onboarding
+                .copied_command
+                .take_if(|(_, at)| now - *at >= COPIED_FOR - 1e-3)
+                .is_some();
         for p in progress {
             self.on_progress(p, now);
         }
@@ -670,26 +675,21 @@ impl App {
         o.stage = None;
         o.pairing = None;
         let notice = if flow == Flow::Join && o.cancelled {
-            Notice {
-                severity: Severity::Neutral,
-                title: "Join cancelled".into(),
-                body: if o.set_up_now {
-                    "Nothing was shared. This device is set up now, with the passphrase you \
-                     chose. Make a new ticket when you're ready."
-                } else {
-                    "Nothing was shared. Make a new ticket when you're ready."
-                }
-                .into(),
-            }
+            let body = if o.set_up_now {
+                "Nothing was shared. This device is set up now, with the passphrase you \
+                 chose. Make a new ticket when you're ready."
+            } else {
+                "Nothing was shared. Make a new ticket when you're ready."
+            };
+            Notice::new(Severity::Neutral, "Join cancelled", body)
         } else if flow == Flow::Join && o.declined {
-            Notice {
-                severity: Severity::Caution,
-                title: "Stopped: the codes didn't match".into(),
-                body: "Nothing was shared and the ticket no longer works. Make a new one and \
-                       compare again. If you didn't start pairing on your other device, \
-                       someone else may have seen the ticket."
-                    .into(),
-            }
+            Notice::new(
+                Severity::Caution,
+                "Stopped: the codes didn't match",
+                "Nothing was shared and the ticket no longer works. Make a new one and \
+                 compare again. If you didn't start pairing on your other device, \
+                 someone else may have seen the ticket.",
+            )
         } else {
             failure_notice(flow, &failure)
         };
@@ -698,10 +698,7 @@ impl App {
         o.set_up_now = false;
         o.notice = Some(notice);
         o.attempted = false;
-        o.step = match flow {
-            Flow::Create => Step::Create,
-            Flow::Join => Step::Join,
-        };
+        o.step = flow.step();
         o.blur();
         if flow == Flow::Create {
             o.vault.focused = true;
@@ -746,27 +743,28 @@ fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
             Flow::Create => "Couldn't create the vault",
             Flow::Join => "Couldn't join",
         };
-        (
-            Severity::Danger,
-            title,
-            format!("{}. Try again.", sentence(message)),
-        )
+        let detail = sentence(message);
+        let detail = if detail.is_empty() {
+            "The agent failed."
+        } else {
+            detail.as_str()
+        };
+        (Severity::Danger, title, format!("{detail} Try again."))
     };
-    Notice {
-        severity,
-        title: title.into(),
-        body,
-    }
+    Notice::new(severity, title, body)
 }
 
-/// `message` with a capital letter and no trailing full stop.
-fn sentence(message: &str) -> String {
-    let message = message.trim().trim_end_matches('.');
-    let mut chars = message.chars();
-    match chars.next() {
+/// A message as a sentence: capitalised, with a full stop.
+pub(crate) fn sentence(message: &str) -> String {
+    let mut chars = message.trim().chars();
+    let mut out: String = match chars.next() {
         Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => "The agent failed".into(),
+        None => return String::new(),
+    };
+    if !out.ends_with(['.', '!', '?']) {
+        out.push('.');
     }
+    out
 }
 
 fn short(id: &str) -> &str {

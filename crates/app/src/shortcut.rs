@@ -7,13 +7,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use rune::{AppHandle, El, Shortcut, ShortcutError, Transition, Tx, col, row, text};
+use rune::{AppHandle, El, Shortcut, ShortcutError, Transition, Tx, row, text};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, Kit, ShortcutRecorder, ShortcutRecorderState,
     shortcut_error_message,
 };
 
 use crate::model::{App, Screen};
+use crate::onboarding::view::offer_card;
 
 /// macOS already uses ⌘Space (Spotlight) and ⌥⌘Space (the Finder search
 /// window); ⇧⌘Space is free there, and it's 1Password's Quick Access
@@ -194,6 +195,7 @@ impl Hotkey {
         let Some(shortcut) = self.shortcut.clone() else {
             return;
         };
+        self.refused = None;
         match self.register(&shortcut) {
             Ok(registration) => {
                 self.registration = Some(registration);
@@ -214,11 +216,18 @@ impl Hotkey {
     /// Rune refuses a chord without ⌘, ⌃ or ⌥ (F-keys alone are fine): it
     /// would take that key from typing everywhere.
     pub fn change(&mut self, next: Option<&Shortcut>) -> Result<(), ShortcutError> {
+        if self.registered() && self.shortcut.as_ref() == next {
+            self.error = None;
+            self.reset_error = None;
+            self.refused = None;
+            return Ok(());
+        }
         let registration = next.map(|next| self.register(next)).transpose()?;
         self.registration = registration;
         self.shortcut = next.cloned();
         self.error = None;
         self.reset_error = None;
+        self.refused = None;
         self.save();
         Ok(())
     }
@@ -236,6 +245,8 @@ impl Hotkey {
     pub fn recorder(&mut self) -> &mut ShortcutRecorderState {
         if self.recorder.is_recording() {
             self.reset_error = None;
+        } else {
+            self.refused = None;
         }
         &mut self.recorder
     }
@@ -414,11 +425,16 @@ impl App {
 
     /// The notice's "Choose another…": Settings, with the recorder.
     fn choose_shortcut(&mut self) {
+        if !self.leave_edit() {
+            return;
+        }
         self.open_settings();
-        self.nav.row = crate::settings::rows(self)
-            .iter()
-            .position(|r| *r == crate::settings::Row::Shortcut)
-            .unwrap_or(0);
+        if self.settings_open {
+            self.nav.row = crate::settings::rows(self)
+                .iter()
+                .position(|r| *r == crate::settings::Row::Shortcut)
+                .unwrap_or(0);
+        }
     }
 }
 
@@ -439,63 +455,14 @@ pub fn notice(s: &App, k: &Kit) -> Option<El> {
         ShortcutError::PermissionDenied => "Permission to use it was declined.".to_owned(),
         other => format!("It couldn't be registered: {other}."),
     };
-    let mut card = col()
-        .key("shortcut-notice")
-        .role("status")
-        .w(crate::view::NOTICE_W)
-        .self_center()
-        .padding(12.0)
-        .gap(10.0)
-        .radius(k.radius.lg)
-        .fill(k.c.layer_01)
-        .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
-    for shadow in k.shadow_layers(&k.elevation.floating) {
-        card = card.box_shadow(shadow);
-    }
-    Some(
-        card.child(
-            col()
-                .key("text")
-                .w_full()
-                .gap(2.0)
-                .child(
-                    text(format!("{} isn't available", name(shortcut)))
-                        .font(k.ty.ui_medium)
-                        .color(k.c.text_strong)
-                        .wrap()
-                        .w_full(),
-                )
-                .child(
-                    text(why)
-                        .key("why")
-                        .font(k.ty.text_small)
-                        .color(k.c.text_muted)
-                        .wrap()
-                        .w_full(),
-                ),
-        )
-        .child(
-            row()
-                .key("actions")
-                .gap(8.0)
-                .child(
-                    Button::new("Choose another…")
-                        .variant(ButtonVariant::Neutral)
-                        .control_size(ControlSize::Large)
-                        .on_press(|s: &mut App| s.choose_shortcut())
-                        .build(k)
-                        .key("choose"),
-                )
-                .child(
-                    Button::new("Not now")
-                        .variant(ButtonVariant::Ghost)
-                        .control_size(ControlSize::Large)
-                        .on_press(|s: &mut App| s.hotkey.dismissed = true)
-                        .build(k)
-                        .key("dismiss"),
-                ),
-        ),
-    )
+    Some(offer_card(
+        k,
+        "shortcut-notice",
+        format!("{} isn't available", name(shortcut)),
+        ("why", why),
+        ("choose", "Choose another…", App::choose_shortcut),
+        |s| s.hotkey.dismissed = true,
+    ))
 }
 
 /// Settings' shortcut: why a chosen or refused chord isn't in use (`refusal`,
