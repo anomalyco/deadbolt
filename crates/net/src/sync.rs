@@ -206,7 +206,7 @@ pub(crate) async fn serve_sync(
     let peer = *conn.remote_id().as_bytes();
     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
         let session = run_session(&*handler, peer, &mut send, &mut recv, max_frame_len, false);
-        match tokio::time::timeout(timeout, session).await {
+        match n0_future::time::timeout(timeout, session).await {
             Ok(Ok(outcome)) => debug!(peer = %fmt_id(&peer), ?outcome, "served sync session"),
             Ok(Err(err)) => {
                 let err = fail(&conn, err).await;

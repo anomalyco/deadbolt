@@ -6,7 +6,7 @@
 // login. It never clicks or fills anything by itself.
 
 import { sendToFrame } from "./frames"
-import type { Host } from "./host"
+import type { VaultBackend } from "./backend"
 import { siteOf } from "./site"
 import { isChooserPage, isProviderPage, provider } from "../signin"
 
@@ -38,7 +38,7 @@ export class SignInWith {
   private timers = new Map<number, ReturnType<typeof setTimeout>>()
 
   constructor(
-    host: Host,
+    host: VaultBackend,
     private now: () => number = Date.now,
   ) {
     // Locked or gone: nothing to follow.

@@ -1,0 +1,195 @@
+//! Browser adapters for the shared vault pairing and sync application rules.
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
+
+use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId};
+pub(crate) use deadbolt_net::application::Addr;
+use deadbolt_net::application::{self, Hint, State, clean_name};
+use deadbolt_net::{Blob, HandlerError, Inviter, PairingContext, PeerId, SyncHandler};
+
+use crate::{Error, Loaded, Result, enforce_membership, unhex};
+
+impl State for Loaded {
+    type Error = Error;
+
+    fn device_id(&self) -> DeviceId {
+        self.secret.device_id()
+    }
+    fn device_name(&self) -> &str {
+        &self.name
+    }
+    fn vaults(&self) -> impl Iterator<Item = &Vault> {
+        std::iter::once(&self.vault)
+    }
+
+    fn hints_for(&self, peer: &DeviceId) -> BTreeMap<String, Hint> {
+        if !self.vault.is_member(peer) {
+            return BTreeMap::new();
+        }
+        self.vault
+            .members()
+            .filter(|id| id != peer && *id != self.device_id())
+            .map(|id| {
+                let id = id.to_string();
+                let hint = Hint {
+                    name: self.peer_names.get(&id).cloned(),
+                    addr: self.peers.get(&id).cloned(),
+                    addr_seen: 0,
+                };
+                (id, hint)
+            })
+            .collect()
+    }
+
+    fn update<T>(
+        &mut self,
+        id: VaultId,
+        change: impl FnOnce(&mut Vault, &DeviceSecret) -> std::result::Result<T, application::Error>,
+    ) -> Result<T> {
+        if id != self.vault.id() {
+            return Err(application::Error::VaultNotHeld.into());
+        }
+        let mut staged = self.vault.clone();
+        let result = change(&mut staged, &self.secret)?;
+        self.commit(staged)?;
+        Ok(result)
+    }
+
+    fn learn(
+        &mut self,
+        peer: &DeviceId,
+        name: &str,
+        addr: Option<Addr>,
+        hints: BTreeMap<String, Hint>,
+    ) -> Result<()> {
+        let old_peers = self.peers.clone();
+        let old_names = self.peer_names.clone();
+        let from = peer.to_string();
+        let name = clean_name(name);
+        if !name.is_empty() {
+            self.peer_names.insert(from.clone(), name);
+        }
+        if let Some(addr) = addr {
+            self.peers.insert(from.clone(), addr);
+        }
+        // Direct peer metadata wins. Gossip only fills gaps for known members;
+        // neither names nor addresses ever grant membership.
+        for (id, hint) in hints.into_iter().take(256) {
+            let Ok(bytes) = unhex::<32>(&id) else {
+                continue;
+            };
+            let device = DeviceId::from_bytes(bytes);
+            if device == self.device_id() || id == from || !self.vault.is_member(&device) {
+                continue;
+            }
+            if let Some(name) = hint
+                .name
+                .map(|name| clean_name(&name))
+                .filter(|name| !name.is_empty())
+            {
+                self.peer_names.entry(id.clone()).or_insert(name);
+            }
+            if let Some(addr) = hint.addr {
+                self.peers.entry(id).or_insert(addr);
+            }
+        }
+        if self.peers != old_peers {
+            self.store
+                .meta_set("extension/peers", &serde_json::to_vec(&self.peers)?)?;
+        }
+        if self.peer_names != old_names {
+            self.store.meta_set(
+                "extension/peer-names",
+                &serde_json::to_vec(&self.peer_names)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn received(&mut self, _: &DeviceId) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+pub(crate) struct Handler(pub Arc<Mutex<Option<Loaded>>>);
+
+impl Handler {
+    pub(crate) fn with<T>(&self, f: impl FnOnce(&mut Loaded) -> Result<T>) -> Result<T> {
+        let mut state = self.0.lock().map_err(|_| Error::State)?;
+        f(state.as_mut().ok_or(Error::Locked)?)
+    }
+}
+
+fn failure(error: Error) -> HandlerError {
+    error.to_string().into()
+}
+
+impl SyncHandler for Handler {
+    async fn heads(&self, peer: PeerId) -> std::result::Result<Vec<u8>, HandlerError> {
+        self.with(|s| {
+            Ok(application::hello(
+                s,
+                &DeviceId::from_bytes(peer),
+                s.addr.clone(),
+            )?)
+        })
+        .map_err(failure)
+    }
+
+    async fn missing_for(
+        &self,
+        peer: PeerId,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<Vec<Blob>, HandlerError> {
+        self.with(|s| {
+            let ready = s.ready;
+            application::missing_for(s, &DeviceId::from_bytes(peer), &bytes, ready)
+        })
+        .map_err(failure)
+    }
+
+    async fn receive(
+        &self,
+        peer: PeerId,
+        entries: Vec<Blob>,
+    ) -> std::result::Result<(), HandlerError> {
+        let result = self.with(|s| {
+            let ready = s.ready;
+            application::receive(s, &DeviceId::from_bytes(peer), entries, ready).map(drop)
+        });
+        enforce_membership();
+        result.map_err(failure)
+    }
+}
+
+impl Inviter for Handler {
+    async fn offer(&self, ctx: &PairingContext) -> std::result::Result<Vec<u8>, HandlerError> {
+        self.with(|s| {
+            s.require_ready()?;
+            Ok(application::offer(
+                s,
+                s.vault.id(),
+                &DeviceId::from_bytes(ctx.remote),
+                s.addr.clone(),
+            )?)
+        })
+        .map_err(failure)
+    }
+
+    async fn welcome(
+        &self,
+        ctx: &PairingContext,
+        bytes: Vec<u8>,
+    ) -> std::result::Result<Vec<Blob>, HandlerError> {
+        let result = self.with(|s| {
+            s.require_ready()?;
+            let vault = s.vault.id();
+            application::welcome(s, vault, DeviceId::from_bytes(ctx.remote), &bytes, None)
+        });
+        enforce_membership();
+        result.map_err(failure)
+    }
+}

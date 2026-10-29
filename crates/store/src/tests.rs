@@ -91,6 +91,59 @@ fn mutate_raw(dir: &Path, f: impl FnOnce(&redb::WriteTransaction)) {
 }
 
 #[test]
+fn backend_roundtrip_uses_the_native_encrypted_format() {
+    let dir = TempDir::new().unwrap();
+    let path = db_path(dir.path());
+    let backend = || {
+        redb::backends::FileBackend::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&path)
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    std::fs::File::create_new(&path).unwrap();
+    assert!(matches!(
+        crate::unlock_with_backend(backend(), PASS),
+        Err(Error::NotInitialized(_))
+    ));
+    assert_eq!(std::fs::metadata(&path).unwrap().len(), 0);
+    let store = crate::init_with_backend(backend(), PASS, SECRET, FAST).unwrap();
+    let entry = body(42);
+    store.append_batch([entry.as_slice()]).unwrap();
+    store.meta_set("backend-meta", b"hidden-value").unwrap();
+    drop(store);
+    let bytes = std::fs::read(&path).unwrap();
+    for plain in [entry.as_slice(), b"backend-meta", b"hidden-value", &SECRET] {
+        assert!(!bytes.windows(plain.len()).any(|part| part == plain));
+    }
+    assert!(matches!(
+        crate::init_with_backend(backend(), PASS, SECRET, FAST),
+        Err(Error::AlreadyExists(_))
+    ));
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert!(matches!(
+        crate::unlock_with_backend(backend(), b"wrong"),
+        Err(Error::WrongPassphrase)
+    ));
+    let store = unlock(dir.path());
+    assert_eq!(all(&store), vec![entry.clone()]);
+    store
+        .change_passphrase_with_params(PASS, b"new", FAST)
+        .unwrap();
+    drop(store);
+    let store = crate::unlock_with_backend(backend(), b"new").unwrap();
+    assert_eq!(store.device_secret(), &SECRET);
+    assert_eq!(all(&store), vec![entry]);
+    assert_eq!(
+        store.meta_get("backend-meta").unwrap().unwrap().as_slice(),
+        b"hidden-value"
+    );
+}
+
+#[test]
 fn roundtrip() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().join("nested/data");

@@ -8,17 +8,19 @@ use std::{
 
 use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey,
-    address_lookup::{DnsAddressLookup, PkarrPublisher, PkarrResolver},
+    address_lookup::{PkarrPublisher, PkarrResolver},
     endpoint::{
-        AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, PortmapperConfig,
-        Side, WeakConnectionHandle, presets,
+        AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, Side,
+        WeakConnectionHandle, presets,
     },
 };
-use tokio::{
-    sync::mpsc,
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+use iroh::{address_lookup::DnsAddressLookup, endpoint::PortmapperConfig};
+use n0_future::{
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
+use tokio::sync::mpsc;
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -55,9 +57,10 @@ pub struct NodeConfig {
     /// servers. Required to dial a peer by id alone. Note that it makes the device id
     /// resolvable by anyone who knows it.
     pub address_lookup: bool,
-    /// Bind only this socket instead of all interfaces (IPv4 and IPv6).
+    /// Bind only this socket instead of all interfaces (IPv4 and IPv6). Native only;
+    /// browsers use relay connections and ignore this setting.
     pub bind_addr: Option<SocketAddr>,
-    /// UPnP/PCP/NAT-PMP port mapping.
+    /// UPnP/PCP/NAT-PMP port mapping. Native only; ignored in browsers.
     pub portmapper: bool,
     /// Maximum size of a single frame accepted from a peer.
     pub max_frame_len: usize,
@@ -85,6 +88,7 @@ impl NodeConfig {
     /// No relays, no address lookup, no port mapping, bound to `127.0.0.1:0`, pairing
     /// records in a directory under the system's temporary one. Peers must be dialed with
     /// a [`PeerAddr`] carrying direct addresses. Intended for tests.
+    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
     pub fn local_only(secret_key: [u8; 32]) -> Self {
         Self {
             secret_key: Zeroizing::new(secret_key),
@@ -143,6 +147,9 @@ impl PeerAddr {
                 .map_err(|_| Error::InvalidRelayUrl(url.clone()))?;
             addr = addr.with_relay_url(url);
         }
+        // Browsers cannot use IP transports. Supplying an unusable direct
+        // address would also suppress address lookup when no relay is known.
+        #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
         for ip in &self.direct_addrs {
             addr = addr.with_ip_addr(*ip);
         }
@@ -227,12 +234,17 @@ impl Node {
         if config.address_lookup {
             builder = builder
                 .address_lookup(PkarrPublisher::n0_dns())
-                .address_lookup(PkarrResolver::n0_dns())
-                .address_lookup(DnsAddressLookup::n0_dns());
+                .address_lookup(PkarrResolver::n0_dns());
+            #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+            {
+                builder = builder.address_lookup(DnsAddressLookup::n0_dns());
+            }
         }
+        #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
         if !config.portmapper {
             builder = builder.portmapper_config(PortmapperConfig::Disabled);
         }
+        #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
         if let Some(addr) = config.bind_addr {
             builder = builder
                 .clear_ip_transports()
@@ -245,7 +257,7 @@ impl Node {
             .map_err(|e| Error::Bind(e.to_string()))?;
 
         let handler: Arc<dyn DynSyncHandler> = Arc::new(handler);
-        let accept_task = AbortOnDrop(tokio::spawn(accept_loop(
+        let accept_task = AbortOnDrop(n0_future::task::spawn(accept_loop(
             endpoint.clone(),
             gate.clone(),
             handler.clone(),
@@ -279,7 +291,7 @@ impl Node {
     /// disabled.
     pub async fn online(&self, timeout: Duration) -> bool {
         self.inner.relays_enabled
-            && tokio::time::timeout(timeout, self.inner.endpoint.online())
+            && n0_future::time::timeout(timeout, self.inner.endpoint.online())
                 .await
                 .is_ok()
     }

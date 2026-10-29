@@ -1,8 +1,11 @@
-// Service worker: the extension's only link to Deadbolt. It keeps one native
-// messaging port to `deadbolt browser-host` and answers the content scripts,
-// the inline menu and the popup.
+// Service worker: the extension's only link to Deadbolt. The default native
+// build keeps one messaging port to `deadbolt browser-host` (bg/host.ts).
+// `--standalone` makes the extension its own device, with the Rust vault in
+// an offscreen worker (bg/standalone.ts). It answers the content
+// scripts, the inline menu, the popup and device.html.
 
 import { Autofill } from "./bg/autofill"
+import type { VaultBackend } from "./bg/backend"
 import { Forms } from "./bg/forms"
 import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
@@ -10,9 +13,12 @@ import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
-import type { PopupReply, Status, StatusChanged, ToBackground } from "./messages"
+import { DEVICE_PAGE, deviceCommand, fromDevicePage, StandaloneBackend } from "./bg/standalone"
+import type { DeviceReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
-const host = new Host()
+declare const DEADBOLT_NATIVE: boolean
+const standalone = DEADBOLT_NATIVE ? null : new StandaloneBackend()
+const host: VaultBackend = DEADBOLT_NATIVE ? new Host() : standalone!
 const saver = new Saver(host)
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
 const signInWith = new SignInWith(host)
@@ -35,6 +41,8 @@ function title(status: Status): string {
       return "Deadbolt isn't set up yet"
     case "not-installed":
       return "Deadbolt: run `deadbolt browser install`"
+    case "unavailable":
+      return "Deadbolt couldn't start"
     default:
       return "Deadbolt isn't connected"
   }
@@ -90,6 +98,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       if (saver.ownsSurface(message.token)) return saver.surfaceDismiss(message.token, sender)
       if (forms.owns(message.token)) return forms.menuDismiss(message.token, sender)
       return autofill.menuDismiss(message.token, sender)
+    case "db:menu-unlock":
+      return menuUnlock(String(message.token), sender)
     case "db:menu-resize":
       if (saver.ownsSurface(message.token)) return saver.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
       if (forms.owns(message.token)) return forms.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
@@ -100,6 +110,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
         : { ok: false, message: "This offer has expired.", gone: true }
     case "db:popup-load": {
       if (!fromExtensionPage(sender, "popup.html")) return null
+      host.used?.()
       const reply: PopupReply = await autofill.popupLoad(message.tabId)
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
       const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
@@ -118,7 +129,29 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
         : { ok: false, message: "" }
     case "db:popup-saving-on":
       return fromExtensionPage(sender, "popup.html") ? saver.savingOn(message.tabId) : false
+    case "db:popup-lock":
+      if (!fromExtensionPage(sender, "popup.html") || !standalone) return host.status
+      await standalone.lock()
+      return standalone.status
+    case "db:device":
+      return device(message.command, sender)
   }
+}
+
+/** device.html's commands: only from that exact page of this extension, never a content script or another page. */
+async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promise<DeviceReply> {
+  if (!fromDevicePage(sender)) return { ok: false, message: "", status: host.status }
+  if (!standalone) return { ok: false, message: "This build talks to the Deadbolt app; set it up there.", status: host.status }
+  const command = deviceCommand(raw)
+  if (!command) return { ok: false, message: "Malformed request.", status: host.status }
+  return standalone.device(command)
+}
+
+/** The inline menu's locked row, from the menu frame its token was made for: device.html, where the user unlocks. Nothing else is asked of the vault. */
+async function menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
+  if (!standalone || !(await autofill.menuUnlock(token, sender))) return false
+  await chrome.tabs.create({ url: chrome.runtime.getURL(DEVICE_PAGE) })
+  return true
 }
 
 chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) => {

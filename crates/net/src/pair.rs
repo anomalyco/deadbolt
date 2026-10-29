@@ -33,13 +33,12 @@ use std::{convert::Infallible, fmt, sync::Arc, time::Duration};
 
 use hmac::{Hmac, KeyInit, Mac};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
+use n0_future::{task::JoinSet, time::Instant};
 use sha2::{Digest, Sha256};
 use spake2::{Ed25519Group, Identity, Password, Spake2};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::mpsc,
-    task::JoinSet,
-    time::Instant,
 };
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
@@ -176,12 +175,12 @@ impl Drop for PairingListener {
 struct Publication {
     client: Client,
     lookup: Arc<Lookup>,
-    task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<n0_future::task::JoinHandle<()>>,
 }
 
 impl Publication {
     fn start(node: &Node, client: Client, lookup: Arc<Lookup>) -> Self {
-        let task = tokio::spawn({
+        let task = n0_future::task::spawn({
             let node = node.clone();
             let client = client.clone();
             let lookup = lookup.clone();
@@ -198,7 +197,7 @@ impl Publication {
                             Err(error) => warn!(%error, "publishing the pairing record"),
                         }
                     }
-                    tokio::time::sleep(REPUBLISH_INTERVAL).await;
+                    n0_future::time::sleep(REPUBLISH_INTERVAL).await;
                 }
             }
         });
@@ -216,14 +215,14 @@ impl Publication {
         task.abort();
         let client = self.client.clone();
         let lookup = self.lookup.clone();
-        tokio::spawn(async move {
+        n0_future::task::spawn(async move {
             // The aborted task may be mid-publish; the final record must land last.
             #[expect(
                 clippy::let_underscore_must_use,
                 reason = "an aborted task's join error is the expected outcome"
             )]
             let _ = task.await;
-            match tokio::time::timeout(FINAL_PUBLISH_TIMEOUT, client.publish(&lookup, &record))
+            match n0_future::time::timeout(FINAL_PUBLISH_TIMEOUT, client.publish(&lookup, &record))
                 .await
             {
                 Ok(Ok(())) => {}
@@ -422,7 +421,7 @@ impl PairingListener {
         let mut proving = JoinSet::new();
         let proven = loop {
             tokio::select! {
-                _ = tokio::time::sleep_until(self.expires_at) => return Err(Error::PairingExpired),
+                _ = n0_future::time::sleep_until(self.expires_at) => return Err(Error::PairingExpired),
                 conn = self.rx.recv(), if proving.len() < MAX_PROVING => {
                     let Some(conn) = conn else { return Err(Error::PairingCancelled) };
                     proving.spawn(listener_prove(
@@ -472,7 +471,7 @@ impl PairingListener {
                     clippy::let_underscore_must_use,
                     reason = "best-effort linger ends on either peer close or its deadline"
                 )]
-                let _ = tokio::time::timeout(LINGER_TIMEOUT, conn.closed()).await;
+                let _ = n0_future::time::timeout(LINGER_TIMEOUT, conn.closed()).await;
                 debug!(peer = %crate::fmt_id(&remote), "paired");
                 Ok(outcome)
             }
@@ -488,7 +487,8 @@ async fn listener_prove(
     lookup: PeerId,
 ) -> Result<Proven> {
     let remote = *conn.remote_id().as_bytes();
-    let (mut send, mut recv) = match tokio::time::timeout(PROOF_TIMEOUT, conn.accept_bi()).await {
+    let (mut send, mut recv) = match n0_future::time::timeout(PROOF_TIMEOUT, conn.accept_bi()).await
+    {
         Ok(Ok(streams)) => streams,
         Ok(Err(e)) => return Err(fail_pairing(&conn, Error::Closed(e.to_string())).await),
         Err(_) => {
@@ -508,7 +508,7 @@ async fn listener_prove(
         };
         stream.prove(&mut send, &mut recv).await
     };
-    match tokio::time::timeout(PROOF_TIMEOUT, attempt).await {
+    match n0_future::time::timeout(PROOF_TIMEOUT, attempt).await {
         Ok(Ok(pairing)) => Ok(Proven {
             conn,
             send,
@@ -568,12 +568,29 @@ impl Node {
                     if addr.id == self.id() {
                         return Err(Error::OwnCode);
                     }
+                    // A native joiner can publish its direct addresses before
+                    // iroh selects a home relay. A browser cannot dial that
+                    // record: wait for the republished relay address rather
+                    // than spend the whole find deadline on an impossible dial.
+                    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+                    if addr.relay_url.is_none() {
+                        if Instant::now() >= deadline {
+                            return Err(Error::PairingNotFound);
+                        }
+                        n0_future::time::sleep(FIND_INTERVAL).await;
+                        continue;
+                    }
+                    #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
                     let attempt = tokio::time::timeout_at(
                         deadline,
                         self.pair_with(&addr, code, lookup.public, inviter),
-                    )
-                    .await
-                    .unwrap_or(Err(Error::PairingNotFound));
+                    );
+                    #[cfg(all(target_family = "wasm", target_os = "unknown"))]
+                    let attempt = n0_future::time::timeout(
+                        deadline.saturating_duration_since(Instant::now()),
+                        self.pair_with(&addr, code, lookup.public, inviter),
+                    );
+                    let attempt = attempt.await.unwrap_or(Err(Error::PairingNotFound));
                     match attempt {
                         // The record may still carry an address the device has left.
                         Err(Error::Connect(error)) if Instant::now() < deadline => {
@@ -591,7 +608,7 @@ impl Node {
                 None if Instant::now() >= deadline => return Err(Error::PairingNotFound),
                 None => {}
             }
-            tokio::time::sleep(FIND_INTERVAL).await;
+            n0_future::time::sleep(FIND_INTERVAL).await;
         }
     }
 

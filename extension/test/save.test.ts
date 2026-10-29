@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { HostError } from "../src/bg/host"
+import { HostError } from "../src/bg/backend"
 import { cleanFacts, judge, NEVER_KEY, NOT_NOW_MS, Saver } from "../src/bg/save"
 import type { RequestBody } from "../src/protocol"
 import { fakeHost, installChrome, menuSender, NO_FACTS, pageSender, SITE, type FakeChrome, type FakeHost } from "./chrome"
