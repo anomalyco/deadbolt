@@ -6,7 +6,7 @@
 
 import type { Approved, Box, FrameBoxes, ToContent } from "../messages"
 import { visibleNow } from "../ui/dom"
-import type { Field } from "./detect"
+import type { FormControl } from "./detect"
 import { fillable, throughFrame, visibleBox } from "./fill"
 import { approvals } from "./approvals"
 import { menuHost, type PageState } from "./inline"
@@ -57,7 +57,7 @@ export class Announcements {
  * Observer v2 reading, which also sees what covers it while letting clicks
  * through, here or in any page above.
  */
-export async function ownBoxes(fields: Field[]): Promise<Box[] | null> {
+export async function ownBoxes(fields: Array<{ el: Element & FormControl }>): Promise<Box[] | null> {
   if (!fields.length || !fields.every((f) => fillable(f.el))) return null
   const boxes = fields.map((f) => visibleBox(f.el))
   if (boxes.some((b) => !b)) return null

@@ -546,7 +546,7 @@ value. Granting is a `secret-grant-set` entry.
   AI; masking only keeps it out of the transcript by accident (see "What a
   grant gives").
 
-**Protocol (17).** `resolve {refs, purpose}` → `secrets {secrets: [{vault,
+**Protocol (18).** `resolve {refs, purpose}` → `secrets {secrets: [{vault,
 item, title, field, value}]}` in reference order; `secret-grant-set {vault,
 items, fields, purposes, expires_at, passphrase?}` → `secret-grants
 {grants}`; `secret-grant-list` → `secret-grants`; `agent-grant-remove`

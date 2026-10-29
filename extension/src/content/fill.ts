@@ -8,7 +8,7 @@
 // value differ from what it last rendered and runs its change handler.
 
 import { IDENTIFIER_ROLES, type Box, type FieldRole, type FillValues } from "../messages"
-import { inPlace, type Field } from "./detect"
+import { inPlace, type Field, type FormControl } from "./detect"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -25,7 +25,9 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const key: Promise<CryptoKey | null> | null = globalThis.crypto?.subtle
   ? crypto.subtle.generateKey({ name: "HMAC", hash: "SHA-256" }, false, ["sign"]).catch(() => null)
   : null
-const digests = new WeakMap<HTMLInputElement, Promise<string | null>>()
+const digests = new WeakMap<Element, Promise<string | null>>()
+/** The same, for the values Deadbolt itself last wrote into identity and card fields only. */
+const ours = new WeakMap<Element, Promise<string | null>>()
 
 async function digest(value: string): Promise<string | null> {
   const k = await key
@@ -36,11 +38,32 @@ async function digest(value: string): Promise<string | null> {
 
 export function trackUserInput(event: Event) {
   const el = event.composedPath()[0]
-  if (key && event.isTrusted && el instanceof HTMLInputElement) digests.set(el, digest(el.value))
+  if (key && event.isTrusted && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) digests.set(el, digest(el.value))
+}
+
+/** Deadbolt is writing `value` into an identity or card field (see formfill.ts). */
+export function noteFilled(el: Element, value: string) {
+  if (!key) return
+  const d = digest(value)
+  digests.set(el, d)
+  ours.set(el, d)
+}
+
+/**
+ * Whether the field holds what the user typed into it themselves: its value
+ * is the last one a trusted input event left, and not one Deadbolt wrote.
+ * A value the page put there itself, or one Deadbolt filled before, isn't.
+ */
+export async function typedByUser(el: Element, value: string): Promise<boolean> {
+  if (!value || (await ownValue(el, value)) === undefined) return false
+  const mine = ours.get(el)
+  if (!mine) return true
+  const [a, b] = await Promise.all([mine, digest(value)])
+  return a === null || a !== b
 }
 
 /** `value` if it's what the user last typed into the field or Deadbolt filled. */
-export async function ownValue(el: HTMLInputElement, value: string): Promise<string | undefined> {
+export async function ownValue(el: Element, value: string): Promise<string | undefined> {
   const recorded = digests.get(el)
   if (!value || !recorded) return undefined
   const [a, b] = await Promise.all([recorded, digest(value)])
@@ -154,7 +177,7 @@ export function visibleBox(el: Element): Box | null {
  * What the user would hit in the middle of the visible part is the field.
  * `ours`, Deadbolt's own menu, doesn't count as covering it.
  */
-function onTop(el: HTMLInputElement, box: Box, ours?: Element | null): boolean {
+export function onTop(el: FormControl, box: Box, ours?: Element | null): boolean {
   const root = el.getRootNode() as Document | ShadowRoot
   const x = (box.left + box.right) / 2
   const y = (box.top + box.bottom) / 2
@@ -171,8 +194,8 @@ function onTop(el: HTMLInputElement, box: Box, ours?: Element | null): boolean {
  * field: `ours` names it, so it isn't taken for a cover. It's gone by the
  * time anything is written.
  */
-export function fillable(el: HTMLInputElement, ours?: Element | null): boolean {
-  if (!el.isConnected || el.disabled || el.readOnly) return false
+export function fillable(el: FormControl, ours?: Element | null): boolean {
+  if (!el.isConnected || el.disabled || ("readOnly" in el && el.readOnly)) return false
   const r = el.getBoundingClientRect()
   if (r.width < MIN_SIDE || r.height < MIN_SIDE || hiddenByStyle(el)) return false
   el.scrollIntoView?.({ block: "nearest", inline: "nearest" })
@@ -239,7 +262,7 @@ export function setInputValue(el: HTMLInputElement, value: string, guard: (el: H
  * as many boxes as digits, all in the same form and all fillable, and none
  * moved before each digit goes in.
  */
-export async function fillFields(fields: Field[], values: FillValues, check = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement }> {
+export async function fillFields(fields: Field[], values: FillValues, check: (el: HTMLInputElement) => boolean = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement }> {
   const filled: FieldRole[] = []
   let last: HTMLInputElement | undefined
   const write = (f: Field, value: string, group: Field[] = [f]) => {

@@ -9,7 +9,7 @@ mkdir -p "$out"
 bin=$(cargo build --release --quiet -p deadbolt-app --message-format=json | sed -n 's/.*"executable":"\([^"]*deadbolt-ui\)".*/\1/p' | tail -1)
 for scene in command-offer install-command command-installed locked locked-error vault search revealed code-copied empty failed \
   welcome welcome-set-up create create-typing create-ready create-invalid create-failed \
-  join ticket code join-declined join-cancelled join-failed; do
+  join code join-wrong-code join-cancelled join-failed; do
   "$bin" --scene "$scene" --snap "$out/$scene.png" "$@"
 done
 # The moment: working, the bolt at contact, cooling, and joined.

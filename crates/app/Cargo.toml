@@ -23,7 +23,6 @@ path = "tests/app/main.rs"
 [dependencies]
 blake3 = "1.8"
 deadbolt-client = { path = "../client" }
-qrcode = { version = "0.14.1", default-features = false }
 # Rune is pinned to a rev and bumped deliberately.
 rune = { git = "https://github.com/anomalyco/rune", rev = "47c9523a5e0a77820e177ddff90a23dc1f8e94c2", features = ["native-file-dialog"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "47c9523a5e0a77820e177ddff90a23dc1f8e94c2" }

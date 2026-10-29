@@ -5,14 +5,14 @@
 //!
 //! ```text
 //! client -> agent   Request   {"v":1,"cmd":"...",...}
-//! agent  -> client  Message*  {"type":"event",...}         pairing only
-//! client -> agent   Answer    {"answer":true}               after an event that asks
+//! agent  -> client  Message*  {"type":"event",...}         join only
+//! client -> agent   Answer    {"answer":true,"passphrase":"…"}   after an event that asks
 //! agent  -> client  Message   {"type":"ok",...} | {"type":"error",...}   final
 //! ```
 //!
-//! Pairing events ask for an answer only when the request set `confirm`;
-//! otherwise the code is accepted automatically. A client hanging up cancels
-//! a pending `join`/`pair`.
+//! Only `joined` with `passphrase` set asks for an answer: the passphrase for a
+//! device that isn't set up yet. A client hanging up cancels a pending
+//! `join`/`pair`, and discards a joined vault still waiting for its passphrase.
 //!
 //! `watch` keeps the connection open and streams what changed:
 //!
@@ -53,7 +53,7 @@ pub use caller::{
 };
 pub use reference::{Reference, SCHEME};
 
-pub const PROTOCOL_VERSION: u32 = 17;
+pub const PROTOCOL_VERSION: u32 = 18;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -129,15 +129,19 @@ pub enum Command {
     Sync {
         vault: Option<String>,
     },
-    /// Emits `ticket`, then `joining` (answered if `confirm`), then replies `vault`.
+    /// Emits `code`, then `joined` once paired, then replies `vault`. On a
+    /// device that isn't set up, the device key and the vault stay in memory
+    /// until the passphrase arrives: `passphrase` here, else the answer to
+    /// `joined`. A `false` answer or hanging up discards them. `device_name`
+    /// (default: the agent's hostname) applies only then.
     Join {
-        confirm: bool,
+        device_name: Option<String>,
+        passphrase: Option<Secret>,
     },
-    /// Emits `pairing` (answered if `confirm`), then replies `device`.
+    /// Admits the device showing `code` into `vault`; replies `device`.
     Pair {
-        ticket: String,
+        code: String,
         vault: Option<String>,
-        confirm: bool,
     },
     /// Creates an item; replies `item`.
     ItemNew {
@@ -509,7 +513,8 @@ impl Command {
     /// check who it is talking to before sending it.
     pub fn carries_passphrase(&self) -> bool {
         match self {
-            Self::Setup { .. } | Self::Unlock { .. } => true,
+            // A join asks for one if the device isn't set up.
+            Self::Setup { .. } | Self::Unlock { .. } | Self::Join { .. } => true,
             Self::AgentClientAdd { passphrase, .. }
             | Self::AgentGrantSet { passphrase, .. }
             | Self::SecretGrantSet { passphrase, .. } => passphrase.is_some(),
@@ -1025,21 +1030,45 @@ pub enum ErrorCode {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "event", rename_all = "kebab-case")]
 pub enum Event {
-    /// The new device's pairing ticket.
-    Ticket { ticket: String },
-    /// The joining side's confirmation code and the vault it is joining.
-    Joining {
-        code: String,
+    /// The code to type on a device that holds the vault.
+    Code { code: String },
+    /// Paired into `vault` by `inviter`. With `passphrase`, the device isn't
+    /// set up and the answer must carry its new passphrase.
+    Joined {
         vault: String,
         inviter: DeviceInfo,
+        passphrase: bool,
     },
-    /// The inviting side's confirmation code.
-    Pairing { code: String, device: String },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Answer {
     pub answer: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub passphrase: Option<Secret>,
+}
+
+impl Answer {
+    pub fn yes() -> Self {
+        Self {
+            answer: true,
+            passphrase: None,
+        }
+    }
+
+    pub fn no() -> Self {
+        Self {
+            answer: false,
+            passphrase: None,
+        }
+    }
+
+    pub fn passphrase(passphrase: Secret) -> Self {
+        Self {
+            answer: true,
+            passphrase: Some(passphrase),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]

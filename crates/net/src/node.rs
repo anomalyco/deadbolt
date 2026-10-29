@@ -23,7 +23,7 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::{
-    Membership, PAIR_ALPN, PeerId, SYNC_ALPN,
+    Membership, PAIR_ALPN, PeerId, Rendezvous, SYNC_ALPN,
     error::{Error, Result, close},
     fmt_id,
     sync::{
@@ -63,6 +63,8 @@ pub struct NodeConfig {
     pub max_frame_len: usize,
     /// How long a sync session a peer opened may take before its connection is closed.
     pub inbound_sync_timeout: Duration,
+    /// Where a new device publishes its pairing record.
+    pub rendezvous: Rendezvous,
 }
 
 impl NodeConfig {
@@ -76,11 +78,13 @@ impl NodeConfig {
             portmapper: true,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
+            rendezvous: Rendezvous::N0,
         }
     }
 
-    /// No relays, no address lookup, no port mapping, bound to `127.0.0.1:0`. Peers must be
-    /// dialed with a [`PeerAddr`] carrying direct addresses. Intended for tests.
+    /// No relays, no address lookup, no port mapping, bound to `127.0.0.1:0`, pairing
+    /// records in a directory under the system's temporary one. Peers must be dialed with
+    /// a [`PeerAddr`] carrying direct addresses. Intended for tests.
     pub fn local_only(secret_key: [u8; 32]) -> Self {
         Self {
             secret_key: Zeroizing::new(secret_key),
@@ -90,6 +94,7 @@ impl NodeConfig {
             portmapper: false,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
+            rendezvous: Rendezvous::Dir(std::env::temp_dir().join("deadbolt-rendezvous")),
         }
     }
 }
@@ -104,6 +109,7 @@ impl fmt::Debug for NodeConfig {
             .field("portmapper", &self.portmapper)
             .field("max_frame_len", &self.max_frame_len)
             .field("inbound_sync_timeout", &self.inbound_sync_timeout)
+            .field("rendezvous", &self.rendezvous)
             .finish()
     }
 }
@@ -168,6 +174,7 @@ pub(crate) struct Inner {
     pub(crate) handler: Arc<dyn DynSyncHandler>,
     pub(crate) max_frame_len: usize,
     pub(crate) relays_enabled: bool,
+    pub(crate) rendezvous: Rendezvous,
     accept_task: AbortOnDrop,
 }
 
@@ -252,6 +259,7 @@ impl Node {
                 handler,
                 max_frame_len: config.max_frame_len,
                 relays_enabled,
+                rendezvous: config.rendezvous,
                 accept_task,
             }),
         })
@@ -397,6 +405,22 @@ struct GateState {
     conns: HashMap<PeerId, Vec<Tracked>>,
     pairing: Option<PairingSlot>,
     next_slot: u64,
+    /// The last code was used (or burnt by a wrong guess), and no new one opened since:
+    /// late dialers hear so rather than "not pairing".
+    used: bool,
+}
+
+impl GateState {
+    /// Why a pairing connection can't be taken, if it can't.
+    fn pairing_refusal(&self) -> Option<(iroh::endpoint::VarInt, &'static [u8])> {
+        if self.pairing.as_ref().is_some_and(PairingSlot::open) {
+            None
+        } else if self.used {
+            Some((close::PAIRING_USED, b"code already used"))
+        } else {
+            Some((close::PAIRING_UNAVAILABLE, b"not pairing"))
+        }
+    }
 }
 
 /// The membership gate. Shared by the endpoint hook and the [`Node`].
@@ -461,9 +485,9 @@ impl Gate {
             }
             PAIR_ALPN => {
                 if conn.side() == Side::Server
-                    && !st.pairing.as_ref().is_some_and(PairingSlot::open)
+                    && let Some(refusal) = st.pairing_refusal()
                 {
-                    return Err((close::PAIRING_UNAVAILABLE, b"not pairing"));
+                    return Err(refusal);
                 }
                 ConnKind::Pair
             }
@@ -520,6 +544,7 @@ impl Gate {
         st.next_slot += 1;
         let id = st.next_slot;
         st.pairing = Some(PairingSlot { id, expires_at, tx });
+        st.used = false;
         id
     }
 
@@ -530,16 +555,29 @@ impl Gate {
         }
     }
 
+    /// Closes the slot because its code was used up.
+    pub(crate) fn consume_pairing(&self, id: u64) {
+        let mut st = self.lock();
+        if st.pairing.as_ref().is_some_and(|s| s.id == id) {
+            st.pairing = None;
+            st.used = true;
+        }
+    }
+
     fn route_pairing(&self, conn: Connection) {
-        let tx = {
+        let route = {
             let st = self.lock();
-            st.pairing
-                .as_ref()
-                .filter(|s| s.open())
-                .map(|s| s.tx.clone())
+            match st.pairing_refusal() {
+                None => st
+                    .pairing
+                    .as_ref()
+                    .map(|s| s.tx.clone())
+                    .ok_or((close::PAIRING_UNAVAILABLE, &b"not pairing"[..])),
+                Some(refusal) => Err(refusal),
+            }
         };
-        match tx {
-            Some(tx) => {
+        match route {
+            Ok(tx) => {
                 if let Err(err) = tx.try_send(conn) {
                     warn!("dropping pairing connection: {err}");
                     let (mpsc::error::TrySendError::Full(conn)
@@ -547,7 +585,7 @@ impl Gate {
                     conn.close(close::PAIRING_UNAVAILABLE, b"busy");
                 }
             }
-            None => conn.close(close::PAIRING_UNAVAILABLE, b"not pairing"),
+            Err((code, reason)) => conn.close(code, reason),
         }
     }
 }
@@ -637,7 +675,7 @@ pub(crate) mod tests {
         // The pairing ALPN is not membership-gated on dial (the remote decides).
         let conn = a.inner.endpoint.connect(addr, PAIR_ALPN).await;
         if let Ok(conn) = conn {
-            // b has no outstanding ticket, so it closes the connection.
+            // b has no outstanding code, so it closes the connection.
             conn.closed().await;
             assert!(matches!(
                 crate::error::from_conn(&conn, Error::Timeout),

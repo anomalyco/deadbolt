@@ -8,7 +8,7 @@ use rune::Tx;
 use crate::agent::{self, Agent, Job};
 use crate::model::{App, Screen};
 use crate::onboarding::worker::Stage;
-use crate::onboarding::{Flow, Pairing, Step};
+use crate::onboarding::{Flow, Step};
 use crate::view::{Notice, Severity};
 use crate::{import, install, shortcut};
 
@@ -146,13 +146,6 @@ pub(super) fn join_notice(s: &mut App, severity: Severity, title: &str, body: &s
     s.onboarding.notice = Some(Notice::new(severity, title, body));
 }
 
-pub(super) fn pairing() -> Pairing {
-    Pairing {
-        vault: "personal".into(),
-        inviter: "studio".into(),
-    }
-}
-
 pub(super) fn vault_info(name: &str) -> VaultInfo {
     VaultInfo {
         id: "v1".into(),
@@ -163,20 +156,20 @@ pub(super) fn vault_info(name: &str) -> VaultInfo {
     }
 }
 
-/// A ticket-shaped string: `DBPAIR` and 274 base32 characters, the length of
-/// a real ticket with a relay and a few direct addresses.
-pub(super) fn fixture_ticket() -> String {
-    const BASE32: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
-    let mut x: u32 = 0x2545_f491;
-    let body: String = (0..274)
-        .map(|_| {
-            x ^= x << 13;
-            x ^= x >> 17;
-            x ^= x << 5;
-            BASE32[(x % 32) as usize] as char
-        })
-        .collect();
-    format!("DBPAIR{body}")
+/// A pairing code as `deadbolt join` shows it.
+pub(super) fn fixture_pairing_code() -> String {
+    "violin-garden-tiger-lamp".into()
+}
+
+/// The device that pairs this one in the join scenes.
+pub(super) fn inviter() -> DeviceInfo {
+    DeviceInfo {
+        id: "5f0c9a2e".into(),
+        name: Some("studio".into()),
+        this: false,
+        connected: true,
+        last_seen: None,
+    }
 }
 
 pub(super) fn status(unlocked: bool) -> Status {

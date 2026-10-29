@@ -1,6 +1,6 @@
 //! Drawing first run: the welcome, the two forms, inline notices, and the
-//! empty-vault guide; `ceremony` draws progress, the pairing ticket and code,
-//! and the moment the vault is ready.
+//! empty-vault guide; `ceremony` draws progress, the pairing code, and the
+//! moment the vault is ready.
 //!
 //! Motion: steps swap with the app's whole-state replacement, except progress
 //! and its result, which share one panel so the bolt can throw. Hints swap in
@@ -48,12 +48,7 @@ pub fn screen(s: &App, k: &Kit, dark: bool) -> Paged {
         Step::Working(flow) | Step::Done { flow, .. } => {
             super::ceremony::progress(s, k, dark, *flow)
         }
-        Step::Ticket => super::ceremony::ticket(s, k),
-        Step::Confirm {
-            code,
-            vault,
-            inviter,
-        } => super::ceremony::confirm(k, code, vault, inviter),
+        Step::Code => super::ceremony::code(s, k),
     }
 }
 
@@ -288,8 +283,8 @@ fn form(s: &App, k: &Kit, flow: Flow) -> Paged {
         (Flow::Join, false) => (
             "join",
             "Join from another device",
-            "This device is set up. Make a ticket, then pair from a device that has your vault.",
-            "Make a pairing ticket",
+            "This device is set up. Make a code, then type it on a device that has your vault.",
+            "Make a pairing code",
         ),
     };
     let mut panel = col().key("panel").w(PANEL_W).gap(16.0).items_start().child(

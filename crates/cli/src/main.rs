@@ -25,10 +25,12 @@ use std::process::ExitCode;
 use anyhow::{Result, bail};
 use clap::{Args, Parser, Subcommand};
 use deadbolt_client::{export, paths, protocol};
-use deadbolt_net::{PairingTicket, QrStyle};
+use deadbolt_net::PairingCode;
 
 use crate::paths::Paths;
-use crate::protocol::{Command, DeviceInfo, ErrorCode, Event, Reply, Status, VaultInfo};
+use crate::protocol::{
+    Answer, Command, DeviceInfo, ErrorCode, Event, Reply, Secret, Status, VaultInfo,
+};
 
 #[derive(Parser)]
 #[command(
@@ -70,22 +72,24 @@ enum Commands {
         #[arg(long)]
         device_name: Option<String>,
     },
-    /// Join a vault from one of your other devices: prints a ticket, then
-    /// waits until `deadbolt pair <ticket>` runs on a member device.
+    /// Join a vault from one of your other devices: shows a code, then
+    /// waits until `deadbolt pair <code>` runs on a device with the vault.
+    ///
+    /// Codes work once, for 5 minutes. On a device that isn't set up yet,
+    /// the passphrase for this device is asked once it has joined (or taken
+    /// from DEADBOLT_PASSPHRASE or --passphrase-stdin), and nothing is saved
+    /// before then.
     Join {
         /// This device's name, shown to your other devices (default: hostname).
         #[arg(long)]
         device_name: Option<String>,
-        /// Accept the confirmation code without asking, even on a terminal.
-        #[arg(short, long)]
-        yes: bool,
     },
-    /// Admit a new device into a vault, using the ticket `deadbolt join` shows.
+    /// Add the device showing a code from `deadbolt join` to a vault (the
+    /// default vault, or --vault).
     Pair {
-        ticket: String,
-        /// Accept the confirmation code without asking, even on a terminal.
-        #[arg(short, long)]
-        yes: bool,
+        /// The code, such as violin-garden-tiger-lamp.
+        #[arg(required = true, num_args = 1.., value_name = "CODE")]
+        code: Vec<String>,
     },
     /// List the devices in a vault.
     Devices(DevicesArgs),
@@ -569,31 +573,43 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let default = if vault.default { " (default)" } else { "" };
             println!("created vault {}{default}", vault.name);
         }
-        Commands::Join { device_name, yes } => {
+        Commands::Join { device_name } => {
             let status = client::ensure_running(&paths).await?;
-            if !status.initialized {
-                setup(&paths, device_name, from_stdin).await?;
-            }
-            let confirm = !yes && prompt::interactive();
-            let reply = pairing(&paths, Command::Join { confirm }, from_stdin).await?;
-            let Reply::Vault { vault } = reply else {
+            // A new device gets its passphrase last, once it has joined. One
+            // supplied up front goes with the request; without one and without
+            // a terminal to ask on, fail before a code is spent.
+            let passphrase = if status.initialized {
+                None
+            } else {
+                let supplied = prompt::supplied_passphrase(from_stdin)?;
+                if supplied.is_none() && !prompt::interactive() {
+                    bail!(
+                        "a passphrase is needed for this device: set DEADBOLT_PASSPHRASE or pass --passphrase-stdin"
+                    );
+                }
+                supplied.map(|p| Secret::new(p.as_str()))
+            };
+            let command = Command::Join {
+                device_name: Some(prompt::device_name(device_name)),
+                passphrase,
+            };
+            let Reply::Vault { .. } = join(&paths, command, from_stdin).await? else {
                 bail!("unexpected reply");
             };
-            println!("joined vault {}", vault.name);
         }
-        Commands::Pair { ticket, yes } => {
+        Commands::Pair { code } => {
+            let code = code.join(" ");
+            code.parse::<PairingCode>()?;
             client::ensure_running(&paths).await?;
-            let confirm = !yes && prompt::interactive();
-            let command = Command::Pair {
-                ticket,
-                vault,
-                confirm,
+            let vault = match vault {
+                Some(vault) => Some(vault),
+                None => choose_vault(&paths, from_stdin).await?,
             };
-            let reply = pairing(&paths, command, from_stdin).await?;
+            let reply = request(&paths, Command::Pair { code, vault }, from_stdin).await?;
             let Reply::Device { vault, device } = reply else {
                 bail!("unexpected reply");
             };
-            println!("added {} to {}", device_name(&device), vault.name);
+            println!("✓ added \"{}\" to {}", device_name(&device), vault.name);
         }
         Commands::Devices(args) => {
             client::ensure_running(&paths).await?;
@@ -825,7 +841,7 @@ async fn request_with(
     paths: &Paths,
     command: Command,
     from_stdin: bool,
-    on_event: &mut impl FnMut(Event) -> Result<Option<bool>>,
+    on_event: &mut impl FnMut(Event) -> Result<Option<Answer>>,
 ) -> Result<Reply> {
     match client::call(paths, command.clone(), &mut *on_event).await {
         Err(error) if client::code(&error) == Some(ErrorCode::Locked) && prompt::interactive() => {
@@ -836,49 +852,55 @@ async fn request_with(
     }
 }
 
-/// Runs a pairing request: the ticket goes to stdout, the QR code and the
-/// confirmation code to stderr. The code is asked about only if the request
-/// set `confirm`.
-async fn pairing(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply> {
-    let confirm =
-        |code: &str| prompt::confirm(&format!("confirm code {code} matches the other device?"));
-    request_with(paths, command.clone(), from_stdin, &mut |event| {
-        let ask = matches!(
-            command,
-            Command::Join { confirm: true } | Command::Pair { confirm: true, .. }
-        );
+/// Runs `join`: the code and the outcome go to stdout, what to do with the
+/// code to stderr. A device that isn't set up is asked for its passphrase
+/// once it has joined, unless the request carries one.
+async fn join(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply> {
+    request_with(paths, command, from_stdin, &mut |event| {
         Ok(match event {
-            Event::Ticket { ticket } => {
-                if let Ok(qr) = ticket
-                    .parse::<PairingTicket>()
-                    .and_then(|t| t.to_qr(QrStyle::LightOnDark))
-                {
-                    eprintln!("{qr}");
-                }
-                eprintln!("On a device that is already set up, run: deadbolt pair <ticket>");
-                println!("{ticket}");
-                eprintln!("waiting...");
+            Event::Code { code } => {
+                println!("Code: {code}");
+                eprintln!("On a device with your vault, run: deadbolt pair {code}");
+                eprintln!("waiting…");
                 None
             }
-            Event::Joining {
-                code,
+            Event::Joined {
                 vault,
                 inviter,
+                passphrase,
             } => {
-                eprintln!(
-                    "code {code}: joining vault {vault} from {} {}",
-                    device_name(&inviter),
-                    short(&inviter.id)
-                );
-                if ask { Some(confirm(&code)?) } else { None }
-            }
-            Event::Pairing { code, device } => {
-                eprintln!("code {code}: adding device {device}");
-                if ask { Some(confirm(&code)?) } else { None }
+                println!("✓ joined \"{vault}\" from {}", device_name(&inviter));
+                if passphrase {
+                    let passphrase = prompt::new_passphrase("Passphrase for this device", "Again")?;
+                    Some(Answer::passphrase(Secret::new(passphrase.as_str())))
+                } else {
+                    None
+                }
             }
         })
     })
     .await
+}
+
+/// The vault `pair` adds to when `--vault` isn't given: the only one, else
+/// asked on a terminal (the default first), else an error.
+async fn choose_vault(paths: &Paths, from_stdin: bool) -> Result<Option<String>> {
+    let Reply::Vaults { vaults } = request(paths, Command::VaultList, from_stdin).await? else {
+        bail!("unexpected reply");
+    };
+    let mut vaults: Vec<VaultInfo> = vaults.into_iter().filter(|v| v.member).collect();
+    if vaults.len() < 2 {
+        return Ok(None);
+    }
+    vaults.sort_by_key(|v| !v.default);
+    let names: Vec<&str> = vaults.iter().map(|v| v.name.as_str()).collect();
+    if !prompt::interactive() {
+        bail!(
+            "this device holds several vaults ({}); choose one with --vault",
+            names.join(", ")
+        );
+    }
+    prompt::choose("Add to which vault?", &names).map(Some)
 }
 
 fn short(id: &str) -> &str {

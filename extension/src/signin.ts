@@ -17,12 +17,18 @@ export interface Provider {
    * only then is the linked account sent to its page, to ring the tile.
    */
   chooser: boolean
+  /**
+   * The account the provider's own password step shows (its account chip,
+   * or the hidden username its form carries) may narrow the menu there, on
+   * hosts that are only its own sign-in pages (see isAccountPage).
+   */
+  pageAccount?: boolean
   /** How a site's button names it, lowercased. */
   words: string[]
 }
 
 const KNOWN: Record<string, Omit<Provider, "id">> = {
-  google: { name: "Google", hosts: ["accounts.google.com"], words: ["google"], chooser: true },
+  google: { name: "Google", hosts: ["accounts.google.com"], words: ["google"], chooser: true, pageAccount: true },
   apple: { name: "Apple", hosts: ["appleid.apple.com"], words: ["apple", "apple id"], chooser: false },
   github: { name: "GitHub", hosts: ["github.com"], words: ["github"], chooser: false },
   microsoft: { name: "Microsoft", hosts: ["login.microsoftonline.com", "login.live.com"], words: ["microsoft", "outlook"], chooser: false },
@@ -64,3 +70,17 @@ export function isProviderPage(p: Provider, url: string): boolean {
 
 /** Whether the linked account may be sent to `url` to ring its tile: the provider's own page, with a reliable chooser. */
 export const isChooserPage = (p: Provider, url: string) => p.chooser && isProviderPage(p, url)
+
+/**
+ * Whether `url` is the sign-in page of a provider whose page-set account may
+ * narrow the menu (Provider.pageAccount): one of its exact hosts, over https.
+ * Anywhere else, a username the page put there itself is ignored.
+ */
+export const isAccountPage = (url: string) => Object.entries(KNOWN).some(([id, p]) => p.pageAccount === true && isProviderPage(provider(id), url))
+
+/** The account a provider's page names, if it looks like one: an email address or a plain username, at most 500 characters. */
+export function pageAccountOf(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || raw.length > 500) return undefined
+  const v = raw.trim()
+  return /^[^\s@<>"']+@[^\s@<>"']+\.[^\s@<>"']+$/.test(v) || /^[\w.+-]{1,64}$/.test(v) ? v : undefined
+}

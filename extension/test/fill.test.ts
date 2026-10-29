@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test"
 import { fillable, fillFields, hiddenByStyle, ownValue, renderedParent, setInputValue, trackUserInput, visibleBox } from "../src/content/fill"
 import { ownerOf, type Field } from "../src/content/detect"
+import { scanForms } from "../src/content/forms"
+import { fillForm } from "../src/content/formfill"
+import { splitNumber, valueFor } from "../src/content/transform"
+import { fillsWords } from "../src/messages"
 
 function input(): HTMLInputElement {
   document.body.innerHTML = `<input type="password">`
@@ -233,5 +237,101 @@ describe("fillFields", () => {
     fields[2].el.addEventListener("keydown", () => document.getElementById("evil")!.append(fields[5].el))
     expect((await fillFields(fields, { totp: "492039" }, () => true)).filled).toEqual([])
     expect(fields.map((f) => f.el.value).join("")).toBe("49")
+  })
+})
+
+describe("form values", () => {
+  const el = (html: string) => {
+    document.body.innerHTML = html
+    return document.body.firstElementChild as HTMLInputElement & HTMLSelectElement & HTMLTextAreaElement
+  }
+  const kit = {
+    "given-name": "Kit", "additional-name": "J", "family-name": "Langton", phone: "+14155550123", country: "US", region: "NY",
+    "address-line1": "123 Main St", "address-line2": "Apt 4", city: "Brooklyn", "postal-code": "11201", birthday: "1990-07-04",
+  }
+  const card = { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Kit J Langton", brand: "Visa" }
+
+  test("names: full and split", () => {
+    expect(valueFor("name", el(`<input>`), kit)).toBe("Kit J Langton")
+    expect(valueFor("cc-given-name", el(`<input>`), card)).toBe("Kit J")
+    expect(valueFor("cc-family-name", el(`<input>`), card)).toBe("Langton")
+  })
+
+  test("street address joined in one box, lines in a textarea", () => {
+    expect(valueFor("street-address", el(`<input>`), kit)).toBe("123 Main St, Apt 4")
+    expect(valueFor("street-address", el(`<textarea></textarea>`), kit)).toBe("123 Main St\nApt 4")
+  })
+
+  test("phone international, national when the box is short", () => {
+    expect(valueFor("tel", el(`<input type="tel">`), kit)).toBe("+14155550123")
+    expect(valueFor("tel", el(`<input type="tel" maxlength="10">`), kit)).toBe("4155550123")
+    expect(valueFor("tel-national", el(`<input>`), { ...kit, phone: "+442071234567", country: "GB" })).toBe("02071234567")
+    expect(valueFor("tel-country-code", el(`<input>`), kit)).toBe("+1")
+  })
+
+  test("country and region: code, name or the matching option", () => {
+    expect(valueFor("country", el(`<input maxlength="2">`), kit)).toBe("US")
+    expect(valueFor("country", el(`<input>`), kit)).toBe("United States")
+    expect(valueFor("country", el(`<select><option value="">Choose</option><option value="CA">Canada</option><option value="USA">United States of America</option></select>`), kit)).toBe("USA")
+    expect(valueFor("address-level1", el(`<select><option value="1">New Jersey</option><option value="2">New York</option></select>`), kit)).toBe("2")
+    expect(valueFor("address-level1", el(`<input maxlength="2">`), { ...kit, region: "New York" })).toBe("NY")
+  })
+
+  test("birthday whole and in parts", () => {
+    expect(valueFor("bday", el(`<input type="date">`), kit)).toBe("1990-07-04")
+    expect(valueFor("bday", el(`<input placeholder="MM/DD/YYYY">`), kit)).toBe("07/04/1990")
+    expect(valueFor("bday-month", el(`<select><option value="6">June</option><option value="7">July</option></select>`), kit)).toBe("7")
+    expect(valueFor("bday-year", el(`<input maxlength="4">`), kit)).toBe("1990")
+  })
+
+  test("expiry in one box, and as month and year", () => {
+    expect(valueFor("cc-exp", el(`<input placeholder="MM / YY">`), card)).toBe("08 / 28")
+    expect(valueFor("cc-exp", el(`<input placeholder="MM/YYYY">`), card)).toBe("08/2028")
+    expect(valueFor("cc-exp", el(`<input maxlength="4">`), card)).toBe("0828")
+    expect(valueFor("cc-exp", el(`<input>`), card)).toBe("08/28")
+    expect(valueFor("cc-exp-month", el(`<select><option value="07">07</option><option value="08">08</option></select>`), card)).toBe("08")
+    expect(valueFor("cc-exp-year", el(`<select><option value="27">27</option><option value="28">28</option></select>`), card)).toBe("28")
+    expect(valueFor("cc-exp-year", el(`<input maxlength="2">`), card)).toBe("28")
+  })
+
+  test("an expiry year box: two digits only for YY, four for YYYY", () => {
+    expect(valueFor("cc-exp-year", el(`<input placeholder="YYYY">`), card)).toBe("2028")
+    expect(valueFor("cc-exp-year", el(`<input placeholder="YY">`), card)).toBe("28")
+    expect(valueFor("cc-exp-year", el(`<input>`), card)).toBe("2028")
+    expect(valueFor("cc-exp", el(`<input placeholder="MM / YYYY">`), card)).toBe("08 / 2028")
+    expect(valueFor("cc-exp", el(`<input placeholder="mm/yy">`), card)).toBe("08/28")
+  })
+
+  test("what an identity fills, in words", () => {
+    const roles = ["given-name", "family-name", "email", "tel", "address-line1", "country"] as const
+    expect(fillsWords([...roles], ["given-name", "email", "phone", "address-line1", "country"])).toEqual(["name", "email", "phone", "address"])
+    // A country alone doesn't fill a phone box.
+    expect(fillsWords(["tel"], ["country"])).toEqual([])
+  })
+
+  test("card number with or without spaces, and split over boxes", () => {
+    expect(valueFor("cc-number", el(`<input>`), card)).toBe("4242424242424242")
+    expect(valueFor("cc-number", el(`<input placeholder="1234 1234 1234 1234">`), card)).toBe("4242 4242 4242 4242")
+    document.body.innerHTML = `<input maxlength="4"><input maxlength="4"><input maxlength="4"><input maxlength="4">`
+    expect(splitNumber(card.number, Array.from(document.querySelectorAll("input")))).toEqual(["4242", "4242", "4242", "4242"])
+  })
+
+  test("a whole section fills, selects included", async () => {
+    document.body.innerHTML = `<form><input id="n" autocomplete="name"><input id="z" autocomplete="postal-code"><select id="c" autocomplete="country"><option value="">-</option><option value="US">United States</option></select></form>`
+    const fields = scanForms()
+    const { filled } = await fillForm(fields, kit, () => true)
+    expect(filled).toEqual(["name", "postal-code", "country"])
+    expect((document.getElementById("n") as HTMLInputElement).value).toBe("Kit J Langton")
+    expect((document.getElementById("c") as HTMLSelectElement).value).toBe("US")
+  })
+
+  test("split card boxes fill only as a whole", async () => {
+    document.body.innerHTML = `<form><label for="a">Card number</label><input id="a" maxlength="4"><input maxlength="4"><input maxlength="4"><input maxlength="4"></form>`
+    const fields = scanForms()
+    const boxes = Array.from(document.querySelectorAll("input"))
+    expect((await fillForm(fields, card, (e) => e !== boxes[2])).filled).toEqual([])
+    expect(boxes.map((b) => b.value).join("")).toBe("")
+    expect((await fillForm(fields, card, () => true)).filled).toEqual(["cc-number"])
+    expect(boxes.map((b) => b.value)).toEqual(["4242", "4242", "4242", "4242"])
   })
 })

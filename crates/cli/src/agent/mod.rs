@@ -93,6 +93,8 @@ pub struct Agent {
     sync_now: Notify,
     /// Serializes setup, unlock and lock.
     transition: tokio::sync::Mutex<()>,
+    /// Held by the one join or pair running.
+    pairing: tokio::sync::Mutex<()>,
     /// Held by the one sync from 1Password running.
     syncing_op: tokio::sync::Mutex<()>,
     /// Bumped by a lock and at shutdown: a sync from 1Password running
@@ -156,6 +158,7 @@ impl Agent {
             ready: watch::channel(false).0,
             sync_now: Notify::new(),
             transition: tokio::sync::Mutex::new(()),
+            pairing: tokio::sync::Mutex::new(()),
             syncing_op: tokio::sync::Mutex::new(()),
             interrupts: watch::channel(0).0,
             #[cfg(test)]
@@ -1263,7 +1266,7 @@ fn invalid_request(error: &serde_json::Error) -> anyhow::Error {
 /// One control connection: sends events and reads answers.
 pub struct Conversation {
     write: tokio::sync::Mutex<OwnedWriteHalf>,
-    answers: tokio::sync::Mutex<mpsc::Receiver<bool>>,
+    answers: tokio::sync::Mutex<mpsc::Receiver<Answer>>,
     closed: watch::Receiver<bool>,
 }
 
@@ -1282,12 +1285,10 @@ impl Conversation {
         self.send(&Message::Event { event }).await
     }
 
-    /// Sends an event and waits for the client's answer; `false` if it hangs up.
-    pub async fn ask(&self, event: Event) -> bool {
-        if self.event(event).await.is_err() {
-            return false;
-        }
-        self.answers.lock().await.recv().await.unwrap_or(false)
+    /// Sends an event and waits for the client's answer; `None` if it hangs up.
+    pub async fn ask(&self, event: Event) -> Option<Answer> {
+        self.event(event).await.ok()?;
+        self.answers.lock().await.recv().await
     }
 
     /// Resolves once the client hangs up.
@@ -1329,7 +1330,7 @@ impl Agent {
                 let Ok(answer) = serde_json::from_str::<Answer>(&line) else {
                     break;
                 };
-                if answers_tx.send(answer.answer).await.is_err() {
+                if answers_tx.send(answer).await.is_err() {
                     break;
                 }
             }
@@ -1578,12 +1579,11 @@ impl Agent {
                     peers: sync::sync_all(&self, only).await?,
                 })
             }
-            Command::Join { confirm } => pairing::join(&self, conv, confirm).await,
-            Command::Pair {
-                ticket,
-                vault,
-                confirm,
-            } => pairing::pair(&self, conv, ticket, vault, confirm).await,
+            Command::Join {
+                device_name,
+                passphrase,
+            } => pairing::join(&self, conv, device_name, passphrase).await,
+            Command::Pair { code, vault } => pairing::pair(&self, conv, code, vault).await,
             Command::ItemGet { vault, query, otp } => Ok(Reply::Item {
                 item: self.with(|s| items::get(s, vault.as_deref(), &query, otp))?,
             }),
@@ -2107,6 +2107,40 @@ impl Agent {
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
         self.start(loaded, None).await
+    }
+
+    /// First run through a join: creates the store with the device key that
+    /// joined and stores the vault it received, then unlocks.
+    async fn setup_joined(
+        self: &Arc<Self>,
+        joined: pairing::Fresh,
+        passphrase: crate::protocol::Secret,
+    ) -> Result<crate::protocol::VaultInfo> {
+        self.cancel_biometric_prompt();
+        let _transition = self.transition.lock().await;
+        self.settle_activity(true);
+        *self
+            .biometric_cooldown_until
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        if deadbolt_store::is_initialized(&self.paths.data) {
+            bail!("this device was set up meanwhile; nothing from the join was saved");
+        }
+        if passphrase.expose().is_empty() {
+            bail!("the passphrase cannot be empty");
+        }
+        let dir = self.paths.data.clone();
+        let params = self.kdf;
+        let (loaded, vault) =
+            tokio::task::spawn_blocking(move || joined.persist(&dir, &passphrase, params))
+                .await??;
+        self.biometric_was_enrolled.store(false, Ordering::SeqCst);
+        *self
+            .biometric_slot
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = None;
+        self.start(loaded, None).await?;
+        Ok(vault)
     }
 
     /// Unlocks with `passphrase`. While unlocked, it changes the idle

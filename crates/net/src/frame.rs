@@ -13,7 +13,7 @@ pub(crate) mod tag {
     pub const DONE: u8 = 0x03;
     pub const RESULT: u8 = 0x04;
 
-    pub const PROOF: u8 = 0x10;
+    pub const PAKE: u8 = 0x10;
     pub const CONFIRM: u8 = 0x11;
     pub const OFFER: u8 = 0x12;
     pub const JOIN: u8 = 0x13;
