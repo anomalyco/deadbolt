@@ -51,21 +51,24 @@ pub fn shown(kind: &str, field: &str) -> bool {
     kind != "passkey" || matches!(field, "rp-id" | "username" | "created" | "notes")
 }
 
-fn plain(ev: &KeyEvent) -> bool {
+pub(crate) fn plain(ev: &KeyEvent) -> bool {
     !ev.mods.cmd && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl
 }
 
-fn chord(ev: &KeyEvent, c: char) -> bool {
+pub(crate) fn chord(ev: &KeyEvent, c: char) -> bool {
     ev.is_command(c) && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl
 }
 
 /// J and K, ↑ and ↓: -1, 1 or none.
-fn step(ev: &KeyEvent, letters: bool) -> Option<isize> {
+pub(crate) fn step(ev: &KeyEvent, letters: bool) -> Option<isize> {
+    if !plain(ev) {
+        return None;
+    }
     match &ev.key {
-        Key::Up if !ev.mods.cmd => Some(-1),
-        Key::Down if !ev.mods.cmd => Some(1),
-        Key::Text(t) if letters && plain(ev) && t == "k" => Some(-1),
-        Key::Text(t) if letters && plain(ev) && t == "j" => Some(1),
+        Key::Up => Some(-1),
+        Key::Down => Some(1),
+        Key::Text(t) if letters && t == "k" => Some(-1),
+        Key::Text(t) if letters && t == "j" => Some(1),
         _ => None,
     }
 }
@@ -146,8 +149,10 @@ impl App {
             return Some(true);
         }
         if let Key::Command(c @ '1'..='9') = ev.key
+            && ev.mods.cmd
             && !ev.mods.shift
             && !ev.mods.alt
+            && !ev.mods.ctrl
         {
             let at = c as usize - '1' as usize;
             if let Some(id) = self.visible().get(at).map(|i| i.id.clone()) {
@@ -162,7 +167,7 @@ impl App {
             return Some(true);
         }
         if self.nav.field.is_some() {
-            return Some(self.field_key(ev, tx));
+            return self.field_key(ev, tx);
         }
         if ev.key == Key::Tab && !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl {
             if !ev.mods.shift && !self.shown_fields().is_empty() {
@@ -183,22 +188,23 @@ impl App {
 
     /// Keys on the field ⇥ moved into: ↑↓ (or J K) move between fields, Space
     /// shows or hides a secret, ↵ copies it, and ⇥ or Esc go back to the search.
-    fn field_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+    /// `None` for keys it leaves to the vault (⌘L, ⌘F, ⌘N, ⌘E, ⌘⌫, ⇧⌘I, ⇧⌘B, typing).
+    fn field_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
         let count = self.shown_fields().len();
         let Some(at) = self.nav.field.filter(|at| *at < count) else {
-            self.leave_fields();
-            return false;
+            self.nav.field = None;
+            return None;
         };
         if let Some(by) = step(ev, true) {
             let next = (at as isize + by).clamp(0, count as isize - 1) as usize;
             tx.instant();
             self.nav.field = Some(next);
             tx.scroll_into_view(format!("field-{}", self.shown_fields()[next].name));
-            return true;
+            return Some(true);
         }
         let field = self.shown_fields()[at].clone();
         match &ev.key {
-            Key::Tab | Key::Escape => {
+            Key::Tab | Key::Escape if !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl => {
                 tx.instant();
                 self.leave_fields();
             }
@@ -207,16 +213,33 @@ impl App {
                     self.toggle_reveal(&field.name);
                 }
             }
-            Key::Enter if ev.mods.shift || ev.mods.alt => return self.list_key(ev, tx),
-            Key::Enter => self.copy_field(&field.name, tx),
-            // Typing goes back to the search with what was typed.
-            Key::Text(_) if plain(ev) || ev.mods.shift => {
-                self.leave_fields();
-                return false;
+            Key::Enter if !ev.mods.cmd && !ev.mods.ctrl && (ev.mods.shift || ev.mods.alt) => {
+                return Some(self.list_key(ev, tx));
             }
-            _ => return false,
+            Key::Enter if plain(ev) => self.copy_field(&field.name, tx),
+            // Typing goes back to the search with what was typed (`vault_key` / `search`).
+            Key::Text(t)
+                if !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl && !t.trim().is_empty() =>
+            {
+                self.nav.field = None;
+                return None;
+            }
+            _ => {
+                if chord(ev, 'n')
+                    || chord(ev, 'e')
+                    || crate::import::is_shortcut(ev)
+                    || (ev.key == Key::Backspace
+                        && ev.mods.cmd
+                        && !ev.mods.shift
+                        && !ev.mods.alt
+                        && !ev.mods.ctrl)
+                {
+                    self.nav.field = None;
+                }
+                return None;
+            }
         }
-        true
+        Some(true)
     }
 
     /// Back from the fields to the search.
@@ -292,17 +315,17 @@ impl App {
 
     /// ↑↓ select, ⏎, ⇧⏎ and ⌥⏎ copy, esc clears the search.
     pub(crate) fn list_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
+        if let Some(by) = step(ev, false) {
+            self.move_selection(by, tx);
+            return true;
+        }
         match ev.key {
-            Key::Up | Key::Down => {
-                self.move_selection(if ev.key == Key::Up { -1 } else { 1 }, tx);
-            }
-            Key::Enter => {
-                let field = if ev.mods.alt {
-                    "otp"
-                } else if ev.mods.shift {
-                    "username"
-                } else {
-                    self.primary_field()
+            Key::Enter if !ev.mods.cmd && !ev.mods.ctrl => {
+                let field = match (ev.mods.shift, ev.mods.alt) {
+                    (false, true) => "otp",
+                    (true, false) => "username",
+                    (false, false) => self.primary_field(),
+                    (true, true) => return false,
                 };
                 self.copy_selected(field, tx);
             }
@@ -323,30 +346,37 @@ impl App {
         if self.editing() || self.deleting() {
             return;
         }
+        self.cancel_delete();
+        self.import.hover = false;
         self.settings_open = true;
         self.nav = Nav::default();
         self.search.focused = false;
     }
 
+    /// Keys that act before the search editor and before the vault's list:
+    /// the quick-panel fallback, ⌘K / ? / ⌘, / ⇥ fields, Settings or the
+    /// install page, the import view, and the form or delete confirm.
+    fn intercept_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
+        if !self.hotkey.recorder.is_recording() && self.panel_shortcut(ev, tx) {
+            return Some(true);
+        }
+        if let Some(handled) = self.nav_key(ev, tx) {
+            return Some(handled);
+        }
+        if let Some(handled) = self.overlay_key(ev, tx) {
+            return Some(handled);
+        }
+        if let Some(handled) = self.import_key(ev) {
+            return Some(handled);
+        }
+        self.edit_key(ev)
+    }
+
     /// Keys in the search field (the vault's and the panel's), before its
     /// editor. True when handled.
     pub fn search_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if let Some(handled) = self.nav_key(ev, tx) {
-            return handled;
-        }
-        if let Some(handled) = self.overlay_key(ev, tx) {
-            return handled;
-        }
-        if let Some(handled) = self.import_key(ev) {
-            return handled;
-        }
-        if let Some(handled) = self.edit_key(ev) {
-            return handled;
-        }
-        if self.panel_shortcut(ev, tx) {
-            return true;
-        }
-        self.list_key(ev, tx)
+        self.intercept_key(ev, tx)
+            .unwrap_or_else(|| self.list_key(ev, tx))
     }
 
     /// Keys for Settings or the install page, which sit in the vault's place:
@@ -367,7 +397,7 @@ impl App {
             return None;
         }
         // Locking still locks.
-        if ev.is_command('l') && !self.hotkey.recorder.is_recording() {
+        if chord(ev, 'l') && !self.hotkey.recorder.is_recording() {
             return None;
         }
         if self.settings_open {
@@ -389,23 +419,11 @@ impl App {
     /// otherwise. In the vault that includes the list's keys, so they work
     /// with focus on a button or nowhere.
     pub fn on_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
-        if let Some(handled) = self.nav_key(ev, tx) {
+        if let Some(handled) = self.intercept_key(ev, tx) {
             return handled;
-        }
-        if let Some(handled) = self.overlay_key(ev, tx) {
-            return handled;
-        }
-        if let Some(handled) = self.import_key(ev) {
-            return handled;
-        }
-        if let Some(handled) = self.edit_key(ev) {
-            return handled;
-        }
-        if self.panel_shortcut(ev, tx) {
-            return true;
         }
         match ev.key {
-            Key::Command('l') if self.screen == Screen::Vault => {
+            _ if self.screen == Screen::Vault && chord(ev, 'l') => {
                 self.lock();
                 true
             }
@@ -431,7 +449,7 @@ fn is_question(ev: &KeyEvent) -> bool {
     matches!(&ev.key, Key::Text(t) if t == "?") && !ev.mods.cmd && !ev.mods.alt && !ev.mods.ctrl
 }
 
-fn is_letter(ev: &KeyEvent, letter: &str) -> bool {
+pub(crate) fn is_letter(ev: &KeyEvent, letter: &str) -> bool {
     matches!(&ev.key, Key::Text(t) if t == letter) && plain(ev)
 }
 

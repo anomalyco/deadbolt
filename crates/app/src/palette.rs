@@ -5,6 +5,7 @@
 use rune::{Color, El, Key, KeyEvent, Tx, col, el, row, text};
 use rune_kit::{Keybind, Kit};
 
+use crate::keys::{chord, is_letter, plain, step};
 use crate::model::{App, copy_label, has_code, is_secret};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -65,7 +66,7 @@ fn secret(s: &App) -> Option<(String, bool)> {
     let f = s
         .shown_fields()
         .into_iter()
-        .find(|f| is_secret(&f.kind) && f.kind != "otp" && !f.value.is_empty())?;
+        .find(|f| is_secret(&f.kind) && f.kind != "otp")?;
     let shown = s.revealed.iter().any(|r| r == &f.name);
     Some((f.name.clone(), shown))
 }
@@ -154,27 +155,21 @@ impl App {
     /// Keys while ⌘K's actions are open; they take every key.
     pub(crate) fn palette_key(&mut self, ev: &KeyEvent, tx: &mut Tx) {
         let list = actions(self);
-        let at = self
-            .nav
-            .palette
-            .unwrap_or(0)
-            .min(list.len().saturating_sub(1));
-        let plain = !ev.mods.cmd && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
-        match &ev.key {
-            Key::Escape => self.close_palette(),
-            _ if ev.is_command('k') => self.close_palette(),
-            Key::Up => self.nav.palette = Some(at.saturating_sub(1)),
-            Key::Down => self.nav.palette = Some((at + 1).min(list.len().saturating_sub(1))),
-            Key::Text(t) if plain && t == "k" => self.nav.palette = Some(at.saturating_sub(1)),
-            Key::Text(t) if plain && t == "j" => {
-                self.nav.palette = Some((at + 1).min(list.len().saturating_sub(1)));
+        let last = list.len().saturating_sub(1);
+        let at = self.nav.palette.unwrap_or(0).min(last);
+        if ev.key == Key::Escape || chord(ev, 'k') {
+            self.close_palette();
+        } else if chord(ev, 'l') {
+            self.close_palette();
+            self.lock();
+        } else if let Some(by) = step(ev, true) {
+            self.nav.palette = Some((at as isize + by).clamp(0, last as isize) as usize);
+        } else if ev.key == Key::Enter && plain(ev) {
+            if let Some(&a) = list.get(at) {
+                self.run(a, tx);
             }
-            Key::Enter if plain => {
-                if let Some(a) = list.get(at) {
-                    self.run(*a, tx);
-                }
-            }
-            _ => {}
+        } else if let Some(a) = shortcut_action(ev).filter(|a| list.contains(a)) {
+            self.run(a, tx);
         }
     }
 
@@ -199,6 +194,26 @@ impl App {
             Action::Lock => self.lock(),
             Action::Window => self.open_main(tx),
         }
+    }
+}
+
+fn shortcut_action(ev: &KeyEvent) -> Option<Action> {
+    match &ev.key {
+        Key::Enter if !ev.mods.cmd && !ev.mods.ctrl => match (ev.mods.shift, ev.mods.alt) {
+            (true, false) => Some(Action::Username),
+            (false, true) => Some(Action::Code),
+            _ => None,
+        },
+        Key::Backspace if ev.mods.cmd && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl => {
+            Some(Action::Delete)
+        }
+        _ if chord(ev, 'o') || is_letter(ev, "o") => Some(Action::Open),
+        _ if chord(ev, 'e') => Some(Action::Edit),
+        _ if chord(ev, 'n') => Some(Action::New),
+        _ if crate::import::is_shortcut(ev) => Some(Action::Import),
+        _ if chord(ev, ',') => Some(Action::Settings),
+        _ if chord(ev, 'l') => Some(Action::Lock),
+        _ => None,
     }
 }
 

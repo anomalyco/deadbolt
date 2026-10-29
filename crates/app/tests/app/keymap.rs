@@ -141,6 +141,32 @@ fn tab_moves_into_the_fields_and_back() {
     assert_eq!(rt.state.nav.field, None, "Esc leaves the fields too");
     assert!(rt.state.search.focused);
 
+    // Typing from a field goes straight into the search without dropping the first letter.
+    tap(&mut rt, Key::Tab);
+    assert_eq!(rt.state.nav.field, Some(0));
+    text(&mut rt, "g");
+    assert_eq!(rt.state.nav.field, None);
+    assert!(rt.state.search.focused);
+    assert_eq!(rt.state.search.text, "g");
+    tap(&mut rt, Key::Escape);
+
+    // Vault shortcuts (⇧⌘B, ⌘E) still reach the vault from a field.
+    tap(&mut rt, Key::Tab);
+    press(
+        &mut rt,
+        Key::Command('b'),
+        Mods {
+            cmd: true,
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert!(!rt.state.sidebar.is_open());
+    command(&mut rt, 'e');
+    assert_eq!(rt.state.nav.field, None);
+    assert!(rt.state.editing());
+    tap(&mut rt, Key::Escape);
+
     // A new selection leaves the fields.
     tap(&mut rt, Key::Tab);
     command(&mut rt, '1');
@@ -240,7 +266,7 @@ fn command_k_lists_the_actions_and_runs_one() {
     command(&mut rt, 'k');
     assert_eq!(rt.state.nav.palette, None);
 
-    // Its Edit opens the form.
+    // Its Edit opens the form, whether chosen with ↓+↵ or by its own ⌘E.
     command(&mut rt, 'k');
     let edit = deadbolt_app::palette::actions(&rt.state)
         .iter()
@@ -251,6 +277,28 @@ fn command_k_lists_the_actions_and_runs_one() {
     }
     tap(&mut rt, Key::Enter);
     assert!(rt.state.editing());
+    tap(&mut rt, Key::Escape);
+
+    command(&mut rt, 'k');
+    press(
+        &mut rt,
+        Key::Enter,
+        Mods {
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(rt.state.nav.palette, None);
+    assert_eq!(copied(&rt), Some("username"));
+
+    // A cached page (before its values land) still offers Show in ⌘K.
+    rt.update(|s, _| {
+        let item = s.detail.take().unwrap();
+        s.cache.insert(&item, None, 0.0);
+    });
+    assert!(
+        deadbolt_app::palette::actions(&rt.state).contains(&deadbolt_app::palette::Action::Show)
+    );
 }
 
 #[test]

@@ -120,6 +120,44 @@ fn vault_keys_work_with_nothing_focused() {
     tap(&mut rt, Key::Up);
     assert_eq!(at(&rt), from);
     assert!(!rt.state.search.focused, "nothing took focus");
+
+    // Modified chords (⌃L, ⇧⌘L) don't fire ⌘L, and ⌘↑ in the search doesn't move the list.
+    let (agent, jobs, _) = deadbolt_app::agent::Agent::scripted();
+    rt.state.agent = agent;
+    press(
+        &mut rt,
+        Key::Command('l'),
+        Mods {
+            ctrl: true,
+            ..Mods::default()
+        },
+    );
+    press(
+        &mut rt,
+        Key::Command('l'),
+        Mods {
+            cmd: true,
+            shift: true,
+            ..Mods::default()
+        },
+    );
+    assert!(
+        !jobs
+            .try_iter()
+            .any(|j| matches!(j, deadbolt_app::agent::Job::Lock))
+    );
+    command(&mut rt, 'f');
+    tap(&mut rt, Key::Down);
+    let moved = at(&rt);
+    press(
+        &mut rt,
+        Key::Up,
+        Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    );
+    assert_eq!(at(&rt), moved, "⌘↑ stays in the search field");
 }
 
 /// ⏎ copies the field each kind is for, and a secure note lists and shows
