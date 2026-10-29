@@ -57,9 +57,12 @@ export interface PageState {
 export const MENU_ROW = 44
 /** The list's 6px padding, top and bottom. */
 const MENU_CHROME = 12
-/** The site's caption, over two or more rows. */
+/** The caption over an identity or card list: where a pick goes. Login lists have none. */
 const MENU_CAPTION = 22
-const MENU_WIDTH = 300
+/** The narrowest the menu gets under a narrow field: an avatar, a title and username, and ⏎. */
+const MENU_MIN_WIDTH = 240
+/** The menu's gap to each side of the viewport. */
+const MENU_MARGIN = 4
 /** The save offer's place: the top right corner, near the toolbar button. */
 const SAVE_INSET = 12
 /** The offer's compact pill, before its frame says its size. */
@@ -306,11 +309,12 @@ function targetRect(): Rect | null {
     const left = inside ? r.right - width - (r.height - height) / 2 : Math.min(r.right + 6, innerWidth - width - 4)
     return { left, top: r.top + (r.height - height) / 2, width, height }
   }
-  const width = Math.max(MENU_WIDTH, Math.min(r.width, 420))
+  // As wide as the field (or the frame's box), left-aligned with it, within the viewport.
+  const width = Math.min(Math.max(r.width, MENU_MIN_WIDTH), innerWidth - 2 * MENU_MARGIN)
   const below = r.bottom + 6
   const fitsBelow = below + menuHeight < innerHeight
   const top = fitsBelow ? below : Math.max(4, r.top - menuHeight - 6)
-  const left = Math.min(Math.max(4, r.left), innerWidth - width - 4)
+  const left = Math.min(Math.max(MENU_MARGIN, r.left), innerWidth - width - MENU_MARGIN)
   return { left, top, width, height: menuHeight }
 }
 
@@ -398,8 +402,11 @@ function frameStyle(radius: number) {
   return `all:initial;width:100%;height:100%;border:0;border-radius:${radius}px;box-shadow:${SHADOW()};background:transparent;color-scheme:normal;`
 }
 
-/** Opens the surface: under `el` with the account list, or with no field, the save offer. */
-function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMode = "accounts", at?: Box) {
+/**
+ * Opens the surface: under `el` with the account list, or with no field, the
+ * save offer. `captioned` for an identity or card list, which says where a pick goes.
+ */
+function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMode = "accounts", at?: Box, captioned = false) {
   closeMenu()
   anchor = el
   anchorBox = at ? { box: at, x: scrollX, y: scrollY } : null
@@ -411,7 +418,7 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   for (const s of Object.values(offset)) s.jump(0)
   lastTarget = null
   const shown = Math.min(Math.max(rows, 1), 5)
-  menuHeight = shown * MENU_ROW + MENU_CHROME + (rows >= 2 ? MENU_CAPTION : 0)
+  menuHeight = shown * MENU_ROW + MENU_CHROME + (captioned ? MENU_CAPTION : 0)
   raises = 0
   const box = (host = document.createElement(hostTag()))
   box.setAttribute("popover", "manual")
@@ -729,7 +736,7 @@ async function maybeOpenForms(el: FormControl, how: Asked) {
     const roles = [...new Set(sectionFields(state.formFields(), f.section, f.kind).filter(fillsNow).map((x) => x.role))]
     const reply = await send<QueryReply>({ type: "db:forms-query", kind: f.kind, form: state.formsForm(), section: f.section, roles, explicit, ...(box ? { box } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
-    else if (isTop && reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
+    else if (isTop && reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows, "accounts", undefined, true)
   })().finally(() => (querying = null))
 }
 
@@ -1073,7 +1080,7 @@ export function initMenu(page: PageState) {
         approvedForms(formsState(), String(message.approval)).then((boxes) => respond(boxes ? { boxes } : null), () => respond(null))
         return true
       case "db:open-at":
-        return void respond(openAt(String(message.token), Number(message.rows), message.box, message.mode === "pill" ? "pill" : "accounts"))
+        return void respond(openAt(String(message.token), Number(message.rows), message.box, message.mode === "pill" ? "pill" : "accounts", message.captioned === true))
       case "db:hold":
         // Only the surface the asker owns. Asked about another, it says
         // whether nothing of Deadbolt's shows, which the measuring needs.
@@ -1146,13 +1153,13 @@ function pointAtTile(account: string) {
 /**
  * The menu for a field in a frame below, at `box` in this page (see
  * Autofill.query and Forms.query), or a session step's pill on it (`as`
- * "pill", see Autofill.fill). Top page only.
+ * "pill", see Autofill.fill). `captioned` for an identity or card list. Top page only.
  */
-function openAt(t: string, rows: number, box: Box, as: "accounts" | "pill"): boolean {
+function openAt(t: string, rows: number, box: Box, as: "accounts" | "pill", captioned: boolean): boolean {
   if (!isTop || document.hidden || (host && (mode === "save" || as === "pill"))) return false
   if (as === "accounts" && !(Number.isFinite(rows) && rows >= 1)) return false
   if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
-  openMenu(null, t, as === "pill" ? 0 : rows, as, box)
+  openMenu(null, t, as === "pill" ? 0 : rows, as, box, captioned)
   return true
 }
 

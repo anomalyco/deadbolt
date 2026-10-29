@@ -180,7 +180,7 @@ export class Forms {
     const token = newToken()
     this.tokens.set(token, { owner, source, kind, form: form as number, section, needs, roles: sectionRoles, createdAt: Date.now() })
     if (!at) return { token, rows }
-    const opened = await sendToFrame<boolean>(owner, { type: "db:open-at", token, rows, box: at })
+    const opened = await sendToFrame<boolean>(owner, { type: "db:open-at", token, rows, box: at, captioned: true })
     if (!opened) this.tokens.delete(token)
     return { rows: opened ? rows : 0 }
   }

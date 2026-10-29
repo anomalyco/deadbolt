@@ -252,7 +252,7 @@ export type ToContent =
    * identity or card field in a frame below; with `mode` "pill", a sign-in
    * session step's pill on that field instead. Top page only.
    */
-  | { type: "db:open-at"; token: string; rows: number; box: Box; mode?: "pill" }
+  | { type: "db:open-at"; token: string; rows: number; box: Box; mode?: "pill"; captioned?: true }
   /** Which of the form's identity or card fields may be filled now: those of `section`, or every one of `kind` (see Approved). */
   | { type: "db:forms-approve"; form: number; kind: FormKind; section?: string; measure: boolean }
   /** Where the fields of a forms approval show now, if every one of them still does. */
