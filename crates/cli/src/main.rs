@@ -236,7 +236,7 @@ enum BrowserCommand {
         #[arg(long, value_enum)]
         browser: Vec<browser::Browser>,
         /// Also keep an unpacked copy of the extension in DIR current with
-        /// `deadbolt update` (new, empty, or already the extension).
+        /// `deadbolt update` (a new or empty directory; update owns it).
         #[arg(long, value_name = "DIR")]
         extension_dir: Option<PathBuf>,
     },

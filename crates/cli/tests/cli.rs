@@ -2860,18 +2860,56 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("outside"));
     assert!(std::fs::read(&exe).unwrap() == original);
 
-    // A good release, with an unpacked extension registered beside it.
-    files.lock().unwrap().insert(
-        "/release/deadbolt/cli/dev.json".to_string(),
-        manifest(
+    // A replayed older manifest is refused unless asked for.
+    let sequenced = |n: u32| {
+        String::from_utf8(manifest(
             "cli",
             "dev",
             "0.0.0-dev-99",
             &target,
             tar.len(),
             good.clone(),
-        ),
+        ))
+        .unwrap()
+        .replace("\"sequence\":1", &format!("\"sequence\":{n}"))
+        .into_bytes()
+    };
+    let serve = |n: u32| {
+        files
+            .lock()
+            .unwrap()
+            .insert("/release/deadbolt/cli/dev.json".to_string(), sequenced(n));
+    };
+    serve(3);
+    assert_eq!(
+        update(&["update", "--check", "--channel", "dev"])
+            .status
+            .code(),
+        Some(10)
     );
+    serve(2);
+    let output = update(&["update", "--channel", "dev"]);
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--allow-rollback"));
+    assert!(std::fs::read(&exe).unwrap() == original);
+    let output = update(&["update", "--check", "--channel", "dev", "--allow-rollback"]);
+    assert_eq!(output.status.code(), Some(10));
+    serve(3);
+
+    // On macOS the new deadbolt pins its own helper: a release without one
+    // never replaces a deadbolt that has one beside it.
+    if cfg!(target_os = "macos") {
+        std::fs::write(bin.join("deadbolt-enclave"), "old helper").unwrap();
+        let output = update(&["update", "--channel", "dev"]);
+        assert!(String::from_utf8_lossy(&output.stderr).contains("deadbolt-enclave"));
+        assert!(std::fs::read(&exe).unwrap() == original);
+        assert_eq!(
+            std::fs::read(bin.join("deadbolt-enclave")).unwrap(),
+            b"old helper"
+        );
+        std::fs::remove_file(bin.join("deadbolt-enclave")).unwrap();
+    }
+
+    // A good release, with an unpacked extension registered beside it.
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
         .unwrap();
@@ -2952,5 +2990,10 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
         std::fs::read_to_string(ext.join("manifest.json"))
             .unwrap()
             .contains("0.0.0-dev-99")
+    );
+    // It knows the files it put there, and nothing else is in the way.
+    assert_eq!(
+        std::fs::read_to_string(ext.join(".deadbolt-extension")).unwrap(),
+        "manifest.json\n"
     );
 }

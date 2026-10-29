@@ -52,6 +52,9 @@ pub struct UpdateArgs {
     /// Switch channels without asking, even on a terminal.
     #[arg(short, long)]
     yes: bool,
+    /// Accept a manifest older than one already seen (a lower `sequence`).
+    #[arg(long)]
+    allow_rollback: bool,
 }
 
 /// How the running `deadbolt` is installed, which decides what updating it
@@ -165,6 +168,8 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 struct Manifest {
     schema: u32,
     app: String,
+    /// Grows with every write to the channel (a rollback included).
+    sequence: u64,
     artifact: String,
     channel: String,
     release: Release,
@@ -248,6 +253,11 @@ fn parse(text: &str) -> Option<Manifest> {
         && release.rollout_percent <= 100
         && release.targets.values().all(|t| hex(&t.sha256)))
     .then_some(manifest)
+}
+
+/// The manifest's `sequence`; 0 if it doesn't parse.
+fn sequence(text: &str) -> u64 {
+    parse(text).map_or(0, |m| m.sequence)
 }
 
 /// Decides what to do with `text`, the manifest for `artifact` on
@@ -529,7 +539,18 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         bail!("there is no {channel} release of {what} yet");
     };
     let mut available = false;
-    match decide(artifact, channel, &text, &running) {
+    let decision = decide(artifact, channel, &text, &running);
+    if let Decision::Reject(reason) = decision {
+        bail!("{url} is not a usable {artifact} manifest ({reason})");
+    }
+    check_sequence(
+        &state,
+        artifact,
+        channel,
+        sequence(&text),
+        args.allow_rollback,
+    )?;
+    match decision {
         Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),
         Decision::None("up_to_date") => println!("{what} {shown} is up to date on {channel}"),
         Decision::None("rollout_deferred") => println!(
@@ -580,17 +601,30 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
                 println!("Updating {what} {shown} to {version} ({channel})...");
                 match &install {
                     Install::App(bundle) => {
+                        refuse_foreign_root(bundle.parent().unwrap_or(bundle))?;
                         update_app(paths, &service, &url, &target, bundle, &version).await?;
                     }
                     Install::Standalone(dir) => {
-                        update_cli(paths, &service, &url, &target, &exe, dir).await?;
+                        refuse_foreign_root(dir)?;
+                        let macos = cfg!(target_os = "macos");
+                        update_cli(paths, &service, &url, &target, &exe, dir, built, macos).await?;
                     }
                     _ => bail!("unexpected install for {what}"),
                 }
             }
         }
     }
-    available |= extension(paths, &service, channel, bucket, built, args.check).await?;
+    available |= extension(
+        paths,
+        &service,
+        &state,
+        channel,
+        bucket,
+        built,
+        args.check,
+        args.allow_rollback,
+    )
+    .await?;
     Ok(if args.check && available {
         ExitCode::from(EXIT_AVAILABLE)
     } else {
@@ -638,20 +672,40 @@ fn requirement(identifier: &str) -> String {
         .to_string()
 }
 
-/// Whether `path` satisfies `requirement` (`codesign --verify --strict`).
-fn satisfies(path: &Path, requirement: &str, deep: bool) -> bool {
-    let mut command = Command::new("codesign");
+// The tools updates use, by absolute path so PATH can't swap them.
+const CODESIGN: &str = "/usr/bin/codesign";
+const SPCTL: &str = "/usr/sbin/spctl";
+const DITTO: &str = "/usr/bin/ditto";
+const XATTR: &str = "/usr/bin/xattr";
+const OSASCRIPT: &str = "/usr/bin/osascript";
+const OPEN: &str = "/usr/bin/open";
+
+/// Whether a standalone `deadbolt`'s replacement must be signed with
+/// Deadbolt's Developer ID: always for a release build (one published on a
+/// channel) on macOS, decided when it was built, never by what's on disk.
+/// Builds from source rely on the checksum alone.
+fn signature_required(macos: bool, built: Option<&str>) -> bool {
+    macos && built.is_some()
+}
+
+/// Whether `path` satisfies `requirement` (`codesign --verify --strict`,
+/// with `tool` as codesign). An error if codesign can't run: that is never
+/// read as "not signed".
+fn satisfies(tool: &str, path: &Path, requirement: &str, deep: bool) -> Result<bool> {
+    let mut command = Command::new(tool);
     command.args(["--verify", "--strict", "--all-architectures"]);
     if deep {
         command.arg("--deep");
     }
-    command
+    let status = command
         .arg(format!("-R={requirement}"))
         .arg(path)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success())
+        .with_context(|| format!("running {tool}"))?;
+    Ok(status.success())
 }
 
 fn run_tool(command: &mut Command, what: &str) -> Result<()> {
@@ -664,6 +718,58 @@ fn run_tool(command: &mut Command, what: &str) -> Result<()> {
             "{what} failed: {}",
             String::from_utf8_lossy(&output.stderr).trim()
         );
+    }
+    Ok(())
+}
+
+/// Whether root may update: only an install in a root-owned directory, with
+/// root's own HOME, so a root shell never writes into a user's files.
+fn root_may_update(euid: u32, dir_owner: Option<u32>, home_owner: Option<u32>) -> bool {
+    euid != 0 || (dir_owner == Some(0) && home_owner == Some(0))
+}
+
+fn refuse_foreign_root(dir: &Path) -> Result<()> {
+    use std::os::unix::fs::MetadataExt;
+    let owner = |p: &Path| std::fs::metadata(p).ok().map(|m| m.uid());
+    let home = crate::config::env("HOME").ok().map(PathBuf::from);
+    let euid = rustix::process::geteuid().as_raw();
+    if !root_may_update(euid, owner(dir), home.as_deref().and_then(owner)) {
+        bail!(
+            "refusing to update {} as root: run `deadbolt update` as the user who owns it",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// The highest manifest `sequence` seen for each artifact and channel, kept
+/// in the state directory, so a replayed older manifest can't take an
+/// install back. A real rollback is a new write with a higher sequence
+/// (docs/protocol.md, "Operations"), so it passes.
+fn check_sequence(
+    state: &Path,
+    artifact: &str,
+    channel: &str,
+    sequence: u64,
+    allow_rollback: bool,
+) -> Result<()> {
+    let path = state.join("release-sequences.json");
+    let mut seen: BTreeMap<String, u64> = std::fs::read(&path)
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok())
+        .unwrap_or_default();
+    let key = format!("{artifact}/{channel}");
+    let highest = seen.get(&key).copied().unwrap_or(0);
+    if sequence < highest && !allow_rollback {
+        bail!(
+            "the service sent an older {artifact} manifest for {channel} (sequence {sequence}, \
+             but {highest} was seen); pass --allow-rollback to accept it"
+        );
+    }
+    if sequence > highest {
+        seen.insert(key, sequence);
+        std::fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
+        crate::browser::write_atomic(&path, &serde_json::to_string(&seen)?)?;
     }
     Ok(())
 }
@@ -691,8 +797,182 @@ async fn restart_agent(paths: &Paths, program: PathBuf) {
     }
 }
 
+/// Stops the agent before its files are replaced; a failure is a warning.
+async fn stop_agent(paths: &Paths) -> bool {
+    match crate::client::stop(paths).await {
+        Ok(_) => true,
+        Err(error) => {
+            eprintln!("warning: couldn't stop the old agent: {error}; run `deadbolt agent stop`");
+            false
+        }
+    }
+}
+
+/// Moves each `(new, dest)` into place, first moving every existing `dest`
+/// into `aside`. On any failure every `dest` gets its old file back (or
+/// none, if it had none), so the pair never ends half replaced.
+fn swap(files: &[(PathBuf, PathBuf)], aside: &Path) -> Result<()> {
+    std::fs::create_dir_all(aside)?;
+    let mut moved: Vec<(PathBuf, Option<PathBuf>)> = Vec::new();
+    let restore = |moved: &[(PathBuf, Option<PathBuf>)]| {
+        for (dest, old) in moved.iter().rev() {
+            match old {
+                Some(old) => {
+                    std::fs::rename(old, dest).ok();
+                }
+                None => {
+                    std::fs::remove_file(dest).ok();
+                }
+            }
+        }
+    };
+    for (i, (_, dest)) in files.iter().enumerate() {
+        let old = aside.join(i.to_string());
+        match std::fs::symlink_metadata(dest) {
+            Ok(_) => {
+                if let Err(error) = std::fs::rename(dest, &old) {
+                    restore(&moved);
+                    return Err(error).with_context(|| format!("moving {} aside", dest.display()));
+                }
+                moved.push((dest.clone(), Some(old)));
+            }
+            Err(_) => moved.push((dest.clone(), None)),
+        }
+    }
+    for (new, dest) in files {
+        if let Err(error) = std::fs::rename(new, dest) {
+            restore(&moved);
+            return Err(error).with_context(|| format!("replacing {}", dest.display()));
+        }
+    }
+    Ok(())
+}
+
+/// The largest file taken from a CLI tarball.
+const TAR_FILE_LIMIT: u64 = 256 << 20;
+
+/// Unpacks `deadbolt` and `deadbolt-enclave` from the gzipped tarball
+/// `archive` into `out`, and nothing else: no other names, links, devices
+/// or paths, so nothing lands outside `out` or keeps the archive's owner.
+fn unpack_cli(archive: &Path, out: &Path) -> Result<Vec<PathBuf>> {
+    use std::io::Read;
+    const NAMES: [&str; 2] = ["deadbolt", "deadbolt-enclave"];
+    let octal = |field: &[u8]| -> Result<u64> {
+        let text = std::str::from_utf8(field)
+            .ok()
+            .map(|t| t.trim_matches(|c: char| c == '\0' || c == ' '))
+            .context("a malformed tar header")?;
+        if text.is_empty() {
+            return Ok(0);
+        }
+        u64::from_str_radix(text, 8).context("a malformed tar header")
+    };
+    let text = |field: &[u8]| {
+        let end = field.iter().position(|b| *b == 0).unwrap_or(field.len());
+        String::from_utf8_lossy(&field[..end]).into_owned()
+    };
+    let mut tar = flate2::read::GzDecoder::new(std::fs::File::open(archive)?);
+    let mut written = Vec::new();
+    let mut next_name: Option<String> = None;
+    let mut header = [0u8; 512];
+    loop {
+        tar.read_exact(&mut header).context("a truncated tarball")?;
+        if header.iter().all(|b| *b == 0) {
+            break;
+        }
+        let sum: u64 = header
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                if (148..156).contains(&i) {
+                    32
+                } else {
+                    u64::from(*b)
+                }
+            })
+            .sum();
+        if octal(&header[148..156])? != sum {
+            bail!("a tar header with a wrong checksum");
+        }
+        let size = octal(&header[124..136])?;
+        let kind = header[156];
+        let mut name = text(&header[0..100]);
+        if &header[257..262] == b"ustar" {
+            let prefix = text(&header[345..500]);
+            if !prefix.is_empty() {
+                name = format!("{prefix}/{name}");
+            }
+        }
+        let name = next_name.take().unwrap_or(name);
+        let padded = size.div_ceil(512) * 512;
+        let mut data = (&mut tar).take(padded);
+        match kind {
+            // A pax header's `path`, or a GNU long name, names the next entry.
+            b'x' | b'L' => {
+                if size > 1 << 20 {
+                    bail!("an oversized tar header");
+                }
+                let mut body = vec![0u8; usize::try_from(padded)?];
+                data.read_exact(&mut body)?;
+                body.truncate(usize::try_from(size)?);
+                next_name = if kind == b'L' {
+                    Some(text(&body))
+                } else {
+                    pax_path(&body)
+                };
+            }
+            b'g' | b'5' => {
+                std::io::copy(&mut data, &mut std::io::sink())?;
+            }
+            b'0' | 0 => {
+                let name = name.strip_prefix("./").unwrap_or(&name);
+                if !NAMES.contains(&name) {
+                    // AppleDouble and the like: never written.
+                    std::io::copy(&mut data, &mut std::io::sink())?;
+                    continue;
+                }
+                if size > TAR_FILE_LIMIT {
+                    bail!("{name} in the release is too large");
+                }
+                let path = out.join(name);
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&path)
+                    .with_context(|| format!("the release has {name} twice"))?;
+                std::io::copy(&mut (&mut data).take(size), &mut file)?;
+                std::io::copy(&mut data, &mut std::io::sink())?;
+                written.push(path);
+            }
+            other => bail!(
+                "the release's tarball holds a link or special file ({:?}, type {})",
+                name,
+                char::from(other)
+            ),
+        }
+    }
+    Ok(written)
+}
+
+/// The `path` record of a pax extended header.
+fn pax_path(body: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(body).ok()?;
+    let mut rest = text;
+    while let Some((len, _)) = rest.split_once(' ') {
+        let len: usize = len.parse().ok()?;
+        let record = rest.get(..len)?;
+        rest = &rest[len..];
+        let (_, kv) = record.split_once(' ')?;
+        if let Some(path) = kv.strip_suffix('\n')?.strip_prefix("path=") {
+            return Some(path.to_string());
+        }
+    }
+    None
+}
+
 /// Replaces the standalone `exe` (and `deadbolt-enclave` beside it) with the
 /// release's tarball.
+#[expect(clippy::too_many_arguments, reason = "one call site, all distinct")]
 async fn update_cli(
     paths: &Paths,
     service: &Service,
@@ -700,34 +980,40 @@ async fn update_cli(
     target: &Target,
     exe: &Path,
     dir: &Path,
+    built: Option<&str>,
+    macos: bool,
 ) -> Result<()> {
     let stage = stage_beside(exe)?;
     let archive = stage.path().join("deadbolt.tar.gz");
     service.download(manifest, target, &archive).await?;
     let unpacked = stage.path().join("unpacked");
     std::fs::create_dir(&unpacked)?;
-    run_tool(
-        Command::new("tar")
-            .arg("-xzf")
-            .arg(&archive)
-            .arg("-C")
-            .arg(&unpacked),
-        "tar",
-    )?;
-    let regular = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_file());
+    unpack_cli(&archive, &unpacked)?;
     let new = unpacked.join("deadbolt");
-    if !regular(&new) {
+    if !new.is_file() {
         bail!("the release has no deadbolt");
     }
     let enclave = unpacked.join("deadbolt-enclave");
-    let enclave = regular(&enclave).then_some(enclave);
-    // A Developer ID-signed deadbolt never gives way to one that isn't.
-    if cfg!(target_os = "macos") && satisfies(exe, &requirement("pw.deadbolt.cli"), false) {
-        if !satisfies(&new, &requirement("pw.deadbolt.cli"), false) {
+    let enclave = enclave.is_file().then_some(enclave);
+    let installed_enclave = dir.join("deadbolt-enclave");
+    // The new deadbolt pins its own helper: never leave the old one beside it.
+    if macos && enclave.is_none() && std::fs::symlink_metadata(&installed_enclave).is_ok() {
+        bail!(
+            "the release has no deadbolt-enclave to replace {}; nothing was changed",
+            installed_enclave.display()
+        );
+    }
+    if signature_required(macos, built) {
+        if !satisfies(CODESIGN, &new, &requirement("pw.deadbolt.cli"), false)? {
             bail!("the new deadbolt is not signed by Deadbolt's Developer ID; nothing was changed");
         }
         if let Some(enclave) = &enclave
-            && !satisfies(enclave, &requirement("pw.deadbolt.app.enclave"), false)
+            && !satisfies(
+                CODESIGN,
+                enclave,
+                &requirement("pw.deadbolt.app.enclave"),
+                false,
+            )?
         {
             bail!(
                 "the new deadbolt-enclave is not signed by Deadbolt's Developer ID; nothing was changed"
@@ -735,22 +1021,112 @@ async fn update_cli(
         }
     }
     let ours = agent_runs(paths, |p| p == exe).await;
+    let mut files = Vec::new();
     for file in std::iter::once(&new).chain(&enclave) {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(file, std::fs::Permissions::from_mode(0o755))?;
     }
     // The helper first: the new deadbolt pins it, the old one checks before use.
     if let Some(enclave) = &enclave {
-        let dest = dir.join("deadbolt-enclave");
-        std::fs::rename(enclave, &dest).with_context(|| format!("replacing {}", dest.display()))?;
+        files.push((enclave.clone(), installed_enclave));
     }
-    std::fs::rename(&new, exe).with_context(|| format!("replacing {}", exe.display()))?;
+    files.push((new, exe.to_path_buf()));
+    swap(&files, &stage.path().join("old"))?;
     println!("Updated {}", exe.display());
-    if ours {
-        if let Err(error) = crate::client::stop(paths).await {
-            eprintln!("warning: couldn't stop the old agent: {error}; run `deadbolt agent stop`");
-        } else {
-            restart_agent(paths, exe.to_path_buf()).await;
+    if ours && stop_agent(paths).await {
+        restart_agent(paths, exe.to_path_buf()).await;
+    }
+    Ok(())
+}
+
+/// Whether `target`, a symlink in `parent` (both relative to an archive's
+/// root), stays inside `root`, its first component, by path alone.
+fn link_inside(parent: &Path, target: &Path) -> bool {
+    use std::path::Component;
+    let mut depth: Vec<_> = parent.components().collect();
+    let Some(root) = depth.first().copied() else {
+        return false;
+    };
+    for part in target.components() {
+        match part {
+            Component::Normal(_) => depth.push(part),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                depth.pop();
+                if depth.first() != Some(&root) {
+                    return false;
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => return false,
+        }
+    }
+    true
+}
+
+/// The most an app zip may unpack to.
+const APP_ZIP_LIMIT: u64 = 2 << 30;
+
+/// Checks the app zip before `ditto` unpacks it: only `Deadbolt.app/…` and
+/// `__MACOSX/…` (ditto's sequestered resource forks), every symlink inside
+/// the bundle, and nothing written through one.
+fn check_app_zip(archive: &Path) -> Result<()> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)?;
+    let mut links: Vec<PathBuf> = Vec::new();
+    let mut names: Vec<PathBuf> = Vec::new();
+    let mut total = 0u64;
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        let name = entry
+            .enclosed_name()
+            .with_context(|| format!("the app zip has an unsafe path {:?}", entry.name()))?;
+        let first = name.components().next().map(|c| c.as_os_str().to_owned());
+        let sequestered = first.as_deref() == Some("__MACOSX".as_ref());
+        if first.as_deref() != Some("Deadbolt.app".as_ref()) && !sequestered {
+            bail!("the app zip holds {} outside Deadbolt.app", name.display());
+        }
+        total = total.saturating_add(entry.size());
+        if total > APP_ZIP_LIMIT {
+            bail!("the app zip is too large");
+        }
+        if entry.is_symlink() {
+            let mut target = String::new();
+            (&mut entry).take(4096).read_to_string(&mut target)?;
+            let parent = name.parent().unwrap_or(Path::new(""));
+            if sequestered || !link_inside(parent, Path::new(&target)) {
+                bail!("the app zip links {} outside the bundle", name.display());
+            }
+            links.push(name.clone());
+        }
+        names.push(name);
+    }
+    if let Some(name) = names.iter().find(|name| {
+        links
+            .iter()
+            .any(|link| name.starts_with(link) && *name != link)
+    }) {
+        bail!("the app zip writes {} through a symlink", name.display());
+    }
+    Ok(())
+}
+
+/// After unpacking: every symlink in `bundle` stays inside it.
+fn check_bundle_links(bundle: &Path) -> Result<()> {
+    let base = bundle.parent().context("no directory")?;
+    let mut dirs = vec![bundle.to_path_buf()];
+    while let Some(dir) = dirs.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let meta = std::fs::symlink_metadata(&path)?;
+            if meta.is_symlink() {
+                let target = std::fs::read_link(&path)?;
+                let parent = path.parent().and_then(|p| p.strip_prefix(base).ok());
+                if !parent.is_some_and(|p| link_inside(p, &target)) {
+                    bail!("{} links outside the bundle", path.display());
+                }
+            } else if meta.is_dir() {
+                dirs.push(path);
+            }
         }
     }
     Ok(())
@@ -768,9 +1144,10 @@ async fn update_app(
     let stage = stage_beside(bundle)?;
     let archive = stage.path().join("Deadbolt.zip");
     service.download(manifest, target, &archive).await?;
+    check_app_zip(&archive)?;
     let unpacked = stage.path().join("unpacked");
     run_tool(
-        Command::new("ditto")
+        Command::new(DITTO)
             .args(["-x", "-k"])
             .arg(&archive)
             .arg(&unpacked),
@@ -780,25 +1157,28 @@ async fn update_app(
     if !new.join("Contents/Helpers/deadbolt").is_file() {
         bail!("the release has no Deadbolt.app");
     }
-    let quarantined = Command::new("xattr")
+    check_bundle_links(&new)?;
+    let quarantined = Command::new(XATTR)
         .args(["-p", "com.apple.quarantine"])
         .arg(&new)
+        .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-        .is_ok_and(|s| s.success());
-    if !satisfies(&new, APP_REQUIREMENT.trim(), true) {
+        .with_context(|| format!("running {XATTR}"))?
+        .success();
+    if !satisfies(CODESIGN, &new, APP_REQUIREMENT.trim(), true)? {
         bail!("the new Deadbolt.app is not signed and notarized as Deadbolt; nothing was changed");
     }
     run_tool(
-        Command::new("spctl")
+        Command::new(SPCTL)
             .args(["--assess", "--type", "execute"])
             .arg(&new),
         "Gatekeeper's check of the new Deadbolt.app",
     )?;
     if quarantined {
         run_tool(
-            Command::new("xattr")
+            Command::new(XATTR)
                 .args(["-dr", "com.apple.quarantine"])
                 .arg(&new),
             "xattr",
@@ -806,13 +1186,27 @@ async fn update_app(
     }
 
     // Verified: stop the old app and its agent, then swap.
-    let app_ran = quit_app();
-    crate::client::stop(paths).await.ok();
+    let app_ran = quit_app()?;
+    stop_agent(paths).await;
     let old = stage.path().join("old.app");
-    std::fs::rename(bundle, &old).with_context(|| format!("moving {} aside", bundle.display()))?;
-    if let Err(error) = std::fs::rename(&new, bundle) {
-        std::fs::rename(&old, bundle).ok();
-        return Err(error).with_context(|| format!("installing {}", bundle.display()));
+    let swapped = std::fs::rename(bundle, &old)
+        .with_context(|| format!("moving {} aside", bundle.display()))
+        .and_then(|()| {
+            std::fs::rename(&new, bundle).or_else(|error| {
+                std::fs::rename(&old, bundle).ok();
+                Err(error).with_context(|| format!("installing {}", bundle.display()))
+            })
+        });
+    // Whichever app is in place now, its agent comes back.
+    restart_agent(paths, bundle.join("Contents/Helpers/deadbolt")).await;
+    let reopen = || {
+        if app_ran && let Err(error) = Command::new(OPEN).arg(bundle).status() {
+            eprintln!("warning: couldn't reopen {}: {error}", bundle.display());
+        }
+    };
+    if let Err(error) = swapped {
+        reopen();
+        return Err(error);
     }
     let trashed = trash(&old, &format!("Deadbolt-{VERSION}"));
     println!("Updated {} to {version}", bundle.display());
@@ -822,28 +1216,28 @@ async fn update_app(
             std::fs::remove_dir_all(&old).ok();
         }
     }
-    restart_agent(paths, bundle.join("Contents/Helpers/deadbolt")).await;
-    if app_ran {
-        Command::new("open").arg(bundle).status().ok();
-    }
+    reopen();
     Ok(())
 }
 
-/// Quits Deadbolt.app if it runs (best effort), and says whether it did.
-fn quit_app() -> bool {
-    let running = Command::new("osascript")
+/// Quits Deadbolt.app if it runs, and says whether it did.
+fn quit_app() -> Result<bool> {
+    let running = Command::new(OSASCRIPT)
         .args(["-e", "application id \"pw.deadbolt.app\" is running"])
+        .stdin(Stdio::null())
         .output()
-        .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).trim() == "true");
+        .with_context(|| format!("running {OSASCRIPT}"))?;
+    let running = String::from_utf8_lossy(&running.stdout).trim() == "true";
     if running {
-        Command::new("osascript")
+        Command::new(OSASCRIPT)
             .args(["-e", "tell application id \"pw.deadbolt.app\" to quit"])
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()
-            .ok();
+            .with_context(|| format!("running {OSASCRIPT}"))?;
     }
-    running
+    Ok(running)
 }
 
 /// Moves `path` to `~/.Trash/<name>.app` (or `<name> 2.app`, …), if it can.
@@ -860,6 +1254,13 @@ fn trash(path: &Path, name: &str) -> Option<PathBuf> {
 
 // The browser extension.
 
+/// Written into an extension directory `deadbolt update` installed, listing
+/// what it put there, so it only ever replaces its own files.
+const EXTENSION_MARKER: &str = ".deadbolt-extension";
+/// The most an extension zip may unpack to, and its most entries.
+const EXTENSION_LIMIT: u64 = 64 << 20;
+const EXTENSION_ENTRIES: usize = 4096;
+
 /// The version an unpacked extension says it is: `version_name`, else
 /// `version`.
 fn extension_version(dir: &Path) -> Option<String> {
@@ -869,31 +1270,101 @@ fn extension_version(dir: &Path) -> Option<String> {
     field("version_name").or_else(|| field("version"))
 }
 
-/// Whether `dir` may be replaced by Deadbolt's extension: absent, empty, or
-/// already an unpacked Deadbolt extension.
+/// Whether `dir` may be replaced by Deadbolt's extension: an absolute path
+/// that doesn't exist yet, is empty, or holds only what `deadbolt update`
+/// installed there (its marker's list).
 pub fn extension_dir_ok(dir: &Path) -> bool {
-    match std::fs::read_dir(dir) {
-        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
-        Ok(mut entries) => {
-            entries.next().is_none()
-                || std::fs::read(dir.join("manifest.json"))
-                    .ok()
-                    .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
-                    .is_some_and(|m| m.get("name").and_then(|n| n.as_str()) == Some("Deadbolt"))
+    if !dir.is_absolute() {
+        return false;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Err(error) => return error.kind() == std::io::ErrorKind::NotFound,
+        Ok(entries) => entries,
+    };
+    let Ok(names) = entries
+        .map(|e| e.map(|e| e.file_name().to_string_lossy().into_owned()))
+        .collect::<Result<Vec<_>, _>>()
+    else {
+        return false;
+    };
+    if names.is_empty() {
+        return true;
+    }
+    let Ok(marker) = std::fs::read_to_string(dir.join(EXTENSION_MARKER)) else {
+        return false;
+    };
+    let ours: Vec<&str> = marker.lines().collect();
+    names
+        .iter()
+        .all(|name| name == EXTENSION_MARKER || ours.contains(&name.as_str()))
+}
+
+/// Unpacks the extension zip `archive` into `out` (absent): regular files
+/// and directories only, at most [`EXTENSION_LIMIT`] bytes, then writes the
+/// marker listing its top-level entries.
+fn unpack_extension(archive: &Path, out: &Path) -> Result<()> {
+    use std::io::Read;
+    let mut zip = zip::ZipArchive::new(std::fs::File::open(archive)?)?;
+    if zip.len() > EXTENSION_ENTRIES {
+        bail!("the extension zip has too many files");
+    }
+    std::fs::create_dir(out)?;
+    let mut total = 0u64;
+    let mut top = std::collections::BTreeSet::new();
+    for i in 0..zip.len() {
+        let mut entry = zip.by_index(i)?;
+        let name = entry
+            .enclosed_name()
+            .with_context(|| format!("the extension zip has an unsafe path {:?}", entry.name()))?;
+        let Some(first) = name.components().next() else {
+            continue;
+        };
+        let first = first.as_os_str().to_string_lossy().into_owned();
+        if first == EXTENSION_MARKER {
+            bail!("the extension zip holds {EXTENSION_MARKER}");
+        }
+        top.insert(first);
+        let path = out.join(&name);
+        if entry.is_symlink() {
+            bail!("the extension zip holds a symlink, {}", name.display());
+        }
+        if entry.is_dir() {
+            std::fs::create_dir_all(&path)?;
+            continue;
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("writing {}", path.display()))?;
+        let left = EXTENSION_LIMIT - total;
+        let copied = std::io::copy(&mut (&mut entry).take(left + 1), &mut file)?;
+        total += copied;
+        if total > EXTENSION_LIMIT {
+            bail!("the extension zip unpacks to more than {EXTENSION_LIMIT} bytes");
         }
     }
+    let marker: String = top.iter().map(|name| format!("{name}\n")).collect();
+    std::fs::write(out.join(EXTENSION_MARKER), marker)?;
+    Ok(())
 }
 
 /// Checks, and unless `check` updates, the extension directory registered
 /// with `deadbolt browser install --extension-dir`. True when an update is
 /// available.
+#[expect(clippy::too_many_arguments, reason = "one call site, all distinct")]
 async fn extension(
     paths: &Paths,
     service: &Service,
+    state: &Path,
     channel: &str,
     bucket: u8,
     built: Option<&str>,
     check: bool,
+    allow_rollback: bool,
 ) -> Result<bool> {
     let link = format!("{SERVICE}deadbolt/extension/{channel}/chromium");
     let Some(dir) = crate::config::Config::load(&paths.config)?.extension_dir else {
@@ -907,8 +1378,8 @@ async fn extension(
     };
     if !extension_dir_ok(&dir) {
         bail!(
-            "{} is not an unpacked Deadbolt extension; register another with \
-             `deadbolt browser install --extension-dir <dir>`",
+            "{} holds files deadbolt didn't install there (or isn't an absolute path); \
+             register an empty directory with `deadbolt browser install --extension-dir <dir>`",
             dir.display()
         );
     }
@@ -924,7 +1395,12 @@ async fn extension(
         println!("Browser extension: no {channel} release yet");
         return Ok(false);
     };
-    match decide("extension", channel, &text, &running) {
+    let decision = decide("extension", channel, &text, &running);
+    if let Decision::Reject(reason) = decision {
+        bail!("{url} is not a usable extension manifest ({reason})");
+    }
+    check_sequence(state, "extension", channel, sequence(&text), allow_rollback)?;
+    match decision {
         Decision::Install {
             version, target, ..
         } => {
@@ -934,6 +1410,7 @@ async fn extension(
                     dir.display()
                 );
             } else {
+                refuse_foreign_root(dir.parent().unwrap_or(&dir))?;
                 update_extension(service, &url, &target, &dir).await?;
                 println!(
                     "Updated the browser extension in {} to {version}; \
@@ -947,13 +1424,11 @@ async fn extension(
             println!("Browser extension {current} is up to date");
             Ok(false)
         }
-        Decision::None(_) => Ok(false),
-        Decision::Reject(reason) => bail!("{url} is not a usable extension manifest ({reason})"),
-        Decision::Notify { .. } => Ok(false),
+        _ => Ok(false),
     }
 }
 
-/// Replaces `dir`'s contents with the release's extension zip.
+/// Replaces `dir` with the release's extension zip, staged beside it.
 async fn update_extension(
     service: &Service,
     manifest: &Url,
@@ -968,10 +1443,7 @@ async fn update_extension(
     let archive = stage.path().join("extension.zip");
     service.download(manifest, target, &archive).await?;
     let new = stage.path().join("new");
-    let file = std::fs::File::open(&archive)?;
-    zip::ZipArchive::new(file)
-        .and_then(|mut zip| zip.extract(&new))
-        .context("unpacking the extension")?;
+    unpack_extension(&archive, &new).context("unpacking the extension")?;
     if extension_version(&new).is_none() {
         bail!("the release has no extension manifest");
     }
@@ -1286,24 +1758,248 @@ mod tests {
     fn reads_extension_versions_and_guards_the_directory() {
         let dir = tempfile::tempdir().unwrap();
         let ext = dir.path().join("ext");
+        assert!(!extension_dir_ok(Path::new("relative/ext")));
         assert!(extension_dir_ok(&ext));
         std::fs::create_dir(&ext).unwrap();
         assert!(extension_dir_ok(&ext));
-        std::fs::write(ext.join("notes.txt"), "mine").unwrap();
-        assert!(!extension_dir_ok(&ext));
         std::fs::write(
             ext.join("manifest.json"),
             r#"{"name":"Deadbolt","version":"0.0.0.11","version_name":"0.0.0-dev-11"}"#,
         )
         .unwrap();
-        assert!(extension_dir_ok(&ext));
         assert_eq!(extension_version(&ext).as_deref(), Some("0.0.0-dev-11"));
-        std::fs::write(
-            ext.join("manifest.json"),
-            r#"{"name":"Other","version":"1.2.3"}"#,
+        // Even a Deadbolt extension isn't replaced unless update put it there.
+        assert!(!extension_dir_ok(&ext));
+        std::fs::write(ext.join(EXTENSION_MARKER), "manifest.json\n").unwrap();
+        assert!(extension_dir_ok(&ext));
+        std::fs::write(ext.join("notes.txt"), "mine").unwrap();
+        assert!(!extension_dir_ok(&ext));
+    }
+
+    fn zip_of(entries: &[(&str, Option<&str>, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default();
+        for (name, link, body) in entries {
+            match link {
+                Some(target) => zip.add_symlink(*name, *target, options).unwrap(),
+                None if name.ends_with('/') => zip.add_directory(*name, options).unwrap(),
+                None => {
+                    zip.start_file(*name, options).unwrap();
+                    zip.write_all(body).unwrap();
+                }
+            }
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn unpacks_extensions_without_links_or_bombs() {
+        let dir = tempfile::tempdir().unwrap();
+        let unpack = |name: &str, bytes: Vec<u8>| {
+            let archive = dir.path().join(format!("{name}.zip"));
+            std::fs::write(&archive, bytes).unwrap();
+            let out = dir.path().join(name);
+            unpack_extension(&archive, &out).map(|()| out)
+        };
+        let out = unpack(
+            "good",
+            zip_of(&[
+                (
+                    "manifest.json",
+                    None,
+                    br#"{"name":"Deadbolt","version":"1.0"}"#,
+                ),
+                ("icons/", None, b""),
+                ("icons/a.png", None, b"png"),
+            ]),
         )
         .unwrap();
-        assert!(!extension_dir_ok(&ext));
-        assert_eq!(extension_version(&ext).as_deref(), Some("1.2.3"));
+        assert_eq!(
+            std::fs::read_to_string(out.join(EXTENSION_MARKER)).unwrap(),
+            "icons\nmanifest.json\n"
+        );
+        assert!(extension_dir_ok(&out));
+        assert!(unpack("link", zip_of(&[("evil", Some("/etc/passwd"), b"")])).is_err());
+        assert!(unpack("marker", zip_of(&[(EXTENSION_MARKER, None, b"x")])).is_err());
+        let big = vec![0u8; usize::try_from(EXTENSION_LIMIT).unwrap() + 1];
+        assert!(unpack("bomb", zip_of(&[("big.bin", None, &big)])).is_err());
+    }
+
+    #[test]
+    fn checks_app_zips_for_escaping_links() {
+        let dir = tempfile::tempdir().unwrap();
+        let check = |bytes: Vec<u8>| {
+            let archive = dir.path().join("app.zip");
+            std::fs::write(&archive, bytes).unwrap();
+            check_app_zip(&archive)
+        };
+        let framework = "Deadbolt.app/Contents/Frameworks/F.framework";
+        check(zip_of(&[
+            ("Deadbolt.app/Contents/Helpers/deadbolt", None, b"bin"),
+            (&format!("{framework}/Versions/A/F"), None, b"lib"),
+            (&format!("{framework}/Versions/Current"), Some("A"), b""),
+            (&format!("{framework}/F"), Some("Versions/Current/F"), b""),
+            ("__MACOSX/Deadbolt.app/._x", None, b"fork"),
+        ]))
+        .unwrap();
+        for bad in [
+            zip_of(&[("Other.app/x", None, b"")]),
+            zip_of(&[("Deadbolt.app/etc", Some("/etc"), b"")]),
+            zip_of(&[("Deadbolt.app/up", Some("../../x"), b"")]),
+            zip_of(&[("Deadbolt.app/up", Some("../Other.app"), b"")]),
+            zip_of(&[
+                ("Deadbolt.app/d", Some("Contents"), b""),
+                ("Deadbolt.app/d/x", None, b"through the link"),
+            ]),
+        ] {
+            assert!(check(bad).is_err());
+        }
+        assert!(link_inside(
+            Path::new("Deadbolt.app/a/b"),
+            Path::new("../../c")
+        ));
+        assert!(!link_inside(
+            Path::new("Deadbolt.app/a"),
+            Path::new("../../c")
+        ));
+    }
+
+    #[test]
+    fn signature_checks_are_decided_by_the_build_and_fail_closed() {
+        assert!(signature_required(true, Some("dev")));
+        assert!(signature_required(true, Some("stable")));
+        assert!(!signature_required(true, None));
+        assert!(!signature_required(false, Some("stable")));
+        // codesign that can't run is an error, never "unsigned".
+        let exe = std::env::current_exe().unwrap();
+        assert!(satisfies("/nonexistent/codesign", &exe, "anchor apple", false).is_err());
+        if cfg!(target_os = "macos") {
+            // This test binary is signed ad hoc, not by Deadbolt's Developer ID.
+            assert!(!satisfies(CODESIGN, &exe, &requirement("pw.deadbolt.cli"), false).unwrap());
+        }
+    }
+
+    #[test]
+    fn root_updates_only_root_owned_installs() {
+        assert!(root_may_update(501, Some(501), Some(501)));
+        assert!(root_may_update(0, Some(0), Some(0)));
+        assert!(!root_may_update(0, Some(501), Some(0)));
+        assert!(!root_may_update(0, Some(0), Some(501)));
+        assert!(!root_may_update(0, None, Some(0)));
+    }
+
+    #[test]
+    fn refuses_older_manifests_unless_asked() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = dir.path().join("state");
+        check_sequence(&state, "cli", "dev", 5, false).unwrap();
+        check_sequence(&state, "cli", "dev", 5, false).unwrap();
+        check_sequence(&state, "cli", "dev", 7, false).unwrap();
+        assert!(check_sequence(&state, "cli", "dev", 6, false).is_err());
+        // Each artifact and channel is its own.
+        check_sequence(&state, "cli", "stable", 1, false).unwrap();
+        check_sequence(&state, "extension", "dev", 1, false).unwrap();
+        check_sequence(&state, "cli", "dev", 6, true).unwrap();
+        assert!(check_sequence(&state, "cli", "dev", 5, false).is_err());
+        assert_eq!(sequence(&manifest(100, false)), 7);
+    }
+
+    #[test]
+    fn a_failed_swap_puts_every_old_file_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = |name: &str| dir.path().join(name);
+        for (name, body) in [
+            ("deadbolt", "old cli"),
+            ("deadbolt-enclave", "old helper"),
+            ("new-enclave", "new helper"),
+        ] {
+            std::fs::write(path(name), body).unwrap();
+        }
+        // The helper goes in, then the new deadbolt is missing.
+        let files = [
+            (path("new-enclave"), path("deadbolt-enclave")),
+            (path("new-deadbolt"), path("deadbolt")),
+        ];
+        assert!(swap(&files, &path("aside")).is_err());
+        assert_eq!(
+            std::fs::read_to_string(path("deadbolt")).unwrap(),
+            "old cli"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path("deadbolt-enclave")).unwrap(),
+            "old helper"
+        );
+        // A file that wasn't there before isn't left behind either.
+        let files = [
+            (path("new-enclave"), path("fresh")),
+            (path("new-deadbolt"), path("deadbolt")),
+        ];
+        std::fs::write(path("new-enclave"), "new helper").ok();
+        assert!(swap(&files, &path("aside2")).is_err());
+        assert!(!path("fresh").exists());
+        assert_eq!(
+            std::fs::read_to_string(path("deadbolt")).unwrap(),
+            "old cli"
+        );
+        // And a good swap replaces both.
+        std::fs::write(path("new-enclave"), "new helper").unwrap();
+        std::fs::write(path("new-deadbolt"), "new cli").unwrap();
+        let files = [
+            (path("new-enclave"), path("deadbolt-enclave")),
+            (path("new-deadbolt"), path("deadbolt")),
+        ];
+        swap(&files, &path("aside3")).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(path("deadbolt")).unwrap(),
+            "new cli"
+        );
+        assert_eq!(
+            std::fs::read_to_string(path("deadbolt-enclave")).unwrap(),
+            "new helper"
+        );
+    }
+
+    #[test]
+    fn unpacks_only_the_cli_from_its_tarball() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("deadbolt"), "cli").unwrap();
+        std::fs::write(src.join("deadbolt-enclave"), "helper").unwrap();
+        std::fs::write(src.join("README"), "other").unwrap();
+        std::os::unix::fs::symlink("/etc/passwd", src.join("link")).unwrap();
+        let tar = |name: &str, files: &[&str]| {
+            let archive = dir.path().join(name);
+            let status = Command::new("tar")
+                .arg("-czf")
+                .arg(&archive)
+                .arg("-C")
+                .arg(&src)
+                .args(files)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            let out = dir.path().join(format!("{name}.out"));
+            std::fs::create_dir(&out).unwrap();
+            unpack_cli(&archive, &out).map(|_| out)
+        };
+        let out = tar("good.tar.gz", &["./deadbolt", "deadbolt-enclave", "README"]).unwrap();
+        let mut names: Vec<_> = std::fs::read_dir(&out)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["deadbolt", "deadbolt-enclave"]);
+        assert_eq!(
+            std::fs::read_to_string(out.join("deadbolt")).unwrap(),
+            "cli"
+        );
+        let error = tar("link.tar.gz", &["deadbolt", "link"]).unwrap_err();
+        assert!(format!("{error:#}").contains("link"), "{error:#}");
+        let long = "a".repeat(150);
+        std::fs::write(src.join(&long), "long").unwrap();
+        tar("long.tar.gz", &[&long, "deadbolt"]).unwrap();
+        assert!(pax_path(b"19 path=deadbolt-x\n").is_some_and(|p| p == "deadbolt-x"));
     }
 }

@@ -1028,6 +1028,7 @@ dependencies = [
  "deadbolt-net",
  "deadbolt-send",
  "deadbolt-store",
+ "flate2",
  "getrandom 0.4.3",
  "indexmap",
  "memchr",

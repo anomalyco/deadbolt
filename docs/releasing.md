@@ -123,7 +123,7 @@ only after the tap serves it (`record-brew`). `site/public/install` reads the
 
 ## Updater
 
-`deadbolt update [--check] [--channel dev|beta|stable] [--yes]`
+`deadbolt update [--check] [--channel dev|beta|stable] [--yes] [--allow-rollback]`
 (`crates/cli/src/update.rs`) follows the release service's client rules
 (`anomalyco/release` `docs/protocol.md`, `src/protocol/decide.ts`): versions
 are display text, tested only for equality, so an install updates whenever its
@@ -140,35 +140,59 @@ channel's current release isn't the build it runs, a rollback included.
   resolved:
   - `Deadbolt.app/Contents/Helpers/deadbolt` (or `~/.local/bin/deadbolt`
     linked to it): the `desktop` artifact's `macos-arm64`/`macos-x64` zip.
-    Unzipped with `ditto`, it must pass `codesign --verify --deep --strict`
-    against `crates/app/update-requirement.txt` (compiled in) and
+    Before `ditto -x -k` unpacks it, every entry must be under
+    `Deadbolt.app/` (or ditto's `__MACOSX/`), with no symlink pointing out of
+    the bundle and nothing written through one, at most 2 GiB; after, every
+    symlink in the bundle is checked again. It must pass
+    `codesign --verify --deep --strict` against
+    `crates/app/update-requirement.txt` (compiled in) and
     `spctl --assess --type execute`; then the app is quit, the agent stopped,
     the old bundle renamed aside within its directory and moved to
     `~/.Trash/Deadbolt-<old version>.app`, the new one renamed into place,
-    quarantine cleared if present, and the agent restarted from the new
-    helper (the vault comes back locked). An app on a disk image or under App
+    quarantine cleared if present, and the agent restarted from whichever
+    bundle is in place, even if the swap failed and the old one was put back
+    (the vault comes back locked). An app on a disk image or under App
     Translocation is refused, and one whose cask record exists
     (`<brew prefix>/Caskroom/deadbolt`) gets the manifest's
     `brew upgrade --cask` instead.
   - Anything else (the install script, a tarball, a build): the `cli`
-    artifact's tarball for this OS and architecture. `deadbolt` and, on macOS,
-    `deadbolt-enclave` are renamed over the running ones from a staging
-    directory beside them. A Developer ID-signed `deadbolt` only gives way to
-    one that satisfies the same requirement with identifier `pw.deadbolt.cli`
-    (and `pw.deadbolt.app.enclave` for the helper), without `notarized`, as
-    bare executables aren't stapled; an ad-hoc build (source, unsigned dev)
-    relies on the checksum, as the install script does. If the running agent
-    is this binary it is stopped and started again from the new one.
+    artifact's tarball for this OS and architecture, read in-process: only
+    regular files named `deadbolt` and `deadbolt-enclave` are written, never
+    links, devices, other names or owners, into the 0700 staging directory
+    beside the install. On macOS a release without `deadbolt-enclave` doesn't
+    replace a `deadbolt` that has one beside it (the new one pins its own
+    helper). The running files are moved into the stage, the new pair renamed
+    in, and on any failure both old files come back. If the running agent is
+    this binary it is stopped and started again from the new one.
   - A path under Homebrew's `Cellar`, `/nix/store`, `/usr` (not `/usr/local`)
     or `~/.cargo/bin` belongs to that package manager: `update` prints the
     manifest's `command` (or a hint) and changes nothing.
+- **Signatures:** a release build (published on a channel) on macOS always
+  requires its replacement to satisfy the update requirement with identifier
+  `pw.deadbolt.cli` (and `pw.deadbolt.app.enclave` for the helper), without
+  `notarized`, as bare executables aren't stapled. That's fixed when it's
+  built: nothing on disk turns it off, so an unsigned dev build can't update
+  itself until dev builds are signed. Only builds from source rely on the
+  checksum alone, as the install script does. `codesign`, `spctl`, `ditto`,
+  `xattr`, `osascript` and `open` run from `/usr/bin` (`/usr/sbin/spctl`), and
+  one that can't run is an error, never "unsigned".
+- **Older manifests:** the highest `sequence` seen for each artifact and
+  channel is kept in `$XDG_STATE_HOME/deadbolt/release-sequences.json`, and a
+  lower one is refused unless `--allow-rollback`. A real rollback is a new
+  write with a higher sequence, so installs still follow it. The protocol's
+  `revoked_versions` is always `[]` and clients ignore it, so `update` does
+  too.
+- **Root:** as euid 0, `update` only changes an install in a root-owned
+  directory with a root-owned `HOME`.
 - **Extension:** `deadbolt browser install --extension-dir <dir>` records an
-  unpacked copy (`extension_dir` in `config.toml`; the directory must be new,
-  empty or already Deadbolt's extension). `update` then compares its
-  `manifest.json` `version_name` with the `extension` manifest, replaces the
-  directory with the `chromium` zip (staged beside it, renamed into place) and
-  says to reload Deadbolt in `chrome://extensions`. Without one it prints the
-  channel's download link.
+  absolute path (`extension_dir` in `config.toml`); the directory must be new
+  or empty. `update` compares its `manifest.json` `version_name` with the
+  `extension` manifest and replaces the directory from the `chromium` zip
+  (regular files and directories only, at most 64 MiB and 4096 entries,
+  staged beside it and renamed into place), writing `.deadbolt-extension`
+  with the names it installed. It never replaces a directory holding anything
+  else. Then it says to reload Deadbolt in `chrome://extensions`. Without a
+  registered directory it prints the channel's download link.
 - **Checks:** manifests come only from `https://anoma.ly/release` (no
   redirects, 30 s, at most 1 MiB); file URLs are resolved against the manifest
   URL and must stay under its origin's `/release/deadbolt/files/`; a download

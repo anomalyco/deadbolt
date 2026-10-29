@@ -219,7 +219,7 @@ fn register_extension_dir(dir: &Path, config: &Path) -> Result<()> {
     let dir = dir.canonicalize().unwrap_or(dir);
     if !crate::update::extension_dir_ok(&dir) {
         bail!(
-            "{} holds something other than Deadbolt's extension; \
+            "{} holds files deadbolt update didn't install; \
              choose an empty or new directory",
             dir.display()
         );
