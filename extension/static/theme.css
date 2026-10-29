@@ -89,8 +89,11 @@ html {
   text-rendering: optimizeLegibility;
 }
 
+/* Chrome gives extension pages a default body font (and size) of its own:
+   take the page's instead. */
 body {
   margin: 0;
+  font: inherit;
 }
 
 button {
