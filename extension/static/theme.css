@@ -1,77 +1,154 @@
-/* Deadbolt's extension pages. Colours are OpenCode's v2 theme tokens
-   (rune themes/opencode/assets/theme.json); Geist is the type. */
+/* Deadbolt's extension pages, drawn like the Deadbolt app (crates/app), which
+   is built on Rune with rune-theme-opencode. Every value below is copied by
+   hand from the Rune pin in crates/app/Cargo.toml (rev 47c9523, 2026-10-27):
+
+   - colours and shadows: themes/opencode/assets/theme.json (the `v2-*`
+     tokens, as themes/opencode/src/lib.rs maps them onto rune-kit's Palette
+     and Elevation);
+   - type, radii and motion: themes/opencode/src/lib.rs (`Type`, `Radius`,
+     `Motion`), and crates/app/src/view/theme.rs for the app's own styles;
+   - controls: crates/rune-kit/src (actions.rs buttons, text_input.rs,
+     switch.rs, radio.rs) and the app's rows (crates/app/src/vault/mod.rs).
+
+   The fonts are the app's: Inter (rune-theme-opencode's InterVariable.ttf,
+   pinned at its 14pt optical size and subset to Latin, Greek and Cyrillic)
+   and IBM Plex Mono (converted to WOFF2, otherwise unchanged), both under the
+   SIL Open Font License (fonts/*-LICENSE.txt). On a Rune bump, re-read those
+   files and update this block. */
 
 @font-face {
-  font-family: "Geist";
-  src: url("fonts/Geist-Variable.woff2") format("woff2");
+  font-family: "Inter";
+  src: url("fonts/Inter-Variable.woff2") format("woff2");
   font-weight: 100 900;
   font-display: block;
 }
 
 @font-face {
-  font-family: "Geist Mono";
-  src: url("fonts/GeistMono-Variable.woff2") format("woff2");
-  font-weight: 100 900;
+  font-family: "IBM Plex Mono";
+  src: url("fonts/IBMPlexMono-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-display: block;
+}
+
+@font-face {
+  font-family: "IBM Plex Mono";
+  src: url("fonts/IBMPlexMono-Medium.woff2") format("woff2");
+  font-weight: 500 600;
   font-display: block;
 }
 
 :root {
   color-scheme: light dark;
+  /* Surfaces: the window behind (bg_deep), the card (bg_base), then layers. */
+  --bg-deep: #fafafa;
   --bg: #ffffff;
   --layer-01: #fafafa;
   --layer-02: #f2f2f2;
   --layer-03: #eeeeee;
+  --layer-04: #dbdbdb;
   --border: #0000001a;
   --border-muted: #00000014;
   --border-strong: #00000033;
+  --border-weak: #dbdbdb;
   --focus: #7698fd;
   --hover: #0000000a;
   --pressed: #00000014;
   --text: #161616;
+  --text-strong: #171717;
   --muted: #5c5c5c;
   --faint: #808080;
+  --icon: #3a3a3a;
+  --icon-muted: #808080;
+  --icon-faint: #aeaeae;
   --accent: #3b5cf6;
   --text-accent: #3b5cf6;
+  /* The Contrast button (bg_contrast, text_contrast) and its overlays. */
   --contrast: #242424;
   --on-contrast: #ffffff;
+  --contrast-hover: #ffffff1f;
+  --contrast-pressed: #ffffff3d;
+  /* The Neutral button and text field fill (bg_button_neutral). */
+  --button: #ffffff;
+  --knob: #f2f2f2;
   --danger: #b82d35;
   --danger-bg: #fcecebff;
+  --danger-border: #f2bbb7;
   --success: #198b43;
   --success-bg: #e7f9ea;
   --warning: #cb9f34;
   --warning-bg: #fefaec;
   --brand: #f02e29;
+  /* Elevation (v2-elevation-*). */
   --shadow-xs: #0000000a 0 1px 2px -0.5px, #00000006 0 0.5px 1.5px 0, #0000000d 0 1px 3px 0;
-  --sans: "Geist", ui-sans-serif, system-ui, -apple-system, sans-serif;
-  --mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
-  /* Physical motion: quick out of the gate, settling softly. */
+  --elevation-raised: #0000000a 0 2px 4px 0, #00000014 0 1px 2px -1px, #0000001f 0 0 0 0.5px;
+  --elevation-floating: #0000000a 0 8px 16px 0, #00000014 0 4px 8px 0, #0000001f 0 0 0 0.5px;
+  --elevation-overlay: #0000000a 0 16px 32px 0, #00000014 0 8px 16px 0, #0000001f 0 0 0 0.5px;
+  --elevation-button: #0000001a 0 1px 1.5px 0, #00000024 0 0 0 0.5px;
+  --elevation-contrast: #00000033 0 1px 1.5px 0, #3a3a3a 0 0 0 0.5px, inset #ffffff24 0 1px 2px 0, inset #0000000f 0 -1px 2px 0;
+  --elevation-switch-off: inset #00000014 0 1px 1px 0, inset #00000014 0 0.5px 0.5px 0, inset #0000001a 0 0 0 0.5px;
+  --elevation-switch-on: inset #0000001a 0 2px 2px 0, inset #0000001a 0 1px 1px 0, inset #00000033 0 0 0 0.5px;
+  --elevation-elements: #00000066 0 0.5px 0.5px 0;
+  /* Radius: xs 2, sm 4, md 6, lg 8, xl 10. */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 10px;
+  /* Type: Inter at Rune's variable weights, with its tracking. */
+  --sans: "Inter", ui-sans-serif, system-ui, -apple-system, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --weight: 440;
+  --weight-medium: 530;
+  --weight-strong: 600;
+  --tracking: -0.04px;
+  --tracking-small: 0.05px;
+  /* Motion: Rune's controls settle in about 200 ms, overlays 240, disclosures
+     300 (critically damped springs); this curve is that shape. */
   --settle: cubic-bezier(0.2, 0.9, 0.3, 1);
+  --control: 200ms;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
+    --bg-deep: #080808;
     --bg: #161616;
     --layer-01: #242424;
     --layer-02: #2e2e2e;
     --layer-03: #3a3a3a;
+    --layer-04: #5c5c5c;
     --border: #ffffff1a;
     --border-muted: #ffffff14;
     --border-strong: #ffffff33;
+    --border-weak: #282828;
     --hover: #ffffff0f;
     --pressed: #ffffff1a;
     --text: #fafafa;
+    --text-strong: #ededed;
     --muted: #aeaeae;
     --faint: #808080;
+    --icon: #dbdbdb;
+    --icon-muted: #808080;
+    --icon-faint: #5c5c5c;
     --text-accent: #a2bcff;
-    --contrast: #fafafa;
-    --on-contrast: #161616;
+    --contrast: #5c5c5c;
+    --on-contrast: #ffffff;
+    --contrast-hover: #0000003d;
+    --contrast-pressed: #00000066;
+    --button: #ffffff0f;
     --danger: #f17471;
     --danger-bg: #461516;
+    --danger-border: #97252b;
     --success: #6bd586;
     --success-bg: #14361d;
     --warning: #f2cf76;
     --warning-bg: #4b4025;
-    --shadow-xs: #00000040 0 1px 2px 0;
+    --shadow-xs: #0000000f 0 1px 2px -0.5px, #00000014 0 0.5px 1.5px 0, #0000001a 0 1px 3px 0;
+    --elevation-raised: #0000004d 0 2px 4px 0, #0000004d 0 1px 2px 0, #ffffff29 0 0 0 0.5px, #ffffff0f 0 -0.5px 0 0;
+    --elevation-floating: #0000004d 0 8px 16px 0, #0000004d 0 4px 8px 0, #ffffff29 0 0 0 0.5px, #ffffff0f 0 -0.5px 0 0;
+    --elevation-overlay: #0000004d 0 16px 32px 0, #0000004d 0 8px 16px 0, #ffffff29 0 0 0 0.5px, #ffffff0f 0 -0.5px 0 0;
+    --elevation-button: #00000066 0 1px 2px 0, #ffffff33 0 0 0 0.5px, #ffffff1a 0 -0.5px 0 0;
+    --elevation-contrast: #00000066 0 1px 2px 0, #ffffff66 0 0 0 0.5px, #ffffff4d 0 -0.5px 0 0;
+    --elevation-switch-off: inset #ffffff1a 0 -0.5px 0 0, inset #ffffff29 0 0 0 0.5px;
+    --elevation-switch-on: inset #ffffff1a 0 -0.5px 0 0, inset #ffffff29 0 0 0 0.5px;
   }
 }
 
@@ -81,8 +158,10 @@
   box-sizing: border-box;
 }
 
+/* Rune's `ui` style: Inter 13 at 440, a 20px line, -0.04px tracking. */
 html {
-  font: 13px/1.45 var(--sans);
+  font: var(--weight) 13px/20px var(--sans);
+  letter-spacing: var(--tracking);
   color: var(--text);
   background: var(--bg);
   -webkit-font-smoothing: antialiased;
@@ -98,7 +177,14 @@ body {
 
 button {
   font: inherit;
+  letter-spacing: inherit;
   color: inherit;
+}
+
+input,
+textarea,
+select {
+  letter-spacing: inherit;
 }
 
 p {
@@ -114,11 +200,13 @@ code,
 kbd {
   font-family: var(--mono);
   font-size: 12px;
+  font-weight: 400;
+  letter-spacing: 0;
 }
 
 code {
   padding: 1px 5px;
-  border-radius: 5px;
+  border-radius: var(--radius-sm);
   background: var(--layer-02);
   color: var(--text);
 }
@@ -131,12 +219,14 @@ code {
   color: var(--faint);
 }
 
+/* A section's name: Rune's `small_medium` (11/530), muted, as the app's
+   "Security" and vault headings. */
 .label {
   font-size: 11px;
-  font-weight: 500;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--faint);
+  line-height: 12px;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-small);
+  color: var(--muted);
 }
 
 .error {
@@ -144,54 +234,61 @@ code {
   font-size: 12px;
 }
 
-/* Buttons. Primary is OpenCode's contrast button: ink on paper. */
+/* Buttons: rune-kit's Large push button (28 tall, 14 across, an 8px radius,
+   `ui_medium`). Neutral is the default; primary is Contrast, with its sheen.
+   Hover and press lay the theme's overlays over the fill. */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   height: 28px;
-  padding: 0 12px;
-  border-radius: 7px;
+  padding: 0 14px;
+  border-radius: var(--radius-lg);
   border: 0;
-  background: var(--bg);
-  box-shadow: 0 0 0 1px var(--border), var(--shadow-xs);
-  font-size: 12px;
-  font-weight: 500;
+  background-color: var(--button);
+  box-shadow: var(--elevation-button);
+  color: var(--text);
+  font-size: 13px;
+  font-weight: var(--weight-medium);
   white-space: nowrap;
   cursor: pointer;
   transition:
     background-color 120ms ease-out,
-    transform 160ms var(--settle);
-}
-
-@media (prefers-color-scheme: dark) {
-  .btn {
-    background: #ffffff0f;
-  }
+    transform var(--control) var(--settle);
 }
 
 .btn:hover {
-  background: var(--layer-02);
+  background-image: linear-gradient(var(--hover), var(--hover));
 }
 
 .btn:active {
-  transform: translateY(0.5px) scale(0.98);
+  background-image: linear-gradient(var(--pressed), var(--pressed));
+  transform: scale(0.98);
 }
 
 .btn.primary {
-  background: var(--contrast);
+  background-color: var(--contrast);
+  background-image: linear-gradient(#ffffff33, #ffffff00);
+  box-shadow: var(--elevation-contrast);
   color: var(--on-contrast);
-  box-shadow: none;
 }
 
 .btn.primary:hover {
-  background: color-mix(in srgb, var(--contrast) 88%, var(--bg));
+  background-image: linear-gradient(var(--contrast-hover), var(--contrast-hover)), linear-gradient(#ffffff33, #ffffff00);
+}
+
+.btn.primary:active {
+  background-image: linear-gradient(var(--contrast-pressed), var(--contrast-pressed)), linear-gradient(#ffffff33, #ffffff00);
 }
 
 .btn[disabled] {
   opacity: 0.5;
   cursor: default;
+}
+
+.btn.primary[disabled] {
+  opacity: 0.4;
 }
 
 .link {
@@ -201,9 +298,9 @@ code {
   gap: 4px;
   cursor: pointer;
   font-size: 12px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   color: var(--muted);
-  border-radius: 4px;
+  border-radius: var(--radius-sm);
   transition: color 120ms ease-out;
 }
 
@@ -216,16 +313,17 @@ code {
   color: var(--text);
 }
 
+/* rune-kit's ghost IconButton: a muted glyph, the hover overlay behind it. */
 .icon-button {
   all: unset;
   box-sizing: border-box;
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   display: grid;
   place-items: center;
-  color: var(--faint);
+  color: var(--icon-muted);
   cursor: pointer;
   transition:
     background-color 120ms ease-out,
@@ -233,14 +331,18 @@ code {
 }
 
 .icon-button svg {
-  width: 15px;
-  height: 15px;
+  width: 16px;
+  height: 16px;
   animation: settle-in 180ms var(--settle);
 }
 
 .icon-button:hover {
   background: var(--hover);
-  color: var(--text);
+  color: var(--icon);
+}
+
+.icon-button:active {
+  background: var(--pressed);
 }
 
 .icon-button[disabled] {
@@ -253,60 +355,60 @@ code {
   color: var(--success);
 }
 
+/* Rune's focus ring: 2px of border_focus, clear of the control. */
 .btn:focus-visible,
 .link:focus-visible,
 .icon-button:focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 1px;
+  outline-offset: 2px;
 }
 
-/* A login's letter tile. */
+/* A kind's glyph tile, as the app's (view/theme.rs glyph_tile): layer_02, one tone. */
 .tile {
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  border-radius: 7px;
+  border-radius: var(--radius-lg);
   display: grid;
   place-items: center;
   background: var(--layer-02);
-  box-shadow: inset 0 0 0 1px var(--border-muted);
-  color: var(--text);
+  color: var(--icon);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--weight-medium);
 }
 
 .tile svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
 }
 
 .tile.soft {
-  color: var(--muted);
+  color: var(--icon-muted);
 }
 
-/* A login's avatar: its letter on a soft tint of its own hue (--hue, see ui/dom.ts avatar). */
+/* A login's avatar: its letter in the app's glyph tile, quiet and one tone. */
 .avatar {
   flex-shrink: 0;
   width: 28px;
   height: 28px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   display: grid;
   place-items: center;
-  background: oklch(0.94 0.035 var(--hue, 250));
-  color: oklch(0.42 0.11 var(--hue, 250));
+  background: var(--layer-02);
+  color: var(--icon);
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0;
   line-height: 1;
 }
 
 .avatar svg {
-  width: 15px;
-  height: 15px;
+  width: 14px;
+  height: 14px;
 }
 
 .avatar.neutral {
-  background: var(--layer-02);
-  color: var(--muted);
+  color: var(--icon-muted);
 }
 
 .avatar.brand {
@@ -316,22 +418,6 @@ code {
 .avatar.brand svg {
   width: 100%;
   height: 100%;
-}
-
-@media (prefers-color-scheme: dark) {
-  .avatar {
-    background: oklch(0.33 0.045 var(--hue, 250));
-    color: oklch(0.87 0.07 var(--hue, 250));
-  }
-
-  .avatar.neutral {
-    background: var(--layer-02);
-    color: var(--muted);
-  }
-
-  .avatar.brand {
-    background: none;
-  }
 }
 
 .logo svg {

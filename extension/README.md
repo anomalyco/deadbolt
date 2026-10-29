@@ -60,7 +60,7 @@ migration required before changing the release default.
 | `src/protocol.ts`        | Host message types and parsing                                               |
 | `src/signin.ts`          | "Sign in with" providers: names, hosts, button words                         |
 | `src/messages.ts`        | Messages inside the extension                                                |
-| `static/`                | Manifest, pages, CSS (OpenCode theme), Geist fonts, icons                    |
+| `static/`                | Manifest, pages, CSS (Rune's OpenCode theme), Inter and IBM Plex Mono, icons |
 | `e2e/`                   | Headless Chromium runs against a fake host                                   |
 | `corpus/`                | Real-site crawl, and `learned.ts` for Learn this site logs                   |
 

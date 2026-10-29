@@ -50,7 +50,7 @@ main.vault.popup {
 
 .vault-name {
   font-size: 12px;
-  font-weight: 400;
+  font-weight: var(--weight);
   color: var(--faint);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -58,8 +58,8 @@ main.vault.popup {
 }
 
 .icon-button.on {
-  background: var(--layer-02);
-  color: var(--text);
+  background: var(--pressed);
+  color: var(--icon);
 }
 
 .vault .bottom {
@@ -162,7 +162,7 @@ main.vault.popup {
 }
 
 .view > p.muted {
-  font-size: 12.5px;
+  font-size: 13px;
 }
 
 .small {
@@ -190,8 +190,9 @@ main.vault.popup {
 .toolbar h2 {
   flex: 1;
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: var(--weight-strong);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -199,7 +200,6 @@ main.vault.popup {
 
 .toolbar .back {
   margin-left: -6px;
-  color: var(--muted);
 }
 
 .toolbar-actions {
@@ -234,19 +234,16 @@ main.vault.popup {
   height: 14px;
 }
 
+/* rune-kit's ExtraLarge push button: 36 tall, a 10px radius. */
 .btn.wide {
-  height: 32px;
+  height: 36px;
   width: 100%;
+  border-radius: var(--radius-xl);
 }
 
+/* rune-kit's Danger button: the neutral button with the danger ink. */
 .btn.danger {
-  background: var(--danger);
-  color: #fff;
-  box-shadow: none;
-}
-
-.btn.danger:hover {
-  background: color-mix(in srgb, var(--danger) 88%, var(--bg));
+  color: var(--danger);
 }
 
 /* ---- Fields ---- */
@@ -258,20 +255,24 @@ main.vault.popup {
 }
 
 .field label {
-  font-size: 12px;
-  font-weight: 500;
+  font-size: 11px;
+  line-height: 12px;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-small);
   color: var(--muted);
 }
 
+/* rune-kit's TextInput, large: bg_base with a faint sheen and the neutral
+   button's elevation; focus and invalid are a 1px outline instead. */
 .vault .input {
   width: 100%;
   min-width: 0;
   height: 32px;
   padding: 0 10px;
   border: 0;
-  border-radius: 8px;
-  background: var(--bg);
-  box-shadow: 0 0 0 1px var(--border), var(--shadow-xs);
+  border-radius: var(--radius-md);
+  background: var(--bg) linear-gradient(#ffffff0f, #ffffff05);
+  box-shadow: var(--elevation-button);
   color: var(--text);
   font: inherit;
   font-size: 13px;
@@ -279,10 +280,8 @@ main.vault.popup {
   transition: box-shadow 120ms ease-out;
 }
 
-@media (prefers-color-scheme: dark) {
-  .vault .input {
-    background: #ffffff08;
-  }
+.vault .input:hover:not(:focus) {
+  background-image: linear-gradient(var(--hover), var(--hover));
 }
 
 .vault .input::placeholder {
@@ -290,11 +289,11 @@ main.vault.popup {
 }
 
 .vault .input:focus-visible {
-  box-shadow: 0 0 0 1px var(--focus), 0 0 0 3px color-mix(in srgb, var(--focus) 30%, transparent);
+  box-shadow: 0 0 0 1px var(--focus);
 }
 
 .vault .input.invalid {
-  box-shadow: 0 0 0 1px var(--danger), 0 0 0 3px color-mix(in srgb, var(--danger) 18%, transparent);
+  box-shadow: 0 0 0 1px var(--danger);
 }
 
 .vault .input:disabled {
@@ -342,9 +341,37 @@ main.vault.popup {
 }
 
 .vault input[type="checkbox"],
-.vault input[type="radio"],
 .vault input[type="range"] {
-  accent-color: var(--contrast);
+  accent-color: var(--accent);
+}
+
+/* rune-kit's Radio: a 16px disc on bg_base with a strong hairline; checked,
+   the accent with a sheen and a 6px knob. */
+.vault input[type="radio"] {
+  appearance: none;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: var(--bg) linear-gradient(#ffffff0f, #ffffff00);
+  box-shadow: inset 0 0 0 0.5px var(--border-strong);
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background-color var(--control) var(--settle);
+}
+
+.vault input[type="radio"]:checked {
+  background: var(--accent) linear-gradient(#ffffff33, #ffffff00);
+}
+
+.vault input[type="radio"]:checked::after {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--knob);
+  box-shadow: #00000066 0 0.5px 0.5px;
 }
 
 .vault input:focus-visible,
@@ -372,12 +399,12 @@ main.vault.popup {
 .hero h1 {
   margin: 4px 0 0;
   font-size: 17px;
-  font-weight: 600;
-  letter-spacing: -0.01em;
+  line-height: 22px;
+  font-weight: var(--weight-medium);
 }
 
 .hero p {
-  font-size: 12.5px;
+  font-size: 13px;
   text-wrap: pretty;
 }
 
@@ -409,7 +436,7 @@ main.vault.popup {
   align-items: center;
   gap: 12px;
   padding: 12px;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
   cursor: pointer;
@@ -429,7 +456,7 @@ main.vault.popup {
 .choice .tile {
   width: 32px;
   height: 32px;
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
 }
 
 .choice .tile svg {
@@ -438,9 +465,9 @@ main.vault.popup {
 }
 
 .choice.primary .tile {
-  background: var(--contrast);
+  background: var(--contrast) linear-gradient(#ffffff33, #ffffff00);
   color: var(--on-contrast);
-  box-shadow: none;
+  box-shadow: var(--elevation-contrast);
 }
 
 .choice-text {
@@ -453,12 +480,13 @@ main.vault.popup {
 
 .choice-title {
   font-size: 13px;
-  font-weight: 600;
+  font-weight: var(--weight-medium);
 }
 
 .choice-sub {
   font-size: 12px;
-  line-height: 1.35;
+  line-height: 18px;
+  letter-spacing: 0;
   color: var(--muted);
 }
 
@@ -481,7 +509,7 @@ main.vault.popup {
   align-items: center;
   gap: 10px;
   padding: 14px 12px 14px 16px;
-  border-radius: 12px;
+  border-radius: var(--radius-xl);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
 }
@@ -492,8 +520,8 @@ main.vault.popup {
   font-family: var(--mono);
   font-size: 18px;
   line-height: 1.35;
-  font-weight: 560;
-  letter-spacing: 0.01em;
+  font-weight: 500;
+  letter-spacing: 0;
   user-select: all;
 }
 
@@ -517,7 +545,7 @@ main.vault.popup {
   display: flex;
   gap: 10px;
   padding: 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
 }
@@ -536,7 +564,7 @@ main.vault.popup {
 }
 
 .notice p {
-  font-size: 12.5px;
+  font-size: 13px;
   text-wrap: pretty;
 }
 
@@ -587,6 +615,7 @@ main.vault.popup {
 
 .search-row {
   display: flex;
+  align-items: center;
   gap: 8px;
   position: sticky;
   top: -10px;
@@ -606,19 +635,30 @@ main.vault.popup {
 .search-wrap svg {
   position: absolute;
   left: 10px;
-  width: 15px;
-  height: 15px;
-  color: var(--faint);
+  width: 14px;
+  height: 14px;
+  color: var(--icon-muted);
   pointer-events: none;
 }
 
+/* The app's search: plain (no ring, no shadow) on layer_02, layer_01 in the
+   dark, an 8px radius, 30 tall. It has focus whenever the list opens. */
 .search-wrap .input {
-  padding-left: 32px;
+  height: 30px;
+  padding-left: 30px;
+  border-radius: var(--radius-lg);
+  background: var(--layer-02);
+  box-shadow: none;
 }
 
-/* The search box has focus whenever the list opens: a quiet ring, not a loud one. */
+@media (prefers-color-scheme: dark) {
+  .search-wrap .input {
+    background: var(--layer-01);
+  }
+}
+
 .search-wrap .input:focus-visible {
-  box-shadow: 0 0 0 1px color-mix(in srgb, var(--focus) 70%, var(--border)), var(--shadow-xs);
+  box-shadow: none;
 }
 
 .search-wrap .input::-webkit-search-cancel-button {
@@ -627,8 +667,8 @@ main.vault.popup {
 }
 
 .btn.add {
-  height: 32px;
-  padding: 0 11px 0 8px;
+  height: 30px;
+  padding: 0 12px 0 8px;
   gap: 4px;
 }
 
@@ -652,7 +692,10 @@ main.vault.popup {
 }
 
 .group .section-head .mono {
+  font-family: var(--sans);
   font-size: 11px;
+  letter-spacing: var(--tracking-small);
+  color: var(--faint);
 }
 
 .rows {
@@ -668,8 +711,8 @@ main.vault.popup {
   left: 0;
   right: 0;
   top: 0;
-  border-radius: 10px;
-  background: var(--hover);
+  border-radius: var(--radius-lg);
+  background: var(--pressed);
   pointer-events: none;
 }
 
@@ -677,9 +720,9 @@ main.vault.popup {
   position: relative;
   display: flex;
   align-items: center;
-  min-height: 48px;
+  min-height: 46px;
   padding-right: 6px;
-  border-radius: 10px;
+  border-radius: var(--radius-lg);
 }
 
 .vrow-main {
@@ -690,9 +733,9 @@ main.vault.popup {
   gap: 10px;
   flex: 1;
   min-width: 0;
-  height: 48px;
-  padding: 0 8px;
-  border-radius: 10px;
+  height: 46px;
+  padding: 0 10px;
+  border-radius: var(--radius-lg);
   cursor: pointer;
 }
 
@@ -711,16 +754,17 @@ main.vault.popup {
   white-space: nowrap;
 }
 
+/* The app's row: the label in `ui` over the detail in its 11.5/440 `FACT`. */
 .vrow .title {
   font-size: 13px;
-  line-height: 16px;
-  font-weight: 500;
+  line-height: 20px;
 }
 
 .vrow .sub {
-  font-size: 12px;
-  line-height: 16px;
-  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 14px;
+  letter-spacing: 0;
+  color: var(--faint);
 }
 
 /* A row's actions stay out of the way until the row is wanted. */
@@ -756,15 +800,16 @@ main.vault.popup {
   opacity: 0.3 !important;
 }
 
+/* rune-kit's Regular push button: 24 tall, a 6px radius. */
 .vrow-actions .btn.fill {
-  height: 26px;
+  height: 24px;
   margin-left: 4px;
-  padding: 0 11px;
+  padding: 0 12px;
+  border-radius: var(--radius-md);
 }
 
 .avatar.favicon {
   background: var(--layer-02);
-  box-shadow: inset 0 0 0 1px var(--border-muted);
 }
 
 .avatar.favicon img {
@@ -794,13 +839,13 @@ main.vault.popup {
 
 .empty-state h2 {
   margin: 2px 0 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 13px;
+  font-weight: var(--weight-medium);
 }
 
 .empty-state p {
   max-width: 260px;
-  font-size: 12.5px;
+  font-size: 13px;
   text-wrap: pretty;
 }
 
@@ -817,7 +862,7 @@ main.vault.popup {
 
 .skeleton-row {
   height: 36px;
-  border-radius: 9px;
+  border-radius: var(--radius-lg);
   background: linear-gradient(90deg, var(--layer-01), var(--layer-02), var(--layer-01));
   background-size: 200% 100%;
   animation: shimmer 1.4s ease-in-out infinite;
@@ -838,11 +883,12 @@ main.vault.popup {
   padding: 2px 0 4px;
 }
 
+/* The app's item head: a 44 glyph tile (10px radius) by a big title. */
 .detail-head .avatar {
-  width: 40px;
-  height: 40px;
-  border-radius: 11px;
-  font-size: 17px;
+  width: 44px;
+  height: 44px;
+  border-radius: var(--radius-xl);
+  font-size: 18px;
 }
 
 .detail-head .avatar.favicon img {
@@ -859,22 +905,49 @@ main.vault.popup {
 
 .detail-head .title {
   margin: 0;
-  font-size: 16px;
-  font-weight: 600;
+  font-size: 20px;
+  line-height: 26px;
+  font-weight: var(--weight-strong);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .detail-head .sub {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 
 .vault .box {
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
+}
+
+/* A login's fields, as the app's item page: no box, a label over its value,
+   and the one in use fills layer_02 with a 10px radius. */
+.vault .detail > .box {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0 -8px;
+  background: none;
+  box-shadow: none;
+}
+
+.vault .detail > .box > * + * {
+  border-top: 0;
+}
+
+.vault .detail > .box .line {
+  padding-left: 8px;
+  border-radius: var(--radius-xl);
+  transition: background-color 120ms ease-out;
+}
+
+.detail > .box .line:hover,
+.detail > .box .line:focus-within {
+  background: var(--layer-02);
 }
 
 .vault .line {
@@ -893,8 +966,11 @@ main.vault.popup {
 
 .line-label {
   grid-column: 1;
-  font-size: 11.5px;
-  color: var(--faint);
+  font-size: 11px;
+  line-height: 16px;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-small);
+  color: var(--muted);
 }
 
 .line .value {
@@ -905,7 +981,7 @@ main.vault.popup {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 13px;
-  font-weight: 500;
+  line-height: 20px;
 }
 
 .line .value .dots {
@@ -935,7 +1011,7 @@ main.vault.popup {
 
 .code-value {
   font-size: 15px;
-  font-weight: 560;
+  font-weight: 500;
   letter-spacing: 0.06em;
 }
 
@@ -1007,7 +1083,7 @@ main.vault.popup {
   gap: 10px;
   margin-top: -6px;
   padding: 10px 12px 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
   animation: settle-in 200ms var(--settle);
@@ -1115,7 +1191,7 @@ main.vault.popup {
 }
 
 .pair-area .btn {
-  height: 30px;
+  height: 28px;
 }
 
 .pair-form {
@@ -1123,7 +1199,7 @@ main.vault.popup {
   flex-direction: column;
   gap: 8px;
   padding: 12px;
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
   animation: settle-in 200ms var(--settle);
@@ -1137,12 +1213,12 @@ main.vault.popup {
   margin-top: 0;
 }
 
+/* The app's Settings rows: no box; the row in use fills layer_02. */
 .presets {
   display: flex;
   flex-direction: column;
-  border-radius: 10px;
-  background: var(--layer-01);
-  box-shadow: inset 0 0 0 1px var(--border-muted);
+  gap: 2px;
+  margin: 0 -12px;
 }
 
 .preset {
@@ -1151,16 +1227,13 @@ main.vault.popup {
   gap: 10px;
   padding: 10px 12px;
   cursor: pointer;
-  border-radius: 10px;
+  border-radius: var(--radius-xl);
+  transition: background-color 120ms ease-out;
 }
 
-.preset + .preset {
-  border-top: 1px solid var(--border-muted);
-  border-radius: 0 0 10px 10px;
-}
-
-.preset:nth-child(2) {
-  border-radius: 0;
+.preset:hover,
+.preset:has(input:focus-visible) {
+  background: var(--layer-02);
 }
 
 .preset input {
@@ -1175,12 +1248,13 @@ main.vault.popup {
 
 .preset .title {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .preset .sub {
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 18px;
+  letter-spacing: 0;
   color: var(--muted);
   text-wrap: pretty;
 }
@@ -1196,11 +1270,16 @@ main.vault.popup {
   display: flex;
   align-items: center;
   gap: 12px;
+  margin: 0 -12px;
   padding: 10px 12px;
-  border-radius: 10px;
-  background: var(--layer-01);
-  box-shadow: inset 0 0 0 1px var(--border-muted);
+  border-radius: var(--radius-xl);
   cursor: pointer;
+  transition: background-color 120ms ease-out;
+}
+
+.switch-row:hover,
+.switch-row:has(input:focus-visible) {
+  background: var(--layer-02);
 }
 
 .switch-row .text {
@@ -1213,48 +1292,54 @@ main.vault.popup {
 
 .switch-row .title {
   font-size: 13px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .switch-row .sub {
   font-size: 12px;
-  line-height: 1.4;
+  line-height: 18px;
+  letter-spacing: 0;
   color: var(--muted);
   text-wrap: pretty;
 }
 
+/* rune-kit's Switch, Mini (NSSwitch's measure): a 36x16 capsule, layer_04
+   off and the accent on, each with its sheen and inset elevation, and a 21x14
+   pill knob. */
 .vault input[role="switch"] {
   appearance: none;
   flex-shrink: 0;
   position: relative;
-  width: 30px;
-  height: 18px;
+  width: 36px;
+  height: 16px;
   margin: 0;
   border-radius: 999px;
-  background: var(--layer-03);
-  box-shadow: inset 0 0 0 1px var(--border);
+  background: var(--layer-04) linear-gradient(#ffffff00, #ffffff33);
+  box-shadow: var(--elevation-switch-off);
   cursor: pointer;
-  transition: background-color 160ms ease-out;
+  transition: background-color var(--control) var(--settle);
 }
 
 .vault input[role="switch"]::after {
   content: "";
   position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 14px;
+  top: 1px;
+  left: 1px;
+  width: 21px;
   height: 14px;
-  border-radius: 50%;
-  background: var(--bg);
-  box-shadow: var(--shadow-xs);
-  transition: transform 220ms var(--settle);
+  border-radius: 7px;
+  background: var(--knob) linear-gradient(#ffffff, #ffffff00);
+  box-shadow: var(--elevation-elements), inset 0 0 0 0.5px #ffffff;
+  transition:
+    transform var(--control) var(--settle),
+    width var(--control) var(--settle);
 }
 
 .vault input[role="switch"]:checked {
-  background: var(--contrast);
-  box-shadow: none;
+  background: var(--accent) linear-gradient(#ffffff00, #ffffff1a);
+  box-shadow: var(--elevation-switch-on);
 }
 
 .vault input[role="switch"]:checked::after {
-  transform: translateX(12px);
+  transform: translateX(13px);
 }
