@@ -4,8 +4,7 @@
 //! screen. Progress lands in an inbox the UI drains each frame; the thread
 //! wakes the window when it sends.
 
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread::JoinHandle;
 
 use deadbolt_client::protocol::{Command, DeviceInfo, Event, Reply, Status, VaultInfo};
@@ -15,6 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 use zeroize::Zeroizing;
 
 use crate::agent::Failure;
+use crate::worker::{Inbox, Poster};
 
 /// What a request is doing now. Sent as each slow part starts, so progress is
 /// only ever what really happened.
@@ -57,9 +57,7 @@ pub struct NewDevice {
 
 pub struct Worker {
     agent: Option<(Paths, Launch)>,
-    sender: Sender<Progress>,
-    inbox: Receiver<Progress>,
-    waker: Arc<Mutex<Option<Waker>>>,
+    inbox: Inbox<Progress>,
     answer: Option<mpsc::UnboundedSender<bool>>,
     cancel: Option<oneshot::Sender<()>>,
     /// The running request's thread, so one runs at a time and close can wait for it.
@@ -78,12 +76,9 @@ impl Worker {
 
     /// No agent: requests go nowhere, for scenes and snapshots.
     pub fn offline() -> Worker {
-        let (sender, inbox) = channel();
         Worker {
             agent: None,
-            sender,
-            inbox,
-            waker: Arc::default(),
+            inbox: Inbox::new(),
             answer: None,
             cancel: None,
             thread: None,
@@ -101,12 +96,12 @@ impl Worker {
     }
 
     pub fn set_waker(&self, waker: Waker) {
-        *self.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
+        self.inbox.set_waker(waker);
     }
 
     /// Progress so far, and the time of the next scripted delivery.
     pub fn drain(&mut self, now: f64) -> (Vec<Progress>, Option<f64>) {
-        let mut out: Vec<Progress> = self.inbox.try_iter().collect();
+        let mut out = self.inbox.drain();
         let due = self.script.iter().take_while(|(at, _)| *at <= now).count();
         out.extend(self.script.drain(..due).map(|(_, p)| p));
         (out, self.script.first().map(|(at, _)| *at))
@@ -114,9 +109,9 @@ impl Worker {
 
     /// Sets up this device if `device` is given, then creates `vault`.
     pub fn create(&mut self, device: Option<NewDevice>, vault: String) {
-        self.start(Progress::Created, move |paths, launch, report| async move {
-            let result = create(&paths, &launch, device, vault, &report).await;
-            report(Progress::Created(result));
+        self.start(Progress::Created, move |paths, launch, post| async move {
+            let result = create(&paths, &launch, device, vault, &post).await;
+            post.send(Progress::Created(result));
         });
     }
 
@@ -127,9 +122,9 @@ impl Worker {
         let (cancel, cancelled) = oneshot::channel();
         self.answer = Some(answer);
         self.cancel = Some(cancel);
-        self.start(Progress::Joined, move |paths, launch, report| async move {
-            let result = join(&paths, &launch, device, answers, cancelled, &report).await;
-            report(Progress::Joined(result));
+        self.start(Progress::Joined, move |paths, launch, post| async move {
+            let result = join(&paths, &launch, device, answers, cancelled, &post).await;
+            post.send(Progress::Joined(result));
         });
     }
 
@@ -160,7 +155,7 @@ impl Worker {
     /// Runs `run` on its own thread; `done` reports a thread that couldn't start.
     fn start<F, Fut>(&mut self, done: fn(Result<VaultInfo, Failure>) -> Progress, run: F)
     where
-        F: FnOnce(Paths, Launch, Report) -> Fut + Send + 'static,
+        F: FnOnce(Paths, Launch, Poster<Progress>) -> Fut + Send + 'static,
         Fut: Future<Output = ()>,
     {
         let Some((paths, launch)) = self.agent.clone() else {
@@ -171,49 +166,35 @@ impl Worker {
         if let Some(previous) = self.thread.take() {
             previous.join().ok();
         }
-        let sender = self.sender.clone();
-        let waker = self.waker.clone();
-        let report: Report = Arc::new(move |progress| {
-            if sender.send(progress).is_ok() {
-                let wake = waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                if let Some(wake) = wake {
-                    wake();
-                }
-            }
-        });
-        let failed = report.clone();
-        let spawned = std::thread::Builder::new()
-            .name("deadbolt-onboarding".into())
-            .spawn(move || {
-                match tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                {
-                    Ok(runtime) => runtime.block_on(run(paths, launch, report)),
-                    Err(error) => report(done(Err(Failure {
-                        code: None,
-                        message: format!("starting the request thread: {error}"),
-                    }))),
-                }
-            });
-        match spawned {
-            Ok(thread) => self.thread = Some(thread),
-            Err(error) => failed(done(Err(Failure {
+        let fail = move |error| {
+            done(Err(Failure {
                 code: None,
                 message: format!("starting the request thread: {error}"),
-            }))),
+            }))
+        };
+        let post = self.inbox.poster();
+        let spawned = post.clone().spawn("deadbolt-onboarding", move |post| {
+            match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime.block_on(run(paths, launch, post)),
+                Err(error) => post.send(fail(error)),
+            }
+        });
+        match spawned {
+            Ok(thread) => self.thread = Some(thread),
+            Err(error) => post.send(fail(error)),
         }
     }
 }
-
-type Report = Arc<dyn Fn(Progress) + Send + Sync>;
 
 /// The agent's refusal when a device is set up twice; the app says the same.
 pub const ALREADY_SET_UP: &str = "this device is already set up";
 
 /// Starts the agent and reads its status.
-async fn start(paths: &Paths, launch: &Launch, report: &Report) -> Result<Status, Failure> {
-    report(Progress::Stage(Stage::Starting));
+async fn start(paths: &Paths, launch: &Launch, post: &Poster<Progress>) -> Result<Status, Failure> {
+    post.send(Progress::Stage(Stage::Starting));
     Ok(deadbolt_client::ensure_running(paths, launch).await?)
 }
 
@@ -225,7 +206,7 @@ async fn set_up(
     paths: &Paths,
     status: &Status,
     device: Option<NewDevice>,
-    report: &Report,
+    post: &Poster<Progress>,
 ) -> Result<(), Failure> {
     let set_up = !status.initialized;
     match (status.initialized, device) {
@@ -243,7 +224,7 @@ async fn set_up(
             });
         }
         (false, Some(device)) => {
-            report(Progress::Stage(Stage::Protecting));
+            post.send(Progress::Stage(Stage::Protecting));
             let command = Command::Setup {
                 passphrase: device.passphrase,
                 device_name: device.name,
@@ -251,7 +232,7 @@ async fn set_up(
             deadbolt_client::simple(paths, command).await?;
         }
     }
-    report(Progress::DeviceReady { set_up });
+    post.send(Progress::DeviceReady { set_up });
     Ok(())
 }
 
@@ -260,11 +241,11 @@ async fn create(
     launch: &Launch,
     device: Option<NewDevice>,
     vault: String,
-    report: &Report,
+    post: &Poster<Progress>,
 ) -> Result<VaultInfo, Failure> {
-    let status = start(paths, launch, report).await?;
-    set_up(paths, &status, device, report).await?;
-    report(Progress::Stage(Stage::CreatingVault));
+    let status = start(paths, launch, post).await?;
+    set_up(paths, &status, device, post).await?;
+    post.send(Progress::Stage(Stage::CreatingVault));
     match deadbolt_client::simple(paths, Command::VaultCreate { name: vault }).await? {
         Reply::Vault { vault } => Ok(vault),
         _ => Err(unexpected()),
@@ -281,22 +262,22 @@ async fn join(
     device: Option<NewDevice>,
     answers: mpsc::UnboundedReceiver<bool>,
     mut cancelled: oneshot::Receiver<()>,
-    report: &Report,
+    post: &Poster<Progress>,
 ) -> Result<VaultInfo, Failure> {
     let cancel = || Failure {
         code: None,
         message: "cancelled".into(),
     };
     let status = tokio::select! {
-        status = start(paths, launch, report) => status?,
+        status = start(paths, launch, post) => status?,
         _ = &mut cancelled => return Err(cancel()),
     };
-    set_up(paths, &status, device, report).await?;
+    set_up(paths, &status, device, post).await?;
     tokio::select! {
         biased;
         // Dropping the request hangs up, which cancels the join in the agent.
         _ = &mut cancelled => Err(cancel()),
-        result = pair(paths, answers, report) => result,
+        result = pair(paths, answers, post) => result,
     }
 }
 
@@ -304,17 +285,17 @@ async fn join(
 async fn pair(
     paths: &Paths,
     answers: mpsc::UnboundedReceiver<bool>,
-    report: &Report,
+    post: &Poster<Progress>,
 ) -> Result<VaultInfo, Failure> {
-    report(Progress::Stage(Stage::MakingTicket));
+    post.send(Progress::Stage(Stage::MakingTicket));
     let answers = Arc::new(tokio::sync::Mutex::new(answers));
     let reply = deadbolt_client::converse(paths, Command::Join { confirm: true }, |event| {
         let answers = answers.clone();
-        let report = report.clone();
+        let post = post.clone();
         async move {
             Ok::<_, std::convert::Infallible>(match event {
                 Event::Ticket { ticket } => {
-                    report(Progress::Ticket(Zeroizing::new(ticket)));
+                    post.send(Progress::Ticket(Zeroizing::new(ticket)));
                     None
                 }
                 Event::Joining {
@@ -322,14 +303,14 @@ async fn pair(
                     vault,
                     inviter,
                 } => {
-                    report(Progress::Code {
+                    post.send(Progress::Code {
                         code,
                         vault,
                         inviter,
                     });
                     let matches = answers.lock().await.recv().await.unwrap_or(false);
                     if matches {
-                        report(Progress::Stage(Stage::Joining));
+                        post.send(Progress::Stage(Stage::Joining));
                     }
                     Some(matches)
                 }

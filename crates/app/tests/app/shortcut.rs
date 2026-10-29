@@ -95,6 +95,40 @@ fn a_conflict_at_launch_shows_a_notice_that_leads_to_settings() {
 
     press(&mut rt, "dismiss");
     assert!(rt.find("shortcut-notice").is_none(), "Not now puts it away");
+
+    // Over an unchanged form, Choose another… closes the form for Settings;
+    // over a changed one, it nudges instead of silently failing.
+    let mut rt = main_window(Hotkey::new(Some(default.clone()), vec![default.clone()]));
+    rt.update(|s, _| s.edit_selected());
+    settle(&mut rt, 0.3);
+    press(&mut rt, "choose");
+    assert!(!rt.state.editing() && rt.state.settings_open);
+
+    let mut rt = main_window(Hotkey::new(Some(default.clone()), vec![default.clone()]));
+    rt.update(|s, _| {
+        s.edit_selected();
+        s.name_mut().replace_text("Renamed");
+    });
+    settle(&mut rt, 0.3);
+    press(&mut rt, "choose");
+    assert!(rt.state.editing() && !rt.state.settings_open);
+    assert!(rt.state.edit.form.as_ref().unwrap().nudge);
+}
+
+#[test]
+fn recording_the_already_active_shortcut_from_settings_keys_keeps_it() {
+    let chosen = parse("ctrl+alt+k");
+    let mut rt = main_window(Hotkey::new(Some(chosen.clone()), Vec::new()));
+    rt.update(|s, _| {
+        s.open_settings();
+        s.hotkey.recorder.begin();
+    });
+    settle(&mut rt, 0.2);
+    // Simulate Settings' keyboard recording (`record_key`) proposing the same chord.
+    rt.update(|s, _| s.change_shortcut(Some(&chosen)).unwrap());
+    assert!(rt.state.hotkey.registered());
+    assert_eq!(rt.state.hotkey.shortcut.as_ref(), Some(&chosen));
+    assert!(rt.state.hotkey.refused.is_none());
 }
 
 /// When the desktop says who holds a chord (macOS's own shortcuts, another

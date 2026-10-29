@@ -199,15 +199,7 @@ fn an_export_already_imported_has_nothing_new() {
     until(&mut rt, "the items", |s| s.items.len() == 3);
 
     // ⇧⌘I opens the import view in a vault with items.
-    rt.key(KeyEvent {
-        key: Key::Command('i'),
-        mods: Mods {
-            cmd: true,
-            shift: true,
-            ..Mods::default()
-        },
-    });
-    rt.frame(1.0 / 60.0);
+    import_passwords(&mut rt);
     assert!(rt.state.import.open && shows(&rt, "Drop an export here"));
 
     drop_file(&mut rt, file);
@@ -561,6 +553,16 @@ fn import_passwords_leaves_the_install_page_and_settings() {
     rt.state.hotkey.recorder().cancel();
     import_passwords(&mut rt);
     assert!(!rt.state.settings_open && rt.state.import.open);
+
+    // Dropping an export while Settings is open leaves Settings for the import view.
+    let mut rt = scene("settings");
+    assert!(rt.state.settings_open);
+    rt.drop_files(
+        vec![PathBuf::from("/fixture/export.1pux")],
+        Some((600.0, 300.0)),
+    );
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.settings_open && rt.state.import.showing());
 }
 
 /// A dialog answering after its import was cancelled is ignored; a Choose

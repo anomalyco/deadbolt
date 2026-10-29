@@ -3,18 +3,23 @@
 //! their installer; neither files nor somebody else's links are replaced.
 //! Scans and installs run off the UI thread: PATH can name slow or
 //! unreadable directories.
+
+mod view;
+
+pub use view::{offer, page, setting};
+
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{Receiver, Sender, channel};
-use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use deadbolt_client::Paths;
 use rune::{Tx, Waker};
 
 use crate::binary;
 use crate::onboarding::COPIED_FOR;
+use crate::worker::Inbox;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Existing {
@@ -197,14 +202,15 @@ pub fn scan(source: &Path, home: &Path, path: &OsStr, search: &[PathBuf]) -> Sca
         .filter(|p| p.is_absolute())
         .collect();
     let (mut destination, _) = destination(home, &dirs);
+    let extra = destination
+        .parent()
+        .is_none_or(|dir| !search.iter().any(|d| d == dir))
+        .then(|| destination.clone());
     let mut found: Vec<(PathBuf, Existing)> = search
         .iter()
         .map(|dir| dir.join("deadbolt"))
-        .chain(std::iter::once(destination.clone()))
-        .filter_map(|p| match existing(&p, source) {
-            Ok(Some(kind)) => Some((p, kind)),
-            Ok(None) | Err(_) => None,
-        })
+        .chain(extra)
+        .filter_map(|p| existing(&p, source).ok().flatten().map(|kind| (p, kind)))
         .collect();
     let found = match found.iter().position(|(_, kind)| kind.ours()) {
         Some(i) => Some(found.swap_remove(i)),
@@ -231,6 +237,7 @@ pub enum Copied {
 }
 
 struct Outcome {
+    seq: u64,
     scan: Scan,
     error: Option<String>,
     installing: bool,
@@ -241,9 +248,7 @@ struct Live {
     home: PathBuf,
     path: OsString,
     search: Vec<PathBuf>,
-    results: Sender<Outcome>,
-    inbox: Receiver<Outcome>,
-    waker: Arc<Mutex<Option<Waker>>>,
+    inbox: Inbox<Outcome>,
 }
 
 pub struct Installer {
@@ -259,13 +264,27 @@ pub struct Installer {
     pub error: Option<String>,
     /// Which command was copied, and when on the app's clock.
     pub copied: Option<(Copied, f64)>,
+    seq: u64,
     marker: Option<PathBuf>,
     live: Option<Live>,
 }
 
 impl Installer {
+    /// An installer for this process when running from a macOS `.app` bundle.
+    pub fn from_env(paths: &Paths) -> Option<Self> {
+        let source = std::env::current_exe()
+            .ok()
+            .as_deref()
+            .and_then(binary::bundled)?;
+        let home = std::env::var_os("HOME")?;
+        Some(Self::live(
+            source,
+            home.into(),
+            paths.config.with_file_name("app-command-offered"),
+        ))
+    }
+
     pub fn live(source: PathBuf, home: PathBuf, marker: PathBuf) -> Self {
-        let (results, inbox) = channel();
         let path = std::env::var_os("PATH").unwrap_or_default();
         let search = binary::search_dirs(&path, Some(&home));
         let mut state = Self {
@@ -276,14 +295,13 @@ impl Installer {
             busy: false,
             error: None,
             copied: None,
+            seq: 0,
             marker: Some(marker),
             live: Some(Live {
                 home,
                 path,
                 search,
-                results,
-                inbox,
-                waker: Arc::default(),
+                inbox: Inbox::new(),
             }),
         };
         state.refresh();
@@ -305,6 +323,7 @@ impl Installer {
             busy: false,
             error: None,
             copied: None,
+            seq: 0,
             marker: None,
             live: None,
         }
@@ -312,7 +331,7 @@ impl Installer {
 
     pub fn set_waker(&self, waker: Waker) {
         if let Some(live) = &self.live {
-            *live.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
+            live.inbox.set_waker(waker);
         }
     }
 
@@ -349,12 +368,13 @@ impl Installer {
         let Some(live) = &self.live else {
             return;
         };
+        self.seq += 1;
+        let seq = self.seq;
         self.error = None;
         self.busy = true;
         let (source, home) = (self.source.clone(), live.home.clone());
         let (path, search) = (live.path.clone(), live.search.clone());
-        let (results, waker) = (live.results.clone(), live.waker.clone());
-        let work = move || {
+        let spawned = live.inbox.poster().spawn("deadbolt-install", move |post| {
             let mut error = None;
             if installing {
                 let before = scan(&source, &home, &path, &search);
@@ -365,21 +385,14 @@ impl Installer {
                     error = Some(e.to_string());
                 }
             }
-            let outcome = Outcome {
+            post.send(Outcome {
+                seq,
                 scan: scan(&source, &home, &path, &search),
                 error,
                 installing,
-            };
-            if results.send(outcome).is_ok()
-                && let Some(wake) = waker.lock().unwrap_or_else(|e| e.into_inner()).clone()
-            {
-                wake();
-            }
-        };
-        if let Err(e) = std::thread::Builder::new()
-            .name("deadbolt-install".into())
-            .spawn(work)
-        {
+            });
+        });
+        if let Err(e) = spawned {
             self.busy = false;
             self.error = Some(format!("Couldn't check for the command: {e}"));
         }
@@ -387,19 +400,18 @@ impl Installer {
 
     /// Applies finished work and lets a "Copied" lapse. True when anything changed.
     pub fn poll(&mut self, now: f64) -> bool {
-        let mut changed = false;
-        if self
+        let mut changed = self
             .copied
-            .is_some_and(|(_, at)| now - at >= COPIED_FOR - 1e-3)
-        {
-            self.copied = None;
-            changed = true;
-        }
-        let outcomes: Vec<Outcome> = match &self.live {
-            Some(live) => live.inbox.try_iter().collect(),
+            .take_if(|(_, at)| now - *at >= COPIED_FOR - 1e-3)
+            .is_some();
+        let outcomes = match &mut self.live {
+            Some(live) => live.inbox.drain(),
             None => Vec::new(),
         };
         for outcome in outcomes {
+            if outcome.seq != self.seq {
+                continue;
+            }
             changed = true;
             self.busy = false;
             self.error = outcome.error;
@@ -426,13 +438,14 @@ impl Installer {
             .is_some_and(|(c, at)| c == which && now - at < COPIED_FOR)
     }
 
-    /// Opens the install page with a fresh scan.
+    /// Opens the install page with a fresh scan, answering the vault's offer.
     pub fn show(&mut self) {
         self.open = true;
+        self.answer();
         self.refresh();
     }
 
-    /// Leaves the install page. Having seen it answers the vault's offer.
+    /// Leaves the install page.
     pub fn close(&mut self) {
         self.open = false;
         self.answer();
@@ -444,6 +457,9 @@ impl Installer {
     }
 
     fn answer(&mut self) {
+        if self.offered {
+            return;
+        }
         self.offered = true;
         if let Some(marker) = &self.marker {
             let result = marker
@@ -494,9 +510,6 @@ impl Installer {
     }
 }
 
-// -------------------------------------------------------------------------------------------
-// Views: the install page, the vault's one-time offer, and the footer's Settings.
-
 impl crate::model::App {
     /// Opens the install page over the vault. It takes no drops, so a drag in
     /// progress is forgotten: the window won't hear when it ends.
@@ -507,333 +520,6 @@ impl crate::model::App {
         }
     }
 }
-
-mod view {
-    use rune::{El, Transition, col, row, text};
-    use rune_kit::{Button, ButtonVariant, ControlSize, Kit};
-
-    use super::{Copied, Existing, InstallError, Installer, quote, temporary};
-    use crate::model::App;
-    use crate::onboarding::view::{PANEL_W, bar, muted, page as centred, title};
-    use crate::view::Paged;
-
-    fn installer(s: &mut App) -> Option<&mut Installer> {
-        s.installer.as_mut()
-    }
-
-    /// A command to run, with a Copy button that confirms in place.
-    fn command(i: &Installer, k: &Kit, now: f64, which: Copied) -> El {
-        let (key, line, label) = match which {
-            Copied::Command => ("command", i.command(), "Copy command"),
-            Copied::Path => ("path-command", i.path_command(), "Copy PATH command"),
-        };
-        let copied = i.copied(which, now);
-        col()
-            .key(key)
-            .w_full()
-            .gap(8.0)
-            .items_start()
-            .child(
-                text(line)
-                    .key("line")
-                    .font(k.ty.mono)
-                    .color(k.c.text_base)
-                    .wrap()
-                    .w_full(),
-            )
-            .child(
-                Button::new(if copied { "Copied" } else { label })
-                    .variant(ButtonVariant::Neutral)
-                    .control_size(ControlSize::Large)
-                    .icon(if copied {
-                        k.glyph.check_small
-                    } else {
-                        k.glyph.copy
-                    })
-                    .on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
-                        let now = s.clock;
-                        if let Some(i) = installer(s) {
-                            i.copy(which, now, tx);
-                        }
-                    })
-                    .build(k)
-                    .key(if copied { "copied" } else { "copy" })
-                    .transition(Transition::blur_replace()),
-            )
-    }
-
-    fn action(k: &Kit, label: &str, busy: bool, press: fn(&mut Installer)) -> El {
-        Button::new(label)
-            .variant(ButtonVariant::Contrast)
-            .control_size(ControlSize::Large)
-            .disabled(busy)
-            .on_press(move |s: &mut App| {
-                if let Some(i) = installer(s) {
-                    press(i);
-                }
-            })
-            .build(k)
-            .key("action")
-    }
-
-    /// The install page, in place of the vault.
-    pub fn page(s: &App, k: &Kit) -> Paged {
-        let Some(i) = &s.installer else {
-            return col().into();
-        };
-        let mut body = col().w_full().gap(14.0).items_start();
-        let key = match &i.scan {
-            None => {
-                body = body
-                    .child(title(k, "title", "Install the deadbolt command"))
-                    .child(muted(k, "about", "Checking for an existing command…"));
-                "checking"
-            }
-            Some(_) if temporary(&i.source) => {
-                body = body
-                    .child(title(k, "title", "Install the deadbolt command"))
-                    .child(muted(k, "about", InstallError::Temporary.to_string()));
-                "temporary"
-            }
-            Some(scan) if scan.installed() => {
-                body = body
-                    .child(title(k, "title", "Command installed"))
-                    .child(muted(
-                        k,
-                        "about",
-                        format!("{} links to this app.", scan.destination.display()),
-                    ))
-                    .child(muted(
-                        k,
-                        "undo",
-                        format!("To undo: rm {}", quote(&scan.destination)),
-                    ));
-                "installed"
-            }
-            Some(scan) => match &scan.found {
-                Some((path, Existing::Moved(target))) => {
-                    body = body
-                        .child(title(k, "title", "Repair the deadbolt command"))
-                        .child(muted(
-                            k,
-                            "about",
-                            format!(
-                                "{} links to a Deadbolt that moved or was deleted ({}).",
-                                path.display(),
-                                target.display()
-                            ),
-                        ));
-                    if scan.manual {
-                        body = body
-                            .child(muted(
-                                k,
-                                "manual",
-                                "Administrator access is needed. Run this in your terminal:",
-                            ))
-                            .child(command(i, k, s.clock, Copied::Command));
-                    } else {
-                        let label = if i.busy {
-                            "Repairing…"
-                        } else {
-                            "Point it at this app"
-                        };
-                        body = body.child(action(k, label, i.busy, Installer::apply));
-                    }
-                    "moved"
-                }
-                Some((path, kind)) => {
-                    let name = match kind {
-                        Existing::Homebrew => "a Homebrew install",
-                        Existing::Cargo => "a Cargo install",
-                        _ => "an existing command",
-                    };
-                    let label = if i.busy { "Checking…" } else { "Check again" };
-                    body = body
-                        .child(title(k, "title", "Install the deadbolt command"))
-                        .child(muted(
-                            k,
-                            "about",
-                            format!(
-                                "Found {name} at {}. Remove it with its installer to use this app's command.",
-                                path.display()
-                            ),
-                        ))
-                        .child(
-                            Button::new(label)
-                                .variant(ButtonVariant::Neutral)
-                                .control_size(ControlSize::Large)
-                                .disabled(i.busy)
-                                .on_press(|s: &mut App| {
-                                    if let Some(i) = installer(s) {
-                                        i.refresh();
-                                    }
-                                })
-                                .build(k)
-                                .key("action"),
-                        );
-                    "existing"
-                }
-                None => {
-                    body = body
-                        .child(title(k, "title", "Install the deadbolt command"))
-                        .child(muted(
-                            k,
-                            "about",
-                            "Use Deadbolt from your terminal and coding agents.",
-                        ));
-                    if scan.manual {
-                        body = body
-                            .child(muted(
-                                k,
-                                "manual",
-                                "Administrator access is needed. Run this in your terminal:",
-                            ))
-                            .child(command(i, k, s.clock, Copied::Command));
-                    } else {
-                        let label = if i.busy {
-                            "Installing…"
-                        } else {
-                            "Install command"
-                        };
-                        body = body
-                            .child(muted(
-                                k,
-                                "location",
-                                format!("Links {}", scan.destination.display()),
-                            ))
-                            .child(action(k, label, i.busy, Installer::apply));
-                    }
-                    "install"
-                }
-            },
-        };
-        if let Some(scan) = &i.scan
-            && !scan.on_path
-            && matches!(key, "install" | "installed")
-        {
-            body = body
-                .child(muted(
-                    k,
-                    "path",
-                    "If your terminal can't find deadbolt, add this to your shell profile:",
-                ))
-                .child(command(i, k, s.clock, Copied::Path));
-        }
-        let mut panel = col()
-            .key("panel")
-            .w(PANEL_W)
-            .gap(14.0)
-            .child(body.key(key).transition(Transition::blur_replace()));
-        if let Some(error) = &i.error {
-            panel = panel.child(
-                text(error.clone())
-                    .key("install-error")
-                    .font(k.ty.text_small)
-                    .color(k.c.danger.fg)
-                    .wrap()
-                    .w_full()
-                    .transition(Transition::opacity()),
-            );
-        }
-        let back = bar(k, "Back", &crate::onboarding::view::CHEVRON_LEFT, |s| {
-            if let Some(i) = installer(s) {
-                i.close();
-            }
-        });
-        centred("install-command", Some(back), panel)
-    }
-
-    /// The vault's one-time offer, above the copy notice.
-    pub fn offer(s: &App, k: &Kit) -> Option<El> {
-        let i = s.installer.as_ref().filter(|i| i.offering())?;
-        let moved = matches!(
-            i.scan.as_ref().and_then(|s| s.found.as_ref()),
-            Some((_, Existing::Moved(_)))
-        );
-        let (head, about, label) = if moved {
-            (
-                "Your deadbolt command needs repair",
-                "It links to a Deadbolt that moved or was deleted.",
-                "Repair…",
-            )
-        } else {
-            (
-                "Use Deadbolt from your terminal",
-                "Install the deadbolt command for your shell and coding agents.",
-                "Install…",
-            )
-        };
-        let mut card = col()
-            .key("command-offer")
-            .role("status")
-            .w(crate::view::NOTICE_W)
-            .self_center()
-            .padding(12.0)
-            .gap(10.0)
-            .radius(k.radius.lg)
-            .fill(k.c.layer_01)
-            .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
-        for shadow in k.shadow_layers(&k.elevation.floating) {
-            card = card.box_shadow(shadow);
-        }
-        Some(
-            card.child(
-                col()
-                    .key("text")
-                    .w_full()
-                    .gap(2.0)
-                    .child(text(head).font(k.ty.ui_medium).color(k.c.text_strong))
-                    .child(muted(k, "about", about)),
-            )
-            .child(
-                row()
-                    .key("actions")
-                    .gap(8.0)
-                    .child(
-                        Button::new(label)
-                            .variant(ButtonVariant::Neutral)
-                            .control_size(ControlSize::Large)
-                            .on_press(|s: &mut App| s.show_installer())
-                            .build(k)
-                            .key("open"),
-                    )
-                    .child(
-                        Button::new("Not now")
-                            .variant(ButtonVariant::Ghost)
-                            .control_size(ControlSize::Large)
-                            .on_press(|s: &mut App| {
-                                if let Some(i) = installer(s) {
-                                    i.dismiss();
-                                }
-                            })
-                            .build(k)
-                            .key("dismiss"),
-                    ),
-            ),
-        )
-    }
-
-    /// Settings' way to the install page, when the app has a command to install.
-    pub fn setting(s: &App, k: &Kit) -> Option<El> {
-        let i = s.installer.as_ref()?;
-        let label = if i.installed() {
-            "Details…"
-        } else {
-            "Install…"
-        };
-        Some(
-            crate::settings::button(label)
-                .on_press(|s: &mut App| {
-                    s.close_settings();
-                    s.show_installer();
-                })
-                .build(k)
-                .key("install"),
-        )
-    }
-}
-
-pub use view::{offer, page, setting};
 
 #[cfg(test)]
 mod tests {
@@ -1014,9 +700,64 @@ mod tests {
         state.marker = Some(marker.clone());
         state.offered = false;
         state.show();
+        assert!(state.offered, "opening the page answers the offer");
         assert!(!state.offering(), "not while the page is open");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
         state.close();
         assert!(!state.offering());
-        assert_eq!(fs::read_to_string(marker).unwrap(), "1\n");
+    }
+
+    #[test]
+    fn stale_scan_outcomes_do_not_clobber_newer_install_state() {
+        let home = tempfile::tempdir().unwrap();
+        let source = helper(home.path(), "Deadbolt.app");
+        let marker = home.path().join("app-command-offered");
+        let inbox = Inbox::new();
+        let post = inbox.poster();
+        let destination = home.path().join(".local/bin/deadbolt");
+        let mut state = Installer {
+            open: true,
+            offered: false,
+            source,
+            scan: None,
+            busy: true,
+            error: None,
+            copied: None,
+            seq: 2,
+            marker: Some(marker),
+            live: Some(Live {
+                home: home.path().into(),
+                path: OsString::new(),
+                search: Vec::new(),
+                inbox,
+            }),
+        };
+        post.send(Outcome {
+            seq: 1,
+            scan: Scan {
+                destination: destination.clone(),
+                on_path: true,
+                found: None,
+                manual: false,
+            },
+            error: None,
+            installing: false,
+        });
+        assert!(!state.poll(0.0));
+        assert!(state.busy && state.scan.is_none());
+
+        post.send(Outcome {
+            seq: 2,
+            scan: Scan {
+                destination: destination.clone(),
+                on_path: true,
+                found: Some((destination, Existing::Ours)),
+                manual: false,
+            },
+            error: None,
+            installing: true,
+        });
+        assert!(state.poll(0.0));
+        assert!(!state.busy && state.installed());
     }
 }

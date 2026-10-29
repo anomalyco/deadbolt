@@ -179,6 +179,51 @@ fn the_create_form_confirms_in_place() {
     assert!(rt.state.onboarding.passphrase.text.is_empty());
 }
 
+#[test]
+fn enter_in_name_fields_keeps_a_single_focused_field_and_submits_when_ready() {
+    let focused = |rt: &Runtime<App>| {
+        let o = &rt.state.onboarding;
+        [
+            ("device", o.device.focused),
+            ("vault", o.vault.focused),
+            ("passphrase", o.passphrase.focused),
+            ("repeat", o.repeat.focused),
+        ]
+        .into_iter()
+        .filter_map(|(name, on)| on.then_some(name))
+        .collect::<Vec<_>>()
+    };
+    let mut rt = runtime("create", true);
+    rt.update(|s, _| {
+        s.onboarding.blur();
+        s.onboarding.device.focused = true;
+    });
+    rt.frame(FRAME);
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert_eq!(focused(&rt), ["passphrase"]);
+
+    rt.update(|s, _| {
+        s.onboarding.blur();
+        s.onboarding.vault.focused = true;
+    });
+    rt.frame(FRAME);
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert_eq!(focused(&rt), ["passphrase"]);
+
+    let mut rt = runtime("create-ready", true);
+    rt.update(|s, _| {
+        s.onboarding.blur();
+        s.onboarding.vault = rune::TextEdit::new("work");
+        s.onboarding.vault.focused = true;
+    });
+    rt.frame(FRAME);
+    rt.key(key(Key::Enter));
+    rt.frame(FRAME);
+    assert_eq!(rt.state.onboarding.step, Step::Working(Flow::Create));
+}
+
 /// ⇧⌘Space in a field opens the quick panel; it never types a space, not
 /// into a plain field and not, unseen, into a passphrase.
 #[test]
@@ -293,25 +338,14 @@ fn joining_lands_in_the_vault() {
 /// leaves the flow where it is: it finishes or fails on its own.
 #[test]
 fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
-    use deadbolt_client::protocol::{Change, Status};
-    let locked = Status {
-        pid: 1,
-        version: "fixture".into(),
-        protocol: deadbolt_client::protocol::PROTOCOL_VERSION,
-        program: None,
-        home: String::new(),
-        initialized: true,
-        unlocked: false,
-        locks_in_secs: None,
-        caller: deadbolt_client::protocol::CallerInfo::unverified("fixture"),
-        device: None,
-        vaults: Vec::new(),
-        peers_online: 0,
-        peers: 0,
-        touch_id_available: false,
-        touch_id_enabled: false,
-        touch_id_ready: false,
-        touch_id_reset: false,
+    use deadbolt_client::protocol::Change;
+    let locked = {
+        let mut st = runtime("locked", false).state.status.unwrap();
+        st.device = None;
+        st.vaults.clear();
+        st.peers_online = 0;
+        st.peers = 0;
+        st
     };
     for scene in ["creating", "ticket", "code", "joining"] {
         let mut rt = runtime(scene, false);
