@@ -2,7 +2,10 @@
 //! window or picked with Choose File… is previewed, then imported, cancelled,
 //! or forgotten on locking. The exports are made up.
 
+// The agent reads the test switches these set (`DEADBOLT_NET`,
+// `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
 #![cfg(test)]
+#![cfg(debug_assertions)]
 
 mod support;
 

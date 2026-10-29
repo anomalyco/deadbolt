@@ -23,7 +23,8 @@ See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 `DEADBOLT_SIM_SEED`, `DEADBOLT_SIM_SEEDS`, `DEADBOLT_SIM_TRACE`,
 `DEADBOLT_SIM_TIMING`. Membership tests use `DEADBOLT_MEMBERSHIP_CASES` and
 `DEADBOLT_MEMBERSHIP_DEPTH`; other property tests use `PROPTEST_CASES`.
-CLI integration tests use `DEADBOLT_NET=local` and `DEADBOLT_KDF=fast`.
+CLI integration tests use `DEADBOLT_NET=local` and `DEADBOLT_KDF=fast`, which
+only debug builds read (so they don't run under `--release`).
 
 ## Rune
 
