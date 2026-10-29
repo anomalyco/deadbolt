@@ -41,6 +41,16 @@ beforeEach(() => {
       case "device-join-finish":
         vault = "ready"
         return { reply: { type: m.body.type, ok: true } }
+      case "fill-form":
+        // Strict: a card's number needs the passphrase, every time.
+        if (m.body.passphrase === undefined) return { reply: { type: "error", code: "passphrase_needed", message: "Enter your passphrase to continue." } }
+        if (m.body.passphrase === "wrong") return { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } }
+        // Chrome discarded the worker: a fresh one answers, locked.
+        if (m.body.passphrase === "discarded") {
+          vault = "locked"
+          return { reply: { type: "error", code: "locked", message: "Deadbolt is locked" } }
+        }
+        return { reply: { type: "fill-form", values: { number: "4242424242424242" }, verified: true } }
       case "device-logins":
         return { reply: { type: "device-logins", accounts: [] } }
       case "device-join-start":
@@ -119,8 +129,19 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-generate", length: 24, symbols: false })).toEqual({ type: "device-generate", length: 24, symbols: false })
     expect(deviceCommand({ type: "device-generate", length: 4, symbols: true })).toBeNull()
     expect(deviceCommand({ type: "device-generate", length: 24.5, symbols: true })).toBeNull()
-    expect(deviceCommand({ type: "device-copied", value: "pw", extra: 1 })).toEqual({ type: "device-copied", value: "pw" })
-    expect(deviceCommand({ type: "device-copied", value: "" })).toBeNull()
+    // A copy is named by its salted hash only; the value itself is refused.
+    const salt = "0".repeat(32)
+    const hash = "f".repeat(64)
+    expect(deviceCommand({ type: "device-copied", salt, hash, value: "pw" })).toEqual({ type: "device-copied", salt, hash })
+    expect(deviceCommand({ type: "device-copied", value: "pw" })).toBeNull()
+    expect(deviceCommand({ type: "device-copied", salt: "x", hash })).toBeNull()
+    expect(deviceCommand({ type: "device-copied", salt, hash: hash.toUpperCase() })).toBeNull()
+    const reauthId = "a".repeat(32)
+    expect(deviceCommand({ type: "device-reauth", id: reauthId })).toEqual({ type: "device-reauth" })
+    expect(deviceCommand({ type: "device-reauth-confirm", id: reauthId, passphrase: "p", extra: 1 })).toEqual({ type: "device-reauth-confirm", id: reauthId, passphrase: "p" })
+    expect(deviceCommand({ type: "device-reauth-confirm", id: reauthId, passphrase: "" })).toBeNull()
+    expect(deviceCommand({ type: "device-reauth-confirm", id: "nope", passphrase: "p" })).toBeNull()
+    expect(deviceCommand({ type: "device-reauth-cancel", id: reauthId })).toEqual({ type: "device-reauth-cancel", id: reauthId })
   })
 
   test("a join starts and polls without counting as use or asking hello again", async () => {
@@ -421,6 +442,190 @@ describe("wrong passphrases", () => {
   })
 })
 
+describe("a fill waiting on the passphrase", () => {
+  const body = { type: "fill-form" as const, origin: "https://shop.test", ref: `${"a".repeat(64)}:${"1".repeat(32)}`, fields: ["number" as const] }
+  const ask = { tabId: 1, title: "Visa •••• 4242", site: "shop.test" }
+  const waiting = async (backend: StandaloneBackend) => {
+    const r = await backend.device({ type: "device-reauth" })
+    return r.ok ? (r.reply.reauth as { id: string; title: string; site: string } | null) : null
+  }
+
+  test("is asked in the popup, runs once with the passphrase, and keeps none of it", async () => {
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const fill = backend.reauth(body, ask, new AbortController().signal)
+    await settle()
+    expect(fake.popups).toEqual([7])
+    const r = await waiting(backend)
+    expect(r).toMatchObject({ title: "Visa •••• 4242", site: "shop.test" })
+    // A wrong passphrase leaves it waiting; the right one fills.
+    const wrong = await backend.device({ type: "device-reauth-confirm", id: r!.id, passphrase: "wrong" })
+    expect(!wrong.ok && wrong.code).toBe("wrong_passphrase")
+    expect(await waiting(backend)).toEqual(r)
+    expect((await backend.device({ type: "device-reauth-confirm", id: r!.id, passphrase: "right" })).ok).toBe(true)
+    expect(await fill).toMatchObject({ values: { number: "4242424242424242" }, verified: true })
+    expect(await waiting(backend)).toBeNull()
+    const sent = requests().filter((b) => b.type === "fill-form")
+    expect(sent.map((b) => b.passphrase)).toEqual(["wrong", "right"])
+    // Answered once: the same id fills nothing more.
+    const again = await backend.device({ type: "device-reauth-confirm", id: r!.id, passphrase: "right" })
+    expect(!again.ok && again.code).toBe("expired")
+    expect(requests().filter((b) => b.type === "fill-form")).toHaveLength(2)
+  })
+
+  /** Chrome's windows and Deadbolt's open pages, as this test has them; returns what the background did to tabs and windows, in order. */
+  const browser = (contexts: Array<{ contextType: string; documentUrl: string; tabId?: number }>, focused: number[]) => {
+    const c = (globalThis as unknown as { chrome: Record<string, any> }).chrome
+    const log: string[] = []
+    c.runtime.getContexts = async () => contexts
+    c.windows = { get: async (id: number) => ({ id, focused: focused.includes(id) }), update: async (id: number) => void log.push(`focus ${id}`) }
+    c.tabs.update = async (id: number) => {
+      log.push(`activate ${id}`)
+      return { id, ...fake.tabs[id] }
+    }
+    c.tabs.remove = async (id: number) => void log.push(`close ${id}`)
+    return { c, log }
+  }
+  const answer = async (backend: StandaloneBackend, fill: Promise<unknown>, log: string[]) => {
+    const done = fill.then(() => log.push("filled"))
+    expect((await backend.device({ type: "device-reauth-confirm", id: (await waiting(backend))!.id, passphrase: "right" })).ok).toBe(true)
+    await done
+  }
+
+  test("a device.html left in a background tab doesn't hide it: the popup opens over the page", async () => {
+    // The user's Settings, in another tab of the same window and in a window behind.
+    fake.tabs[5] = { active: false, windowId: 7 }
+    fake.tabs[6] = { active: true, windowId: 8 }
+    const { log } = browser(
+      [
+        { contextType: "TAB", documentUrl: `${DEVICE_URL}#settings`, tabId: 5 },
+        { contextType: "TAB", documentUrl: DEVICE_URL, tabId: 6 },
+      ],
+      [7],
+    )
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const fill = backend.reauth(body, ask, new AbortController().signal)
+    await settle()
+    expect(fake.popups).toEqual([7])
+    await answer(backend, fill, log)
+    // The page comes to the front before the fill goes on; the user's own tabs stay open.
+    expect(log).toEqual(["activate 1", "focus 7", "filled"])
+  })
+
+  test("a device.html in front asks there, and the page comes back to the front before the fill goes on", async () => {
+    fake.tabs[1] = { active: false, windowId: 7 }
+    fake.tabs[5] = { active: true, windowId: 7 }
+    const { log } = browser([{ contextType: "TAB", documentUrl: DEVICE_URL, tabId: 5 }], [7])
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const fill = backend.reauth(body, ask, new AbortController().signal)
+    await settle()
+    expect(fake.popups).toEqual([])
+    expect(fake.opened).toEqual([])
+    await answer(backend, fill, log)
+    expect(log).toEqual(["activate 1", "focus 7", "filled"])
+  })
+
+  test("without the popup, device.html opens in a tab of its own, which alone is closed after", async () => {
+    const { c, log } = browser([], [7])
+    c.action.openPopup = async () => {
+      throw new Error("no focused window")
+    }
+    c.tabs.create = async ({ url }: { url: string }) => {
+      fake.opened.push(url)
+      return { id: 9 }
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const fill = backend.reauth(body, ask, new AbortController().signal)
+    await settle()
+    expect(fake.opened).toEqual([`${DEVICE_URL}#reauth`])
+    await answer(backend, fill, log)
+    expect(log).toEqual(["activate 1", "focus 7", "close 9", "filled"])
+  })
+
+  test("a newer fill never counts on the tab an older one opened, which is closing", async () => {
+    const { c, log } = browser([], [7])
+    c.action.openPopup = async () => {
+      throw new Error("no focused window")
+    }
+    let next = 9
+    c.tabs.create = async ({ url }: { url: string }) => {
+      fake.opened.push(url)
+      const id = next++
+      // The new tab is in front of the focused window, and Chrome lists it.
+      fake.tabs[id] = { active: true, windowId: 7 }
+      c.runtime.getContexts = async () => [{ contextType: "TAB", documentUrl: `${DEVICE_URL}#reauth`, tabId: id }]
+      return { id }
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const first = backend.reauth(body, ask, new AbortController().signal)
+    first.catch(() => {})
+    await settle()
+    expect(fake.opened).toHaveLength(1)
+    // Another pick before the first was answered: tab 9 goes with the first fill.
+    const second = backend.reauth(body, ask, new AbortController().signal)
+    await expect(first).rejects.toMatchObject({ code: "cancelled" })
+    await settle()
+    expect(fake.opened).toHaveLength(2)
+    expect(log).toContain("close 9")
+    await answer(backend, second, log)
+    expect(log.filter((l) => l.startsWith("close"))).toEqual(["close 9", "close 10"])
+    expect(log.at(-1)).toBe("filled")
+  })
+
+  test("a vault found locked when the passphrase is checked shows as locked", async () => {
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const fill = backend.reauth(body, ask, new AbortController().signal)
+    fill.catch(() => {})
+    await settle()
+    const r = await backend.device({ type: "device-reauth-confirm", id: (await waiting(backend))!.id, passphrase: "discarded" })
+    expect(!r.ok && r.code).toBe("locked")
+    expect(r.status.state).toBe("locked")
+    expect(backend.status.state).toBe("locked")
+    await expect(fill).rejects.toMatchObject({ code: "locked" })
+  })
+
+  test("a fill that ends unanswered leaves the user where they are", async () => {
+    fake.tabs[5] = { active: true, windowId: 7 }
+    const { log } = browser([{ contextType: "TAB", documentUrl: DEVICE_URL, tabId: 5 }], [7])
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const fill = backend.reauth(body, ask, new AbortController().signal)
+    await settle()
+    await backend.device({ type: "device-reauth-cancel", id: (await waiting(backend))!.id })
+    await expect(fill).rejects.toMatchObject({ code: "cancelled" })
+    expect(log).toEqual([])
+  })
+
+  test("ends on cancel, on lock and when the page navigates", async () => {
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const cancelled = backend.reauth(body, ask, new AbortController().signal)
+    await settle()
+    await backend.device({ type: "device-reauth-cancel", id: (await waiting(backend))!.id })
+    await expect(cancelled).rejects.toMatchObject({ code: "cancelled" })
+
+    const page = new AbortController()
+    const navigated = backend.reauth(body, ask, page.signal)
+    page.abort()
+    await expect(navigated).rejects.toMatchObject({ code: "cancelled" })
+    expect(await waiting(backend)).toBeNull()
+
+    const locked = backend.reauth(body, ask, new AbortController().signal)
+    await settle()
+    const id = (await waiting(backend))!.id
+    await backend.lock()
+    await expect(locked).rejects.toMatchObject({ code: "locked" })
+    expect(requests().filter((b) => b.type === "fill-form")).toHaveLength(0)
+    const late = await backend.device({ type: "device-reauth-confirm", id, passphrase: "right" })
+    expect(late.ok).toBe(false)
+  })
+})
+
 describe("clipboard", () => {
   const clears = () => fake.sent.filter((m): m is VaultClipboard => (m as { type: string }).type === VAULT_CLIPBOARD)
 
@@ -438,7 +643,7 @@ describe("clipboard", () => {
   test("without the clipboard permissions nothing is kept, nothing scheduled, nothing cleared", async () => {
     const backend = new StandaloneBackend()
     await backend.connect()
-    const r = await backend.device({ type: "device-copied", value: "pw" })
+    const r = await backend.device({ type: "device-copied", ...(await record("pw")) })
     expect(r.ok && r.reply.clears).toBe(false)
     expect(fake.alarms[CLIPBOARD_ALARM]).toBeUndefined()
     expect(fake.session[COPIED_KEY]).toBeUndefined()
@@ -452,7 +657,7 @@ describe("clipboard", () => {
     setSystemTime(start)
     const backend = new StandaloneBackend()
     await backend.connect()
-    const r = await backend.device({ type: "device-copied", value: "pw" })
+    const r = await backend.device({ type: "device-copied", ...(await record("pw")) })
     expect(r.ok && r.reply.clears).toBe(true)
     expect(fake.alarms[CLIPBOARD_ALARM]).toEqual({ when: start.getTime() + 30_000 })
     const kept = fake.session[COPIED_KEY] as { salt: string; hash: string }
@@ -472,7 +677,7 @@ describe("clipboard", () => {
     fake.granted = new Set(["clipboardRead", "clipboardWrite"])
     const backend = new StandaloneBackend()
     await backend.connect()
-    await backend.device({ type: "device-copied", value: "pw" })
+    await backend.device({ type: "device-copied", ...(await record("pw")) })
     const restarted = new StandaloneBackend()
     await restarted.connect()
     await restarted.lock()

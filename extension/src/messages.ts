@@ -479,10 +479,33 @@ export type DeviceCommand =
   | { type: "device-used" }
   /** A new password from the core's generator: `{ type: "device-generate", password }`. */
   | { type: "device-generate"; length: number; symbols: boolean }
-  /** The page copied a password or code: clear it in 30 s if the clipboard permissions allow (`{ clears }`). */
-  | { type: "device-copied"; value: string }
+  /**
+   * The page copied a password or code: clear it in 30 s if the clipboard
+   * permissions allow (`{ clears }`). Only its salted hash (bg/clipboard.ts),
+   * never the value.
+   */
+  | { type: "device-copied"; salt: string; hash: string }
+  /** The fill waiting on the passphrase, if any: `{ type: "device-reauth", reauth: Reauth | null }`. */
+  | { type: "device-reauth" }
+  /** The passphrase for fill `id`, once: the background runs that fill with it and forgets it. */
+  | { type: "device-reauth-confirm"; id: string; passphrase: string }
+  /** The user turned fill `id` down: nothing is filled. */
+  | { type: "device-reauth-cancel"; id: string }
   | { type: "list"; origin: string }
   | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
+
+/** A fill waiting on the passphrase (a card's number or code under Strict), as Deadbolt's own pages ask for it. */
+export interface Reauth {
+  id: string
+  /** "Visa •••• 4242". */
+  title: string
+  site: string
+}
+
+/** Broadcast to Deadbolt's own pages when a fill starts or stops waiting on the passphrase: they ask device-reauth. */
+export interface ReauthChanged {
+  type: "db:reauth"
+}
 
 /** device-join-status's reply: `code` while waiting (so a reloaded page shows it again), `vault` once admitted, `message` when it failed. */
 export type JoinStatus = { type: "device-join-status"; phase: "waiting" | "admitted" | "failed" | "idle"; code?: string; vault?: string; message?: string }
@@ -507,5 +530,5 @@ export interface LoginDetail {
 /** `reply`: the vault's answer as it gave it; `ms`: how long it took. */
 export type DeviceReply =
   | { ok: true; reply: Record<string, unknown>; ms: number; status: Status }
-  /** `code`: why, for the page to act on ("wrong_passphrase", "passphrase_needed", "backoff", "locked"). */
+  /** `code`: why, for the page to act on ("wrong_passphrase", "passphrase_needed", "backoff", "locked", "expired"). */
   | { ok: false; message: string; status: Status; code?: string }

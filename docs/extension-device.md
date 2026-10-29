@@ -1,9 +1,11 @@
-# The extension as a device — Phase 1 proof
+# The extension as a device
 
 The extension is its own Deadbolt device: a fresh Ed25519 `DeviceSecret`, a
 membership entry and an encrypted vault replica. A CLI on the same computer is
-another peer, not a required helper. This is a proof, not a feature-complete
-replacement for the native-backed extension.
+another peer, not a required helper. The standalone build supports daily login
+autofill, save/update offers, password generation and identity/card filling.
+Passkeys and the other limitations below still use the browser's own fallback;
+there is no silent fallback to a native host.
 
 ## Architecture
 
@@ -23,16 +25,47 @@ later flip makes the standalone device the default, with a first run that detect
 an installed native host and offers "Pair with Deadbolt on this Mac" instead of
 creating a separate vault; neither the flip nor that first run is in this proof.
 
-The proof supports a single vault, login create/update/list/fill, passphrase
-lock/unlock, joining an existing vault or inviting a CLI device, and bidirectional sync. Unsupported
-operations fail rather than silently delegating to a native host.
+The device supports a single vault, login create/update/list/fill, save/update
+offers after sign-in, generated passwords, identity/card fills, passphrase
+lock/unlock, joining an existing vault or inviting a CLI device, and bidirectional
+sync. Unsupported operations fail rather than silently delegating to a native host.
 
-The proof deliberately limits login matching to an **exact origin**. The existing
-background frame, user-gesture, navigation and menu clickjacking checks are reused.
-The full CLI public-suffix matching policy is a follow-up; the proof does not
-broaden where a login may be filled. It advertises no passkey, card reauthentication,
-password-generation capability. Synced OTP fields use core's TOTP generator for
-the current code; the proof's login editor does not create OTP fields.
+### Shared autofill rules
+
+Both the native agent and wasm device call `deadbolt-core::site`, moved from the
+CLI without changing its policy: the full Public Suffix List including private
+suffixes, same-site subdomains, every saved URL field, and origin/host/parent/site
+ranking. Recent fills break ranking ties in encrypted local metadata. The same
+shared policy gates list, fill, credential checks and saves. The existing
+background frame, user-gesture, navigation and menu clickjacking checks still run;
+a frame asks for its own origin, never its parent's credentials.
+
+Save offers use the existing `bg/save.ts` flow. Checks use shared trimmed,
+case-insensitive username comparison and constant-time password hash comparison;
+without a username they match by password alone. A confirmed update changes only
+the existing login's password, preserving its title, username and saved URLs.
+New logins and updates commit to the encrypted log before being announced, then
+wake background sync. “Never for this site” remains the background's local
+`neverSave` preference, shared with the native build; it is not a vault command
+and does not sync.
+
+Password generation uses the same Rust page-rule planning, vendored Apple site
+rules and bounded candidate/kept-password lifecycle as native. `generate-check`
+works while locked; generation requires unlock. Candidates last two minutes,
+kept passwords fifteen minutes, are bound to the requesting origin, and are
+forgotten on save, drop or lock. The existing signup/change-password menu and
+post-submit save flow use these commands unchanged.
+
+`forms` and `fill-form` use shared Rust identity/card field allowlists and labels.
+Only requested fields leave the vault; identity ID numbers, notes and card PINs
+never fill. Strict requires the local passphrase for every card-number/CVV fill,
+enforced in Rust's `policy.rs`, not just the extension UI. Comfortable and Relaxed
+follow the native Touch-ID-off rule: the explicit menu pick is sufficient. There
+is no standalone Activity log, so card fills are **not** recorded as Activity.
+Identities and cards can be synced from another device; the standalone editor
+still edits logins only. Its website input now uses the same site policy too:
+public suffixes and single-label intranet hosts cannot be saved by hand. Synced
+OTP fields use core's current-code generator; the editor does not create OTP fields.
 
 ### Storage: redb over OPFS
 
@@ -213,8 +246,10 @@ passphrase check before a password is shown or copied. The choice is a setting i
 worker with every unlock and change, and the Rust core enforces Strict itself
 (`crates/ext-core/src/policy.rs`): under Strict it returns no password without a
 passphrase, which it checks against the open store's key set, and a worker that
-was never told assumes Strict. Card fields and Touch ID/passkey unlock don't exist
-in this build yet. The unwrapped key stays in worker memory only under every
+was never told assumes Strict. Card number/CVV fills also require the passphrase on every Strict fill.
+Comfortable and Relaxed currently follow the native rule with Touch ID off (the
+explicit pick is enough), rather than claiming biometric reauthentication.
+Touch ID/passkey unlock is not implemented. The unwrapped key stays in worker memory only under every
 preset: session-key restoration and passkey PRF wrapping need their own security
 review and browser capability handling, so an offscreen restart still locks under
 Comfortable and Relaxed.
@@ -234,7 +269,8 @@ never copies passwords). It can clear it again 30 seconds later, or when Deadbol
 locks, whichever is first, and only if the clipboard still holds that value, so
 nothing the user copied since is lost. The service worker keeps no copy: only a
 salted SHA-256 of the value, in memory and in `chrome.storage.session`, and a
-one-shot alarm. The offscreen document (opened with the `CLIPBOARD` reason too)
+one-shot alarm. The page computes that digest before sending `device-copied
+{salt, hash}`; the plaintext copy is never sent to the service worker. The offscreen document (opened with the `CLIPBOARD` reason too)
 reads the clipboard, compares, and empties it.
 
 Reading and writing the clipboard from there needs `clipboardRead` and
@@ -273,7 +309,11 @@ page, saves a login there and sees it listed without a click, checks hello, list
 and fill answer within the latency limit, fills it through the real inline menu,
 locks, checks OPFS holds no plaintext markers, rejects reads while locked and a
 wrong passphrase, unlocks with the real KDF, and restarts Chrome to check the
-vault persists and starts locked.
+vault persists and starts locked. It also fills a login saved for `acme.test` on
+`accounts.acme.test`, rejects lookalike sites, and exercises save/update offers
+and generated passwords on signup and password-change forms. Submit flows use
+trusted localhost: HTTP `.test` pages lack Web Crypto, so the shared content
+script cannot track typed password values there.
 
 The full run adds a real CLI over n0's public relays, so it stays out of CI. It
 pairs a CLI started with `deadbolt join`, checks the browser's login reached it and
@@ -294,6 +334,15 @@ sets its separate local passphrase, lists both devices and all five logins, and
 fills the synced login and current TOTP. Lock/unlock and browser restart verify the
 joined replica persists. The offline smoke also checks the no-relay failure.
 
+Both online runs also exercise signup, generated password changes and two-step
+sign-in on `https://acme-demo.i.vogel.dev`, plus synced identities and cards on
+localhost and the demo checkout. Strict card fills reject a wrong passphrase and
+require the right one for every fill; Comfortable and Relaxed fill on the explicit
+menu pick, following the native Touch-ID-off rule. The demo keeps its password
+change form visible after success; if the shared save heuristic does not offer an
+update there, the test verifies the update at the next successful sign-in.
+`--video <dir>` saves headless WebM recordings of these synthetic flows.
+
 All runs trap native messaging, use a profile with no native host manifest, and
 use only synthetic credentials; the profile and CLI store are deleted at the end.
 The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
@@ -309,10 +358,28 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
    storage/lifetime adapters, and exercise
    suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
    startup contacts (the proof dials sequentially within the same 30-second budget).
-3. Trusted-use accounting, offscreen session-key restoration (security review
-   first), browser-quit semantics and the card re-authentication gate.
+3. Offscreen session-key restoration (security review first), stronger
+   browser-lifetime guarantees and biometric card reauthentication.
 4. Add WebAuthn PRF/passkey unlock with capability detection; review key wrapping,
    extension origin binding and memory/permission boundaries.
-5. Reach native autofill feature parity (PSL policy, OTP editing, generation, passkeys,
-   cards/identities, SSO and learning), harden packaging/update/CSP permissions,
-   measure wasm size/unlock across devices, and decide native-path retirement.
+5. Finish OTP/identity/card editing, passkeys and learning; harden
+   packaging/update/CSP permissions, measure wasm size/unlock across devices, and
+   decide native-path retirement.
+
+## Remaining limitations
+
+- One vault per browser device; no native-host discovery or automatic migration.
+- No passkey registration/assertion capability and no biometric/PRF unlock.
+  WebAuthn falls back to the browser. This is a separate extraction across
+  `cli/src/webauthn.rs` (ES256/CBOR/client data), `agent/passkeys.rs` (RP and
+  exclusion checks, listing, signing and mutation planning) and the browser host's
+  ceremony adapter. Move the pure crypto and validation into core, then add
+  wasm storage/consent/cancellation adapters, registration and assertion e2e,
+  and durable-save/exclusion-race checks. Initially report `canVerify=false` and
+  UV=false, handing required-UV ceremonies to the browser; passphrase card
+  reauthentication must not silently claim native Touch ID verification.
+- No standalone Activity log or learning log. Neither capability is advertised.
+- The vault UI edits logins only: other item kinds and OTP secrets must be created
+  on a peer and synced. No automatic save/update offers for identities or cards.
+- Worker/offscreen loss locks every preset; no session-key restoration. Chrome
+  extension removal or storage clearing destroys this replica.

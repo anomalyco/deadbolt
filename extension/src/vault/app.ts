@@ -6,15 +6,15 @@
 // lock preset, the vault's name). Passphrases and passwords go to the
 // background in one message and are never kept here or in storage.
 
-import type { DeviceCommand, DeviceReply, LockPreset, PopupReply, Status, StatusChanged, VaultDevice } from "../messages"
-import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
+import type { DeviceCommand, DeviceReply, LockPreset, PopupReply, Reauth, ReauthChanged, Status, StatusChanged, VaultDevice } from "../messages"
+import { CLIPBOARD_PERMISSIONS, record } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
 import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from "./kit"
 import { detailView, editView, listView } from "./logins"
 import { settingsView } from "./settings"
-import { Setup, unlockView } from "./setup"
+import { reauthView, Setup, unlockView } from "./setup"
 
 export type Surface = "popup" | "page"
 
@@ -56,6 +56,8 @@ export class App {
   preset: LockPreset = "comfortable"
   site: Site | null = null
   syncing = false
+  /** A page's fill waiting on the passphrase, shown before anything else. */
+  reauth: Reauth | null = null
   /** The search, kept across views. */
   query = ""
   private route: Route = { name: "list" }
@@ -124,6 +126,7 @@ export class App {
       default:
         return message(icon("plug"), "Deadbolt isn't running", "Reload the extension and try again.")
     }
+    if (this.reauth) return reauthView(this, this.reauth)
     switch (this.route.name) {
       case "list":
         return listView(this)
@@ -209,10 +212,36 @@ export class App {
     await this.askClearing()
   }
 
-  /** The page copied a password or code: the background clears it in 30 s if it may. */
+  /** The page copied a password or code: the background clears it in 30 s if it may. It gets only a salted hash of it. */
   async copiedSecret(value: string): Promise<string> {
-    const r = await this.run({ type: "device-copied", value })
+    const r = await this.run({ type: "device-copied", ...(await record(value)) })
     return r.ok && r.reply.clears === true ? "Copied. It clears in 30 seconds." : "Copied."
+  }
+
+  /** Asks whether a page's fill waits on the passphrase, and shows its prompt (or stops showing it). */
+  async loadReauth() {
+    if (this.status.state !== "ready") return
+    const r = await this.run({ type: "device-reauth" })
+    const next = r.ok ? reauthOf(r.reply.reauth) : null
+    if (next?.id === this.reauth?.id) return
+    this.reauth = next
+    if (this.shell === "ready") this.show(0)
+  }
+
+  /** The fill was answered (or ended with `message`): the popup closes; device.html goes back to the vault. */
+  reauthDone(message?: string) {
+    this.reauth = null
+    if (this.surface === "popup" && !message) return window.close()
+    this.show(-1)
+    if (message) this.announce(message)
+  }
+
+  async reauthCancel(reauth: Reauth) {
+    await this.run({ type: "device-reauth-cancel", id: reauth.id })
+    if (this.reauth?.id !== reauth.id) return
+    this.reauth = null
+    if (this.surface === "popup") return window.close()
+    this.show(-1)
   }
 
   /** The vault just opened (unlock, create, join): show it, unless a status push already did. */
@@ -237,6 +266,7 @@ export class App {
       this.logins = null
       this.devices = null
       this.site = null
+      this.reauth = null
     }
     if (!this.root.contains(this.stage)) this.root.replaceChildren(this.header, this.stage, this.footer, this.live)
     const first = this.shell === ""
@@ -278,7 +308,8 @@ export class App {
   /** Follows the background's status pushes, and starts. */
   start() {
     document.head.append(h("style", {}, ROLL_CSS))
-    chrome.runtime.onMessage.addListener((message: StatusChanged) => {
+    chrome.runtime.onMessage.addListener((message: StatusChanged | ReauthChanged) => {
+      if (message?.type === "db:reauth") return void this.loadReauth()
       if (message?.type !== "db:status") return
       const was = this.status.state
       this.status = message.status
@@ -292,17 +323,29 @@ export class App {
       else if (this.status.state === "ready" && message.change === "items") void this.refresh()
       if (this.status.state === "ready" && this.status.state !== was) void this.refresh()
     })
-    addEventListener("pagehide", () => this.setup.stop())
+    addEventListener("pagehide", () => {
+      this.setup.stop()
+      // Closed without an answer: the fill it asked for doesn't wait on it. A
+      // device.html closed in a background tab never showed the prompt (the
+      // popup or another tab did), so it leaves the fill waiting.
+      if (this.reauth && document.visibilityState === "visible") void this.ask({ type: "device-reauth-cancel", id: this.reauth.id })
+    })
     // A vault slow to answer shows that it's starting, never an empty frame.
     const slow = setTimeout(() => this.shell === "" && this.render(), 250)
     void this.run({ type: "device-status" }).then(async () => {
       clearTimeout(slow)
       if (this.status.state === "not-set-up") await this.setup.check()
       if (this.status.state === "locked") await this.loadPreset()
+      if (this.status.state === "ready") await this.loadReauth()
       this.render()
       if (this.status.state === "ready") void this.refresh()
     })
   }
+}
+
+function reauthOf(v: unknown): Reauth | null {
+  const r = v as Partial<Reauth> | null
+  return r && typeof r.id === "string" && typeof r.title === "string" && typeof r.site === "string" ? { id: r.id, title: r.title, site: r.site } : null
 }
 
 function vaultDevice(v: unknown): VaultDevice | null {

@@ -36,6 +36,22 @@ export interface VaultBackend {
   send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, options?: SendOptions): Promise<ReplyFor[T]>
   /** The user did something (opened the popup, filled, saved): restarts the idle lock, where there is one. */
   used?(): void
+  /**
+   * The browser-only vault only: a fill the vault answered `passphrase_needed`
+   * (a card's number or code under Strict). Asks for the passphrase in
+   * Deadbolt's own popup or device.html, never the page, and runs the fill
+   * once with it. Rejects if the user cancels, Deadbolt locks, `signal`
+   * aborts (the page navigated) or nobody answers in time.
+   */
+  reauth?(body: Extract<RequestBody, { type: "fill-form" }>, ask: ReauthAsk, signal: AbortSignal): Promise<ReplyFor["fill-form"]>
+}
+
+/** What a passphrase prompt for a fill says, and the tab it's for. */
+export interface ReauthAsk {
+  tabId: number
+  /** The item, as the menu names it: "Visa •••• 4242". */
+  title: string
+  site: string
 }
 
 export const cancelled = () => new HostError("cancelled", "The request was cancelled.")
