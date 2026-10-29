@@ -23,12 +23,12 @@ const BLEED: f32 = 12.0;
 const BUTTON_W: f32 = 30.0;
 
 /// The page and its foot of key hints.
-pub fn pane(s: &App, k: &Kit) -> El {
+pub fn pane(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     col()
         .key("vault")
         .w_full()
         .min_h(0.0)
-        .child(detail(s, k))
+        .child(detail(s, k, layer))
         .child(foot(s, k))
 }
 
@@ -48,7 +48,7 @@ pub fn toolbar(s: &App, k: &Kit) -> El {
         .child(crate::edit::view::toolbar_new(s, k))
 }
 
-fn detail(s: &App, k: &Kit) -> El {
+fn detail(s: &App, k: &Kit, layer: &mut Vec<El>) -> El {
     let offer = s.loaded.then(|| crate::install::offer(s, k)).flatten();
     let notices = [
         crate::shortcut::notice(s, k),
@@ -69,7 +69,7 @@ fn detail(s: &App, k: &Kit) -> El {
             crate::import::view::pane(s, k)
         }
     } else if let Some(form) = &s.edit.form {
-        crate::edit::view::form(s, k, form)
+        crate::edit::view::form(s, k, form, layer)
     } else {
         // One element, item or not, so leaving for the import view and coming
         // back swap whole, while a new selection (or none) replaces what's in

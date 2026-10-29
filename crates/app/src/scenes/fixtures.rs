@@ -89,7 +89,7 @@ pub(super) fn show_preview(s: &mut App, preview: import::Preview) {
 pub(super) fn new_of(s: &mut App, kind: &str, name: &str) {
     vault(s);
     s.new_item();
-    s.pick_kind(kind);
+    s.choose_type(kind);
     if let Some(form) = &mut s.edit.form {
         form.name.replace_text(name);
     }

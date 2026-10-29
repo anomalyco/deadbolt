@@ -62,13 +62,13 @@ for theme in dark light; do
   done
 done
 # Adding, changing and deleting, dark and light: a new login with a generated
-# password, a new card, a new secure note, a new SSH key, a new identity, a
+# password, the type list as ⌘N opens it and filtered by "key", a new card, a new secure note, a new SSH key, a new identity, a
 # new API credential, database, Wi-Fi network and document, an
 # edit, an SSH key's edit (its private key hidden, then shown), a refused
 # card number, the delete confirm, and an edit another device changed
 # meanwhile.
 for theme in dark light; do
-  for scene in new-login new-card new-note new-ssh new-identity new-api new-database new-wifi new-document edit edit-ssh edit-ssh-revealed edit-invalid delete-confirm edit-conflict; do
+  for scene in new-login picker-open picker-key new-card new-note new-ssh new-identity new-api new-database new-wifi new-document edit edit-ssh edit-ssh-revealed edit-invalid delete-confirm edit-conflict; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done

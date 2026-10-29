@@ -781,6 +781,8 @@ fn add_edit_and_delete_items() {
     });
     let password = form_value(&rt.state, "password");
     assert_eq!(password.chars().count(), 24);
+    // ⏎ in the type list keeps Login and puts the name in focus.
+    rt.key(key(Key::Enter));
     for c in "Linear".chars() {
         rt.key(key(Key::Text(c.into())));
     }

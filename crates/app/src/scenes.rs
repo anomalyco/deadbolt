@@ -285,11 +285,27 @@ pub(crate) const SCENES: &[Scene] = &[
         vault(s);
         s.show_import();
     }),
-    // ⌘N: a new login, with a password from the generator.
+    // ⌘N: a new login, with a password from the generator (its type list
+    // closed).
     ("new-login", |s| {
         vault(s);
         s.new_item();
+        s.close_types();
         generated(s);
+    }),
+    // ⌘N as it opens: the type list, unfiltered, its filter focused.
+    ("picker-open", |s| {
+        vault(s);
+        s.new_item();
+        generated(s);
+    }),
+    // The type list filtered by "key": SSH key, then API credential.
+    ("picker-key", |s| {
+        vault(s);
+        s.new_item();
+        generated(s);
+        s.edit.types.filter.replace_text("key");
+        s.types_filtered();
     }),
     // A new card, its number typed.
     ("new-card", |s| {

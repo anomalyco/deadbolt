@@ -65,6 +65,13 @@ impl Rig {
         self.settle(0.05);
     }
 
+    /// ⌘N, then ⏎ in its type list: a new login, its name focused.
+    pub(super) fn new_item(&mut self) {
+        self.command('n');
+        self.tap(Key::Enter);
+        self.settle(0.05);
+    }
+
     pub(super) fn command(&mut self, c: char) {
         self.press(Key::Command(c), cmd());
     }
@@ -327,7 +334,7 @@ pub(super) fn failure(message: &str) -> Failure {
 #[test]
 fn form_fields_are_named_for_assistive_tech() {
     let mut r = rig("vault");
-    r.command('n');
+    r.new_item();
     let labels: Vec<String> =
         r.rt.elements()
             .iter()
@@ -346,7 +353,9 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
     r.sent();
     r.command('n');
     let form = r.rt.state.edit.form.as_ref().expect("a form");
-    assert!(form.is_new() && form.kind == "login" && form.name.focused);
+    assert!(form.is_new() && form.kind == "login");
+    // The type list opens with it, its filter focused.
+    assert!(r.rt.state.types_open() && r.rt.state.edit.types.filter.focused);
     let seq = match r.sent().as_slice() {
         [
             Job::Generate {
@@ -358,6 +367,7 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
         _ => panic!("expected one generate"),
     };
     assert!(r.shows("Login") && r.shows("Card"));
+    r.tap(Key::Escape);
 
     r.reply(Done::Generated {
         seq,
@@ -397,7 +407,7 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
     assert_eq!(r.value("password"), "abcdefghijklmnopqrstuvwxyzABCDEF");
 
     // A card has nothing to generate.
-    r.rt.update(|s, _| s.pick_kind("card"));
+    r.rt.update(|s, _| s.choose_type("card"));
     assert!(r.sent().is_empty());
     let form = r.rt.state.edit.form.as_ref().unwrap();
     assert_eq!(form.kind, "card");
@@ -407,23 +417,23 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
 #[test]
 fn switching_a_new_items_type_keeps_focus_and_ctrl_tab_working() {
     let mut r = rig("vault");
-    r.command('n');
+    r.new_item();
     r.focus("password");
     r.press(Key::Tab, ctrl());
     let form = r.rt.state.edit.form.as_ref().unwrap();
-    assert_eq!(form.kind, "card");
+    assert_eq!(form.kind, "note");
     assert!(form.name.focused, "falls back to name when password goes");
 
     // ⌃⇥ keeps cycling even when no field is focused.
     r.rt.update(|s, _| s.edit.form.as_mut().unwrap().name.focused = false);
     r.press(Key::Tab, ctrl());
-    assert_eq!(r.rt.state.edit.form.as_ref().unwrap().kind, "note");
+    assert_eq!(r.rt.state.edit.form.as_ref().unwrap().kind, "card");
 }
 
 #[test]
 fn a_new_login_saves_and_is_selected() {
     let mut r = rig("vault");
-    r.command('n');
+    r.new_item();
     r.type_text("Linear");
     r.fill("username", "kit");
     r.fill("password", "pw-linear");
@@ -475,7 +485,7 @@ fn a_new_login_saves_and_is_selected() {
 /// A new login, its password generated, saved: the create's tag.
 fn save_new_login(r: &mut Rig, password: Option<&str>) -> u64 {
     r.sent();
-    r.command('n');
+    r.new_item();
     let generate = r.take_generate();
     if let Some(password) = password {
         r.reply(Done::Generated {
@@ -510,7 +520,7 @@ fn a_saving_form_holds_until_the_agent_answers() {
         s.generate();
         s.set_length(64);
         s.toggle_symbols();
-        s.pick_kind("card");
+        s.choose_type("card");
         s.name_mut().replace_text("Typed meanwhile");
         s.input_mut(0).replace_text("typed meanwhile");
         s.cancel_edit();
@@ -546,7 +556,7 @@ fn a_saving_form_holds_until_the_agent_answers() {
 fn a_password_generated_after_save_is_dropped() {
     let mut r = rig("vault");
     r.sent();
-    r.command('n');
+    r.new_item();
     let pending = r.take_generate();
     r.fill("password", "typed-password");
     r.command('s');
@@ -624,8 +634,8 @@ fn an_edit_sends_only_what_changed_in_one_set() {
 #[test]
 fn a_refusal_shows_on_its_field_and_keeps_the_form() {
     let mut r = rig("vault");
-    r.command('n');
-    r.rt.update(|s, _| s.pick_kind("card"));
+    r.new_item();
+    r.rt.update(|s, _| s.choose_type("card"));
     r.fill("number", "4242");
     r.sent();
     r.tap(Key::Enter);
@@ -775,7 +785,9 @@ fn cmd_n_replaces_an_unchanged_edit() {
     let form = r.rt.state.edit.form.as_ref().unwrap();
     assert!(form.is_new() && !form.nudge);
 
-    // One with changes stays, and says so.
+    // One with changes stays, and says so. (The first esc closes the
+    // type list, the second the form.)
+    r.tap(Key::Escape);
     r.tap(Key::Escape);
     r.command('e');
     r.fill("username", "kit");
@@ -829,7 +841,7 @@ fn add_offers_an_identity_in_parts() {
     let mut r = rig("vault");
     r.command('n');
     assert!(r.shows("Identity"), "the picker offers it");
-    r.rt.update(|s, _| s.pick_kind("identity"));
+    r.rt.update(|s, _| s.choose_type("identity"));
     r.settle(0.3);
     let form = r.rt.state.edit.form.as_ref().unwrap();
     let names: Vec<&str> = form.fields.iter().map(|f| f.name.as_str()).collect();
@@ -887,7 +899,7 @@ fn add_offers_an_identity_in_parts() {
 #[test]
 fn enter_breaks_the_line_in_notes() {
     let mut r = rig("vault");
-    r.command('n');
+    r.new_item();
     r.focus("notes");
     r.sent();
     r.type_text("first");
@@ -900,8 +912,8 @@ fn enter_breaks_the_line_in_notes() {
     assert_eq!(pairs(&fields).last(), Some(&("notes", "first\nsecond")));
 
     let mut r = rig("vault");
-    r.command('n');
-    r.rt.update(|s, _| s.pick_kind("identity"));
+    r.new_item();
+    r.rt.update(|s, _| s.choose_type("identity"));
     r.focus("notes");
     r.type_text("1 Main St");
     r.tap(Key::Enter);
@@ -915,7 +927,7 @@ fn enter_breaks_the_line_in_notes() {
 #[test]
 fn a_login_saves_without_a_password() {
     let mut r = rig("vault");
-    r.command('n');
+    r.new_item();
     r.fill("username", "kit");
     r.fill("password", "");
     r.sent();
@@ -930,10 +942,16 @@ fn add_offers_every_type() {
     let mut r = rig("vault");
     r.command('n');
     r.settle(0.3);
+    // ⌘N opens with the type list showing, each type by its full name.
+    assert!(r.rt.state.types_open());
     for label in [
-        "API", "Database", "Server", "Wi-Fi", "License", "Bank", "Document",
+        "Login",
+        "Secure note",
+        "API credential",
+        "Database",
+        "Wi-Fi network",
     ] {
-        assert!(r.shows(label), "the picker offers {label}");
+        assert!(r.shows(label), "the list offers {label}");
     }
     for (kind, first, count) in [
         ("api", "credential", 8),
@@ -949,7 +967,7 @@ fn add_offers_every_type() {
         ("membership", "organization", 9),
         ("crypto", "recovery-phrase", 5),
     ] {
-        r.rt.update(|s, _| s.pick_kind(kind));
+        r.rt.update(|s, _| s.choose_type(kind));
         r.settle(0.05);
         let form = r.rt.state.edit.form.as_ref().unwrap();
         assert_eq!(form.kind, kind);
@@ -957,7 +975,7 @@ fn add_offers_every_type() {
         assert_eq!(form.fields.len(), count, "{kind}");
     }
     // An API credential needs its credential, as the agent says.
-    r.rt.update(|s, _| s.pick_kind("api"));
+    r.rt.update(|s, _| s.choose_type("api"));
     r.fill("username", "deploy-bot");
     r.command('s');
     let form = r.rt.state.edit.form.as_ref().unwrap();
@@ -990,8 +1008,8 @@ fn a_document_takes_a_chosen_file() {
         .unwrap();
 
     let mut r = rig("vault");
-    r.command('n');
-    r.rt.update(|s, _| s.pick_kind("document"));
+    r.new_item();
+    r.rt.update(|s, _| s.choose_type("document"));
     r.settle(0.3);
     assert!(r.shows("No file chosen") && r.shows("Choose File…"));
     r.click_at("choose");
@@ -1016,4 +1034,59 @@ fn a_document_takes_a_chosen_file() {
     let (_, kind, name, fields) = r.take_create();
     assert_eq!((kind.as_str(), name.as_deref()), ("document", Some("Scan")));
     assert_eq!(pairs(&fields), [("file", "scan.pdf\nJVBERg==")]);
+}
+
+/// ⌘N opens the type list with its filter focused: typing narrows it,
+/// ↑↓ move, ⏎ picks and the name takes focus; esc closes it, and ⌘T,
+/// or a press on the type row, opens it again.
+#[test]
+fn typing_picks_a_new_items_type() {
+    let mut r = rig("vault");
+    r.command('n');
+    r.settle(0.3);
+    assert!(r.rt.state.types_open());
+    assert!(r.rt.state.edit.types.filter.focused);
+    r.type_text("api");
+    assert!(r.shows("API credential") && !r.shows("Secure note"));
+    r.tap(Key::Enter);
+    r.settle(0.1);
+    let form = r.rt.state.edit.form.as_ref().unwrap();
+    assert_eq!(form.kind, "api");
+    assert!(form.name.focused && !r.rt.state.types_open());
+    assert!(r.shows("API credential"), "the type row names it");
+
+    // Typed fields stay through a change of type.
+    r.rt.update(|s, _| s.edit.form.as_mut().unwrap().name.replace_text("Deploy"));
+    r.fill("username", "deploy-bot");
+    r.command('t');
+    assert!(r.rt.state.types_open());
+    r.type_text("key");
+    assert!(r.shows("SSH key") && r.shows("API credential") && !r.shows("Login"));
+    // SSH key first, then API credential: ↓ moves to it, ↑ back.
+    r.tap(Key::Down);
+    assert_eq!(r.rt.state.edit.types.active, 1);
+    r.tap(Key::Up);
+    r.tap(Key::Enter);
+    r.settle(0.1);
+    let form = r.rt.state.edit.form.as_ref().unwrap();
+    assert_eq!(form.kind, "ssh");
+    assert_eq!(form.name.text, "Deploy");
+
+    r.command('t');
+    r.type_text("db");
+    r.tap(Key::Escape);
+    r.settle(0.1);
+    assert!(
+        !r.rt.state.types_open() && r.rt.state.editing(),
+        "esc closes only the list"
+    );
+    assert_eq!(r.rt.state.edit.form.as_ref().unwrap().kind, "ssh");
+
+    r.click_at("type");
+    r.settle(0.5);
+    assert!(r.rt.state.types_open());
+    r.click_at("type-wifi");
+    r.settle(0.1);
+    assert_eq!(r.rt.state.edit.form.as_ref().unwrap().kind, "wifi");
+    assert!(!r.rt.state.types_open());
 }

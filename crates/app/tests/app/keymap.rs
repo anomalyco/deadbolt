@@ -398,7 +398,7 @@ fn control_tab_picks_the_new_items_type() {
         ..Mods::default()
     };
     press(&mut rt, Key::Tab, ctrl);
-    assert_eq!(kind(&rt), "card");
+    assert_eq!(kind(&rt), "note");
     let back = Mods {
         ctrl: true,
         shift: true,

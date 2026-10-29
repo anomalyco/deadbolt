@@ -11,9 +11,11 @@
 //! Locking, or the agent stopping, wipes the form wherever it was.
 
 mod form;
+mod types;
 pub mod view;
 
 pub use form::{Conflict, Form, Input, Problem, editable};
+pub use types::{Types, matches as type_matches};
 
 use deadbolt_client::protocol::{AppAction, ItemInfo};
 use rune::{Key, KeyEvent, TextEdit, Tx};
@@ -32,22 +34,22 @@ const DEFAULT_LENGTH: usize = 24;
 pub const NEW: &str = "New Item";
 pub const EDIT: &str = "Edit Item";
 pub const DELETE: &str = "Delete Item…";
-/// What ⌘N can add, in the order its picker shows them: the everyday
-/// types, then credentials for machines, then documents and the rest.
+/// What ⌘N can add, in the order its type list shows them (and ⌃⇥ steps
+/// through them): the common types first, then the rest.
 pub const KINDS: [&str; 17] = [
     "login",
-    "card",
     "note",
+    "card",
     "identity",
-    "ssh",
     "api",
+    "ssh",
     "database",
     "server",
     "wifi",
-    "license",
-    "bank",
     "document",
+    "bank",
     "crypto",
+    "license",
     "passport",
     "driver-license",
     "id-document",
@@ -56,6 +58,8 @@ pub const KINDS: [&str; 17] = [
 
 pub struct Edit {
     pub form: Option<Form>,
+    /// A new item's type picker (`types`).
+    pub types: Types,
     /// Deleting the selected item: asked, or under way.
     pub delete: Option<Delete>,
     /// The generator's length and symbols, kept from one form to the next.
@@ -76,6 +80,7 @@ impl Default for Edit {
     fn default() -> Edit {
         Edit {
             form: None,
+            types: Types::default(),
             delete: None,
             length: DEFAULT_LENGTH,
             symbols: true,
@@ -158,7 +163,8 @@ impl App {
         self.edit.form.as_ref().is_some_and(|f| f.saving)
     }
 
-    /// ⌘N: a form for a new login. A form already open stays.
+    /// ⌘N: a form for a new login, with its type list open and the filter
+    /// focused, so typing picks the type. A form already open stays.
     pub fn new_item(&mut self) {
         if !self.edits() || !self.loaded || !self.leave_edit() {
             return;
@@ -167,6 +173,7 @@ impl App {
         self.edit.form = Some(Form::new("login", "", None));
         self.search.focused = false;
         self.generate();
+        self.open_types();
     }
 
     /// The new item's type picker: the form changes to that type, keeping
@@ -242,6 +249,7 @@ impl App {
             return;
         }
         self.edit.scratch.clear();
+        self.close_types();
         if self.edit.form.take().is_some() {
             self.edit.seq += 1;
             self.search.focused = true;
@@ -758,6 +766,7 @@ impl App {
 
     /// Wipes the form and drops replies still on their way.
     pub(crate) fn forget_edit(&mut self) {
+        self.close_types();
         self.edit.form = None;
         self.edit.delete = None;
         self.edit.seq += 1;
@@ -767,7 +776,7 @@ impl App {
     /// Keys for the form and the delete confirm, before the list's: ⌘N, ⌘E
     /// and ⌘⌫ start them; in the form ⌘S and ⏎ save and esc cancels; in the
     /// confirm ⏎ deletes and esc cancels. `None` for keys they leave alone.
-    pub(crate) fn edit_key(&mut self, ev: &KeyEvent) -> Option<bool> {
+    pub(crate) fn edit_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> Option<bool> {
         if self.screen != Screen::Vault || self.panel.is_some() {
             return None;
         }
@@ -784,7 +793,12 @@ impl App {
         let plain = !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
         let chord = |c| ev.is_command(c) && plain;
         if self.editing() {
+            // The type list's keys, wherever focus is while it shows.
+            if self.types_key(ev, tx) {
+                return Some(true);
+            }
             match ev.key {
+                _ if chord('t') => self.toggle_types(),
                 Key::Escape => self.cancel_edit(),
                 Key::Tab if ev.mods.ctrl && !ev.mods.cmd && !ev.mods.alt => {
                     self.step_kind(if ev.mods.shift { -1 } else { 1 });
@@ -887,6 +901,7 @@ impl App {
             (Key::Enter, Field::Wrapped) => self.save(),
             _ if ev.is_command('s') && plain => self.save(),
             _ if ev.is_command('n') && plain => self.new_item(),
+            _ if ev.is_command('t') && plain => self.toggle_types(),
             _ => return false,
         }
         true
