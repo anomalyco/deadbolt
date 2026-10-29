@@ -52,6 +52,8 @@ export type Request =
     }
   | { id: number; type: "passkey-get"; origin: string; rpId?: string; ref: string; challenge: string; userVerification: UserVerification }
   | { id: number; type: "passkey-cancel"; request: number }
+  /** Appends one line to the learning log of `session` (see src/learn.ts). No values, ever. */
+  | { id: number; type: "learn"; session: string; line: Record<string, unknown> }
 
 export type RequestBody = Request extends infer R ? (R extends { id: number } ? Omit<R, "id"> : never) : never
 
@@ -149,6 +151,9 @@ export interface PasskeyCancelledReply {
   type: "passkey-cancelled"
   found: boolean
 }
+export interface LearnedReply {
+  type: "learned"
+}
 export interface ErrorReply {
   type: "error"
   code: ErrorCode
@@ -167,6 +172,7 @@ export type Reply =
   | PasskeyCreatedReply
   | PasskeyAssertionReply
   | PasskeyCancelledReply
+  | LearnedReply
   | ErrorReply
 
 /** What a request of each type is answered with, besides an error. */
@@ -184,6 +190,7 @@ export interface ReplyFor {
   "passkey-create": PasskeyCreatedReply
   "passkey-get": PasskeyAssertionReply
   "passkey-cancel": PasskeyCancelledReply
+  learn: LearnedReply
 }
 
 /** The reply type each request expects. */
@@ -201,6 +208,7 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   "passkey-create": "passkey-created",
   "passkey-get": "passkey-assertion",
   "passkey-cancel": "passkey-cancelled",
+  learn: "learned",
 }
 
 export type HostMessage =
@@ -343,6 +351,8 @@ function parseReply(raw: Record<string, unknown>): Reply | null {
     }
     case "passkey-cancelled":
       return { type: "passkey-cancelled", found: raw.found === true }
+    case "learned":
+      return { type: "learned" }
     case "error": {
       const code = CODES.includes(raw.code as ErrorCode) ? (raw.code as ErrorCode) : "failed"
       return { type: "error", code, message: str(raw.message, 1000) ?? "" }

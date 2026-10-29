@@ -4,6 +4,7 @@
 // document and form the user chose to fill, and in a capture, sent by a
 // content script after the user submitted a login form.
 
+import type { LearnSession, LearnStep } from "./learn"
 import type { Account, FieldRules, HostStatus } from "./protocol"
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
@@ -61,6 +62,10 @@ export type ToBackground =
   /** The user themselves submitted a login form here: a trusted click on its submit control, or Enter in one of its fields. */
   | { type: "db:submitted" }
   | { type: "db:menu-close"; token: string; dismissed?: boolean }
+  /** A frame that just loaded asks whether its tab is learning (see src/learn.ts): a LearnSession or null. */
+  | { type: "db:learn-ask" }
+  /** A step of the learning session `session`, from this frame. */
+  | { type: "db:learn-step"; session: string; step: LearnStep }
   // inline menu
   /** `parent`: the origin of the parent window that handed the menu its token. */
   | { type: "db:menu-load"; token: string; parent: string }
@@ -80,6 +85,8 @@ export type ToBackground =
   | { type: "db:popup-offer"; tabId: number; id: string; choice: OfferChoice }
   /** Turn saving back on for the tab's site after "Never for this site". */
   | { type: "db:popup-saving-on"; tabId: number }
+  /** Start or stop learning the tab's site. Answers with a LearnReply. */
+  | { type: "db:popup-learn"; tabId: number; on: boolean }
   // passkeys (bg/passkeys.ts): the content script relays the page's hook
   /** `request`: the hook's id for the call; `options`: the page's options, checked in the background. */
   | { type: "pk:get" | "pk:create"; request: number; options: unknown; allowed: boolean }
@@ -131,6 +138,8 @@ export type ToContent =
   | { type: "db:frame-child"; nonce: string; boxes: Box[] }
   /** To the frame below: tell the frame above which element you're in. */
   | { type: "db:frame-announce"; nonce: string }
+  /** To every frame of a tab: the learning session it joins, or null when it ends. */
+  | { type: "db:learn"; session: LearnSession | null }
 
 /**
  * What the top page shows after a sign-in was submitted, as the content
@@ -229,7 +238,18 @@ export interface PopupReply {
   passkey?: PasskeyPrompt
   /** The tab's site, when the user said "Never for this site". */
   savingOff?: string
+  /** The tab is learning its site (see src/learn.ts). */
+  learning?: Learning
 }
+
+export interface Learning {
+  site: string
+  /** Steps logged so far. */
+  steps: number
+  until: number
+}
+
+export type LearnReply = { ok: true; learning?: Learning } | { ok: false; message: string }
 
 /** "later" (Not now) also holds back the same login on this site for a day; "never" stops offers for the site. */
 export type OfferChoice = "save" | "later" | "never"
