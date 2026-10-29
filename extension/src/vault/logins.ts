@@ -8,6 +8,7 @@ import { avatar, h, icon } from "../ui/dom"
 import { offerCard } from "../ui/offer"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
+import { enrollment, verify } from "./biometric"
 import { button, copied, favicon, field, glyph, hostOf, iconButton, para, refuse, slidingHighlight, toolbar } from "./kit"
 
 const url = (a: Account) => a.urls.find(Boolean) ?? ""
@@ -26,8 +27,8 @@ function avatarFor(title: string, link: string): HTMLElement {
 }
 
 /** A password to copy or reveal: Strict asks for the passphrase first, in the login's own view. */
-async function secret(app: App, ref: string, passphrase?: string): Promise<{ password?: string; message?: string; reauth?: boolean }> {
-  const r = await app.run(passphrase ? { type: "device-secret", ref, passphrase } : { type: "device-secret", ref })
+async function secret(app: App, ref: string, passphrase?: string, prf?: string): Promise<{ password?: string; message?: string; reauth?: boolean }> {
+  const r = await app.run(prf ? { type: "device-secret", ref, prf } : passphrase ? { type: "device-secret", ref, passphrase } : { type: "device-secret", ref })
   if (r.ok && typeof r.reply.password === "string") return { password: r.reply.password }
   return { message: r.ok ? "Deadbolt didn't answer." : r.message, reauth: !r.ok && r.code === "passphrase_needed" }
 }
@@ -244,6 +245,17 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     error.hidden = true
     const go = h("button", { class: "btn primary", type: "submit" }, kind === "copy" ? "Copy" : "Show")
     const form = h("form", { class: "reauth", novalidate: "" }, h("p", { class: "muted small" }, kind === "copy" ? "Strict: enter your passphrase to copy this password." : "Strict: enter your passphrase to show this password."), h("div", { class: "reauth-row" }, input, go), error)
+    const touch = button("btn primary", "Verify with Touch ID", async (b) => {
+      b.disabled = true
+      try {
+        const s = await secret(app, ref, undefined, await verify(app))
+        if (s.password === undefined) throw new Error(s.message || "Couldn't verify Touch ID.")
+        if (kind === "reveal") show(s.password)
+        else { reauth = null; paint(); await copySecret(app, el.querySelector<HTMLElement>(".copy-password")!, s.password) }
+      } catch (e) { error.textContent = (e as Error).message; error.hidden = false; input.focus() }
+      finally { b.disabled = false }
+    })
+    void enrollment(app).then((t) => { if (t && form.isConnected) { form.prepend(touch); touch.focus() } })
     form.addEventListener("submit", async (e) => {
       e.preventDefault()
       if (!input.value) return refuse(input)

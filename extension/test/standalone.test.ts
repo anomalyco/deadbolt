@@ -18,6 +18,7 @@ const fireAlarm = (name: string) => fake.alarmListeners.forEach((l) => l({ name 
 
 beforeEach(() => {
   fake = installChrome()
+  chrome.storage.session.setAccessLevel = async () => {}
   vault = "ready"
   // The offscreen document, answering for its worker.
   fake.runtimeAnswer = (message) => {
@@ -64,6 +65,180 @@ beforeEach(() => {
 })
 
 afterEach(() => setSystemTime())
+
+describe("browser session restoration", () => {
+  const key = "deadbolt.sessionKey"
+  function sessions() {
+    const answer = fake.runtimeAnswer
+    chrome.idle.queryState = async () => "active" as const
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-session-wrap") return { reply: { type: m.body.type, wrapped: "ab".repeat(104) } }
+      if (m.type === VAULT_REQUEST && m.body.type === "device-resume") { vault = "ready"; return { reply: { type: m.body.type, ok: true } } }
+      return answer?.(message)
+    }
+  }
+
+  test("both execution contexts can disappear; Strict never keeps a session", async () => {
+    sessions()
+    for (const preset of ["comfortable", "relaxed", "strict"] as const) {
+      const first = new StandaloneBackend()
+      await first.device({ type: "device-preset", preset })
+      await first.device({ type: "device-unlock", passphrase: "right" })
+      expect(!!fake.session[key]).toBe(preset !== "strict")
+      vault = "locked"
+      const restarted = new StandaloneBackend()
+      await restarted.connect()
+      expect(restarted.status.state).toBe(preset === "strict" ? "locked" : "ready")
+      await restarted.lock()
+      expect(fake.session[key]).toBeUndefined()
+    }
+  })
+
+  test("expired sessions are removed before an unlock surface can count as use", async () => {
+    sessions()
+    const first = new StandaloneBackend()
+    await first.device({ type: "device-unlock", passphrase: "right" })
+    setSystemTime(new Date(Date.now() + HOUR + 1))
+    vault = "locked"
+    const restarted = new StandaloneBackend()
+    await restarted.device({ type: "device-used" })
+    await restarted.connect()
+    expect(restarted.status.state).toBe("locked")
+    expect(fake.session[key]).toBeUndefined()
+  })
+
+  test("popup use before settings load cannot revive an expired session", async () => {
+    sessions()
+    const first = new StandaloneBackend()
+    await first.device({ type: "device-unlock", passphrase: "right" })
+    await settle()
+    setSystemTime(new Date(Date.now() + HOUR + 1))
+    vault = "locked"
+    const restarted = new StandaloneBackend()
+    restarted.used()
+    await restarted.connect()
+    expect(restarted.status.state).toBe("locked")
+    expect(fake.session[key]).toBeUndefined()
+    expect(requests().some(b => b.type === "device-resume")).toBe(false)
+  })
+
+  test("Lock ends the worker even if removing its saved session fails", async () => {
+    sessions()
+    const backend = new StandaloneBackend()
+    await backend.device({ type: "device-unlock", passphrase: "right" })
+    const remove = chrome.storage.session.remove
+    chrome.storage.session.remove = async () => { throw new Error("storage unavailable") }
+    try {
+      await backend.lock()
+      expect(vault).toBe("locked")
+      expect(fake.session[key]).toBeNull()
+      await backend.connect()
+      expect(backend.status.state).toBe("locked")
+    } finally { chrome.storage.session.remove = remove }
+  })
+
+  test("an unlock crossing a preset change locks rather than keeping the old policy", async () => {
+    sessions()
+    vault = "locked"
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let opening!: () => void
+    const reached = new Promise<void>(resolve => opening = resolve)
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-unlock") {
+        opening()
+        return new Promise(resolve => { release = () => { vault = "ready"; resolve({ reply: { type: m.body.type, ok: true } }) } })
+      }
+      return answer?.(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const unlock = backend.device({ type: "device-unlock", passphrase: "right" })
+    await reached
+    await backend.device({ type: "device-preset", preset: "strict" })
+    release()
+    expect((await unlock).ok).toBe(false)
+    expect(vault).toBe("locked")
+    expect(backend.status.state).toBe("locked")
+    expect(fake.session[key]).toBeUndefined()
+  })
+
+  test("Comfortable never restores while the screen is locked", async () => {
+    sessions()
+    const first = new StandaloneBackend()
+    await first.device({ type: "device-unlock", passphrase: "right" })
+    vault = "locked"
+    chrome.idle.queryState = async () => "locked" as const
+    const restarted = new StandaloneBackend()
+    await restarted.connect()
+    expect(restarted.status.state).toBe("locked")
+    expect(fake.session[key]).toBeUndefined()
+    expect(requests().some(b => b.type === "device-resume")).toBe(false)
+  })
+
+  test("a preset change while an opening command exports its session ends the old-policy worker", async () => {
+    sessions()
+    vault = "locked"
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let exporting!: () => void
+    const reached = new Promise<void>(resolve => exporting = resolve)
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-session-wrap") {
+        exporting()
+        return new Promise(resolve => { release = () => resolve({ reply: { type: m.body.type, wrapped: "ab".repeat(104) } }) })
+      }
+      return answer?.(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const unlock = backend.device({ type: "device-unlock", passphrase: "right" })
+    await reached
+    await backend.device({ type: "device-preset", preset: "strict" })
+    release()
+    expect((await unlock).ok).toBe(false)
+    expect(vault).toBe("locked")
+    expect(backend.status.state).toBe("locked")
+    expect(fake.session[key]).toBeUndefined()
+  })
+
+  test("Lock still terminates the worker if trusted storage initialization failed", async () => {
+    chrome.storage.session.setAccessLevel = async () => { throw new Error("storage unavailable") }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(backend.status.state).toBe("unavailable")
+    await backend.lock()
+    expect(vault).toBe("locked")
+    expect(locks()).toBe(1)
+  })
+
+  test("an export completed after Lock cannot recreate the session", async () => {
+    sessions()
+    const answer = fake.runtimeAnswer
+    let release!: () => void
+    let exporting!: () => void
+    const reached = new Promise<void>(resolve => exporting = resolve)
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-session-wrap") {
+        exporting()
+        return new Promise(resolve => { release = () => resolve({ reply: { type: m.body.type, wrapped: "ab".repeat(104) } }) })
+      }
+      return answer?.(message)
+    }
+    const backend = new StandaloneBackend()
+    const unlock = backend.device({ type: "device-unlock", passphrase: "right" })
+    await reached
+    await backend.lock()
+    release()
+    await unlock
+    expect(fake.session[key]).toBeUndefined()
+    expect(vault).toBe("locked")
+  })
+})
 
 describe("device page commands", () => {
   test("only this extension's own device.html and popup may send them", () => {
@@ -173,7 +348,7 @@ describe("device page commands", () => {
     const sent = requests()
     const finish = sent.findIndex((b) => b.type === "device-join-finish")
     expect(sent[finish]).toEqual({ type: "device-join-finish", passphrase: "browser pass", deviceName: expect.any(String), preset: "comfortable" })
-    expect(sent[finish + 1]?.type).toBe("hello")
+    expect(sent.slice(finish + 1).some(b => b.type === "hello")).toBe(true)
     expect(sent.slice(finish + 2).some((b) => b.type === "device-sync")).toBe(true)
     expect(changes[0]).toBe("unlocked")
   })
@@ -206,7 +381,7 @@ describe("device page commands", () => {
     const sent = requests()
     const unlock = sent.findIndex((b) => b.type === "device-unlock")
     expect(sent[unlock]).toEqual({ type: "device-unlock", passphrase: "correct horse", deviceName: expect.any(String), preset: "comfortable" })
-    expect(sent[unlock + 1]?.type).toBe("hello")
+    expect(sent.slice(unlock + 1).some(b => b.type === "hello")).toBe(true)
     // No waiting for the five-minute sync alarm.
     expect(sent.slice(unlock + 2).some((b) => b.type === "device-sync")).toBe(true)
   })
@@ -271,7 +446,7 @@ describe("idle lock", () => {
     const backend = new StandaloneBackend()
     await backend.connect()
     const reply = await backend.device({ type: "device-preset", preset: "strict" })
-    expect(reply.ok && reply.reply).toEqual({ type: "device-settings", preset: "strict" })
+    expect(reply.ok && reply.reply).toMatchObject({ type: "device-settings", preset: "strict" })
     expect(fake.local["deadbolt.lockPreset"]).toBe("strict")
     backend.used()
     setSystemTime(new Date(start.getTime() + 5 * 60_000 - 1000))

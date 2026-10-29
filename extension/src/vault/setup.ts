@@ -10,6 +10,7 @@ import { h, icon, ICONS, svg } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { button, copied, field, glyph, para, refuse, toolbar } from "./kit"
+import { enrollment, verify } from "./biometric"
 
 type Join =
   | { step: "choose" }
@@ -293,6 +294,16 @@ export class Setup {
 }
 
 export function unlockView(app: App): View {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const backoff = (until: number) => {
+    clearTimeout(timer)
+    const seconds = Math.ceil((until - Date.now()) / 1000)
+    submit.disabled = seconds > 0
+    if (seconds <= 0) { error.textContent = "You can try your passphrase again."; return }
+    error.hidden = false
+    error.textContent = `Too many wrong passphrases. Try again in ${seconds} s.`
+    timer = setTimeout(() => backoff(until), 250)
+  }
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
   const error = h("p", { class: "error", role: "alert" })
   error.hidden = true
@@ -313,8 +324,27 @@ export function unlockView(app: App): View {
     input.classList.remove("invalid")
     error.hidden = true
   })
+  const touch = button("btn primary wide", "Unlock with Touch ID", async (b) => {
+    b.disabled = true
+    error.hidden = true
+    try {
+      const r = await app.run({ type: "device-unlock", prf: await verify(app) })
+      if (!r.ok) throw new Error(r.message)
+      return app.opened()
+    } catch (e) {
+      error.textContent = (e as Error).message
+      error.hidden = false
+      input.focus()
+    } finally { b.disabled = false }
+  })
+  void Promise.all([enrollment(app), chrome.storage.local.get("deadbolt.unlockMethod")]).then(([enrolled, settings]) => {
+    if (!enrolled || !form.isConnected) return
+    form.insertBefore(touch, input)
+    if (settings["deadbolt.unlockMethod"] !== "passphrase") touch.focus()
+  })
   form.addEventListener("submit", async (e) => {
     e.preventDefault()
+    if (submit.disabled) return
     if (!input.value) return refuse(input)
     submit.disabled = true
     rollLabel(label, "Unlocking…")
@@ -326,10 +356,14 @@ export function unlockView(app: App): View {
     if (!r.ok && r.code === "wrong_passphrase") error.textContent = "That passphrase isn't right."
     else error.textContent = r.ok ? "" : r.message
     error.hidden = false
+    if (!r.ok && r.retryAt) backoff(r.retryAt)
     refuse(input)
     input.focus()
   })
-  return { el: form, focus: () => input.focus() }
+  void app.ask({ type: "device-settings" }).then((r) => {
+    if (r.ok && typeof r.reply.retryAt === "number" && r.reply.retryAt > Date.now() && form.isConnected) backoff(r.reply.retryAt)
+  })
+  return { el: form, focus: () => input.focus(), leave: () => clearTimeout(timer) }
 }
 
 /**
@@ -357,6 +391,19 @@ export function reauthView(app: App, reauth: Reauth): View {
     input.classList.remove("invalid")
     error.hidden = true
   })
+  const touch = button("btn primary wide", "Verify with Touch ID", async (b) => {
+    b.disabled = true
+    try {
+      const r = await app.run({ type: "device-reauth-confirm", id: reauth.id, prf: await verify(app) })
+      if (!r.ok) throw new Error(r.message)
+      return app.reauthDone()
+    } catch (e) {
+      error.textContent = (e as Error).message
+      error.hidden = false
+      input.focus()
+    } finally { b.disabled = false }
+  })
+  void enrollment(app).then((t) => { if (t && form.isConnected) { form.insertBefore(touch, input); touch.focus() } })
   form.addEventListener("submit", async (e) => {
     e.preventDefault()
     if (!input.value) return refuse(input)

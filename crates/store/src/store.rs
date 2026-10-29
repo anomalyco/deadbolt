@@ -93,17 +93,7 @@ pub fn init_with_backend(
 /// is rejected without creating a database. As on native, all live redb page
 /// checksums are checked before unwrapping the key set.
 pub fn unlock_with_backend(backend: impl StorageBackend, passphrase: &[u8]) -> Result<Unlocked> {
-    if backend.len()? == 0 {
-        return Err(Error::NotInitialized(PathBuf::from(DB_FILE)));
-    }
-    let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Database> {
-        let mut db = redb::Builder::new()
-            .set_cache_size(CACHE_BYTES)
-            .create_with_backend(backend)?;
-        db.check_integrity()?;
-        Ok(db)
-    }));
-    let db = opened.unwrap_or_else(|_| Err(Error::corrupt("database file is damaged")))?;
+    let db = open_backend(backend)?;
     let header = {
         let txn = db.begin_read()?;
         Header::read(&txn.open_table(HEADER)?)?
@@ -114,6 +104,87 @@ pub fn unlock_with_backend(backend: impl StorageBackend, passphrase: &[u8]) -> R
         dir: PathBuf::from(DB_FILE),
         keys: Keys::new(keyset),
     })
+}
+
+fn open_backend(backend: impl StorageBackend) -> Result<Database> {
+    if backend.len()? == 0 {
+        return Err(Error::NotInitialized(PathBuf::from(DB_FILE)));
+    }
+    let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Database> {
+        let mut db = redb::Builder::new()
+            .set_cache_size(CACHE_BYTES)
+            .create_with_backend(backend)?;
+        db.check_integrity()?;
+        Ok(db)
+    }));
+    opened.unwrap_or_else(|_| Err(Error::corrupt("database file is damaged")))
+}
+
+/// Opens the platform-key slot on an exclusively owned backend. The key must
+/// come from a fresh authenticator ceremony, not a stored verification flag.
+pub fn unlock_biometric_with_backend(
+    backend: impl StorageBackend,
+    key: &[u8; KEY_LEN],
+) -> Result<Unlocked> {
+    let db = open_backend(backend)?;
+    let keyset = {
+        let txn = db.begin_read()?;
+        let table = txn.open_table(HEADER)?;
+        Header::read(&table)?;
+        let (token, wrapped) = read_biometric(&table)?.ok_or(Error::InvalidBiometric)?;
+        KeySet::unwrap_biometric(key, &token, &wrapped)?
+    };
+    Ok(Unlocked {
+        db,
+        dir: PathBuf::from(DB_FILE),
+        keys: Keys::new(keyset),
+    })
+}
+
+/// Public enrollment metadata, readable without unlocking. Never contains the key.
+pub fn biometric_token_with_backend(backend: impl StorageBackend) -> Result<Option<Vec<u8>>> {
+    let db = open_backend(backend)?;
+    let txn = db.begin_read()?;
+    let table = txn.open_table(HEADER)?;
+    Header::read(&table)?;
+    Ok(read_biometric(&table)?.map(|(token, _)| token))
+}
+
+/// Restores an ephemeral wrapped key set. Both arguments are bearer secrets:
+/// storing the wrapping key beside the envelope provides no separate security
+/// boundary. The envelope is bound to this store's current passphrase slot.
+pub fn resume_with_backend(
+    backend: impl StorageBackend,
+    key: &[u8; KEY_LEN],
+    wrapped: &[u8],
+) -> Result<Unlocked> {
+    let db = open_backend(backend)?;
+    let header = {
+        let txn = db.begin_read()?;
+        Header::read(&txn.open_table(HEADER)?)?
+    };
+    let plain = crypto::open(&crypto::cipher(key), &session_aad(&header), wrapped)
+        .ok_or_else(|| Error::corrupt("session key failed authentication"))?;
+    let keys = Keys::new(KeySet::decode(&plain)?);
+    {
+        let txn = db.begin_read()?;
+        read_log_len(&keys, &txn.open_table(HEADER)?)?;
+    }
+    Ok(Unlocked {
+        db,
+        dir: PathBuf::from(DB_FILE),
+        keys,
+    })
+}
+
+fn session_aad(header: &Header) -> Vec<u8> {
+    [
+        b"deadbolt-store/v2/session".as_slice(),
+        &FORMAT_VERSION.to_le_bytes(),
+        &header.kdf.encode(),
+        &header.keyset,
+    ]
+    .concat()
 }
 
 fn initialize_db(db: &Database, keys: &Keys, kdf: &KdfHeader, wrapped: &[u8]) -> Result<()> {
@@ -155,6 +226,18 @@ impl fmt::Debug for Unlocked {
 }
 
 impl Unlocked {
+    /// An ephemeral second envelope, never written to the database. The caller
+    /// must discard both it and `key` on lock or browser exit.
+    pub fn wrap_session(&self, key: &[u8; KEY_LEN]) -> Result<Vec<u8>> {
+        let txn = self.db.begin_read()?;
+        let header = Header::read(&txn.open_table(HEADER)?)?;
+        crypto::seal(
+            &crypto::cipher(key),
+            &session_aad(&header),
+            &[self.keys.keyset.encode().as_slice()],
+        )
+    }
+
     /// The 32-byte device secret (Ed25519 seed) given at creation.
     pub fn device_secret(&self) -> &[u8; 32] {
         &self.keys.keyset.device_secret

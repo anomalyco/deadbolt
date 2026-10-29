@@ -676,6 +676,15 @@ fn login_secret(body: &mut Value) -> Result<Value> {
 
 /// Checks an explicit passphrase without holding the live vault during the KDF.
 fn reauthenticate(body: &mut Value, required: bool) -> Result<bool> {
+    if body.get("prf").is_some() {
+        let key = take_key(body, "prf")?;
+        return state().with(|s| {
+            if !s.store.check_biometric(&key)? {
+                return Err(Error::Protocol("Touch ID didn't unlock this vault. Use your passphrase, then reset Touch ID in Settings."));
+            }
+            Ok(true)
+        });
+    }
     let passphrase = body.get_mut("passphrase").map(Value::take);
     if required && passphrase.is_none() {
         return Err(Error::PassphraseNeeded);
@@ -692,6 +701,11 @@ fn reauthenticate(body: &mut Value, required: bool) -> Result<bool> {
         return Err(Error::WrongPassphrase);
     }
     Ok(true)
+}
+
+fn take_key(body: &mut Value, field: &str) -> Result<Zeroizing<[u8; 32]>> {
+    let encoded = take_secret(body, field)?;
+    Ok(Zeroizing::new(unhex::<32>(&encoded)?))
 }
 
 /// Adds a login by hand, or edits one, from the vault page: unlike a page's
@@ -886,14 +900,78 @@ async fn dispatch(mut body: Value) -> Result<Value> {
             start(store, body.get("deviceName").and_then(Value::as_str)).await?;
             Ok(json!({"type":"device-create", "ok":true}))
         }
+        "device-biometric-info" => {
+            let token = if node().is_ok() {
+                state().with(|s| Ok(s.store.biometric_token()?))?
+            } else if storage_exists()
+                .await
+                .map_err(|_| Error::Protocol(STORAGE))?
+                .as_bool()
+                == Some(true)
+            {
+                deadbolt_store::biometric_token_with_backend(backend(false).await?)?
+            } else {
+                None
+            };
+            Ok(
+                json!({"type":"device-biometric-info", "token":token.and_then(|t| String::from_utf8(t).ok())}),
+            )
+        }
+        "device-biometric-set" => {
+            // Enrolling a new unlock factor requires the passphrase, not just
+            // possession of an already-open popup or another cached factor.
+            let key = take_key(&mut body, "prf")?;
+            body.as_object_mut().ok_or(Error::State)?.remove("prf");
+            reauthenticate(&mut body, true)?;
+            let token = text(&body, "token")?;
+            if token.len() > 8192 {
+                return Err(Error::Protocol("Invalid passkey metadata"));
+            }
+            state().with(|s| Ok(s.store.set_biometric(&key, token.as_bytes())?))?;
+            Ok(json!({"type":"device-biometric-set", "ok":true}))
+        }
+        "device-biometric-reset" => {
+            state().with(|s| Ok(s.store.clear_biometric()?))?;
+            Ok(json!({"type":"device-biometric-reset", "ok":true}))
+        }
+        "device-session-wrap" => {
+            if PRESET.with(Cell::get) == Preset::Strict {
+                return Err(Error::Protocol("Strict does not retain session keys"));
+            }
+            let key = take_key(&mut body, "key")?;
+            let wrapped = state().with(|s| Ok(s.store.wrap_session(&key)?))?;
+            Ok(
+                json!({"type":"device-session-wrap", "wrapped":data_encoding::HEXLOWER.encode(&wrapped)}),
+            )
+        }
+        "device-resume" => {
+            join::require_idle()?;
+            if node().is_ok() {
+                return Err(Error::Protocol("Deadbolt is already unlocked"));
+            }
+            if !matches!(preset, Some(Preset::Comfortable | Preset::Relaxed)) {
+                return Err(Error::Protocol("Strict does not restore session keys"));
+            }
+            let key = take_key(&mut body, "key")?;
+            let wrapped = data_encoding::HEXLOWER
+                .decode(text(&body, "wrapped")?.as_bytes())
+                .map_err(|_| Error::Protocol("Invalid session envelope"))?;
+            let store = deadbolt_store::resume_with_backend(backend(false).await?, &key, &wrapped)?;
+            start(store, None).await?;
+            Ok(json!({"type":"device-resume", "ok":true}))
+        }
         "device-unlock" => {
             join::require_idle()?;
             if node().is_ok() {
                 return Err(Error::Protocol("Deadbolt is already unlocked"));
             }
-            let passphrase = take_secret(&mut body, "passphrase")?;
-            let store =
-                deadbolt_store::unlock_with_backend(backend(false).await?, passphrase.as_bytes())?;
+            let store = if body.get("prf").is_some() {
+                let key = take_key(&mut body, "prf")?;
+                deadbolt_store::unlock_biometric_with_backend(backend(false).await?, &key)?
+            } else {
+                let passphrase = take_secret(&mut body, "passphrase")?;
+                deadbolt_store::unlock_with_backend(backend(false).await?, passphrase.as_bytes())?
+            };
             start(store, body.get("deviceName").and_then(Value::as_str)).await?;
             Ok(json!({"type":"device-unlock", "ok":true}))
         }
@@ -960,6 +1038,10 @@ fn plain(error: &Error) -> String {
         | Error::Protocol(_) => error.to_string(),
         Error::Generation(_) => error.to_string(),
         Error::Store(deadbolt_store::Error::WrongPassphrase) => Error::WrongPassphrase.to_string(),
+        Error::Store(deadbolt_store::Error::InvalidBiometric) => {
+            "That passkey couldn't unlock Deadbolt. Use your passphrase, then set up Touch ID again."
+                .into()
+        }
         Error::Store(_) | Error::Decode(_) | Error::Json(_) => STORAGE.into(),
         Error::Core(_) | Error::Application(_) => {
             "Deadbolt couldn't make that change to the vault.".into()

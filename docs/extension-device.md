@@ -87,7 +87,9 @@ worker. This preserves the existing redb transactions, sealed log-length check,
 blinded metadata keys, XChaCha20-Poly1305 record encryption and Argon2id key wrapping.
 Only ciphertext enters OPFS. The backend calls `flush()` on redb durability barriers,
 checks complete reads/writes, and holds OPFS's exclusive file lock until close.
-No plaintext snapshot or unwrapped key is stored in IndexedDB or extension storage.
+No plaintext snapshot or key is written to IndexedDB or persistent extension
+storage. Comfortable and Relaxed retain a wrapped key set **and its wrapping
+key** in memory-only `chrome.storage.session` (see Security review needed below).
 
 OPFS is preferable to a new IndexedDB key-value implementation for this proof:
 redb already supplies atomic multi-record updates and crash recovery; replacing it
@@ -187,7 +189,8 @@ so those setup operations never overlap each other. Everything else
 core interleaves requests at its await points, so a sync or pairing waiting on the
 network does not hold up a list or fill. Locking bypasses all of it: the offscreen
 document terminates the worker and rejects in-flight and queued requests. A new
-worker reopens the encrypted file only after passphrase unlock.
+worker reopens the encrypted file after passphrase/PRF unlock or an allowed
+browser-session restoration.
 
 Pairing's Argon2 rendezvous-key derivation is an exception: on wasm it runs
 synchronously on the vault worker and can stall its other requests for about
@@ -202,9 +205,17 @@ membership round. That barrier gates peer data exchange and invitations, not
 local reads. While the offscreen document exists, iroh can
 receive connections independently of the service worker, so peers can sync with
 the extension without it asking. Chrome may still discard the offscreen document
-or renderer. This proof fails closed in that case: the vault relocks, even under
-Comfortable. It does **not** claim guaranteed offscreen lifetime or any session-key
-restoration.
+or renderer. Strict fails closed in that case. Comfortable and Relaxed reopen the
+OPFS store from a browser-session envelope, provided its previous idle deadline
+has not passed. Restoration does not count as use. Screen lock clears
+Comfortable's envelope; Relaxed retains it. Explicit Lock removes it before
+terminating the worker, falling back to overwriting the record if removal fails.
+Even when both storage operations fail, the worker is terminated and this service
+worker refuses restoration. Quit the browser to clear session memory if storage
+errors persist: a subsequent service-worker restart cannot remember a failed
+deletion. Exports are generation-checked and serialized with removal. A setup or
+unlock crossing a lock/preset change ends the worker rather than retaining its
+old policy.
 
 ## Security compared with the native-host model
 
@@ -219,7 +230,8 @@ The passphrase necessarily crosses the trusted extension page, service worker an
 offscreen messaging boundary. Rust zeroizes its owned passphrase/key buffers, but
 JS strings, structured-clone copies and browser process memory cannot be reliably
 wiped. Lock terminates the worker and closes its network endpoint; it does not
-promise forensic erasure from RAM. No key is persisted unencrypted in this proof.
+promise forensic erasure from RAM. No key is persisted unencrypted on disk;
+session restoration deliberately expands the in-memory secret boundary.
 
 The management command route accepts only the exact extension device page and the
 toolbar popup, which show the same vault UI (`extension/src/vault`); content
@@ -236,19 +248,18 @@ cannot retract secrets already received by a removed member.
 
 ## Lock presets
 
-These are the target product contract, not a claim that all settings ship in Phase 1.
-The Unwrapped key row for Comfortable and Relaxed is a proposal, not a settled
-decision: keeping the unwrapped key in `chrome.storage.session` needs its own
-security review before anything implements it.
+Session restoration is gated by the preset: Strict never exports or accepts a
+session envelope. The Comfortable/Relaxed change requires security review before
+merge; its risks are explicit below rather than described as hardware protection.
 
 | | Strict | Comfortable (default) | Relaxed |
 | --- | --- | --- | --- |
 | Idle lock | 5 min | 1 h | 12 h |
 | Screen lock / sleep (`chrome.idle` locked) | locks | locks | stays unlocked |
 | Browser quit | locks | locks | locks |
-| Unwrapped key | offscreen memory only | proposed: memory + `chrome.storage.session` for offscreen restart | proposed: same as Comfortable |
+| Session restoration | none | wrapped key set + wrapping key in `chrome.storage.session` | same as Comfortable |
 | Touch ID / passkey unlock | allowed | allowed | allowed |
-| Reveal/copy password; card number/CVV | re-auth every time | re-auth card number/CVV | no re-auth |
+| Reveal/copy password; card number/CVV | re-auth every time | no re-auth | no re-auth |
 
 Use means a pick, fill, save, opening the popup, opening a login, or reveal. Passive
 listing for a page menu is not use, and neither is a page reading the vault again
@@ -258,14 +269,92 @@ passphrase check before a password is shown or copied. The choice is a setting i
 `chrome.storage.local`, never a key. The service worker sends it to the vault's
 worker with every unlock and change, and the Rust core enforces Strict itself
 (`crates/ext-core/src/policy.rs`): under Strict it returns no password without a
-passphrase, which it checks against the open store's key set, and a worker that
-was never told assumes Strict. Card number/CVV fills also require the passphrase on every Strict fill.
+passphrase or PRF key, which it checks against the open store's key set, and a
+worker that was never told assumes Strict. Card number/CVV fills require the
+same verification on every Strict fill.
 Comfortable and Relaxed currently follow the native rule with Touch ID off (the
 explicit pick is enough), rather than claiming biometric reauthentication.
-Touch ID/passkey unlock is not implemented. The unwrapped key stays in worker memory only under every
-preset: session-key restoration and passkey PRF wrapping need their own security
-review and browser capability handling, so an offscreen restart still locks under
-Comfortable and Relaxed.
+Opt-in **Unlock with Touch ID** uses a platform WebAuthn passkey with PRF. Strict
+reveals/copies and card fills accept a new PRF assertion or the passphrase. Rust
+checks the actual PRF key against the enrolled store slot, never a JS boolean.
+The UI remembers the successful unlock method, keeps passphrase fallback visible,
+submits on Enter, and shows the backoff countdown. The locked inline row opens
+the device page; unlock returns to the requesting document and reopens its menu,
+without choosing or filling a credential.
+
+### Platform passkey unlock
+
+Enrollment creates a resident platform credential with `userVerification:
+"required"`, no attestation, and the extension's own RP (no remote website).
+A random 32-byte PRF input and credential id are public metadata in the store
+header. A subsequent assertion must return 32 PRF bytes before enrollment is
+committed. That output wraps the existing random store key set in the shared
+store's XChaCha20-Poly1305 biometric slot, alongside the Argon2id passphrase slot.
+Enrollment also requires the current passphrase. Neither passphrase nor PRF
+output is saved in preferences. Reset Touch ID removes the slot and metadata;
+it does not delete the OS passkey. A deleted passkey, cancellation, missing
+platform authenticator or missing PRF output leaves passphrase unlock available.
+Changing the passphrase through the store API also clears the biometric slot.
+
+**Browser evidence:** headless Chromium 156 and Helium 0.20.2.1 (Chromium
+156.0.8078.73) both create internal-platform PRF credentials on
+`chrome-extension://` with CDP's CTAP2.1 virtual authenticator (`hasPrf: true`).
+The standalone e2e exercises registration, assertion, wrapping, unlock, Strict
+secret checks, fake-output rejection and reset. This proves the origin/browser
+plumbing, **not real Touch ID hardware**: exos is Linux. Availability depends on
+the provider. Chromium's legacy local-profile macOS authenticator lacks PRF;
+Google Password Manager and supported system passkey providers may supply it
+([Chromium discussion](https://groups.google.com/a/chromium.org/g/blink-dev/c/iTNOgLwD2bI)).
+There is no insecure emulation when PRF is absent: the closest standalone option
+is a PRF-capable platform provider, otherwise keep the passphrase (native Secure
+Enclave unlock remains a separate native-host option). No HTTPS bridge/helper is
+introduced. Real Chrome and Helium on macOS still need an on-device acceptance
+check. UV may be a device PIN/password or provider verification: the UI label is
+**not a guarantee of biometric-only, device-bound Secure Enclave protection**.
+A synced provider may copy the unlock credential.
+
+An attacker with only OPFS gets public credential metadata and two encrypted key
+slots. Without PRF output they must guess the passphrase through Argon2id; the
+public salt/id alone cannot evaluate PRF. A compromised extension can read all
+unlocked secrets, solicit an assertion and cache its output, steal the passphrase
+as typed, or weaken future UI checks. PRF is not an enclave for extension code;
+Rust cannot establish fresh user presence from a PRF value alone. Origin binding
+protects against an unrelated website, not malicious code at this extension origin.
+
+### Security review needed: session restoration
+
+Comfortable and Relaxed keep a random 256-bit wrapping key beside the encrypted
+64-byte store key set in `chrome.storage.session`. The envelope authenticates a
+separate versioned purpose and the current passphrase slot/KDF header: it cannot
+open another store or survive a passphrase change. It does not change the native
+agent's lifecycle or write a session slot into OPFS.
+
+**Co-location adds no confidentiality.** A wrapping key in only the service
+worker survives an offscreen discard; one in only the offscreen survives worker
+termination. Neither survives losing both. MV3 offers no always-live context.
+Restoring after both discards without a prompt requires session storage to hold
+all information needed to decrypt. Treat possession of this record as possession
+of the unlocked vault and device signing key, not harmless ciphertext.
+
+[`storage.session`](https://developer.chrome.com/docs/extensions/reference/api/storage)
+is memory-only: Chrome does not persist it to disk, sync it, or retain it across
+browser restart or extension reload/update/disable. Closing all windows may not
+quit a browser running in the background. We explicitly set `TRUSTED_CONTEXTS`.
+Content scripts (including our isolated worlds), ordinary websites and other
+extensions cannot read it through the API. **All trusted pages of this extension
+and its service worker can**, including the web-accessible menu frame: trusted
+does not mean only the vault page. Offscreen documents lack the storage API and
+route through the worker. Code execution in any trusted extension context thus
+compromises a retained session. Sender checks on commands are not a separate
+storage boundary.
+
+Memory inspection, swap/hibernation and crash dumps may contain the wrapping key,
+decrypted wasm memory, JS copies or typed passphrases. Memory-only API guarantees
+do not promise forensic erasure or exclusion from OS crash reports. Compared with
+Strict, the key remains available even while both extension execution contexts
+are absent. Manual/idle/screen lock removes the record, but cannot retract a
+copied key or guarantee browser-allocation zeroization. Review this exposure,
+especially trusted-page compromise and crash-dump policy, before shipping.
 
 Wrong passphrases back off. After three in a row, for unlocking or for Strict's
 check before a password, the service worker refuses the next try for 1 s, then 2,
@@ -375,10 +464,9 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
    storage/lifetime adapters, and exercise
    suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
    startup contacts (the proof dials sequentially within the same 30-second budget).
-3. Offscreen session-key restoration (security review first), stronger
-   browser-lifetime guarantees and biometric card reauthentication.
-4. Add WebAuthn PRF/passkey unlock with capability detection; review key wrapping,
-   extension origin binding and memory/permission boundaries.
+3. Complete security review of session restoration and PRF unlock; validate real
+   platform providers in Chrome and Helium on macOS.
+4. Stronger browser-lifetime guarantees and Comfortable biometric card policy.
 5. Finish OTP/identity/card editing, passkeys and learning; harden
    packaging/update/CSP permissions, measure wasm size/unlock across devices, and
    decide native-path retirement.
@@ -386,7 +474,7 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 ## Remaining limitations
 
 - One vault per browser device; no native-host discovery or automatic migration.
-- No passkey registration/assertion capability and no biometric/PRF unlock.
+- No website passkey registration/assertion capability (unlock passkeys are separate).
   WebAuthn falls back to the browser. A headless check with an unlocked standalone
   vault verified browser-owned ES256 resident-key registration and assertion with
   required user verification, no advertised passkey capability and no native
@@ -401,5 +489,6 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 - No standalone Activity log or learning log. Neither capability is advertised.
 - The vault UI edits logins only: other item kinds and OTP secrets must be created
   on a peer and synced. No automatic save/update offers for identities or cards.
-- Worker/offscreen loss locks every preset; no session-key restoration. Chrome
-  extension removal or storage clearing destroys this replica.
+- Strict locks after worker/offscreen loss; Comfortable/Relaxed restore for the
+  remaining browser session and idle lifetime. Extension removal or storage
+  clearing destroys this replica.

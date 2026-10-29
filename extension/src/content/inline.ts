@@ -89,6 +89,7 @@ let state: PageState
 let host: HTMLElement | null = null
 let frame: HTMLIFrameElement | null = null
 let anchor: FormControl | null = null
+let unlockAnchor: FormControl | null = null
 /**
  * For a field in a frame below: where it showed in this page when the menu
  * opened, and the page's scroll then. The menu follows the page's scrolling.
@@ -1096,12 +1097,29 @@ export function initMenu(page: PageState) {
         return void respond(true)
       case "db:close-menu":
         if (message.token === token) {
+          if (message.unlock) unlockAnchor = anchor
           if (mode === "accounts") {
             dismissedFor = anchor
             closeMenu(true)
           } else leave()
         }
         return void respond(true)
+      case "db:unlock-wait":
+        unlockAnchor = framedFor instanceof HTMLInputElement || framedFor instanceof HTMLTextAreaElement || framedFor instanceof HTMLSelectElement ? framedFor : anchor
+        return void respond(!!unlockAnchor)
+      case "db:unlock-return": {
+        const el = unlockAnchor
+        unlockAnchor = null
+        if (!el?.isConnected || !fillable(el)) return void respond(false)
+        // Focus fires synchronously. Suppress its passive query so the
+        // explicit reopen below wins, including on previously empty fields.
+        dismissedFor = el
+        lastGestureAt = Date.now()
+        el.focus()
+        dismissedFor = null
+        void maybeOpen(el, "again")
+        return void respond(true)
+      }
       case "db:resize-menu":
         if (message.token === token) resize(message.height, message.width, message.mode)
         return void respond(true)

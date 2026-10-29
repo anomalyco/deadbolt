@@ -138,6 +138,7 @@ pub use store::native::{
 };
 pub use store::{
     ActivityPage, ActivityRow, Budget, DB_FILE, Dropped, FORMAT_VERSION, LogIter, PassphraseCheck,
-    Unlocked, generate_biometric_key, init_with_backend, unlock_with_backend,
+    Unlocked, biometric_token_with_backend, generate_biometric_key, init_with_backend,
+    resume_with_backend, unlock_biometric_with_backend, unlock_with_backend,
 };
 pub use zeroize::Zeroizing;

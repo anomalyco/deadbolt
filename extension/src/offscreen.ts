@@ -14,7 +14,7 @@ import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultCh
 
 const BACKGROUND = chrome.runtime.getURL("background.js")
 /** The requests that set the vault up, run one at a time. */
-const SETUP = new Set(["device-create", "device-unlock", "device-join-start", "device-join-finish"])
+const SETUP = new Set(["device-create", "device-unlock", "device-join-start", "device-join-finish", "device-resume", "device-biometric-info"])
 
 interface Pending {
   resolve: (response: VaultResponse) => void

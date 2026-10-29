@@ -184,6 +184,7 @@ async function quick(worker: Worker, title: string, password: string, during: st
 async function launch() {
   context = await chromium.launchPersistentContext(profile, {
     channel: "chromium", headless: true, viewport: { width: 1000, height: 700 },
+    ...(arg("--browser") ? { executablePath: resolve(arg("--browser")!) } : {}),
     args: [
       `--disable-extensions-except=${dist}`, `--load-extension=${dist}`,
       // The toolbar popup isn't among Playwright's pages: the card prompt drives it over DevTools (loopback only).
@@ -822,6 +823,111 @@ async function joinExistingVault(device: Page, worker: Worker) {
   return fixtures.length
 }
 
+async function unlockLifetime(device: Page, worker: Worker) {
+  for (const preset of ["comfortable", "relaxed", "strict"] as const) {
+    await request(device, { type: "device-preset", preset })
+    const saved = await worker.evaluate(async () => !!(await chrome.storage.session.get("deadbolt.sessionKey"))["deadbolt.sessionKey"])
+    check(saved === (preset !== "strict"), `${preset}: session envelope is present only outside Strict`)
+    await worker.evaluate(() => chrome.offscreen.closeDocument())
+    check(await state(device) === (preset === "strict" ? "locked" : "ready"), `${preset}: offscreen discard ${preset === "strict" ? "locks" : "restores"} the vault`)
+    if (preset === "strict") await request(device, { type: "device-unlock", passphrase })
+  }
+  await request(device, { type: "device-preset", preset: "comfortable" })
+  await request(device, { type: "device-lock" })
+  check(!await worker.evaluate(async () => !!(await chrome.storage.session.get("deadbolt.sessionKey"))["deadbolt.sessionKey"]), "explicit lock removes the session envelope")
+  await worker.evaluate(() => chrome.offscreen.closeDocument())
+  check(await state(device) === "locked", "offscreen restart after explicit lock cannot restore")
+  await request(device, { type: "device-unlock", passphrase })
+}
+
+async function inlineUnlock(device: Page) {
+  await request(device, { type: "device-lock" })
+  const page = await newPage("inline-unlock")
+  await page.goto(origin)
+  const locked = await menuOn(page, "#username", "Unlock Deadbolt")
+  const opened = context!.waitForEvent("page")
+  await locked.getByRole("button", { name: /Unlock Deadbolt/ }).click()
+  const surface = await opened
+  await surface.waitForURL(`chrome-extension://${ID}/device.html#unlock`)
+  await surface.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+  await surface.getByLabel("Passphrase", { exact: true }).press("Enter")
+  await until("inline unlock closes its own surface", async () => surface.isClosed())
+  await until("inline unlock reopens the menu", async () => {
+    const frame = menuFrame(page)
+    return frame && await frame.locator("button.row").count() > 0 && !(await frame.getByText("Unlock Deadbolt", { exact: true }).count())
+  })
+  check(await page.inputValue("#password") === "", "inline unlock returns to the page and reopens the menu without filling")
+  await page.close()
+}
+
+async function biometricUnlock(device: Page, worker: Worker) {
+  const cdp = await context!.newCDPSession(device)
+  await cdp.send("WebAuthn.enable")
+  const { authenticatorId } = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
+    protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true,
+    hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: true,
+  } })
+  await device.bringToFront()
+  await device.getByRole("button", { name: "Settings", exact: true }).click()
+  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByLabel("Passphrase for Touch ID").fill(passphrase)
+  await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
+  await device.getByRole("button", { name: "Reset Touch ID", exact: true }).waitFor({ timeout: 60_000 })
+  check(true, "extension-origin platform passkey enrolls with real WebAuthn PRF")
+  await request(device, { type: "device-preset", preset: "strict" })
+  await request(device, { type: "device-lock" })
+  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await until("PRF unlock", async () => await state(device) === "ready")
+  check(true, "Touch ID unlock unwraps the second slot without a passphrase")
+  const list = await vault(worker, { type: "device-logins" })
+  const ref = (list.reply.accounts as Array<{ref: string}>)[0]!.ref
+  check(!(await command(device, { type: "device-secret", ref })).ok, "Strict reveal still requires a fresh proof")
+  const info = await request(device, { type: "device-biometric-info" })
+  const prf = await device.evaluate(async (metadata) => {
+    const t = JSON.parse(metadata as string)
+    const bytes = (s: string) => Uint8Array.from(s.match(/../g)!, b => parseInt(b, 16))
+    const credential = await navigator.credentials.get({ publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)), userVerification: "required",
+      allowCredentials: [{ type: "public-key", id: bytes(t.id), transports: ["internal"] }],
+      extensions: { prf: { eval: { first: bytes(t.salt) } } } as AuthenticationExtensionsClientInputs,
+    } }) as PublicKeyCredential
+    const result = credential.getClientExtensionResults() as unknown as {prf: {results: {first: ArrayBuffer}}}
+    return Array.from(new Uint8Array(result.prf.results.first), b => b.toString(16).padStart(2, "0")).join("")
+  }, info.reply.token)
+  check((await command(device, { type: "device-secret", ref, prf })).ok, "Strict reveal accepts the authenticator's PRF output")
+  check(!(await command(device, { type: "device-secret", ref, prf: "00".repeat(32) })).ok, "Strict reveal rejects a fake PRF output")
+  if (!smoke) {
+    const forms = await vault(worker, { type: "forms", origin, kinds: ["card"] })
+    const card = (forms.reply.cards as Array<{ref: string}>)[0]!
+    const fill = { type: "fill-form", origin, ref: card.ref, fields: ["number", "cvv"] }
+    check((await vault(worker, { ...fill, prf: "00".repeat(32) })).reply.type === "error", "Strict card fill rejects a fake PRF output")
+    check((await vault(worker, { ...fill, prf })).reply.type === "fill-form", "Strict card fill accepts the authenticator's PRF output")
+  }
+  await cdp.send("WebAuthn.clearCredentials", { authenticatorId })
+  await request(device, { type: "device-lock" })
+  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByText(/Touch ID was cancelled, unavailable, or its passkey was removed/).waitFor({ timeout: 70_000 })
+  check(await state(device) === "locked", "a deleted authenticator passkey cannot unlock and explains passphrase fallback")
+  await request(device, { type: "device-unlock", passphrase })
+  await request(device, { type: "device-biometric-reset" })
+  check(!(await command(device, { type: "device-secret", ref, prf })).ok, "Reset Touch ID invalidates the old PRF slot")
+  await request(device, { type: "device-lock" })
+  await request(device, { type: "device-unlock", passphrase })
+  await request(device, { type: "device-preset", preset: "comfortable" })
+  await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId })
+  const unsupported = await cdp.send("WebAuthn.addVirtualAuthenticator", { options: {
+    protocol: "ctap2", ctap2Version: "ctap2_1", transport: "internal", hasResidentKey: true,
+    hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: false,
+  } })
+  await device.getByRole("button", { name: "Settings", exact: true }).click()
+  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByLabel("Passphrase for Touch ID").fill(passphrase)
+  await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
+  await device.getByText(/This authenticator doesn't support PRF unlock/).waitFor()
+  check((await request(device, { type: "device-biometric-info" })).reply.token === null, "unsupported PRF is explained and saves no unlock slot")
+  await cdp.send("WebAuthn.removeVirtualAuthenticator", { authenticatorId: unsupported.authenticatorId })
+  await cdp.detach()
+}
+
 try {
   if (!arg("--dist")) {
     const build = Bun.spawnSync(["bun", "scripts/build.ts", "--e2e", dist, "--standalone"], { cwd: join(import.meta.dir, ".."), stdout: "inherit", stderr: "inherit" })
@@ -914,15 +1020,19 @@ try {
     await formFlows(device, worker, `${DEMO}/checkout`)
   }
 
+  await unlockLifetime(device, worker)
+  await inlineUnlock(device)
+  await biometricUnlock(device, worker)
   await request(device, { type: "device-lock" })
   check(await state(device) === "locked", "lock closes the vault")
-  const encrypted = await device.evaluate(async (markers) => {
+  // Worker termination releases the exclusive OPFS handle asynchronously.
+  const encrypted = await until("OPFS handle released after lock", () => device.evaluate(async (markers) => {
     const directory = await navigator.storage.getDirectory()
     const handle = await directory.getFileHandle("vault.redb")
     const bytes = await (await handle.getFile()).arrayBuffer()
     const text = new TextDecoder().decode(bytes)
     return bytes.byteLength > 0 && markers.every((marker) => !text.includes(marker))
-  }, [browserPassword, cliPassword, "browser@example.test", "From CLI", "From browser", "saved@acme.test", "Acme accounts", "4242424242424242"])
+  }, [browserPassword, cliPassword, "browser@example.test", "From CLI", "From browser", "saved@acme.test", "Acme accounts", "4242424242424242"]))
   check(encrypted, "OPFS contains no plaintext credential or item-label markers")
   check(!(await command(device, { type: "device-logins" })).ok, "locked vault refuses login listing")
   check(!(await command(device, { type: "device-unlock", passphrase: "wrong fixture passphrase" })).ok, "wrong passphrase is rejected")

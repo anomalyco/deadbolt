@@ -35,7 +35,11 @@ impl Preset {
 pub fn accepts_preset(command: &str) -> bool {
     matches!(
         command,
-        "device-preset" | "device-create" | "device-unlock" | "device-join-finish"
+        "device-preset"
+            | "device-create"
+            | "device-unlock"
+            | "device-join-finish"
+            | "device-resume"
     )
 }
 

@@ -25,6 +25,7 @@ const signInWith = new SignInWith(host)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
 const learner = new Learner(host)
 const forms = new Forms(host)
+let unlockTab: number | undefined
 saver.signedIn = (tabId, site) => {
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
@@ -144,13 +145,20 @@ async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promi
   if (!standalone) return { ok: false, message: "This build talks to the Deadbolt app; set it up there.", status: host.status }
   const command = deviceCommand(raw)
   if (!command) return { ok: false, message: "Deadbolt didn't understand that request. Reload the extension and try again.", status: host.status }
-  return standalone.device(command)
+  const reply = await standalone.device(command)
+  if (command.type === "device-unlock" && reply.ok && await autofill.returnAfterUnlock()) {
+    const opened = unlockTab
+    unlockTab = undefined
+    if (opened !== undefined) void chrome.tabs.remove(opened).catch(() => {})
+  }
+  return reply
 }
 
 /** The inline menu's locked row, from the menu frame its token was made for: device.html, where the user unlocks. Nothing else is asked of the vault. */
 async function menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
   if (!standalone || !(await autofill.menuUnlock(token, sender))) return false
-  await chrome.tabs.create({ url: chrome.runtime.getURL(DEVICE_PAGE) })
+  const page = await chrome.tabs.create({ url: `${chrome.runtime.getURL(DEVICE_PAGE)}#unlock` })
+  unlockTab = page.id
   return true
 }
 

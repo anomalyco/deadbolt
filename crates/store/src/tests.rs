@@ -144,6 +144,66 @@ fn backend_roundtrip_uses_the_native_encrypted_format() {
 }
 
 #[test]
+fn backend_key_slots_are_independent_and_session_is_bound_to_store() {
+    let dir = TempDir::new().unwrap();
+    let backend = || {
+        redb::backends::FileBackend::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(db_path(dir.path()))
+                .unwrap(),
+        )
+        .unwrap()
+    };
+    let store = init(dir.path());
+    let prf = [0x31; 32];
+    let session_key = [0x42; 32];
+    store
+        .set_biometric(&prf, b"credential id and salt")
+        .unwrap();
+    append(&store, b"entry").unwrap();
+    let wrapped = store.wrap_session(&session_key).unwrap();
+    drop(store);
+    assert_eq!(
+        crate::biometric_token_with_backend(backend())
+            .unwrap()
+            .unwrap(),
+        b"credential id and salt"
+    );
+    assert!(crate::unlock_biometric_with_backend(backend(), &[0; 32]).is_err());
+    let store = crate::unlock_biometric_with_backend(backend(), &prf).unwrap();
+    assert_eq!(all(&store), vec![b"entry".to_vec()]);
+    store.clear_biometric().unwrap();
+    drop(store);
+    assert!(crate::unlock_biometric_with_backend(backend(), &prf).is_err());
+    assert!(crate::resume_with_backend(backend(), &[0; 32], &wrapped).is_err());
+    let mut damaged = wrapped.clone();
+    damaged[30] ^= 1;
+    assert!(crate::resume_with_backend(backend(), &session_key, &damaged).is_err());
+    let store = crate::resume_with_backend(backend(), &session_key, &wrapped).unwrap();
+    assert_eq!(all(&store), vec![b"entry".to_vec()]);
+    assert!(store.passphrase_check().unwrap().matches(PASS));
+    store
+        .change_passphrase_with_params(PASS, b"new passphrase", FAST)
+        .unwrap();
+    drop(store);
+    assert!(crate::resume_with_backend(backend(), &session_key, &wrapped).is_err());
+    let other = TempDir::new().unwrap();
+    drop(init(other.path()));
+    let other_backend = redb::backends::FileBackend::new(
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(db_path(other.path()))
+            .unwrap(),
+    )
+    .unwrap();
+    assert!(crate::resume_with_backend(other_backend, &session_key, &wrapped).is_err());
+    assert!(crate::unlock_with_backend(backend(), b"new passphrase").is_ok());
+}
+
+#[test]
 fn roundtrip() {
     let tmp = TempDir::new().unwrap();
     let dir = tmp.path().join("nested/data");
