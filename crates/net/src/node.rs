@@ -26,7 +26,9 @@ use crate::{
     Membership, PAIR_ALPN, PeerId, SYNC_ALPN,
     error::{Error, Result, close},
     fmt_id,
-    sync::{DynSyncHandler, SyncConnection, SyncHandler, SyncOutcome, serve_sync},
+    sync::{
+        DynSyncHandler, INBOUND_SYNC_TIMEOUT, SyncConnection, SyncHandler, SyncOutcome, serve_sync,
+    },
 };
 
 /// Default maximum size of one frame (one heads blob or one entry).
@@ -59,6 +61,8 @@ pub struct NodeConfig {
     pub portmapper: bool,
     /// Maximum size of a single frame accepted from a peer.
     pub max_frame_len: usize,
+    /// How long a sync session a peer opened may take before its connection is closed.
+    pub inbound_sync_timeout: Duration,
 }
 
 impl NodeConfig {
@@ -71,6 +75,7 @@ impl NodeConfig {
             bind_addr: None,
             portmapper: true,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
+            inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
         }
     }
 
@@ -84,6 +89,7 @@ impl NodeConfig {
             bind_addr: Some(SocketAddr::from(([127, 0, 0, 1], 0))),
             portmapper: false,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
+            inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
         }
     }
 }
@@ -97,6 +103,7 @@ impl fmt::Debug for NodeConfig {
             .field("bind_addr", &self.bind_addr)
             .field("portmapper", &self.portmapper)
             .field("max_frame_len", &self.max_frame_len)
+            .field("inbound_sync_timeout", &self.inbound_sync_timeout)
             .finish()
     }
 }
@@ -236,6 +243,7 @@ impl Node {
             gate.clone(),
             handler.clone(),
             config.max_frame_len,
+            config.inbound_sync_timeout,
         )));
         Ok(Self {
             inner: Arc::new(Inner {
@@ -321,6 +329,7 @@ async fn accept_loop(
     gate: Arc<Gate>,
     handler: Arc<dyn DynSyncHandler>,
     max_frame_len: usize,
+    session_timeout: Duration,
 ) {
     let mut tasks = JoinSet::new();
     loop {
@@ -339,7 +348,9 @@ async fn accept_loop(
                         }
                     };
                     match conn.alpn() {
-                        SYNC_ALPN => serve_sync(conn, handler, max_frame_len).await,
+                        SYNC_ALPN => {
+                            serve_sync(conn, handler, max_frame_len, session_timeout).await;
+                        }
                         PAIR_ALPN => gate.route_pairing(conn),
                         _ => conn.close(close::PROTOCOL, b"unknown alpn"),
                     }
@@ -584,20 +595,24 @@ impl EndpointHooks for GateHook {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{HandlerError, SyncHandler};
 
-    struct Nothing;
+    pub(crate) struct Nothing;
 
     impl SyncHandler for Nothing {
         async fn heads(&self, _: PeerId) -> Result<Vec<u8>, HandlerError> {
             Ok(vec![])
         }
-        async fn missing_for(&self, _: PeerId, _: Vec<u8>) -> Result<Vec<Vec<u8>>, HandlerError> {
+        async fn missing_for(
+            &self,
+            _: PeerId,
+            _: Vec<u8>,
+        ) -> Result<Vec<crate::Blob>, HandlerError> {
             Ok(vec![])
         }
-        async fn receive(&self, _: PeerId, _: Vec<Vec<u8>>) -> Result<(), HandlerError> {
+        async fn receive(&self, _: PeerId, _: Vec<crate::Blob>) -> Result<(), HandlerError> {
             Ok(())
         }
     }

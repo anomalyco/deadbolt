@@ -2,15 +2,25 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::data::{self, Item, ItemState, Version};
 use crate::encoding::{Reader, Writer};
-use crate::entry::{DataOp, Entry, Log, LogId, MembershipOp, Payload, consent_message, valid_name};
+use crate::entry::{
+    DataOp, Entry, Log, LogId, MembershipOp, Payload, consent_message, data_entry_len, valid_name,
+};
 use crate::error::{DecodeError, Error};
 use crate::id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 use crate::item::{Field, ItemError};
 use crate::membership::{self, Membership};
 
-/// Approximate field data per entry written by [`Vault::create_items`],
-/// well under the sync frame limit.
+/// Encoded ops per entry written by [`Vault::create_items`] (a single op may
+/// exceed it), well under [`MAX_ENTRY_LEN`].
 pub const CREATE_BATCH_BYTES: usize = 1024 * 1024;
+
+/// The largest encoded entry [`Vault::commit`] accepts: one sync frame
+/// (deadbolt-net's 16 MiB `DEFAULT_MAX_FRAME_LEN`, which covers a tag byte
+/// and the body) minus its tag. A larger entry could be stored but never
+/// sent to another device.
+pub const MAX_ENTRY_LEN: usize = 16 * 1024 * 1024 - 1;
+
+const _: () = assert!(CREATE_BATCH_BYTES * 8 < MAX_ENTRY_LEN);
 
 /// Per log, the highest seq in an entry's causal past (inclusive).
 pub(crate) type Clock = BTreeMap<LogId, u64>;
@@ -51,7 +61,7 @@ impl Heads {
 
     /// Canonical encoding: count, then (author, log tag, seq) in ascending order.
     pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
+        let mut w = Writer::new(Vec::new());
         w.len(self.0.len());
         for (log, seq) in &self.0 {
             w.bytes(log.author.as_bytes());
@@ -340,6 +350,13 @@ impl Vault {
         let prev = self.logs.get(&log_id).and_then(|log| log.last());
         let deps: Vec<Hash> = tips.iter().chain(prev).copied().collect();
         let entry = Entry::sign(secret, self.id, self.next_seq(log_id), deps, payload);
+        let len = entry.encoded_len();
+        if len > MAX_ENTRY_LEN {
+            return Err(Error::TooLarge {
+                len,
+                max: MAX_ENTRY_LEN,
+            });
+        }
         self.apply(entry.clone())?;
         Ok(entry)
     }
@@ -409,11 +426,12 @@ impl Vault {
         Ok((ItemId::of_create(&entry.hash(), 0), entry))
     }
 
-    /// Creates many items (an import) in as few entries as fit about
-    /// [`CREATE_BATCH_BYTES`] of field data each. Every op must be a
+    /// Creates many items (an import) in as few entries as fit
+    /// [`CREATE_BATCH_BYTES`] of encoded ops each. Every op must be a
     /// [`DataOp::Create`] (an edit fails as [`ItemError::NoSuchItem`]). Every
     /// item is checked before anything is written, so either all are
-    /// created or none.
+    /// created or none; one too large to sync even in an entry of its own
+    /// fails as [`Error::TooLarge`].
     pub fn create_items(
         &mut self,
         secret: &DeviceSecret,
@@ -422,25 +440,23 @@ impl Vault {
         if !self.is_member(&secret.device_id()) {
             return Err(Error::NotMember);
         }
+        // The first entry depends on every tip and this device's previous
+        // entry; later ones only on the entry before.
+        let deps = self.tips.len() + 1;
         let mut batches: Vec<Vec<DataOp>> = Vec::new();
         let mut size = 0;
         for op in items {
-            let DataOp::Create {
-                kind,
-                name,
-                fields,
-                source,
-            } = &op
-            else {
+            if !matches!(op, DataOp::Create { .. }) {
                 return Err(ItemError::NoSuchItem.into());
-            };
-            let bytes = kind.len()
-                + name.as_ref().map_or(0, String::len)
-                + source.as_ref().map_or(0, |s| s.id.len() + s.version.len())
-                + fields
-                    .iter()
-                    .map(|(n, f)| n.len() + f.kind.as_str().len() + f.value.len() + 16)
-                    .sum::<usize>();
+            }
+            let bytes = op.encoded_len();
+            let len = data_entry_len(deps, bytes);
+            if len > MAX_ENTRY_LEN {
+                return Err(Error::TooLarge {
+                    len,
+                    max: MAX_ENTRY_LEN,
+                });
+            }
             data::check(&self.items, &op)?;
             match batches.last_mut() {
                 Some(batch) if size + bytes <= CREATE_BATCH_BYTES => batch.push(op),

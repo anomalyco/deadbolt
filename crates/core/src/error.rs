@@ -28,6 +28,11 @@ pub enum Error {
     InvalidName,
     #[error("not a valid genesis entry")]
     InvalidGenesis,
+    /// A change whose entry could never be sent to another device.
+    #[error(
+        "too large to sync to other devices: {len} bytes in one change, the limit is {max} bytes"
+    )]
+    TooLarge { len: usize, max: usize },
     #[error(transparent)]
     Item(#[from] ItemError),
 }

@@ -5,26 +5,35 @@
 //!
 //! 1. send `HEADS(my heads)`, receive `HEADS(peer heads)`
 //! 2. send `ENTRY(blob)`* `DONE` for `missing_for(peer heads)`, receive the peer's entries
-//! 3. hand the received entries, in order, to [`SyncHandler::receive`]
+//! 3. hand the received entries, in order, to [`SyncHandler::receive`]: in batches of
+//!    bounded size and count while they arrive, the last one (possibly empty) after
+//!    `DONE`
 //! 4. the responder sends `RESULT` (empty = ok, otherwise an error message) once its
 //!    `receive` returned; the initiator waits for it, so a completed session means both
 //!    sides processed everything.
 //!
 //! Entries are delivered in the order the sender produced them. Ordering membership
 //! entries before the data that depends on them is the [`SyncHandler`]'s job.
+//!
+//! An inbound session must finish within [`crate::NodeConfig::inbound_sync_timeout`].
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use iroh::endpoint::Connection;
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
 use crate::{
-    PeerId,
+    Blob, PeerId,
     error::{Error, HandlerError, Result, close, from_conn, settle},
     fmt_id,
     frame::{self, tag},
 };
+
+/// Default for how long a session a peer opened may take, from accepting its stream to
+/// our `RESULT`, before the connection is closed ([`crate::NodeConfig`]). Generous: the
+/// CLI gives up on a session it opened after 15 seconds, including the dial.
+pub const INBOUND_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Application side of the sync protocol. Heads and entries are opaque bytes.
 ///
@@ -39,13 +48,15 @@ pub trait SyncHandler: Send + Sync + 'static {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> impl Future<Output = Result<Vec<Vec<u8>>, HandlerError>> + Send;
+    ) -> impl Future<Output = Result<Vec<Blob>, HandlerError>> + Send;
 
-    /// Entries received from `peer`, in the order it sent them.
+    /// Entries received from `peer`, in the order it sent them. One session may call
+    /// this several times, with consecutive batches; the last call (after the peer's
+    /// `DONE`, possibly with no entries) always happens unless an earlier one failed.
     fn receive(
         &self,
         peer: PeerId,
-        entries: Vec<Vec<u8>>,
+        entries: Vec<Blob>,
     ) -> impl Future<Output = Result<(), HandlerError>> + Send;
 }
 
@@ -58,14 +69,14 @@ impl<T: SyncHandler> SyncHandler for Arc<T> {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> impl Future<Output = Result<Vec<Vec<u8>>, HandlerError>> + Send {
+    ) -> impl Future<Output = Result<Vec<Blob>, HandlerError>> + Send {
         (**self).missing_for(peer, peer_heads)
     }
 
     fn receive(
         &self,
         peer: PeerId,
-        entries: Vec<Vec<u8>>,
+        entries: Vec<Blob>,
     ) -> impl Future<Output = Result<(), HandlerError>> + Send {
         (**self).receive(peer, entries)
     }
@@ -79,12 +90,8 @@ pub(crate) trait DynSyncHandler: Send + Sync + 'static {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> BoxFuture<'_, Result<Vec<Vec<u8>>, HandlerError>>;
-    fn receive(
-        &self,
-        peer: PeerId,
-        entries: Vec<Vec<u8>>,
-    ) -> BoxFuture<'_, Result<(), HandlerError>>;
+    ) -> BoxFuture<'_, Result<Vec<Blob>, HandlerError>>;
+    fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> BoxFuture<'_, Result<(), HandlerError>>;
 }
 
 impl<T: SyncHandler> DynSyncHandler for T {
@@ -96,15 +103,11 @@ impl<T: SyncHandler> DynSyncHandler for T {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> BoxFuture<'_, Result<Vec<Vec<u8>>, HandlerError>> {
+    ) -> BoxFuture<'_, Result<Vec<Blob>, HandlerError>> {
         Box::pin(SyncHandler::missing_for(self, peer, peer_heads))
     }
 
-    fn receive(
-        &self,
-        peer: PeerId,
-        entries: Vec<Vec<u8>>,
-    ) -> BoxFuture<'_, Result<(), HandlerError>> {
+    fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> BoxFuture<'_, Result<(), HandlerError>> {
         Box::pin(SyncHandler::receive(self, peer, entries))
     }
 }
@@ -198,14 +201,20 @@ pub(crate) async fn serve_sync(
     conn: Connection,
     handler: Arc<dyn DynSyncHandler>,
     max_frame_len: usize,
+    timeout: Duration,
 ) {
     let peer = *conn.remote_id().as_bytes();
     while let Ok((mut send, mut recv)) = conn.accept_bi().await {
-        match run_session(&*handler, peer, &mut send, &mut recv, max_frame_len, false).await {
-            Ok(outcome) => debug!(peer = %fmt_id(&peer), ?outcome, "served sync session"),
-            Err(err) => {
+        let session = run_session(&*handler, peer, &mut send, &mut recv, max_frame_len, false);
+        match tokio::time::timeout(timeout, session).await {
+            Ok(Ok(outcome)) => debug!(peer = %fmt_id(&peer), ?outcome, "served sync session"),
+            Ok(Err(err)) => {
                 let err = fail(&conn, err).await;
                 debug!(peer = %fmt_id(&peer), "sync session failed: {err}");
+            }
+            Err(_) => {
+                conn.close(close::PROTOCOL, b"timeout");
+                debug!(peer = %fmt_id(&peer), "sync session timed out");
             }
         }
     }
@@ -234,25 +243,23 @@ async fn run_session(
     initiator: bool,
 ) -> Result<SyncOutcome> {
     let heads = handler.heads(peer).await.map_err(Error::Handler)?;
-    let ((), peer_heads) = tokio::try_join!(
+    let ((), mut peer_heads) = tokio::try_join!(
         frame::write(send, tag::HEADS, &heads),
         frame::expect(recv, tag::HEADS, max),
     )?;
 
     let missing = handler
-        .missing_for(peer, peer_heads)
+        .missing_for(peer, std::mem::take(&mut *peer_heads))
         .await
         .map_err(Error::Handler)?;
-    let ((), entries) = tokio::try_join!(
+    let ((), (received, local)) = tokio::try_join!(
         frame::write_entries(send, &missing),
-        frame::read_entries(recv, max),
+        receive_entries(handler, peer, recv, max),
     )?;
-
     let outcome = SyncOutcome {
         sent: missing.len(),
-        received: entries.len(),
+        received,
     };
-    let local = handler.receive(peer, entries).await;
 
     if initiator {
         if let Err(error) = send.shutdown().await {
@@ -270,6 +277,30 @@ async fn run_session(
         local.map_err(Error::Handler)?;
     }
     Ok(outcome)
+}
+
+/// Reads the peer's entries, handing them on in bounded batches as they arrive so a
+/// session never buffers more than one batch. Once a batch fails, the rest are read
+/// and dropped, so the failure is reported in `RESULT` as before. Returns how many
+/// entries were read and the handler's result.
+async fn receive_entries(
+    handler: &dyn DynSyncHandler,
+    peer: PeerId,
+    recv: &mut (impl AsyncRead + Unpin),
+    max: usize,
+) -> Result<(usize, Result<(), HandlerError>)> {
+    let mut received = 0;
+    let mut result = Ok(());
+    loop {
+        let (batch, done) = frame::read_batch(recv, max).await?;
+        received += batch.len();
+        if result.is_ok() {
+            result = handler.receive(peer, batch).await;
+        }
+        if done {
+            return Ok((received, result));
+        }
+    }
 }
 
 /// Closes the connection for locally detected failures and maps I/O failures to the

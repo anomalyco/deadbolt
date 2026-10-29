@@ -22,14 +22,17 @@ case "$version" in
 esac
 target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
 if $universal; then
+  # deadbolt-cli first: the app pins the helper its build.rs stages.
   for arch in aarch64 x86_64; do
-    cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app --target "$arch-apple-darwin" -j 2
+    cargo +stable build --release --locked -p deadbolt-cli --target "$arch-apple-darwin" -j 2
+    cargo +stable build --release --locked -p deadbolt-app --target "$arch-apple-darwin" -j 2
   done
   for bin in deadbolt deadbolt-enclave deadbolt-ui; do
     lipo -create "$target/aarch64-apple-darwin/release/$bin" "$target/x86_64-apple-darwin/release/$bin" -output "$scratch/$bin"
   done
 else
-  cargo +stable build --release --locked -p deadbolt-cli -p deadbolt-app -j 2
+  cargo +stable build --release --locked -p deadbolt-cli -j 2
+  cargo +stable build --release --locked -p deadbolt-app -j 2
   cp "$target/release/deadbolt" "$target/release/deadbolt-enclave" "$target/release/deadbolt-ui" "$scratch/"
 fi
 app="$scratch/Deadbolt.app"
@@ -68,7 +71,7 @@ iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbol
 # already signed it (or took the release workflow's Developer ID-signed helper
 # from `DEADBOLT_ENCLAVE_PREBUILT`; docs/releasing.md) (using `DEADBOLT_APPLE_SIGNING_IDENTITY` with `--options runtime
 # --timestamp` when set, or ad-hoc `-` otherwise) before embedding its whole-file
-# SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt`. Re-signing `deadbolt-enclave`
+# SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt` and `Deadbolt`. Re-signing `deadbolt-enclave`
 # after `deadbolt` is compiled would alter its `__LINKEDIT` signature bytes and
 # break the agent's SHA-256 verification.
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
@@ -82,6 +85,14 @@ fi
 plutil -lint "$app/Contents/Info.plist"
 codesign --verify --strict "$app/Contents/Helpers/deadbolt-enclave"
 codesign --verify --deep --strict "$app"
+# The app pins the helper it ships, as `deadbolt` does (crates/app/build.rs).
+helper="$app/Contents/Helpers/deadbolt-enclave"
+if $universal; then slices="arm64 x86_64"; else slices=thin; fi
+for slice in $slices; do
+  if [[ $slice == thin ]]; then cp "$helper" "$scratch/helper-$slice"; else lipo "$helper" -thin "$slice" -output "$scratch/helper-$slice"; fi
+  pin=$(shasum -a 256 "$scratch/helper-$slice" | cut -d' ' -f1)
+  grep -aqF "$pin" "$app/Contents/MacOS/Deadbolt" || { echo "Deadbolt doesn't pin its $slice deadbolt-enclave ($pin)." >&2; exit 1; }
+done
 "$app/Contents/Helpers/deadbolt" --version
 "$app/Contents/Helpers/deadbolt-enclave" status >/dev/null
 "$app/Contents/MacOS/Deadbolt" --list-scenes >/dev/null

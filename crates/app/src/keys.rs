@@ -244,26 +244,24 @@ impl App {
         }
     }
 
-    /// The selected item's website, with a scheme if it had none.
+    /// The selected item's website, with a scheme if it had none: a login's
+    /// URL field, or a passkey's relying party (a domain, so always https).
+    /// Only an http or https address with a host is one.
     pub fn site(&self) -> Option<String> {
         let full = self.detail.as_ref()?;
         if self.selected.as_deref() != Some(full.id.as_str()) {
             return None;
         }
-        let name = if full.kind == "passkey" {
-            "rp-id"
+        let (name, kind) = if full.kind == "passkey" {
+            ("rp-id", "text")
         } else {
-            "url"
+            ("url", "url")
         };
-        let url = full.fields.iter().find(|f| f.name == name)?.value.trim();
-        if url.is_empty() {
+        let field = full.fields.iter().find(|f| f.name == name)?;
+        if field.kind != kind {
             return None;
         }
-        Some(if url.contains("://") {
-            url.to_owned()
-        } else {
-            format!("https://{url}")
-        })
+        web_address(field.value.trim(), kind == "url")
     }
 
     /// The vault's keys wherever focus is, after overlays and the import view
@@ -340,4 +338,62 @@ fn is_question(ev: &KeyEvent) -> bool {
 
 fn is_letter(ev: &KeyEvent, letter: &str) -> bool {
     matches!(&ev.key, Key::Text(t) if t == letter) && plain(ev)
+}
+
+/// `value` as an address the browser may open, `https://` added when it has
+/// no scheme (or always, for a bare domain): only http and https with a host,
+/// so nothing else the system knows how to open (a `file:`, a custom app
+/// scheme) is reached from a vault value.
+fn web_address(value: &str, may_have_scheme: bool) -> Option<String> {
+    if value.is_empty() || value.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        return None;
+    }
+    let address = if value.contains("://") {
+        if !may_have_scheme {
+            return None;
+        }
+        value.to_owned()
+    } else {
+        format!("https://{value}")
+    };
+    let parsed = url::Url::parse(&address).ok()?;
+    (matches!(parsed.scheme(), "http" | "https") && parsed.host().is_some()).then_some(address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::web_address;
+
+    #[test]
+    fn only_web_addresses_open() {
+        for (value, opens) in [
+            ("github.com", "https://github.com"),
+            ("https://github.com/login", "https://github.com/login"),
+            ("http://router.local:8080/", "http://router.local:8080/"),
+            ("HTTPS://Example.com", "HTTPS://Example.com"),
+        ] {
+            assert_eq!(web_address(value, true).as_deref(), Some(opens), "{value}");
+        }
+        for value in [
+            "",
+            "file:///etc/passwd",
+            "file://localhost/Applications/Calculator.app",
+            "javascript:alert(1)",
+            "javascript://%0aalert(1)",
+            "ftp://example.com",
+            "x-apple.systempreferences://",
+            "vscode://file/tmp/x",
+            "smb://server/share",
+            "https://",
+            "https://exa mple.com",
+            "https://example.com/\n",
+        ] {
+            assert_eq!(web_address(value, true), None, "{value:?}");
+        }
+        assert_eq!(
+            web_address("example.com", false).as_deref(),
+            Some("https://example.com")
+        );
+        assert_eq!(web_address("http://example.com", false), None);
+    }
 }

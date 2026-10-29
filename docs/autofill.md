@@ -453,7 +453,10 @@ not running without sending hello, which would start the agent again.
 - **Changing a password.** A change-password form with a username updates
   the login whose password is the current one. Without a username, it's the
   one login here whose password is the current one (a `check` with no
-  username), else the only login here, else nothing.
+  username), else the only login here, else nothing. With a username the
+  extension always checks both the current and the new password, so the host
+  sees the same requests (and spends the same rate limit) whether or not the
+  current one matched; a new password that is the current one offers nothing.
 - **Passkeys.** A script in the page's own world answers
   `navigator.credentials.create` and `get` from Deadbolt, through the
   toolbar popup or the inline menu, and hands anything Deadbolt can't do back

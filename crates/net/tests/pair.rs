@@ -6,7 +6,7 @@ use std::{sync::Mutex, time::Duration};
 
 use common::*;
 use deadbolt_net::{
-    ConfirmationCode, Error, HandlerError, Inviter, Joiner, PairingContext, PairingOptions,
+    Blob, ConfirmationCode, Error, HandlerError, Inviter, Joiner, PairingContext, PairingOptions,
     PairingTicket, QrStyle,
 };
 
@@ -36,12 +36,8 @@ impl Joiner for NewDevice {
         Ok(join)
     }
 
-    async fn receive(
-        &self,
-        _ctx: &PairingContext,
-        welcome: Vec<Vec<u8>>,
-    ) -> Result<(), HandlerError> {
-        *self.welcome.lock().unwrap() = Some(welcome);
+    async fn receive(&self, _ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
+        *self.welcome.lock().unwrap() = Some(welcome.iter().map(|b| b.to_vec()).collect());
         Ok(())
     }
 }
@@ -68,7 +64,7 @@ impl Inviter for ExistingDevice {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> Result<Vec<Vec<u8>>, HandlerError> {
+    ) -> Result<Vec<Blob>, HandlerError> {
         let mut expected = b"consent:vault-1".to_vec();
         expected.extend_from_slice(&ctx.remote);
         expected.extend_from_slice(&ctx.local);
@@ -77,9 +73,9 @@ impl Inviter for ExistingDevice {
         }
         *self.join.lock().unwrap() = Some(join);
         Ok(vec![
-            b"add".to_vec(),
-            b"membership-log".to_vec(),
-            b"data".to_vec(),
+            Blob::new(b"add".to_vec()),
+            Blob::new(b"membership-log".to_vec()),
+            Blob::new(b"data".to_vec()),
         ])
     }
 }
