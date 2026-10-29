@@ -93,6 +93,13 @@ fn an_item_synced_in_fades_into_the_list_and_the_selection_stays() {
     let key = format!("item-{}", synced.id);
     let (_, fade) = at(&rt, &key).expect("the synced row is in the list");
     assert!(fade < 0.5, "the synced row fades in (opacity {fade})");
+    let sel_key = format!("item-{}", selected.as_deref().unwrap());
+    let (row_y, _) = at(&rt, &sel_key).unwrap();
+    let (lit_y, _) = at(&rt, "highlight").unwrap();
+    assert!(
+        (row_y - lit_y).abs() < 0.5,
+        "the highlight rides its row during sync ({lit_y} vs {row_y})"
+    );
     for _ in 0..60 {
         rt.frame(FRAME);
     }
@@ -243,4 +250,92 @@ fn a_new_selection_replaces_the_item_at_once() {
         "no field lingers once the hold ends"
     );
     assert_eq!(title(&rt), (label(&rt), 1.0), "the click's title");
+}
+
+#[test]
+fn overlays_and_settings_appear_and_leave_at_once() {
+    let mut rt = runtime("vault");
+    rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+    let cmd = |c| rune::KeyEvent {
+        key: rune::Key::Command(c),
+        mods: rune::Mods {
+            cmd: true,
+            ..rune::Mods::default()
+        },
+    };
+
+    // ⌘K menu appears and leaves without a fade.
+    rt.key(cmd('k'));
+    rt.frame(FRAME);
+    assert_eq!(at(&rt, "palette-over").map(|(_, o)| o), Some(1.0));
+    tap(&mut rt, rune::Key::Escape);
+    assert_eq!(at(&rt, "palette-over"), None);
+
+    // ? shortcut sheet appears and leaves without a fade.
+    rt.update(|_, tx| tx.blur());
+    rt.frame(FRAME);
+    tap(&mut rt, rune::Key::Text("?".into()));
+    assert_eq!(at(&rt, "sheet").map(|(_, o)| o), Some(1.0));
+    tap(&mut rt, rune::Key::Escape);
+    assert_eq!(at(&rt, "sheet"), None);
+
+    // ⌘, Settings swaps with the vault page without crossfading.
+    rt.key(cmd(','));
+    rt.frame(FRAME);
+    assert_eq!(at(&rt, "settings").map(|(_, o)| o), Some(1.0));
+    assert_eq!(at(&rt, "vault"), None);
+    tap(&mut rt, rune::Key::Escape);
+    assert_eq!(at(&rt, "settings"), None);
+    assert_eq!(at(&rt, "vault").map(|(_, o)| o), Some(1.0));
+}
+
+#[test]
+fn the_copy_notice_slides_out_when_it_leaves() {
+    let mut rt = runtime("copied");
+    let (rest_y, opacity) = at(&rt, "copy-notice").expect("copy notice shown");
+    assert_eq!(opacity, 1.0);
+
+    rt.update(|s, _| s.copy = None);
+    rt.frame(FRAME);
+    let (exit_y, exit_opacity) = at(&rt, "copy-notice").expect("copy notice exiting");
+    assert!(
+        exit_opacity > 0.0 && exit_opacity < 1.0,
+        "fades out ({exit_opacity})"
+    );
+    assert!(
+        exit_y > rest_y,
+        "slides down 12 pt on exit instead of freezing ({rest_y} -> {exit_y})"
+    );
+}
+
+#[test]
+fn settings_keys_scroll_offscreen_rows_into_view() {
+    let mut rt = runtime("settings");
+    rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
+    rt.set_viewport((640.0, 420.0), 1.0);
+    for _ in 0..10 {
+        rt.frame(FRAME);
+    }
+    let viewport = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("settings"))
+        .unwrap()
+        .rect;
+    for _ in 0..10 {
+        tap(&mut rt, rune::Key::Text("j".into()));
+    }
+    for _ in 0..60 {
+        rt.frame(FRAME);
+    }
+    let row = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.key.as_deref() == Some("set-activity-row"))
+        .unwrap()
+        .rect;
+    assert!(
+        row[1] + row[3] <= viewport[1] + viewport[3] - 20.0,
+        "activity row scrolled clear of the bottom edge ({row:?} in {viewport:?})"
+    );
 }

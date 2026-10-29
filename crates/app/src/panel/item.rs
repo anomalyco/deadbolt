@@ -2,12 +2,12 @@
 //! then one line per field, its name before its value. Secrets stay masked;
 //! ⏎ and ⌘K copy from here.
 
-use deadbolt_client::protocol::code_field;
-use rune::{El, TextStyle, col, row, text};
+use rune::{El, col, row, text};
 use rune_kit::Kit;
 
-use crate::keys::shown;
 use crate::model::{App, group_code, is_secret, title_case};
+use crate::view::theme::PANEL_ITEM_TITLE;
+use crate::view::{item_fields, masked_secret, tnum};
 
 /// The width of a field's name.
 const NAME_W: f32 = 96.0;
@@ -34,34 +34,35 @@ pub fn view(s: &App, k: &Kit) -> El {
         .child(
             text(item.label.clone())
                 .key("title")
-                .font(TextStyle::new(15.0, 600.0).lh(20.0))
+                .font(PANEL_ITEM_TITLE)
                 .color(k.c.text_strong)
                 .truncate_fade(),
         );
     let mut fields = col().key("fields").w_full();
-    if let Some(full) = s.detail.as_ref().filter(|d| d.id == item.id) {
-        let code = code_field(&full.fields);
-        for (i, field) in full.fields.iter().enumerate() {
-            if !shown(&full.kind, &field.name) {
-                continue;
-            }
-            let value = if code == Some(i) {
+    if let Some(full) = s.page() {
+        for (field, is_code) in item_fields(full) {
+            let value = if is_code {
                 let now = s.otp.as_ref().filter(|o| o.item == full.id);
-                text(
-                    now.and_then(|o| o.code.as_ref())
-                        .map_or_else(|| "••• •••".to_owned(), |c| group_code(c)),
-                )
-                .font(k.ty.mono.features("'tnum' 1"))
+                match (
+                    now.and_then(|o| o.code.as_ref()),
+                    now.and_then(|o| o.error.as_ref()),
+                ) {
+                    (Some(code), _) => text(group_code(code))
+                        .font(tnum(k.ty.mono))
+                        .color(k.c.text_base),
+                    (None, Some(err)) => text(format!("No code: {err}"))
+                        .font(k.ty.text_small)
+                        .color(k.c.danger.fg),
+                    (None, None) => text("••• •••").font(tnum(k.ty.mono)).color(k.c.text_base),
+                }
             } else if is_secret(&field.kind) {
-                text(field.value.trim_end_matches(['\r', '\n']).to_owned())
-                    .secure()
-                    .revealed(false)
-                    .font(k.ty.mono)
+                masked_secret().font(k.ty.mono).color(k.c.text_base)
             } else {
                 text(field.value.lines().next().unwrap_or_default().to_owned())
                     .font(k.ty.text_small)
+                    .color(k.c.text_base)
             };
-            let name = if code == Some(i) {
+            let name = if is_code {
                 "One-time code".to_owned()
             } else {
                 title_case(&field.name)
@@ -84,7 +85,6 @@ pub fn view(s: &App, k: &Kit) -> El {
                     .child(
                         value
                             .key("value")
-                            .color(k.c.text_base)
                             .grow(1.0)
                             .shrink()
                             .min_w(0.0)

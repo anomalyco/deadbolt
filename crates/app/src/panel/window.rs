@@ -6,7 +6,7 @@
 //! shortcut itself is `crate::shortcut`.
 
 use rune::{
-    Align, AppHandle, ConfiguredWindowOptions, Cursor, DisplayTarget, El, Key, KeyEvent, MenuError,
+    Align, AppHandle, ConfiguredWindowOptions, DisplayTarget, El, Key, KeyEvent, MenuError,
     MenuItem, OverlayPlacement, ScreenEdge, Shortcut, WindowOptions,
 };
 use rune_kit::Kit;
@@ -225,9 +225,9 @@ pub fn entry(s: &App, k: &Kit) -> Option<El> {
         .map(rune::Shortcut::keycaps)
         .unwrap_or_default();
     let keys: Vec<&str> = keys.iter().map(String::as_str).collect();
-    let hint = crate::view::hint(k, "h-panel", &keys, "Quick panel")
-        .cursor(Cursor::Pointer)
-        .label("Open quick panel")
-        .on_press(|s: &mut App| s.open_panel());
-    Some(hint)
+    Some(
+        crate::view::hint(k, "h-panel", &keys, "Quick panel")
+            .label("Open quick panel")
+            .on_press(|s: &mut App| s.open_panel()),
+    )
 }
