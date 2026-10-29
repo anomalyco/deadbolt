@@ -7,7 +7,7 @@
 
 import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type SignInReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
-import { boxesInTop, cleanApproved, cleanBox, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
+import { boxesInTop, cleanApproved, cleanBox, LOGIN_FRAME_PLACE, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type VaultBackend } from "./backend"
 import { isAccountPage, pageAccountOf } from "../signin"
 import type { SignInWith } from "./signinwith"
@@ -289,7 +289,7 @@ export class Autofill {
     if (target.frameId !== 0) {
       const own = cleanBox(box)
       const top = own ? await sameSiteTop(target) : null
-      const shown = top && own ? await boxesInTop(target, [own]) : null
+      const shown = top && own ? await boxesInTop(target, [own], LOGIN_FRAME_PLACE) : null
       if (!top || !shown) return { rows: 0 }
       owner = top
       at = shown[0]
@@ -529,7 +529,7 @@ export class Autofill {
     const wrote = sanitizeRoles(ack?.filled)
     // A frame's step pill opens in the top page, where the frame says the field it wrote last shows.
     const box = cleanBox(ack?.box)
-    const shown = pill && owner && wrote.length && box ? await boxesInTop(target, [box]) : null
+    const shown = pill && owner && wrote.length && box ? await boxesInTop(target, [box], LOGIN_FRAME_PLACE) : null
     if (pill && owner && shown) await sendToFrame(owner, { type: "db:open-at", token: pill, rows: 0, box: shown[0], mode: "pill" })
     return wrote
   }

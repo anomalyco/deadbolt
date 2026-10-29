@@ -125,14 +125,14 @@ export const cleanBox = (box: unknown): Box | null => (isBoxes([box]) ? (box as 
  */
 export async function shownInPage(target: FrameTarget, form: number, sameSite = false): Promise<Approved | null> {
   const approved = cleanApproved(await sendToFrame(target, { type: "db:approve", form, measure: true, ...(sameSite ? { sameSite } : {}) }))
-  return approved?.boxes && (await boxesInTop(target, approved.boxes, sameSite)) ? { ...approved, ...(sameSite ? { sameSite } : {}) } : null
+  return approved?.boxes && (await boxesInTop(target, approved.boxes, sameSite ? LOGIN_FRAME : {})) ? { ...approved, ...(sameSite ? { sameSite } : {}) } : null
 }
 
 /** Whether the fields `approved` fixed still all show, through every frame above (measured as shownInPage did). */
 export async function stillShown(target: FrameTarget, approved: Approved): Promise<boolean> {
   const sameSite = approved.sameSite === true
   const boxes = (await sendToFrame<FrameBoxes>(target, { type: "db:approved", approval: approved.approval, ...(sameSite ? { sameSite } : {}) }))?.boxes
-  return isBoxes(boxes) && !!(await boxesInTop(target, boxes, sameSite))
+  return isBoxes(boxes) && !!(await boxesInTop(target, boxes, sameSite ? LOGIN_FRAME : {}))
 }
 
 /**
@@ -152,11 +152,12 @@ export function cleanApproved(reply: unknown): Approved | null {
  * the top page, if they do. One frame up at a time, the parent's content script finds the
  * element that embeds the frame below (that frame names it by posting a
  * one-time nonce to its parent), gives it the checks a field gets (with
- * `track`, a fresh visibility reading too) and passes the boxes up in its own
+ * `track`, a fresh visibility reading too; with `unsandboxed`, refusing an
+ * element with a `sandbox` attribute) and passes the boxes up in its own
  * coordinates. A frame that can't answer, such as an
  * ancestor without the content script, means no.
  */
-export async function boxesInTop(target: FrameTarget, first: Box[], track = false): Promise<Box[] | null> {
+export async function boxesInTop(target: FrameTarget, first: Box[], how: { track?: boolean; unsandboxed?: boolean } = {}): Promise<Box[] | null> {
   const chain = await frameChain(target)
   if (!chain) return null
   let boxes: Box[] | undefined = first
@@ -165,7 +166,7 @@ export async function boxesInTop(target: FrameTarget, first: Box[], track = fals
     if (!isBoxes(boxes)) return null
     const nonce = newToken()
     // Ask the parent first, so it's listening when the child speaks up.
-    const answer: Promise<FrameBoxes | null> = sendToFrame<FrameBoxes>(parent, { type: "db:frame-child", nonce, boxes, ...(track ? { track } : {}) })
+    const answer: Promise<FrameBoxes | null> = sendToFrame<FrameBoxes>(parent, { type: "db:frame-child", nonce, boxes, ...(how.track ? { track: true } : {}), ...(how.unsandboxed ? { unsandboxed: true } : {}) })
     if (!(await sendToFrame(child, { type: "db:frame-announce", nonce }))) return null
     boxes = (await answer)?.boxes
     child = parent
@@ -202,7 +203,12 @@ export async function frameChain(target: FrameTarget): Promise<FrameTarget[] | n
 /**
  * The top page above frame `target`, if a login field in the frame may open
  * the inline menu there: the frame and every frame above it on one site, over
- * https (see sameSiteChain), by the browser's own frame records.
+ * https (see sameSiteChain), by the browser's own frame records. No frame on
+ * the way may be sandboxed, which the browser's records don't say: a frame
+ * sandboxed without allow-same-origin has an opaque origin and never gets
+ * this far (see senderOrigin), and every frame above checks the element the
+ * frame below sits in for a `sandbox` attribute as the boxes go up
+ * (LOGIN_FRAME, see boxesInTop).
  */
 export async function sameSiteTop(target: FrameTarget): Promise<FrameTarget | null> {
   if (target.frameId === 0) return null
@@ -216,6 +222,11 @@ export async function sameSiteTop(target: FrameTarget): Promise<FrameTarget | nu
   }
   return sameSiteChain(urls) ? chain[chain.length - 1] : null
 }
+
+/** How a login frame's boxes go up to the top page: no sandboxed frame on the way, and each frame element unobscured. */
+export const LOGIN_FRAME = { track: true, unsandboxed: true } as const
+/** The same, for where a field shows (the menu's place, a pill's): no visibility reading. */
+export const LOGIN_FRAME_PLACE = { unsandboxed: true } as const
 
 export function newToken(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("")

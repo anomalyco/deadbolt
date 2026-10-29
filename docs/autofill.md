@@ -319,7 +319,18 @@ not running without sending hello, which would start the agent again.
     by the browser's own frame records (`sameSiteTop` in `bg/frames.ts`).
     idmsa.apple.com inside appstoreconnect.apple.com qualifies; a frame of
     another site doesn't, and nor does a frame of the site inside one of
-    another site. The reason is what a page can do with a frame it embeds:
+    another site. Nor does a sandboxed frame, or one with a sandboxed frame
+    anywhere above it: a sandbox without `allow-same-origin` gives the
+    frame an opaque origin, which never gets logins at all, and every frame
+    above checks the element the frame below sits in for a `sandbox`
+    attribute as the field's box goes up (from the menu's opening to the
+    fill), whatever its flags. That's the side that can tell: from inside, a
+    document can't read its own sandbox flags. Two gaps follow, both only
+    open to the site itself: flags set by a `Content-Security-Policy:
+    sandbox` header with `allow-same-origin`, and an attribute removed after
+    the frame loaded. Schwab (a 630×65 sign-in bar framed from
+    sws-gateway-nr.schwab.com) and account.apple.com qualify, as does App
+    Store Connect. The reason is what a page can do with a frame it embeds:
     where it sits, how big it is, what's over it and what's under the
     pointer are all up to the embedder. A hostile embedder (an ad, a widget
     host, a page that frames a real sign-in) could lay a decoy over the

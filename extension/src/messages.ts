@@ -272,9 +272,10 @@ export type ToContent =
   /**
    * To the frame above: where those boxes show in it, through the element
    * `nonce` names; with `track`, only if a fresh visibility reading of that
-   * element says it's unobscured.
+   * element says it's unobscured; with `unsandboxed`, only if that element
+   * has no `sandbox` attribute.
    */
-  | { type: "db:frame-child"; nonce: string; boxes: Box[]; track?: boolean }
+  | { type: "db:frame-child"; nonce: string; boxes: Box[]; track?: boolean; unsandboxed?: boolean }
   /** To the frame below: tell the frame above which element you're in. */
   | { type: "db:frame-announce"; nonce: string }
   /** To every frame of a tab: the learning session it joins, or null when it ends. */

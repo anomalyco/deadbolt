@@ -115,7 +115,7 @@ export function initFrameChecks(state: PageState) {
       case "db:frame-child":
         announcements.from(message.nonce, ANNOUNCE_WAIT_MS).then(async (source) => {
           const el = source ? deepQueryAll<HTMLIFrameElement>("iframe, frame").find((f) => f.contentWindow === source) : undefined
-          const boxes = el ? throughFrame(el, message.boxes) : null
+          const boxes = el ? throughFrame(el, message.boxes, message.unsandboxed === true) : null
           respond(reply(boxes && el && message.track === true && !(await visibleNow(1000, el)) ? null : boxes))
         }, () => respond(null))
         return true

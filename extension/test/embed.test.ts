@@ -88,6 +88,18 @@ describe("throughFrame", () => {
     expect(throughFrame(el, [field])).toBeNull()
   })
 
+  test("for a login frame, not a sandboxed one, whatever its flags", () => {
+    const el = frame()
+    el.setAttribute("sandbox", "allow-scripts allow-same-origin allow-forms")
+    expect(throughFrame(el, [field], true)).toBeNull()
+    el.setAttribute("sandbox", "")
+    expect(throughFrame(el, [field], true)).toBeNull()
+    // Other frames' checks (the popup's, cards') don't ask.
+    expect(throughFrame(el, [field])).toEqual([{ left: 110, top: 70, right: 310, bottom: 100 }])
+    el.removeAttribute("sandbox")
+    expect(throughFrame(el, [field], true)).toEqual([{ left: 110, top: 70, right: 310, bottom: 100 }])
+  })
+
   test("not one with something else over the field", () => {
     const el = frame()
     document.elementFromPoint = () => document.body

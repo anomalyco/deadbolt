@@ -209,9 +209,12 @@ export function fillable(el: FormControl, ours?: Element | null): boolean {
  * embedding the frame gets the checks a field gets (style up the rendered
  * tree, size, clipping, on screen), has to sit as laid out (no scaling,
  * rotation or skew) and has to be what's under the middle of each field.
+ * With `unsandboxed`, a frame element with a `sandbox` attribute doesn't show
+ * anything either: a login menu never serves a sandboxed frame (see
+ * sameSiteTop).
  */
-export function throughFrame(el: HTMLElement, boxes: Box[]): Box[] | null {
-  if (!el.isConnected) return null
+export function throughFrame(el: HTMLElement, boxes: Box[], unsandboxed = false): Box[] | null {
+  if (!el.isConnected || (unsandboxed && el.hasAttribute("sandbox"))) return null
   const r = el.getBoundingClientRect()
   if (r.width < MIN_SIDE || r.height < MIN_SIDE || hiddenByStyle(el)) return null
   if (Math.abs(r.width - el.offsetWidth) > 1 || Math.abs(r.height - el.offsetHeight) > 1) return null

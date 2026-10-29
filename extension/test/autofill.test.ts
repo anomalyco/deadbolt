@@ -463,6 +463,8 @@ describe("filling a frame's form", () => {
     const checks = delivered("db:frame-child").map((d) => d.message)
     // The menu's opening (no reading), then the pick's two checks (with one).
     expect(checks.map((m) => m.track === true)).toEqual([false, false, true, true, true, true])
+    // Every frame up is asked to refuse a sandboxed frame element.
+    expect(checks.every((m) => m.unsandboxed === true)).toBe(true)
     expect(delivered("db:hold").map((d) => d.message.hold)).toEqual([true, false, true, false])
     expect(fills()).toMatchObject([{ origin: SITE, want: ["username", "password"] }])
   })
@@ -472,6 +474,16 @@ describe("filling a frame's form", () => {
     expect(await autofill.query(frameSender(), ["email", "password"], "email", 2)).toEqual({ rows: 0 })
     scripts["top-doc db:frame-child"] = null
     expect(await autofill.query(frameSender(), ["email", "password"], "email", 2, true, undefined, false, "login", undefined, undefined, BOX)).toEqual({ rows: 0 })
+    expect(delivered("db:open-at")).toEqual([])
+  })
+
+  test("not a sandboxed frame: one with an opaque origin, or one a frame above says is sandboxed", async () => {
+    Object.assign(scripts, { "top-doc db:open-at": true })
+    const opaque = pageSender({ frameId: 3, url: "https://www.example.com/embed", origin: "null", documentId: "frame-doc" })
+    expect(await autofill.query(opaque, ["email", "password"], "email", 2, true, undefined, false, "login", undefined, undefined, BOX)).toEqual({ rows: 0 })
+    // The middle frame's content script finds the frame element sandboxed: no boxes.
+    scripts["mid-doc db:frame-child"] = (m: { unsandboxed?: boolean }) => (m.unsandboxed ? null : { boxes: [LOW] })
+    expect(await frameMenu()).toBeUndefined()
     expect(delivered("db:open-at")).toEqual([])
   })
 

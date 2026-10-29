@@ -527,11 +527,16 @@ const APPLE_WIDGET = `<!doctype html><html><head><meta charset="utf-8"><title>Si
     }, 200)
   })
 </script></body></html>`
-/** The page around it: App Store Connect's sign-in page, with the widget from `frame` (or through a frame on `via`), maybe under a sheet that lets clicks through. */
-const appleLogin = (port: string, frame: string, via?: string, cover = false) => {
+/**
+ * The page around it: App Store Connect's sign-in page, with the widget from
+ * `frame` (or through a frame on `via`), maybe under a sheet that lets clicks
+ * through, maybe with `sandbox` flags on its iframe.
+ */
+const appleLogin = (port: string, frame: string, via?: string, cover = false, sandbox?: string) => {
   const widget = `http://${frame}:${port}/appleauth/auth/signin?widgetKey=e2e&language=en_US`
   const src = via ? `http://${via}:${port}/apple/shell?inner=${encodeURIComponent(widget)}` : widget
-  return `<h1>App Store Connect</h1><iframe id="aid-auth-widget-iFrame" name="aid-auth-widget" src="${src}" style="width:100%;height:330px;border:0"></iframe>
+  const flags = sandbox === undefined ? "" : ` sandbox="${sandbox.replace(/[^a-z -]/g, "")}"`
+  return `<h1>App Store Connect</h1><iframe id="aid-auth-widget-iFrame" name="aid-auth-widget"${flags} src="${src}" style="width:100%;height:330px;border:0"></iframe>
     ${cover ? `<section style="position:fixed;inset:0;z-index:9;pointer-events:none;background:rgb(244 244 245 / 97%)"></section>` : ""}
     <script>addEventListener("message", (e) => { if (e.data?.type === "signed-in") location.assign("/apple/apps?u=" + encodeURIComponent(e.data.account)) })</script>`
 }
@@ -587,7 +592,7 @@ const server = Bun.serve({
     switch (url.pathname) {
       // Apple's sign-in (see APPLE_WIDGET): ?frame=<host> serves the widget from another host, ?via=<host> through a frame there.
       case "/apple/login":
-        return html("App Store Connect", appleLogin(url.port, url.searchParams.get("frame") ?? "idmsa.apple.test", url.searchParams.get("via") ?? undefined, url.searchParams.has("cover")))
+        return html("App Store Connect", appleLogin(url.port, url.searchParams.get("frame") ?? "idmsa.apple.test", url.searchParams.get("via") ?? undefined, url.searchParams.has("cover"), url.searchParams.get("sandbox") ?? undefined))
       case "/appleauth/auth/signin":
         return new Response(APPLE_WIDGET, { headers: { "content-type": "text/html; charset=utf-8" } })
       case "/apple/shell": {
@@ -2522,11 +2527,14 @@ async function frameLogins() {
   const seen = () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)
   const widget = () => page.frames().find((f) => f.url().includes("/appleauth/auth/signin")) ?? null
   /** The widget, once its frame reported the form. */
-  const open = async (query = "") => {
+  const open = async (query = "", reported = true) => {
     await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
     await page.goto(`${top}/apple/login${query}`)
     const inner = await until(`the sign-in frame loads${query ? ` (${query})` : ""}`, widget)
-    if (inner) await until("the frame's form is found", async () => (await seen()).some((s) => /^db:page@[1-9]\d*:\/appleauth\/auth\/signin$/.test(s)), 15_000)
+    const found = async () => (await seen()).some((s) => /^db:page@[1-9]\d*:\/appleauth\/auth\/signin$/.test(s))
+    // A sandboxed frame may never report: wait a while, without failing.
+    if (inner && reported) await until("the frame's form is found", found, 15_000)
+    else if (inner) for (let i = 0; i < 30 && !(await found()); i++) await Bun.sleep(100)
     return inner
   }
   const menuNow = async () => {
@@ -2606,12 +2614,17 @@ async function frameLogins() {
       check((await covered.inputValue("#account_name_text_field")) === "" && (await wants()).length === before, "a frame under a sheet that lets clicks through gets nothing, and the host isn't asked")
     }
 
-    // A frame on another site, and one of the site inside a frame on another site: no menu.
+    // A frame on another site, one of the site inside a frame on another
+    // site, and sandboxed frames (keeping their origin or not, or inside a
+    // sandboxed frame of the site): no menu.
     for (const [query, what] of [
       ["?frame=idmsa.evilpay.test", "a cross-site frame"],
       ["?via=shell.evilpay.test", "a same-site frame inside a cross-site frame"],
+      ["?sandbox=allow-scripts allow-same-origin allow-forms", "a sandboxed same-site frame that keeps its origin"],
+      ["?sandbox=allow-scripts allow-forms", "a sandboxed same-site frame with an opaque origin"],
+      ["?via=shell.apple.test&sandbox=allow-scripts allow-same-origin", "a same-site frame inside a sandboxed same-site frame"],
     ]) {
-      const other = await open(query)
+      const other = await open(query, false)
       if (!other) continue
       await other.click("#account_name_text_field")
       await Bun.sleep(2500)
