@@ -7,7 +7,7 @@
 import { isVisible, scanPage, type Field } from "./content/detect"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
-import { ownValue, trackUserInput } from "./content/fill"
+import { ownValue, trackUserInput, visibleBox } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
@@ -138,7 +138,9 @@ async function report(always: boolean) {
   // (a "Use a different account" step ends a sign-in session).
   const identifier = fields.find((f) => IDENTIFIER_ROLES.includes(f.role))
   const idEmpty = !!identifier && !identifier.el.value
-  const signature = JSON.stringify([location.href, kind, roles, formId, moved, idEmpty])
+  // Which of them show: a password box a step uncollapses in place (Apple's) is news.
+  const shown = fields.map((f) => visibleBox(f.el) !== null)
+  const signature = JSON.stringify([location.href, kind, roles, formId, moved, idEmpty, shown])
   const tell = always || (kind ? signature !== lastSignature : reported)
   lastSignature = kind ? signature : ""
   reported = !!kind

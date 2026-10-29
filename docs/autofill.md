@@ -116,9 +116,11 @@ not running without sending hello, which would start the agent again.
   title and username, under the field. ↓/↑ choose, ⏎ fills, esc closes, and
   ↓ reopens it. While Deadbolt is locked, the menu's "locked" row opens on
   focus once per site until Deadbolt locks or unlocks again; after that it
-  takes a click into the field or ↓. Fields in frames get no menu (see
-  Frames). It's an extension page in an iframe inside a closed shadow root,
-  so the page can't read it or click it for you.
+  takes a click into the field or ↓. A login field in a frame of the page's
+  own site gets the menu too, opened in the top page under the field; any
+  other frame's fields get none (see Frames). It's an extension page in an
+  iframe inside a closed shadow root, so the page can't read it or click it
+  for you.
 - **Menu in the top layer.** The host element of Deadbolt's surface (the
   menu, the pill it folds into and the save offer, see One surface) gets a
   fresh random custom-element name and inline `!important` styles, so page
@@ -254,7 +256,12 @@ not running without sending hello, which would start the agent again.
   saved URL of the login names exactly: the agent lists a login on every
   subdomain of its sites, so its say alone isn't enough here. Every fill
   goes through the same field checks and is bound to that frame, document
-  and form snapshot; frames never get a session. It
+  and form snapshot. A frame gets a session only when it may have the menu
+  (see Frames), and its step fills only the fields that show through every
+  frame above, checked as for a pick; one whose fields don't show yet (a
+  password box still collapsed, as Apple's is until Continue) isn't the step
+  yet, and the frame reports again once they show. Its pill opens in the top
+  page, on the field. It
   ends after three minutes (four on a site known to step by navigation),
   when the code is filled or a password with no code to follow, and on Esc
   or closing the menu, picking another login, a page of another site, a
@@ -300,19 +307,56 @@ not running without sending hello, which would start the agent again.
   password is), so it neither waits for the page to settle nor counts as a
   failure.
 - **Frames.** Every frame runs the content script, but only frames on the same
-  site as the top page get logins, and sandboxed frames get none. A frame
-  gets no inline menu: where it sits, how big it is and what covers it are
-  up to the page around it, and a menu inside can't watch that. A frame's
-  form fills only from the popup, and only if the user can see it through
-  every frame above it, checked when the user clicks Fill and again once the
-  values are in hand. Both checks cover exactly the fields that will be
-  written. The frame checks its fields (style up the tree, size,
-  clipping, on screen, nothing over them, and a fresh `trackVisibility`
-  reading, which also sees covers that let clicks through). Then each frame
-  above, up to the top page, checks the element the frame below sits in the
-  same way, unscaled, and that the fields' middles land on it. Any frame on
-  the way that can't answer, such as one without the content script, means
-  no fill. If more than one frame's form shows, nothing is filled.
+  site as the top page get logins, and sandboxed frames get none. Some sites
+  sign in only in a frame of their own: appstoreconnect.apple.com has no
+  fields itself, and Apple's sign-in widget is a frame from idmsa.apple.com,
+  with no `<form>`, the account box first and the password box opening in
+  the same frame after Continue.
+  - **Which frames get the menu.** A login field in a frame gets the inline
+    menu only when the frame and every frame between it and the top page are
+    on the top page's site (registrable domain, as `siteOf` computes it) and
+    https (http only on the local development hosts that get logins at all),
+    by the browser's own frame records (`sameSiteTop` in `bg/frames.ts`).
+    idmsa.apple.com inside appstoreconnect.apple.com qualifies; a frame of
+    another site doesn't, and nor does a frame of the site inside one of
+    another site. The reason is what a page can do with a frame it embeds:
+    where it sits, how big it is, what's over it and what's under the
+    pointer are all up to the embedder. A hostile embedder (an ad, a widget
+    host, a page that frames a real sign-in) could lay a decoy over the
+    frame, slide the frame under the user's click, or show the menu for
+    fields the user can't see (clickjacking), and would learn which site's
+    logins Deadbolt has. A page on the frame's own site could already read
+    its own logins' fills in its own frames, so it gains nothing.
+  - **How it opens.** The menu never opens inside a frame. The frame says
+    where its field shows in its own viewport (after the checks a field
+    gets before a fill); the background carries that box up through every
+    frame, each checking the element the frame below sits in (see
+    `boxesInTop`), and opens the menu in the top page under it, following
+    the page's scroll. It lists the logins for the frame's own origin, as a
+    top page on that origin would, and a pick fills only that frame. Every
+    check on a pick holds: the dwell and the menu's own visibility
+    readings in the top page, trusted events only, the user's recent click
+    or keypress in the frame, and, before the host is asked and again once
+    the values are in hand, the frame's fields through every frame above
+    (with Deadbolt's pill put away while they're measured). The fields get
+    the checks a top page's fields get, and every frame above takes a fresh
+    `trackVisibility` reading of the element the frame below sits in, so a
+    cover over the frame that lets clicks through still stops the fill. (A
+    reading of the field itself, as the popup takes, says no on Apple's
+    widget: its label floats over its own field.) Typing in the
+    field, clicking elsewhere in the frame or esc there (which the top page
+    can't see) puts the menu away. A frame never gets a generated password.
+  - **The popup.** Any same-site frame's form also fills from the popup,
+    and only if the user can see it through every frame above it, checked
+    when the user clicks Fill and again once the values are in hand.
+  Both checks cover exactly the fields that will be written. The frame
+  checks its fields (style up the tree, size, clipping, on screen, nothing
+  over them, and a fresh `trackVisibility` reading, which also sees covers
+  that let clicks through). Then each frame above, up to the top page,
+  checks the element the frame below sits in the same way, unscaled, and
+  that the fields' middles land on it. Any frame on the way that can't
+  answer, such as one without the content script, means no fill. If more
+  than one frame's form shows, the popup fills nothing.
 - **Popup.** Shows whether Deadbolt is ready, locked, not set up, or the host
   isn't installed (with the `deadbolt browser install` command), and the
   current site's logins with Fill and Copy username. Passwords are never
@@ -960,9 +1004,9 @@ number in Stripe's frame are two picks. Each pick is one `fill-form`, so
 one Touch ID prompt. Each frame below the top page fills only if all
 its fields show through every frame above, checked before the host is asked
 and again once the values are in hand. While those checks run, the pill
-steps out of the top layer for a moment (Chromium reads nothing as fully
-visible while anything shows there), and frame pills sit in the top right
-corner, clear of the fields being checked.
+steps out of the top layer and isn't drawn for a moment (Chromium reads
+nothing as fully visible while anything shows there, and a frame's pill
+sits on its field).
 
 e2e builds (`scripts/build.ts --e2e`) also take a provider host with `.test`
 for `.com` over http, and an http top page on `localhost` or a `.test` host,
@@ -1113,8 +1157,10 @@ other build defines that branch away.
   the press, may not show up in any reading, and the press counts. The user
   still has to press on a menu that was shown and still for the half second
   before, and the cover has to land between readings. This is why frames,
-  whose placement the page around them controls, get no menu and fill only
-  from the popup after an explicit check.
+  whose placement the page around them controls, get the menu only when
+  every frame up to the top page is the same site, and why a frame's
+  fields are checked through every frame above before and after the host
+  is asked.
 - **Passkeys: a page signs only for itself.** A page can call WebAuthn as
   often as it likes, but every answer is bound to the origin the browser
   reported for its frame, which the agent writes into the client data and

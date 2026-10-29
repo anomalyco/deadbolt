@@ -48,7 +48,7 @@ host.onChange((status) => {
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
   switch (message.type) {
     case "db:query":
-      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount)
+      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount, message.box)
     case "db:page":
       if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true, message.idEmpty === true)
@@ -64,6 +64,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return saver.failed(sender, message.submission)
     case "db:submitted":
       return autofill.submitted(sender)
+    case "db:menu-away":
+      return autofill.menuAway(sender, message.dismissed === true)
     case "db:learn-ask":
       return learner.ask(sender)
     case "db:learn-step":

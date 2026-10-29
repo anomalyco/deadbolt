@@ -5,9 +5,9 @@
 // Ryan Vogel), and so is the start of the sign-in session (its email-first
 // continuation), which here follows a login through every step of a sign-in.
 
-import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type SignInReply, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type SignInReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
-import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
+import { boxesInTop, cleanApproved, cleanBox, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
 import { isAccountPage, pageAccountOf } from "../signin"
 import type { SignInWith } from "./signinwith"
@@ -27,6 +27,11 @@ const NOT_SHOWN = "That login form isn't fully visible. Nothing was filled."
 const UNRELATED = new Set(["typed", "auto_bookmark", "generated", "keyword", "keyword_generated", "reload", "start_page", "auto_toplevel"])
 
 interface MenuToken extends FrameTarget {
+  /**
+   * For a field in a frame below (see sameSiteTop): the top page, where the
+   * menu is. The token itself names the frame, the only one it fills.
+   */
+  owner?: FrameTarget
   roles: FieldRole[]
   focused: FieldRole
   /** The form snapshot the menu opened on. */
@@ -46,13 +51,14 @@ interface MenuToken extends FrameTarget {
 
 /**
  * A sign-in session: the login the user picked, followed through the next
- * steps of the sign-in in the same tab. When the top page shows the next
- * step (a password, a one-time code, the username asked again beside a
- * password), it fills from the same login without another pick: once per
- * step, only after the user's own submit (see Autofill.page), only on the
- * origin the pick was on or one whose host a saved URL of the login names
- * exactly, and only for a few minutes. Frames never get one: a frame's
- * fields fill only when the user picks a login in the popup for them.
+ * steps of the sign-in in the same tab. When the top page, or a frame that
+ * may have the inline menu (see sameSiteTop), shows the next step (a
+ * password, a one-time code, the username asked again beside a password), it
+ * fills from the same login without another pick: once per step, only after
+ * the user's own submit (see Autofill.page), only on the origin the pick was
+ * on or one whose host a saved URL of the login names exactly, only into a
+ * frame whose fields show through every frame above, and only for a few
+ * minutes.
  */
 interface Session {
   ref: string
@@ -85,7 +91,7 @@ export interface Flow {
   at: number
 }
 
-/** What a tab's top page has shown of the current sign-in, to learn its Flow from. */
+/** What a tab's top page (or its same-site login frame) has shown of the current sign-in, to learn its Flow from. */
 interface Track {
   site: string
   identifierDoc?: string
@@ -171,7 +177,7 @@ export class Autofill {
   private sessionTimers = new Map<number, ReturnType<typeof setTimeout>>()
   /** What each tab's top page has shown of its sign-in, to learn the site's Flow from. */
   private tracks = new Map<number, Track>()
-  /** The last time the user themselves submitted a login form in each tab's top page, and in which document. */
+  /** The last time the user themselves submitted a login form in each tab's top page (or same-site login frame), and in which document. */
   private submits = new Map<number, { documentId: string; at: number }>()
   /** Each tab's session work runs one piece at a time, so a step is used once. */
   private queues = new Map<number, Promise<unknown>>()
@@ -217,7 +223,7 @@ export class Autofill {
     const t = this.tokens.get(token)
     if (!t || Date.now() - t.createdAt > TOKEN_TTL_MS || !sender.documentId || (t.picked && !resize)) return undefined
     if (t.menuDocumentId === undefined) {
-      if (parent === undefined || !(await menuFrameOf(sender, t, parent))) return undefined
+      if (parent === undefined || !(await menuFrameOf(sender, t.owner ?? t, parent))) return undefined
       t.menuDocumentId = sender.documentId
     }
     return t.menuDocumentId === sender.documentId && sender.tab?.id === t.tabId ? t : undefined
@@ -248,6 +254,15 @@ export class Autofill {
    * On a sign-up or change-password form's new-password box (`kind`), the
    * menu offers a generated password within the page's `rules` instead, if
    * the agent says they allow a strong one.
+   *
+   * In the top page, the token goes back to the content script, which opens
+   * the menu under the field. A field in a frame below gets the menu only
+   * when the frame and every frame above it are one site over https (see
+   * sameSiteTop): the background opens it in the top page, under where the
+   * field shows there (`box`, carried up through every frame and checked on
+   * the way, see boxesInTop), lists the frame's own origin's logins and
+   * fills only that frame. The frame gets no token. No generated passwords
+   * in frames.
    */
   async query(
     sender: chrome.runtime.MessageSender,
@@ -260,14 +275,25 @@ export class Autofill {
     kind?: unknown,
     rules?: unknown,
     pageAccount?: unknown,
+    box?: unknown,
   ): Promise<QueryReply> {
     const target = await targetFor(sender)
     const clean = sanitizeRoles(roles)
-    // The menu opens only in the top page (see inline.ts).
-    if (!target || target.frameId !== 0 || !Number.isSafeInteger(form) || !MENU_ROLES.includes(focused as FieldRole) || !clean.includes(focused as FieldRole)) return { rows: 0 }
+    if (!target || !Number.isSafeInteger(form) || !MENU_ROLES.includes(focused as FieldRole) || !clean.includes(focused as FieldRole)) return { rows: 0 }
     // A new-password box offers a generated password, and only on sign-up and change-password forms.
     const generating = focused === "new-password"
-    if (generating && !GENERATE_KINDS.includes(kind as SurfaceKind)) return { rows: 0 }
+    if (generating && (target.frameId !== 0 || !GENERATE_KINDS.includes(kind as SurfaceKind))) return { rows: 0 }
+    // The menu opens only in the top page (see inline.ts), for a frame's field under where it shows there.
+    let owner: FrameTarget | undefined
+    let at: Box | undefined
+    if (target.frameId !== 0) {
+      const own = cleanBox(box)
+      const top = own ? await sameSiteTop(target) : null
+      const shown = top && own ? await boxesInTop(target, [own]) : null
+      if (!top || !shown) return { rows: 0 }
+      owner = top
+      at = shown[0]
+    }
     await this.host.connect()
     const generate = generating ? fieldRules(rules) : undefined
     const site = siteOf(new URL(target.origin).hostname) ?? target.origin
@@ -311,8 +337,11 @@ export class Autofill {
     if (!rows) return { rows: 0 }
     this.sweep()
     const token = newToken()
-    this.tokens.set(token, { ...target, roles: clean, focused: focused as FieldRole, form: form as number, createdAt: Date.now(), ...(generate ? { generate } : {}), ...(only ? { only } : {}) })
-    return { token, rows }
+    this.tokens.set(token, { ...target, ...(owner ? { owner } : {}), roles: clean, focused: focused as FieldRole, form: form as number, createdAt: Date.now(), ...(generate ? { generate } : {}), ...(only ? { only } : {}) })
+    if (!owner || !at) return { token, rows }
+    const opened = await sendToFrame<boolean>(owner, { type: "db:open-at", token, rows, box: at })
+    if (!opened) this.tokens.delete(token)
+    return { rows: opened ? rows : 0 }
   }
 
   async menuLoad(token: string, sender: chrome.runtime.MessageSender, parent: string): Promise<MenuLoadReply | null> {
@@ -340,7 +369,7 @@ export class Autofill {
     const signedIn = await this.passkeys?.menuPick(t, ref)
     if (signedIn) {
       this.tokens.delete(token)
-      if (signedIn.ok) await sendToFrame(t, { type: "db:close-menu", token })
+      if (signedIn.ok) await sendToFrame(t.owner ?? t, { type: "db:close-menu", token })
       return signedIn
     }
     const reply = await this.list(t.origin).catch(() => null)
@@ -350,7 +379,11 @@ export class Autofill {
     if (account.signIn && !account.hasPassword) return { ok: false, message: "This login signs in with another account." }
     // Picked once: its pill may still resize to say how the fill went (see token).
     t.picked = true
-    return this.fillAndArm(t, account, t.roles, t.form)
+    if (!t.owner) return this.fillAndArm(t, account, t.roles, t.form)
+    // A frame's fields: only those that show through every frame above, checked now and again once the values are in hand.
+    const framed = await this.measured(t.tabId, () => shownInPage(t, t.form, true))
+    if (!framed) return { ok: false, message: NOT_SHOWN }
+    return this.fillAndArm(t, account, t.roles, t.form, framed)
   }
 
   /**
@@ -418,18 +451,34 @@ export class Autofill {
     const t = await this.token(token, sender)
     if (!t) return
     await this.cancel(t.tabId)
-    await sendToFrame(t, { type: "db:close-menu", token })
+    await sendToFrame(t.owner ?? t, { type: "db:close-menu", token })
   }
 
   async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender, width?: unknown, mode?: unknown) {
     const t = await this.token(token, sender, undefined, true)
-    if (t) await sendToFrame(t, resizeMessage(token, height, width, mode))
+    if (t) await sendToFrame(t.owner ?? t, resizeMessage(token, height, width, mode))
+  }
+
+  /**
+   * A frame's field the menu opened for in the top page: the user typed in
+   * it, clicked elsewhere in the frame, or pressed esc there (`dismissed`),
+   * none of which the top page sees. Its open menu goes; a pick's pill stays.
+   */
+  async menuAway(sender: chrome.runtime.MessageSender, dismissed: boolean) {
+    const target = await targetFor(sender)
+    if (!target || target.frameId === 0) return
+    for (const [token, t] of this.tokens) {
+      if (!t.owner || t.picked || t.notice || t.tabId !== target.tabId || t.frameId !== target.frameId || t.documentId !== target.documentId) continue
+      this.tokens.delete(token)
+      await sendToFrame(t.owner, { type: "db:close-menu", token })
+    }
+    if (dismissed) await this.cancel(target.tabId)
   }
 
   /** The page closed its menu; with `dismissed`, the user said no (esc). */
   async menuClose(token: string, dismissed: boolean, sender: chrome.runtime.MessageSender) {
     const t = this.tokens.get(token)
-    if (!t || sender.tab?.id !== t.tabId || sender.documentId !== t.documentId) return
+    if (!t || sender.tab?.id !== t.tabId || sender.documentId !== (t.owner ?? t).documentId) return
     this.tokens.delete(token)
     if (dismissed) await this.cancel(t.tabId)
   }
@@ -442,7 +491,8 @@ export class Autofill {
    * only into those fields. Nothing goes out if the tab's sign-in was
    * cancelled since `generation`, or for a frame, if its fields no longer all
    * show once the values are in hand. Returns what the content script says it
-   * wrote.
+   * wrote. A session step's pill (`notice`) shows on the last field written:
+   * for a frame's, in the top page, where that field shows there.
    */
   private async fill(target: FrameTarget, account: Account, roles: FieldRole[], form: number, generation: number, framed?: Approved, notice?: boolean): Promise<FieldRole[]> {
     const approved = framed ?? cleanApproved(await sendToFrame(target, { type: "db:approve", form, measure: false }))
@@ -452,7 +502,7 @@ export class Autofill {
     const reply = await this.host.send({ type: "fill", origin: target.origin, ref: account.ref, want })
     // Esc, or the user leaving, while the host answered: nothing goes out.
     if (generation !== this.generation(target.tabId)) return []
-    if (framed && !(await stillShown(target, framed))) throw new Error(NOT_SHOWN)
+    if (framed && !(await this.measured(target.tabId, () => stillShown(target, framed)))) throw new Error(NOT_SHOWN)
     if (generation !== this.generation(target.tabId)) return []
     const values: FillValues = {}
     if (want.includes("username") && reply.username) values.username = reply.username
@@ -460,16 +510,37 @@ export class Autofill {
     if (want.includes("totp") && reply.totp) values.totp = reply.totp
     // A step filled without a pick says so on the field, in a pill of its own (see stepLabel).
     let pill: string | undefined
-    if (notice) {
+    const owner = notice && target.frameId !== 0 ? await sameSiteTop(target) : undefined
+    if (notice && (target.frameId === 0 || owner)) {
       pill = newToken()
       const filled = want.map((w): FieldRole => (w === "username" ? "username" : w === "totp" ? "otp" : "password"))
-      this.tokens.set(pill, { ...target, roles: [], focused: "password", form, createdAt: Date.now(), notice: { label: stepLabel(filled), title: account.title } })
+      this.tokens.set(pill, { ...target, ...(owner ? { owner } : {}), roles: [], focused: "password", form, createdAt: Date.now(), notice: { label: stepLabel(filled), title: account.title } })
     }
     const ack = await sendToFrame<FillAck>(target, { type: "db:fill", values, form, approval: approved.approval, ...(pill ? { notice: pill } : {}) })
-    return sanitizeRoles(ack?.filled)
+    const wrote = sanitizeRoles(ack?.filled)
+    // A frame's step pill opens in the top page, where the frame says the field it wrote last shows.
+    const box = cleanBox(ack?.box)
+    const shown = pill && owner && wrote.length && box ? await boxesInTop(target, [box]) : null
+    if (pill && owner && shown) await sendToFrame(owner, { type: "db:open-at", token: pill, rows: 0, box: shown[0], mode: "pill" })
+    return wrote
   }
 
-  /** Fill, and say what the session is now if this fill, in the top page, wrote something (null: over). */
+  /**
+   * Runs `measure` (a frame's fields checked through every frame above) with
+   * Deadbolt's pill in the tab's top page out of sight: Chromium reads nothing
+   * as fully visible while anything shows in the top layer (see db:hold).
+   */
+  private async measured<T>(tabId: number, measure: () => Promise<T>): Promise<T> {
+    const { target: top } = await topTarget(tabId)
+    if (top) await sendToFrame(top, { type: "db:hold", hold: true })
+    try {
+      return await measure()
+    } finally {
+      if (top) await sendToFrame(top, { type: "db:hold", hold: false })
+    }
+  }
+
+  /** Fill, and say what the session is now if this fill, in the top page or a frame that may have the menu, wrote something (null: over). */
   private async fillStep(
     target: FrameTarget,
     account: Account,
@@ -486,7 +557,7 @@ export class Autofill {
       return { reply: { ok: false, message: fillError(err) } }
     }
     if (!filled.length) return { reply: { ok: false, message: "The page changed. Try again." } }
-    if (target.frameId !== 0) return { reply: { ok: true } }
+    if (target.frameId !== 0 && !(await sameSiteTop(target))) return { reply: { ok: true } }
     const site = siteOf(new URL(target.origin).hostname)
     const all = [...new Set([...(session?.ref === account.ref ? session.filled : []), ...filled])]
     if (!site || !nextStep(all, account)) return { reply: { ok: true }, next: null }
@@ -575,10 +646,10 @@ export class Autofill {
    */
   async submitted(sender: chrome.runtime.MessageSender) {
     const target = await targetFor(sender)
-    if (target?.frameId === 0) this.submits.set(target.tabId, { documentId: target.documentId, at: Date.now() })
+    if (target && (target.frameId === 0 || (await sameSiteTop(target)))) this.submits.set(target.tabId, { documentId: target.documentId, at: Date.now() })
   }
 
-  /** What the top page shows of the sign-in, step by step, to learn the site's Flow from. */
+  /** What the top page (or its same-site login frame) shows of the sign-in, step by step, to learn the site's Flow from. */
   private track(tabId: number, target: FrameTarget, roles: FieldRole[]) {
     const site = siteOf(new URL(target.origin).hostname)
     if (!site) return
@@ -632,7 +703,10 @@ export class Autofill {
     if (!kind) frames.delete(target.frameId)
     else frames.set(target.frameId, { ...target, kind, roles: clean, form: form as number })
     this.pages.set(target.tabId, frames)
-    if (target.frameId !== 0 || !kind) return
+    if (!kind) return
+    // Only frames that may have the inline menu go on with a session (see sameSiteTop).
+    const framed = target.frameId !== 0
+    if (framed && !(await sameSiteTop(target))) return
     this.track(target.tabId, target, clean)
 
     await this.serial(target.tabId, async () => {
@@ -660,9 +734,14 @@ export class Autofill {
       if (target.origin !== s.origin && !account.urls.some((u) => sameHost(u, target.origin))) return
       const step = stepRoles(clean, account, idEmpty).filter((r) => !s.filled.includes(r) || IDENTIFIER_ROLES.includes(r))
       if (!step.length) return
+      const shown = framed ? await this.measured(target.tabId, () => shownInPage(target, form as number, true)) : undefined
+      // A frame's step fills only fields that show through every frame above. One
+      // that shows none of them yet (a password box still collapsed) isn't the
+      // step yet: the frame reports again once more of its fields show.
+      if (framed && (!shown || !step.some((r) => shown.roles.includes(r)) || generation !== this.generation(target.tabId))) return
       // Used once: whatever happens next, this step in this document doesn't fill again.
       await this.setSession(target.tabId, { ...s, documentId: target.documentId })
-      const { next } = await this.fillStep(target, account, step, form as number, generation, undefined, s)
+      const { next } = await this.fillStep(target, account, step, form as number, generation, shown ?? undefined, s)
       if (next !== undefined) await this.arm(target.tabId, generation, next)
     })
   }
@@ -718,9 +797,8 @@ export class Autofill {
    * reported or, if it has none, the one form in a (same-site) frame that the
    * user can see through every frame above it, checked once to choose it and
    * again once the values are in hand (see shownInPage). The popup is no
-   * evidence that the user sees a frame, and frames get no inline menu.
-   * Without a report from the current document (sandboxed and opaque-origin
-   * pages never make one), nothing.
+   * evidence that the user sees a frame. Without a report from the current
+   * document (sandboxed and opaque-origin pages never make one), nothing.
    */
   async popupFill(tabId: number, ref: string): Promise<PickReply> {
     // The top page's report may be stale (a page can swap its form for a

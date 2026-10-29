@@ -117,6 +117,8 @@ const SAVE_CAP_MS = 60_000
 /** The largest a pill can be. */
 const PILL_MAX = { width: 260, height: 32 }
 let dismissedFor: Element | null = null
+/** In a frame: the field the background last opened the menu for in the top page, which can't see the frame's events (see db:menu-away). */
+let framedFor: Element | null = null
 /**
  * Fields whose typing narrowed the menu to nothing (or that the user typed a
  * password into by hand): the menu doesn't come back on focus until the field
@@ -166,8 +168,10 @@ const GESTURE_WINDOW_MS = 1000
 const recentGesture = () => Date.now() - lastGestureAt < GESTURE_WINDOW_MS
 /**
  * The menu opens only in the top page. A frame's position, size and style are
- * up to the page around it, which the menu inside can't watch; frames' forms
- * fill from the toolbar popup instead (see Autofill.popupFill).
+ * up to the page around it, which a menu inside can't watch. A field in a
+ * frame only says where it shows; the background opens the menu in the top
+ * page under it, for a login field only when every frame up to the top page
+ * is the same site (see Autofill.query and Forms.query).
  */
 const isTop = window === window.top
 
@@ -272,9 +276,10 @@ interface Rect {
 /** Where the surface goes in its mode, in the viewport. */
 function targetRect(): Rect | null {
   if (mode === "save") return corner(wanted.width || SAVE_GUESS.width, wanted.height || SAVE_GUESS.height)
-  // The saved pill stays in the same corner.
-  // So does a pill for a frame's field: on the field, it would cover what the frame's checks read.
-  if (mode === "pill" && !anchor) return corner(Math.min(wanted.width || 180, 320), 32)
+  // The saved pill stays in the same corner. A pill for a frame's field sits
+  // on where the field shows (anchorBox), out of sight while the frame's
+  // fields are checked (see hold).
+  if (mode === "pill" && !anchor && !anchorBox) return corner(Math.min(wanted.width || 180, 320), 32)
   const r = anchor ? anchor.getBoundingClientRect() : boxNow()
   if (!r) return null
   if (mode === "pill") {
@@ -331,7 +336,8 @@ function position() {
     width: `${at.width}px`,
     height: `${at.height}px`,
     margin: "0",
-    display: "block",
+    // Held, it isn't drawn at all: it may sit on a frame's field being checked (see hold).
+    display: held ? "none" : "block",
     "z-index": "2147483647",
     ...(closing ? { "pointer-events": "none" } : {}),
   })
@@ -510,17 +516,21 @@ function leave(travel = false) {
 }
 
 /**
- * Takes the pill out of the top layer (`on`), or puts it back. While
- * anything shows in the top layer, Chromium's visibility readings say no
- * field anywhere is fully visible, so the checks of a frame's fields (see
- * Forms.menuPick) run with it put away for a moment. Only a pill.
+ * Takes the pill out of the top layer and out of sight (`on`), or puts it
+ * back. While anything shows in the top layer, Chromium's visibility
+ * readings say no field anywhere is fully visible, and a pill on a frame's
+ * field covers it, so the checks of a frame's fields (see Forms.menuPick and
+ * Autofill.measured) run with it put away for a moment. Only a pill.
  */
 function hold(on: boolean): boolean {
   if (!host || mode !== "pill" || closing) return false
   held = on
   raising = true
   try {
-    if (on) host.hidePopover()
+    if (on) {
+      host.hidePopover()
+      host.style.setProperty("display", "none", "important")
+    }
   } catch {
     // Not shown: nothing to put away.
   } finally {
@@ -619,7 +629,7 @@ type Asked = "focus" | "click" | "again"
 async function maybeOpen(el: FormControl, how: Asked = "focus") {
   if (!(el instanceof HTMLInputElement) || !targetFor(el)) return maybeOpenForms(el, how)
   // While the tab learns its site, the user signs in by hand.
-  if (!isTop || querying || dismissedFor === el || !recentGesture() || learning()) return
+  if (querying || dismissedFor === el || !recentGesture() || learning()) return
   // The save offer stays until it's answered or its time runs out.
   if (host && mode === "save") return
   const explicit = how !== "focus"
@@ -631,8 +641,12 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
   const kind = state.kind()
   const generating = t.role === "new-password"
   if (generating && !(kind && GENERATE_KINDS.includes(kind))) return
-  if (anchor === el && host) return
+  // Open already; in a frame, the background opened it in the top page (a rescan mustn't open it again).
+  if ((anchor === el && host) || (framedFor === el && how === "focus")) return
   querying = (async () => {
+    // In a frame, the background opens the menu in the top page, under where the field shows (see Autofill.query).
+    const at = isTop ? undefined : fillable(el) ? visibleBox(el) : null
+    if (at === null) return
     const roles = [...new Set(state.targets().map((x) => x.role))]
     // On a later step's field, the username the form holds: the menu narrows
     // to the login it names, or stays away when it names none (see Autofill.query).
@@ -650,10 +664,10 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     const reply =
       rules === null
         ? null
-        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}) })
-    if (reply?.token && reply.rows > 0) {
-      if (deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
-    } else emptyUntil.set(el, Date.now() + 15_000)
+        : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}) })
+    if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
+    else if (!isTop) framedFor = el
+    else if (reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
   })().finally(() => (querying = null))
 }
 
@@ -723,6 +737,13 @@ function onInput(event: Event) {
     quiet.delete(el)
     byHand.delete(formOf(el))
   }
+  // In a frame, the menu in the top page can't narrow as the user types: it goes.
+  if (!isTop && el === framedFor) {
+    framedFor = null
+    const role = targetFor(el)?.role
+    if (role && !IDENTIFIER_ROLES.includes(role)) quiet.add(el)
+    return void send({ type: "db:menu-away" })
+  }
   if (!host || mode !== "accounts" || el !== anchor || closing) return
   typedSinceOpen = true
   const role = targetFor(el)?.role
@@ -759,6 +780,10 @@ function onPointerDown(event: PointerEvent) {
   lastGestureAt = Date.now()
   const target = event.composedPath()[0]
   lastPointer = target ?? null
+  if (!isTop && framedFor && target !== framedFor) {
+    framedFor = null
+    void send({ type: "db:menu-away" })
+  }
   // Clicking a field that already has focus (e.g. autofocus) opens the menu too.
   if (isControl(target) && target === deepActiveElement() && !host) {
     if (dismissedFor === target) dismissedFor = null
@@ -783,6 +808,11 @@ function onKeyDown(event: KeyboardEvent) {
   lastGestureAt = Date.now()
   lastPointer = null
   const target = event.composedPath()[0]
+  if (!isTop && event.key === "Escape" && framedFor && target === framedFor) {
+    dismissedFor = framedFor
+    framedFor = null
+    return void send({ type: "db:menu-away", dismissed: true })
+  }
   if (!host) {
     // ↓ in a field that has no menu (dismissed, or focused from script) asks for one.
     if (event.key === "ArrowDown" && target instanceof HTMLInputElement && (targetFor(target) || state.formFields().some((f) => f.el === target))) {
@@ -844,8 +874,13 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
   // A sign-in session's step, filled without a pick: a pill on the field
   // says so ("Password filled"), then goes (see menu.ts showNotice).
   // On the last field written: for a code in one box per digit, beside the last box.
+  // In a frame, the background opens it in the top page, where the field shows (see Autofill.fill).
   const on = [...lastFilled].reverse().find((el) => el.isConnected)
-  if (filled.length && typeof message.notice === "string" && isTop && on && !host) openMenu(on, message.notice, 0, "pill")
+  if (filled.length && typeof message.notice === "string" && on) {
+    if (isTop && !host) openMenu(on, message.notice, 0, "pill")
+    const box = isTop ? null : visibleBox(on)
+    if (box) return { filled, box }
+  }
   return { filled }
 }
 
@@ -1019,10 +1054,10 @@ export function initMenu(page: PageState) {
       case "db:forms-approved":
         approvedForms(formsState(), String(message.approval)).then((boxes) => respond(boxes ? { boxes } : null), () => respond(null))
         return true
-      case "db:forms-open":
-        return void respond(openForFrame(String(message.token), Number(message.rows), message.box))
-      case "db:forms-hold":
-        if (message.token !== token) return void respond(false)
+      case "db:open-at":
+        return void respond(openAt(String(message.token), Number(message.rows), message.box, message.mode === "pill" ? "pill" : "accounts"))
+      case "db:hold":
+        if (message.token !== undefined && message.token !== token) return void respond(false)
         if (!message.hold) return void respond(hold(false))
         pillSettled(900).then(() => respond(hold(true)))
         return true
@@ -1085,11 +1120,16 @@ function pointAtTile(account: string) {
   tileTimer = setInterval(look, 300)
 }
 
-/** The forms menu for a field in a frame below, at `box` in this page (see Forms.query). Top page only. */
-function openForFrame(t: string, rows: number, box: Box): boolean {
-  if (!isTop || document.hidden || (host && mode === "save") || !Number.isFinite(rows) || rows < 1) return false
+/**
+ * The menu for a field in a frame below, at `box` in this page (see
+ * Autofill.query and Forms.query), or a session step's pill on it (`as`
+ * "pill", see Autofill.fill). Top page only.
+ */
+function openAt(t: string, rows: number, box: Box, as: "accounts" | "pill"): boolean {
+  if (!isTop || document.hidden || (host && (mode === "save" || as === "pill"))) return false
+  if (as === "accounts" && !(Number.isFinite(rows) && rows >= 1)) return false
   if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
-  openMenu(null, t, rows, "accounts", box)
+  openMenu(null, t, as === "pill" ? 0 : rows, as, box)
   return true
 }
 

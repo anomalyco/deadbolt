@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test"
 import { paymentProvider, securePage } from "../src/payments"
-import { fillableOrigin, saveTitle, saveUrl, sameSite, senderOrigin, siteOf } from "../src/bg/site"
+import { fillableOrigin, saveTitle, saveUrl, sameSite, sameSiteChain, senderOrigin, siteOf } from "../src/bg/site"
 
 const u = (s: string) => new URL(s)
 
@@ -152,5 +152,34 @@ describe("payment provider frames", () => {
   test("cards go into them only from an https page", () => {
     expect(securePage(new URL("https://shop.example/checkout"))).toBe(true)
     expect(securePage(new URL("http://localhost:3000/checkout"))).toBe(false)
+  })
+})
+
+describe("sameSiteChain (a frame's login field and the inline menu)", () => {
+  const chain = (...urls: string[]) => sameSiteChain(urls.map(u))
+
+  test("a frame on the top page's site, both https", () => {
+    expect(chain("https://idmsa.apple.com/appleauth/auth/signin", "https://appstoreconnect.apple.com/login")).toBe(true)
+    expect(chain("https://idmsa.apple.com/", "https://www.apple.com/shell", "https://appstoreconnect.apple.com/")).toBe(true)
+  })
+
+  test("a cross-site frame is refused", () => {
+    expect(chain("https://idmsa.apple.com/", "https://evil.example/")).toBe(false)
+    // Private-section public suffixes are their own sites.
+    expect(chain("https://kit.github.io/", "https://evil.github.io/")).toBe(false)
+  })
+
+  test("a same-site frame nested in a cross-site frame is refused", () => {
+    expect(chain("https://idmsa.apple.com/", "https://ads.example.net/", "https://appstoreconnect.apple.com/")).toBe(false)
+  })
+
+  test("plain http is refused, except on local development hosts", () => {
+    expect(chain("http://idmsa.apple.com/", "https://appstoreconnect.apple.com/")).toBe(false)
+    expect(chain("https://idmsa.apple.com/", "http://appstoreconnect.apple.com/")).toBe(false)
+    expect(chain("http://idmsa.apple.test/", "http://appstoreconnect.apple.test/")).toBe(true)
+  })
+
+  test("the top page alone isn't a frame", () => {
+    expect(chain("https://appstoreconnect.apple.com/")).toBe(false)
   })
 })
