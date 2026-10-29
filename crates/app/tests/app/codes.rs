@@ -455,13 +455,18 @@ fn the_agent_computes_the_code() {
     rt.poll = Some(|s, now, tx| s.poll(now, tx));
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
     rt.state.agent.send(Job::Connect);
+    // The clock when it came: `until` draws another frame after, which can
+    // be past the end of a code that came with less than a frame left.
+    let came = std::cell::Cell::new(0.0);
     until(&mut rt, "github.com's code", |s| {
+        came.set(s.clock);
         s.otp.as_ref().is_some_and(|o| o.code.is_some())
     });
+    let came = came.get();
     let otp = rt.state.otp.as_ref().unwrap();
     let code = otp.code.as_ref().unwrap();
     assert!(code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()));
-    assert!(otp.until > rt.state.clock && otp.until <= rt.state.clock + 30.0);
+    assert!(otp.until > came && otp.until <= came + 30.0);
     let detail = rt.state.detail.as_ref().unwrap();
     let field = detail.fields.iter().find(|f| f.name == "otp").unwrap();
     assert!(field.value.is_empty(), "the agent left the secret out");
