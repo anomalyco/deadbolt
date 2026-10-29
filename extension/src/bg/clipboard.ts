@@ -3,8 +3,9 @@
 // offscreen document reads the clipboard and empties it, but only if it still
 // holds what Deadbolt copied, so nothing the user copied since is lost.
 //
-// Neither the value nor anything that gives it back is kept: only a salted
-// SHA-256 of it, in the service worker's memory and in chrome.storage.session
+// Neither the value nor anything that gives it back is kept: the page that
+// copied it hashes it, and the service worker gets only that salted SHA-256,
+// which it keeps in memory and in chrome.storage.session
 // (which a restarted service worker reads back, and which never reaches
 // disk). Reading the clipboard needs the clipboardRead permission (and
 // writing it from the offscreen document clipboardWrite); both are optional,
@@ -41,5 +42,11 @@ export async function holds(copied: Copied, text: string): Promise<boolean> {
   return (await digest(copied.salt, text)) === copied.hash
 }
 
+/** A record as `record` makes it: a 16-byte salt and a SHA-256, in lowercase hex. */
 export const isCopied = (v: unknown): v is Copied =>
-  typeof v === "object" && v !== null && typeof (v as Copied).salt === "string" && typeof (v as Copied).hash === "string"
+  typeof v === "object" &&
+  v !== null &&
+  typeof (v as Copied).salt === "string" &&
+  /^[0-9a-f]{32}$/.test((v as Copied).salt) &&
+  typeof (v as Copied).hash === "string" &&
+  /^[0-9a-f]{64}$/.test((v as Copied).hash)

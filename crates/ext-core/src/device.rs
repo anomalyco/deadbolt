@@ -1,11 +1,15 @@
 //! Phase-one standalone device, hosted only in an extension-owned worker.
 //! JavaScript routes messages; core owns signatures, membership and secrets.
 
+mod forms;
+mod generate;
 mod join;
 mod opfs;
 mod wire;
 
 use crate::policy::{self, Preset};
+use deadbolt_core::autofill::{item_name, otp, same_password, same_username, urls, value};
+use deadbolt_core::site::{Closeness, Site, closeness, page_url, url_host};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{DataOp, DeviceId, DeviceSecret, Entry, Field, FieldType, Item, ItemId, Vault};
 use deadbolt_net::{Node, NodeConfig, PairingOptions, PeerAddr, PeerId};
@@ -100,6 +104,12 @@ enum Error {
     State,
     #[error("That passphrase isn't right.")]
     WrongPassphrase,
+    #[error("Enter your passphrase to continue.")]
+    PassphraseNeeded,
+    #[error("That login is for a different site.")]
+    DomainMismatch,
+    #[error("That item is not in the vault.")]
+    NotFound,
     #[error("{0}")]
     Protocol(&'static str),
     #[error(transparent)]
@@ -114,9 +124,12 @@ enum Error {
     Application(#[from] deadbolt_net::application::Error),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
+    #[error(transparent)]
+    Generation(#[from] deadbolt_core::site_password::Error),
 }
 
 struct Loaded {
+    generated: deadbolt_core::site_password::Pending,
     store: Unlocked,
     secret: DeviceSecret,
     vault: Vault,
@@ -156,6 +169,7 @@ impl Loaded {
         let secret = DeviceSecret::from_bytes(store.device_secret());
         let ready = vault.members().all(|peer| peer == secret.device_id());
         Ok(Self {
+            generated: Default::default(),
             store,
             secret,
             vault,
@@ -416,41 +430,34 @@ async fn sync_round() -> Result<()> {
     Ok(())
 }
 
-// The proof deliberately matches the exact origin, rather than broadening a
-// credential's scope without the CLI's full PSL policy. Content-script frame
-// and gesture checks still run in the shared background autofill implementation.
+/// Parse the page using the same public-suffix policy as the native agent.
+fn site(raw: &str) -> Result<Site> {
+    Site::from_origin(raw).map_err(Error::Protocol)
+}
+
 fn origin(raw: &str) -> Result<String> {
-    let url = url::Url::parse(raw).map_err(|_| Error::Protocol("That isn't a web address"))?;
-    let host = url
-        .host_str()
-        .ok_or(Error::Protocol("That web address has no site in it"))?;
-    let local = host == "localhost"
-        || host == "127.0.0.1"
-        || host.ends_with(".localhost")
-        || host.ends_with(".test");
-    if url.scheme() != "https" && !(url.scheme() == "http" && local) {
-        return Err(Error::Protocol(
-            "Deadbolt only saves logins for https sites",
-        ));
-    }
-    Ok(url.origin().ascii_serialization())
+    site(raw)?;
+    url::Url::parse(raw)
+        .map(|url| url.origin().ascii_serialization())
+        .map_err(|_| Error::Protocol("That isn't a web address"))
 }
 
 fn field(item: &Item, key: &str) -> String {
-    item.fields
-        .get(key)
-        .map(|f| f.value.clone())
-        .unwrap_or_default()
+    value(item, key).unwrap_or_default().to_owned()
 }
-fn matches(item: &Item, page: &str) -> bool {
-    let saved = field(item, "url");
-    let saved = if saved.contains("://") {
-        saved
-    } else {
-        format!("https://{saved}")
-    };
-    !item.deleted && item.kind == "login" && origin(&saved).is_ok_and(|saved| saved == page)
+
+fn matches(item: &Item, page: &Site) -> bool {
+    !item.deleted && item.kind == "login" && page.matches(urls(item))
 }
+
+fn find_login(s: &Loaded, body: &Value, page: &Site) -> Result<Item> {
+    let item = login(s, body)?;
+    if !matches(&item, page) {
+        return Err(Error::DomainMismatch);
+    }
+    Ok(item)
+}
+
 fn reference(vault: &Vault, id: ItemId) -> String {
     format!("{}:{id}", vault.id())
 }
@@ -465,43 +472,103 @@ fn item_ref(vault: &Vault, value: &str) -> Result<ItemId> {
     Ok(ItemId::from_bytes(unhex(item)?))
 }
 
-fn otp(item: &Item) -> Option<&Field> {
-    item.fields
-        .get("otp")
-        .filter(|f| f.kind == FieldType::Otp)
-        .or_else(|| item.fields.values().find(|f| f.kind == FieldType::Otp))
-        .filter(|f| !f.value.is_empty())
-}
-
 fn account(item: &Item, vault: &Vault) -> Value {
-    json!({"ref": reference(vault, item.id), "vault": vault.name(), "title": item.name.as_deref().unwrap_or("Login"),
-        "username": field(item, "username"), "hasPassword": item.fields.contains_key("password"), "hasTotp": otp(item).is_some(),
-        "urls": [field(item, "url")]})
+    let title = item.name.clone().unwrap_or_else(|| {
+        value(item, "url")
+            .and_then(url_host)
+            .map(|host| host.strip_prefix("www.").unwrap_or(&host).to_owned())
+            .or_else(|| value(item, "username").map(str::to_owned))
+            .unwrap_or_else(|| "login".into())
+    });
+    let mut account = json!({"ref": reference(vault, item.id), "vault": vault.name(), "title": title,
+        "hasPassword": value(item, "password").is_some(), "hasTotp": otp(item).is_some_and(|f| !f.value.is_empty()),
+        "urls": urls(item).collect::<Vec<_>>()});
+    if let Some(username) = value(item, "username") {
+        account["username"] = json!(username);
+    }
+    if let Some(provider) = value(item, "sign-in-with") {
+        let mut sign_in = json!({"provider": provider});
+        if let Some(linked) = value(item, "sign-in-account")
+            .and_then(|id| unhex(id).ok())
+            .map(ItemId::from_bytes)
+            .filter(|id| *id != item.id)
+            .and_then(|id| vault.item(&id))
+            .filter(|i| !i.deleted)
+        {
+            sign_in["account"] = json!(
+                value(&linked, "username")
+                    .map(str::to_owned)
+                    .or(linked.name)
+                    .unwrap_or_else(|| "login".into())
+            );
+        }
+        account["signIn"] = sign_in;
+    }
+    account
 }
 
 fn list_logins(body: &Value) -> Result<Value> {
-    let page = origin(text(body, "origin")?)?;
+    let origin = text(body, "origin")?;
+    let page = site(origin)?;
     state().with(|s| {
-        Ok(json!({"type": "list",
-        "site": url::Url::parse(&page).ok().and_then(|u| u.host_str().map(str::to_owned)),
-        "accounts": s.vault.items().iter().filter(|i| matches(i, &page))
-            .map(|i| account(i, &s.vault)).collect::<Vec<_>>()}))
+        let filled: BTreeMap<String, u64> = s
+            .store
+            .meta_get("extension/filled")?
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        let mut accounts: Vec<_> = s
+            .vault
+            .items()
+            .iter()
+            .filter(|i| matches(i, &page))
+            .map(|i| {
+                let mut account = account(i, &s.vault);
+                let urls: Vec<_> = urls(i).filter(|url| page.matches_url(url)).collect();
+                let close = urls
+                    .iter()
+                    .filter_map(|url| closeness(origin, url))
+                    .min()
+                    .unwrap_or(Closeness::Site);
+                account["urls"] = json!(urls);
+                let used = filled.get(&reference(&s.vault, i.id)).copied().unwrap_or(0);
+                (close, used, account)
+            })
+            .collect();
+        accounts.sort_by(|(ca, ua, a), (cb, ub, b)| {
+            ca.cmp(cb).then(ub.cmp(ua)).then_with(|| {
+                (
+                    a["title"].as_str().unwrap_or_default().to_lowercase(),
+                    a["username"].as_str(),
+                    a["ref"].as_str(),
+                )
+                    .cmp(&(
+                        b["title"].as_str().unwrap_or_default().to_lowercase(),
+                        b["username"].as_str(),
+                        b["ref"].as_str(),
+                    ))
+            })
+        });
+        Ok(json!({"type": "list", "site": page.domain,
+            "accounts": accounts.into_iter().map(|(_, _, account)| account).collect::<Vec<_>>()}))
     })
 }
 
 fn fill_login(body: &Value) -> Result<Value> {
-    let page = origin(text(body, "origin")?)?;
+    let page = site(text(body, "origin")?)?;
     state().with(|s| {
-        let id = item_ref(&s.vault, text(body, "ref")?)?;
-        let item = s
-            .vault
-            .item(&id)
-            .filter(|i| matches(i, &page))
-            .ok_or(Error::Protocol("That login is for a different site"))?;
+        let item = find_login(s, body, &page)?;
         let wants = body
             .get("want")
             .and_then(Value::as_array)
             .ok_or(Error::Protocol("Missing requested fields"))?;
+        if wants.is_empty()
+            || wants.len() > 3
+            || wants
+                .iter()
+                .any(|w| !matches!(w.as_str(), Some("username" | "password" | "totp")))
+        {
+            return Err(Error::Protocol("Invalid requested fields"));
+        }
         let mut reply = json!({"type": "fill"});
         for key in ["username", "password"] {
             if wants.iter().any(|w| w.as_str() == Some(key)) && item.fields.contains_key(key) {
@@ -515,69 +582,97 @@ fn fill_login(body: &Value) -> Result<Value> {
                 .map_err(|_| Error::Protocol("Invalid one-time password field"))?;
             reply["totp"] = json!(totp.code(unix_time() as u64));
         }
+        let mut filled: BTreeMap<String, u64> = s
+            .store
+            .meta_get("extension/filled")?
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        filled.insert(reference(&s.vault, item.id), unix_time() as u64);
+        s.store
+            .meta_set("extension/filled", &serde_json::to_vec(&filled)?)?;
         Ok(reply)
     })
 }
 
 fn check_login(body: &Value) -> Result<Value> {
-    let page = origin(text(body, "origin")?)?;
-    let password = text(body, "password")?;
-    let username = body
-        .get("username")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
+    let page = site(text(body, "origin")?)?;
+    let origin = text(body, "origin")?;
+    let username = body.get("username").and_then(Value::as_str);
+    if username.is_some_and(|u| u.chars().count() > 500) {
+        return Err(Error::Protocol("The username is too long"));
+    }
     state().with(|s| {
-        let items = s.vault.items();
-        let matched: Vec<_> = items.iter().filter(|i| matches(i, &page) && field(i, "username") == username).collect();
-        let same = matched.iter().any(|i| field(i, "password") == password);
-        Ok(json!({"type": "check", "status": if same {"same"} else if matched.is_empty() {"new"} else {"update"},
-            "matches": matched.iter().map(|i| reference(&s.vault, i.id)).collect::<Vec<_>>()}))
+        let password = generate::resolve(&mut s.generated, origin, body)?;
+        let mut same = Vec::new();
+        let mut other = Vec::new();
+        for item in s.vault.items().iter().filter(|i| matches(i, &page)) {
+            if !username.is_none_or(|u| same_username(value(item, "username"), u)) {
+                continue;
+            }
+            let reference = reference(&s.vault, item.id);
+            if same_password(value(item, "password"), &password) {
+                same.push(reference);
+            } else {
+                other.push(reference);
+            }
+        }
+        let (status, matches) = if !same.is_empty() {
+            ("same", same)
+        } else if !other.is_empty() && username.is_some() {
+            ("update", other)
+        } else {
+            ("new", Vec::new())
+        };
+        Ok(json!({"type": "check", "status": status, "matches": matches}))
     })
 }
 
 fn save_login(body: &Value) -> Result<Value> {
-    let page = origin(text(body, "origin")?)?;
+    let page = site(text(body, "origin")?)?;
     let input = body.get("entry").ok_or(Error::Protocol("Missing login"))?;
-    let url = text(input, "url")?;
-    if origin(url)? != page {
-        return Err(Error::Protocol("That login is for a different site"));
+    let url = page_url(text(input, "url")?).map_err(Error::Protocol)?;
+    let origin = text(body, "origin")?;
+    let username = text(input, "username")?.trim();
+    let title = text(input, "title")?.trim();
+    if url.len() > 2048
+        || username.chars().count() > 500
+        || title.is_empty()
+        || title.chars().count() > 128
+    {
+        return Err(Error::Protocol("The login is too long"));
+    }
+    if !page.matches_url(url) {
+        return Err(Error::DomainMismatch);
     }
     let reply = state().with(|s| {
-        let fields = [
-            (
-                "username".into(),
-                Field::new(FieldType::Text, text(input, "username")?),
-            ),
-            (
-                "password".into(),
-                Field::new(FieldType::Secret, text(input, "password")?),
-            ),
-            ("url".into(), Field::new(FieldType::Url, url)),
-        ];
+        let password = generate::resolve(&mut s.generated, origin, input)?;
         let mut staged = s.vault.clone();
-        let (id, created) = if let Some(reference) = body.get("ref").and_then(Value::as_str) {
-            let id = item_ref(&s.vault, reference)?;
-            if !s.vault.item(&id).is_some_and(|i| matches(&i, &page)) {
-                return Err(Error::Protocol("That login is for a different site"));
-            }
+        let (id, created) = if body.get("ref").is_some() {
+            let item = find_login(s, body, &page)?;
+            // An update from a submitted page changes only the password.
             staged.write(
                 &s.secret,
-                fields
-                    .into_iter()
-                    .map(|(name, value)| DataOp::set(id, name, value))
-                    .collect(),
+                vec![DataOp::set(
+                    item.id,
+                    "password",
+                    Field::new(FieldType::Secret, &*password),
+                )],
             )?;
-            (id, false)
+            (item.id, false)
         } else {
-            let (id, _) = staged.create_item(
-                &s.secret,
-                "login",
-                Some(text(input, "title")?.into()),
-                fields,
-            )?;
+            let mut fields = vec![
+                ("url".into(), Field::new(FieldType::Url, url)),
+                ("password".into(), Field::new(FieldType::Secret, &*password)),
+            ];
+            if !username.is_empty() {
+                fields.push(("username".into(), Field::new(FieldType::Text, username)));
+            }
+            let name = Some(item_name(title)).filter(|t| !t.is_empty() && *t != page.domain);
+            let (id, _) = staged.create_item(&s.secret, "login", name, fields)?;
             (id, true)
         };
         s.commit(staged)?;
+        generate::saved(&mut s.generated, input);
         Ok(json!({"type": "save", "ref": reference(&s.vault, id), "created": created}))
     })?;
     request_sync();
@@ -589,7 +684,7 @@ fn login(s: &Loaded, body: &Value) -> Result<Item> {
     s.vault
         .item(&id)
         .filter(|i| !i.deleted && i.kind == "login")
-        .ok_or(Error::Protocol("That login isn't in the vault any more"))
+        .ok_or(Error::NotFound)
 }
 
 /// One login for the vault page's detail view: everything but its password,
@@ -612,27 +707,31 @@ fn login_detail(body: &Value) -> Result<Value> {
 /// `passphrase` (the Strict lock preset asks for it every time), only if it
 /// unlocks this store; the KDF runs without holding the vault.
 fn login_secret(body: &mut Value) -> Result<Value> {
-    let passphrase = body.get_mut("passphrase").map(Value::take);
-    // Strict, kept here too: no password without the passphrase.
-    if !policy::may_reveal(PRESET.with(Cell::get), passphrase.is_some()) {
-        return Err(Error::Protocol(
-            "Enter your passphrase to show this password.",
-        ));
-    }
-    if let Some(passphrase) = passphrase {
-        let Value::String(passphrase) = passphrase else {
-            return Err(Error::Protocol("A required field is missing"));
-        };
-        let passphrase = Zeroizing::new(passphrase);
-        let check = state().with(|s| Ok(s.store.passphrase_check()?))?;
-        if !check.matches(passphrase.as_bytes()) {
-            return Err(Error::WrongPassphrase);
-        }
-    }
+    reauthenticate(body, PRESET.with(Cell::get).reauth())?;
     state().with(|s| {
         let item = login(s, body)?;
         Ok(json!({"type": "device-secret", "password": field(&item, "password")}))
     })
+}
+
+/// Checks an explicit passphrase without holding the live vault during the KDF.
+fn reauthenticate(body: &mut Value, required: bool) -> Result<bool> {
+    let passphrase = body.get_mut("passphrase").map(Value::take);
+    if required && passphrase.is_none() {
+        return Err(Error::PassphraseNeeded);
+    }
+    let Some(passphrase) = passphrase else {
+        return Ok(false);
+    };
+    let Value::String(passphrase) = passphrase else {
+        return Err(Error::Protocol("A required field is missing"));
+    };
+    let passphrase = Zeroizing::new(passphrase);
+    let check = state().with(|s| Ok(s.store.passphrase_check()?))?;
+    if !check.matches(passphrase.as_bytes()) {
+        return Err(Error::WrongPassphrase);
+    }
+    Ok(true)
 }
 
 /// Adds a login by hand, or edits one, from the vault page: unlike a page's
@@ -797,7 +896,7 @@ async fn dispatch(mut body: Value) -> Result<Value> {
                 "not-set-up"
             };
             Ok(
-                json!({"type":"hello", "protocol":3, "version":"standalone-proof", "status":status, "capabilities":[]}),
+                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms"]}),
             )
         }
         "device-create" => {
@@ -866,6 +965,12 @@ async fn dispatch(mut body: Value) -> Result<Value> {
             items_changed();
             Ok(json!({"type":"device-pair", "ok":true}))
         }
+        "generate-check" => generate::check(&body),
+        "generate" => generate::generate(&body),
+        "generate-keep" => generate::keep(&body),
+        "generate-drop" => generate::drop_candidate(&body),
+        "forms" => forms::list(&body),
+        "fill-form" => forms::fill(&mut body),
         "list" => list_logins(&body),
         "fill" => fill_login(&body),
         "check" => check_login(&body),
@@ -882,9 +987,14 @@ const STORAGE: &str = "Deadbolt couldn't read or write its storage in this brows
 fn plain(error: &Error) -> String {
     use deadbolt_net::Error as Net;
     match error {
-        Error::Locked | Error::State | Error::WrongPassphrase | Error::Protocol(_) => {
-            error.to_string()
-        }
+        Error::Locked
+        | Error::State
+        | Error::WrongPassphrase
+        | Error::PassphraseNeeded
+        | Error::DomainMismatch
+        | Error::NotFound
+        | Error::Protocol(_) => error.to_string(),
+        Error::Generation(_) => error.to_string(),
         Error::Store(deadbolt_store::Error::WrongPassphrase) => Error::WrongPassphrase.to_string(),
         Error::Store(_) | Error::Decode(_) | Error::Json(_) => STORAGE.into(),
         Error::Core(_) | Error::Application(_) => {
@@ -942,7 +1052,20 @@ pub async fn request(body: JsValue) -> std::result::Result<JsValue, JsValue> {
         Ok(reply) => reply,
         Err(error) => {
             let code = match error {
+                Error::Generation(ref error) => match error {
+                    deadbolt_core::site_password::Error::Expired => "not_found",
+                    deadbolt_core::site_password::Error::Refused(
+                        deadbolt_core::password_rules::Refused::Weak,
+                    ) => "weak",
+                    deadbolt_core::site_password::Error::Origin(_)
+                    | deadbolt_core::site_password::Error::RulesTooLong => "bad_request",
+                    _ => "failed",
+                },
                 Error::Locked => "locked",
+                Error::PassphraseNeeded => "passphrase_needed",
+                Error::DomainMismatch => "domain_mismatch",
+                Error::NotFound => "not_found",
+                Error::Protocol(_) => "bad_request",
                 Error::WrongPassphrase | Error::Store(deadbolt_store::Error::WrongPassphrase) => {
                     "wrong_passphrase"
                 }

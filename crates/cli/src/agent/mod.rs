@@ -1701,12 +1701,12 @@ impl Agent {
                 })?,
             }),
             Command::SiteGenerateCheck { origin, field } => {
-                generate::check(&origin, &generate::FieldRules::of(&field))?;
+                generate::check(&origin, &generate::field_rules(&field))?;
                 Ok(Reply::Done)
             }
             Command::SiteGenerate { origin, field } => {
                 let password = crate::protocol::Secret::new(
-                    generate::generate(&origin, &generate::FieldRules::of(&field))?.as_str(),
+                    generate::generate(&origin, &generate::field_rules(&field))?.as_str(),
                 );
                 let id = self.with(|s| {
                     s.generated

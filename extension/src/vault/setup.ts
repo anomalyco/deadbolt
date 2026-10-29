@@ -5,7 +5,7 @@
 // carries on where it was.
 
 import { describePreset, duration, PRESETS, VAULT_NAME } from "../device-rules"
-import type { JoinStatus } from "../messages"
+import type { JoinStatus, Reauth } from "../messages"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
@@ -325,6 +325,52 @@ export function unlockView(app: App): View {
     rollLabel(label, "Unlock")
     if (!r.ok && r.code === "wrong_passphrase") error.textContent = "That passphrase isn't right."
     else error.textContent = r.ok ? "" : r.message
+    error.hidden = false
+    refuse(input)
+    input.focus()
+  })
+  return { el: form, focus: () => input.focus() }
+}
+
+/**
+ * A page's fill waiting on the passphrase (a card's number or code under
+ * Strict): asked here, in Deadbolt's own popup or page, never in the page
+ * being filled. The passphrase goes to the background in one message, for
+ * that one fill.
+ */
+export function reauthView(app: App, reauth: Reauth): View {
+  const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
+  const error = h("p", { class: "error", role: "alert" })
+  error.hidden = true
+  const label = h("span", { class: "roll-label" }, "Fill")
+  label.dataset.text = "Fill"
+  const submit = h("button", { class: "btn primary wide", type: "submit" }, label)
+  const form = h(
+    "form",
+    { class: "view center unlock", novalidate: "" },
+    h("div", { class: "state" }, h("span", { class: "state-icon" }, icon("lock")), h("h2", {}, `Fill ${reauth.title}`), para("Strict: enter your passphrase to fill this card on ", h("span", { class: "mono" }, reauth.site), ".")),
+    input,
+    error,
+    h("div", { class: "buttons stack" }, submit, button("link", "Cancel", () => void app.reauthCancel(reauth))),
+  )
+  input.addEventListener("input", () => {
+    input.classList.remove("invalid")
+    error.hidden = true
+  })
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault()
+    if (!input.value) return refuse(input)
+    submit.disabled = true
+    rollLabel(label, "Filling…")
+    const passphrase = input.value
+    input.value = ""
+    const r = await app.run({ type: "device-reauth-confirm", id: reauth.id, passphrase })
+    if (r.ok) return app.reauthDone()
+    submit.disabled = false
+    rollLabel(label, "Fill")
+    // Wrong, or too many wrong: the fill waits for another try. Anything else ended it.
+    if (r.code !== "wrong_passphrase" && r.code !== "backoff") return app.reauthDone(r.message)
+    error.textContent = r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.message
     error.hidden = false
     refuse(input)
     input.focus()

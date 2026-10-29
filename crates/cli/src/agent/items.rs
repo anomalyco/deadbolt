@@ -19,6 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
+use deadbolt_core::forms::last_four;
 use deadbolt_core::item::check_new_value;
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{
@@ -53,11 +54,6 @@ fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
     item.fields.get(field).map(|f| f.value.as_str())
 }
 
-fn last_four(item: &Item) -> Option<&str> {
-    let number = value(item, "number")?;
-    Some(&number[number.len().saturating_sub(4)..])
-}
-
 /// The item's name, else a label derived from its fields.
 pub fn label(item: &Item) -> String {
     if let Some(name) = &item.name {
@@ -69,15 +65,8 @@ pub fn label(item: &Item) -> String {
             .filter(|h| !h.is_empty())
             .or_else(|| value(item, "username").map(str::to_string))
             .unwrap_or_else(|| "login".into()),
-        "card" => format!(
-            "{} •••• {}",
-            value(item, "brand").unwrap_or("card"),
-            last_four(item).unwrap_or_default()
-        ),
+        "card" | "identity" => deadbolt_core::forms::title(item),
         "ssh" => value(item, "comment").unwrap_or("SSH key").into(),
-        "identity" => person(item)
-            .or_else(|| value(item, "email").map(str::to_string))
-            .unwrap_or_else(|| "identity".into()),
         "passkey" => value(item, "rp-id").unwrap_or("passkey").into(),
         "api" => value(item, "url")
             .map(host)
@@ -107,23 +96,6 @@ pub fn label(item: &Item) -> String {
         // A secure note's body is secret: never a label.
         kind => kind.into(),
     }
-}
-
-/// An identity's name: given and family name, else its nickname, else the
-/// one-line `name` an identity made before names had parts may still have.
-pub fn person(item: &Item) -> Option<String> {
-    let parts: Vec<&str> = ["given-name", "family-name"]
-        .iter()
-        .filter_map(|f| value(item, f))
-        .map(str::trim)
-        .filter(|v| !v.is_empty())
-        .collect();
-    if !parts.is_empty() {
-        return Some(parts.join(" "));
-    }
-    value(item, "nickname")
-        .or_else(|| value(item, "name"))
-        .map(str::to_string)
 }
 
 /// A login's username (else how it signs in: "Sign in with Google"), a

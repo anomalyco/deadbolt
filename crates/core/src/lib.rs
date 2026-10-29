@@ -74,15 +74,19 @@
 //! signature over `"deadbolt join consent v2\0" || vault_id || inviter || device`,
 //! where the inviter is the `Add`'s author.
 
+pub mod autofill;
 mod data;
 mod encoding;
 mod entry;
 mod error;
+pub mod forms;
 mod id;
 pub mod item;
 mod membership;
 pub mod password;
 pub mod password_rules;
+pub mod site;
+pub mod site_password;
 pub mod totp;
 mod vault;
 
