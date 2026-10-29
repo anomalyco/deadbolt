@@ -195,6 +195,7 @@ impl Hotkey {
         let Some(shortcut) = self.shortcut.clone() else {
             return;
         };
+        self.refused = None;
         match self.register(&shortcut) {
             Ok(registration) => {
                 self.registration = Some(registration);
@@ -215,11 +216,18 @@ impl Hotkey {
     /// Rune refuses a chord without ⌘, ⌃ or ⌥ (F-keys alone are fine): it
     /// would take that key from typing everywhere.
     pub fn change(&mut self, next: Option<&Shortcut>) -> Result<(), ShortcutError> {
+        if self.registered() && self.shortcut.as_ref() == next {
+            self.error = None;
+            self.reset_error = None;
+            self.refused = None;
+            return Ok(());
+        }
         let registration = next.map(|next| self.register(next)).transpose()?;
         self.registration = registration;
         self.shortcut = next.cloned();
         self.error = None;
         self.reset_error = None;
+        self.refused = None;
         self.save();
         Ok(())
     }
@@ -237,6 +245,8 @@ impl Hotkey {
     pub fn recorder(&mut self) -> &mut ShortcutRecorderState {
         if self.recorder.is_recording() {
             self.reset_error = None;
+        } else {
+            self.refused = None;
         }
         &mut self.recorder
     }
@@ -415,11 +425,16 @@ impl App {
 
     /// The notice's "Choose another…": Settings, with the recorder.
     fn choose_shortcut(&mut self) {
+        if !self.leave_edit() {
+            return;
+        }
         self.open_settings();
-        self.nav.row = crate::settings::rows(self)
-            .iter()
-            .position(|r| *r == crate::settings::Row::Shortcut)
-            .unwrap_or(0);
+        if self.settings_open {
+            self.nav.row = crate::settings::rows(self)
+                .iter()
+                .position(|r| *r == crate::settings::Row::Shortcut)
+                .unwrap_or(0);
+        }
     }
 }
 

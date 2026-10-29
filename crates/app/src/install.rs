@@ -237,6 +237,7 @@ pub enum Copied {
 }
 
 struct Outcome {
+    seq: u64,
     scan: Scan,
     error: Option<String>,
     installing: bool,
@@ -263,6 +264,7 @@ pub struct Installer {
     pub error: Option<String>,
     /// Which command was copied, and when on the app's clock.
     pub copied: Option<(Copied, f64)>,
+    seq: u64,
     marker: Option<PathBuf>,
     live: Option<Live>,
 }
@@ -293,6 +295,7 @@ impl Installer {
             busy: false,
             error: None,
             copied: None,
+            seq: 0,
             marker: Some(marker),
             live: Some(Live {
                 home,
@@ -320,6 +323,7 @@ impl Installer {
             busy: false,
             error: None,
             copied: None,
+            seq: 0,
             marker: None,
             live: None,
         }
@@ -364,6 +368,8 @@ impl Installer {
         let Some(live) = &self.live else {
             return;
         };
+        self.seq += 1;
+        let seq = self.seq;
         self.error = None;
         self.busy = true;
         let (source, home) = (self.source.clone(), live.home.clone());
@@ -380,6 +386,7 @@ impl Installer {
                 }
             }
             post.send(Outcome {
+                seq,
                 scan: scan(&source, &home, &path, &search),
                 error,
                 installing,
@@ -406,6 +413,9 @@ impl Installer {
             None => Vec::new(),
         };
         for outcome in outcomes {
+            if outcome.seq != self.seq {
+                continue;
+            }
             changed = true;
             self.busy = false;
             self.error = outcome.error;
@@ -432,13 +442,14 @@ impl Installer {
             .is_some_and(|(c, at)| c == which && now - at < COPIED_FOR)
     }
 
-    /// Opens the install page with a fresh scan.
+    /// Opens the install page with a fresh scan, answering the vault's offer.
     pub fn show(&mut self) {
         self.open = true;
+        self.answer();
         self.refresh();
     }
 
-    /// Leaves the install page. Having seen it answers the vault's offer.
+    /// Leaves the install page.
     pub fn close(&mut self) {
         self.open = false;
         self.answer();
@@ -450,6 +461,9 @@ impl Installer {
     }
 
     fn answer(&mut self) {
+        if self.offered {
+            return;
+        }
         self.offered = true;
         if let Some(marker) = &self.marker {
             let result = marker
@@ -690,9 +704,64 @@ mod tests {
         state.marker = Some(marker.clone());
         state.offered = false;
         state.show();
+        assert!(state.offered, "opening the page answers the offer");
         assert!(!state.offering(), "not while the page is open");
+        assert_eq!(fs::read_to_string(&marker).unwrap(), "1\n");
         state.close();
         assert!(!state.offering());
-        assert_eq!(fs::read_to_string(marker).unwrap(), "1\n");
+    }
+
+    #[test]
+    fn stale_scan_outcomes_do_not_clobber_newer_install_state() {
+        let home = tempfile::tempdir().unwrap();
+        let source = helper(home.path(), "Deadbolt.app");
+        let marker = home.path().join("app-command-offered");
+        let inbox = Inbox::new();
+        let post = inbox.poster();
+        let destination = home.path().join(".local/bin/deadbolt");
+        let mut state = Installer {
+            open: true,
+            offered: false,
+            source,
+            scan: None,
+            busy: true,
+            error: None,
+            copied: None,
+            seq: 2,
+            marker: Some(marker),
+            live: Some(Live {
+                home: home.path().into(),
+                path: OsString::new(),
+                search: Vec::new(),
+                inbox,
+            }),
+        };
+        post.send(Outcome {
+            seq: 1,
+            scan: Scan {
+                destination: destination.clone(),
+                on_path: true,
+                found: None,
+                manual: false,
+            },
+            error: None,
+            installing: false,
+        });
+        assert!(!state.poll(0.0));
+        assert!(state.busy && state.scan.is_none());
+
+        post.send(Outcome {
+            seq: 2,
+            scan: Scan {
+                destination: destination.clone(),
+                on_path: true,
+                found: Some((destination, Existing::Ours)),
+                manual: false,
+            },
+            error: None,
+            installing: true,
+        });
+        assert!(state.poll(0.0));
+        assert!(!state.busy && state.installed());
     }
 }

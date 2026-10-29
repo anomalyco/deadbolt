@@ -179,6 +179,9 @@ impl App {
                 input.edit.set_secure(true);
             }
         }
+        if !next.name.focused && !next.fields.iter().any(|f| f.edit.focused) {
+            next.name.focused = true;
+        }
         *form = next;
         if form.generates().is_some() {
             self.generate();
@@ -620,6 +623,7 @@ impl App {
         if form.landing.as_deref() == Some(item.id.as_str()) {
             self.edit.form = None;
             self.search.focused = true;
+            self.keep_selection_visible();
             return;
         }
         if form.saving || form.id.as_deref() != Some(item.id.as_str()) {
@@ -636,6 +640,7 @@ impl App {
         if self.edit.form.as_ref().is_some_and(|f| f.landing.is_some()) {
             self.edit.form = None;
             self.search.focused = true;
+            self.keep_selection_visible();
         }
     }
 
@@ -691,6 +696,9 @@ impl App {
         if self.editing() {
             match ev.key {
                 Key::Escape => self.cancel_edit(),
+                Key::Tab if ev.mods.ctrl && !ev.mods.cmd && !ev.mods.alt => {
+                    self.step_kind(if ev.mods.shift { -1 } else { 1 });
+                }
                 _ if chord('s') => self.save(),
                 // Every Enter is the form's: ⌘⏎ saves, and ⏎ does outside the
                 // search; other chords do nothing rather than reach the list.

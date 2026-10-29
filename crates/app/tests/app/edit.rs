@@ -263,6 +263,26 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
 }
 
 #[test]
+fn switching_a_new_items_type_keeps_focus_and_ctrl_tab_working() {
+    let mut r = rig("vault");
+    r.command('n');
+    focus(&mut r, "password");
+    let ctrl_tab = Mods {
+        ctrl: true,
+        ..Mods::default()
+    };
+    r.press(Key::Tab, ctrl_tab);
+    let form = r.rt.state.edit.form.as_ref().unwrap();
+    assert_eq!(form.kind, "card");
+    assert!(form.name.focused, "falls back to name when password goes");
+
+    // ⌃⇥ keeps cycling even when no field is focused.
+    r.rt.update(|s, _| s.edit.form.as_mut().unwrap().name.focused = false);
+    r.press(Key::Tab, ctrl_tab);
+    assert_eq!(r.rt.state.edit.form.as_ref().unwrap().kind, "note");
+}
+
+#[test]
 fn a_new_login_saves_and_is_selected() {
     let mut r = rig("vault");
     r.command('n');

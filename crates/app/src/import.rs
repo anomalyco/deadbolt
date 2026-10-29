@@ -114,17 +114,27 @@ impl App {
         if self.screen != Screen::Vault || self.panel.is_some() || !self.leave_edit() {
             return;
         }
+        self.enter_import();
+    }
+
+    /// Clears overlays that share the detail pane so the import view shows cleanly.
+    fn enter_import(&mut self) {
         self.edit.delete = None;
         if let Some(installer) = self.installer.as_mut().filter(|i| i.open) {
             installer.close();
         }
         self.close_settings();
+        self.nav = crate::keys::Nav::default();
         self.import.open = true;
     }
 
-    /// The window takes dropped files: the vault is showing, not the install page.
+    /// The window takes dropped files: the main window's vault, not the install page.
     pub fn accepts_drops(&self) -> bool {
-        self.screen == Screen::Vault && !self.installing() && !self.editing() && !self.deleting()
+        self.screen == Screen::Vault
+            && self.panel.is_none()
+            && !self.installing()
+            && !self.editing()
+            && !self.deleting()
     }
 
     /// An export is being dragged over the window, which would take it.
@@ -154,7 +164,7 @@ impl App {
         }
         self.import.seq += 1;
         self.import.phase = Phase::Idle;
-        self.import.open = true;
+        self.enter_import();
         self.import.error = Some(Notice {
             severity: Severity::Caution,
             title: format!("{} isn't an export Deadbolt can read", name(file)),
@@ -195,7 +205,7 @@ impl App {
             path: path.clone(),
         };
         self.import.error = None;
-        self.import.open = true;
+        self.enter_import();
         self.agent.send(Job::Import {
             path,
             apply: None,
@@ -320,7 +330,7 @@ impl App {
             Ok(None) => {}
             // Linux without a FileChooser portal lands here; dropping still works.
             Err(message) => {
-                self.import.open = true;
+                self.enter_import();
                 self.import.error = Some(Notice {
                     severity: Severity::Caution,
                     title: "Couldn't show the file dialog".into(),

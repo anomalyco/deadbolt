@@ -307,7 +307,7 @@ impl Onboarding {
         }
     }
 
-    pub(crate) fn blur(&mut self) {
+    pub fn blur(&mut self) {
         self.device.focused = false;
         self.vault.focused = false;
         self.passphrase.focused = false;
@@ -430,6 +430,23 @@ impl App {
         o.notice = None;
         o.blur();
         o.step = Step::Welcome;
+    }
+
+    /// Enter in a name field: submits once the passphrase is ready (or none is
+    /// needed), else moves cleanly to the next passphrase field.
+    pub(crate) fn advance_onboarding(&mut self, flow: Flow) {
+        let o = &mut self.onboarding;
+        if !o.needs_device()
+            || (o.passphrase_problem().is_none() && o.repeat_matches() == Some(true))
+        {
+            self.submit_onboarding(flow);
+        } else if o.passphrase_problem().is_none() {
+            o.blur();
+            o.repeat.focused = true;
+        } else {
+            o.blur();
+            o.passphrase.focused = true;
+        }
     }
 
     pub fn submit_create(&mut self) {

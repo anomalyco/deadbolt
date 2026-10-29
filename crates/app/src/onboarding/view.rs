@@ -377,7 +377,7 @@ fn form(s: &App, k: &Kit, flow: Flow) -> Paged {
     }
     let mut names = row().key("names").w_full().gap(12.0).items_start();
     if device {
-        names = names.child(device_field(s, k));
+        names = names.child(device_field(s, k, flow));
     }
     if flow == Flow::Create {
         names = names.child(vault_field(s, k));
@@ -446,7 +446,7 @@ fn hint(k: &Kit, key: &str, ink: Color, words: impl Into<String>) -> El {
         )
 }
 
-fn device_field(s: &App, k: &Kit) -> El {
+fn device_field(s: &App, k: &Kit, flow: Flow) -> El {
     let o = &s.onboarding;
     let problem = o.device_problem().filter(|_| o.attempted);
     let input = TextInput::new(&o.device)
@@ -456,7 +456,7 @@ fn device_field(s: &App, k: &Kit) -> El {
         .invalid(problem.is_some())
         .on_edit(|s: &mut App| &mut s.onboarding.device)
         .on_key(super::key)
-        .on_submit(|s: &mut App, _| s.onboarding.passphrase.focused = true)
+        .on_submit(move |s: &mut App, _| s.advance_onboarding(flow))
         .build(k)
         .key("device-input");
     let hint = problem.map(|p| hint(k, "device-problem", k.c.danger.fg, p));
@@ -467,11 +467,6 @@ fn vault_field(s: &App, k: &Kit) -> El {
     let o = &s.onboarding;
     let typed = !o.vault.text.trim().is_empty();
     let problem = o.vault_problem().filter(|_| typed || o.attempted);
-    let submit: fn(&mut App, &mut rune::Tx) = if o.device_ready {
-        |s, _| s.submit_onboarding(Flow::Create)
-    } else {
-        |s, _| s.onboarding.passphrase.focused = true
-    };
     let input = TextInput::new(&o.vault)
         .placeholder("personal")
         .large()
@@ -479,7 +474,7 @@ fn vault_field(s: &App, k: &Kit) -> El {
         .invalid(problem.is_some())
         .on_edit(|s: &mut App| &mut s.onboarding.vault)
         .on_key(super::key)
-        .on_submit(submit)
+        .on_submit(|s: &mut App, _| s.advance_onboarding(Flow::Create))
         .build(k)
         .key("vault-input");
     let hint = problem.map(|p| hint(k, "vault-problem", k.c.danger.fg, p));

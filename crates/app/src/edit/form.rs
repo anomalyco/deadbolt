@@ -365,12 +365,11 @@ impl Form {
 
     /// Whether leaving would lose something typed.
     pub fn changed(&self) -> bool {
-        match self.changes() {
-            Ok(c) if self.saves_over().is_some() => !c.is_empty(),
-            // A new item: anything typed (a generated password counts).
-            _ => {
-                !self.name.text.trim().is_empty() || self.fields.iter().any(|f| f.value().is_some())
-            }
+        if self.saves_over().is_some() {
+            self.changes().map_or(true, |c| !c.is_empty())
+        } else {
+            !self.name.text.trim().is_empty()
+                || self.fields.iter().any(|f| f.keeps() || f.value().is_some())
         }
     }
 
@@ -499,6 +498,19 @@ mod tests {
         let c = form.changes().unwrap();
         assert_eq!(c.set.len(), 1);
         assert_eq!(c.name.as_deref(), Some("GitHub"));
+    }
+
+    #[test]
+    fn clearing_a_required_field_marks_an_existing_item_changed() {
+        let card = ItemInfo {
+            kind: "card".into(),
+            ..item(&[("number", "secret", "4242424242424242")])
+        };
+        let mut form = Form::new("card", &card.label, Some(&card));
+        form.name.clear();
+        set(&mut form, "number", "");
+        assert!(form.changes().is_err());
+        assert!(form.changed());
     }
 
     #[test]
