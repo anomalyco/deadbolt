@@ -79,8 +79,8 @@ extern "C" {
 
 /// An exclusive OPFS file owned by redb. Obtain its handle in a dedicated worker:
 /// `await file.createSyncAccessHandle()` (the default `readwrite` mode).
-/// Pass it to [`Self::new`], then [`crate::init_with_backend`] or
-/// [`crate::unlock_with_backend`]. Only ciphertext reaches this adapter.
+/// Pass it to [`Self::new`], then [`deadbolt_store::init_with_backend`] or
+/// [`deadbolt_store::unlock_with_backend`]. Only ciphertext reaches this adapter.
 ///
 /// Ownership transfers on successful construction: the caller must not use or
 /// close the JS handle again. This adapter closes it on drop, including failed

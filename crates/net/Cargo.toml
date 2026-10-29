@@ -17,8 +17,13 @@ path = "tests/net/main.rs"
 [features]
 # Exposes transport bypasses for deterministic simulations, never needed by the CLI runtime.
 sim = []
+# Shared vault envelopes and application rules for native and browser devices.
+application = ["dep:deadbolt-core", "dep:serde", "dep:serde_json"]
 
 [dependencies]
+deadbolt-core = { path = "../core", optional = true }
+serde = { version = "1.0.229", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }
 data-encoding = "2.11.1"
 getrandom = "0.4"

@@ -14,74 +14,37 @@
 //! a join abandoned at the passphrase leaves a member that was never seen,
 //! which `devices remove` takes out like any other.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
-use deadbolt_core::{DeviceId, DeviceSecret, Entry, Signature, Vault, VaultId, valid_name};
+use deadbolt_core::{DeviceId, DeviceSecret, VaultId};
+use deadbolt_net::application;
+pub(super) use deadbolt_net::application::{Offer, Welcomed};
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, Node, NodeConfig, PairingCode, PairingContext,
     PairingOptions, PeerId, SyncHandler,
 };
 use deadbolt_store::KdfParams;
-use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use super::session::{Addr, Hint, Loaded, clean_name, hex, unhex};
+use super::session::{Addr, Loaded, clean_name};
 use super::{Agent, Conversation};
 use crate::protocol::{DeviceInfo, Event, Reply, Secret, VaultInfo};
-
-#[derive(Serialize, Deserialize)]
-pub(super) struct Offer {
-    v: u32,
-    vault: String,
-    vault_name: String,
-    name: String,
-    addr: Option<Addr>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct JoinBlob {
-    v: u32,
-    consent: String,
-    name: String,
-    addr: Option<Addr>,
-}
-
-#[derive(Serialize, Deserialize)]
-struct WelcomeMeta {
-    v: u32,
-    peers: BTreeMap<String, Hint>,
-}
 
 fn handler_error(error: anyhow::Error) -> HandlerError {
     format!("{error:#}").into()
 }
 
 pub(super) fn offer(s: &Loaded, vault: VaultId, addr: Option<Addr>) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&Offer {
-        v: 2,
-        vault: vault.to_string(),
-        vault_name: s.vault(&vault).name().into(),
-        name: s.meta.device_name.clone(),
-        addr,
-    })?)
+    Ok(application::offer(s, vault, addr)?)
 }
 
-/// Reads an offer, refusing names that couldn't be a vault's and ids that
-/// aren't ids.
 pub(super) fn read_offer(offer: &[u8]) -> Result<(Offer, VaultId)> {
-    let offer: Offer = serde_json::from_slice(offer).context("reading the offer")?;
-    if !valid_name(&offer.vault_name) {
-        bail!("invalid vault name");
-    }
-    let vault = VaultId::from_bytes(unhex(&offer.vault)?);
-    Ok((offer, vault))
+    application::read_offer(offer).context("reading the offer")
 }
 
-/// The joining device's signed consent to join the offered vault through
-/// `inviter`, with its name and address.
 pub(super) fn join_blob(
     secret: &DeviceSecret,
     device_name: &str,
@@ -89,17 +52,15 @@ pub(super) fn join_blob(
     vault: &VaultId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>> {
-    Ok(serde_json::to_vec(&JoinBlob {
-        v: 2,
-        consent: hex(secret.join_consent(vault, &inviter).as_bytes()),
-        name: device_name.into(),
+    Ok(application::join_blob(
+        secret,
+        device_name,
+        inviter,
+        vault,
         addr,
-    })?)
+    )?)
 }
 
-/// Admits `device` into `vault` and returns the welcome. A device that is
-/// already a member (its earlier join never finished on its side) gets the
-/// welcome again without a second `Add`.
 pub(super) fn welcome(
     s: &mut Loaded,
     vault: VaultId,
@@ -107,92 +68,29 @@ pub(super) fn welcome(
     join: &[u8],
     fallback_addr: Option<Addr>,
 ) -> Result<(Vec<Blob>, DeviceInfo)> {
-    let join: JoinBlob = serde_json::from_slice(join)?;
-    let consent = Signature::from_bytes(unhex(&join.consent)?);
-    let held = s.vault(&vault);
-    if !held.is_member(&s.id) {
-        bail!("this device is no longer a member of {}", held.name());
-    }
-    if held.was_removed(&device) {
-        bail!(
-            "that device was removed from {} and can't rejoin it",
-            held.name()
-        );
-    }
-    if !held.is_member(&device) {
-        s.update(vault, |v, secret| {
-            v.add(secret, device, consent).context("adding the device")
-        })?;
-    }
-    s.learn(
-        &device,
-        Some(&join.name),
-        join.addr.or(fallback_addr),
-        BTreeMap::new(),
-    );
-    s.save_peers()?;
-    let mut blobs = vec![Blob::new(serde_json::to_vec(&WelcomeMeta {
-        v: 2,
-        peers: s.hints_for(&device),
-    })?)];
-    blobs.extend(s.vault(&vault).entries().into_iter().map(Entry::encode));
+    let blobs = application::welcome(s, vault, device, join, fallback_addr)?;
     Ok((blobs, s.device_info(&device, &HashSet::new())))
 }
 
-/// A checked welcome, not stored yet.
-pub(super) struct Welcomed {
-    vault: Vault,
-    inviter: DeviceId,
-    inviter_name: String,
-    inviter_addr: Option<Addr>,
-    peers: BTreeMap<String, Hint>,
-}
-
-impl Welcomed {
-    fn vault_name(&self) -> String {
-        clean_name(self.vault.name())
-    }
-
-    fn inviter_info(&self) -> DeviceInfo {
-        DeviceInfo {
-            id: self.inviter.to_string(),
-            name: Some(clean_name(&self.inviter_name)).filter(|n| !n.is_empty()),
-            this: false,
-            connected: true,
-            last_seen: None,
-        }
+fn inviter_info(welcomed: &Welcomed) -> DeviceInfo {
+    DeviceInfo {
+        id: welcomed.inviter.to_string(),
+        name: Some(clean_name(&welcomed.inviter_name)).filter(|n| !n.is_empty()),
+        this: false,
+        connected: true,
+        last_seen: None,
     }
 }
 
-/// Checks that `welcome` is the offered vault and admits `device` through
-/// `inviter`, storing nothing.
 pub(super) fn verify_welcome(
     device: &DeviceId,
     inviter: DeviceId,
     offer: Offer,
     welcome: Vec<Blob>,
 ) -> Result<Welcomed> {
-    let mut blobs = welcome.into_iter();
-    let meta: WelcomeMeta =
-        serde_json::from_slice(&blobs.next().ok_or_else(|| anyhow!("empty welcome"))?)?;
-    let entries: Vec<Entry> = blobs
-        .map(|bytes| Entry::decode(&bytes))
-        .collect::<Result<_, _>>()
-        .context("decoding welcome")?;
-    let vault = Vault::load(entries).context("loading the vault")?;
-    if vault.id().to_string() != offer.vault {
-        bail!("the welcome is for another vault");
-    }
-    if !vault.is_member(device) || !vault.is_member(&inviter) {
-        bail!("the welcome does not admit this device");
-    }
-    Ok(Welcomed {
-        vault,
-        inviter,
-        inviter_name: offer.name,
-        inviter_addr: offer.addr,
-        peers: meta.peers,
-    })
+    Ok(application::verify_welcome(
+        device, inviter, offer, welcome,
+    )?)
 }
 
 /// Stores a checked welcome.
@@ -329,7 +227,7 @@ impl Joiner for NewDevice<'_> {
         let welcomed = verify_welcome(&device, inviter, offer, welcome).map_err(handler_error)?;
         match &self.home {
             Home::Store(agent) => {
-                let inviter = welcomed.inviter_info();
+                let inviter = inviter_info(&welcomed);
                 let vault = agent
                     .with(|s| {
                         let info = adopt(s, welcomed)?;
@@ -439,7 +337,7 @@ pub async fn join(
             Home::Memory(Box::new(Memory {
                 secret,
                 name,
-                addr: Addr::from_peer(&node.addr()),
+                addr: Addr::from_peer(node.addr()),
             })),
         ),
     };
@@ -490,8 +388,8 @@ pub async fn join(
                 .unwrap_or_else(|e| e.into_inner())
                 .ok_or_else(|| anyhow!("pairing finished without a vault"))?;
             let event = Event::Joined {
-                vault: welcomed.vault_name(),
-                inviter: welcomed.inviter_info(),
+                vault: clean_name(welcomed.vault.name()),
+                inviter: inviter_info(&welcomed),
                 passphrase: passphrase.is_none(),
             };
             let fresh = Fresh {
@@ -531,15 +429,7 @@ impl Inviter for ExistingDevice<'_> {
         self.agent
             .with_data(|s| {
                 let held = s.vault(&self.vault);
-                if !held.is_member(&s.id) {
-                    bail!("this device is no longer a member of {}", held.name());
-                }
-                if held.was_removed(&device) {
-                    bail!(
-                        "that device was removed from {} and can't rejoin it",
-                        held.name()
-                    );
-                }
+                application::can_invite(held, &s.id, &device)?;
                 offer(s, self.vault, Some(s.own_addr()))
             })
             .map_err(handler_error)

@@ -98,7 +98,7 @@
 //! plaintext.
 //!
 //! On wasm, use [`init_with_backend`] and [`unlock_with_backend`] with an
-//! `OpfsBackend` owning an exclusive OPFS sync access handle in a dedicated
+//! application-owned backend with an exclusive OPFS sync access handle in a dedicated
 //! worker. The encrypted format and transactions are identical; OPFS `flush`
 //! supplies the durability barrier and the access handle supplies the lock.
 //! The caller publishes a newly initialized file only after creation succeeds.
@@ -121,12 +121,6 @@
 //! On native, `unlock_biometric` opens the store with that key; changing the passphrase
 //! or calling [`Unlocked::clear_biometric`] removes the slot.
 
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-mod opfs;
-
-#[cfg(all(target_family = "wasm", target_os = "unknown"))]
-pub use opfs::OpfsBackend;
-
 mod crypto;
 mod error;
 mod kdf;
@@ -137,13 +131,13 @@ mod tests;
 
 pub use error::{Error, Result};
 pub use kdf::KdfParams;
+#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
+pub use store::native::{
+    biometric_token, clear_biometric, init, init_with_params, is_initialized, unlock,
+    unlock_biometric,
+};
 pub use store::{
     ActivityPage, ActivityRow, Budget, DB_FILE, Dropped, FORMAT_VERSION, LogIter, PassphraseCheck,
     Unlocked, generate_biometric_key, init_with_backend, unlock_with_backend,
-};
-#[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
-pub use store::{
-    biometric_token, clear_biometric, init, init_with_params, is_initialized, unlock,
-    unlock_biometric,
 };
 pub use zeroize::Zeroizing;

@@ -1,58 +1,116 @@
-//! CLI-compatible application envelopes over deadbolt-net's authenticated
-//! pairing and sync. The entries themselves are always decoded by core.
+//! Browser adapters for the shared vault pairing and sync application rules.
 use std::{
     collections::BTreeMap,
-    net::SocketAddr,
     sync::{Arc, Mutex},
 };
 
-use deadbolt_core::{DeviceId, Entry, Heads, Log, Signature};
-use deadbolt_net::{Blob, HandlerError, Inviter, PairingContext, PeerAddr, PeerId, SyncHandler};
-use serde::{Deserialize, Serialize};
+use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId};
+pub(crate) use deadbolt_net::application::Addr;
+use deadbolt_net::application::{self, Hint, State, clean_name};
+use deadbolt_net::{Blob, HandlerError, Inviter, PairingContext, PeerId, SyncHandler};
 
 use crate::{Error, Loaded, Result, enforce_membership, unhex};
 
-#[derive(Clone, Default, Serialize, Deserialize)]
-pub(crate) struct Addr {
-    #[serde(default)]
-    relay: Option<String>,
-    #[serde(default)]
-    direct: Vec<SocketAddr>,
-}
+impl State for Loaded {
+    type Error = Error;
 
-impl Addr {
-    pub(crate) fn from_peer(peer: PeerAddr) -> Self {
-        Self {
-            relay: peer.relay_url,
-            direct: peer.direct_addrs,
-        }
+    fn device_id(&self) -> DeviceId {
+        self.secret.device_id()
+    }
+    fn device_name(&self) -> &str {
+        &self.name
+    }
+    fn vaults(&self) -> impl Iterator<Item = &Vault> {
+        std::iter::once(&self.vault)
     }
 
-    pub(crate) fn peer(&self, id: PeerId) -> PeerAddr {
-        PeerAddr {
-            id,
-            relay_url: self.relay.clone(),
-            direct_addrs: self.direct.clone(),
+    fn hints_for(&self, peer: &DeviceId) -> BTreeMap<String, Hint> {
+        if !self.vault.is_member(peer) {
+            return BTreeMap::new();
         }
+        self.vault
+            .members()
+            .filter(|id| id != peer && *id != self.device_id())
+            .map(|id| {
+                let id = id.to_string();
+                let hint = Hint {
+                    name: self.peer_names.get(&id).cloned(),
+                    addr: self.peers.get(&id).cloned(),
+                    addr_seen: 0,
+                };
+                (id, hint)
+            })
+            .collect()
     }
-}
 
-#[derive(Serialize, Deserialize)]
-struct Hello {
-    v: u32,
-    name: String,
-    addr: Option<Addr>,
-    #[serde(default)]
-    peers: BTreeMap<String, serde_json::Value>,
-    vaults: BTreeMap<String, String>,
-}
+    fn update<T>(
+        &mut self,
+        id: VaultId,
+        change: impl FnOnce(&mut Vault, &DeviceSecret) -> std::result::Result<T, application::Error>,
+    ) -> Result<T> {
+        if id != self.vault.id() {
+            return Err(application::Error::VaultNotHeld.into());
+        }
+        let mut staged = self.vault.clone();
+        let result = change(&mut staged, &self.secret)?;
+        self.commit(staged)?;
+        Ok(result)
+    }
 
-#[derive(Deserialize)]
-struct Join {
-    v: u32,
-    consent: String,
-    name: String,
-    addr: Option<Addr>,
+    fn learn(
+        &mut self,
+        peer: &DeviceId,
+        name: &str,
+        addr: Option<Addr>,
+        hints: BTreeMap<String, Hint>,
+    ) -> Result<()> {
+        let old_peers = self.peers.clone();
+        let old_names = self.peer_names.clone();
+        let from = peer.to_string();
+        let name = clean_name(name);
+        if !name.is_empty() {
+            self.peer_names.insert(from.clone(), name);
+        }
+        if let Some(addr) = addr {
+            self.peers.insert(from.clone(), addr);
+        }
+        // Direct peer metadata wins. Gossip only fills gaps for known members;
+        // neither names nor addresses ever grant membership.
+        for (id, hint) in hints.into_iter().take(256) {
+            let Ok(bytes) = unhex::<32>(&id) else {
+                continue;
+            };
+            let device = DeviceId::from_bytes(bytes);
+            if device == self.device_id() || id == from || !self.vault.is_member(&device) {
+                continue;
+            }
+            if let Some(name) = hint
+                .name
+                .map(|name| clean_name(&name))
+                .filter(|name| !name.is_empty())
+            {
+                self.peer_names.entry(id.clone()).or_insert(name);
+            }
+            if let Some(addr) = hint.addr {
+                self.peers.entry(id).or_insert(addr);
+            }
+        }
+        if self.peers != old_peers {
+            self.store
+                .meta_set("extension/peers", &serde_json::to_vec(&self.peers)?)?;
+        }
+        if self.peer_names != old_names {
+            self.store.meta_set(
+                "extension/peer-names",
+                &serde_json::to_vec(&self.peer_names)?,
+            )?;
+        }
+        Ok(())
+    }
+
+    fn received(&mut self, _: &DeviceId) -> Result<()> {
+        Ok(())
+    }
 }
 
 #[derive(Clone)]
@@ -63,15 +121,6 @@ impl Handler {
         let mut state = self.0.lock().map_err(|_| Error::State)?;
         f(state.as_mut().ok_or(Error::Locked)?)
     }
-
-    fn learn(s: &mut Loaded, peer: PeerId, addr: Option<Addr>) -> Result<()> {
-        if let Some(addr) = addr {
-            s.peers.insert(data_encoding::HEXLOWER.encode(&peer), addr);
-            s.store
-                .meta_set("extension/peers", &serde_json::to_vec(&s.peers)?)?;
-        }
-        Ok(())
-    }
 }
 
 fn failure(error: Error) -> HandlerError {
@@ -81,21 +130,11 @@ fn failure(error: Error) -> HandlerError {
 impl SyncHandler for Handler {
     async fn heads(&self, peer: PeerId) -> std::result::Result<Vec<u8>, HandlerError> {
         self.with(|s| {
-            let vaults = if s.vault.is_member(&DeviceId::from_bytes(peer)) {
-                BTreeMap::from([(
-                    s.vault.id().to_string(),
-                    data_encoding::HEXLOWER.encode(&s.vault.heads().encode()),
-                )])
-            } else {
-                BTreeMap::new()
-            };
-            Ok(serde_json::to_vec(&Hello {
-                v: 1,
-                name: "Chromium".into(),
-                addr: s.addr.clone(),
-                peers: BTreeMap::new(),
-                vaults,
-            })?)
+            Ok(application::hello(
+                s,
+                &DeviceId::from_bytes(peer),
+                s.addr.clone(),
+            )?)
         })
         .map_err(failure)
     }
@@ -106,30 +145,8 @@ impl SyncHandler for Handler {
         bytes: Vec<u8>,
     ) -> std::result::Result<Vec<Blob>, HandlerError> {
         self.with(|s| {
-            let hello: Hello = serde_json::from_slice(&bytes)?;
-            if hello.v != 1 {
-                return Err(Error::Protocol("unsupported sync envelope"));
-            }
-            Self::learn(s, peer, hello.addr)?;
-            let mut membership = Vec::new();
-            let mut data = Vec::new();
-            if s.vault.is_member(&DeviceId::from_bytes(peer))
-                && let Some(heads) = hello.vaults.get(&s.vault.id().to_string())
-            {
-                let bytes = data_encoding::HEXLOWER
-                    .decode(heads.as_bytes())
-                    .map_err(|_| Error::Protocol("invalid heads"))?;
-                let heads = Heads::decode(&bytes)?;
-                for entry in s.vault.missing_for(&heads) {
-                    match entry.log() {
-                        Log::Membership => membership.push(entry.encode()),
-                        Log::Data if s.ready => data.push(entry.encode()),
-                        Log::Data => {}
-                    }
-                }
-            }
-            membership.append(&mut data);
-            Ok(membership)
+            let ready = s.ready;
+            application::missing_for(s, &DeviceId::from_bytes(peer), &bytes, ready)
         })
         .map_err(failure)
     }
@@ -140,27 +157,8 @@ impl SyncHandler for Handler {
         entries: Vec<Blob>,
     ) -> std::result::Result<(), HandlerError> {
         let result = self.with(|s| {
-            let mut staged = s.vault.clone();
-            for bytes in entries {
-                let Ok(entry) = Entry::decode(&bytes) else {
-                    continue;
-                };
-                if entry.vault() != staged.id() {
-                    continue;
-                }
-                if entry.log() == Log::Data
-                    && (!s.ready || !staged.is_member(&DeviceId::from_bytes(peer)))
-                {
-                    continue;
-                }
-                // Like the CLI, skip rejected entries without discarding valid
-                // membership updates in the same batch (including removals of
-                // a faulty author whose fork an honest peer relayed).
-                if staged.apply(entry).is_err() {
-                    continue;
-                }
-            }
-            s.commit(staged)
+            let ready = s.ready;
+            application::receive(s, &DeviceId::from_bytes(peer), entries, ready).map(drop)
         });
         enforce_membership();
         result.map_err(failure)
@@ -168,13 +166,11 @@ impl SyncHandler for Handler {
 }
 
 impl Inviter for Handler {
-    async fn offer(&self, _: &PairingContext) -> std::result::Result<Vec<u8>, HandlerError> {
+    async fn offer(&self, ctx: &PairingContext) -> std::result::Result<Vec<u8>, HandlerError> {
         self.with(|s| {
             s.require_ready()?;
-            Ok(serde_json::to_vec(&serde_json::json!({
-                "v": 2, "vault": s.vault.id().to_string(), "vault_name": s.vault.name(),
-                "name": "Chromium", "addr": s.addr,
-            }))?)
+            application::can_invite(&s.vault, &s.device_id(), &DeviceId::from_bytes(ctx.remote))?;
+            Ok(application::offer(s, s.vault.id(), s.addr.clone())?)
         })
         .map_err(failure)
     }
@@ -186,31 +182,8 @@ impl Inviter for Handler {
     ) -> std::result::Result<Vec<Blob>, HandlerError> {
         let result = self.with(|s| {
             s.require_ready()?;
-            let join: Join = serde_json::from_slice(&bytes)?;
-            if join.v != 2 {
-                return Err(Error::Protocol("unsupported pairing envelope"));
-            }
-            let device = DeviceId::from_bytes(ctx.remote);
-            if s.vault.was_removed(&device) {
-                return Err(Error::Protocol("a removed device cannot rejoin"));
-            }
-            if !s.vault.is_member(&device) {
-                let mut staged = s.vault.clone();
-                staged.add(
-                    &s.secret,
-                    device,
-                    Signature::from_bytes(unhex(&join.consent)?),
-                )?;
-                s.commit(staged)?;
-            }
-            // Names are display-only; never authority. The proof doesn't show peer names.
-            drop(join.name);
-            Self::learn(s, ctx.remote, join.addr)?;
-            let mut welcome = vec![Blob::new(serde_json::to_vec(
-                &serde_json::json!({"v": 2, "peers": {}}),
-            )?)];
-            welcome.extend(s.vault.entries().into_iter().map(Entry::encode));
-            Ok(welcome)
+            let vault = s.vault.id();
+            application::welcome(s, vault, DeviceId::from_bytes(ctx.remote), &bytes, None)
         });
         enforce_membership();
         result.map_err(failure)

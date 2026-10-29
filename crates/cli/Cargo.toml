@@ -22,7 +22,7 @@ getrandom = "0.4"
 indexmap = "2.14"
 deadbolt-client = { path = "../client" }
 deadbolt-core = { path = "../core" }
-deadbolt-net = { path = "../net" }
+deadbolt-net = { path = "../net", features = ["application"] }
 deadbolt-send = { path = "../send" }
 deadbolt-store = { path = "../store" }
 rpassword = "7.5.4"
