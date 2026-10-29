@@ -40,7 +40,7 @@ pub fn view(s: &App, k: &Kit) -> Option<El> {
     if !s.nav.sheet {
         return None;
     }
-    let mut card = col()
+    let card = col()
         .key("sheet")
         .role("dialog")
         .label("Keyboard shortcuts")
@@ -65,8 +65,5 @@ pub fn view(s: &App, k: &Kit) -> Option<El> {
                 .child(Keybind::new(&["esc"]).build(k)),
         )
         .child(columns(k));
-    for shadow in k.shadow_layers(&k.elevation.overlay) {
-        card = card.box_shadow(shadow);
-    }
-    Some(card)
+    Some(k.elevate(card, &k.elevation.overlay))
 }

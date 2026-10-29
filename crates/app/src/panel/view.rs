@@ -9,15 +9,16 @@
 //! vault, …) swap with the whole-state replacement. Reduced motion keeps only
 //! fades (Rune).
 
-use rune::{
-    Cx, El, Icon, ScrollSpec, Spring, SpringPair, TextStyle, Transition, col, el, icon, row,
-    spacer, text,
-};
+use rune::{Cx, El, Icon, Spring, SpringPair, Transition, col, el, icon, row, spacer, text};
 use rune_kit::{Button, ButtonVariant, ControlSize, Kit, TextInput};
 
 use super::{CLOSE, MARGIN, Phase};
 use crate::model::{App, Screen};
-use crate::view::{LIST_EDGE, copy_line, hint, passphrase_field, search_placeholder, unlock_error};
+use crate::view::theme::PANEL_HEADER;
+use crate::view::{
+    copy_line, device_name, extra_copy_hints, hint, instant, passphrase_field, replace,
+    search_placeholder, touch_id_button, unlock_error,
+};
 
 const HEADER_H: f32 = 56.0;
 const FOOTER_H: f32 = 40.0;
@@ -82,25 +83,23 @@ fn card(s: &App, k: &Kit) -> El {
             message(k, "connecting", "Starting Deadbolt…", None),
         ),
     };
-    let mut card = col()
-        .key("card")
-        .w_full()
-        .h_full()
-        .radius(k.radius.lg)
-        .fill(k.c.bg_base)
-        // Only the close fades (`summon` settles what's inside).
-        .transition(Transition::asymmetric(
-            Transition::identity(),
-            Transition::opacity().springs(SpringPair::new(
-                Spring::new(CLOSE as f32, 0.0),
-                Spring::new(CLOSE as f32, 0.0),
+    let close = Spring::new(CLOSE as f32, 0.0);
+    let card = k.elevate(
+        col()
+            .key("card")
+            .w_full()
+            .h_full()
+            .radius(k.radius.lg)
+            .fill(k.c.bg_base)
+            // Only the close fades (`summon` settles what's inside).
+            .transition(Transition::asymmetric(
+                Transition::identity(),
+                Transition::opacity().springs(SpringPair::new(close, close)),
             )),
-        ));
-    for shadow in k.shadow_layers(&k.elevation.floating) {
-        card = card.box_shadow(shadow);
-    }
+        &k.elevation.floating,
+    );
     let card = card
-        .child(header.transition(Transition::blur_replace()))
+        .child(header.transition(replace()))
         .child(rule("rule-top", k))
         .child(
             col()
@@ -108,7 +107,7 @@ fn card(s: &App, k: &Kit) -> El {
                 .w_full()
                 .grow(1.0)
                 .min_h(0.0)
-                .child(body.transition(Transition::blur_replace())),
+                .child(body.transition(replace())),
         )
         .child(rule("rule-bottom", k))
         .child(footer(s, k));
@@ -121,7 +120,11 @@ fn card(s: &App, k: &Kit) -> El {
                 .justify_end()
                 .pr(16.0)
                 .pb(FOOTER_H + 8.0)
-                .on_press(|s: &mut App| s.close_palette())
+                .transition(instant())
+                .on_press_tx(|s: &mut App, tx| {
+                    tx.instant();
+                    s.close_palette();
+                })
                 .child(actions.on_press(|_: &mut App| {})),
         ),
         None => card,
@@ -145,18 +148,17 @@ fn header(key: &str) -> El {
 /// A flat field filling the header: a press anywhere on it, the icon too,
 /// lands in the field. While the copy's confirmation shows it takes nothing.
 fn search(s: &App, k: &Kit) -> El {
-    let inert = s.panel_inert();
     let mut field = TextInput::new(&s.search)
         .plain()
         .placeholder(search_placeholder(s))
         .leading_icon(k.glyph.search)
         .leading_icon_size(18.0)
-        .text_style(TextStyle::new(17.0, 400.0).lh(24.0))
+        .text_style(PANEL_HEADER)
         .height(HEADER_H)
         .width(None)
         .on_key(|s: &mut App, ev, tx| s.panel_search_key(ev, tx))
         .on_change(|s: &mut App, _| s.search_changed());
-    if !inert {
+    if !s.panel_inert() {
         field = field.on_edit(|s: &mut App| &mut s.search);
         if !s.search.text.is_empty() {
             field = field
@@ -176,47 +178,32 @@ fn title(k: &Kit, key: &str, glyph: &'static Icon, label: &str) -> El {
         .child(icon(glyph, 18.0).color(k.c.icon_muted))
         .child(
             text(label.to_owned())
-                .font(TextStyle::new(17.0, 400.0).lh(24.0))
+                .font(PANEL_HEADER)
                 .color(k.c.text_strong),
         )
 }
 
 /// The list beside the selected item.
 fn vault(s: &App, k: &Kit) -> El {
+    let visible = s.visible();
     row()
         .key("split")
         .w_full()
         .h_full()
         .items_stretch()
-        .child(
-            col()
-                .key("list")
-                .w(LIST_W)
-                .h_full()
-                .scroll(ScrollSpec {
-                    stick_bottom: false,
-                })
-                .scroll_edge_fade(LIST_EDGE)
-                .scroll_margin(LIST_EDGE)
-                .child(crate::vault::rows(s, k)),
-        )
+        .child(crate::vault::item_list(s, k, &visible).w(LIST_W).h_full())
         .child(el().key("rule-side").w(1.0).h_full().fill(k.c.border_weak))
         .child(super::item::view(s, k))
 }
 
 fn locked(s: &App, k: &Kit) -> El {
-    let device = s
-        .status
-        .as_ref()
-        .and_then(|st| st.device.as_ref())
-        .and_then(|d| d.name.clone());
-    let about = match (device, s.touch_id_ready()) {
+    let about = match (device_name(s), s.touch_id_ready()) {
         (Some(name), true) => format!("Use Touch ID or enter your passphrase to unlock {name}."),
         (None, true) => "Use Touch ID or enter your passphrase to unlock this device.".into(),
         (Some(name), false) => format!("Enter your passphrase to unlock {name}."),
         (None, false) => "Enter your passphrase to unlock this device.".into(),
     };
-    let mut body = col()
+    col()
         .key("unlock")
         .w_full()
         .px(18.0)
@@ -231,32 +218,13 @@ fn locked(s: &App, k: &Kit) -> El {
                 .wrap()
                 .w_full(),
         )
-        .child(passphrase_field(s, k));
-    if let Some(e) = unlock_error(s, k) {
-        body = body.child(e);
-    }
-    if s.touch_id_ready() {
-        let touch_label = if s.touch_id_unlocking {
-            "Touch ID…"
-        } else {
-            "Use Touch ID"
-        };
-        body = body.child(
-            Button::new(touch_label)
-                .variant(ButtonVariant::Neutral)
-                .control_size(ControlSize::Large)
-                .disabled(s.busy_unlocking())
-                .on_press(|s: &mut App| s.unlock_touch_id())
-                .build(k)
-                .key("touch-id")
-                .mt(4.0),
-        );
-    }
-    body
+        .child(passphrase_field(s, k))
+        .children(unlock_error(s, k))
+        .children(touch_id_button(s, k).map(|b| b.mt(4.0)))
 }
 
 fn message(k: &Kit, key: &str, body: &str, action: Option<El>) -> El {
-    let mut out = col()
+    col()
         .key(format!("{key}-body"))
         .w_full()
         .px(18.0)
@@ -270,11 +238,8 @@ fn message(k: &Kit, key: &str, body: &str, action: Option<El>) -> El {
                 .color(k.c.text_muted)
                 .wrap()
                 .w_full(),
-        );
-    if let Some(action) = action {
-        out = out.child(action.key("action"));
-    }
-    out
+        )
+        .children(action.map(|a| a.key("action")))
 }
 
 /// What ⏎ does, rolling into the copy's line (as in the vault's copy notice)
@@ -300,7 +265,7 @@ fn footer(s: &App, k: &Kit) -> El {
                 .key(format!("notice:{notice}"))
                 .shrink()
                 .center_y()
-                .transition(Transition::blur_replace())
+                .transition(replace())
                 .child(
                     text(notice.clone())
                         .font(k.ty.text_small)
@@ -311,14 +276,7 @@ fn footer(s: &App, k: &Kit) -> El {
     } else if copy.is_some() || !enter.is_empty() {
         bar = bar.child(copy_line(k, "footer-line", copy, enter, false));
     }
-    bar = bar.child(spacer());
-    if s.has_username() {
-        bar =
-            bar.child(hint(k, "h-user", &["⇧", "⏎"], "Username").transition(Transition::opacity()));
-    }
-    if crate::model::has_code(s) {
-        bar = bar.child(hint(k, "h-code", &["⌥", "⏎"], "Code").transition(Transition::opacity()));
-    }
+    bar = bar.child(spacer()).children(extra_copy_hints(s, k));
     if s.screen == Screen::Vault && s.selected_item().is_some() {
         bar = bar.child(hint(k, "h-actions", &["⌘", "K"], "Actions"));
     }

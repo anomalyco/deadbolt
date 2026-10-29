@@ -1,40 +1,23 @@
 //! Drawing the form and the delete confirm.
 //!
-//! Motion: the form and the item swap whole, with the import view's
-//! replacement (.3 in, .25 out). The delete button grows into its confirm, a
-//! dim red surface, on one spring (.3, no bounce) and shrinks back into it on
-//! cancel; with Reduce Motion they fade in place (.2). A generated password
-//! replaces the last one with the app's blur replacement. Problems, the
-//! conflict notice and the nudge fade in where they show.
+//! Motion: the form and the item swap whole, with the app's whole-state
+//! replacement. The delete button grows into its confirm, a dim red surface,
+//! on one spring (.3, no bounce) and shrinks back into it on cancel; with
+//! Reduce Motion they fade in place (.2). A generated password replaces the
+//! last one with the app's blur replacement. Problems, the conflict notice and
+//! the nudge fade in where they show.
 
-use rune::{El, Icon, Shadow, Spring, SpringPair, Transition, col, el, row, spacer, text};
+use rune::{El, Shadow, Spring, SpringPair, Transition, col, el, row, spacer, text};
 use rune_kit::{
     Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Kit, SegmentedControl,
     State, Switch, TextArea, TextInput,
 };
 
 use super::{Conflict, Delete, Field, Form, Input, KINDS, LENGTHS, editable};
-use crate::import::view::swap;
 use crate::model::{App, title_case};
 use crate::onboarding::{Notice, Severity};
-
-pub static PLUS: Icon = Icon {
-    name: "deadbolt-plus",
-    view: 16.0,
-    body: r#"<path d="M8 3.25v9.5M3.25 8h9.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/>"#,
-};
-
-pub static TRASH: Icon = Icon {
-    name: "deadbolt-trash",
-    view: 16.0,
-    body: r#"<path d="M2.75 4.25h10.5M6.25 4.25v-1c0-.41.34-.75.75-.75h2c.41 0 .75.34.75.75v1M4.25 4.25l.6 8.1c.04.65.58 1.15 1.23 1.15h3.84c.65 0 1.19-.5 1.23-1.15l.6-8.1" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
-};
-
-pub static REGENERATE: Icon = Icon {
-    name: "deadbolt-regenerate",
-    view: 16.0,
-    body: r#"<path d="M12.75 8a4.75 4.75 0 1 1-1.39-3.36" stroke="currentColor" stroke-width="1.25" stroke-linecap="round"/><path d="M11.75 2.25v2.5h-2.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#,
-};
+use crate::view::theme::{PLUS, REGENERATE, TRASH};
+use crate::view::{replace, reveal_button, scroll_col};
 
 /// A shown secret's text area grows to this, then scrolls inside.
 const SECRET_LINES: usize = 12;
@@ -45,10 +28,6 @@ const FIELD_PAD: f32 = 3.0;
 const GROW: Spring = Spring::new(0.3, 0.0);
 /// The confirm's fade where nothing grows (Reduce Motion).
 const FADE: Spring = Spring::new(0.2, 0.0);
-
-fn fade() -> Transition {
-    Transition::opacity()
-}
 
 /// The detail pane while a form is open.
 pub fn form(s: &App, k: &Kit, f: &Form) -> El {
@@ -63,24 +42,19 @@ pub fn form(s: &App, k: &Kit, f: &Form) -> El {
         .shrink()
         .min_h(0.0)
         .gap(16.0)
-        .transition(swap());
+        .transition(replace());
     // The head and the foot line up with the scroll's padded fields.
     form.child(head(k, f).px(FIELD_PAD))
         .children(conflict(k, f))
         .children(mirrored(k, f))
         .child(
-            col()
-                .key("form-scroll")
+            scroll_col("form-scroll")
                 .w_full()
                 .grow(1.0)
                 .shrink()
                 .min_h(0.0)
                 // Room for a focused field's edge the viewport would clip.
                 .padding(FIELD_PAD)
-                .scroll(rune::ScrollSpec {
-                    stick_bottom: false,
-                })
-                .scroll_edge_fade(crate::view::LIST_EDGE)
                 .child(fields),
         )
         .child(foot(k, f).px(FIELD_PAD))
@@ -88,6 +62,7 @@ pub fn form(s: &App, k: &Kit, f: &Form) -> El {
 
 /// The name, and the type: a picker for a new item.
 fn head(k: &Kit, f: &Form) -> El {
+    let invalid = f.problem_for("name").is_some();
     let name = TextInput::new(&f.name)
         .placeholder(if f.is_new() {
             "Name"
@@ -96,12 +71,12 @@ fn head(k: &Kit, f: &Form) -> El {
         })
         .large()
         .width(None)
-        .invalid(f.problem_for("name").is_some())
+        .invalid(invalid)
         .on_edit(|s: &mut App| s.name_mut())
         .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line))
         .on_change(|s: &mut App, _| s.form_changed())
         .on_submit(|s: &mut App, _| s.save());
-    let name = quiet(k, name.build(k), &f.name, f.problem_for("name").is_some())
+    let name = quiet(k, name.build(k), &f.name, invalid)
         .key("name")
         .label("Name");
     let mut head = col().key("head").w_full().gap(8.0);
@@ -129,11 +104,8 @@ fn head(k: &Kit, f: &Form) -> El {
                 .child(disable(kinds, labels.len(), f.saving).build(k)),
         );
     }
-    head = head.child(name);
-    if let Some(p) = f.problem_for("name") {
-        head = head.child(problem(k, "name-problem", p));
-    }
-    head
+    head.child(name)
+        .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
 }
 
 /// Another device changed or deleted the item while it was open here.
@@ -156,7 +128,7 @@ fn conflict(k: &Kit, f: &Form) -> Option<El> {
         .key("conflict")
         .w_full()
         .gap(8.0)
-        .transition(fade())
+        .transition(Transition::opacity())
         .child(crate::onboarding::view::banner(k, &notice));
     if conflict == Conflict::Changed {
         block = block.child(
@@ -188,7 +160,7 @@ fn mirrored(k: &Kit, f: &Form) -> Option<El> {
         col()
             .key("mirrored")
             .w_full()
-            .transition(fade())
+            .transition(Transition::opacity())
             .child(crate::onboarding::view::banner(k, &notice)),
     )
 }
@@ -225,7 +197,6 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         // A secret over several lines: hidden, one fixed row of dots, or
         // empty for a value kept (`Input::kept`); shown, the whole value,
         // wrapping and editable anywhere. Still secure either way.
-        let shown = input.edit.is_revealed();
         row()
             .key("secret-lines")
             .w_full()
@@ -237,7 +208,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                         k,
                         TextArea::new(&input.edit)
                             .secure()
-                            .revealed(shown)
+                            .revealed(input.edit.is_revealed())
                             .wrap_anywhere()
                             .width(None)
                             .auto_grow(1, SECRET_LINES)
@@ -300,7 +271,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
             // Each generated password replaces the last, rather than popping in.
             el().key(format!("value-{}", f.generated))
                 .w_full()
-                .transition(crate::view::replace())
+                .transition(replace())
                 .child(built)
         } else {
             built
@@ -308,6 +279,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
     };
     let mut value = col()
         .key("value")
+        .w_full()
         .grow(1.0)
         .shrink()
         .min_w(0.0)
@@ -331,7 +303,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                 .font(k.ty.small_medium)
                 .color(k.c.text_faint),
         )
-        .child(value.w_full())
+        .child(value)
 }
 
 /// A focused field keeps a neutral edge instead of the kit's blue ring;
@@ -367,14 +339,8 @@ fn secret_actions(k: &Kit, input: &Input, i: usize, generates: bool, saving: boo
         return actions;
     }
     actions.child(
-        IconButton::new(if shown { k.glyph.eye_off } else { k.glyph.eye })
-            .variant(IconButtonVariant::GhostMuted)
+        reveal_button(k, &noun, shown)
             .control_size(ControlSize::Small)
-            .label(if shown {
-                format!("Hide {noun}")
-            } else {
-                format!("Show {noun}")
-            })
             .disabled(saving)
             .on_press(move |s: &mut App| s.toggle_shown(i))
             .build(k)
@@ -444,7 +410,7 @@ fn problem(k: &Kit, key: &str, message: &str) -> El {
         .color(k.c.danger.fg)
         .wrap()
         .w_full()
-        .transition(fade())
+        .transition(Transition::opacity())
 }
 
 /// Cancel and Save, after a problem that names no field or the nudge.
@@ -459,7 +425,7 @@ fn foot(k: &Kit, f: &Form) -> El {
                 .color(k.c.text_muted)
                 .wrap()
                 .w_full()
-                .transition(fade()),
+                .transition(Transition::opacity()),
         ),
         _ => None,
     };
@@ -530,7 +496,7 @@ pub fn item_actions(s: &App, k: &Kit) -> El {
 /// "Delete “GitHub”?" in place, on a dim red surface, grown from the delete button.
 pub fn confirm(k: &Kit, d: &Delete) -> El {
     let red = k.c.danger.fg;
-    let mut body = col()
+    let body = col()
         .key("words")
         .w_full()
         .gap(2.0)
@@ -548,10 +514,8 @@ pub fn confirm(k: &Kit, d: &Delete) -> El {
                 .color(k.c.text_muted)
                 .wrap()
                 .w_full(),
-        );
-    if let Some(e) = &d.error {
-        body = body.child(problem(k, "problem", e));
-    }
+        )
+        .children(d.error.as_deref().map(|e| problem(k, "problem", e)));
     col()
         .key("delete-confirm")
         .role("alertdialog")

@@ -122,13 +122,22 @@ impl App {
     /// main window: the card fades, then the window hides. A part-typed passphrase goes as
     /// the card starts leaving.
     pub fn dismiss(&mut self, tx: &mut Tx) {
-        let Some(panel) = &mut self.panel else { return };
-        if matches!(panel.phase, Phase::Closing { .. } | Phase::Hidden) {
-            return;
+        if self.begin_close(None) {
+            tx.wake_after(Duration::ZERO);
         }
-        panel.phase = Phase::Closing { until: None };
+    }
+
+    fn begin_close(&mut self, until: Option<f64>) -> bool {
+        let Some(panel) = &mut self.panel else {
+            return false;
+        };
+        if matches!(panel.phase, Phase::Closing { .. } | Phase::Hidden) {
+            return false;
+        }
+        panel.phase = Phase::Closing { until };
+        self.close_palette();
         self.passphrase.clear();
-        tx.wake_after(Duration::ZERO);
+        true
     }
 
     /// A copy landed: show the confirmation, then close. The search lets go
@@ -138,6 +147,7 @@ impl App {
         let Some(panel) = &mut self.panel else { return };
         if panel.phase == Phase::Open {
             panel.phase = Phase::Copied { until: None };
+            self.close_palette();
             self.search.focused = false;
             tx.wake_after(Duration::ZERO);
         }
@@ -180,12 +190,7 @@ impl App {
                 return false;
             }
             Phase::Copied { until: Some(until) } if now >= *until - 1e-3 => {
-                self.dismiss(tx);
-                if let Some(panel) = &mut self.panel {
-                    panel.phase = Phase::Closing {
-                        until: Some(now + HIDE_AFTER),
-                    };
-                }
+                self.begin_close(Some(now + HIDE_AFTER));
                 tx.wake_after(Duration::from_secs_f64(HIDE_AFTER));
             }
             Phase::Closing { until: Some(until) } if now >= *until - 1e-3 => self.hide_panel(tx),
@@ -315,23 +320,30 @@ impl App {
         if self.panel_shortcut(ev, tx) {
             return true;
         }
+        if self.screen == Screen::Vault && !self.panel_inert() {
+            if let Some(handled) = self.nav_key(ev, tx) {
+                return handled;
+            }
+            if ev.key == Key::Escape {
+                self.dismiss(tx);
+                return true;
+            }
+            if ev.is_command('l') && !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl {
+                self.lock();
+                return true;
+            }
+            return self.vault_key(ev, tx);
+        }
         match ev.key {
             Key::Escape => self.dismiss(tx),
             Key::Enter if self.screen == Screen::Locked => self.submit_unlock(),
             Key::Enter if self.screen == Screen::Onboarding => self.open_main(tx),
             Key::Enter if matches!(self.screen, Screen::Failed(_)) => self.retry(),
-            Key::Command('l')
-                if self.screen == Screen::Vault && self.panel_phase() == Some(Phase::Open) =>
-            {
-                self.lock()
-            }
             _ => return false,
         }
         true
     }
-}
 
-impl App {
     /// The main window closed: wipe it and quit, through the panel when
     /// there is one, so the panel clears its own copy first. macOS Quit (the
     /// menu, ⌘Q, the Dock, logout) runs this too, as the app is already

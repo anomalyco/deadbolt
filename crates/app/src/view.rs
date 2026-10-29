@@ -7,26 +7,22 @@
 //! a click) replaces the item's title and fields at once. Nothing animates on
 //! first paint, and reduced motion keeps only fades (Rune's runtime does both).
 
-use rune::{Chrome, Cx, Edge, El, Icon, TextStyle, Transition, col, el, icon, row, text};
+pub(crate) mod theme;
+
+use deadbolt_client::protocol::{FieldInfo, ItemInfo, code_field};
+use rune::{Cx, Edge, El, Icon, ScrollSpec, Transition, col, el, icon, row, text};
 use rune_kit::shell::Page;
-use rune_kit::{Button, ButtonVariant, ControlSize, Keybind, Kit, RollingText, TextInput};
-
-use crate::model::{App, BAR_W, Copy, Screen};
-
-/// The main window: content under a transparent title bar, with the traffic
-/// lights centred in the shell's 48 pt band.
-pub const CHROME: Chrome = Chrome {
-    full_size_content: true,
-    traffic_lights: Some((16.0, 17.0)),
-    drag_regions: true,
+use rune_kit::{
+    Button, ButtonVariant, ControlSize, IconButton, IconButtonVariant, Keybind, Kit, RollingText,
+    TextInput,
 };
-/// How far a list's edges fade over hidden rows, and how far a row brought into view stops from them.
-pub(crate) const LIST_EDGE: f32 = 24.0;
-pub(crate) const NOTICE_W: f32 = BAR_W + 24.0;
 
-pub(crate) fn replace() -> Transition {
-    Transition::blur_replace()
-}
+use crate::keys::shown;
+use crate::model::{App, Copy, Screen, has_code};
+use theme::CARD_TITLE;
+
+pub use theme::CHROME;
+pub(crate) use theme::{LIST_EDGE, NOTICE_W, instant, replace, rise, tnum};
 
 pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     if s.reduced_motion {
@@ -34,9 +30,10 @@ pub fn app(s: &App, cx: &mut Cx<App>) -> El {
     }
     let k = rune_theme_opencode::kit(cx.system_dark());
     let inset = cx.titlebar_inset();
+    let reduced = cx.is_reduced_motion();
     let mut layer = Vec::new();
     let screen = match &s.screen {
-        Screen::Vault if !s.installing() => crate::vault::view(s, k, inset, &mut layer),
+        Screen::Vault if !s.installing() => crate::vault::view(s, k, inset, reduced, &mut layer),
         Screen::Vault => page(k, inset, crate::install::page(s, k)),
         Screen::Connecting => page(k, inset, connecting(k).into()),
         Screen::Onboarding => page(
@@ -113,7 +110,7 @@ fn centred(key: &str, k: &Kit, glyph: &'static Icon, title: &str, body: El) -> E
             .child(
                 text(title)
                     .key("title")
-                    .font(TextStyle::new(17.0, 500.0).lh(22.0))
+                    .font(CARD_TITLE)
                     .color(k.c.text_strong),
             )
             .child(body),
@@ -159,13 +156,8 @@ fn failed(k: &Kit, message: &str) -> El {
 }
 
 fn unlock(s: &App, k: &Kit) -> El {
-    let device = s
-        .status
-        .as_ref()
-        .and_then(|st| st.device.as_ref())
-        .and_then(|d| d.name.clone());
     let vaults = s.status.as_ref().map_or(0, |st| st.vaults.len());
-    let about = match (device, vaults) {
+    let about = match (device_name(s), vaults) {
         (Some(name), 0) => format!("Locked · {name}"),
         (Some(name), n) => format!(
             "Locked · {name} · {n} vault{}",
@@ -178,10 +170,8 @@ fn unlock(s: &App, k: &Kit) -> El {
         .w_full()
         .gap(12.0)
         .child(muted(k, "about", about))
-        .child(passphrase_field(s, k));
-    if let Some(e) = unlock_error(s, k) {
-        body = body.child(e);
-    }
+        .child(passphrase_field(s, k))
+        .children(unlock_error(s, k));
     let label = if s.unlocking {
         "Unlocking…"
     } else {
@@ -194,13 +184,8 @@ fn unlock(s: &App, k: &Kit) -> El {
         .on_press(|s: &mut App| s.submit_unlock())
         .build(k)
         .key("unlock");
-    body = if s.touch_id_ready() {
-        let touch_label = if s.touch_id_unlocking {
-            "Touch ID…"
-        } else {
-            "Use Touch ID"
-        };
-        body.child(
+    body = match touch_id_button(s, k) {
+        Some(touch_id) => body.child(
             row()
                 .key("actions")
                 .w_full()
@@ -209,19 +194,9 @@ fn unlock(s: &App, k: &Kit) -> El {
                 .mt(4.0)
                 .motion(k.motion.control)
                 .child(unlock_button.grow(1.0))
-                .child(
-                    Button::new(touch_label)
-                        .variant(ButtonVariant::Neutral)
-                        .control_size(ControlSize::Large)
-                        .disabled(s.busy_unlocking())
-                        .on_press(|s: &mut App| s.unlock_touch_id())
-                        .build(k)
-                        .key("touch-id")
-                        .grow(1.0),
-                ),
-        )
-    } else {
-        body.child(unlock_button.mt(4.0))
+                .child(touch_id.grow(1.0)),
+        ),
+        None => body.child(unlock_button.mt(4.0)),
     };
     col().key("unlock").center().child(
         col()
@@ -251,6 +226,24 @@ pub(crate) fn passphrase_field(s: &App, k: &Kit) -> El {
         .key("passphrase")
 }
 
+/// Use Touch ID when a biometric slot is ready on this lock screen.
+pub(crate) fn touch_id_button(s: &App, k: &Kit) -> Option<El> {
+    s.touch_id_ready().then(|| {
+        let label = if s.touch_id_unlocking {
+            "Touch ID…"
+        } else {
+            "Use Touch ID"
+        };
+        Button::new(label)
+            .variant(ButtonVariant::Neutral)
+            .control_size(ControlSize::Large)
+            .disabled(s.busy_unlocking())
+            .on_press(|s: &mut App| s.unlock_touch_id())
+            .build(k)
+            .key("touch-id")
+    })
+}
+
 /// Shown when the enrolled Touch ID slot was wiped (expired, fingerprint set
 /// changed, or passphrase changed).
 pub const TOUCH_ID_RESET: &str = "Touch ID was reset; enter your passphrase.";
@@ -260,50 +253,103 @@ pub const TOUCH_ID_RESET: &str = "Touch ID was reset; enter your passphrase.";
 pub const TOUCH_ID_FINISH_SETUP: &str = "Enter your passphrase once to finish turning on Touch ID.";
 
 pub(crate) fn unlock_error(s: &App, k: &Kit) -> Option<El> {
-    if let Some(e) = &s.unlock_error {
-        return Some(
-            text(e.clone())
-                .key("error")
-                .font(k.ty.text_small)
-                .color(k.c.danger.fg)
-                .wrap()
-                .w_full()
-                .transition(Transition::opacity()),
-        );
-    }
-    if s.touch_id_reset() {
-        return Some(
-            text(TOUCH_ID_RESET)
-                .key("touch-id-reset")
-                .font(k.ty.text_small)
-                .color(k.c.text_muted)
-                .wrap()
-                .w_full()
-                .transition(Transition::opacity()),
-        );
-    }
-    if s.touch_id_enabled() && !s.touch_id_ready() {
-        return Some(
-            text(TOUCH_ID_FINISH_SETUP)
-                .key("touch-id-finish")
-                .font(k.ty.text_small)
-                .color(k.c.text_muted)
-                .wrap()
-                .w_full()
-                .transition(Transition::opacity()),
-        );
-    }
-    None
+    let (key, msg, ink) = if let Some(e) = &s.unlock_error {
+        ("error", e.as_str(), k.c.danger.fg)
+    } else if s.touch_id_reset() {
+        ("touch-id-reset", TOUCH_ID_RESET, k.c.text_muted)
+    } else if s.touch_id_enabled() && !s.touch_id_ready() {
+        ("touch-id-finish", TOUCH_ID_FINISH_SETUP, k.c.text_muted)
+    } else {
+        return None;
+    };
+    Some(
+        text(msg.to_owned())
+            .key(key)
+            .font(k.ty.text_small)
+            .color(ink)
+            .wrap()
+            .w_full()
+            .transition(Transition::opacity()),
+    )
 }
 
 // -------------------------------------------------------------------------------------------
-// Shared with the vault and the quick panel.
+// Shared builders across the vault, quick panel, Settings, edit and import views.
+
+pub(crate) fn device_name(s: &App) -> Option<&str> {
+    s.status
+        .as_ref()
+        .and_then(|st| st.device.as_ref())
+        .and_then(|d| d.name.as_deref())
+}
+
+pub(crate) fn vault_name<'a>(s: &'a App, fallback: &'a str) -> &'a str {
+    s.status
+        .as_ref()
+        .and_then(|st| st.vaults.iter().find(|v| v.default).or(st.vaults.first()))
+        .map_or(fallback, |v| v.name.as_str())
+}
 
 pub(crate) fn search_placeholder(s: &App) -> String {
     match s.items.len() {
         1 => "Search 1 item".to_owned(),
         n => format!("Search {n} items"),
     }
+}
+
+/// A vertical scroll viewport with edge fade over hidden content.
+pub(crate) fn scroll_col(key: &str) -> El {
+    col()
+        .key(key)
+        .scroll(ScrollSpec {
+            stick_bottom: false,
+        })
+        .scroll_edge_fade(LIST_EDGE)
+}
+
+/// A floating status pill that rises in and leaves the same way.
+pub(crate) fn status_pill(k: &Kit, key: &str, pill: El) -> El {
+    let pill = pill
+        .key(key)
+        .role("status")
+        .w(NOTICE_W)
+        .self_center()
+        .padding(12.0)
+        .radius(k.radius.lg)
+        .fill(k.c.layer_01)
+        .transition(rise());
+    k.elevate(pill, &k.elevation.floating)
+}
+
+/// Show/Hide icon button for a secret field.
+pub(crate) fn reveal_button(k: &Kit, noun: &str, revealed: bool) -> IconButton {
+    let glyph = if revealed {
+        k.glyph.eye_off
+    } else {
+        k.glyph.eye
+    };
+    IconButton::new(glyph)
+        .variant(IconButtonVariant::GhostMuted)
+        .label(if revealed {
+            format!("Hide {noun}")
+        } else {
+            format!("Show {noun}")
+        })
+}
+
+/// Shown fields of `full`, each paired with whether it's the item's active one-time code field.
+pub(crate) fn item_fields(full: &ItemInfo) -> impl Iterator<Item = (&FieldInfo, bool)> {
+    let code = code_field(&full.fields);
+    full.fields
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| shown(&full.kind, &f.name))
+        .map(move |(i, f)| (f, code == Some(i)))
+}
+
+/// Fixed 12-bullet secure mask without copying any secret value into the tree.
+pub(crate) fn masked_secret() -> El {
+    text("•").secure()
 }
 
 /// A key and what it does, for the hint bars.
@@ -318,6 +364,18 @@ pub(crate) fn hint(k: &Kit, key: &str, keys: &[&str], label: &str) -> El {
                 .font(k.ty.small)
                 .color(k.c.text_muted),
         )
+}
+
+/// `⇧⏎ Username` and `⌥⏎ Code` hints for the selected item.
+pub(crate) fn extra_copy_hints(s: &App, k: &Kit) -> Vec<El> {
+    let mut hints = Vec::new();
+    if s.has_username() {
+        hints.push(hint(k, "h-user", &["⇧", "⏎"], "Username").transition(Transition::opacity()));
+    }
+    if has_code(s) {
+        hints.push(hint(k, "h-code", &["⌥", "⏎"], "Code").transition(Transition::opacity()));
+    }
+    hints
 }
 
 /// What a copy says, in one label that rolls only the characters that
@@ -374,10 +432,8 @@ pub(crate) fn copy_line(k: &Kit, key: &str, copy: Option<&Copy>, does: &str, wra
         .transition(replace())
         .child(lead)
         .child(
-            // Tabular figures: the countdown's digits keep one width, so the
-            // line doesn't shake as it counts.
             RollingText::new(format!("{key}-label"), label)
-                .font(k.ty.small.features("'tnum' 1"))
+                .font(tnum(k.ty.small))
                 .color(ink)
                 .from(Edge::Top)
                 .build(k),

@@ -35,9 +35,8 @@ fn runtime(scene: &str, dark: bool) -> Runtime<App> {
     rt
 }
 
-/// The main window, on the vault scene with an item's values showing.
-fn main_window() -> Runtime<App> {
-    let app = rune::tooling::initial_state(&deadbolt_app::spec(), Some("vault"));
+fn main_scene(scene: &str) -> Runtime<App> {
+    let app = rune::tooling::initial_state(&deadbolt_app::spec(), Some(scene));
     let mut rt = Runtime::new(
         app,
         deadbolt_app::view::app,
@@ -51,6 +50,11 @@ fn main_window() -> Runtime<App> {
     rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
     rt.frame(0.0);
     rt
+}
+
+/// The main window, on the vault scene with an item's values showing.
+fn main_window() -> Runtime<App> {
+    main_scene("vault")
 }
 
 /// One clipboard for both windows, as Rune gives every window in a process.
@@ -303,14 +307,7 @@ fn escape_fades_the_card_then_hides() {
     frames(&mut rt, 10);
     rt.key(key(Key::Escape));
     rt.frame(FRAME);
-    assert!(matches!(phase(&rt), Phase::Closing { .. }));
-    frames(&mut rt, 5);
-    let fade = find(&rt, "card").expect("still fading").1;
-    assert!(fade > 0.0 && fade < 1.0, "the card fades ({fade})");
-    frames(&mut rt, 20);
-    assert_eq!(phase(&rt), Phase::Hidden);
-    let gone = find(&rt, "card").map_or(0.0, |c| c.1);
-    assert!(gone < 0.01, "faded out by the time it hides ({gone})");
+    fades_then_hides(&mut rt, "Escape");
 }
 
 /// A window draws no frames while nothing moves, so the app's clock stands
@@ -445,20 +442,6 @@ fn the_shortcut_closes_the_locked_panel_from_its_field() {
 /// and closing leaves an empty secure field.
 #[test]
 fn the_passphrase_stays_in_its_field() {
-    let main = || {
-        let app = rune::tooling::initial_state(&deadbolt_app::spec(), Some("locked"));
-        let mut rt = Runtime::new(
-            app,
-            deadbolt_app::view::app,
-            (820.0, 540.0),
-            Env {
-                system_dark: true,
-                scale: 1.0,
-            },
-        );
-        rt.on_key = Some(|s, ev, tx| s.on_key(ev, tx));
-        rt
-    };
     let with = |key, mods| KeyEvent { key, mods };
     let cmd = Mods {
         cmd: true,
@@ -468,7 +451,7 @@ fn the_passphrase_stays_in_its_field() {
         ctrl: true,
         ..Mods::default()
     };
-    for mut rt in [runtime("locked", true), main()] {
+    for mut rt in [runtime("locked", true), main_scene("locked")] {
         frames(&mut rt, 2);
         assert!(rt.has_secure_focus());
         for c in "hunter".chars() {
@@ -1473,4 +1456,104 @@ fn the_clear_button_empties_the_search() {
     assert_eq!(rt.state.search.text, "");
     assert!(rt.state.search.focused);
     assert!(clear(&rt).is_none());
+}
+
+#[test]
+fn panel_keys_work_when_the_search_loses_focus_and_palette_opens_at_once() {
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 4);
+    let first = rt.state.selected.clone();
+
+    // Clicking non-focusable chrome inside the panel blurs the search field.
+    rt.update(|_, tx| tx.blur());
+    frames(&mut rt, 2);
+    assert!(!rt.state.search.focused);
+
+    // ⌘K opens the actions menu at once, and Esc closes the menu before the panel.
+    rt.key(KeyEvent {
+        key: Key::Command('k'),
+        mods: Mods {
+            cmd: true,
+            ..Mods::default()
+        },
+    });
+    rt.frame(FRAME);
+    assert_eq!(find(&rt, "actions").map(|(_, o)| o), Some(1.0));
+    rt.key(key(Key::Down));
+    rt.frame(FRAME);
+    assert_eq!(rt.state.nav.palette, Some(1));
+    rt.key(key(Key::Escape));
+    rt.frame(FRAME);
+    assert_eq!(find(&rt, "actions"), None);
+    assert_eq!(
+        phase(&rt),
+        Phase::Open,
+        "Esc closed the menu, not the panel"
+    );
+
+    // ↓ still moves the selection, and typing returns focus to the search.
+    rt.key(key(Key::Down));
+    rt.frame(FRAME);
+    assert_ne!(rt.state.selected, first);
+    rt.key(key(Key::Text("g".into())));
+    rt.frame(FRAME);
+    assert!(rt.state.search.focused);
+    assert_eq!(rt.state.search.text, "g");
+}
+
+#[test]
+fn panel_item_masks_empty_secrets_shows_code_errors_and_uses_cached_pages() {
+    use deadbolt_client::protocol::FieldInfo;
+
+    let mut rt = runtime("empty", true);
+    frames(&mut rt, 2);
+    let first_id = rt.state.selected.clone().unwrap();
+    let item = rt.state.detail.clone().unwrap();
+
+    // Cache the first item, add a backup otp with an empty value, and surface a code error.
+    rt.update(move |s, tx| {
+        s.cache.insert(&item, None, s.clock);
+        if let Some(d) = &mut s.detail {
+            d.fields.push(FieldInfo {
+                name: "backup-otp".into(),
+                kind: "otp".into(),
+                value: String::new(),
+            });
+        }
+        let seq = s.seq();
+        s.apply(
+            Done::Code {
+                seq,
+                result: Err(deadbolt_app::agent::Failure {
+                    code: None,
+                    message: "invalid secret".into(),
+                }),
+            },
+            tx,
+        );
+    });
+    rt.frame(FRAME);
+    assert!(shows(&rt, "No code: invalid secret"));
+    let backup = rt
+        .elements()
+        .into_iter()
+        .find(|e| e.path.ends_with("field-backup-otp/value"))
+        .expect("backup otp value");
+    assert!(rt.element_is_secure(&backup.path));
+    assert!(
+        backup.rect[2] > 20.0,
+        "empty secret still draws the 12-dot mask"
+    );
+
+    // Stepping away and back shows the cached page immediately while detail is still in flight.
+    rt.key(key(Key::Down));
+    rt.frame(FRAME);
+    rt.key(key(Key::Up));
+    rt.frame(FRAME);
+    assert_eq!(rt.state.selected.as_deref(), Some(first_id.as_str()));
+    assert!(rt.state.detail.is_none());
+    assert!(
+        find(&rt, "field-username").is_some(),
+        "cached page renders at once"
+    );
 }
