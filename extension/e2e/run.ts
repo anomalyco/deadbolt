@@ -3,9 +3,9 @@
 // real browser profile or vault: each run uses a fresh profile directory with
 // the fake host's manifest in it.
 //
-//   bun run e2e [--stills <dir>] [--only <scenario>,<scenario>]
+//   bun run e2e [--stills <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list]
 //
-// `--only security` is the subset CI runs: hidden and covered fields, form
+// `--only security` is the fast subset CI runs first: hidden and covered fields, form
 // swaps, opaque origins, value swaps, navigation during a fill and the
 // back/forward cache.
 //
@@ -2236,18 +2236,43 @@ const once: Record<string, () => Promise<void>> = { detection, coldSave, signInS
 const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "occlusionSweep", "midFill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
+// `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
+// (each scenario in each scheme, then each `once` entry), balanced by these
+// rough run times in seconds (per scheme; unlisted ones count 10); `--list`
+// prints the units and their shards.
+const cost: Record<string, number> = {
+  detection: 100, passkeys: 85, occlusionSweep: 55, securityPage: 45, coveredMenu: 45, generator: 37, signInShapes: 23,
+  savePrompt: 20, topLayer: 14, keyboardEntry: 13, rateLimited: 9, coldSave: 6, midFill: 6, backForward: 6, fillAndTotp: 4, locked: 2, notInstalled: 1,
+}
+const units = [
+  ...(["light", "dark"] as const).flatMap((scheme) =>
+    Object.entries(scenarios).map(([name, run]) => ({ key: name, name: `${name} (${scheme})`, run: () => run(scheme) })),
+  ),
+  ...Object.entries(once).map(([name, run]) => ({ key: name, name, run })),
+].filter((u) => !picked || picked.includes(u.key))
+const [part, parts] = (arg("--shard") ?? "1/1").split("/").map(Number)
+if (!(parts >= 1 && part >= 1 && part <= parts)) throw new Error("--shard wants <i>/<n> with 1 <= i <= n")
+const load = Array<number>(parts).fill(0)
+const shardOf = new Map<string, number>()
+for (const u of [...units].sort((a, b) => (cost[b.key] ?? 10) - (cost[a.key] ?? 10))) {
+  const bin = load.indexOf(Math.min(...load))
+  load[bin] += cost[u.key] ?? 10
+  shardOf.set(u.name, bin + 1)
+}
+const mine = units.filter((u) => shardOf.get(u.name) === part)
+if (process.argv.includes("--list")) {
+  for (const u of units) console.log(`${shardOf.get(u.name)}/${parts}  ${u.name}`)
+  server.stop(true)
+  process.exit(0)
+}
+if (parts > 1) console.log(`shard ${part}/${parts}: ${mine.map((u) => u.name).join(", ") || "nothing"}`)
+
 try {
-  for (const scheme of ["light", "dark"] as const) {
-    for (const [name, run] of Object.entries(scenarios)) {
-      if (picked && !picked.includes(name)) continue
-      console.log(`\n# ${name} (${scheme})`)
-      await run(scheme)
-    }
-  }
-  for (const [name, run] of Object.entries(once)) {
-    if (picked && !picked.includes(name)) continue
-    console.log(`\n# ${name}`)
-    await run()
+  for (const u of mine) {
+    console.log(`\n# ${u.name}`)
+    const start = Date.now()
+    await u.run()
+    console.log(`  (${u.name}: ${((Date.now() - start) / 1000).toFixed(1)} s)`)
   }
 } finally {
   server.stop(true)

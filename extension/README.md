@@ -54,10 +54,13 @@ timers, host message parsing, and the host client against a fake port.
 
 `bun run e2e` loads the built extension in headless Chromium with fresh
 profiles and `e2e/fake-host.py` as the host. `--only security` runs the
-hidden, covered, swapped and navigated cases that CI runs; `--stills <dir>`
+hidden, covered, swapped and navigated cases first in CI; `--stills <dir>`
 saves screenshots. `--only passkeys --deadbolt <path to deadbolt>` runs the
 passkey cases against the real `deadbolt browser-host` and a throwaway store,
 and checks every registration and assertion with `@simplewebauthn/server`.
+`--shard <i>/<n>` runs one of n balanced slices (`--list` shows them); CI runs
+the whole suite as four. `bun run e2e:parallel [--jobs <n>]` builds once and
+runs the slices side by side (about 100 s instead of about 9 minutes).
 
 ## Not here
 
