@@ -85,7 +85,7 @@ impl App {
 
     /// Tells the agent this app showed or copied `field` of the shown item.
     pub(crate) fn report(&self, action: AppAction, field: &str) {
-        let Some(item) = &self.detail else { return };
+        let Some(item) = self.page() else { return };
         self.report_item(action, &item.id, &item.label, field);
     }
 

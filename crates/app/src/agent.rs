@@ -5,6 +5,8 @@
 //! Both wake the window when something lands; nothing polls. The main
 //! window's stream watches as the app, so another launch brings it forward.
 
+use std::cell::RefCell;
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -47,10 +49,21 @@ pub enum Job {
     },
     /// One item with its values, and its one-time code if it has one (the
     /// agent leaves otp secrets out); `seq` tells a stale reply from the
-    /// current one.
+    /// current one. `cached` when its page already shows from the cache:
+    /// then the reads ahead (`Peek`) go first.
     Get {
         id: String,
         seq: u64,
+        cached: bool,
+    },
+    /// An item's values for the page cache (`cache::Cache`), read ahead of
+    /// the selection. Only when nothing else waits: the worker runs these
+    /// last, and drops a batch once a newer one comes (`next_jobs`). `epoch`
+    /// tells a reply from before the cache was cleared.
+    Peek {
+        id: String,
+        epoch: u64,
+        batch: u64,
     },
     /// The item's current one-time code, tagged like `Get`.
     Code {
@@ -136,6 +149,12 @@ pub enum Done {
     },
     Item {
         seq: u64,
+        result: Result<Values, Failure>,
+    },
+    /// A `Peek`'s values, for `id`.
+    Peeked {
+        id: String,
+        epoch: u64,
         result: Result<Values, Failure>,
     },
     Code {
@@ -301,6 +320,98 @@ pub struct Agent {
     waker: Arc<Mutex<Option<Waker>>>,
     /// Dropping it ends the watch thread.
     _watching: Option<oneshot::Sender<()>>,
+    /// A worker on this thread, on the app's clock, for scenes and tests.
+    loopback: Option<RefCell<Loopback>>,
+}
+
+/// Item reads (`Get`, `Peek`) the worker runs at once, each on its own
+/// connection, so a selection the cache missed still reads ahead.
+pub const LANES: usize = 3;
+
+/// Picks the worker's next jobs from what's waiting (`prune`, then the
+/// first of the highest rank, with up to `LANES` item reads together):
+/// `Peek`s run only when nothing else waits but a `cached` `Get`, so while
+/// an arrow is held, reading ahead keeps the pages coming.
+pub fn next_jobs(queue: &mut VecDeque<Job>) -> Vec<Job> {
+    prune(queue, |j| j);
+    take_next(queue, queue.len(), |j| j)
+}
+
+/// `next_jobs` among the first `seen` waiting, unpruned.
+fn take_next<T>(queue: &mut VecDeque<T>, seen: usize, job: impl Fn(&T) -> &Job) -> Vec<T> {
+    let read = |j: &Job| matches!(j, Job::Get { .. } | Job::Peek { .. });
+    let Some(first) = pick(queue.iter().take(seen).map(&job)).and_then(|at| queue.remove(at))
+    else {
+        return Vec::new();
+    };
+    let mut jobs = vec![first];
+    // Anything but a read runs alone, in order.
+    while jobs.len() < LANES && read(job(&jobs[0])) {
+        match pick(queue.iter().take(seen - jobs.len()).map(&job)) {
+            Some(at) if read(job(&queue[at])) => jobs.extend(queue.remove(at)),
+            _ => break,
+        }
+    }
+    jobs
+}
+
+/// Drops what waits that nobody needs any more: every item request but the
+/// newest (an older one's reply would be dropped as stale, and so would a
+/// code asked for it), a `cached` one when the same was hurried (a copy
+/// waiting), and every `Peek` but the newest batch's.
+pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
+    let get = |j: &Job| match j {
+        Job::Get { seq, cached, .. } => Some((*seq, !*cached)),
+        _ => None,
+    };
+    let keep = (0..queue.len()).max_by_key(|&i| (get(job(&queue[i])), std::cmp::Reverse(i)));
+    let newest = keep.and_then(|i| get(job(&queue[i]))).map(|(seq, _)| seq);
+    let newest_batch = queue
+        .iter()
+        .filter_map(|j| match job(j) {
+            Job::Peek { batch, .. } => Some(*batch),
+            _ => None,
+        })
+        .max();
+    let mut i = 0;
+    queue.retain(|j| {
+        let at = i;
+        i += 1;
+        match job(j) {
+            Job::Get { .. } => Some(at) == keep,
+            Job::Code { seq, .. } => newest.is_none_or(|n| *seq >= n),
+            Job::Peek { batch, .. } => newest_batch.is_none_or(|n| *batch >= n),
+            _ => true,
+        }
+    });
+}
+
+/// Where the next job to run is among `jobs`.
+fn pick<'a>(jobs: impl Iterator<Item = &'a Job>) -> Option<usize> {
+    let rank = |j: &Job| match j {
+        Job::Peek { .. } => 1,
+        Job::Get { cached: true, .. } => 2,
+        _ => 0,
+    };
+    jobs.enumerate()
+        .min_by_key(|(_, j)| rank(j))
+        .map(|(i, _)| i)
+}
+
+/// An agent answered on the UI thread by `answer`: each round of requests
+/// takes `cost` seconds of the app's clock, picked as the worker picks them
+/// (`next_jobs`).
+struct Loopback {
+    /// What waits, with when it was sent, pruned as the worker would.
+    queue: VecDeque<(f64, Job)>,
+    answer: fn(Job) -> Option<Done>,
+    cost: f64,
+    /// When the worker is next free.
+    free_at: f64,
+    /// The clock at the last drain: what's sent since was sent then.
+    last: f64,
+    /// The most requests ever waiting at once.
+    most: usize,
 }
 
 impl Agent {
@@ -333,6 +444,7 @@ impl Agent {
             inbox,
             waker,
             _watching: Some(watching),
+            loopback: None,
         }
     }
 
@@ -344,7 +456,34 @@ impl Agent {
             inbox,
             waker: Arc::default(),
             _watching: None,
+            loopback: None,
         }
+    }
+
+    /// An agent `answer` answers, each request taking `cost` seconds of the
+    /// app's clock, for scenes and tests that need replies without a socket.
+    pub fn loopback(answer: fn(Job) -> Option<Done>, cost: f64) -> Agent {
+        let (_, inbox) = channel();
+        Agent {
+            jobs: None,
+            inbox,
+            waker: Arc::default(),
+            _watching: None,
+            loopback: Some(RefCell::new(Loopback {
+                queue: VecDeque::new(),
+                answer,
+                cost,
+                free_at: 0.0,
+                last: 0.0,
+                most: 0,
+            })),
+        }
+    }
+
+    /// A loopback's requests still waiting, and the most that ever were.
+    pub fn backlog(&self) -> Option<(usize, usize)> {
+        let lb = self.loopback.as_ref()?.borrow();
+        Some((lb.queue.len(), lb.most))
     }
 
     /// A connection the caller answers for, in tests: it reads the jobs and
@@ -357,15 +496,24 @@ impl Agent {
             inbox,
             waker: Arc::default(),
             _watching: None,
+            loopback: None,
         };
         (agent, requests, results)
     }
 
     pub fn is_live(&self) -> bool {
-        self.jobs.is_some()
+        self.jobs.is_some() || self.loopback.is_some()
     }
 
     pub fn send(&self, job: Job) {
+        if let Some(lb) = &self.loopback {
+            let mut lb = lb.borrow_mut();
+            let at = lb.last;
+            lb.queue.push_back((at, job));
+            prune(&mut lb.queue, |(_, j)| j);
+            lb.most = lb.most.max(lb.queue.len());
+            return;
+        }
         if let Some(jobs) = &self.jobs {
             // The worker only stops when this sender drops, so sending cannot fail while
             // `self` lives.
@@ -377,8 +525,30 @@ impl Agent {
         *self.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
     }
 
-    pub fn drain(&self) -> Vec<Done> {
-        self.inbox.try_iter().collect()
+    /// What's landed by `now`, on the app's clock.
+    pub fn drain(&self, now: f64) -> Vec<Done> {
+        let mut done: Vec<Done> = self.inbox.try_iter().collect();
+        if let Some(lb) = &self.loopback {
+            let lb = &mut *lb.borrow_mut();
+            let mut at = lb.free_at;
+            while let Some((sent, _)) = lb.queue.front() {
+                at = at.max(*sent);
+                if at + lb.cost > now + 1e-9 {
+                    break;
+                }
+                // What was sent by the time the worker's free: sent times only grow.
+                let seen = lb.queue.iter().take_while(|(sent, _)| *sent <= at).count();
+                let jobs = take_next(&mut lb.queue, seen, |(_, j)| j);
+                if jobs.is_empty() {
+                    break;
+                }
+                at += lb.cost;
+                done.extend(jobs.into_iter().filter_map(|(_, job)| (lb.answer)(job)));
+            }
+            lb.free_at = at;
+            lb.last = now;
+        }
+        done
     }
 }
 
@@ -474,7 +644,34 @@ fn work(
             return;
         }
     };
-    for job in requests {
+    let main = Post {
+        results: results.clone(),
+        waker: waker.clone(),
+    };
+    let mut queue = VecDeque::new();
+    loop {
+        if queue.is_empty() {
+            match requests.recv() {
+                Ok(job) => queue.push_back(job),
+                Err(_) => return,
+            }
+        }
+        queue.extend(requests.try_iter());
+        let mut jobs = next_jobs(&mut queue);
+        if jobs.len() > 1 {
+            if !all(
+                &runtime,
+                jobs,
+                |job| run(&paths, &launch, job),
+                |done| main.send(done),
+            ) {
+                return;
+            }
+            continue;
+        }
+        let Some(job) = jobs.pop() else {
+            continue;
+        };
         if let Job::SyncOnePassword { seq } = job {
             let post = || Post {
                 results: results.clone(),
@@ -506,15 +703,37 @@ fn work(
             }
             continue;
         }
-        let done = runtime.block_on(run(&paths, &launch, job));
-        if results.send(done).is_err() {
+        if !main.send(runtime.block_on(run(&paths, &launch, job))) {
             return;
         }
-        let wake = waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(wake) = wake {
-            wake();
-        }
     }
+}
+
+/// Runs `jobs` at once, posting each reply as it comes; false once the app
+/// has gone.
+fn all<'a, F: Future<Output = Done> + 'a>(
+    runtime: &tokio::runtime::Runtime,
+    jobs: Vec<Job>,
+    run: impl Fn(Job) -> F,
+    mut post: impl FnMut(Done) -> bool,
+) -> bool {
+    let mut running: Vec<_> = jobs.into_iter().map(|job| Box::pin(run(job))).collect();
+    let mut live = true;
+    runtime.block_on(std::future::poll_fn(|cx| {
+        running.retain_mut(|f| match f.as_mut().poll(cx) {
+            std::task::Poll::Ready(done) => {
+                live &= post(done);
+                false
+            }
+            std::task::Poll::Pending => true,
+        });
+        if running.is_empty() {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
+    }));
+    live
 }
 
 async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
@@ -609,22 +828,15 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             };
             Done::Items { generation, result }
         }
-        Job::Get { id, seq } => {
-            let command = Command::ItemGet {
-                vault: None,
-                query: vec![id.clone()],
-                otp: false,
-            };
-            let result = match deadbolt_client::simple(paths, command).await {
-                Ok(Reply::Item { item }) if code_field(&item.fields).is_some() => {
-                    Ok(Values::with_code(item, code(paths, id).await))
-                }
-                Ok(Reply::Item { item }) => Ok(Values::new(item)),
-                Ok(_) => Err(unexpected()),
-                Err(error) => Err(error.into()),
-            };
-            Done::Item { seq, result }
-        }
+        Job::Get { id, seq, .. } => Done::Item {
+            seq,
+            result: values(paths, id).await,
+        },
+        Job::Peek { id, epoch, .. } => Done::Peeked {
+            id: id.clone(),
+            epoch,
+            result: values(paths, id).await,
+        },
         Job::Code { id, seq } => Done::Code {
             seq,
             result: code(paths, id).await,
@@ -700,6 +912,23 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             };
             Done::Generated { seq, result }
         }
+    }
+}
+
+/// One item with its values, and its one-time code if it has one.
+async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
+    let command = Command::ItemGet {
+        vault: None,
+        query: vec![id.clone()],
+        otp: false,
+    };
+    match deadbolt_client::simple(paths, command).await {
+        Ok(Reply::Item { item }) if code_field(&item.fields).is_some() => {
+            Ok(Values::with_code(item, code(paths, id).await))
+        }
+        Ok(Reply::Item { item }) => Ok(Values::new(item)),
+        Ok(_) => Err(unexpected()),
+        Err(error) => Err(error.into()),
     }
 }
 

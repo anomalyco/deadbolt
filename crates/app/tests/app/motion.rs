@@ -200,6 +200,9 @@ fn deliver(rt: &mut Runtime<App>) {
 #[test]
 fn a_new_selection_replaces_the_item_at_once() {
     let mut rt = runtime("vault");
+    // The app's clock, which ends a held page.
+    rt.poll = Some(|s, now, tx| s.poll(now, tx));
+    rt.frame(FRAME);
     let rows = row_keys(&rt);
     let title = |rt: &Runtime<App>| {
         let e = rt
@@ -221,15 +224,23 @@ fn a_new_selection_replaces_the_item_at_once() {
     deliver(&mut rt);
     assert_eq!(at(&rt, "field-password").map(|(_, o)| o), Some(1.0));
 
+    // A click to a row with no page ready keeps the page before whole (its
+    // title and fields, never a mix), then shows the title alone.
+    let shown = label(&rt);
     let (x, y) = rt.find(&rows[0]).unwrap();
     rt.pointer_down(x, y);
     rt.pointer_up(x, y);
     rt.frame(FRAME);
     assert_eq!(rt.state.selected.as_deref(), rows[0].strip_prefix("item-"));
+    assert_eq!(title(&rt), (shown, 1.0), "the page before, held");
+    assert_eq!(at(&rt, "field-password").map(|(_, o)| o), Some(1.0));
+    for _ in 0..(deadbolt_app::model::HOLD / FRAME).ceil() as usize + 1 {
+        rt.frame(FRAME);
+    }
     assert_eq!(
         at(&rt, "field-password"),
         None,
-        "no field lingers after a click"
+        "no field lingers once the hold ends"
     );
     assert_eq!(title(&rt), (label(&rt), 1.0), "the click's title");
 }

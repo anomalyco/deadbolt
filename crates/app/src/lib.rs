@@ -5,6 +5,7 @@ pub mod activity;
 pub mod agent;
 pub mod agents;
 pub mod binary;
+pub mod cache;
 pub mod edit;
 mod enclave;
 pub mod import;
@@ -221,6 +222,7 @@ const SCENES: &[Scene] = &[
         s.installer = Some(i);
     }),
     ("connecting", |_| {}),
+    ("vault-243", vault_243),
     ("welcome", welcome),
     ("welcome-set-up", |s| {
         welcome(s);
@@ -1025,6 +1027,85 @@ fn vault(s: &mut App) {
         .find(|i| i.label == "github.com")
         .map(|i| i.id.clone());
     detail_for_selection(s);
+}
+
+/// How long the `vault-243` scene's agent takes over each request, about
+/// what a real one does with its connection and peer check.
+pub const LOOPBACK_COST: f64 = 0.03;
+/// Items in the `vault-243` scene.
+pub const MANY: usize = 243;
+
+/// A vault of `MANY` logins with an agent that answers on the app's clock
+/// (`Agent::loopback`), for holding an arrow down the list.
+fn vault_243(s: &mut App) {
+    s.agent = Agent::loopback(many_answer, LOOPBACK_COST);
+    s.status = Some(status(true));
+    s.screen = Screen::Vault;
+    s.items = (0..MANY).map(many_item).collect();
+    s.loaded = true;
+    s.search.focused = true;
+    let first = s.items.first().map(|i| i.id.clone());
+    s.select(first);
+}
+
+/// The `vault-243` scene's item `i`, as listed.
+fn many_item(i: usize) -> ItemInfo {
+    const SITES: [&str; 9] = [
+        "acme",
+        "brightline",
+        "cobalt",
+        "driftwood",
+        "ember",
+        "fathom",
+        "granite",
+        "harbor",
+        "ironwood",
+    ];
+    ItemInfo {
+        id: format!("{i:04x}{}", "0".repeat(60)),
+        short: format!("{i:04x}"),
+        kind: "login".into(),
+        label: format!("{}-{i:03}.com", SITES[i * SITES.len() / MANY]),
+        detail: Some(format!("user{i}@anoma.ly")),
+        fields: Vec::new(),
+        source: None,
+    }
+}
+
+/// The `vault-243` scene's agent: items with their values.
+fn many_answer(job: Job) -> Option<agent::Done> {
+    let values = |id: &str| {
+        let i = usize::from_str_radix(id.get(..4)?, 16).ok()?;
+        let item = many_item(i);
+        let field = |name: &str, kind: &str, value: String| FieldInfo {
+            name: name.into(),
+            kind: kind.into(),
+            value,
+        };
+        let fields = vec![
+            field("password", "secret", format!("fixture-password-{i}")),
+            field("username", "text", item.detail.clone().unwrap_or_default()),
+            field("url", "url", format!("https://{}", item.label)),
+            field("notes", "note", format!("Fixture item {i} of {MANY}.")),
+        ];
+        Some(agent::Values::new(ItemInfo { fields, ..item }))
+    };
+    let missing = || agent::Failure {
+        code: None,
+        message: "no such item".into(),
+    };
+    Some(match job {
+        Job::Get { id, seq, .. } => agent::Done::Item {
+            seq,
+            result: values(&id).ok_or_else(missing),
+        },
+        Job::Peek { id, epoch, .. } => agent::Done::Peeked {
+            result: values(&id).ok_or_else(missing),
+            id,
+            epoch,
+        },
+        _ => return None,
+    })
 }
 
 /// The vault with a secure note, an SSH key, an identity and a passkey, one selected.

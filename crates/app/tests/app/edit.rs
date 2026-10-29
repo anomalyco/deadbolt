@@ -312,7 +312,7 @@ fn a_new_login_saves_and_is_selected() {
     let get = sent
         .iter()
         .find_map(|j| match j {
-            Job::Get { id: got, seq } if got == id => Some(*seq),
+            Job::Get { id: got, seq, .. } if got == id => Some(*seq),
             _ => None,
         })
         .expect("its values are fetched");
@@ -366,7 +366,7 @@ fn saved(r: &mut Rig, seq: u64, id: &str) -> u64 {
     r.sent()
         .into_iter()
         .find_map(|j| match j {
-            Job::Get { id: got, seq } if got == id => Some(seq),
+            Job::Get { id: got, seq, .. } if got == id => Some(seq),
             _ => None,
         })
         .expect("its values are fetched")
