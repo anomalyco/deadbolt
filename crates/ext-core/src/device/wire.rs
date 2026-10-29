@@ -9,7 +9,7 @@ pub(crate) use deadbolt_net::application::Addr;
 use deadbolt_net::application::{self, Hint, State, clean_name};
 use deadbolt_net::{Blob, HandlerError, Inviter, PairingContext, PeerId, SyncHandler};
 
-use crate::{Error, Loaded, Result, enforce_membership, unhex};
+use super::{Error, Loaded, Result, enforce_membership, unhex};
 
 impl State for Loaded {
     type Error = Error;
@@ -109,11 +109,7 @@ impl State for Loaded {
     }
 
     fn received(&mut self, peer: &DeviceId) -> Result<()> {
-        self.seen
-            .insert(peer.to_string(), crate::unix_time() as u64);
-        self.store
-            .meta_set("extension/peer-seen", &serde_json::to_vec(&self.seen)?)?;
-        Ok(())
+        self.saw(peer)
     }
 }
 
