@@ -27,6 +27,13 @@ pub const CODE_BAR: [f32; 2] = [40.0, 3.0];
 /// How long after a code's period ends the next is asked for, so the
 /// agent's clock is past the boundary too.
 pub const CODE_SLACK: f64 = 0.05;
+/// How long the page before stays, whole, when a new selection has nothing
+/// to show yet, before the page gives way to its title alone.
+pub const HOLD: f64 = 0.15;
+/// The rows read ahead of the selection (`Job::Peek`) the way it's moving,
+/// and behind it.
+const AHEAD: isize = 4;
+const BEHIND: isize = 2;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Screen {
@@ -106,6 +113,27 @@ impl Otp {
         }
     }
 
+    /// `code` came at `now`: it shows, and its bar empties over the rest of
+    /// its period.
+    fn land(&mut self, code: &Code, now: f64) {
+        let period = code.period.max(1) as f64;
+        let remaining = (code.remaining_ms as f64 / 1000.0).clamp(0.0, period);
+        if code.valid_until != self.valid_until {
+            self.valid_until = code.valid_until;
+            self.turns += 1;
+        }
+        self.code = Some(code.code.clone());
+        self.error = None;
+        self.until = now + remaining;
+        self.woken = false;
+        let [w, h] = CODE_BAR;
+        self.bar = rune::Tween::linear(
+            [0.0, 0.0, w * (remaining / period) as f32, h],
+            [0.0, 0.0, 0.0, h],
+            Duration::from_secs_f64(remaining),
+        );
+    }
+
     /// The code, while it's valid at `now`.
     pub fn current(&self, now: f64) -> Option<&Zeroizing<String>> {
         self.code.as_ref().filter(|_| now < self.until)
@@ -148,6 +176,16 @@ pub struct App {
     pub selected: Option<String>,
     /// The selected item with its values.
     pub detail: Option<ItemInfo>,
+    /// Pages ready before their values land (`cache`).
+    pub cache: crate::cache::Cache,
+    /// The page shown before a selection with nothing to show yet, and
+    /// since when, kept whole for `HOLD`.
+    held: Option<(String, f64)>,
+    /// Tells the newest batch of `Job::Peek`s from older ones.
+    peeks: u64,
+    /// `seq` when the cache was last cleared: an item asked for before is
+    /// left out of it.
+    cleared_seq: u64,
     pub revealed: Vec<String>,
     /// The shown item's one-time code, when it has an otp.
     pub otp: Option<Otp>,
@@ -161,8 +199,6 @@ pub struct App {
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
     pub sidebar: rune_kit::shell::PaneState,
-    /// Where the list's highlight sits, under the selected row; it slides there.
-    pub highlight: rune::Live<[f32; 2]>,
     /// `--reduced-motion`; otherwise Rune follows the system's setting.
     pub reduced_motion: bool,
     /// Set in the quick panel's `App` only.
@@ -206,6 +242,10 @@ impl App {
             loaded: false,
             selected: None,
             detail: None,
+            cache: crate::cache::Cache::default(),
+            held: None,
+            peeks: 0,
+            cleared_seq: 0,
             revealed: Vec::new(),
             otp: None,
             copy: None,
@@ -218,7 +258,6 @@ impl App {
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
             sidebar: rune_kit::shell::PaneState::new(272.0).range(200.0, 312.0),
-            highlight: rune::Live::new([0.0; 2]),
             reduced_motion: false,
             panel: None,
             windows: None,
@@ -236,11 +275,12 @@ impl App {
     pub fn poll(&mut self, now: f64, tx: &mut Tx) -> bool {
         self.clock = now;
         let mut changed = false;
-        for done in self.agent.drain() {
+        for done in self.agent.drain(now) {
             self.apply(done, tx);
             changed = true;
         }
         changed |= self.poll_onboarding(now, tx);
+        changed |= self.tick_held(now, tx);
         changed |= self.tick_copy(now, tx);
         self.tick_code(now, tx);
         changed |= self.tick_import(now);
@@ -369,14 +409,26 @@ impl App {
                     Err(failure) => self.on_failure(failure, tx),
                 }
             }
-            // Dropping a stale item wipes its values (`agent::Values`).
+            // Dropping a stale item wipes its values (`agent::Values`); its
+            // page is kept for going back to it, unless the vault changed since.
             Done::Item { seq, result } => {
-                if seq != self.seq || self.screen != Screen::Vault || self.panel_inert() {
+                if self.screen != Screen::Vault || self.panel_inert() {
+                    return;
+                }
+                if seq != self.seq {
+                    if seq > self.cleared_seq
+                        && let Ok(values) = result
+                    {
+                        self.keep_page(values);
+                    }
                     return;
                 }
                 match result {
                     Ok(values) => {
                         let (item, code) = values.take();
+                        let landed = code.as_ref().and_then(|c| c.as_ref().ok());
+                        self.cache.insert(&item, landed, self.clock);
+                        self.held = None;
                         // A new selection's fields land in place, not animated: the
                         // selection moved under the user's own hand. A refresh of the
                         // shown item animates what changed, and so does a saved form
@@ -400,6 +452,19 @@ impl App {
                         self.edit_item_failed();
                         self.on_failure(failure, tx);
                     }
+                }
+            }
+            Done::Peeked { id, epoch, result } => {
+                if epoch != self.cache.epoch() || self.screen != Screen::Vault || self.panel_inert()
+                {
+                    return;
+                }
+                let Ok(values) = result else { return };
+                self.keep_page(values);
+                // The selection was waiting on it: its page shows at once.
+                if self.selected.as_deref() == Some(id.as_str()) && self.detail.is_none() {
+                    tx.instant();
+                    self.show_cached(&id);
                 }
             }
             Done::Code { seq, result } => {
@@ -477,8 +542,10 @@ impl App {
             .is_none_or(|v| v.id == vault)
     }
 
-    /// Refetches the list, and with it the selected item.
+    /// Refetches the list, and with it the selected item. What the cache
+    /// kept may have changed too.
     pub(crate) fn refresh(&mut self) {
+        self.forget_pages();
         if self.screen == Screen::Vault {
             self.list();
         }
@@ -530,7 +597,11 @@ impl App {
             if let Some((pending, _)) = &mut self.pending_copy {
                 *pending = self.seq;
             }
-            self.agent.send(Job::Get { id, seq: self.seq });
+            self.agent.send(Job::Get {
+                id,
+                seq: self.seq,
+                cached: false,
+            });
         }
     }
 
@@ -658,6 +729,7 @@ impl App {
         self.generation += 1;
         self.seq += 1;
         self.set_detail(None);
+        self.forget_pages();
         self.items.clear();
         self.loaded = false;
         self.selected = None;
@@ -675,8 +747,14 @@ impl App {
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
     /// revealed only while the same item is shown, and its code while it
     /// still has one from the same field.
+    /// A Show pressed on the selection's page before its values came counts
+    /// as the same item.
     pub(crate) fn set_detail(&mut self, item: Option<ItemInfo>) {
-        let same = matches!((&self.detail, &item), (Some(a), Some(b)) if a.id == b.id);
+        let same = match (&self.detail, &item) {
+            (Some(a), Some(b)) => a.id == b.id,
+            (None, Some(b)) => self.selected.as_deref() == Some(b.id.as_str()),
+            _ => false,
+        };
         let code = item
             .as_ref()
             .and_then(|i| Some((i.id.clone(), i.fields[code_field(&i.fields)?].name.clone())));
@@ -714,22 +792,7 @@ impl App {
                 return;
             }
         };
-        let period = code.period.max(1) as f64;
-        let remaining = (code.remaining_ms as f64 / 1000.0).clamp(0.0, period);
-        if code.valid_until != otp.valid_until {
-            otp.valid_until = code.valid_until;
-            otp.turns += 1;
-        }
-        otp.code = Some(code.code.clone());
-        otp.error = None;
-        otp.until = now + remaining;
-        otp.woken = false;
-        let [w, h] = CODE_BAR;
-        otp.bar = rune::Tween::linear(
-            [0.0, 0.0, w * (remaining / period) as f32, h],
-            [0.0, 0.0, 0.0, h],
-            Duration::from_secs_f64(remaining),
-        );
+        otp.land(&code, now);
         // The code that just came is the one asked for, however little of
         // its period is left.
         if std::mem::take(&mut otp.copy_next) {
@@ -960,10 +1023,15 @@ impl App {
         }
     }
 
+    /// Selects `id`. Its page shows at once if the cache has it, else the
+    /// page before stays a moment (`HOLD`); its values are asked for.
     pub fn select(&mut self, id: Option<String>) {
         if id == self.selected {
             return;
         }
+        let shown = self
+            .page_view()
+            .and_then(|(head, full)| full.map(|_| head.id.clone()));
         self.selected = id.clone();
         self.nav.field = None;
         self.notice = None;
@@ -971,9 +1039,168 @@ impl App {
         self.set_detail(None);
         self.pending_copy = None;
         self.seq += 1;
-        if let Some(id) = id {
-            self.agent.send(Job::Get { id, seq: self.seq });
+        let Some(id) = id else {
+            self.held = None;
+            return;
+        };
+        let cached = self.cache.contains(&id);
+        if cached {
+            self.show_cached(&id);
+        } else if !self.holding() {
+            // A page already held stays for the rest of its moment.
+            self.held = shown
+                .filter(|s| self.cache.contains(s))
+                .map(|s| (s, self.clock));
         }
+        self.agent.send(Job::Get {
+            id,
+            seq: self.seq,
+            cached,
+        });
+    }
+
+    /// The user selects `id`: the rows around it are read ahead too, mostly
+    /// `heading` (the way an arrow moved it: -1 or 1; 0 for a click or ⌘1–9).
+    pub(crate) fn select_by_hand(&mut self, id: String, heading: isize) {
+        self.select(Some(id));
+        self.prefetch(heading);
+    }
+
+    /// The selection's page is in the cache: its code shows with it, until
+    /// its own values come.
+    fn show_cached(&mut self, id: &str) {
+        self.held = None;
+        let Some(page) = self.cache.get(id) else {
+            return;
+        };
+        let Some(at) = code_field(&page.fields) else {
+            return;
+        };
+        let mut otp = Otp::new(id.to_owned(), page.fields[at].name.clone());
+        if let Some(code) = self.cache.code(id, self.clock) {
+            otp.land(&code, self.clock);
+        }
+        self.otp = Some(otp);
+    }
+
+    /// Reads ahead the rows around the selection the cache doesn't have,
+    /// nearest first and mostly the way it's moving, replacing the batch
+    /// before. Only in the main window, on a move of the user's
+    /// (`select_by_hand`): a read counts as use for the agent's idle lock.
+    fn prefetch(&mut self, d: isize) {
+        if self.panel.is_some() || !self.agent.is_live() {
+            return;
+        }
+        let visible = self.visible();
+        let Some(at) = self
+            .selected
+            .as_deref()
+            .and_then(|id| visible.iter().position(|i| i.id == id))
+        else {
+            return;
+        };
+        let order: Vec<isize> = if d == 0 {
+            (1..AHEAD).flat_map(|n| [n, -n]).collect()
+        } else {
+            (1..=AHEAD)
+                .map(|n| n * d)
+                .chain((1..=BEHIND).map(|n| -n * d))
+                .collect()
+        };
+        let ids: Vec<String> = order
+            .into_iter()
+            .filter_map(|by| visible.get(at.checked_add_signed(by)?))
+            .filter(|i| !self.cache.contains(&i.id))
+            .map(|i| i.id.clone())
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.peeks += 1;
+        for id in ids {
+            self.agent.send(Job::Peek {
+                id,
+                epoch: self.cache.epoch(),
+                batch: self.peeks,
+            });
+        }
+    }
+
+    /// The selection's values are wanted now (a copy or Show on its cached
+    /// page): ask for them ahead of the reads ahead.
+    fn hurry(&mut self) {
+        if self.detail.is_none()
+            && let Some(id) = self.selected.clone()
+            && self.cache.contains(&id)
+        {
+            self.agent.send(Job::Get {
+                id,
+                seq: self.seq,
+                cached: false,
+            });
+        }
+    }
+
+    /// Keeps an item's page from its values, then wipes them.
+    fn keep_page(&mut self, values: crate::agent::Values) {
+        let (mut item, code) = values.take();
+        let landed = code.as_ref().and_then(|c| c.as_ref().ok());
+        self.cache.insert(&item, landed, self.clock);
+        forget(&mut item);
+    }
+
+    /// Forgets every kept page: the vault changed, or was closed.
+    pub(crate) fn forget_pages(&mut self) {
+        self.cache.clear();
+        self.cleared_seq = self.seq;
+        self.held = None;
+    }
+
+    /// The fields the selection's page draws: its values once they're here,
+    /// else the cache's page.
+    pub fn page(&self) -> Option<&ItemInfo> {
+        let id = self.selected.as_deref()?;
+        match &self.detail {
+            Some(d) if d.id == id => Some(d),
+            _ => self.cache.get(id),
+        }
+    }
+
+    /// What the page draws: the selection's row and its fields, or, for a
+    /// moment after a selection with nothing to show yet, the page before
+    /// it, whole.
+    pub fn page_view(&self) -> Option<(&ItemInfo, Option<&ItemInfo>)> {
+        let item = self.selected_item()?;
+        if let Some(full) = self.page() {
+            return Some((item, Some(full)));
+        }
+        if self.holding()
+            && let Some(page) = self.held.as_ref().and_then(|(id, _)| self.cache.get(id))
+        {
+            return Some((page, Some(page)));
+        }
+        Some((item, None))
+    }
+
+    fn holding(&self) -> bool {
+        self.held
+            .as_ref()
+            .is_some_and(|(_, since)| self.clock < since + HOLD)
+    }
+
+    /// Lets a held page go once its moment is up, at once like any change
+    /// of selection.
+    fn tick_held(&mut self, now: f64, tx: &mut Tx) -> bool {
+        let Some((_, since)) = self.held else {
+            return false;
+        };
+        if now < since + HOLD {
+            tx.wake_after(Duration::from_secs_f64(since + HOLD - now));
+            return false;
+        }
+        tx.instant();
+        self.held = None;
+        true
     }
 
     pub(crate) fn step(&mut self, by: isize) {
@@ -990,7 +1217,7 @@ impl App {
             None => 0,
         };
         let id = visible[next].id.clone();
-        self.select(Some(id));
+        self.select_by_hand(id, by.signum());
     }
 
     /// Keys in the search field (the vault's and the panel's), before its
@@ -1074,20 +1301,20 @@ impl App {
 
     /// Copies a field of the selected item, waiting for its values if needed.
     pub fn copy_selected(&mut self, field: &str, tx: &mut Tx) {
-        if self.selected.is_none() {
-            return;
-        }
-        if self.detail.is_some() {
+        if self.selected.is_some() {
             self.copy_field(field, tx);
-        } else {
-            self.pending_copy = Some((self.seq, field.into()));
         }
     }
 
     /// Copies a field of the shown item; its otp (`"otp"` names whichever
-    /// field the code comes from) copies the current code.
+    /// field the code comes from) copies the current code. Before its values
+    /// come, it copies once they do.
     pub fn copy_field(&mut self, field: &str, tx: &mut Tx) {
         if self.detail.is_none() {
+            if self.selected.is_some() {
+                self.pending_copy = Some((self.seq, field.into()));
+                self.hurry();
+            }
             return;
         }
         let code = self
@@ -1246,6 +1473,7 @@ impl App {
             None => {
                 self.report(AppAction::Reveal, field);
                 self.revealed.push(field.into());
+                self.hurry();
             }
         }
     }

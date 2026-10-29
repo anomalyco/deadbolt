@@ -76,7 +76,7 @@ impl App {
         let Some(item) = self.selected_item() else {
             return Vec::new();
         };
-        let Some(full) = self.detail.as_ref().filter(|d| d.id == item.id) else {
+        let Some(full) = self.page().filter(|d| d.id == item.id) else {
             return Vec::new();
         };
         full.fields
@@ -152,7 +152,7 @@ impl App {
             let at = c as usize - '1' as usize;
             if let Some(id) = self.visible().get(at).map(|i| i.id.clone()) {
                 tx.instant();
-                self.select(Some(id.clone()));
+                self.select_by_hand(id.clone(), 0);
                 tx.scroll_into_view(format!("item-{id}"));
             }
             return Some(true);
@@ -248,10 +248,7 @@ impl App {
     /// URL field, or a passkey's relying party (a domain, so always https).
     /// Only an http or https address with a host is one.
     pub fn site(&self) -> Option<String> {
-        let full = self.detail.as_ref()?;
-        if self.selected.as_deref() != Some(full.id.as_str()) {
-            return None;
-        }
+        let full = self.page()?;
         let (name, kind) = if full.kind == "passkey" {
             ("rp-id", "text")
         } else {

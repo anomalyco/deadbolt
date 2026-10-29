@@ -923,6 +923,7 @@ impl App {
         match result {
             Ok(item) => {
                 self.edit.delete = None;
+                self.cache.remove(&item.id);
                 // The next item down takes its place (or the one above, at the end).
                 let visible = self.visible();
                 let next = visible
@@ -962,6 +963,8 @@ impl App {
                 // stays until the item's values land, then swaps to them.
                 let id = item.id.clone();
                 form.landing = Some(id.clone());
+                // What the cache kept of it is from before.
+                self.forget_pages();
                 match self.items.iter_mut().find(|i| i.id == id) {
                     Some(listed) => *listed = item,
                     None => {

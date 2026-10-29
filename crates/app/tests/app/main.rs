@@ -12,6 +12,7 @@ mod codes;
 mod edit;
 mod import;
 mod install;
+mod instant;
 mod keymap;
 mod keys;
 mod labels;

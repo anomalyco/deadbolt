@@ -3,14 +3,15 @@
 //! of who's here, Settings and Lock. The item is a page in the inset card
 //! (`page`); ⌘, swaps it for Settings while the sidebar stays.
 //!
-//! Motion: a search replaces the list at once, and any new selection (search,
-//! arrows, a click) replaces the item's page at once, while the highlight
-//! slides to the selected row.
+//! Motion: none for a selection. A search replaces the list at once, and any
+//! new selection (search, arrows, a click) moves the highlight to its row
+//! and replaces the item's page on the same frame, so holding an arrow keeps
+//! up with the key repeat.
 
 pub mod page;
 
 use deadbolt_client::protocol::{ItemInfo, noun};
-use rune::{El, Icon, ScrollSpec, Spring, TextStyle, Transition, col, el, icon, row, text};
+use rune::{Anim, El, Icon, ScrollSpec, TextStyle, Transition, col, el, icon, row, text};
 use rune_kit::shell::{SplitView, Toolbar};
 use rune_kit::{IconButton, IconButtonVariant, Keybind, Kit, TextInput};
 
@@ -21,8 +22,6 @@ use crate::view::LIST_EDGE;
 const ROW_H: f32 = 46.0;
 const ROW_GAP: f32 = 2.0;
 const ROWS_PAD: f32 = 6.0;
-/// The highlight's slide to a new selection.
-const SLIDE: Spring = Spring::new(0.15, 0.0);
 /// The 11.5/440 second line Seer's rows use.
 pub(crate) const FACT: TextStyle = TextStyle::new(11.5, 440.0).lh(14.0);
 
@@ -265,8 +264,7 @@ pub(crate) fn rows(s: &App, k: &Kit) -> El {
         .and_then(|id| visible.iter().position(|i| i.id == id))
         .filter(|_| !s.settings_open);
     if let Some(at) = at {
-        // One highlight for the list, under the rows, sliding to the selection.
-        s.highlight.set([0.0, at as f32 * (ROW_H + ROW_GAP)]);
+        // One highlight for the list, under the rows, on the selection at once.
         rows = rows.child(
             el().key("highlight")
                 .pin(Some(ROWS_PAD), Some(ROWS_PAD), Some(ROWS_PAD), None)
@@ -274,7 +272,8 @@ pub(crate) fn rows(s: &App, k: &Kit) -> El {
                 .radius(8.0)
                 .continuous_corners()
                 .fill(k.c.pressed)
-                .live_offset(s.highlight.smooth(SLIDE)),
+                .offset(0.0, at as f32 * (ROW_H + ROW_GAP))
+                .offset_motion(Anim::INSTANT),
         );
     }
     for (i, item) in visible.iter().enumerate() {
@@ -393,7 +392,7 @@ impl App {
             tx.instant();
         }
         self.cancel_import();
-        self.select(Some(id.to_owned()));
+        self.select_by_hand(id.to_owned(), 0);
     }
 }
 

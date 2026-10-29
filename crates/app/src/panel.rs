@@ -244,7 +244,7 @@ impl App {
         if let Some(windows) = &self.windows {
             windows.hide_panel();
         }
-        for done in self.agent.drain() {
+        for done in self.agent.drain(self.clock) {
             self.apply(done, tx);
         }
         self.forget_items();

@@ -86,8 +86,8 @@ fn detail(s: &App, k: &Kit) -> El {
             .key("item")
             .w_full()
             .transition(crate::import::view::swap());
-        match s.selected_item() {
-            Some(item_info) => item.children(page(s, k, item_info)),
+        match s.page_view() {
+            Some((head, full)) => item.children(page(s, k, head, full)),
             None if s.loaded => item.child(
                 text("Select an item")
                     .key("none")
@@ -133,8 +133,8 @@ fn detail(s: &App, k: &Kit) -> El {
     }))
 }
 
-/// The head, a delete waiting for its answer, and the fields.
-fn page(s: &App, k: &Kit, item: &ItemInfo) -> Vec<El> {
+/// The head, a delete waiting for its answer, and the fields, if they're here.
+fn page(s: &App, k: &Kit, item: &ItemInfo, full: Option<&ItemInfo>) -> Vec<El> {
     let mut sub = crate::vault::kind_name(&item.kind).to_owned();
     if let Some(source) = &item.source {
         sub = format!("{sub} · From {source}");
@@ -172,7 +172,7 @@ fn page(s: &App, k: &Kit, item: &ItemInfo) -> Vec<El> {
         out.push(crate::edit::view::confirm(k, delete).mb(20.0));
     }
     let mut fields = col().key("fields").w_full().gap(2.0);
-    if let Some(full) = s.detail.as_ref().filter(|d| d.id == item.id) {
+    if let Some(full) = full {
         let code = code_field(&full.fields);
         let mut at = 0;
         for (i, field) in full.fields.iter().enumerate() {
@@ -216,13 +216,13 @@ fn capitalized(words: &str) -> String {
 
 /// A field's copy button; its glyph becomes a check while the field is on
 /// the clipboard.
-fn copy_button(k: &Kit, name: &str, noun: &str, copied: bool) -> El {
+fn copy_button(k: &Kit, item: &str, name: &str, noun: &str, copied: bool) -> El {
     let glyph = if copied {
         k.glyph.check_small
     } else {
         k.glyph.copy
     };
-    let n = name.to_owned();
+    let (id, n) = (item.to_owned(), name.to_owned());
     IconButton::new(glyph)
         .variant(IconButtonVariant::GhostMuted)
         .label(if copied {
@@ -230,7 +230,12 @@ fn copy_button(k: &Kit, name: &str, noun: &str, copied: bool) -> El {
         } else {
             format!("Copy {noun}")
         })
-        .on_press_tx(move |s: &mut App, tx| s.copy_field(&n, tx))
+        .on_press_tx(move |s: &mut App, tx| {
+            // A page held over a new selection (`App::page_view`) acts on nothing.
+            if s.selected.as_deref() == Some(id.as_str()) {
+                s.copy_field(&n, tx);
+            }
+        })
         .build(k)
         .key(if copied { "copied" } else { "copy" })
         .transition(replace())
@@ -347,6 +352,7 @@ fn code_row(s: &App, item: &str, field: &FieldInfo, k: &Kit, on: bool) -> El {
         .children(copyable.then(|| {
             copy_button(
                 k,
+                item,
                 &field.name,
                 "one-time code",
                 is_copied(s, item, &field.name),
@@ -385,7 +391,7 @@ fn field_row(s: &App, item: &str, kind: &str, field: &FieldInfo, k: &Kit, on: bo
     let mut buttons = 0;
     if secret && held {
         buttons += 1;
-        let n = name.clone();
+        let (id, n) = (item.to_owned(), name.clone());
         let glyph = if revealed {
             k.glyph.eye_off
         } else {
@@ -399,7 +405,11 @@ fn field_row(s: &App, item: &str, kind: &str, field: &FieldInfo, k: &Kit, on: bo
                 } else {
                     format!("Show {noun}")
                 })
-                .on_press(move |s: &mut App| s.toggle_reveal(&n))
+                .on_press(move |s: &mut App| {
+                    if s.selected.as_deref() == Some(id.as_str()) {
+                        s.toggle_reveal(&n);
+                    }
+                })
                 .build(k)
                 .key("reveal"),
         );
@@ -407,7 +417,13 @@ fn field_row(s: &App, item: &str, kind: &str, field: &FieldInfo, k: &Kit, on: bo
     // A passkey's date is for reading; nothing pastes it anywhere.
     if held && !(kind == "passkey" && name == "created") {
         buttons += 1;
-        actions = actions.child(copy_button(k, &name, &noun, is_copied(s, item, &name)));
+        actions = actions.child(copy_button(
+            k,
+            item,
+            &name,
+            &noun,
+            is_copied(s, item, &name),
+        ));
     }
     // Shown values wrap: notes, an address, a secure note's body or a
     // private key over their lines, and a long public key, URL or base64
