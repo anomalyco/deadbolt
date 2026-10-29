@@ -3,6 +3,7 @@
 // the inline menu and the popup.
 
 import { Autofill } from "./bg/autofill"
+import { Forms } from "./bg/forms"
 import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
 import { Learner } from "./bg/learn"
@@ -17,6 +18,7 @@ const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId)
 const signInWith = new SignInWith(host)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
 const learner = new Learner(host)
+const forms = new Forms(host)
 saver.signedIn = (tabId, site) => {
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
@@ -50,6 +52,10 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
     case "db:page":
       if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true, message.idEmpty === true)
+    case "db:forms-query":
+      return forms.query(sender, message.kind, message.form, message.section, message.explicit === true, message.box, message.roles)
+    case "db:forms-page":
+      return forms.page(sender, message.kinds, message.form)
     case "db:settled":
       return saver.settled(sender)
     case "db:capture":
@@ -65,11 +71,14 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
     // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
       if (saver.ownsSurface(message.token)) return saver.surfaceClosed(String(message.token), sender)
+      if (forms.owns(message.token)) return forms.menuClose(String(message.token), sender)
       return autofill.menuClose(String(message.token), message.dismissed === true, sender)
     case "db:menu-load":
       if (saver.ownsSurface(message.token)) return saver.surfaceLoad(message.token, sender, String(message.parent))
+      if (forms.owns(message.token)) return forms.menuLoad(message.token, sender, String(message.parent))
       return autofill.menuLoad(message.token, sender, String(message.parent))
     case "db:menu-pick":
+      if (forms.owns(message.token)) return forms.menuPick(message.token, String(message.ref), sender)
       return autofill.menuPick(message.token, String(message.ref), sender)
     case "db:menu-generate":
       return autofill.menuGenerate(message.token, sender)
@@ -77,9 +86,11 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return autofill.menuSignIn(message.token, String(message.ref), sender)
     case "db:menu-dismiss":
       if (saver.ownsSurface(message.token)) return saver.surfaceDismiss(message.token, sender)
+      if (forms.owns(message.token)) return forms.menuDismiss(message.token, sender)
       return autofill.menuDismiss(message.token, sender)
     case "db:menu-resize":
       if (saver.ownsSurface(message.token)) return saver.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
+      if (forms.owns(message.token)) return forms.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
       return autofill.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
     case "db:surface-choose":
       return ["save", "later", "never"].includes(message.choice) && saver.ownsSurface(message.token)
@@ -119,12 +130,14 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) =>
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   autofill.forgetTab(tabId)
+  forms.forgetTab(tabId)
   saver.forgetTab(tabId)
   signInWith.forgetTab(tabId)
   learner.forgetTab(tabId)
 })
 chrome.webNavigation.onCommitted.addListener((d) => {
   void autofill.navigated(d)
+  forms.navigated(d)
   if (d.frameId === 0) {
     saver.navigated(d.tabId, d.url, d.transitionType)
     signInWith.navigated(d.tabId, d.url)

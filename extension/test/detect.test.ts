@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test"
 import { findAccountTile, findProviderButton, scanPage, signInWithText } from "../src/content/detect"
 import { isChooserPage, isProviderPage, provider } from "../src/signin"
 import { pageFacts } from "../src/content/outcome"
+import { scanForms } from "../src/content/forms"
 
 function page(html: string, path = "/login", title = "") {
   history.replaceState(null, "", path)
@@ -303,5 +304,121 @@ describe("sign in with a provider", () => {
     } finally {
       delete g.DEADBOLT_E2E
     }
+  })
+})
+
+describe("identity and payment forms", () => {
+  const formRoles = () => scanForms().map((f) => f.role)
+
+  test("a US shipping address by autocomplete tokens", () => {
+    page(`<form>
+      <input autocomplete="shipping name"><input autocomplete="shipping street-address">
+      <input autocomplete="shipping address-level2"><input autocomplete="shipping address-level1">
+      <input autocomplete="shipping postal-code"><select autocomplete="shipping country"><option value="US">United States</option></select>
+      <input type="tel" autocomplete="shipping tel"><input type="email" autocomplete="email">
+    </form>`, "/checkout")
+    const fields = scanForms()
+    expect(fields.map((f) => f.role)).toEqual(["name", "street-address", "address-level2", "address-level1", "postal-code", "country", "tel", "email"])
+    expect(fields.every((f) => f.kind === "identity")).toBe(true)
+  })
+
+  test("labels only, in English, German and French", () => {
+    page(`<form>
+      <label for="a">First name</label><input id="a"><label for="b">Last name</label><input id="b">
+      <label for="c">Straße und Hausnummer</label><input id="c"><label for="d">PLZ</label><input id="d">
+      <label for="e">Ville</label><input id="e"><label for="f">Pays</label><input id="f">
+      <label for="g">Téléphone</label><input id="g">
+    </form>`, "/checkout")
+    expect(formRoles()).toEqual(["given-name", "family-name", "address-line1", "postal-code", "address-level2", "country", "tel"])
+  })
+
+  test("names and placeholders without labels", () => {
+    page(`<form><input name="billing_first_name"><input name="billing_last_name"><input placeholder="Apartment, suite, etc."><input name="zip"></form>`, "/checkout")
+    expect(formRoles()).toEqual(["given-name", "family-name", "address-line2", "postal-code"])
+  })
+
+  test("billing and shipping sections by fieldset", () => {
+    page(`<form>
+      <fieldset><legend>Shipping address</legend><label for="a">Address</label><input id="a"><label for="b">City</label><input id="b"></fieldset>
+      <fieldset><legend>Billing address</legend><label for="c">Address</label><input id="c"><label for="d">City</label><input id="d"></fieldset>
+    </form>`, "/checkout")
+    const fields = scanForms()
+    expect(fields.map((f) => f.role)).toEqual(["address-line1", "address-level2", "address-line1", "address-level2"])
+    expect(fields[0].section).toBe(fields[1].section)
+    expect(fields[0].section).not.toBe(fields[2].section)
+    expect(fields[2].section).toContain("billing")
+  })
+
+  test("a repeated role starts a new section", () => {
+    page(`<form><input autocomplete="address-line1"><input autocomplete="postal-code"><input autocomplete="address-line1"><input autocomplete="postal-code"></form>`, "/checkout")
+    const [a, b, c] = scanForms()
+    expect(a.section).toBe(b.section)
+    expect(c.section).not.toBe(a.section)
+  })
+
+  test("a card: number, expiry as one box, code, name on card", () => {
+    page(`<form>
+      <label for="n">Card number</label><input id="n" inputmode="numeric">
+      <label for="e">Expiration date</label><input id="e" placeholder="MM / YY">
+      <label for="c">CVC</label><input id="c">
+      <label for="h">Name on card</label><input id="h">
+    </form>`, "/checkout")
+    const fields = scanForms()
+    expect(fields.map((f) => f.role)).toEqual(["cc-number", "cc-exp", "cc-csc", "cc-name"])
+    expect(fields.every((f) => f.kind === "card")).toBe(true)
+  })
+
+  test("expiry as month and year selects, read from their options", () => {
+    const year = new Date().getFullYear()
+    const months = Array.from({ length: 12 }, (_, i) => `<option>${String(i + 1).padStart(2, "0")}</option>`).join("")
+    const years = Array.from({ length: 10 }, (_, i) => `<option>${year + i}</option>`).join("")
+    page(`<form><input autocomplete="cc-number"><select name="m"><option value="">Month</option>${months}</select><select name="y"><option value="">Year</option>${years}</select></form>`, "/pay")
+    expect(formRoles()).toEqual(["cc-number", "cc-exp-month", "cc-exp-year"])
+  })
+
+  test("birthday selects outside a card", () => {
+    const years = Array.from({ length: 60 }, (_, i) => `<option>${1950 + i}</option>`).join("")
+    const days = Array.from({ length: 31 }, (_, i) => `<option>${i + 1}</option>`).join("")
+    const months = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"].map((m) => `<option>${m}</option>`).join("")
+    page(`<form><select name="d">${days}</select><select name="mo">${months}</select><select name="yr">${years}</select></form>`, "/profile")
+    expect(formRoles()).toEqual(["bday-day", "bday-month", "bday-year"])
+  })
+
+  test("a card number split over four boxes", () => {
+    page(`<form><label for="a">Card number</label><input id="a" maxlength="4"><input maxlength="4"><input maxlength="4"><input maxlength="4"><label for="c">CVV</label><input id="c" maxlength="4"></form>`, "/pay")
+    const fields = scanForms()
+    expect(fields.map((f) => f.role)).toEqual(["cc-number", "cc-number", "cc-number", "cc-number", "cc-csc"])
+    expect(fields[0].split).toBe(4)
+  })
+
+  test("login fields, coupons and opted-out fields aren't forms", () => {
+    page(`<form>
+      <input autocomplete="username"><input type="password" autocomplete="current-password">
+      <label for="g">Gift card number</label><input id="g">
+      <label for="x">First name</label><input id="x" data-1p-ignore>
+    </form>`)
+    expect(scanForms()).toEqual([])
+  })
+
+  test("labels ending in name that aren't a person's name", () => {
+    page(`<form>
+      <label for="a">Street name</label><input id="a"><label for="b">City name</label><input id="b">
+      <label for="c">State name</label><input id="c"><label for="d">Country name</label><input id="d">
+      <label for="e">Company name</label><input id="e"><label for="f">Region name</label><input id="f">
+      <label for="g">Name</label><input id="g">
+    </form>`, "/checkout")
+    expect(formRoles()).toEqual(["address-line1", "address-level2", "address-level1", "country", "organization", "address-level1", "name"])
+  })
+
+  test("a lone email box isn't an address form, unless the site marks it", () => {
+    page(`<form><label for="n">Newsletter</label><input id="n" type="email"></form><form><label for="e">Your email</label><input id="e" type="email"></form>`, "/")
+    expect(scanForms()).toEqual([])
+    page(`<form><input type="email" autocomplete="email"></form>`, "/")
+    expect(formRoles()).toEqual(["email"])
+  })
+
+  test("login detection doesn't change on a checkout page", () => {
+    page(`<h1>Checkout</h1><form><input type="email" autocomplete="email"><input autocomplete="given-name"><input autocomplete="address-line1"><button>Continue to shipping</button></form>`, "/checkout")
+    expect(scanPage().kind).toBeNull()
   })
 })

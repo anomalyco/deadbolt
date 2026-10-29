@@ -46,8 +46,11 @@ function optedOut(el: Element | null | undefined): boolean {
   )
 }
 
+/** An input, select or textarea: what identity and payment forms are made of. */
+export type FormControl = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement
+
 /** The site asked password managers to leave this field alone, on it, its form or the page. */
-export const ignored = (el: HTMLInputElement) => optedOut(el) || optedOut(el.form ?? el.closest("form")) || optedOut(document.body)
+export const ignored = (el: FormControl) => optedOut(el) || optedOut(el.form ?? el.closest("form")) || optedOut(document.body)
 
 /** Minimum score for the page to count as a given kind of form. */
 const FORM_THRESHOLD = 3
@@ -85,16 +88,18 @@ function nearbyText(el: Element): string {
   return ""
 }
 
-function labelText(el: HTMLInputElement): string {
+/** A field's labels, aria label, placeholder and title, or the text just before it. */
+export function labelText(el: FormControl): string {
   const parts: string[] = []
   for (const label of Array.from(el.labels ?? [])) parts.push(innerText(label))
   const labelledBy = el.getAttribute("aria-labelledby")
   const root = el.getRootNode() as Document | ShadowRoot
   if (labelledBy) for (const id of labelledBy.split(/\s+/)) parts.push(innerText(root.getElementById?.(id)))
-  parts.push(el.getAttribute("aria-label") ?? "", el.placeholder ?? "", el.getAttribute("title") ?? "")
+  const placeholder = el.getAttribute("placeholder") ?? ""
+  parts.push(el.getAttribute("aria-label") ?? "", placeholder, el.getAttribute("title") ?? "")
   if (!parts.some(Boolean)) parts.push(nearbyText(el))
   // "you@example.com" as a placeholder means an email box.
-  if (el.placeholder?.includes("@")) parts.push("email")
+  if (placeholder.includes("@")) parts.push("email")
   return parts.filter(Boolean).join(" ").slice(0, 300)
 }
 

@@ -426,6 +426,65 @@ const TOP: Record<string, string> = {
   </script>`,
 }
 
+// Identity and card forms (see forms*): checkout pages and payment frames.
+const months = `<option value="">Month</option>${Array.from({ length: 12 }, (_, i) => `<option value="${String(i + 1).padStart(2, "0")}">${String(i + 1).padStart(2, "0")}</option>`).join("")}`
+const years = (from: number) => `<option value="">Year</option>${Array.from({ length: 12 }, (_, i) => `<option value="${from + i}">${from + i}</option>`).join("")}`
+const states = `<option value="">State</option><option value="CA">California</option><option value="NJ">New Jersey</option><option value="NY">New York</option><option value="TX">Texas</option><option value="WA">Washington</option><option value="FL">Florida</option><option value="OH">Ohio</option><option value="OR">Oregon</option><option value="GA">Georgia</option><option value="AZ">Arizona</option>`
+const countries = `<option value="">Country</option><option value="CA">Canada</option><option value="DE">Germany</option><option value="FR">France</option><option value="GB">United Kingdom</option><option value="US">United States</option>`
+const sel = (id: string, label: string, options: string, extra = "") => `<label for="${id}">${label}</label><select id="${id}" name="${id}"${extra}>${options}</select>`
+const FORMS: Record<string, string> = {
+  // A US shipping address, with autocomplete tokens.
+  tokens: `<style>main{margin-top:24px}#tokens label{margin:4px 0 2px}#tokens input,#tokens select{height:30px}</style><h1>Shipping</h1><form id="tokens">
+    <label for="ship-name">Full name</label><input id="ship-name" autocomplete="shipping name">
+    <label for="ship-a1">Address</label><input id="ship-a1" autocomplete="shipping address-line1">
+    <label for="ship-a2">Apartment</label><input id="ship-a2" autocomplete="shipping address-line2">
+    <label for="ship-city">City</label><input id="ship-city" autocomplete="shipping address-level2">
+    ${sel("ship-state", "State", states, ` autocomplete="shipping address-level1"`)}
+    <label for="ship-zip">ZIP</label><input id="ship-zip" autocomplete="shipping postal-code">
+    ${sel("ship-country", "Country", countries, ` autocomplete="shipping country"`)}
+    <label for="ship-tel">Phone</label><input id="ship-tel" type="tel" autocomplete="shipping tel">
+    <input id="ship-org" autocomplete="shipping organization" style="width:24px;height:12px;padding:0">
+    <div style="position:relative"><input id="ship-a3" autocomplete="shipping address-line3"><div style="position:absolute;inset:0;background:#f4f4f5"></div></div>
+    <div style="height:900px"></div><label for="ship-email">Email</label><input id="ship-email" type="email" autocomplete="shipping email">
+    <button type="button">Continue</button></form>`,
+  // The same without tokens, in German, the name split in two, the region and country as selects.
+  labels: `<h1>Lieferadresse</h1><form>
+    <label for="vn">Vorname</label><input id="vn" name="vn"><label for="nn">Nachname</label><input id="nn" name="nn">
+    <label for="str">Straße und Hausnummer</label><input id="str" name="str">
+    <label for="plz">PLZ</label><input id="plz" name="plz"><label for="ort">Ort</label><input id="ort" name="ort">
+    ${sel("bl", "Bundesland", states)}${sel("land", "Land", countries)}
+    <button type="button">Weiter</button></form>`,
+  // A card: the expiry in one box.
+  "card-single": `<h1>Payment</h1><form>
+    <label for="cc">Card number</label><input id="cc" inputmode="numeric" placeholder="1234 1234 1234 1234">
+    <label for="exp">Expiration</label><input id="exp" placeholder="MM / YY">
+    <label for="cvc">CVC</label><input id="cvc" inputmode="numeric">
+    <label for="holder">Name on card</label><input id="holder">
+    <button type="button">Pay</button></form>`,
+  // A card: the expiry as month and year selects.
+  "card-selects": `<h1>Payment</h1><form>
+    <label for="cc">Card number</label><input id="cc" autocomplete="cc-number">
+    ${sel("mm", "Expiry month", months)}${sel("yy", "Expiry year", years(new Date().getFullYear()))}
+    <label for="cvv">Security code</label><input id="cvv" autocomplete="cc-csc">
+    <button type="button">Pay</button></form>`,
+  // A card number in four boxes.
+  "card-split": `<h1>Payment</h1><form>
+    <label for="b1">Card number</label><div style="display:flex;gap:6px"><input id="b1" maxlength="4"><input id="b2" maxlength="4"><input id="b3" maxlength="4"><input id="b4" maxlength="4"></div>
+    <label for="cvv">CVV</label><input id="cvv" maxlength="4">
+    <button type="button">Pay</button></form>`,
+}
+/** A payment provider's card frame, served on the provider's .test alias (or an unknown host). */
+const CARD_FRAME = `<!doctype html><html><head><meta charset="utf-8"><style>
+  body{margin:0;padding:8px;font:14px system-ui,sans-serif;background:#fff}label{display:block;margin:6px 0 2px}input{width:100%;box-sizing:border-box;height:34px}
+</style></head><body><form>
+  <label for="cardnumber">Card number</label><input id="cardnumber" autocomplete="cc-number" inputmode="numeric">
+  <label for="exp-date">Expiration date</label><input id="exp-date" autocomplete="cc-exp" placeholder="MM / YY">
+  <label for="cvc">CVC</label><input id="cvc" autocomplete="cc-csc">
+</form></body></html>`
+const cardFrame = (host: string, port: string) => `<h1>Payment</h1>
+  <label for="holder">Name on card</label><input id="holder" autocomplete="cc-name">
+  <iframe id="pay" src="http://${host}:${port}/forms/card-frame" style="width:100%;height:220px;border:0;margin-top:12px"></iframe>`
+
 const changeForm = `<h1>Change your password</h1><form method="post" action="/home" novalidate>
   <label for="current">Current password</label><input id="current" name="current" type="password" autocomplete="current-password">
   <label for="new">New password</label><input id="new" name="new" type="password" autocomplete="new-password">
@@ -722,6 +781,10 @@ const server = Bun.serve({
       case "/fails/post":
         return html("Sign in to Acme", `${loginForm("/fails/post")}${req.method === "POST" ? `<p>That password isn't right.</p>` : ""}<a id="home" href="/home">Home</a>`)
     }
+    if (url.pathname === "/forms/card-frame") return new Response(CARD_FRAME, { headers: { "content-type": "text/html; charset=utf-8" } })
+    if (url.pathname === "/forms/stripe") return html("Checkout", cardFrame("js.stripe.test", url.port))
+    if (url.pathname === "/forms/unknown") return html("Checkout", cardFrame("pay.evilpay.test", url.port))
+    if (url.pathname.startsWith("/forms/") && FORMS[url.pathname.slice(7)]) return html("Checkout", FORMS[url.pathname.slice(7)])
     if (url.pathname.startsWith("/detect/") && DETECT[url.pathname.slice(8)]) {
       const d = DETECT[url.pathname.slice(8)]
       return html(d.title ?? "Acme", d.body.replace("EMBED", `http://127.0.0.1:${server.port}`))
@@ -764,6 +827,8 @@ interface LaunchOptions {
   scale?: number
   /** The fake host adds "Sign in with Google" logins. */
   signIn?: boolean
+  /** "deny": the fake host turns down Touch ID for a card's number. */
+  touchId?: string
 }
 
 async function launch(options: LaunchOptions = {}): Promise<Run> {
@@ -789,7 +854,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
     // *.acme.test is one site on this machine: two origins of it for the sign-in session runs.
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.google.test 127.0.0.1"],
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1"],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -799,6 +864,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
+      DEADBOLT_FAKE_TOUCHID: options.touchId ?? "",
       ...options.realHost,
     },
   })
@@ -2986,6 +3052,232 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
   if (v) check(v.verified && !v.authenticationInfo.userVerified, `@simplewebauthn/server verifies the ${how} assertion (no UV without Touch ID)`)
 }
 
+// ---- Addresses and cards ------------------------------------------------------------
+
+/** The frame of the page whose URL starts with `prefix`, once it has reported its identity or card fields. */
+async function formsFound(run: Run, page: Page, path: string) {
+  await until(`the forms on ${path} are found`, () => run.worker.evaluate((p) => (globalThis as unknown as { __seen: string[] }).__seen.some((s) => s.startsWith("db:forms-page@") && s.endsWith(p)), path), 15_000)
+}
+
+/** Clicks a field (in `frame`, or the page) and waits for the forms menu, at rest. */
+async function formsMenu(run: Run, page: Page, selector: string, path: string, frame?: Frame) {
+  await formsFound(run, page, path)
+  await (frame ?? page).click(selector)
+  const menu = await until(`forms menu on ${selector}`, async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator("button.row").count()) > 0 ? f : null
+  }, 15_000)
+  if (menu) await settled(menu)
+  return menu
+}
+
+/** Picks the row with `text` with the pointer, and waits for the pill to say how it went. */
+async function pickRow(menu: Frame, text: string) {
+  await menu.locator("button.row", { hasText: text }).first().click()
+  return until(`the pill settles after picking ${text}`, async () => {
+    if (await menu.locator(".pill.ok").count().catch(() => 0)) return "ok"
+    if (await menu.locator(".pill.failed").count().catch(() => 0)) {
+      console.log(`  the pill says: ${await menu.locator(".pill .pill-label").getAttribute("title").catch(() => "?")}`)
+      return "failed"
+    }
+    return null
+  }, 15_000)
+}
+
+const formFills = async (run: Run) => (await hostLog(run)).filter((r) => r.type === "fill-form") as Array<{ ref: string; fields: string[]; origin: string }>
+const values = (page: Page | Frame, ids: string[]) => Promise.all(ids.map((id) => page.inputValue(`#${id}`)))
+
+/** A shipping address with tokens and a card with its expiry in one box, in the light and dark themes, with stills of both menus. */
+async function formsSurface(scheme: Scheme) {
+  const run = await launch({ scheme })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/forms/tokens`)
+    const menu = await formsMenu(run, page, "#ship-name", "/forms/tokens")
+    if (menu) {
+      check((await menu.locator(".row .title").allTextContents()).join(",") === "Home,Work", "an address field lists the identities")
+      const sub = await menu.locator(".row .sub").first().textContent()
+      check(sub === "Fills name, phone, address · Kit Langton · 123 Main St, Brooklyn", `with what each fills and its summary (${sub})`)
+      await shotAround(page, `forms-address-${scheme}`, menu, "#ship-name")
+      check((await pickRow(menu, "Home")) === "ok", "picking an identity says Filled")
+      const got = await values(page, ["ship-name", "ship-a1", "ship-a2", "ship-city", "ship-state", "ship-zip", "ship-country", "ship-tel"])
+      check(JSON.stringify(got) === JSON.stringify(["Kit Langton", "123 Main St", "Apt 4", "Brooklyn", "NY", "11201", "US", "+14155550123"]), `the whole address fills, selects included (${got.join(" | ")})`)
+      const skipped = await values(page, ["ship-org", "ship-a3", "ship-email"])
+      check(skipped.every((v) => !v), `a tiny field, a covered one and one off screen get nothing (${skipped.join(" | ")})`)
+      check((await page.evaluate(() => scrollY)) === 0, "and the page isn't scrolled to fill")
+      const asked = (await formFills(run))[0]
+      check(!!asked && !asked.fields.includes("number") && !asked.fields.includes("birthday") && asked.fields.includes("phone"), `fill-form asks only for what the fields need (${asked?.fields.join(",")})`)
+    }
+
+    await page.goto(`${site}/forms/card-single`)
+    const cards = await formsMenu(run, page, "#cc", "/forms/card-single")
+    if (cards) {
+      check((await cards.locator(".row .title").first().textContent()) === "Visa ••4242 · 08/28", "a card field lists cards as brand, last digits and expiry")
+      check((await footText(cards)) === "Deadbolt may ask for Touch ID.", "and says Touch ID may be asked")
+      await shotAround(page, `forms-card-${scheme}`, cards, "#cc")
+      check((await pickRow(cards, "Visa")) === "ok", "picking a card says Filled")
+      const got = await values(page, ["cc", "exp", "cvc", "holder"])
+      check(JSON.stringify(got) === JSON.stringify(["4242 4242 4242 4242", "08 / 28", "123", "Kit Langton"]), `the card fills: spaced number, MM / YY, code, name (${got.join(" | ")})`)
+    }
+  } catch (err) {
+    check(false, `formsSurface threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "formsSurface")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Addresses by labels only (German, split name, selects), and cards with expiry selects and split number boxes. */
+async function formsShapes() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/forms/labels`)
+    // What the user types themselves stays: the city, typed before the pick.
+    await formsFound(run, page, "/forms/labels")
+    await page.click("#ort")
+    await Bun.sleep(400)
+    await page.keyboard.type("Berlin")
+    await page.keyboard.press("Escape")
+    const menu = await formsMenu(run, page, "#vn", "/forms/labels")
+    if (menu && (await pickRow(menu, "Home")) === "ok") {
+      const got = await values(page, ["vn", "nn", "str", "plz", "ort", "bl", "land"])
+      check(JSON.stringify(got) === JSON.stringify(["Kit", "Langton", "123 Main St", "11201", "Berlin", "NY", "US"]), `a labels-only address fills, the name split, region and country selects matched, the typed city kept (${got.join(" | ")})`)
+      await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+      // Another pick replaces what Deadbolt filled, never what was typed.
+      const again = await formsMenu(run, page, "#vn", "/forms/labels")
+      if (again && (await pickRow(again, "Work")) === "ok") {
+        const next = await values(page, ["str", "plz", "ort", "bl"])
+        check(JSON.stringify(next) === JSON.stringify(["1 Market St", "94105", "Berlin", "CA"]), `picking another identity replaces Deadbolt's values, not the user's (${next.join(" | ")})`)
+      } else check(false, "a second pick fills")
+    } else check(false, "the labels-only address fills")
+
+    await page.goto(`${site}/forms/card-selects`)
+    const selects = await formsMenu(run, page, "#cc", "/forms/card-selects")
+    if (selects && (await pickRow(selects, "Visa")) === "ok") {
+      const got = await values(page, ["cc", "mm", "yy", "cvv"])
+      check(JSON.stringify(got) === JSON.stringify(["4242424242424242", "08", "2028", "123"]), `expiry month and year selects fill (${got.join(" | ")})`)
+    } else check(false, "the card with expiry selects fills")
+
+    await page.goto(`${site}/forms/card-split`)
+    const split = await formsMenu(run, page, "#b1", "/forms/card-split")
+    if (split && (await pickRow(split, "Visa")) === "ok") {
+      const got = await values(page, ["b1", "b2", "b3", "b4", "cvv"])
+      check(JSON.stringify(got) === JSON.stringify(["4242", "4242", "4242", "4242", "123"]), `a card number split over four boxes fills each (${got.join(" | ")})`)
+    } else check(false, "the split card number fills")
+  } catch (err) {
+    check(false, `formsShapes threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "formsShapes")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * A card into a payment provider's cross-origin frame (Stripe, on its
+ * e2e alias): the menu opens in the top page under the frame's field,
+ * names both, and the card goes into the frame and the page's own name
+ * box. An unknown cross-origin frame gets no menu and no card.
+ */
+async function formsFrames() {
+  const run = await launch()
+
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/forms/stripe`)
+    const frame = await until("the Stripe frame loads", () => page.frames().find((f) => f.url().includes("js.stripe.test")) ?? null)
+    if (frame) {
+      const menu = await formsMenu(run, page, "#cardnumber", "/forms/card-frame", frame)
+      if (menu) {
+        check(menu.parentFrame() === page.mainFrame(), "a field in the provider's frame opens the menu in the top page")
+        check(((await menu.locator("#caption").textContent()) ?? "").trim() === "Into Stripe on localhost", "the menu names the provider and the site")
+        await shotAround(page, "forms-card-frame-light", menu, "#pay")
+        const box = await (await menu.frameElement()).boundingBox()
+        const field = await page.locator("#pay").boundingBox()
+        check(!!box && !!field && box.y > field.y && box.y < field.y + field.height, "under the frame's field")
+        check((await pickRow(menu, "Visa")) === "ok", "picking the card says Filled")
+        const got = await values(frame, ["cardnumber", "exp-date", "cvc"])
+        check(JSON.stringify(got) === JSON.stringify(["4242424242424242", "08 / 28", "123"]), `the card fills into the provider's frame (${got.join(" | ")})`)
+        check((await page.inputValue("#holder")) === "", "but not the page's own name-on-card box: one pick, one party")
+        const asked = (await formFills(run)).at(-1)
+        check(JSON.stringify(asked?.fields.sort()) === JSON.stringify(["cvv", "expiry", "number"]), `fill-form asks only for the provider frame's fields (${asked?.fields.join(",")})`)
+        await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+        // From the page's own field: the page only, never the provider's frame.
+        const own = await formsMenu(run, page, "#holder", "/forms/stripe")
+        if (own) {
+          check(((await own.locator("#caption").textContent()) ?? "").trim() === "On localhost", "the page's own card menu names only the site")
+          await frame.fill("#cardnumber", "")
+          check((await pickRow(own, "Visa")) === "ok", "picking the card from the page's field fills")
+          check((await page.inputValue("#holder")) === "Kit Langton", "the page's name-on-card box")
+          check((await frame.inputValue("#cardnumber")) === "", "and nothing goes into the provider's frame from it")
+          check(!(await formFills(run)).at(-1)?.fields.includes("number"), "nor is the number asked for")
+        }
+      }
+    }
+
+    await page.goto(`${site}/forms/unknown`)
+    const evil = await until("the unknown frame loads", () => page.frames().find((f) => f.url().includes("evilpay.test")) ?? null)
+    if (evil) {
+      await formsFound(run, page, "/forms/unknown")
+      await Bun.sleep(1500)
+      await evil.click("#cardnumber")
+      await Bun.sleep(2500)
+      check(!extensionFrame(page, "menu.html"), "an unknown cross-origin card frame opens no menu")
+      // A card picked from the page's own field doesn't go into it either.
+      const menu = await formsMenu(run, page, "#holder", "/forms/unknown")
+      check(!!menu && !((await menu.locator("#caption").textContent()) ?? "").includes("Into"), "the page's own card menu names no provider")
+      if (menu) check((await pickRow(menu, "Visa")) === "ok", "picking the card fills the page's own field")
+      check((await page.inputValue("#holder")) === "Kit Langton", "the page's name-on-card box fills")
+      const got = await values(evil, ["cardnumber", "exp-date", "cvc"])
+      check(got.every((v) => !v), "nothing goes into the unknown frame")
+      const last = (await formFills(run)).at(-1)
+      check(!!last && !last.fields.includes("number") && !last.fields.includes("cvv"), `and its number and code are never asked for (${last?.fields.join(",")})`)
+    }
+  } catch (err) {
+    check(false, `formsFrames threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "formsFrames")
+  } finally {
+    await close(run)
+  }
+}
+
+/** A card's number waits on Touch ID: it fills once the agent answers, and nothing fills when Touch ID is turned down. */
+async function formsTouchId() {
+  const slow = await launch({ fillDelay: 1.5 })
+  const page = await slow.context.newPage()
+  try {
+    await page.goto(`${site}/forms/card-single`)
+    const menu = await formsMenu(slow, page, "#cc", "/forms/card-single")
+    if (menu) {
+      await menu.locator("button.row").first().click()
+      check(!!(await until("the pill waits while Touch ID is asked", async () => (await menu.locator(".pill:not(.ok):not(.failed)").count().catch(() => 0)) > 0 && (await page.inputValue("#cc")) === "", 3000)), "the pill says Filling… while the agent asks for Touch ID")
+      check(!!(await until("the card fills once verified", async () => (await page.inputValue("#cc")) !== "", 8000)), "the card fills once Touch ID is answered")
+    }
+  } catch (err) {
+    check(false, `formsTouchId threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(slow, page, "formsTouchId")
+  } finally {
+    await close(slow)
+  }
+  const denied = await launch({ touchId: "deny" })
+  const page2 = await denied.context.newPage()
+  try {
+    await page2.goto(`${site}/forms/card-single`)
+    const menu = await formsMenu(denied, page2, "#cc", "/forms/card-single")
+    if (menu) {
+      check((await pickRow(menu, "Visa")) === "failed", "Touch ID turned down: the pill says it couldn't fill")
+      check((await menu.locator(".pill .pill-label").getAttribute("title").catch(() => "")) === "Touch ID didn't confirm it's you. Nothing was filled.", "and why")
+      const got = await values(page2, ["cc", "exp", "cvc", "holder"])
+      check(got.every((v) => !v), "and nothing is written, not even the name")
+    }
+  } catch (err) {
+    check(false, `formsTouchId (denied) threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(denied, page2, "formsTouchId")
+  } finally {
+    await close(denied)
+  }
+}
+
 type Verdict = { type: string; frame: number; url: string; kind?: string | null; roles?: string[]; loginish?: boolean }
 const verdicts = (run: Run, url: string) =>
   run.worker.evaluate((url) => ((globalThis as unknown as { __verdicts: Verdict[] }).__verdicts ?? []).filter((v) => v.url === url), url) as Promise<Verdict[]>
@@ -3084,7 +3376,7 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
   return passed
 }
 
-const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, generator, signInWith, locked, notInstalled }
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, generator, signInWith, locked, notInstalled, formsSurface }
 const once: Record<string, () => Promise<void>> = {
   film,
   detection,
@@ -3105,8 +3397,11 @@ const once: Record<string, () => Promise<void>> = {
   coveredPill,
   backForward,
   passkeys,
+  formsShapes,
+  formsFrames,
+  formsTouchId,
 }
-const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
+const groups: Record<string, string[]> = { forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
@@ -3117,6 +3412,7 @@ const cost: Record<string, number> = {
   detection: 108, occlusionSweep: 55, signInSessions: 52, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
+  formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12,
 }
 const units = [
   ...(["light", "dark"] as const).flatMap((scheme) =>

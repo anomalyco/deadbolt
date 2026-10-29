@@ -778,8 +778,8 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
 
 Besides logins, Deadbolt fills what people type into forms all the time:
 name, email, phone, postal address, company, birthday, and payment cards.
-This part is the data, the protocol and the safety rules on the agent's side;
-detecting the fields and the menu are the extension's (see The extension).
+Below: the data and the protocol, then the extension's side (detecting the
+fields, the menu, which frames get what), then the safety rules.
 
 ### The data
 
@@ -819,6 +819,144 @@ fields asked for, of one item. Both go to the agent as `form-items` and
 `form-fill` (agent protocol 16; host protocol 3, capability `forms`). See
 Host messages.
 
+### Detection
+
+`extension/src/content/forms.ts` gives each visible input, select and
+textarea a role named by its HTML autocomplete token (`given-name`,
+`address-line1`, `postal-code`, `cc-number`, `cc-exp-month`…):
+
+1. The `autocomplete` attribute first, after its section words
+   (`section-*`, `shipping`, `billing`, `home`, `work`…). `country-name`
+   counts as `country`. Login tokens (`username`, `current-password`…)
+   leave the field to login detection.
+2. Then the field's labels, aria label, placeholder and title, then its id
+   and name, against short word lists in English, German, French, Spanish,
+   Italian, Dutch and Portuguese, with a few Japanese, Chinese and Russian
+   words. Narrow roles are tried before the ones they'd be mistaken for
+   (security code before card number, email before address). Coupons, gift
+   cards and search boxes are never fields.
+3. Then shape: `type=email`, `type=tel`, `type=date`, `type=month`; a
+   select's options (twelve months, 28–31 days, years in the past or the
+   future, a country list, a US, Canadian or Australian region list); and a
+   card number split over short boxes (`maxlength` up to 6), where the
+   first box says what it is and the next ones say nothing.
+
+Fields are grouped into sections, which is what one pick fills: per form
+(or the page, for fields outside one), then by the autocomplete section
+words, then by their surroundings (an ancestor's id, class or aria label,
+or a legend or heading in it, saying billing, shipping or delivery), and a
+role seen twice with neither starts a new section (two address blocks one
+after the other). A form's card fields are one section.
+
+Login detection (`detect.ts`) is unchanged and runs first: a field a login
+form claims (the email box of a sign-in) stays the login's. The same
+opt-out marks apply (`data-1p-ignore`, `data-lpignore="true"`,
+`data-deadbolt-ignore`, …).
+
+### The menu
+
+A click into an identity or card field (or ↓ in it) opens Deadbolt's
+surface under it, on the logins' rules: only right after the user's own
+click or keypress, a token bound to the one menu document and the field's
+document, the half second of rest and the visibility checks before a pick
+counts, and Enter only after the user came into the menu themselves. An
+identity field lists identities, each with what it will fill of the
+section and its summary ("Home: Fills name, phone, address · Kit Langton ·
+123 Main St, Brooklyn"); a card field lists cards ("Visa ••4242 · 08/28").
+The caption names where a pick goes: "On shop.com", or "Into Stripe on
+shop.com" from a provider's frame. A card field also says, when the
+host says Touch ID is on (`canVerify`), that Deadbolt may ask for it. Only
+items with at least one value the section's fields need are listed (from
+the reply's `fields`). Nothing shows while the host doesn't list the
+`forms` capability.
+
+A pick folds the list into the pill, which says Filled. The content
+script first fixes which fields of the section may be filled
+(`db:forms-approve`); the background asks the host for only the values
+those fields need (`fill-form`, a full name asks for the name's parts, a
+phone also for the country, …), and the content script writes each one
+after checking it again, as for logins. Values are shaped per field
+(`content/transform.ts`): a full or split name, a street address joined in
+one box or in lines in a textarea, a phone international or national (a
+short box, or a form with its own country code box), a country or region as
+its code, its name (in the page's language) or the matching option, a
+birthday whole (in the order a placeholder shows) or in parts, an expiry as
+`MM/YY`, `MM/YYYY`, `MMYY` or month and year inputs or selects, and a card
+number with spaces when the placeholder shows groups, or one slice per box
+(all the boxes or none). A select with no matching option is left alone.
+
+An identity goes only into fields the user can see as the page stands:
+nothing is scrolled into view to fill it, and a field smaller than 40×16
+CSS pixels, not wholly on screen, or covered at its middle (Deadbolt's own
+pill aside) is skipped, so a page can't collect an address through boxes
+tucked out of sight. The menu's "Fills …" counts only those fields. A field
+holding what the user typed themselves is never overwritten (the same keyed
+digest of the last trusted input as for logins); a value Deadbolt filled
+before is, so picking Work after Home replaces Home's values.
+
+A card's number and security code make the agent ask for Touch ID; the
+extension waits up to 90 seconds for that answer with the pill on
+"Filling…". Turned down, nothing is written, not even the cardholder's
+name, and the pill says so.
+
+### Frames and payment providers
+
+Identities go only to the top page and to frames on the top page's site,
+as logins do. Cards go there too, and into a payment provider's own
+cross-origin frame, only when:
+
+- the frame's origin is https, on the default port, on one of these hosts
+  (`extension/src/payments.ts`):
+
+  | Provider       | Card frame hosts                                                                 |
+  | -------------- | -------------------------------------------------------------------------------- |
+  | Stripe         | `js.stripe.com`                                                                  |
+  | Braintree      | `assets.braintreegateway.com`                                                    |
+  | PayPal         | `www.paypal.com`, only paths starting `/smart/card-field` (the JS SDK's hosted CardFields) |
+  | Adyen          | `checkoutshopper-live.adyen.com`, `checkoutshopper-test.adyen.com` and regional `checkoutshopper-live-<region>.adyen.com` |
+  | Checkout.com   | `js.checkout.com`                                                                |
+  | Square         | `web.squarecdn.com`, `sandbox.web.squarecdn.com`, `pci-connect.squareup.com`     |
+  | Shopify        | `checkout.pci.shopifyinc.com`                                                    |
+
+- and the top page is https.
+
+Why: these providers keep card fields out of the merchant's page on
+purpose (PCI scope), so the number can only be typed into their frame. A
+cross-origin frame is otherwise someone else's content, an ad or a widget,
+and gets no card; the list is short and exact (no suffix matching) so a
+look-alike host gets nothing, and https on both sides keeps the card off
+the network in the clear. PayPal is the one provider whose card frames
+share a host with its whole site, so for it the path counts too: only the
+hosted card fields take a card. That path is what PayPal's SDK uses today
+and isn't a documented contract; if it moves, PayPal card fields stop
+filling (closed, not open) until the list is updated. Sandboxed and opaque frames, incognito tabs and
+every other cross-origin frame get nothing, identity or card.
+
+A field in a frame can't open the surface itself (the page around the frame
+decides where and how the frame shows). It says where the field shows in
+its own viewport; the background carries that box up through every frame
+above, with the checks a fill makes at each one (`boxesInTop` in
+`bg/frames.ts`), and opens the surface in the top page under it, following
+the page's scroll. A card's surface names both when a provider's frame
+takes it: "Into Stripe on shop.com". One pick hands a card to one party
+only. From a provider's frame, it fills that frame and the same
+provider's other frames that reported card fields (a Braintree page has a
+frame per field), never the page around them or another provider. From the
+top page or a frame of its site, it fills the top page and that site's
+frames, never a provider's frame; a cardholder's name in the page and the
+number in Stripe's frame are two picks. Each pick is one `fill-form`, so
+one Touch ID prompt. Each frame below the top page fills only if all
+its fields show through every frame above, checked before the host is asked
+and again once the values are in hand. While those checks run, the pill
+steps out of the top layer for a moment (Chromium reads nothing as fully
+visible while anything shows there), and frame pills sit in the top right
+corner, clear of the fields being checked.
+
+e2e builds (`scripts/build.ts --e2e`) also take a provider host with `.test`
+for `.com` over http, and an http top page on `localhost` or a `.test` host,
+so the e2e run can serve a Stripe-like frame on `js.stripe.test`. Every
+other build defines that branch away.
+
 ### Security
 
 - **Origins:** forms aren't bound to a site: any page autofill takes may list
@@ -852,6 +990,7 @@ Host messages.
 - Saving a new address or card typed into a checkout, and updating one.
 - Agent grants for forms: Browse and other agent clients fill logins only.
 - A billing address picker in the app (the field is an item id today).
+- Filling forms from the toolbar popup: only the in-page menu fills them.
 
 ## Threat model
 
