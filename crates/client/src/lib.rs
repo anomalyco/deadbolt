@@ -936,7 +936,9 @@ mod tests {
     /// passphrase, not a request, not a watcher, and its status isn't taken.
     #[test]
     fn every_connection_waits_for_the_agent_check() {
-        static CHECKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        // The sockets each check was for. The other tests' connections are
+        // checked too, concurrently, so only this test's socket is counted.
+        static CHECKS: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
         run(async {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
@@ -963,7 +965,14 @@ mod tests {
 
             // The other tests' agents run in this process, and pass.
             set_agent_check(Box::new(|socket| {
-                CHECKS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let socket = std::os::unix::net::UnixStream::from(socket);
+                if let Some(path) = socket
+                    .peer_addr()
+                    .ok()
+                    .and_then(|a| a.as_pathname().map(Into::into))
+                {
+                    CHECKS.lock().unwrap().push(path);
+                }
                 let agent = peer::Peer::of(&socket).map_err(|e| e.to_string())?;
                 if agent.pid == std::process::id() {
                     Ok(())
@@ -997,8 +1006,11 @@ mod tests {
                     .spawn()
                     .unwrap(),
             );
+            // Its socket file appears at `bind`, before it listens: wait
+            // until it takes a connection. Sending nothing, this one isn't
+            // in what it was sent.
             for _ in 0..500 {
-                if impostor.socket.exists() {
+                if UnixStream::connect(&impostor.socket).await.is_ok() {
                     break;
                 }
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -1031,12 +1043,12 @@ mod tests {
             drop(child);
 
             // An agent that passes is checked once, however often it's asked.
-            let before = CHECKS.load(std::sync::atomic::Ordering::SeqCst);
             fake_agent(&paths, PROTOCOL_VERSION);
             for _ in 0..5 {
                 assert!(status(&paths).await.is_some());
             }
-            assert!(CHECKS.load(std::sync::atomic::Ordering::SeqCst) - before <= 1);
+            let checks = CHECKS.lock().unwrap();
+            assert!(checks.iter().filter(|p| **p == paths.socket).count() <= 1);
         });
     }
 

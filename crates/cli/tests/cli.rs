@@ -3832,6 +3832,18 @@ const FORMS_1PUX: &str = r#"{"accounts": [{"attrs": {"uuid": "USERUSERUSERUSERUS
      "overview": {"title": "Visa"}}
   ]}]}]}"#;
 
+/// Whether a string in `value` is `FORMS_1PUX`'s card number or CVV. Ids,
+/// refs, pids and times are full of digits, so a substring of the whole
+/// text could match by chance: only a whole value counts.
+fn holds_card_values(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::String(s) => s == "737" || s.contains("4242424242"),
+        serde_json::Value::Array(values) => values.iter().any(holds_card_values),
+        serde_json::Value::Object(map) => map.values().any(holds_card_values),
+        _ => false,
+    }
+}
+
 /// A `.1pux` import makes a structured identity and a card; the browser
 /// host lists them without values, fills only the fields asked, and
 /// Activity records the card fill but not the identity's.
@@ -3887,12 +3899,7 @@ fn forms_fill_from_an_imported_identity_and_card() {
         (&card["brand"], &card["last4"], &card["expiry"]),
         (&"Visa".into(), &"4242".into(), &"2028-08".into())
     );
-    // Refs are hex, so digits could appear by chance: look for the values.
-    let listed = forms.to_string();
-    assert!(
-        !listed.contains("\"737\"") && !listed.contains("4242424242"),
-        "{listed}"
-    );
+    assert!(!holds_card_values(&forms), "{forms}");
 
     let fill = |host: &mut Host, item: &serde_json::Value, fields: &[&str]| {
         host.ask(serde_json::json!({
@@ -3923,10 +3930,10 @@ fn forms_fill_from_an_imported_identity_and_card() {
     host.close();
 
     let activity = a.run(&["activity", "--since", "1h", "--json"]);
-    assert!(
-        !activity.contains("4242424242") && !activity.contains("737"),
-        "{activity}"
-    );
+    for line in activity.lines() {
+        let entry: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(!holds_card_values(&entry), "{line}");
+    }
     let entries: Vec<serde_json::Value> = activity
         .lines()
         .map(|l| serde_json::from_str(l).unwrap())
