@@ -5,7 +5,7 @@
 
 use deadbolt_client::Paths;
 use deadbolt_client::protocol::{ActivityEntry, AppAction, Command, Outcome, Reply};
-use rune::{El, ScrollSpec, Tx, col, text};
+use rune::{El, Tx, col, text};
 use rune_kit::Kit;
 
 use crate::agent::{Done, Failure, Job};
@@ -206,15 +206,10 @@ pub fn setting(s: &App, k: &Kit) -> (El, Option<El>) {
         quiet("activity-empty", empty.into(), k.c.text_muted)
     } else {
         let now = now();
-        col()
-            .key("activity-list")
+        crate::view::scroll_col("activity-list")
             .w_full()
             .max_h(220.0)
             .gap(6.0)
-            .scroll(ScrollSpec {
-                stick_bottom: false,
-            })
-            .scroll_edge_fade(crate::view::LIST_EDGE)
             .children(a.entries.iter().map(|entry| {
                 text(line(entry, now))
                     .key(format!("activity-{}", entry.id))

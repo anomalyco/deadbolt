@@ -268,7 +268,7 @@ pub fn view(s: &App, k: &Kit) -> Option<El> {
                 .children((!a.keys().is_empty()).then(|| Keybind::new(a.keys()).build(k))),
         );
     }
-    let mut card = col()
+    let card = col()
         .key("actions")
         .role("menu")
         .label("Actions")
@@ -292,8 +292,5 @@ pub fn view(s: &App, k: &Kit) -> Option<El> {
                 ),
         )
         .child(rows);
-    for shadow in k.shadow_layers(&k.elevation.overlay) {
-        card = card.box_shadow(shadow);
-    }
-    Some(card)
+    Some(k.elevate(card, &k.elevation.overlay))
 }
