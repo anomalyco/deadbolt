@@ -14,7 +14,7 @@ use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
 use crate::agent::{ImportFailure, Imported, Job};
 use crate::model::{App, Screen};
-use crate::onboarding::{Notice, Severity};
+use crate::onboarding::{Notice, Severity, sentence};
 
 /// What the window takes from a drag, and Choose File… offers.
 pub const EXTENSIONS: &[&str] = &["1pux", "csv", "json"];
@@ -434,23 +434,6 @@ fn problem(failure: ImportFailure, file: &str, apply: bool) -> Notice {
     }
 }
 
-/// A message as a sentence: capitalised, with a full stop.
-fn sentence(message: &str) -> String {
-    let mut chars = message.trim().chars();
-    let mut out: String = match chars.next() {
-        Some(c) => c.to_uppercase().chain(chars).collect(),
-        None => return String::new(),
-    };
-    if !out.ends_with(['.', '!', '?']) {
-        out.push('.');
-    }
-    out
-}
-
-pub fn plural(n: usize, one: &str, many: &str) -> String {
-    format!("{n} {}", if n == 1 { one } else { many })
-}
-
 /// "12 new logins · 3 cards · 2 secure notes", "1 new login", "2 new SSH keys".
 pub fn new_items(report: &ImportReport) -> String {
     let counts = report.counts();
@@ -512,7 +495,7 @@ pub fn changed(file: &str) -> Notice {
 
 /// The primary button: "Import 12 items".
 pub fn import_label(n: usize) -> String {
-    format!("Import {}", plural(n, "item", "items"))
+    format!("Import {n} {}", if n == 1 { "item" } else { "items" })
 }
 
 #[cfg(test)]
