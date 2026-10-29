@@ -5,27 +5,27 @@
 //! Both wake the window when something lands; nothing polls. The main
 //! window's stream watches as the app, so another launch brings it forward.
 
+mod worker;
+
+pub(crate) use worker::call;
+
 use std::cell::RefCell;
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
-use deadbolt_client::export::{self, ExportError};
+use deadbolt_client::export::ExportError;
 use deadbolt_client::protocol::{
-    ActivityEntry, AppAction, Change, Code, Command, ErrorCode, FieldInput, ImportReport, ItemInfo,
-    MirrorReport, Reply, Status, code_field,
+    ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, ImportReport, ItemInfo,
+    MirrorReport, Status,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
 use tokio::sync::oneshot;
 use zeroize::{Zeroize, Zeroizing};
 
-/// The first wait before watching again after the agent went away.
-const RECONNECT_FIRST: Duration = Duration::from_millis(100);
-/// The longest wait between attempts while no agent is running.
-const RECONNECT_MAX: Duration = Duration::from_secs(2);
+use worker::{Post, watch, work};
 
 /// Whose connection this is. The main window's watch is the app's, which a
 /// second launch brings forward (`app-activate`); the quick panel's isn't.
@@ -373,24 +373,22 @@ fn take_next<T>(queue: &mut VecDeque<T>, seen: usize, job: impl Fn(&T) -> &Job) 
 /// a `cached` `Get` when the same was hurried (a copy waiting), and every
 /// `Peek` but the newest batch's.
 pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
-    let keep_get = queue
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| match job(item) {
-            Job::Get { seq, cached, .. } => Some(((*seq, !*cached), std::cmp::Reverse(i), i)),
-            _ => None,
-        })
-        .max()
-        .map(|(_, _, i)| i);
-    let keep_list = queue
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| match job(item) {
-            Job::List { generation } => Some((*generation, std::cmp::Reverse(i), i)),
-            _ => None,
-        })
-        .max()
-        .map(|(_, _, i)| i);
+    let newest_at = |rank: &dyn Fn(&Job) -> Option<(u64, bool)>| {
+        queue
+            .iter()
+            .enumerate()
+            .filter_map(|(i, item)| Some((rank(job(item))?, std::cmp::Reverse(i), i)))
+            .max()
+            .map(|(_, _, i)| i)
+    };
+    let keep_get = newest_at(&|j| match j {
+        Job::Get { seq, cached, .. } => Some((*seq, !*cached)),
+        _ => None,
+    });
+    let keep_list = newest_at(&|j| match j {
+        Job::List { generation } => Some((*generation, false)),
+        _ => None,
+    });
     let newest_seq = queue
         .iter()
         .filter_map(|item| match job(item) {
@@ -398,17 +396,10 @@ pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
             _ => None,
         })
         .max();
-    let keep_code = queue
-        .iter()
-        .enumerate()
-        .filter_map(|(i, item)| match job(item) {
-            Job::Code { seq, .. } if newest_seq.is_none_or(|n| *seq >= n) => {
-                Some((*seq, std::cmp::Reverse(i), i))
-            }
-            _ => None,
-        })
-        .max()
-        .map(|(_, _, i)| i);
+    let keep_code = newest_at(&|j| match j {
+        Job::Code { seq, .. } if newest_seq.is_none_or(|n| *seq >= n) => Some((*seq, false)),
+        _ => None,
+    });
     let newest_batch = queue
         .iter()
         .filter_map(|item| match job(item) {
@@ -590,458 +581,6 @@ impl Agent {
                 done
             }
         }
-    }
-}
-
-/// Posts to the UI's inbox and wakes the window.
-#[derive(Clone)]
-struct Post {
-    results: Sender<Done>,
-    waker: Arc<Mutex<Option<Waker>>>,
-}
-
-impl Post {
-    /// False once the app is gone.
-    fn send(&self, done: Done) -> bool {
-        if self.results.send(done).is_err() {
-            return false;
-        }
-        let wake = self.waker.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        if let Some(wake) = wake {
-            wake();
-        }
-        true
-    }
-}
-
-/// Keeps a watch stream open until `stop` fires or the app is gone, as the
-/// app's main window when `app`. It never starts the agent: that's the
-/// worker's `Connect` and `Unlock`.
-fn watch(paths: Paths, app: bool, post: Post, mut stop: oneshot::Receiver<()>) {
-    let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    else {
-        return;
-    };
-    runtime.block_on(async {
-        let mut delay = RECONNECT_FIRST;
-        loop {
-            tokio::select! {
-                gone = follow(&paths, app, &post, &mut delay) => if gone { return },
-                _ = &mut stop => return,
-            }
-            tokio::select! {
-                () = tokio::time::sleep(delay) => {}
-                _ = &mut stop => return,
-            }
-            delay = (delay * 2).min(RECONNECT_MAX);
-        }
-    });
-}
-
-/// Follows one watch stream to its end. True once the app is gone.
-async fn follow(paths: &Paths, app: bool, post: &Post, delay: &mut Duration) -> bool {
-    let Ok(mut stream) = deadbolt_client::watch(paths, app).await else {
-        return false;
-    };
-    loop {
-        match stream.next().await {
-            Ok(Some(change)) => {
-                // Only an agent that accepted the watch resets the backoff; one
-                // that refuses it (an older protocol) keeps it growing.
-                if change == Change::Watching {
-                    *delay = RECONNECT_FIRST;
-                }
-                if !post.send(Done::Changed(change)) {
-                    return true;
-                }
-            }
-            // The agent said `stopping` before ending the stream.
-            Ok(None) => return false,
-            Err(_) => return !post.send(Done::WatchLost),
-        }
-    }
-}
-
-fn work(paths: Paths, launch: Launch, requests: Receiver<Job>, main: Post) {
-    let runtime = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(runtime) => runtime,
-        Err(error) => {
-            let failure = Failure {
-                code: None,
-                message: format!("starting the agent thread: {error}"),
-            };
-            main.send(Done::Connected(Err(failure)));
-            return;
-        }
-    };
-    let mut queue = VecDeque::new();
-    loop {
-        if queue.is_empty() {
-            match requests.recv() {
-                Ok(job) => queue.push_back(job),
-                Err(_) => return,
-            }
-        }
-        queue.extend(requests.try_iter());
-        let mut jobs = next_jobs(&mut queue);
-        if jobs.len() > 1 {
-            if !all(
-                &runtime,
-                jobs,
-                |job| run(&paths, &launch, job),
-                |done| main.send(done),
-            ) {
-                return;
-            }
-            continue;
-        }
-        let Some(job) = jobs.pop() else {
-            continue;
-        };
-        if let Job::SyncOnePassword { seq } = job {
-            let failed = move |error: std::io::Error| Done::Mirrored {
-                seq,
-                result: Err(Failure {
-                    code: None,
-                    message: format!("starting the sync: {error}"),
-                }),
-            };
-            let paths = paths.clone();
-            let thread = main.clone();
-            let spawned = std::thread::Builder::new()
-                .name("deadbolt-1password".into())
-                .spawn(move || {
-                    let done = match tokio::runtime::Builder::new_current_thread()
-                        .enable_all()
-                        .build()
-                    {
-                        Ok(runtime) => runtime.block_on(mirror(&paths, seq)),
-                        Err(error) => failed(error),
-                    };
-                    thread.send(done);
-                });
-            if let Err(error) = spawned
-                && !main.send(failed(error))
-            {
-                return;
-            }
-            continue;
-        }
-        if !main.send(runtime.block_on(run(&paths, &launch, job))) {
-            return;
-        }
-    }
-}
-
-/// Runs `jobs` at once, posting each reply as it comes; false once the app
-/// has gone.
-fn all<'a, F: Future<Output = Done> + 'a>(
-    runtime: &tokio::runtime::Runtime,
-    jobs: Vec<Job>,
-    run: impl Fn(Job) -> F,
-    mut post: impl FnMut(Done) -> bool,
-) -> bool {
-    let mut running: Vec<_> = jobs.into_iter().map(|job| Box::pin(run(job))).collect();
-    let mut live = true;
-    runtime.block_on(std::future::poll_fn(|cx| {
-        running.retain_mut(|f| match f.as_mut().poll(cx) {
-            std::task::Poll::Ready(done) => {
-                live &= post(done);
-                false
-            }
-            std::task::Poll::Pending => true,
-        });
-        if running.is_empty() {
-            std::task::Poll::Ready(())
-        } else {
-            std::task::Poll::Pending
-        }
-    }));
-    live
-}
-
-async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
-    match job {
-        Job::Connect => Done::Connected(
-            deadbolt_client::ensure_running(paths, launch)
-                .await
-                .map_err(Failure::from),
-        ),
-        Job::Status => Done::Status(deadbolt_client::status(paths).await),
-        // The agent may have stopped while the unlock screen was up.
-        Job::Unlock(passphrase) => {
-            let command = Command::Unlock {
-                passphrase,
-                timeout_secs: None,
-            };
-            Done::Unlocked(
-                status_after(paths, Some(launch), command, false)
-                    .await
-                    .map_err(|(f, _)| f),
-            )
-        }
-        Job::UnlockBiometric => {
-            let command = Command::UnlockBiometric { timeout_secs: None };
-            Done::UnlockedBiometric(status_after(paths, Some(launch), command, true).await)
-        }
-        Job::TouchIdSet(enabled) => Done::TouchIdSet {
-            enabled,
-            result: status_after(paths, None, Command::TouchIdSet { enabled }, true).await,
-        },
-        Job::Lock => Done::Locked(
-            deadbolt_client::simple(paths, Command::Lock)
-                .await
-                .map(drop)
-                .map_err(Failure::from),
-        ),
-        Job::List { generation } => {
-            let command = Command::ItemList {
-                vault: None,
-                query: Vec::new(),
-                kind: None,
-            };
-            let result = call(paths, command, |r| match r {
-                Reply::Items { items } => Some(items),
-                _ => None,
-            })
-            .await;
-            Done::Items { generation, result }
-        }
-        Job::Get { id, seq, .. } => Done::Item {
-            seq,
-            result: values(paths, id).await,
-        },
-        Job::Peek { id, epoch, .. } => Done::Peeked {
-            id: id.clone(),
-            epoch,
-            result: values(paths, id).await,
-        },
-        Job::Code { id, seq } => Done::Code {
-            seq,
-            result: code(paths, id).await,
-        },
-        Job::Import { path, apply, seq } => {
-            let mut applied = false;
-            let result = import(paths, &path, apply, &mut applied).await;
-            Done::Imported {
-                seq,
-                applied,
-                result,
-            }
-        }
-        Job::SyncOnePassword { seq } => mirror(paths, seq).await,
-        Job::Activity { seq } => crate::activity::list(paths, seq).await,
-        Job::Report {
-            action,
-            item,
-            title,
-            field,
-        } => crate::activity::report(paths, action, item, title, field).await,
-        Job::Agents { seq, revoke } => crate::agents::run(paths, seq, revoke).await,
-        Job::Create {
-            kind,
-            name,
-            fields,
-            seq,
-        } => {
-            let command = Command::ItemNew {
-                vault: None,
-                kind,
-                name,
-                fields,
-            };
-            Done::Saved {
-                seq,
-                result: item(paths, command).await,
-            }
-        }
-        Job::Save {
-            id,
-            name,
-            fields,
-            unset,
-            seq,
-        } => {
-            let command = Command::ItemSet {
-                vault: None,
-                query: vec![id],
-                fields,
-                name,
-                unset,
-            };
-            Done::Saved {
-                seq,
-                result: item(paths, command).await,
-            }
-        }
-        Job::Remove { id, seq } => {
-            let command = Command::ItemRemove {
-                vault: None,
-                query: vec![id],
-            };
-            Done::Removed {
-                seq,
-                result: item(paths, command).await,
-            }
-        }
-        Job::Generate {
-            length,
-            symbols,
-            seq,
-        } => {
-            let command = Command::Generate { length, symbols };
-            let result = call(paths, command, |r| match r {
-                Reply::Password { password } => Some(password),
-                _ => None,
-            })
-            .await;
-            Done::Generated { seq, result }
-        }
-    }
-}
-
-/// Runs `command` (starting the agent first when `launch` is given) and reads
-/// back the fresh `Status`. When `status_on_err` is set, a failure still reads
-/// `Status` so Touch ID sees whether its biometric slot was reset.
-async fn status_after(
-    paths: &Paths,
-    launch: Option<&Launch>,
-    command: Command,
-    status_on_err: bool,
-) -> Result<Status, (Failure, Option<Box<Status>>)> {
-    let result = async {
-        if let Some(launch) = launch {
-            deadbolt_client::ensure_running(paths, launch).await?;
-        }
-        deadbolt_client::simple(paths, command).await?;
-        Ok::<_, Error>(deadbolt_client::status(paths).await)
-    }
-    .await
-    .map_err(Failure::from)
-    .and_then(|status| {
-        status.ok_or_else(|| Failure {
-            code: None,
-            message: "The agent stopped.".into(),
-        })
-    });
-    match result {
-        Ok(status) => Ok(status),
-        Err(failure) => {
-            let status = if status_on_err {
-                deadbolt_client::status(paths).await.map(Box::new)
-            } else {
-                None
-            };
-            Err((failure, status))
-        }
-    }
-}
-
-/// Sends `command` and extracts the expected `Reply` variant.
-pub(crate) async fn call<T>(
-    paths: &Paths,
-    command: Command,
-    take: impl FnOnce(Reply) -> Option<T>,
-) -> Result<T, Failure> {
-    let reply = deadbolt_client::simple(paths, command).await?;
-    take(reply).ok_or_else(unexpected)
-}
-
-/// One item with its values, and its one-time code if it has one.
-async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
-    let command = Command::ItemGet {
-        vault: None,
-        query: vec![id.clone()],
-        otp: false,
-    };
-    let got = item(paths, command).await?;
-    if code_field(&got.fields).is_some() {
-        Ok(Values::with_code(got, code(paths, id).await))
-    } else {
-        Ok(Values::new(got))
-    }
-}
-
-/// A write or read that replies with `Reply::Item`.
-async fn item(paths: &Paths, command: Command) -> Result<ItemInfo, Failure> {
-    call(paths, command, |r| match r {
-        Reply::Item { item } => Some(item),
-        _ => None,
-    })
-    .await
-}
-
-/// The export's text goes into the request, and with it is wiped once sent.
-/// An import goes ahead only if the file still reads as it was previewed;
-/// otherwise this previews it again.
-async fn import(
-    paths: &Paths,
-    path: &Path,
-    apply: Option<blake3::Hash>,
-    applied: &mut bool,
-) -> Result<Imported, ImportFailure> {
-    let export = export::read(path)?;
-    let digest = blake3::hash(export.as_bytes());
-    let changed = apply.is_some_and(|previewed| previewed != digest);
-    *applied = apply.is_some() && !changed;
-    let command = Command::Import {
-        vault: None,
-        export,
-        apply: *applied,
-    };
-    let report = call(paths, command, |r| match r {
-        Reply::Import { report } => Some(report),
-        _ => None,
-    })
-    .await
-    .map_err(ImportFailure::Agent)?;
-    Ok(if *applied {
-        Imported::Done(report)
-    } else {
-        Imported::Preview {
-            report,
-            digest,
-            changed,
-        }
-    })
-}
-
-async fn mirror(paths: &Paths, seq: u64) -> Done {
-    let command = Command::SyncOnePassword {
-        vault: None,
-        account: None,
-        op_vaults: Vec::new(),
-        dry_run: false,
-    };
-    let result = call(paths, command, |r| match r {
-        Reply::Mirror { report } => Some(report),
-        _ => None,
-    })
-    .await;
-    Done::Mirrored { seq, result }
-}
-
-async fn code(paths: &Paths, id: String) -> Result<Code, Failure> {
-    let command = Command::ItemCode {
-        vault: None,
-        query: vec![id],
-    };
-    call(paths, command, |r| match r {
-        Reply::Code { code } => Some(code),
-        _ => None,
-    })
-    .await
-}
-
-fn unexpected() -> Failure {
-    Failure {
-        code: None,
-        message: "unexpected reply from the agent".into(),
     }
 }
 

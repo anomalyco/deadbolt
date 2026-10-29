@@ -8,7 +8,7 @@ use rune::Tx;
 use crate::agent::{Failure, Job, Values};
 
 use super::otp::Otp;
-use super::{App, Screen, copy_label, forget, is_secret};
+use super::{App, copy_label, forget, is_secret};
 
 /// How long the page before stays, whole, when a new selection has nothing
 /// to show yet, before the page gives way to its title alone.
@@ -22,7 +22,7 @@ impl App {
     /// Dropping a stale item wipes its values (`agent::Values`); its page is
     /// kept for going back to it, unless the vault changed since.
     pub(super) fn on_item(&mut self, seq: u64, result: Result<Values, Failure>, tx: &mut Tx) {
-        if self.screen != Screen::Vault || self.panel_inert() {
+        if !self.accepts_vault_replies() {
             return;
         }
         if seq != self.seq {
@@ -102,7 +102,7 @@ impl App {
         result: Result<Values, Failure>,
         tx: &mut Tx,
     ) {
-        if epoch != self.cache.epoch() || self.screen != Screen::Vault || self.panel_inert() {
+        if epoch != self.cache.epoch() || !self.accepts_vault_replies() {
             return;
         }
         let values = match result {

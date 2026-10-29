@@ -218,10 +218,7 @@ impl App {
             // anything from an older generation, for a screen that's gone, or
             // for a panel that's confirming a copy or going.
             Done::Items { generation, result } => {
-                if generation != self.generation
-                    || self.screen != Screen::Vault
-                    || self.panel_inert()
-                {
+                if generation != self.generation || !self.accepts_vault_replies() {
                     return;
                 }
                 // The panel's list lands just after it opens; it opens at rest.
@@ -236,7 +233,7 @@ impl App {
             Done::Item { seq, result } => self.on_item(seq, result, tx),
             Done::Peeked { id, epoch, result } => self.on_peeked(id, epoch, result, tx),
             Done::Code { seq, result } => {
-                if seq != self.seq || self.screen != Screen::Vault || self.panel_inert() {
+                if seq != self.seq || !self.accepts_vault_replies() {
                     return;
                 }
                 self.on_code(result, tx);
@@ -299,6 +296,12 @@ impl App {
             }
             Change::Locked | Change::Unlocked | Change::Items { .. } => {}
         }
+    }
+
+    /// The vault is up and taking replies (not locked, and not a panel that
+    /// has already copied or started closing).
+    pub(super) fn accepts_vault_replies(&self) -> bool {
+        self.screen == Screen::Vault && !self.panel_inert()
     }
 
     /// Whether the list shows `vault`: the default vault, or any when that
