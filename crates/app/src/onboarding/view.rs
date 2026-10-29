@@ -118,6 +118,65 @@ pub(crate) fn bar(k: &Kit, label: &str, glyph: &'static Icon, press: fn(&mut App
         .key("back")
 }
 
+/// A floating vault notice with a primary action and "Not now" (`install`, `shortcut`).
+pub(crate) fn offer_card(
+    k: &Kit,
+    key: &str,
+    head: impl Into<String>,
+    (body_key, body): (&str, impl Into<String>),
+    (action_key, action_label, on_action): (&str, &str, fn(&mut App)),
+    on_dismiss: fn(&mut App),
+) -> El {
+    let mut card = col()
+        .key(key)
+        .role("status")
+        .w(crate::view::NOTICE_W)
+        .self_center()
+        .padding(12.0)
+        .gap(10.0)
+        .radius(k.radius.lg)
+        .fill(k.c.layer_01)
+        .transition(Transition::offset(0.0, 12.0).combined(Transition::opacity()));
+    for shadow in k.shadow_layers(&k.elevation.floating) {
+        card = card.box_shadow(shadow);
+    }
+    card.child(
+        col()
+            .key("text")
+            .w_full()
+            .gap(2.0)
+            .child(
+                text(head.into())
+                    .font(k.ty.ui_medium)
+                    .color(k.c.text_strong)
+                    .wrap()
+                    .w_full(),
+            )
+            .child(muted(k, body_key, body)),
+    )
+    .child(
+        row()
+            .key("actions")
+            .gap(8.0)
+            .child(
+                Button::new(action_label)
+                    .variant(ButtonVariant::Neutral)
+                    .control_size(ControlSize::Large)
+                    .on_press(on_action)
+                    .build(k)
+                    .key(action_key),
+            )
+            .child(
+                Button::new("Not now")
+                    .variant(ButtonVariant::Ghost)
+                    .control_size(ControlSize::Large)
+                    .on_press(on_dismiss)
+                    .build(k)
+                    .key("dismiss"),
+            ),
+    )
+}
+
 // -------------------------------------------------------------------------------------------
 // Welcome
 
