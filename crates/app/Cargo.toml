@@ -25,10 +25,14 @@ rune-kit = { git = "https://github.com/anomalyco/rune", rev = "47c9523a5e0a77820
 rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "47c9523a5e0a77820e177ddff90a23dc1f8e94c2" }
 rustix = { version = "1.1.5", default-features = false, features = ["system", "fs", "std"] }
 serde_json = "1.0.151"
+sha2 = "0.11"
 thiserror = "2.0.21"
 tokio = { version = "1.53.3", features = ["rt", "net", "io-util", "macros", "sync", "time"] }
 url = "2.5.8"
 zeroize = "1.9"
+
+[build-dependencies]
+sha2 = "0.11"
 
 [dev-dependencies]
 tempfile = "3.27.0"
