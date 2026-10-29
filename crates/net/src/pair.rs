@@ -1,37 +1,40 @@
-//! Pairing (`deadbolt/pair/1`).
+//! Pairing (`deadbolt/pair/2`).
 //!
-//! The new device ("listener") calls [`Node::start_pairing`] and shows the
-//! [`PairingTicket`] (QR or text). The existing device ("dialer") calls [`Node::pair`]
-//! with it. On one bidirectional stream opened by the dialer:
+//! The new device ("listener") makes a [`PairingCode`] and calls [`Node::start_pairing`],
+//! which publishes its address under the code's rendezvous key (`rendezvous.rs`). The
+//! existing device ("dialer") calls [`Node::pair`] with the same code: it derives the
+//! key, resolves the address and dials. On one bidirectional stream opened by the dialer:
 //!
 //! ```text
-//! dialer -> listener  PROOF(HMAC(secret, "dialer"   || transcript))
-//! listener -> dialer  PROOF(HMAC(secret, "listener" || transcript))   (ticket consumed)
+//! dialer -> listener  PAKE(rendezvous key || SPAKE2 message A)
+//! listener -> dialer  PAKE(SPAKE2 message B)
+//! dialer -> listener  CONFIRM(HMAC(K, "dialer-confirm"))
+//! listener -> dialer  CONFIRM(HMAC(K, "listener-confirm"))     (code consumed)
 //! dialer -> listener  OFFER(blob)
-//! both                CONFIRM([1]) once the local user confirmed the code
 //! listener -> dialer  JOIN(blob)
 //! dialer -> listener  ENTRY(blob)* DONE
 //! listener -> dialer  RESULT
 //! ```
 //!
-//! `OFFER` precedes `CONFIRM` so the new device can display what it is being asked to
-//! join alongside the confirmation code before signing `JOIN`. Because `OFFER` is sent
-//! once the ticket secret is proven, a party that observed the ticket can learn the
-//! offer payload (in the CLI: the vault id and name, and the inviter's device name and
-//! network addresses) before the inviter compares the six-digit code; join consent and
-//! vault entries only flow after both sides confirm.
+//! SPAKE2 (Ed25519 group) runs on the code, with the dialer's and the listener's endpoint
+//! ids as identities A and B. `K = HMAC-SHA256(SPAKE2 key, "deadbolt/pair/2" || listener
+//! id || dialer id || TLS exporter)`, so the confirmations hold only on this QUIC
+//! connection between these two keys. Nothing but PAKE messages and confirmations flows
+//! before both confirmations check out, so a party without the code learns nothing about
+//! the vault or the inviter, and gets one guess per attempt.
+//!
+//! The rendezvous key in the first frame names the code the dialer resolved. A dialer
+//! holding an older code of this device is refused as `used` without spending the
+//! current one. The first dialer whose confirmation fails ends the code ("burns" it):
+//! the legitimate dialer never fails it, because one that typed a wrong code finds no
+//! device at all, so a failed confirmation means someone is guessing.
 
-use std::{
-    fmt,
-    net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr},
-    str::FromStr,
-    time::Duration,
-};
+use std::{convert::Infallible, fmt, sync::Arc, time::Duration};
 
-use data_encoding::BASE32_NOPAD;
 use hmac::{Hmac, KeyInit, Mac};
 use iroh::endpoint::{Connection, RecvStream, SendStream};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
+use spake2::{Ed25519Group, Identity, Password, Spake2};
 use tokio::{
     io::{AsyncRead, AsyncWrite, AsyncWriteExt},
     sync::mpsc,
@@ -42,236 +45,54 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::{
-    Blob, Node, PAIR_ALPN, PeerAddr, PeerId,
+    Blob, Node, PAIR_ALPN, PairingCode, PeerAddr, PeerId,
     error::{Error, HandlerError, Result, close, from_conn},
     frame::{self, tag},
+    rendezvous::{Client, Lookup, Record},
     sync::{fail, truncate},
 };
 
-/// Default lifetime of a pairing ticket.
-pub const DEFAULT_PAIRING_TTL: Duration = Duration::from_secs(10 * 60);
+/// How long a pairing code works.
+pub const DEFAULT_PAIRING_TTL: Duration = Duration::from_secs(5 * 60);
 
-const TICKET_PREFIX: &str = "DBPAIR";
-const TICKET_VERSION: u8 = 1;
-const MAX_TICKET_ADDRS: usize = 8;
 const PROOF_TIMEOUT: Duration = Duration::from_secs(30);
 /// Pairing connections waiting to be proved, and proofs running at once. Only one
 /// dialer is legitimate; the rest are refused as busy until a slot frees up, at the
 /// latest after [`PROOF_TIMEOUT`].
 const MAX_PROVING: usize = 16;
 const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
-const EXPORTER_LABEL: &[u8] = b"EXPORTER-deadbolt-pair-v1";
-const TRANSCRIPT_LABEL: &[u8] = b"deadbolt/pair/1";
-const DIALER_LABEL: &[u8] = b"dialer-proof";
-const LISTENER_LABEL: &[u8] = b"listener-proof";
-const CODE_LABEL: &[u8] = b"confirmation-code";
+/// How long the dialer looks for the new device's record and retries dialing it.
+pub const DEFAULT_FIND_TIMEOUT: Duration = Duration::from_secs(30);
+const FIND_INTERVAL: Duration = Duration::from_millis(500);
+/// Records older than this are ignored: a code's lifetime plus clock skew.
+const RECORD_MAX_AGE: Duration = Duration::from_secs(10 * 60);
+const REPUBLISH_INTERVAL: Duration = Duration::from_secs(2);
+const FINAL_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
+const EXPORTER_LABEL: &[u8] = b"EXPORTER-deadbolt-pair-v2";
+const TRANSCRIPT_LABEL: &[u8] = b"deadbolt/pair/2";
+const DIALER_LABEL: &[u8] = b"dialer-confirm";
+const LISTENER_LABEL: &[u8] = b"listener-confirm";
+/// A frame carrying the rendezvous key and a SPAKE2 message.
+const MAX_PAKE_FRAME: usize = 128;
 
-/// A one-time pairing ticket created by the new device.
-#[derive(Clone, PartialEq, Eq)]
-pub struct PairingTicket {
-    id: PeerId,
-    secret: Zeroizing<[u8; 32]>,
-    relay_url: Option<String>,
-    direct_addrs: Vec<SocketAddr>,
-}
-
-impl fmt::Debug for PairingTicket {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PairingTicket")
-            .field("id", &crate::fmt_id(&self.id))
-            .field("secret", &"<redacted>")
-            .field("relay_url", &self.relay_url)
-            .field("direct_addrs", &self.direct_addrs)
-            .finish()
-    }
-}
-
-impl PairingTicket {
-    /// The new device's id.
-    pub fn peer_id(&self) -> PeerId {
-        self.id
-    }
-
-    /// How to reach the new device.
-    pub fn addr(&self) -> PeerAddr {
-        PeerAddr {
-            id: self.id,
-            relay_url: self.relay_url.clone(),
-            direct_addrs: self.direct_addrs.clone(),
-        }
-    }
-
-    /// Binary form: `version(1) || id(32) || secret(32) || relay_len(1) || relay_url ||
-    /// addr_count(1) || addr*`, each addr `4 || ipv4(4) || port(2)` or
-    /// `6 || ipv6(16) || port(2)`, integers big-endian.
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(128);
-        out.push(TICKET_VERSION);
-        out.extend_from_slice(&self.id);
-        out.extend_from_slice(self.secret.as_ref());
-        let relay = self.relay_url.as_deref().unwrap_or("").as_bytes();
-        out.push(relay.len() as u8);
-        out.extend_from_slice(relay);
-        out.push(self.direct_addrs.len() as u8);
-        for addr in &self.direct_addrs {
-            match addr.ip() {
-                IpAddr::V4(ip) => {
-                    out.push(4);
-                    out.extend_from_slice(&ip.octets());
-                }
-                IpAddr::V6(ip) => {
-                    out.push(6);
-                    out.extend_from_slice(&ip.octets());
-                }
-            }
-            out.extend_from_slice(&addr.port().to_be_bytes());
-        }
-        out
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
-        let mut r = Reader(bytes);
-        if r.take(1)?[0] != TICKET_VERSION {
-            return Err(Error::InvalidTicket("unsupported version".into()));
-        }
-        let id: PeerId = r.array()?;
-        let secret = Zeroizing::new(r.array()?);
-        let relay_len = r.take(1)?[0] as usize;
-        let relay_url = match relay_len {
-            0 => None,
-            n => Some(
-                String::from_utf8(r.take(n)?.to_vec())
-                    .map_err(|_| Error::InvalidTicket("relay url is not utf-8".into()))?,
-            ),
-        };
-        let count = r.take(1)?[0] as usize;
-        let mut direct_addrs = Vec::with_capacity(count);
-        for _ in 0..count {
-            let ip = match r.take(1)?[0] {
-                4 => IpAddr::V4(Ipv4Addr::from(r.array::<4>()?)),
-                6 => IpAddr::V6(Ipv6Addr::from(r.array::<16>()?)),
-                _ => return Err(Error::InvalidTicket("bad address family".into())),
-            };
-            let port = u16::from_be_bytes(r.array()?);
-            direct_addrs.push(SocketAddr::new(ip, port));
-        }
-        if !r.0.is_empty() {
-            return Err(Error::InvalidTicket("trailing bytes".into()));
-        }
-        iroh::PublicKey::from_bytes(&id)
-            .map_err(|_| Error::InvalidTicket("invalid endpoint id".into()))?;
-        Ok(Self {
-            id,
-            secret,
-            relay_url,
-            direct_addrs,
-        })
-    }
-
-    /// Terminal QR code (unicode half blocks) of the ticket string.
-    pub fn to_qr(&self, style: crate::QrStyle) -> Result<String> {
-        crate::render_qr(&self.to_string(), style)
-    }
-}
-
-/// `DBPAIR` followed by the unpadded uppercase RFC 4648 base32 of [`PairingTicket::to_bytes`].
-/// Only uses QR alphanumeric characters, so QR codes encode it compactly.
-impl fmt::Display for PairingTicket {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{TICKET_PREFIX}{}",
-            BASE32_NOPAD.encode(&self.to_bytes())
-        )
-    }
-}
-
-/// Case-insensitive; ignores whitespace and `-` so the string survives copy/paste and
-/// manual grouping.
-impl FromStr for PairingTicket {
-    type Err = Error;
-
-    fn from_str(s: &str) -> Result<Self> {
-        let cleaned: String = s
-            .chars()
-            .filter(|c| !c.is_whitespace() && *c != '-')
-            .map(|c| c.to_ascii_uppercase())
-            .collect();
-        let body = cleaned
-            .strip_prefix(TICKET_PREFIX)
-            .ok_or_else(|| Error::InvalidTicket("missing DBPAIR prefix".into()))?;
-        let bytes = BASE32_NOPAD
-            .decode(body.as_bytes())
-            .map_err(|e| Error::InvalidTicket(format!("bad base32: {e}")))?;
-        Self::from_bytes(&bytes)
-    }
-}
-
-struct Reader<'a>(&'a [u8]);
-
-impl<'a> Reader<'a> {
-    fn array<const N: usize>(&mut self) -> Result<[u8; N]> {
-        let mut bytes = [0; N];
-        bytes.copy_from_slice(self.take(N)?);
-        Ok(bytes)
-    }
-
-    fn take(&mut self, n: usize) -> Result<&'a [u8]> {
-        if self.0.len() < n {
-            return Err(Error::InvalidTicket("truncated".into()));
-        }
-        let (head, rest) = self.0.split_at(n);
-        self.0 = rest;
-        Ok(head)
-    }
-}
-
-/// Six-digit code both devices display so the user can confirm they are talking to each
-/// other.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ConfirmationCode(u32);
-
-impl ConfirmationCode {
-    pub fn value(&self) -> u32 {
-        self.0
-    }
-}
-
-impl fmt::Display for ConfirmationCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{:06}", self.0)
-    }
-}
-
-impl fmt::Debug for ConfirmationCode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ConfirmationCode({self})")
-    }
-}
-
-/// What both sides know once the pairing proofs succeeded.
+/// What both sides know once the code was confirmed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PairingContext {
     pub local: PeerId,
     pub remote: PeerId,
-    pub code: ConfirmationCode,
 }
 
 /// Result of a successful pairing.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PairingOutcome {
     pub peer: PeerId,
-    pub code: ConfirmationCode,
 }
 
 /// New-device side of pairing.
 pub trait Joiner: Send + Sync {
-    /// Called once both sides proved the ticket secret and the inviter sent `offer`. Show
-    /// `ctx.code` and return whether the user confirmed it matches the other screen.
-    fn confirm(&self, ctx: &PairingContext, offer: &[u8]) -> impl Future<Output = bool> + Send;
-
     /// Produce the join blob (e.g. the new device's signed consent to join the vault named
-    /// in `offer`).
+    /// in `offer`). Runs only after both devices proved the code; an error ends the
+    /// pairing and is reported to the inviter.
     fn join(
         &self,
         ctx: &PairingContext,
@@ -279,6 +100,7 @@ pub trait Joiner: Send + Sync {
     ) -> impl Future<Output = Result<Vec<u8>, HandlerError>> + Send;
 
     /// The existing device's welcome blobs (e.g. the `Add` op, membership log and data).
+    /// The result is reported back, so the inviter learns whether they were accepted.
     fn receive(
         &self,
         ctx: &PairingContext,
@@ -288,10 +110,8 @@ pub trait Joiner: Send + Sync {
 
 /// Existing-device side of pairing.
 pub trait Inviter: Send + Sync {
-    /// See [`Joiner::confirm`].
-    fn confirm(&self, ctx: &PairingContext) -> impl Future<Output = bool> + Send;
-
     /// The offer blob sent to the new device (e.g. the vault id it is asked to join).
+    /// Runs only after both devices proved the code.
     fn offer(
         &self,
         ctx: &PairingContext,
@@ -306,38 +126,39 @@ pub trait Inviter: Send + Sync {
     ) -> impl Future<Output = Result<Vec<Blob>, HandlerError>> + Send;
 }
 
-/// Options for [`Node::start_pairing`].
+/// Options for [`Node::start_pairing`] and [`Node::pair`].
 #[derive(Clone, Copy, Debug)]
 pub struct PairingOptions {
-    /// How long the ticket is valid. Default 10 minutes.
+    /// How long the code works. Default 5 minutes.
     pub ttl: Duration,
-    /// How long to wait for a home relay before creating the ticket, so it carries a relay
-    /// hint. Ignored when relays are disabled. Default 10 seconds.
-    pub online_timeout: Duration,
+    /// How long [`Node::pair`] looks for the device waiting with the code. Default 30
+    /// seconds.
+    pub find_timeout: Duration,
 }
 
 impl Default for PairingOptions {
     fn default() -> Self {
         Self {
             ttl: DEFAULT_PAIRING_TTL,
-            online_timeout: Duration::from_secs(10),
+            find_timeout: DEFAULT_FIND_TIMEOUT,
         }
     }
 }
 
-/// An outstanding pairing ticket on the new device. Dropping it invalidates the ticket.
+/// An outstanding pairing code on the new device. Dropping it ends the code.
 pub struct PairingListener {
     node: Node,
-    ticket: PairingTicket,
+    code: PairingCode,
+    lookup: Arc<Lookup>,
     slot: u64,
     expires_at: Instant,
     rx: mpsc::Receiver<Connection>,
+    publication: Publication,
 }
 
 impl fmt::Debug for PairingListener {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PairingListener")
-            .field("ticket", &self.ticket)
             .field("expires_at", &self.expires_at)
             .finish_non_exhaustive()
     }
@@ -346,6 +167,70 @@ impl fmt::Debug for PairingListener {
 impl Drop for PairingListener {
     fn drop(&mut self) {
         self.node.inner.gate.close_pairing(self.slot);
+        self.publication.finish(Record::Closed);
+    }
+}
+
+/// Keeps the new device's record current until the code ends, then replaces it with
+/// the final one.
+struct Publication {
+    client: Client,
+    lookup: Arc<Lookup>,
+    task: Option<tokio::task::JoinHandle<()>>,
+}
+
+impl Publication {
+    fn start(node: &Node, client: Client, lookup: Arc<Lookup>) -> Self {
+        let task = tokio::spawn({
+            let node = node.clone();
+            let client = client.clone();
+            let lookup = lookup.clone();
+            async move {
+                let mut published: Option<PeerAddr> = None;
+                loop {
+                    let addr = node.addr();
+                    if published.as_ref() != Some(&addr) {
+                        match client
+                            .publish(&lookup, &Record::Waiting(addr.clone()))
+                            .await
+                        {
+                            Ok(()) => published = Some(addr),
+                            Err(error) => warn!(%error, "publishing the pairing record"),
+                        }
+                    }
+                    tokio::time::sleep(REPUBLISH_INTERVAL).await;
+                }
+            }
+        });
+        Self {
+            client,
+            lookup,
+            task: Some(task),
+        }
+    }
+
+    /// Stops republishing and publishes `record` in the background. Only the first call
+    /// does anything.
+    fn finish(&mut self, record: Record) {
+        let Some(task) = self.task.take() else { return };
+        task.abort();
+        let client = self.client.clone();
+        let lookup = self.lookup.clone();
+        tokio::spawn(async move {
+            // The aborted task may be mid-publish; the final record must land last.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "an aborted task's join error is the expected outcome"
+            )]
+            let _ = task.await;
+            match tokio::time::timeout(FINAL_PUBLISH_TIMEOUT, client.publish(&lookup, &record))
+                .await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => debug!(%error, "publishing the final pairing record"),
+                Err(_) => debug!("publishing the final pairing record timed out"),
+            }
+        });
     }
 }
 
@@ -353,29 +238,36 @@ struct Proven {
     conn: Connection,
     send: SendStream,
     recv: RecvStream,
-    transcript: Vec<u8>,
+    pairing: ProvenPairing,
 }
 
 /// Pairing over an authenticated stream. `transcript` must bind both identities and
 /// unique transport keying material; iroh obtains it from its TLS exporter.
-/// The adapter owns ticket expiry, single-use consumption and connection cancellation.
+/// The adapter owns rendezvous, code expiry, single use and connection cancellation.
 pub struct PairingStream {
     local: PeerId,
     remote: PeerId,
-    secret: Zeroizing<[u8; 32]>,
+    listener: bool,
+    password: Zeroizing<String>,
+    lookup: PeerId,
     transcript: Vec<u8>,
+    seed: Zeroizing<[u8; 32]>,
 }
 
 impl PairingStream {
-    /// Both sides supply the same exporter, listener id and dialer id.
-    /// Simulation-only: bypasses the iroh adapter's exporter binding and ticket checks.
+    /// Both sides supply the same code, rendezvous key and exporter. `seed` stands in
+    /// for the OS randomness of the SPAKE2 scalar so runs replay byte for byte.
+    /// Simulation-only: bypasses the iroh adapter's exporter binding, rendezvous and
+    /// code checks.
     #[cfg(feature = "sim")]
     pub fn new(
         local: PeerId,
         remote: PeerId,
-        secret: [u8; 32],
+        code: &PairingCode,
+        lookup: [u8; 32],
         exporter: [u8; 32],
         listener: bool,
+        seed: [u8; 32],
     ) -> Self {
         let (listener_id, dialer_id) = if listener {
             (local, remote)
@@ -385,8 +277,11 @@ impl PairingStream {
         Self {
             local,
             remote,
-            secret: Zeroizing::new(secret),
+            listener,
+            password: code.text(),
+            lookup,
             transcript: transcript_bytes(&listener_id, &dialer_id, &exporter),
+            seed: Zeroizing::new(seed),
         }
     }
 
@@ -394,22 +289,55 @@ impl PairingStream {
         PairingContext {
             local: self.local,
             remote: self.remote,
-            code: confirmation_code(&self.secret, &self.transcript),
         }
     }
 
-    /// Verify the dialer before consuming the one-time ticket. No application callback
-    /// runs and no listener proof is sent until this succeeds.
-    pub async fn prove(self, recv: &mut (impl AsyncRead + Unpin)) -> Result<ProvenPairing> {
-        let proof = frame::expect(recv, tag::PROOF, 64).await?;
-        if !verify(&self.secret, DIALER_LABEL, &self.transcript, &proof) {
-            return Err(Error::PairingProofFailed);
+    fn start(&self) -> (Spake2<Ed25519Group>, Vec<u8>) {
+        let (dialer, listener) = if self.listener {
+            (self.remote, self.local)
+        } else {
+            (self.local, self.remote)
+        };
+        let password = Password::new(self.password.as_bytes());
+        let a = Identity::new(&dialer);
+        let b = Identity::new(&listener);
+        let rng = SeedRng::new(&self.seed);
+        if self.listener {
+            Spake2::<Ed25519Group>::start_b_with_rng(&password, &a, &b, rng)
+        } else {
+            Spake2::<Ed25519Group>::start_a_with_rng(&password, &a, &b, rng)
         }
-        Ok(ProvenPairing(self))
     }
 
-    /// Existing-device exchange. Close the stream on error; cancel this future if
-    /// the authenticated connection closes while the user is confirming.
+    /// Runs the PAKE as the listener and checks the dialer's confirmation. No
+    /// application callback runs and nothing about the vault is sent until this
+    /// succeeds. [`Error::PairingCodeUsed`] means the dialer named another code;
+    /// [`Error::PairingCodeMismatch`] that it doesn't hold this one.
+    pub async fn prove(
+        self,
+        send: &mut (impl AsyncWrite + Unpin),
+        recv: &mut (impl AsyncRead + Unpin),
+    ) -> Result<ProvenPairing> {
+        let first = frame::expect(recv, tag::PAKE, MAX_PAKE_FRAME).await?;
+        if first.len() < 32 {
+            return Err(Error::Protocol("short pake frame".into()));
+        }
+        let (lookup, message) = first.split_at(32);
+        if lookup != self.lookup {
+            return Err(Error::PairingCodeUsed);
+        }
+        let (spake, reply) = self.start();
+        frame::write(send, tag::PAKE, &reply).await?;
+        let key = session_key(spake, message, &self.transcript)?;
+        let confirm = frame::expect(recv, tag::CONFIRM, 64).await?;
+        if !verify(&key, DIALER_LABEL, &confirm) {
+            return Err(Error::PairingCodeMismatch);
+        }
+        Ok(ProvenPairing { stream: self, key })
+    }
+
+    /// Existing-device exchange. Close the stream on error; cancel this future if the
+    /// authenticated connection closes meanwhile.
     pub async fn invite(
         self,
         send: &mut (impl AsyncWrite + Unpin),
@@ -417,20 +345,20 @@ impl PairingStream {
         max: usize,
         inviter: &impl Inviter,
     ) -> Result<PairingOutcome> {
-        frame::write(
-            send,
-            tag::PROOF,
-            &mac(&self.secret, DIALER_LABEL, &self.transcript),
-        )
-        .await?;
-        let proof = frame::expect(recv, tag::PROOF, 64).await?;
-        if !verify(&self.secret, LISTENER_LABEL, &self.transcript, &proof) {
-            return Err(Error::PairingProofFailed);
+        let (spake, message) = self.start();
+        let mut first = self.lookup.to_vec();
+        first.extend_from_slice(&message);
+        frame::write(send, tag::PAKE, &first).await?;
+        let reply = frame::expect(recv, tag::PAKE, MAX_PAKE_FRAME).await?;
+        let key = session_key(spake, &reply, &self.transcript)?;
+        frame::write(send, tag::CONFIRM, &mac(&key, DIALER_LABEL)).await?;
+        let confirm = frame::expect(recv, tag::CONFIRM, 64).await?;
+        if !verify(&key, LISTENER_LABEL, &confirm) {
+            return Err(Error::PairingCodeMismatch);
         }
         let ctx = self.context();
         let offer = inviter.offer(&ctx).await.map_err(Error::Handler)?;
         frame::write(send, tag::OFFER, &offer).await?;
-        confirm_exchange(send, recv, inviter.confirm(&ctx)).await?;
         let mut join = frame::expect(recv, tag::JOIN, max).await?;
         let join = std::mem::take(&mut *join);
         let welcome = inviter.welcome(&ctx, join).await.map_err(Error::Handler)?;
@@ -439,18 +367,18 @@ impl PairingStream {
             debug!(%error, "pairing send closed; peer result determines success");
         }
         frame::read_result(recv, max).await?;
-        Ok(PairingOutcome {
-            peer: ctx.remote,
-            code: ctx.code,
-        })
+        Ok(PairingOutcome { peer: ctx.remote })
     }
 }
 
-/// A dialer has proved the ticket secret. Consume the ticket before calling `complete`.
-pub struct ProvenPairing(PairingStream);
+/// A dialer proved the code. Consume the code before calling `complete`.
+pub struct ProvenPairing {
+    stream: PairingStream,
+    key: Zeroizing<[u8; 32]>,
+}
 
 impl ProvenPairing {
-    /// New-device exchange, after the transport adapter consumes the ticket.
+    /// New-device exchange, after the transport adapter consumed the code.
     pub async fn complete(
         self,
         send: &mut (impl AsyncWrite + Unpin),
@@ -458,16 +386,10 @@ impl ProvenPairing {
         max: usize,
         joiner: &impl Joiner,
     ) -> Result<PairingOutcome> {
-        let ctx = self.0.context();
-        frame::write(
-            send,
-            tag::PROOF,
-            &mac(&self.0.secret, LISTENER_LABEL, &self.0.transcript),
-        )
-        .await?;
+        let ctx = self.stream.context();
+        frame::write(send, tag::CONFIRM, &mac(&self.key, LISTENER_LABEL)).await?;
         let mut offer = frame::expect(recv, tag::OFFER, max).await?;
         let offer = std::mem::take(&mut *offer);
-        confirm_exchange(send, recv, joiner.confirm(&ctx, &offer)).await?;
         let join = joiner.join(&ctx, offer).await.map_err(Error::Handler)?;
         frame::write(send, tag::JOIN, &join).await?;
         let welcome = frame::read_entries(recv, max).await?;
@@ -478,35 +400,37 @@ impl ProvenPairing {
             debug!(%error, "pairing send closed after reporting result");
         }
         received.map_err(Error::Handler)?;
-        Ok(PairingOutcome {
-            peer: ctx.remote,
-            code: ctx.code,
-        })
+        Ok(PairingOutcome { peer: ctx.remote })
     }
 }
 
 impl PairingListener {
-    pub fn ticket(&self) -> &PairingTicket {
-        &self.ticket
+    pub fn code(&self) -> &PairingCode {
+        &self.code
     }
 
     pub fn expires_at(&self) -> Instant {
         self.expires_at
     }
 
-    /// Waits for an existing device to dial with the ticket and runs the pairing. Dialers
-    /// that fail the proof are dropped without consuming the ticket; the first one that
-    /// passes consumes it, whatever happens afterwards.
+    /// Waits for an existing device to dial with the code and runs the pairing. Dialers
+    /// naming another code, or failing before the PAKE, are dropped without spending
+    /// the code. The first one that completes the PAKE ends it: with a pairing if its
+    /// confirmation holds, with [`Error::PairingCodeMismatch`] if not.
     pub async fn complete(mut self, joiner: &impl Joiner) -> Result<PairingOutcome> {
         let local = self.node.id();
-        let secret = self.ticket.secret.clone();
         let mut proving = JoinSet::new();
         let proven = loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(self.expires_at) => return Err(Error::PairingExpired),
                 conn = self.rx.recv(), if proving.len() < MAX_PROVING => {
                     let Some(conn) = conn else { return Err(Error::PairingCancelled) };
-                    proving.spawn(listener_prove(conn, local, secret.clone()));
+                    proving.spawn(listener_prove(
+                        conn,
+                        local,
+                        self.code.text(),
+                        self.lookup.public,
+                    ));
                 }
                 Some(res) = proving.join_next(), if !proving.is_empty() => match res {
                     Ok(Ok(proven)) if Instant::now() < self.expires_at => break proven,
@@ -514,31 +438,31 @@ impl PairingListener {
                         proven.conn.close(close::PAIRING_UNAVAILABLE, b"expired");
                         return Err(Error::PairingExpired);
                     }
+                    Ok(Err(Error::PairingCodeMismatch)) => {
+                        self.node.inner.gate.consume_pairing(self.slot);
+                        self.publication.finish(Record::Used);
+                        return Err(Error::PairingCodeMismatch);
+                    }
                     Ok(Err(err)) => warn!("pairing attempt failed: {err}"),
                     Err(err) => warn!("pairing attempt panicked: {err}"),
                 },
             }
         };
         // Single use: nobody else can reach the pairing protocol from here on.
-        self.node.inner.gate.close_pairing(self.slot);
+        self.node.inner.gate.consume_pairing(self.slot);
+        self.publication.finish(Record::Used);
         drop(proving);
 
         let Proven {
             conn,
             mut send,
             mut recv,
-            transcript,
+            pairing,
         } = proven;
         let remote = *conn.remote_id().as_bytes();
-        let proven = ProvenPairing(PairingStream {
-            local,
-            remote,
-            secret,
-            transcript,
-        });
         let max = self.node.inner.max_frame_len;
         let result = tokio::select! {
-            result = proven.complete(&mut send, &mut recv, max, joiner) => result,
+            result = pairing.complete(&mut send, &mut recv, max, joiner) => result,
             _ = conn.closed() => Err(from_conn(&conn, Error::Closed("closed".into()))),
         };
         match result {
@@ -560,10 +484,11 @@ impl PairingListener {
 async fn listener_prove(
     conn: Connection,
     local: PeerId,
-    secret: Zeroizing<[u8; 32]>,
+    password: Zeroizing<String>,
+    lookup: PeerId,
 ) -> Result<Proven> {
     let remote = *conn.remote_id().as_bytes();
-    let (send, mut recv) = match tokio::time::timeout(PROOF_TIMEOUT, conn.accept_bi()).await {
+    let (mut send, mut recv) = match tokio::time::timeout(PROOF_TIMEOUT, conn.accept_bi()).await {
         Ok(Ok(streams)) => streams,
         Ok(Err(e)) => return Err(fail_pairing(&conn, Error::Closed(e.to_string())).await),
         Err(_) => {
@@ -572,23 +497,23 @@ async fn listener_prove(
         }
     };
     let attempt = async {
-        let transcript = transcript(&conn, &local, &remote)?;
-        let proven = PairingStream {
+        let stream = PairingStream {
             local,
             remote,
-            secret,
-            transcript,
-        }
-        .prove(&mut recv)
-        .await?;
-        Ok(proven.0.transcript)
+            listener: true,
+            password,
+            lookup,
+            transcript: transcript(&conn, &local, &remote)?,
+            seed: random_seed()?,
+        };
+        stream.prove(&mut send, &mut recv).await
     };
     match tokio::time::timeout(PROOF_TIMEOUT, attempt).await {
-        Ok(Ok(transcript)) => Ok(Proven {
+        Ok(Ok(pairing)) => Ok(Proven {
             conn,
             send,
             recv,
-            transcript,
+            pairing,
         }),
         Ok(Err(err)) => Err(fail_pairing(&conn, err).await),
         Err(_) => {
@@ -599,61 +524,96 @@ async fn listener_prove(
 }
 
 impl Node {
-    /// Creates a one-time pairing ticket for this (new) device and starts accepting pairing
-    /// connections for it. Replaces any previous outstanding ticket.
-    pub async fn start_pairing(&self, options: PairingOptions) -> Result<PairingListener> {
-        if self.inner.relays_enabled
-            && tokio::time::timeout(options.online_timeout, self.inner.endpoint.online())
-                .await
-                .is_err()
-        {
-            debug!("relay online deadline elapsed; pairing ticket uses available addresses");
-        }
-        let mut secret = Zeroizing::new([0u8; 32]);
-        getrandom::fill(secret.as_mut()).map_err(|e| Error::Io(std::io::Error::other(e)))?;
-        let addr = self.addr();
-        let ticket = PairingTicket {
-            id: addr.id,
-            secret,
-            relay_url: addr.relay_url.filter(|u| u.len() <= u8::MAX as usize),
-            direct_addrs: addr
-                .direct_addrs
-                .into_iter()
-                .take(MAX_TICKET_ADDRS)
-                .collect(),
-        };
+    /// Starts waiting for an existing device to pair with `code` (new-device side):
+    /// publishes this node's address under the code's rendezvous key and accepts
+    /// pairing connections until the code is used, expires or the listener is dropped.
+    /// Replaces any previous outstanding code.
+    pub async fn start_pairing(
+        &self,
+        code: &PairingCode,
+        options: PairingOptions,
+    ) -> Result<PairingListener> {
+        let lookup = Arc::new(Lookup::derive_async(code).await?);
+        let client = Client::new(&self.inner.rendezvous, &self.inner.endpoint)?;
         let expires_at = Instant::now() + options.ttl;
         let (tx, rx) = mpsc::channel(MAX_PROVING);
         let slot = self.inner.gate.open_pairing(expires_at, tx);
+        let publication = Publication::start(self, client, lookup.clone());
         Ok(PairingListener {
             node: self.clone(),
-            ticket,
+            code: code.clone(),
+            lookup,
             slot,
             expires_at,
             rx,
+            publication,
         })
     }
 
-    /// Pairs with a new device using its ticket (existing-device side).
+    /// Pairs with the new device showing `code` (existing-device side): finds it
+    /// through the rendezvous record and runs the pairing.
     pub async fn pair(
         &self,
-        ticket: &PairingTicket,
+        code: &PairingCode,
+        options: PairingOptions,
+        inviter: &impl Inviter,
+    ) -> Result<PairingOutcome> {
+        let lookup = Lookup::derive_async(code).await?;
+        let client = Client::new(&self.inner.rendezvous, &self.inner.endpoint)?;
+        let deadline = Instant::now() + options.find_timeout;
+        loop {
+            let found = client.resolve(&lookup.public, RECORD_MAX_AGE).await?;
+            match found {
+                Some(Record::Waiting(addr)) => {
+                    if addr.id == self.id() {
+                        return Err(Error::OwnCode);
+                    }
+                    let attempt = tokio::time::timeout_at(
+                        deadline,
+                        self.pair_with(&addr, code, lookup.public, inviter),
+                    )
+                    .await
+                    .unwrap_or(Err(Error::PairingNotFound));
+                    match attempt {
+                        // The record may still carry an address the device has left.
+                        Err(Error::Connect(error)) if Instant::now() < deadline => {
+                            debug!(%error, "dialing the new device");
+                        }
+                        Err(Error::Connect(_)) => return Err(Error::PairingNotFound),
+                        Err(Error::Rejected(reason)) if reason == "not pairing" => {
+                            return Err(Error::PairingNotFound);
+                        }
+                        other => return other,
+                    }
+                }
+                Some(Record::Used) => return Err(Error::PairingCodeUsed),
+                Some(Record::Closed) => return Err(Error::PairingNotFound),
+                None if Instant::now() >= deadline => return Err(Error::PairingNotFound),
+                None => {}
+            }
+            tokio::time::sleep(FIND_INTERVAL).await;
+        }
+    }
+
+    async fn pair_with(
+        &self,
+        addr: &PeerAddr,
+        code: &PairingCode,
+        lookup: PeerId,
         inviter: &impl Inviter,
     ) -> Result<PairingOutcome> {
         let local = self.id();
-        let addr = ticket.addr().to_endpoint_addr()?;
         let conn = self
             .inner
             .endpoint
-            .connect(addr, PAIR_ALPN)
+            .connect(addr.to_endpoint_addr()?, PAIR_ALPN)
             .await
             .map_err(|e| Error::Connect(e.to_string()))?;
-        if *conn.remote_id().as_bytes() != ticket.id {
+        if *conn.remote_id().as_bytes() != addr.id {
             conn.close(close::PROTOCOL, b"unexpected peer");
             return Err(Error::Protocol("connected to unexpected peer".into()));
         }
         let max = self.inner.max_frame_len;
-        let secret = ticket.secret.clone();
         let (mut send, mut recv) = match conn.open_bi().await {
             Ok(streams) => streams,
             Err(e) => return Err(fail_pairing(&conn, Error::Closed(e.to_string())).await),
@@ -663,9 +623,12 @@ impl Node {
         let result = async {
             let stream = PairingStream {
                 local,
-                remote: ticket.id,
-                secret,
-                transcript: transcript(&conn, &ticket.id, &local)?,
+                remote: addr.id,
+                listener: false,
+                password: code.text(),
+                lookup,
+                transcript: transcript(&conn, &addr.id, &local)?,
+                seed: random_seed()?,
             };
             tokio::select! {
                 result = stream.invite(&mut send, &mut recv, max, inviter) => result,
@@ -683,39 +646,18 @@ impl Node {
     }
 }
 
-/// Runs the local confirmation (aborting if the peer goes away meanwhile), then exchanges
-/// `CONFIRM` frames.
-async fn confirm_exchange(
-    send: &mut (impl AsyncWrite + Unpin),
-    recv: &mut (impl AsyncRead + Unpin),
-    confirm: impl Future<Output = bool>,
-) -> Result<()> {
-    let confirmed = confirm.await;
-    if !confirmed {
-        return Err(Error::PairingDeclined);
-    }
-    let ((), peer) = tokio::try_join!(
-        frame::write(send, tag::CONFIRM, &[1]),
-        frame::expect(recv, tag::CONFIRM, 64),
-    )?;
-    if *peer != [1] {
-        return Err(Error::PairingDeclined);
-    }
-    Ok(())
-}
-
 async fn fail_pairing(conn: &Connection, err: Error) -> Error {
     match &err {
-        Error::PairingProofFailed => conn.close(close::PAIRING_PROOF_FAILED, b"proof failed"),
-        Error::PairingDeclined => conn.close(close::PAIRING_DECLINED, b"declined"),
+        Error::PairingCodeMismatch => conn.close(close::PAIRING_PROOF_FAILED, b"wrong code"),
+        Error::PairingCodeUsed => conn.close(close::PAIRING_USED, b"code already used"),
         Error::Remote(m) => conn.close(close::ABORTED, truncate(m)),
         _ => return fail(conn, err).await,
     }
     err
 }
 
-/// `"deadbolt/pair/1" || listener id || dialer id || TLS exporter(32)`. The exporter value
-/// is unique to this QUIC connection, binding the proofs and the confirmation code to it.
+/// `"deadbolt/pair/2" || listener id || dialer id || TLS exporter(32)`. The exporter value
+/// is unique to this QUIC connection, binding the confirmations to it.
 fn transcript(conn: &Connection, listener: &PeerId, dialer: &PeerId) -> Result<Vec<u8>> {
     let mut ekm = Zeroizing::new([0u8; 32]);
     conn.export_keying_material(ekm.as_mut(), EXPORTER_LABEL, b"")
@@ -732,97 +674,295 @@ fn transcript_bytes(listener: &PeerId, dialer: &PeerId, ekm: &[u8; 32]) -> Vec<u
     t
 }
 
+fn random_seed() -> Result<Zeroizing<[u8; 32]>> {
+    let mut seed = Zeroizing::new([0u8; 32]);
+    getrandom::fill(seed.as_mut()).map_err(|e| Error::Io(std::io::Error::other(e)))?;
+    Ok(seed)
+}
+
+/// Finishes SPAKE2 with the peer's message and binds the result to the connection.
+/// A malformed message counts as a wrong code.
+fn session_key(
+    spake: Spake2<Ed25519Group>,
+    peer: &[u8],
+    transcript: &[u8],
+) -> Result<Zeroizing<[u8; 32]>> {
+    let shared = Zeroizing::new(spake.finish(peer).map_err(|_| Error::PairingCodeMismatch)?);
+    let mut key = Zeroizing::new([0u8; 32]);
+    key.copy_from_slice(
+        &hmac(&shared, b"session", transcript)
+            .finalize()
+            .into_bytes(),
+    );
+    Ok(key)
+}
+
 #[expect(clippy::expect_used, reason = "HMAC accepts keys of every length")]
-fn hmac(secret: &[u8; 32], label: &[u8], transcript: &[u8]) -> Hmac<Sha256> {
-    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(secret).expect("any key length");
+fn hmac(key: &[u8], label: &[u8], data: &[u8]) -> Hmac<Sha256> {
+    let mut m = <Hmac<Sha256> as KeyInit>::new_from_slice(key).expect("any key length");
     m.update(label);
     m.update(&[0]);
-    m.update(transcript);
+    m.update(data);
     m
 }
 
-fn mac(secret: &[u8; 32], label: &[u8], transcript: &[u8]) -> Vec<u8> {
-    hmac(secret, label, transcript)
-        .finalize()
-        .into_bytes()
-        .to_vec()
+fn mac(key: &[u8; 32], label: &[u8]) -> Vec<u8> {
+    hmac(key, label, &[]).finalize().into_bytes().to_vec()
 }
 
-fn verify(secret: &[u8; 32], label: &[u8], transcript: &[u8], tag: &[u8]) -> bool {
-    hmac(secret, label, transcript).verify_slice(tag).is_ok()
+fn verify(key: &[u8; 32], label: &[u8], tag: &[u8]) -> bool {
+    hmac(key, label, &[]).verify_slice(tag).is_ok()
 }
 
-fn confirmation_code(secret: &[u8; 32], transcript: &[u8]) -> ConfirmationCode {
-    let out = mac(secret, CODE_LABEL, transcript);
-    let mut prefix = [0; 8];
-    prefix.copy_from_slice(&out[..8]);
-    let n = u64::from_be_bytes(prefix);
-    ConfirmationCode((n % 1_000_000) as u32)
+/// SHA-256 in counter mode over a 32-byte seed: the SPAKE2 scalar's randomness, from the
+/// OS in production and from the simulation's seed under test.
+struct SeedRng {
+    seed: Zeroizing<[u8; 32]>,
+    counter: u64,
+    block: Zeroizing<[u8; 32]>,
+    used: usize,
 }
+
+impl SeedRng {
+    fn new(seed: &[u8; 32]) -> Self {
+        Self {
+            seed: Zeroizing::new(*seed),
+            counter: 0,
+            block: Zeroizing::new([0; 32]),
+            used: 32,
+        }
+    }
+}
+
+impl spake2::rand_core::TryRng for SeedRng {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        let mut bytes = [0; 4];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u32::from_le_bytes(bytes))
+    }
+
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        let mut bytes = [0; 8];
+        self.try_fill_bytes(&mut bytes)?;
+        Ok(u64::from_le_bytes(bytes))
+    }
+
+    fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Infallible> {
+        for byte in dst {
+            if self.used == 32 {
+                let mut h = Sha256::new();
+                h.update(self.seed.as_ref());
+                h.update(self.counter.to_be_bytes());
+                self.block.copy_from_slice(&h.finalize());
+                self.counter += 1;
+                self.used = 0;
+            }
+            *byte = self.block[self.used];
+            self.used += 1;
+        }
+        Ok(())
+    }
+}
+
+impl spake2::rand_core::TryCryptoRng for SeedRng {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn ticket() -> PairingTicket {
-        PairingTicket {
-            id: *iroh::SecretKey::from_bytes(&[7; 32]).public().as_bytes(),
-            secret: Zeroizing::new([9; 32]),
-            relay_url: Some("https://relay.example.com./".into()),
-            direct_addrs: vec![
-                "127.0.0.1:4242".parse().unwrap(),
-                "[fe80::1]:9".parse().unwrap(),
-            ],
+    fn code() -> PairingCode {
+        "violin-garden-tiger-lamp".parse().unwrap()
+    }
+
+    fn stream(code: &PairingCode, exporter: [u8; 32], listener: bool) -> PairingStream {
+        let (local, remote) = if listener {
+            ([2; 32], [1; 32])
+        } else {
+            ([1; 32], [2; 32])
+        };
+        let (listener_id, dialer_id) = if listener {
+            (local, remote)
+        } else {
+            (remote, local)
+        };
+        PairingStream {
+            local,
+            remote,
+            listener,
+            password: code.text(),
+            lookup: [5; 32],
+            transcript: transcript_bytes(&listener_id, &dialer_id, &exporter),
+            seed: random_seed().unwrap(),
         }
     }
 
+    /// Runs the PAKE and confirmations only: what each side concludes.
+    fn exchange(dialer: PairingStream, listener: PairingStream) -> (bool, bool) {
+        let (spake_a, msg_a) = dialer.start();
+        let (spake_b, msg_b) = listener.start();
+        let key_a = session_key(spake_a, &msg_b, &dialer.transcript).unwrap();
+        let key_b = session_key(spake_b, &msg_a, &listener.transcript).unwrap();
+        let listener_ok = verify(&key_b, DIALER_LABEL, &mac(&key_a, DIALER_LABEL));
+        let dialer_ok = verify(&key_a, LISTENER_LABEL, &mac(&key_b, LISTENER_LABEL));
+        (dialer_ok, listener_ok)
+    }
+
     #[test]
-    fn ticket_roundtrip() {
-        let t = ticket();
-        let s = t.to_string();
-        assert!(s.starts_with("DBPAIR"));
-        assert!(
-            s.chars()
-                .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    fn the_same_code_on_the_same_connection_confirms() {
+        let code = code();
+        assert_eq!(
+            exchange(stream(&code, [9; 32], false), stream(&code, [9; 32], true)),
+            (true, true)
         );
-        assert_eq!(s.parse::<PairingTicket>().unwrap(), t);
-        // copy/paste tolerant
-        let messy = format!("  {}\n{} ", s[..20].to_lowercase(), &s[20..]);
-        assert_eq!(messy.parse::<PairingTicket>().unwrap(), t);
-
-        let bare = PairingTicket {
-            relay_url: None,
-            direct_addrs: vec![],
-            ..t.clone()
-        };
-        assert_eq!(bare.to_string().parse::<PairingTicket>().unwrap(), bare);
-        assert!(!format!("{t:?}").contains("9, 9"));
     }
 
     #[test]
-    fn ticket_rejects_garbage() {
-        let s = ticket().to_string();
-        assert!("".parse::<PairingTicket>().is_err());
-        assert!(s[6..].parse::<PairingTicket>().is_err());
-        assert!(s[..s.len() - 3].parse::<PairingTicket>().is_err());
-        assert!(format!("{s}AA").parse::<PairingTicket>().is_err());
-        let mut bytes = ticket().to_bytes();
-        bytes[0] = 2;
-        assert!(PairingTicket::from_bytes(&bytes).is_err());
+    fn a_wrong_code_fails_both_confirmations() {
+        let other: PairingCode = "violin-garden-tiger-lady".parse().unwrap();
+        assert_eq!(
+            exchange(
+                stream(&code(), [9; 32], false),
+                stream(&other, [9; 32], true)
+            ),
+            (false, false)
+        );
+    }
+
+    /// A relay of the PAKE messages onto another connection (another exporter) or
+    /// between other keys fails: the key is bound to the transcript.
+    #[test]
+    fn confirmations_are_bound_to_the_connection_and_keys() {
+        let code = code();
+        assert_eq!(
+            exchange(stream(&code, [9; 32], false), stream(&code, [8; 32], true)),
+            (false, false)
+        );
+        let mut swapped = stream(&code, [9; 32], true);
+        swapped.local = [3; 32];
+        assert_eq!(
+            exchange(stream(&code, [9; 32], false), swapped),
+            (false, false)
+        );
+        // Labels keep a dialer's confirmation from passing as the listener's.
+        let key = Zeroizing::new([4; 32]);
+        assert!(!verify(&key, LISTENER_LABEL, &mac(&key, DIALER_LABEL)));
     }
 
     #[test]
-    fn ticket_qr_renders() {
-        let qr = ticket().to_qr(crate::QrStyle::LightOnDark).unwrap();
-        assert!(qr.lines().count() > 10);
+    fn a_seed_replays_the_same_pake_message() {
+        let code = code();
+        let mut a = stream(&code, [9; 32], false);
+        let mut b = stream(&code, [9; 32], false);
+        a.seed = Zeroizing::new([6; 32]);
+        b.seed = Zeroizing::new([6; 32]);
+        assert_eq!(a.start().1, b.start().1);
+        b.seed = Zeroizing::new([7; 32]);
+        assert_ne!(a.start().1, b.start().1);
+    }
+
+    struct Joins;
+
+    impl Joiner for Joins {
+        async fn join(&self, _: &PairingContext, _: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+            Ok(b"join".to_vec())
+        }
+        async fn receive(&self, _: &PairingContext, _: Vec<Blob>) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
+
+    struct Invites;
+
+    impl Inviter for Invites {
+        async fn offer(&self, _: &PairingContext) -> Result<Vec<u8>, HandlerError> {
+            Ok(b"offer".to_vec())
+        }
+        async fn welcome(&self, _: &PairingContext, _: Vec<u8>) -> Result<Vec<Blob>, HandlerError> {
+            Ok(vec![Blob::new(b"entry".to_vec())])
+        }
+    }
+
+    async fn spawn(dir: &std::path::Path) -> Node {
+        let key = iroh::SecretKey::generate().to_bytes();
+        let mut config = crate::NodeConfig::local_only(key);
+        config.rendezvous = crate::Rendezvous::Dir(dir.to_path_buf());
+        Node::spawn(
+            config,
+            std::sync::Arc::new(|_: &PeerId| false),
+            crate::node::tests::Nothing,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn within<F: Future>(fut: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(20), fut)
+            .await
+            .expect("timed out")
+    }
+
+    /// Someone who found the new device (its address leaked) but guesses the code gets
+    /// one try: the new device fails loudly and the code is spent, so the real
+    /// existing device hears that it was used.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_wrong_guess_burns_the_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = spawn(dir.path()).await;
+        let attacker = spawn(dir.path()).await;
+        let existing = spawn(dir.path()).await;
+        let code = PairingCode::generate().unwrap();
+        let lookup = Lookup::derive(&code).unwrap().public;
+        let listener = new
+            .start_pairing(&code, PairingOptions::default())
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move { listener.complete(&Joins).await });
+        let guess = PairingCode::generate().unwrap();
+        let attempt = within(attacker.pair_with(&new.addr(), &guess, lookup, &Invites)).await;
+        assert!(
+            matches!(attempt, Err(Error::PairingCodeMismatch)),
+            "{attempt:?}"
+        );
+        let joined = within(waiting).await.unwrap();
+        assert!(
+            matches!(joined, Err(Error::PairingCodeMismatch)),
+            "{joined:?}"
+        );
+        let late = within(existing.pair(&code, PairingOptions::default(), &Invites)).await;
+        assert!(matches!(late, Err(Error::PairingCodeUsed)), "{late:?}");
+    }
+
+    /// A dialer naming another code (an old one of this device) is refused without
+    /// spending the current code.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn another_codes_dialer_does_not_spend_this_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = spawn(dir.path()).await;
+        let stale = spawn(dir.path()).await;
+        let existing = spawn(dir.path()).await;
+        let old = PairingCode::generate().unwrap();
+        let old_lookup = Lookup::derive(&old).unwrap().public;
+        let code = PairingCode::generate().unwrap();
+        let listener = new
+            .start_pairing(&code, PairingOptions::default())
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move { listener.complete(&Joins).await });
+        let attempt = within(stale.pair_with(&new.addr(), &old, old_lookup, &Invites)).await;
+        assert!(
+            matches!(attempt, Err(Error::PairingCodeUsed)),
+            "{attempt:?}"
+        );
+        let paired = within(existing.pair(&code, PairingOptions::default(), &Invites)).await;
+        assert_eq!(paired.unwrap().peer, new.id());
+        assert_eq!(within(waiting).await.unwrap().unwrap().peer, existing.id());
     }
 
     struct NeverJoins;
 
     impl Joiner for NeverJoins {
-        async fn confirm(&self, _: &PairingContext, _: &[u8]) -> bool {
-            false
-        }
         async fn join(&self, _: &PairingContext, _: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
             Err("unused".into())
         }
@@ -831,28 +971,15 @@ mod tests {
         }
     }
 
-    /// Dialers that never prove the secret hold at most `MAX_PROVING` proof tasks
-    /// and `MAX_PROVING` queue slots; the next one is refused as busy.
+    /// Dialers that never run the PAKE hold at most `MAX_PROVING` proof tasks and
+    /// `MAX_PROVING` queue slots; the next one is refused as busy.
     #[tokio::test(flavor = "multi_thread")]
     async fn proofs_in_flight_are_capped() {
-        let members = std::sync::Arc::new(|_: &PeerId| false);
-        let spawn = || async {
-            let key = iroh::SecretKey::generate().to_bytes();
-            Node::spawn(
-                crate::NodeConfig::local_only(key),
-                members.clone(),
-                crate::node::tests::Nothing,
-            )
-            .await
-            .unwrap()
-        };
-        let new = spawn().await;
-        let dialer = spawn().await;
+        let dir = tempfile::tempdir().unwrap();
+        let new = spawn(dir.path()).await;
+        let dialer = spawn(dir.path()).await;
         let listener = new
-            .start_pairing(PairingOptions {
-                ttl: Duration::from_secs(60),
-                online_timeout: Duration::ZERO,
-            })
+            .start_pairing(&code(), PairingOptions::default())
             .await
             .unwrap();
         let waiting = tokio::spawn(async move { listener.complete(&NeverJoins).await });
@@ -884,17 +1011,5 @@ mod tests {
         let open = conns.iter().filter(|c| c.close_reason().is_none()).count();
         assert_eq!(open, 2 * MAX_PROVING);
         waiting.abort();
-    }
-
-    #[test]
-    fn proofs_are_bound_to_labels_and_transcript() {
-        let secret = [1; 32];
-        let a = mac(&secret, DIALER_LABEL, b"t");
-        assert!(verify(&secret, DIALER_LABEL, b"t", &a));
-        assert!(!verify(&secret, LISTENER_LABEL, b"t", &a));
-        assert!(!verify(&secret, DIALER_LABEL, b"u", &a));
-        assert!(!verify(&[2; 32], DIALER_LABEL, b"t", &a));
-        assert!(confirmation_code(&secret, b"t").value() < 1_000_000);
-        assert_eq!(ConfirmationCode(42).to_string(), "000042");
     }
 }

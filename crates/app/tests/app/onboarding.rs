@@ -84,12 +84,16 @@ fn every_state_renders_in_both_appearances() {
         ),
         ("join", &["Join from another device", "Continue"]),
         (
-            "ticket",
-            &["Pair from your other device", "deadbolt pair", "DBPA"],
+            "code",
+            &[
+                "Pair from your other device",
+                "violin garden tiger lamp",
+                "deadbolt pair violin-garden-tiger-lamp",
+                "Copy command",
+                "On a device with your vault, run:",
+            ],
         ),
-        ("code", &["Do the codes match?", "482 913", "They match"]),
-        ("joining", &["Joining personal", "Receiving personal"]),
-        ("join-declined", &["Stopped: the codes didn't match"]),
+        ("join-wrong-code", &["Someone tried a wrong code"]),
         ("join-cancelled", &["Join cancelled"]),
         ("join-failed", &["Couldn't join"]),
         (
@@ -125,14 +129,26 @@ fn every_state_renders_in_both_appearances() {
 }
 
 #[test]
-fn the_ticket_is_a_qr_code_and_the_copy_is_the_whole_command() {
-    let mut rt = runtime("ticket", true);
+fn the_code_shows_large_and_the_copy_is_the_whole_command() {
+    let mut rt = runtime("code", true);
     settle(&mut rt, 0.1);
-    let qr = find(&rt, "qr").expect("a QR tile");
-    assert!(qr.rect[2] >= 220.0, "big enough to scan across a desk");
-    rt.update(|s, tx| s.copy_ticket(tx));
+    let code = find(&rt, "code").expect("the code");
+    assert!(code.rect[3] >= 30.0, "large: {:?}", code.rect);
+    rt.update(|s, tx| s.copy_code(tx));
     rt.frame(FRAME);
     assert!(shows(&rt, "Copied"));
+}
+
+/// The other device pairs while the code shows: the code goes, the moment
+/// names who it came from, then the vault opens.
+#[test]
+fn pairing_while_the_code_shows_opens_the_vault() {
+    let mut rt = runtime("joining", true);
+    settle(&mut rt, 0.5);
+    assert!(rt.state.onboarding.code.is_none(), "wiped once paired");
+    settle(&mut rt, 0.6);
+    assert!(matches!(rt.state.onboarding.step, Step::Done { .. }));
+    assert!(shows(&rt, "Joined personal") && shows(&rt, "Synced from studio"));
 }
 
 #[test]
@@ -348,7 +364,7 @@ fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
         st.peers = 0;
         st
     };
-    for scene in ["creating", "ticket", "code", "joining"] {
+    for scene in ["creating", "code", "joining"] {
         let mut rt = runtime(scene, false);
         rt.frame(FRAME);
         let step = rt.state.onboarding.step.clone();
@@ -366,7 +382,7 @@ fn a_lock_from_the_agent_does_not_interrupt_a_create_or_join() {
 fn notices_say_how_serious_they_are() {
     for (scene, severity) in [
         ("join-cancelled", Severity::Neutral),
-        ("join-declined", Severity::Caution),
+        ("join-wrong-code", Severity::Caution),
         ("join-failed", Severity::Danger),
     ] {
         let rt = runtime(scene, true);
@@ -377,7 +393,7 @@ fn notices_say_how_serious_they_are() {
 
 #[test]
 fn nothing_animates_on_first_paint() {
-    for scene in ["welcome", "create", "ticket", "code", "creating"] {
+    for scene in ["welcome", "create", "code", "creating"] {
         let mut rt = runtime(scene, true);
         rt.frame(0.0);
         for e in rt.elements() {
@@ -394,16 +410,17 @@ fn board(clipboard: &MemoryClipboard) -> Option<String> {
     clipboard.text().map(|t| t.as_str().to_owned())
 }
 
-/// The ticket scene after "Copy command", with a clipboard the test can read.
-fn ticket_copied() -> (Runtime<App>, MemoryClipboard) {
-    let mut rt = runtime("ticket", true);
+/// The code scene after "Copy command", with a clipboard the test can read.
+fn code_copied() -> (Runtime<App>, MemoryClipboard) {
+    let mut rt = runtime("code", true);
     let clipboard = rune::clipboard::memory();
     rt.use_clipboard(&clipboard);
     rt.frame(FRAME);
-    rt.update(|s, tx| s.copy_ticket(tx));
+    rt.update(|s, tx| s.copy_code(tx));
     rt.frame(FRAME);
-    assert!(
-        board(&clipboard).is_some_and(|t| t.starts_with("deadbolt pair DBPAIR")),
+    assert_eq!(
+        board(&clipboard).as_deref(),
+        Some("deadbolt pair violin-garden-tiger-lamp"),
         "the whole command is on the clipboard"
     );
     (rt, clipboard)
@@ -440,32 +457,32 @@ fn copied_command_survives_a_stale_clock() {
 }
 
 #[test]
-fn a_copied_ticket_leaves_the_clipboard_with_the_screen() {
+fn a_copied_code_leaves_the_clipboard_with_the_screen() {
     // Closing the window.
-    let (mut rt, clip) = ticket_copied();
+    let (mut rt, clip) = code_copied();
     rt.update(|s, tx| s.close(tx));
     assert_eq!(board(&clip), None, "close clears it");
-    assert!(rt.state.onboarding.ticket.is_none());
+    assert!(rt.state.onboarding.code.is_none());
 
     // The agent stopping, which leaves onboarding for the failed screen.
-    let (mut rt, clip) = ticket_copied();
+    let (mut rt, clip) = code_copied();
     rt.update(|s, tx| s.apply(Done::Status(None), tx));
     assert!(matches!(rt.state.screen, Screen::Failed(_)));
     assert_eq!(board(&clip), None, "leaving clears it");
 
-    // The ticket expiring, which ends the join.
-    let (mut rt, clip) = ticket_copied();
+    // The code expiring, which ends the join.
+    let (mut rt, clip) = code_copied();
     rt.state.onboarding.worker = Worker::scripted(vec![(
         0.0,
-        Progress::Joined(Err(failure("the ticket expired"))),
+        Progress::Joined(Err(failure("the code expired"))),
     )]);
     rt.frame(FRAME);
     assert_eq!(rt.state.onboarding.step, Step::Join);
     assert_eq!(board(&clip), None, "the end of the join clears it");
 
     // Something the person copied since stays, and the button stops saying
-    // the ticket is copied.
-    let (mut rt, clip) = ticket_copied();
+    // the code is copied.
+    let (mut rt, clip) = code_copied();
     clip.set_text("mine");
     rt.frame(FRAME);
     assert!(rt.state.onboarding.copied.is_none());
@@ -474,13 +491,13 @@ fn a_copied_ticket_leaves_the_clipboard_with_the_screen() {
 }
 
 #[test]
-fn a_ticket_that_fails_to_copy_says_so() {
-    let mut rt = runtime("ticket", true);
+fn a_code_that_fails_to_copy_says_so() {
+    let mut rt = runtime("code", true);
     let clip = rune::clipboard::memory();
     clip.fail_writes(Some("no pasteboard"));
     rt.use_clipboard(&clip);
     rt.frame(FRAME);
-    rt.update(|s, tx| s.copy_ticket(tx));
+    rt.update(|s, tx| s.copy_code(tx));
     settle(&mut rt, 0.4);
     assert!(rt.state.onboarding.copied.is_none());
     assert!(shows(&rt, "Couldn't copy") && shows(&rt, "no pasteboard"));
@@ -488,20 +505,11 @@ fn a_ticket_that_fails_to_copy_says_so() {
 }
 
 #[test]
-fn a_late_they_match_after_they_dont_does_nothing() {
-    let mut rt = runtime("code", true);
-    rt.frame(FRAME);
-    rt.update(|s, _| s.answer_code(false));
-    rt.update(|s, _| s.answer_code(true));
-    assert!(matches!(rt.state.onboarding.step, Step::Confirm { .. }));
-}
-
-#[test]
 fn cancelling_while_the_device_is_set_up_waits_for_it() {
     let mut rt = runtime("join", true);
     rt.update(|s, _| {
         let o = &mut s.onboarding;
-        o.plan = vec![Stage::Protecting, Stage::MakingTicket];
+        o.plan = vec![Stage::Protecting, Stage::MakingCode];
         o.stage = Some(Stage::Protecting);
         o.step = Step::Working(Flow::Join);
     });

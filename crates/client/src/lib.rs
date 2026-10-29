@@ -224,7 +224,7 @@ pub struct Launch {
 pub async fn call<E>(
     paths: &Paths,
     command: Command,
-    mut on_event: impl FnMut(Event) -> Result<Option<bool>, E>,
+    mut on_event: impl FnMut(Event) -> Result<Option<Answer>, E>,
 ) -> Result<Reply, Error>
 where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
@@ -233,9 +233,9 @@ where
 }
 
 /// [`call`] with an event handler that may take its time, such as one waiting
-/// for a person to compare a confirmation code. If the agent finishes while
-/// an answer is pending (the other device declined, the ticket expired), its
-/// final message ends the call at once and the pending answer is dropped.
+/// for a person to choose a passphrase. If the agent finishes while an answer
+/// is pending, its final message ends the call at once and the pending answer
+/// is dropped.
 pub async fn converse<E, F>(
     paths: &Paths,
     command: Command,
@@ -243,7 +243,7 @@ pub async fn converse<E, F>(
 ) -> Result<Reply, Error>
 where
     E: Into<Box<dyn std::error::Error + Send + Sync>>,
-    F: Future<Output = Result<Option<bool>, E>>,
+    F: Future<Output = Result<Option<Answer>, E>>,
 {
     let stream = UnixStream::connect(&paths.socket)
         .await
@@ -278,7 +278,7 @@ where
                     }
                 };
                 if let Some(answer) = answer.map_err(|e| Error::Event(e.into()))? {
-                    write.write_all(&encode_line(&Answer { answer })?).await?;
+                    write.write_all(&encode_line(&answer)?).await?;
                 }
             }
             Message::Change { change } => return Err(Error::UnexpectedChange(change)),
@@ -681,10 +681,18 @@ mod tests {
         }
     }
 
+    /// A request for the fake agents below. Not `join`, which carries a
+    /// passphrase and so needs an agent check these tests don't install.
+    fn join() -> Command {
+        Command::Pair {
+            code: "violin-garden-tiger-lamp".into(),
+            vault: None,
+        }
+    }
+
     fn joining() -> Message {
         Message::Event {
-            event: Event::Joining {
-                code: "482913".into(),
+            event: Event::Joined {
                 vault: "personal".into(),
                 inviter: DeviceInfo {
                     id: "d1".into(),
@@ -693,6 +701,7 @@ mod tests {
                     connected: true,
                     last_seen: None,
                 },
+                passphrase: true,
             },
         }
     }
@@ -863,12 +872,14 @@ mod tests {
             let listener = UnixListener::bind(&paths.socket).unwrap();
             let server = agent(listener, |mut lines, mut write| async move {
                 let answer = lines.next_line().await.unwrap().unwrap();
-                assert_eq!(answer, r#"{"answer":true}"#);
+                assert_eq!(answer, r#"{"answer":true,"passphrase":"hunter2"}"#);
                 let done = Message::Ok { reply: Reply::Done };
                 write.write_all(&encode_line(&done).unwrap()).await.unwrap();
             });
-            let client = converse(&paths, Command::Join { confirm: true }, |_| async {
-                Ok::<_, std::convert::Infallible>(Some(true))
+            let client = converse(&paths, join(), |_| async {
+                Ok::<_, std::convert::Infallible>(Some(Answer::passphrase(protocol::Secret::new(
+                    "hunter2",
+                ))))
             });
             let (reply, ()) = tokio::join!(client, server);
             assert!(matches!(reply, Ok(Reply::Done)));
@@ -1047,11 +1058,11 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let paths = paths(dir.path());
             let listener = UnixListener::bind(&paths.socket).unwrap();
-            // The other device declines while this one is still looking at the code.
+            // The agent gives up while this one is still asking for the passphrase.
             let server = agent(listener, |_lines, mut write| async move {
                 let declined = Message::Error {
                     code: ErrorCode::Failed,
-                    message: "pairing confirmation code was not confirmed".into(),
+                    message: "the agent stopped".into(),
                     grant: None,
                     passkeys: None,
                 };
@@ -1060,13 +1071,13 @@ mod tests {
                     .await
                     .unwrap();
             });
-            let client = converse(&paths, Command::Join { confirm: true }, |_| {
-                std::future::pending::<Result<Option<bool>, std::convert::Infallible>>()
+            let client = converse(&paths, join(), |_| {
+                std::future::pending::<Result<Option<Answer>, std::convert::Infallible>>()
             });
             let (reply, ()) = tokio::join!(client, server);
             let error = reply.unwrap_err();
             assert_eq!(error.code(), Some(ErrorCode::Failed));
-            assert!(error.to_string().contains("not confirmed"));
+            assert!(error.to_string().contains("stopped"));
         });
     }
 }

@@ -503,7 +503,7 @@ pub async fn sends(paths: &Paths, args: SendsArgs) -> Result<()> {
     Ok(())
 }
 
-fn no_events(event: crate::protocol::Event) -> Result<Option<bool>> {
+fn no_events(event: crate::protocol::Event) -> Result<Option<crate::protocol::Answer>> {
     Err(anyhow!("unexpected event {event:?}"))
 }
 

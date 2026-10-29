@@ -15,7 +15,7 @@ pub enum QrStyle {
 /// row), with a quiet zone.
 pub fn render_qr(data: &str, style: QrStyle) -> Result<String> {
     let code = QrCode::with_error_correction_level(data.as_bytes(), EcLevel::M)
-        .map_err(|e| Error::InvalidTicket(format!("cannot render qr code: {e}")))?;
+        .map_err(|e| Error::Qr(e.to_string()))?;
     let mut renderer = code.render::<Dense1x2>();
     renderer.quiet_zone(true);
     if style == QrStyle::LightOnDark {
