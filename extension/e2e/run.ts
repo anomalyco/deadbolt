@@ -1,9 +1,17 @@
-// End-to-end run of the built extension in headless Chromium against a fake
-// native host (e2e/fake-host.py) and local test pages. Nothing here touches a
+// End-to-end run of the extension in headless Chromium against a fake
+// native host (e2e/fake-host.py) and local test pages. It builds its own copy
+// first (scripts/build.ts --e2e, into a temporary directory), the only build
+// whose provider pages may be on `.test` hosts. Nothing here touches a
 // real browser profile or vault: each run uses a fresh profile directory with
 // the fake host's manifest in it.
 //
-//   bun run e2e [--stills <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list]
+//   bun run e2e [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
+//
+// `--video <dir>` records the `film` run (the menu, a fill, a sign-in and
+// the save offer in the page) to <dir>/deadbolt-surface.webm.
+//
+// `--dist <dir>` uses an e2e build already made there (scripts/build.ts
+// --e2e <dir>) instead of building, so parallel shards share one build.
 //
 // `--only security` is the fast subset CI runs first: hidden and covered fields, form
 // swaps, opaque origins, value swaps, navigation during a fill and the
@@ -18,21 +26,30 @@
 
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
-import { join } from "node:path"
+import { join, resolve } from "node:path"
 
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const root = join(import.meta.dir, "..")
-const dist = join(root, "dist")
 const arg = (name: string) => {
   const i = process.argv.indexOf(name)
   return i > 0 ? process.argv[i + 1] : undefined
 }
+// An e2e build of its own (DEADBOLT_E2E: provider pages on .test hosts), never dist/.
+const prebuilt = arg("--dist")
+const dist = prebuilt ?? (await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-")))
+if (!prebuilt) {
+  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist], { stdout: "inherit", stderr: "inherit" })
+  if (!built.success) throw new Error("the e2e build failed")
+}
 const stills = arg("--stills")
+const video = arg("--video")
 const only = arg("--only")
-const deadbolt = arg("--deadbolt")
+// Absolute: Chromium reads a relative host path in the manifest as relative to the manifest.
+const deadbolt = arg("--deadbolt") && resolve(arg("--deadbolt")!)
 if (stills) await mkdir(stills, { recursive: true })
+if (video) await mkdir(video, { recursive: true })
 
 // ---- Test pages ---------------------------------------------------------------
 
@@ -53,9 +70,11 @@ const html = (title: string, body: string, headers: Record<string, string> = {})
 const PROBE = () => {
   const probe = { added: [] as string[], blurs: 0 }
   ;(window as unknown as { __probe: typeof probe }).__probe = probe
+  // Init scripts can run before <html> exists: watch the document, and keep what lands on <html> itself.
   new MutationObserver((records) => {
-    for (const r of records) for (const n of Array.from(r.addedNodes)) if (n.nodeName !== "HEAD" && n.nodeName !== "BODY") probe.added.push(n.nodeName)
-  }).observe(document.documentElement, { childList: true })
+    for (const r of records)
+      if (r.target === document.documentElement) for (const n of Array.from(r.addedNodes)) if (n.nodeName !== "HEAD" && n.nodeName !== "BODY" && n.nodeType === 1) probe.added.push(n.nodeName)
+  }).observe(document, { childList: true, subtree: true })
   window.addEventListener("blur", () => probe.blurs++)
 }
 
@@ -343,6 +362,18 @@ const DETECT_FRAMES: Record<string, string> = {
   "google-button": `<div role="button" style="width:240px;height:40px;border:1px solid #ccc">Sign in with Google</div>`,
 }
 
+/** Step two of a sign-in: the password, for the username step one sent (shown, and carried in a hidden box). */
+const FLOW_PASSWORD = (email: string) => `<h1>Enter your password</h1><p>${email}</p><form method="post" action="/flow/nav/next" novalidate>
+  <input type="hidden" name="email" value="${email}">
+  <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+  <button type="submit" id="go">Sign in</button></form><p><a id="other" href="/flow/nav">Use a different account</a></p>`
+
+/** Step three: a six-digit code, one box per digit. */
+const FLOW_CODE = (email: string) => `<h1>Two-step verification</h1><p>Enter the code from your authenticator app.</p><form method="post" action="/flow/done" novalidate>
+  <input type="hidden" name="email" value="${email}">
+  <div style="display:flex;gap:6px">${[1, 2, 3, 4, 5, 6].map((i) => `<input id="d${i}" name="d${i}" maxlength="1" inputmode="numeric" autocomplete="one-time-code" style="width:40px;text-align:center">`).join("")}</div>
+  <button type="submit" id="go">Verify</button></form>`
+
 // novalidate: "admin" isn't an email, and the browser would block the submit.
 const loginForm = (action: string) => `<h1>Sign in to Acme</h1><form method="post" action="${action}" novalidate>
   <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
@@ -406,7 +437,140 @@ const server = Bun.serve({
   hostname: "127.0.0.1",
   async fetch(req): Promise<Response> {
     const url = new URL(req.url)
+    // Where the sign-in outcome forms post (see signInOutcomes). The email
+    // posted is shown back where a real site would show the account.
+    if (req.method === "POST") {
+      const email = String((await req.formData().catch(() => null))?.get("email") ?? "").replace(/[<>&"]/g, "")
+      // Multi-step sign-ins (see signInSessions): the password page, then a
+      // code page for the login that has one, then the signed-in page.
+      if (url.pathname === "/flow/nav/password") return html("Enter your password", FLOW_PASSWORD(email))
+      if (url.pathname === "/flow/nav/next")
+        return email === "kit@acme.test"
+          ? html("Two-step verification", FLOW_CODE(email))
+          : html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
+      if (url.pathname === "/flow/done") return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p><a href="/flow/nav">Sign out</a>`)
+      if (url.pathname === "/flow/failed") return Response.redirect(`/flow/failed?email=${encodeURIComponent(email)}`, 303)
+      switch (url.pathname) {
+        case "/":
+          return html("Acme", `<h1>Acme</h1><div role="alert" class="notice">Incorrect password. Try again.</div><p><a href="/outcome/login?to=/">Back</a></p>`)
+        case "/outcome/wait":
+          return html(
+            "Just a moment...",
+            `<h1>Checking your browser</h1><p>This takes a few seconds.</p><script>setTimeout(() => location.assign("/outcome/welcome?u=" + encodeURIComponent(${JSON.stringify(email)})), 9000)</script>`,
+          )
+        case "/auth/complete":
+          return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${email}</strong>.</p>`)
+        // A signed-in page with its own fixed header, links at the top right.
+        case "/outcome/header":
+          return new Response(
+            `<!doctype html><html><head><meta charset="utf-8"><title>Acme</title><style>
+              body{margin:0;font:15px/1.5 system-ui,sans-serif;background:#f4f4f5}
+              header{position:fixed;top:0;left:0;right:0;height:56px;display:flex;align-items:center;justify-content:space-between;padding:0 20px;background:#fff;border-bottom:1px solid #e4e4e7}
+              header nav{display:flex;gap:16px;align-items:center}
+              main{padding:120px 40px}
+            </style></head><body><header><strong>Acme</strong><nav><span>${email}</span><a id="settings" href="#">Settings</a><a id="signout" href="#">Sign out</a></nav></header>
+            <main><h1>Dashboard</h1><p>Signed in.</p></main></body></html>`,
+            { headers: { "content-type": "text/html; charset=utf-8" } },
+          )
+      }
+    }
     switch (url.pathname) {
+      // Step one, the username alone. With ?accounts, the next step is on
+      // another origin of the same site (accounts.acme.test).
+      case "/flow/nav": {
+        // ?to=<host>: the next step on another host of acme.test (accounts, or a user-content sibling).
+        const to = url.searchParams.get("to")
+        const next = to ? `http://${to}.acme.test:${url.port}/flow/nav/password` : url.searchParams.has("accounts") ? `http://accounts.acme.test:${url.port}/flow/nav/password` : "/flow/nav/password"
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form method="post" action="${next}" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+            <button type="submit" id="go">Continue</button></form>`,
+        )
+      }
+      // The same two steps in one document: Continue swaps the username box for a password box.
+      case "/flow/spa":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" novalidate>
+            <div id="step"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username"></div>
+            <button type="submit" id="go">Continue</button></form><script>
+            let who = ""
+            document.getElementById("f").addEventListener("submit", (e) => {
+              e.preventDefault()
+              if (!who) {
+                who = document.getElementById("email").value
+                document.getElementById("step").innerHTML = '<p>' + who.replace(/[<>&]/g, "") + '</p><label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">'
+                document.getElementById("go").textContent = "Sign in"
+              } else location.assign("/flow/spa/done?u=" + encodeURIComponent(who))
+            })
+          </script>`,
+        )
+      case "/flow/spa/done":
+        return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</strong>.</p>`)
+      // A site's sign-in page with a "Continue with Google" button, and a fake
+      // Google account chooser on accounts.google.test (mapped to this server).
+      case "/social":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1>${loginForm("/home").replace("</form>", "</form>")}
+          <p style="text-align:center;color:#71717a;margin:18px 0 0">or</p>
+          <button id="google" type="button" style="background:#fff;color:#18181b;border:1px solid #d4d4d8">Continue with Google</button>
+          <script>document.getElementById("google").addEventListener("click", () => location.assign("http://accounts.google.test:${url.port}/o/oauth2/chooser?return=" + encodeURIComponent(location.origin + "/social/done")))</script>`,
+        )
+      case "/social/done":
+        return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("as") ?? "").replace(/[<>&"]/g, "")}</strong> with Google.</p>`)
+      case "/o/oauth2/chooser": {
+        const back = url.searchParams.get("return") ?? "/"
+        const tile = (name: string, email: string) =>
+          `<li style="list-style:none;border-top:1px solid #e4e4e7"><div role="link" tabindex="0" data-identifier="${email}" style="display:flex;gap:12px;align-items:center;padding:12px 8px;cursor:pointer"><span style="width:28px;height:28px;border-radius:50%;background:#e0e7ff;display:grid;place-items:center">${name[0]}</span><span><span style="display:block;font-weight:500">${name}</span><span style="color:#71717a;font-size:13px">${email}</span></span></div></li>`
+        return html("Sign in - Google Accounts", `<h1 style="font-weight:400">Choose an account</h1><p>to continue to Acme</p><ul style="padding:0">${tile("Other Person", "other@gmail.com")}${tile("Kit Mercer", "kit@gmail.com")}</ul>
+          <script>for (const t of document.querySelectorAll("[data-identifier]")) t.addEventListener("click", () => location.assign(${JSON.stringify(back)} + "?as=" + encodeURIComponent(t.dataset.identifier)))</script>`)
+      }
+      // A form whose "button" is a plain div: a click on it submits by script
+      // (form.requestSubmit()). ?step: the username alone, on to the password page.
+      case "/flow/divbutton": {
+        const step = url.searchParams.has("step")
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" method="post" action="${step ? "/flow/nav/password" : "/auth/complete"}" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+            ${step ? "" : `<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">`}
+            <div id="lets-go" class="fake-button" style="margin-top:18px;height:38px;border-radius:8px;background:#18181b;color:#fff;display:grid;place-items:center;cursor:pointer">Let's go</div>
+          </form><script>document.getElementById("lets-go").addEventListener("click", () => document.getElementById("f").requestSubmit())</script>`,
+        )
+      }
+      // Pages that try to step themselves once Deadbolt fills the username: one
+      // swaps the username box for a password box, one submits the form.
+      case "/flow/sneaky-swap":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" novalidate><div id="step"><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username"></div><button type="submit">Continue</button></form><script>
+            document.getElementById("email").addEventListener("change", () => setTimeout(() => {
+              document.getElementById("step").innerHTML = '<label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">'
+            }, 300))
+          </script>`,
+        )
+      case "/flow/sneaky-submit":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1><form id="f" method="post" action="/flow/nav/password" novalidate><label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username"><button type="submit">Continue</button></form><script>
+            document.getElementById("email").addEventListener("change", () => setTimeout(() => document.getElementById("f").requestSubmit(), 300))
+          </script>`,
+        )
+      // A sign-in that failed, back with the username it was given (one no login has).
+      case "/flow/failed":
+        return html(
+          "Sign in to Acme",
+          `<h1>Sign in to Acme</h1>${url.searchParams.has("email") ? `<div role="alert">Incorrect password. Try again.</div>` : ""}<form method="post" action="/flow/failed" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" value="${(url.searchParams.get("email") ?? "").replace(/[<>&"]/g, "")}">
+            <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+            <button type="submit">Sign in</button></form>`,
+        )
+      case "/outcome/login":
+        return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
+      case "/outcome/welcome":
+        return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
       case "/login": {
         const form = loginForm(url.searchParams.get("next") === "home" ? "/home" : "/mfa")
         // A password the page enables only once the email box is focused.
@@ -591,6 +755,12 @@ interface LaunchOptions {
   bfcache?: boolean
   /** Runs the deadbolt binary as the host, with this environment. */
   realHost?: Record<string, string>
+  /** Records every page to this directory. */
+  record?: string
+  /** Device pixels per CSS pixel (2 unless set). */
+  scale?: number
+  /** The fake host adds "Sign in with Google" logins. */
+  signIn?: boolean
 }
 
 async function launch(options: LaunchOptions = {}): Promise<Run> {
@@ -614,15 +784,18 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     headless: true,
     colorScheme: options.scheme ?? "light",
     viewport: { width: 900, height: 640 },
-    deviceScaleFactor: 2,
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`],
+    deviceScaleFactor: options.scale ?? 2,
+    // *.acme.test is one site on this machine: two origins of it for the sign-in session runs.
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.google.test 127.0.0.1"],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
+    ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
       ...process.env,
       DEADBOLT_FAKE_STATUS: options.status ?? "ready",
       DEADBOLT_FAKE_LOG: log,
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
+      DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       ...options.realHost,
     },
   })
@@ -651,8 +824,15 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     }
     chrome.runtime.onMessage.addListener((m: { type?: string; token?: string; kind?: unknown; roles?: unknown; loginish?: unknown }, s) => {
       if (s.tab) seen.push(`${m?.type}@${s.frameId}:${s.url ? new URL(s.url).pathname : "?"}`)
-      if (s.tab && s.url && (m?.type === "db:page" || m?.type === "db:quiet"))
-        verdicts.push({ type: m.type, frame: s.frameId, url: s.url.split("?")[0], kind: m.kind, roles: m.roles, loginish: m.loginish })
+      if (s.tab && s.url && m?.type === "db:page") verdicts.push({ type: m.type, frame: s.frameId, url: s.url.split("?")[0], kind: m.kind, roles: m.roles })
+      // A page with no form settled: ask it what it shows, as the save check does, for whether it's still a sign-in step.
+      if (s.tab?.id !== undefined && s.url && m?.type === "db:settled" && s.frameId === 0) {
+        const url = s.url.split("?")[0]
+        void send(s.tab.id, { type: "db:probe" }, { frameId: 0 }).then(
+          (f) => verdicts.push({ type: "db:quiet", frame: 0, url, loginish: (f as { loginish?: unknown } | null)?.loginish === true }),
+          () => {},
+        )
+      }
       if (m?.type === "db:menu-load" && m.token) tokens.push(m.token)
     })
   })
@@ -707,11 +887,36 @@ async function until<T>(what: string, fn: () => Promise<T | null | undefined | f
   return null
 }
 
+/** Like until, but not finding it in time is an answer, not a failure. */
+async function soon<T>(fn: () => T | null | undefined | false, timeout: number): Promise<T | null> {
+  const end = Date.now() + timeout
+  while (Date.now() < end) {
+    const v = fn()
+    if (v) return v
+    await Bun.sleep(100)
+  }
+  return null
+}
+
 const extensionFrame = (page: Page, file: string) => page.frames().find((f) => f.url().includes(`/${file}`)) ?? null
 
 async function shot(page: Page, name: string, clip?: { x: number; y: number; width: number; height: number }) {
   if (!stills) return
   await page.screenshot({ path: join(stills, `${name}.png`), clip })
+}
+
+/** A still of the surface in `frame`, with room for its shadow, and (`include`) the field it belongs to. */
+async function shotAround(page: Page, name: string, frame: Frame, include?: string) {
+  if (!stills) return
+  const box = await (await frame.frameElement().catch(() => null))?.boundingBox()
+  if (!box) return
+  let [x0, y0, x1, y1] = [box.x, box.y, box.x + box.width, box.y + box.height]
+  const extra = include ? await page.locator(include).boundingBox().catch(() => null) : null
+  if (extra) [x0, y0, x1, y1] = [Math.min(x0, extra.x), Math.min(y0, extra.y), Math.max(x1, extra.x + extra.width), Math.max(y1, extra.y + extra.height)]
+  const view = page.viewportSize() ?? { width: 900, height: 640 }
+  // The shadow reaches about 30px down and 20px to the sides.
+  const clip = { x: Math.max(0, x0 - 40), y: Math.max(0, y0 - 32), right: Math.min(view.width, x1 + 40), bottom: Math.min(view.height, y1 + 56) }
+  await page.screenshot({ path: join(stills, `${name}.png`), clip: { x: clip.x, y: clip.y, width: clip.right - clip.x, height: clip.bottom - clip.y } })
 }
 
 /** The popup page, pointed at a tab: tabs.query would otherwise find the popup's own tab. */
@@ -786,7 +991,11 @@ async function fillAndTotp(scheme: Scheme) {
       })
       check(!fonts.includes("error") && fonts.includes("loaded"), `Geist fonts load in the menu (${fonts})`)
       await Bun.sleep(500)
-      await shot(page, `menu-${scheme}`, { x: 250, y: 80, width: 420, height: 300 })
+      await shotAround(page, `menu-${scheme}`, menu, "#email")
+      // The frame is exactly the surface: no transparent strip of it over the page.
+      const frameBox = await (await menu.frameElement()).boundingBox()
+      const surfaceBox = await menu.evaluate(() => document.getElementById("surface")!.getBoundingClientRect().toJSON() as DOMRect)
+      check(!!frameBox && Math.abs(frameBox.height - surfaceBox.height) < 1 && Math.abs(frameBox.width - surfaceBox.width) < 1, `the menu's frame is exactly its surface (${frameBox?.height} vs ${surfaceBox.height})`)
       await settled(menu)
       // Keyboard: ↓ moves into the menu, ↓↑ choose, ⏎ fills.
       await page.keyboard.press("ArrowDown")
@@ -797,7 +1006,12 @@ async function fillAndTotp(scheme: Scheme) {
       await until("username and password fill", async () => (await page.inputValue("#password")) === "correct horse")
       check((await page.inputValue("#email")) === "kit@acme.test", "username filled")
       check((await page.inputValue("#password")) === "correct horse", "password filled")
-      check(!extensionFrame(page, "menu.html"), "menu closes after filling")
+      // The menu folded into a pill on the field, which says Filled and goes by itself.
+      const filled = await until("the pill says Filled", async () => (await menu.locator(".pill.ok .pill-label[aria-label='Filled']").count().catch(() => 0)) > 0)
+      check(!!filled, "the menu folds into a pill that says Filled")
+      await Bun.sleep(350)
+      await shotAround(page, `surface-filled-${scheme}`, menu, "#email")
+      check(!!(await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)), "and goes by itself")
       await page.click("button[type=submit]")
       await page.waitForURL("**/mfa")
       const code = await until("one-time code fills on the next page", async () => (await page.inputValue("#code")) === "492039")
@@ -837,12 +1051,15 @@ async function fillAndTotp(scheme: Scheme) {
 async function type(run: Run, page: Page, selector: string, text: string) {
   await formFound(page)
   await page.click(selector)
-  // The test site always has logins, so the menu always comes; wait for it
-  // rather than click where it's about to appear.
-  if (await until(`menu opens on ${selector}`, () => extensionFrame(page, "menu.html"), 15_000)) {
+  // The test site always has logins, so the username box's menu always
+  // comes; wait for it rather than click where it's about to appear. A
+  // password box opens none when the username typed names no saved login.
+  const password = (await page.locator(selector).getAttribute("type")) === "password"
+  const menu = password ? await soon(() => extensionFrame(page, "menu.html"), 1500) : await until(`menu opens on ${selector}`, () => extensionFrame(page, "menu.html"), 15_000)
+  if (menu) {
     await page.keyboard.press("Escape")
     await until("esc closes the menu", () => !extensionFrame(page, "menu.html"))
-  } else await diagnose(run, page, `no menu on ${selector}`)
+  } else if (!password) await diagnose(run, page, `no menu on ${selector}`)
   await page.locator(selector).pressSequentially(text)
 }
 
@@ -866,13 +1083,31 @@ async function savePrompt(scheme: Scheme) {
   const run = await launch({ scheme })
   const page = await run.context.newPage()
   try {
-    // A form that posts and navigates, submitted with a click.
-    await signIn(run, page, "/login?next=home", "new@acme.test", "a new password")
-    await page.waitForURL("**/home")
+    // A form that posts and navigates, submitted with a click, to a page that shows the account.
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "new@acme.test", "a new password")
+    await page.waitForURL("**/auth/complete")
     if (!(await offered(run))) await diagnose(run, page, "new login, click + navigation")
     else {
-      // The offer is browser UI: nothing was added to the page, which can't tell what the check said.
-      check((await probe(page)).added.length === 0, "nothing is added to the page for an offer")
+      // A confirmed sign-in shows the offer in the page too, as Deadbolt's
+      // surface: one element in a closed shadow root holding an extension
+      // frame, which the page can't look into.
+      const surface = await until("the save offer shows in the page", () => extensionFrame(page, "menu.html"))
+      // The host is a popover with a random custom-element name (see topLayer).
+      const added = (await probe(page)).added
+      check(added.length === 1 && /^[A-Z]{5}-[A-Z]{5}$/.test(added[0]), `only one element is added to the page for an offer (${JSON.stringify(added)})`)
+      const sees = await page.evaluate(() => {
+        const host = [...document.documentElement.children].find((el) => el.matches(":popover-open"))
+        const frames: string[] = []
+        for (let i = 0; i < window.frames.length; i++)
+          try {
+            frames.push(window.frames[i].document.body.innerText)
+          } catch {
+            frames.push("blocked")
+          }
+        return { shadow: host?.shadowRoot === null, inside: host?.innerHTML ?? null, frames }
+      })
+      check(!!surface && sees.shadow && sees.inside === "" && sees.frames.every((f) => f === "blocked"), `the page can't read the offer (${JSON.stringify(sees)})`)
+      check(!((await surface?.content()) ?? "").includes("a new password"), "the surface never holds the password")
       check(!(await hostLog(run)).some((r) => r.type === "save"), "nothing saved before the click")
       const { p, title } = await offerIn(run, `offer-save-${scheme}`)
       check(title === "Save login for localhost?", `the popup asks to save (${title})`)
@@ -881,9 +1116,10 @@ async function savePrompt(scheme: Scheme) {
       await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
       const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
       check(save?.origin === site && save.entry?.username === "new@acme.test", "save carries the submitted login")
-      check(save?.entry?.title === "Sign in to Acme" && save.entry?.url === `${site}/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
+      check(save?.entry?.title === "Sign in to Acme" && save.entry?.url === `${site}/outcome/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
       check(!!(await until("popup confirms", async () => ((await p.locator(".done").textContent().catch(() => "")) ?? "").includes("Saved"))), "the popup confirms the save")
       check(!!(await until("badge clears", async () => (await badge(run)) === "")), "and the badge clears")
+      check(!!(await until("the surface closes", () => !extensionFrame(page, "menu.html"))), "and answering in the popup closes the offer in the page")
       await p.close()
     }
 
@@ -1065,6 +1301,17 @@ async function signInShapes() {
     const checks = (await hostLog(run)).filter((r) => r.type === "check")
     check(checks.some((r) => r.username === "two@acme.test" && r.password === "two step"), "email-first check pairs the username from step one")
 
+    // A div "button" whose click submits by script: the user's click still captures, and the save is offered.
+    await newTurn(run)
+    await page.goto(`${site}/flow/divbutton`)
+    await type(run, page, "#email", "div@acme.test")
+    await type(run, page, "#password", "div password")
+    await page.click("#lets-go")
+    await page.waitForURL("**/auth/complete")
+    if (!check(!!(await offered(run)), "a form submitted by script after a click on a div button offers a save")) await diagnose(run, page, "div button")
+    check((await hostLog(run)).some((r) => r.type === "check" && r.username === "div@acme.test"), "with the login typed")
+    await clearBadge(run)
+
     // A page script that sets a password and submits gets no check.
     const before = (await hostLog(run)).filter((r) => r.type === "check").length
     await page.goto(`${site}/sneaky`)
@@ -1096,6 +1343,224 @@ async function coldSave() {
   } catch (err) {
     check(false, `cold save threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "cold")
+  } finally {
+    await close(run)
+  }
+}
+
+/** The save offer's surface in `page`, once it shows its offer. */
+const saveSurface = (page: Page, what = "the save offer shows in the page", timeout = 20_000) =>
+  until(what, async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator(".offer").count().catch(() => 0)) > 0 ? f : null
+  }, timeout)
+
+/** Where a surface's frame is on the page. */
+const frameBox = async (f: Frame) => (await (await f.frameElement()).boundingBox()) ?? { x: 0, y: 0, width: 0, height: 0 }
+
+/** A new turn for the site, so the next confirmed sign-in may show its offer again. */
+const newTurn = (run: Run) => run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+
+
+/** The save offer in the page after a confirmed sign-in: Save, Not now, its time running out, and none for a likely one. */
+async function savedInPage(scheme: Scheme) {
+  const run = await launch({ scheme })
+  const page = await run.context.newPage()
+  try {
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "surface@acme.test", "surface password")
+    let surface = await saveSurface(page)
+    if (!surface) return void (await diagnose(run, page, "surface"))
+    check(((await surface.locator(".offer-title").textContent()) ?? "") === "Save login?", "the surface asks to save")
+    check(((await surface.locator(".offer-user").textContent()) ?? "") === "surface@acme.test · localhost", "with the username and site inside")
+    await Bun.sleep(500)
+    check((await frameBox(surface)).height <= 40, "it starts as a small pill in the corner")
+    await shotAround(page, `surface-compact-${scheme}`, surface)
+    await surface.locator(".offer-row").hover()
+    check(!!(await until("it opens on approach", async () => (await frameBox(surface!)).height > 60)), "it opens on approach")
+    await settled(surface)
+    await shotAround(page, `surface-expanded-${scheme}`, surface)
+    await surface.locator(".offer-row .btn.primary").click()
+    await until("Save in the page saves", async () => (await hostLog(run)).some((r) => r.type === "save" && (r.entry as { username?: string })?.username === "surface@acme.test"))
+    check(!!(await until("the surface folds into a Saved pill", async () => (await surface!.locator(".pill.ok").count().catch(() => 0)) > 0)), "the surface folds into a Saved pill")
+    await Bun.sleep(300)
+    await shotAround(page, `surface-saved-${scheme}`, surface)
+    check(!!(await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)), "and goes toward the toolbar button")
+    check(!!(await until("badge clears", async () => (await badge(run)) === "")), "and the badge clears")
+
+    // Not now puts the surface away; the toolbar keeps the offer.
+    await newTurn(run)
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "later@acme.test", "later password")
+    surface = await saveSurface(page)
+    if (surface) {
+      await Bun.sleep(500)
+      await surface.locator(".offer-row").hover()
+      await until("it opens on approach", async () => (await frameBox(surface!)).height > 60)
+      await settled(surface)
+      await surface.locator(".offer-actions .btn").click()
+      check(!!(await until("Not now puts the surface away", () => !extensionFrame(page, "menu.html"), 5000)), "Not now puts the surface away")
+      check((await badge(run)) === "1", "and the toolbar keeps the offer")
+      const { p, title } = await offerIn(run)
+      check(title === "Save login for localhost?", `which the popup still shows (${title})`)
+      await p.close()
+    }
+
+    // An update, left alone: its time runs out and the offer waits in the toolbar.
+    await newTurn(run)
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "admin", "changed again")
+    surface = await saveSurface(page)
+    if (surface) {
+      check(((await surface.locator(".offer-title").textContent()) ?? "") === "Update password?" && ((await surface.locator(".offer-user").textContent()) ?? "").startsWith("admin"), "a changed password asks to update, for its username")
+      await Bun.sleep(500)
+      await shotAround(page, `surface-update-${scheme}`, surface)
+      check(!!(await until("its time runs out: a dot in the corner", async () => (await frameBox(surface!)).width <= 30, 16_000)), "when its time runs out it shrinks to a dot in the corner")
+      await Bun.sleep(400)
+      await shotAround(page, `surface-dot-${scheme}`, surface)
+      check((await badge(run)) === "1", "and the toolbar keeps the offer")
+    }
+
+    // A likely sign-in only badges: nothing in the page.
+    await newTurn(run)
+    await clearBadge(run)
+    await signIn(run, page, "/login?next=home", "likely@acme.test", "likely password")
+    await page.waitForURL("**/home")
+    check(!!(await offered(run)), "a likely sign-in badges")
+    await Bun.sleep(1000)
+    check(!extensionFrame(page, "menu.html"), "and shows nothing in the page")
+  } catch (err) {
+    check(false, `save in page threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "save in page")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * A short recording for `--video` at one device pixel per CSS pixel: the
+ * menu, a fill, a sign-in and the save offer in the page. Also writes 30 fps
+ * frame strips of the pick folding into the pill and of Save folding into
+ * the saved pill (strip-fill.png, strip-save.png).
+ */
+async function film() {
+  if (!video) return void console.log("  (needs --video <dir>)")
+  const run = await launch({ record: video, scale: 1 })
+  const page = await run.context.newPage()
+  const t0 = Date.now()
+  const marks: Record<string, { at: number; clip: { x: number; y: number; width: number; height: number } }> = {}
+  const around = (b: { x: number; y: number; width: number; height: number }, w: number, hgt: number) => ({
+    x: Math.max(0, Math.round(b.x + b.width / 2 - w / 2)),
+    y: Math.max(0, Math.round(b.y + b.height / 2 - hgt / 2)),
+    width: w,
+    height: hgt,
+  })
+  try {
+    await page.goto(`${site}/outcome/login?to=/auth/complete`)
+    await Bun.sleep(600)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "film menu"))
+    for (const key of ["ArrowDown", "ArrowDown", "ArrowUp"]) {
+      await page.keyboard.press(key)
+      await Bun.sleep(450)
+    }
+    const field = await page.locator("#email").boundingBox()
+    marks.fill = { at: (Date.now() - t0) / 1000, clip: around(field ?? { x: 270, y: 150, width: 360, height: 38 }, 420, 240) }
+    await page.keyboard.press("Enter")
+    await until("the pill says Filled", async () => (await menu.locator(".pill.ok").count().catch(() => 0)) > 0)
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+    await Bun.sleep(400)
+    await page.click("#password")
+    await until("menu on the password", () => extensionFrame(page, "menu.html"))
+    await page.keyboard.press("Escape")
+    await page.keyboard.press("ControlOrMeta+a")
+    await page.locator("#password").pressSequentially("a fresh horse", { delay: 45 })
+    await Bun.sleep(300)
+    await page.click("button[type=submit]")
+    const surface = await saveSurface(page)
+    if (!surface) return void (await diagnose(run, page, "film surface"))
+    await settled(surface)
+    await Bun.sleep(600)
+    marks.save = { at: (Date.now() - t0) / 1000, clip: { x: 900 - 400, y: 0, width: 400, height: 200 } }
+    await surface.locator(".offer-row .btn.primary").click()
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    await Bun.sleep(800)
+    check(true, "recorded the surface")
+  } catch (err) {
+    check(false, `film threw: ${(err as Error).message.split("\n")[0]}`)
+  } finally {
+    const recording = await page.video()?.path().catch(() => null)
+    const blank = await Promise.all(run.context.pages().filter((p) => p !== page).map((p) => p.video()?.path().catch(() => null)))
+    await close(run)
+    const out = join(video, "deadbolt-surface.webm")
+    if (recording) await rename(recording, out).catch((err) => check(false, `couldn't keep the recording: ${err}`))
+    for (const path of blank) if (path) await rm(path, { force: true })
+    console.log(`  video: ${out}`)
+    // The fold starts once the pick passes its checks, about 0.4 s after the press.
+    for (const [name, mark] of Object.entries(marks)) {
+      const { x, y, width, height } = mark.clip
+      const strip = join(video, `strip-${name}.png`)
+      // The pick's fold takes 0.8 s; Save holds "Saving…" in the button first, so its strip runs 1.8 s.
+      const [length, tile] = name === "save" ? ["1.8", "9x6"] : ["0.8", "6x4"]
+      const ffmpeg = Bun.spawnSync(["ffmpeg", "-v", "error", "-y", "-ss", String(mark.at + 0.3), "-t", length, "-i", out, "-vf", `fps=30,crop=${width}:${height}:${x}:${y},tile=${tile}`, "-frames:v", "1", strip])
+      check(ffmpeg.exitCode === 0, `wrote ${strip}${ffmpeg.exitCode ? `: ${ffmpeg.stderr.toString().trim()}` : ""}`)
+    }
+  }
+}
+
+/** Counts the popup opening by itself, without opening it. */
+const countOpens = (run: Run) =>
+  run.worker.evaluate(() => {
+    const g = globalThis as unknown as { __opens: number }
+    g.__opens = 0
+    ;(chrome.action as unknown as { openPopup: () => Promise<void> }).openPopup = async () => void g.__opens++
+  })
+const opens = (run: Run) => run.worker.evaluate(() => (globalThis as unknown as { __opens: number }).__opens)
+const checksFor = async (run: Run, username: string) => (await hostLog(run)).filter((r) => r.type === "check" && r.username === username).length
+
+/** Whether a sign-in worked, judged from the page it lands on. */
+async function signInOutcomes() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await countOpens(run)
+
+    // A wrong password: the site answers with an error and no form, on a page that isn't a sign-in URL.
+    await signIn(run, page, "/outcome/login?to=/", "wrong@acme.test", "a wrong guess")
+    await page.waitForSelector("[role=alert]")
+    await Bun.sleep(9000)
+    check((await checksFor(run, "wrong@acme.test")) === 0, "a failed sign-in is never checked")
+    check((await badge(run)) === "", "and offers nothing")
+
+    // Signed in, but the page shows neither the account nor Sign out: badge only.
+    await signIn(run, page, "/login?next=home", "likely@acme.test", "likely password")
+    await page.waitForURL("**/home")
+    if (!check(!!(await offered(run)), "a sign-in without evidence still badges")) await diagnose(run, page, "likely")
+    check((await opens(run)) === 0 && !extensionFrame(page, "menu.html"), "but neither opens the popup nor shows anything in the page")
+    await clearBadge(run)
+
+    // A bot check after the submit, then the signed-in page. Long enough on
+    // the check for a page without evidence to have been offered by now.
+    await signIn(run, page, "/outcome/login?to=/outcome/wait", "captcha@acme.test", "captcha password")
+    await page.waitForURL("**/outcome/wait")
+    await Bun.sleep(8000)
+    check((await checksFor(run, "captcha@acme.test")) === 0 && (await badge(run)) === "", "a challenge page offers nothing yet")
+    await page.waitForURL("**/outcome/welcome**", { timeout: 15_000 })
+    if (!check(!!(await offered(run)), "the page after the challenge offers a save")) await diagnose(run, page, "challenge")
+    check((await checksFor(run, "captcha@acme.test")) === 1, "with one check")
+    check(!!(await saveSurface(page, "the offer shows in the page")), "and, showing the account, shows the offer in the page")
+    check((await opens(run)) === 0, "instead of opening the popup")
+    await clearBadge(run)
+
+    // Signed in on a sign-in looking URL that shows the account. A fresh turn for the popup.
+    await run.worker.evaluate(() => chrome.storage.session.remove("opened:localhost"))
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "complete@acme.test", "complete password")
+    await page.waitForURL("**/auth/complete")
+    if (!check(!!(await offered(run)), "a sign-in landing on /auth/complete with the account shown offers a save")) await diagnose(run, page, "auth/complete")
+    check(!!(await saveSurface(page, "the offer shows in the page")), "and shows the offer in the page")
+    const { p, title } = await offerIn(run)
+    check(title === "Save login for localhost?", `the popup asks to save (${title})`)
+    await p.close()
+  } catch (err) {
+    check(false, `sign-in outcomes threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "outcomes")
   } finally {
     await close(run)
   }
@@ -1155,7 +1620,7 @@ async function locked(scheme: Scheme) {
     if (menu) {
       check(((await menu.locator(".title").textContent()) ?? "").includes("locked"), "menu says Deadbolt is locked")
       await Bun.sleep(400)
-      await shot(page, `menu-locked-${scheme}`, { x: 250, y: 80, width: 420, height: 200 })
+      await shotAround(page, `menu-locked-${scheme}`, menu, "#email")
     }
     const p = await popup(run, site, `popup-locked-${scheme}`)
     check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
@@ -1681,6 +2146,335 @@ async function topLayer() {
   }
 }
 
+/**
+ * Sign-in sessions: a login picked on the first step fills the later ones
+ * (password, code) without another pick, through same-document steps,
+ * navigations and another origin of the same site, with a pill for each,
+ * until a "Use a different account" step ends it. A username typed by hand
+ * narrows the password step's menu to its login; one no login has (a failed
+ * sign-in that came back with it) brings no menu at all.
+ */
+async function signInSessions() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  const pillSays = async (label: string) =>
+    until(`a pill says ${label}`, async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && ((await f.locator(".pill.ok .pill-label").textContent().catch(() => "")) ?? "").includes(label)
+    })
+  const pickLogin = async (username: string) => {
+    const menu = await menuOn(page)
+    if (!menu) throw new Error("no menu")
+    await menu.locator("button.row", { hasText: username }).click()
+    await until(`${username} fills`, async () => (await page.inputValue("#email")) === username)
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+  }
+  const wants = async () => (await hostLog(run)).filter((r) => r.type === "fill").map((r) => (r.want as string[]).join("+"))
+  try {
+    // (a) The same document: the username box is replaced by the password box.
+    await page.goto(`${site}/flow/spa`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    check(!!(await until("the password fills in place", async () => (await page.inputValue("#password").catch(() => "")) === "correct horse")), "a same-document password step fills from the login picked on the first")
+    check(!!(await pillSays("Password filled")), "and its pill says Password filled")
+    check(JSON.stringify(await wants()) === JSON.stringify(["username", "password"]), `with one fill per step (${await wants()})`)
+
+    // (b) + (d) Navigation to the password page, then a code page of split boxes.
+    await page.goto(`${site}/flow/nav`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/password")
+    check(!!(await until("the password page fills", async () => (await page.inputValue("#password")) === "correct horse")), "the password page after a navigation fills")
+    check(!!(await pillSays("Password filled")), "with its pill")
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/next")
+    const code = await until("the code boxes fill", async () => {
+      const digits = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => page.inputValue(`#d${i}`)))
+      return digits.join("") === "492039"
+    })
+    check(!!code, "the code step's split boxes fill with the current code")
+    check(!!(await pillSays("Code filled")), "and its pill says Code filled")
+
+    // (c) The password step on another origin of the same site.
+    await page.goto(`http://www.acme.test:${server.port}/flow/nav?accounts`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    await page.waitForURL("http://accounts.acme.test:*/flow/nav/password")
+    check(!!(await until("the other origin's password step fills", async () => (await page.inputValue("#password")) === "correct horse")), "a password step on another origin of the same site fills")
+
+    // (e) "Use a different account" ends the session.
+    await page.goto(`${site}/flow/nav`)
+    await pickLogin("admin")
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/password")
+    await until("admin's password fills", async () => (await page.inputValue("#password")) === "hunter2")
+    await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    await page.click("#other")
+    await page.waitForURL("**/flow/nav")
+    await formFound(page)
+    await page.click("#email")
+    await page.locator("#email").pressSequentially("other@acme.test", { delay: 20 })
+    await page.click("#go")
+    await page.waitForURL("**/flow/nav/password")
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "after \"Use a different account\", the next password step gets nothing")
+    await page.click("#password")
+    await Bun.sleep(1200)
+    check(!extensionFrame(page, "menu.html"), "and, for a username no login has, no menu")
+
+    // (f) A username typed by hand that a login has: the password step's menu is just that login.
+    await page.goto(`${site}/flow/nav`)
+    await formFound(page)
+    await page.click("#email")
+    await page.locator("#email").pressSequentially("admin", { delay: 30 })
+    // Enter, as a person would with the narrowed menu still over the button.
+    await page.keyboard.press("Enter")
+    await page.waitForURL("**/flow/nav/password")
+    await formFound(page)
+    await page.click("#password")
+    const narrowed = await until("the password menu opens", async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && (await f.locator("button.row").count()) > 0 ? f : null
+    })
+    check(!!narrowed && (await narrowed.locator("button.row").count()) === 1 && ((await narrowed.locator(".row .sub").textContent()) ?? "") === "admin", "a username typed by hand narrows the password step's menu to its login")
+    await page.keyboard.press("Escape")
+
+    // (g) A failed sign-in, typed by hand, back with a username no login has: no menu on the password field.
+    await page.goto(`${site}/flow/failed`)
+    await type(run, page, "#email", "nobody@acme.test")
+    await type(run, page, "#password", "a wrong guess")
+    await page.keyboard.press("Enter")
+    await page.waitForURL("**/flow/failed?email=*")
+    await formFound(page)
+    await page.click("#password")
+    await Bun.sleep(1500)
+    check(!extensionFrame(page, "menu.html"), "a failed sign-in back with an unknown username opens no menu on the password field")
+    await page.keyboard.press("ArrowDown")
+    check(!!(await until("↓ still brings the full list", () => extensionFrame(page, "menu.html"))), "↓ still brings the list")
+    await page.keyboard.press("Escape")
+
+    // (h) A sibling host the agent would list the login on, but no saved URL names: nothing.
+    await page.goto(`http://www.acme.test:${server.port}/flow/nav?to=user-content`)
+    await pickLogin("kit@acme.test")
+    await page.click("#go")
+    await page.waitForURL("http://user-content.acme.test:*/flow/nav/password")
+    await formFound(page)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a sibling host no saved URL names gets nothing on its password step")
+
+    // (i) The page swaps the username box for a password box itself: no user submit, no step.
+    await page.goto(`${site}/flow/sneaky-swap`)
+    await pickLogin("kit@acme.test")
+    await until("the page swaps its own form", async () => (await page.locator("#password").count()) > 0)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a page that swaps in a password box itself gets nothing")
+
+    // (k) A div "button" the user clicks, which submits by script: not the
+    // user's own submit to the step gate, so the next step isn't filled.
+    await page.goto(`${site}/flow/divbutton?step`)
+    await pickLogin("kit@acme.test")
+    await page.click("#lets-go")
+    await page.waitForURL("**/flow/nav/password")
+    await formFound(page)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a step submitted by script from a div \"button\" gets no auto-fill")
+
+    // (j) The page submits itself (form.requestSubmit()): no user submit, no step.
+    await page.goto(`${site}/flow/sneaky-submit`)
+    await pickLogin("kit@acme.test")
+    await page.waitForURL("**/flow/nav/password")
+    await formFound(page)
+    await Bun.sleep(2000)
+    check((await page.inputValue("#password")) === "", "a page that submits its own form gets nothing on the next step")
+  } catch (err) {
+    check(false, `sign-in sessions threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "sessions")
+  } finally {
+    await close(run)
+  }
+}
+
+/** The rings Deadbolt draws (closed shadow roots on elements of its own): how many show, and where. */
+const rings = (page: Page) =>
+  page.evaluate(() => [...document.documentElement.children].filter((el) => el.nodeName === "DIV" && (el as HTMLElement).style.inset === "0px" && el.shadowRoot === null).length)
+
+/**
+ * "Sign in with Google": the menu shows the login as that, picking it rings
+ * the site's own button (nothing filled, nothing clicked), and on Google's
+ * account chooser the linked account's tile is ringed.
+ */
+async function signInWith(scheme: Scheme) {
+  const run = await launch({ scheme, signIn: true })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`http://www.acme.test:${server.port}/social`)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "sign in with"))
+    const row = menu.locator("button.row", { hasText: "Sign in with Google" })
+    check((await row.count()) === 1 && ((await row.locator(".sub").textContent()) ?? "") === "kit@gmail.com", "the menu shows the login as Sign in with Google · its account")
+    check((await menu.locator("button.row", { hasText: "Acme admin" }).count()) === 1, "beside the site's password logins")
+    await shotAround(page, `signin-menu-${scheme}`, menu, "#email")
+    await settled(menu)
+    await row.click()
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 5000)), "picking it puts the menu away")
+    check(!!(await until("a ring shows", async () => (await rings(page)) === 1, 5000)), "and rings the site's Continue with Google button")
+    await Bun.sleep(600)
+    const button = await page.locator("#google").boundingBox()
+    if (stills && button) await page.screenshot({ path: join(stills, `signin-ring-${scheme}.png`), clip: { x: Math.max(0, button.x - 60), y: Math.max(0, button.y - 70), width: button.width + 120, height: button.height + 120 } })
+    await Bun.sleep(1000)
+    check(new URL(page.url()).pathname === "/social", "nothing clicks it for the user")
+    check((await page.inputValue("#email")) === "" && (await page.inputValue("#password")) === "", "and nothing is filled")
+    await page.click("#google")
+    await page.waitForURL("http://accounts.google.test:*/o/oauth2/chooser*")
+    check(!!(await until("the chooser's tile is ringed", async () => (await rings(page)) === 1, 6000)), "on Google's chooser, a ring shows")
+    await Bun.sleep(600)
+    const tile = await page.locator('[data-identifier="kit@gmail.com"]').boundingBox()
+    if (stills && tile) await page.screenshot({ path: join(stills, `signin-chooser-${scheme}.png`), clip: { x: Math.max(0, tile.x - 40), y: Math.max(0, tile.y - 60), width: tile.width + 80, height: tile.height + 100 } })
+    await Bun.sleep(1200)
+    check(new URL(page.url()).pathname === "/o/oauth2/chooser", "and nothing picks the account for the user")
+    check(!(await hostLog(run)).some((r) => r.type === "fill"), "no fill anywhere")
+    await page.click('[data-identifier="kit@gmail.com"]')
+    await page.waitForURL("**/social/done**")
+    check((await rings(page)) === 0, "back on the site, nothing is pointed at")
+  } catch (err) {
+    check(false, `sign in with threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "sign in with")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Typing narrows the menu, and a login typed by hand puts it away for the rest of the form. */
+async function narrowing() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "narrowing"))
+    const shown = () => menu.locator("button.row:not([hidden]):not(.leaving)")
+    const height = async () => (await (await menu.frameElement()).boundingBox())?.height ?? 0
+    const tall = await height()
+    await page.keyboard.type("k")
+    check(!!(await until("typing narrows the list", async () => (await shown().count()) === 1)), "typing in the field narrows the menu to the logins that match")
+    check(((await shown().locator(".sub").textContent()) ?? "") === "kit@acme.test", "to the one that matches")
+    check(!!(await until("the menu shrinks to fit", async () => (await height()) < tall - 30)), "and the menu shrinks to fit")
+    await page.keyboard.type("z")
+    check(!!(await until("nothing matches: the menu goes", () => !extensionFrame(page, "menu.html"), 5000)), "when nothing matches, the menu goes by itself")
+    await page.click("#password")
+    await Bun.sleep(1500)
+    check(!extensionFrame(page, "menu.html"), "and the rest of the form, typed by hand, gets no menu on click")
+    await page.keyboard.press("ArrowDown")
+    check(!!(await until("↓ still asks for it", () => extensionFrame(page, "menu.html"))), "↓ still brings it")
+    await page.keyboard.press("Escape")
+    // Clearing the identifier starts over; a password typed by hand puts the menu away.
+    await page.click("#email")
+    await until("a second click on the field brings the menu back", () => extensionFrame(page, "menu.html"))
+    await page.keyboard.press("Escape")
+    await page.keyboard.press("ControlOrMeta+a")
+    await page.keyboard.press("Backspace")
+    await page.click("#password")
+    check(!!(await until("with the identifier cleared, the password field gets its menu again", () => extensionFrame(page, "menu.html"))), "clearing the identifier brings the menu back to the form")
+    await Bun.sleep(700)
+    await page.keyboard.type("x")
+    check(!!(await until("typing a password puts the menu away", () => !extensionFrame(page, "menu.html"), 5000)), "typing a password by hand puts the menu away")
+    check((await fillCount(run)) === 0, "and nothing was filled")
+  } catch (err) {
+    check(false, `narrowing threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "narrowing")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * The save offer sits in the top right corner as a small pill, even over a
+ * site's own header; it opens on approach and closes after, and a click in
+ * the page shrinks it to a dot that reopens it.
+ */
+async function corner() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await signIn(run, page, "/outcome/login?to=/outcome/header", "header@acme.test", "header password")
+    const surface = await saveSurface(page)
+    if (!surface) return void (await diagnose(run, page, "corner"))
+    await Bun.sleep(700)
+    const compact = await frameBox(surface)
+    const view = page.viewportSize() ?? { width: 900, height: 640 }
+    const inCorner = (b: typeof compact) => Math.abs(b.x + b.width - (view.width - 12)) <= 1.5 && Math.abs(b.y - 12) <= 1.5
+    check(inCorner(compact) && compact.height <= 40 && compact.width < 260, `the offer is a small pill in the top right corner (${JSON.stringify(compact)})`)
+    await surface.locator(".offer-row").hover()
+    const open = await until("it opens on approach, down and to the left", async () => {
+      const b = await frameBox(surface)
+      return b.height > 60 && b.width > compact.width ? b : null
+    })
+    check(!!open && inCorner(open), `it opens on approach, from the corner (${JSON.stringify(open)})`)
+    await page.mouse.move(80, 520)
+    check(!!(await until("leaving closes it again", async () => (await frameBox(surface)).height <= 40, 3000)), "moving away closes it again")
+    await page.mouse.click(80, 520)
+    const dot = await until("a click in the page shrinks it to a dot", async () => {
+      const b = await frameBox(surface)
+      return b.width <= 30 && b.height <= 30 ? b : null
+    }, 3000)
+    check(!!dot && inCorner(dot), `a click in the page shrinks it to a dot in the corner (${JSON.stringify(dot)})`)
+    check((await badge(run)) === "1", "and the toolbar keeps it")
+    // Onto the dot, from the page, as a hand would.
+    await page.mouse.move(dot!.x - 40, dot!.y + 40)
+    await page.mouse.move(dot!.x + dot!.width / 2, dot!.y + dot!.height / 2, { steps: 6 })
+    check(!!(await until("hovering the dot brings the pill back", async () => (await frameBox(surface)).width > 100, 3000)), "hovering the dot brings the pill back")
+    // Save straight from the pill, without waiting for it to open.
+    {
+      await Bun.sleep(1200)
+      const b = await surface.locator(".offer-row .btn.primary").boundingBox()
+      await page.mouse.click(b!.x + b!.width / 2, b!.y + b!.height / 2)
+      check(!!(await until("Save from the compact pill saves", async () => (await hostLog(run)).some((r) => r.type === "save"))), "Save straight from the compact pill saves")
+      await until("the saved pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+    }
+  } catch (err) {
+    check(false, `corner threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "corner")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * The pill is an element of the page: a page that restyles it (with
+ * !important) to cover the form while a fill is on its way gets nothing
+ * written; the pill counts as Deadbolt's own only where Deadbolt put it.
+ */
+async function coveredPill() {
+  const run = await launch({ fillDelay: 1 })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    const menu = await menuOn(page)
+    if (menu) {
+      await menu.locator("button.row").first().click()
+      await until("the menu folds into a pill", async () => (await menu.locator(".pill").count().catch(() => 0)) > 0)
+      // The host's own styles are inline and !important, which no stylesheet
+      // beats; a page script can still rewrite them, and does after every write.
+      await page.evaluate(() => {
+        const host = document.querySelector(":popover-open") as HTMLElement
+        const stretch = "position:fixed !important;inset:0 !important;width:100vw !important;height:100vh !important;margin:0 !important;display:block !important"
+        // Only when Deadbolt changed it back (its own write sets a pixel width), or this would answer itself.
+        new MutationObserver(() => host.style.width !== "100vw" && (host.style.cssText = stretch)).observe(host, { attributes: true, attributeFilter: ["style"] })
+        host.style.cssText = stretch
+      })
+      await until("the delayed fill reaches the host", async () => (await fillCount(run)) > 0)
+      await Bun.sleep(2500)
+      check((await page.inputValue("#email")) === "" && (await page.inputValue("#password")) === "", "a pill the page stretched over the form isn't Deadbolt's own: nothing is written under it")
+    }
+  } catch (err) {
+    check(false, `covered pill threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "covered pill")
+  } finally {
+    await close(run)
+  }
+}
+
 /** Navigating away while the host is still answering: the new page gets nothing. */
 async function midFill() {
   const run = await launch({ fillDelay: 2 })
@@ -1690,7 +2484,7 @@ async function midFill() {
     const menu = await menuOn(page)
     if (menu) {
       await menu.locator("button.row").first().click()
-      await until("the menu is filling", async () => (await footText(menu)).includes("Filling"))
+      await until("the menu folds into a Filling pill", async () => ((await menu.locator(".pill .pill-label").textContent().catch(() => "")) ?? "").includes("Filling"))
       await page.goto(`${site}/login?next=home`)
       await until("the delayed fill reaches the host", async () => (await fillCount(run)) > 0)
       await Bun.sleep(3000)
@@ -2231,9 +3025,28 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
   return passed
 }
 
-const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, generator, locked, notInstalled }
-const once: Record<string, () => Promise<void>> = { detection, coldSave, signInShapes, rateLimited, securityPage, keyboardEntry, coveredMenu, topLayer, occlusionSweep, midFill, backForward, passkeys }
-const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "occlusionSweep", "midFill", "backForward"] }
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, generator, signInWith, locked, notInstalled }
+const once: Record<string, () => Promise<void>> = {
+  film,
+  detection,
+  coldSave,
+  signInShapes,
+  signInOutcomes,
+  narrowing,
+  corner,
+  signInSessions,
+  rateLimited,
+  securityPage,
+  keyboardEntry,
+  coveredMenu,
+  topLayer,
+  occlusionSweep,
+  midFill,
+  coveredPill,
+  backForward,
+  passkeys,
+}
+const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
@@ -2241,15 +3054,17 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // rough run times in seconds (per scheme; unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 100, passkeys: 85, occlusionSweep: 55, securityPage: 45, coveredMenu: 45, generator: 37, signInShapes: 23,
-  savePrompt: 20, topLayer: 14, keyboardEntry: 13, rateLimited: 9, coldSave: 6, midFill: 6, backForward: 6, fillAndTotp: 4, locked: 2, notInstalled: 1,
+  detection: 108, occlusionSweep: 55, signInSessions: 52, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
+  coldSave: 8, backForward: 7, narrowing: 6, midFill: 6, coveredPill: 5, locked: 2, notInstalled: 1,
 }
 const units = [
   ...(["light", "dark"] as const).flatMap((scheme) =>
     Object.entries(scenarios).map(([name, run]) => ({ key: name, name: `${name} (${scheme})`, run: () => run(scheme) })),
   ),
   ...Object.entries(once).map(([name, run]) => ({ key: name, name, run })),
-].filter((u) => !picked || picked.includes(u.key))
+  // The recording runs only when asked for.
+].filter((u) => (!picked || picked.includes(u.key)) && (u.key !== "film" || video))
 const [part, parts] = (arg("--shard") ?? "1/1").split("/").map(Number)
 if (!(parts >= 1 && part >= 1 && part <= parts)) throw new Error("--shard wants <i>/<n> with 1 <= i <= n")
 const load = Array<number>(parts).fill(0)

@@ -108,7 +108,6 @@ jobs:
       - run: cargo +stable build -p deadbolt-cli --locked
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
-      - run: bun run build
       - run: |
           mkdir -p e2e-out
           bun e2e/run.ts --shard ${{ matrix.shard }}/4 --deadbolt ../target/debug/deadbolt --stills e2e-out/stills 2>&1 | tee e2e-out/run.log

@@ -1,0 +1,193 @@
+# Shared negatives: shop, address, payment and free-text fields that are never a login identifier or code.
+# Included by username, email, phone and otp.
+
+name = "not-a-login-field"
+
+[[element]]
+element = "search"
+score = -5
+why = "type=search is usually a site search, but some logins use it for the user id (login5.fisglobal.com, accountview.lpl.com)"
+
+[[clue]]
+phrase = "search"
+score = -8
+channel = "display"
+why = "Ported from clues.ts: a search box, not a login"
+
+[[clue]]
+phrase = "search"
+score = -5
+channel = "code"
+why = "Search in ids is weaker evidence: Material UI's sample id outlined-search is copied onto login boxes (avtoobuchenie.bg)"
+
+[[clue]]
+phrase = "coupon"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "promo"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "voucher"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "gift card"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "discount"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "first name"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "last name"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "full name"
+score = -3
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "company"
+score = -3
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "street"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "city"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "zip"
+score = -5
+channel = "display"
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "zipcode"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "zip code"
+score = -6
+channel = "display"
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "postal"
+score = -5
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "post code"
+score = -5
+channel = "display"
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "postcode"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "card number"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "card"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "cvc"
+score = -6
+channel = "display"
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "cvv"
+score = -6
+channel = "display"
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "sort code"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "iban"
+score = -6
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "message"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "comment"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "subject"
+score = -3
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "referral"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "quantity"
+score = -5
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "amount"
+score = -5
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "price"
+score = -5
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "birth"
+score = -5
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "year"
+score = -4
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+
+[[clue]]
+phrase = "age"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: a shop, address, payment or free-text field, not a login"
+

@@ -3,11 +3,12 @@
 
 The browser passes its environment through: DEADBOLT_FAKE_STATUS picks the
 hello status, DEADBOLT_FAKE_LOG gets one JSON line per request, and
-DEADBOLT_FAKE_RATE_LIMIT=fill,generate-keep answers those with rate_limited, and
-DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds. Saves
-are checked against the spec's title and URL rules. Generated passwords are
-held per origin, as the agent holds them: candidates until generate-keep,
-then pending, and check and save resolve only pending ones. Fields that allow
+DEADBOLT_FAKE_RATE_LIMIT=fill,generate-keep answers those with rate_limited,
+DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds, and
+DEADBOLT_FAKE_SIGNIN adds "Sign in with Google" logins. Saves are checked
+against the spec's title and URL rules. Generated passwords are held per
+origin, as the agent holds them: candidates until generate-keep, then
+pending, and check and save resolve only pending ones. Fields that allow
 under 60 bits are weak, as the agent's floor.
 """
 import json, math, os, secrets, string, struct, sys, time
@@ -19,10 +20,19 @@ FILL_DELAY = float(os.environ.get("DEADBOLT_FAKE_FILL_DELAY") or 0)
 REF1 = "a" * 64 + ":" + "1" * 32
 REF2 = "a" * 64 + ":" + "2" * 32
 ACCOUNTS = [
-    {"ref": REF1, "vault": "Personal", "title": "Acme", "username": "kit@acme.test", "hasPassword": True, "hasTotp": True, "urls": []},
+    {"ref": REF1, "vault": "Personal", "title": "Acme", "username": "kit@acme.test", "hasPassword": True, "hasTotp": True, "urls": ["http://www.acme.test", "http://accounts.acme.test"]},
     {"ref": REF2, "vault": "Work", "title": "Acme admin", "username": "admin", "hasPassword": True, "hasTotp": False, "urls": []},
 ]
 VALUES = {REF1: {"username": "kit@acme.test", "password": "correct horse", "totp": "492039"}, REF2: {"username": "admin", "password": "hunter2"}}
+# DEADBOLT_FAKE_SIGNIN=1 adds a "Sign in with Google" login for the site, and
+# the Google account's own login it signs in with.
+if os.environ.get("DEADBOLT_FAKE_SIGNIN"):
+    REF3 = "a" * 64 + ":" + "3" * 32
+    REF4 = "a" * 64 + ":" + "4" * 32
+    ACCOUNTS.append({"ref": REF3, "vault": "Personal", "title": "Acme", "hasPassword": False, "hasTotp": False, "urls": [], "signIn": {"provider": "google", "account": "kit@gmail.com"}})
+    ACCOUNTS.append({"ref": REF4, "vault": "Personal", "title": "Google", "username": "kit@gmail.com", "hasPassword": True, "hasTotp": False, "urls": ["https://accounts.google.com"]})
+    VALUES[REF3] = {}
+    VALUES[REF4] = {"username": "kit@gmail.com", "password": "google password"}
 
 
 def read():
@@ -131,11 +141,11 @@ while True:
     elif kind in ("check", "save") and secret(req, req if kind == "check" else req.get("entry") or {}) is None:
         write({"id": rid, "type": "error", "code": "not_found", "message": "No such generated password."})
     elif kind == "check" and "username" not in req:
-        same = [r for r, v in VALUES.items() if v["password"] == secret(req, req)]
+        same = [r for r, v in VALUES.items() if v.get("password") == secret(req, req)]
         write({"id": rid, "type": "check", "status": "same" if same else "new", "matches": same})
     elif kind == "check":
-        known = [r for r, v in VALUES.items() if v["username"] == req["username"]]
-        same = [r for r in known if VALUES[r]["password"] == secret(req, req)]
+        known = [r for r, v in VALUES.items() if v.get("username") == req["username"]]
+        same = [r for r in known if VALUES[r].get("password") == secret(req, req)]
         status = "same" if same else "update" if known else "new"
         write({"id": rid, "type": "check", "status": status, "matches": same or known})
     elif kind == "save" and not valid_entry(req.get("entry") or {}, req["origin"]):

@@ -82,8 +82,16 @@ main {
   min-height: 120px;
 }
 
-.body.changed > * {
-  animation: settle-in 200ms var(--settle);
+/* A state on its way out, over the one coming in (see render). */
+main {
+  position: relative;
+}
+
+.body.leaving {
+  position: absolute;
+  left: 0;
+  right: 0;
+  pointer-events: none;
 }
 
 .state {
@@ -166,13 +174,16 @@ main {
   align-items: center;
   gap: 10px;
   min-height: 48px;
-  padding: 0 6px;
-  border-radius: 8px;
-  transition: background-color 90ms ease-out;
+  padding: 0 8px;
+  border-radius: 10px;
+  transition: background-color 100ms ease-out;
 }
 
-.account:hover {
-  background: var(--hover);
+@media (hover: hover) and (pointer: fine) {
+  .account:hover {
+    background: var(--hover);
+    transition: none;
+  }
 }
 
 .account-text {
@@ -188,11 +199,17 @@ main {
 }
 
 .account-title {
+  font-size: 13px;
+  line-height: 16px;
   font-weight: 500;
+  color: var(--text);
 }
 
 .account-sub {
+  margin-top: 1px;
   font-size: 12px;
+  line-height: 16px;
+  font-weight: 400;
   color: var(--muted);
 }
 
@@ -306,7 +323,24 @@ main {
 .offer .buttons {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 6px;
+}
+
+/* Never for this site: a quiet way out, away from Save. */
+.offer .buttons .link {
+  margin-right: auto;
+  font-size: 11px;
+  color: var(--faint);
+}
+
+.saving-off {
+  align-items: center;
+  margin-top: 12px;
+}
+
+.saving-off .link {
+  font-size: 11px;
 }
 
 .done {
@@ -346,4 +380,10 @@ main {
 
 .passkey-prompt .buttons .btn:first-child {
   margin-right: auto;
+}
+
+.roll-label {
+  display: inline-flex;
+  overflow: hidden;
+  white-space: nowrap;
 }

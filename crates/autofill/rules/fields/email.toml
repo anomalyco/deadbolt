@@ -1,0 +1,181 @@
+# Email addresses used as the login identifier.
+#
+# Clue scores add up per field; see crates/autofill/README.md.
+
+type = "email"
+include = ["not-a-login-field", "non-login-autocomplete"]
+
+[[autocomplete]]
+token = "email"
+score = 8
+why = "The site declares the field an email address"
+
+[[element]]
+element = "password"
+score = -10
+why = "A password box is never the identifier"
+
+[[element]]
+element = "email"
+score = 5
+why = "type=email"
+
+[[inputmode]]
+mode = "email"
+score = 3
+why = "inputmode=email"
+
+[[clue]]
+phrase = "email"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "e mail"
+score = 5
+channel = "display"
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "email address"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "mail"
+score = 2
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "correo"
+score = 4
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "correo electronico"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "courriel"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "adresse e mail"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "e mail adresse"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "indirizzo email"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "e mailadres"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "メール"
+score = 4
+why = "Ported from clues.ts: label wording for this field (Japanese)"
+
+[[clue]]
+phrase = "メールアドレス"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Japanese)"
+
+[[clue]]
+phrase = "邮箱"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "电子邮件"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "電子郵件"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Chinese)"
+
+[[clue]]
+phrase = "почта"
+score = 4
+why = "Ported from clues.ts: label wording for this field (Russian)"
+
+[[clue]]
+phrase = "электронная почта"
+score = 5
+why = "Ported from clues.ts: label wording for this field (Russian)"
+
+[[clue]]
+phrase = "이메일"
+score = 5
+why = "Ported from clues.ts: label wording for this field"
+
+[[clue]]
+phrase = "confirm"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "repeat"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "again"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "retype"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "re enter"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "newsletter"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "subscribe"
+score = -2
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "friend"
+score = -3
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "recipient"
+score = -3
+why = "Ported from clues.ts: wording that points elsewhere"
+
+[[clue]]
+phrase = "е поща"
+langs = ["имейл"]
+score = 5
+channel = "display"
+why = "Bulgarian: email (avtoobuchenie.bg)"
+
+[[clue]]
+phrase = "e postadresse"
+langs = ["e postadress", "sähköposti", "e posta"]
+score = 5
+why = "Email in Norwegian, Swedish, Finnish, Turkish and Danish (payment.schibsted.no 'E-postadresse')"
+

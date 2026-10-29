@@ -17,14 +17,16 @@ use anyhow::{Result, anyhow, bail};
 use deadbolt_core::item::check_new_value;
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{
-    DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Vault, VaultId, schema, valid_name,
+    DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Source, Vault, VaultId, schema,
+    valid_name,
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use super::session::Loaded;
-use crate::import::Imported;
+use super::session::{Loaded, hex};
+use crate::import::onepassword::source_key;
+use crate::import::{Imported, MirrorVersion, digest};
 use crate::items::{format_month, line, with_scheme};
-use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo};
+use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo, Tally, sign_in_name};
 
 const MIN_SHORT: usize = 4;
 
@@ -78,9 +80,9 @@ pub fn label(item: &Item) -> String {
     }
 }
 
-/// A login's username, a card's expiry (`MM/YY`), an SSH key's comment or
-/// fingerprint, an identity's email, a passkey's username. A secure note
-/// has none.
+/// A login's username (else how it signs in: "Sign in with Google"), a
+/// card's expiry (`MM/YY`), an SSH key's comment or fingerprint, an
+/// identity's email, a passkey's username. A secure note has none.
 fn detail(item: &Item) -> Option<String> {
     let first = |fields: &[&str]| {
         fields
@@ -89,7 +91,9 @@ fn detail(item: &Item) -> Option<String> {
             .map(str::to_string)
     };
     match item.kind.as_str() {
-        "login" => first(&["username"]),
+        "login" => first(&["username"]).or_else(|| {
+            value(item, "sign-in-with").map(|p| format!("Sign in with {}", sign_in_name(p)))
+        }),
         "card" => value(item, "expiry")
             .and_then(|e| e.split_once('-'))
             .map(|(year, month)| format!("{month}/{}", &year[year.len().saturating_sub(2)..])),
@@ -426,11 +430,13 @@ fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Opti
             .get(field)
             .map_or(String::new(), |f: &Field| f.value.clone())
     };
+    // A sign-in link is the import's own doing, not the item's content.
     let whole = || Key::Whole {
         kind: kind.into(),
         name: name.unwrap_or_default().into(),
         fields: fields
             .iter()
+            .filter(|(field, _)| *field != "sign-in-account")
             .map(|(field, f)| (field.clone(), f.value.clone()))
             .collect(),
     };
@@ -470,9 +476,48 @@ fn key(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> Opti
     }
 }
 
+/// Where an item of an export is, or will be, here.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Target {
+    Here(ItemId),
+    /// The export's new item at this index.
+    New(usize),
+}
+
+/// A sign-in method that links to an account the import cannot find.
+const UNLINKED: (&str, &str) = (
+    "sign-in method links to an account not in this export (kept without the link)",
+    "sign-in methods link to an account not in this export (kept without the link)",
+);
+
+/// Sign-in links written per entry.
+const LINK_BATCH: usize = 256;
+
+/// The source of an item imported from 1Password, as it records a digest
+/// of the item as written: now with `field` as its `sign-in-account`.
+fn relinked_source(v: &Vault, id: &ItemId, field: &Field) -> Option<DataOp> {
+    let item = v.item(id)?;
+    let source = item.source.as_ref()?;
+    let mut version = MirrorVersion::parse(&source.version)?;
+    let mut fields = item.fields.clone();
+    fields.insert("sign-in-account".into(), field.clone());
+    version.digest = digest(&item.kind, item.name.as_deref(), &fields);
+    let source = Source {
+        id: source.id.clone(),
+        version: version.to_string(),
+    };
+    Some(DataOp::source(*id, Some(source)))
+}
+
 /// Imports a mapped export. Items the vault already has, or the export
 /// repeats, are left out, so importing again changes nothing. With
 /// `apply`, the rest are created, all or none.
+///
+/// A login that signs in with another ([`Imported::sign_in_link`]) is then
+/// linked to it by `sign-in-account`: to the item created from that
+/// 1Password item, or the one here it duplicates, or one here imported or
+/// mirrored from it before. Item ids come from the entries that create
+/// them, so the links are a second write.
 pub fn import(
     s: &mut Loaded,
     vault: Option<&str>,
@@ -480,20 +525,55 @@ pub fn import(
     apply: bool,
 ) -> Result<ImportReport> {
     let vault = s.resolve(vault)?;
-    let mut seen: BTreeSet<Key> = s
-        .vault(&vault)
-        .items()
-        .iter()
-        .filter_map(|item| key(&item.kind, item.name.as_deref(), &item.fields))
-        .collect();
+    let mut seen: BTreeMap<Key, Target> = BTreeMap::new();
+    for item in s.vault(&vault).items() {
+        if let Some(key) = key(&item.kind, item.name.as_deref(), &item.fields) {
+            seen.entry(key).or_insert(Target::Here(item.id));
+        }
+    }
+    // 1Password items by vault and item id: this vault's copies first.
+    let mut copies: BTreeMap<(String, String), Target> = BTreeMap::new();
+    let others = s.vaults.iter().filter(|(id, _)| **id != vault);
+    for (_, v) in std::iter::once((&vault, s.vault(&vault))).chain(others) {
+        for item in v.items() {
+            if let Some((_, vault, id)) = item.source.as_ref().and_then(|s| source_key(&s.id)) {
+                copies
+                    .entry((vault.into(), id.into()))
+                    .or_insert(Target::Here(item.id));
+            }
+        }
+    }
     let mut new = Vec::new();
+    let mut links = Vec::new();
     for item in items {
-        if key(item.kind, item.name.as_deref(), &item.fields).is_some_and(|key| !seen.insert(key)) {
+        let target = match key(item.kind, item.name.as_deref(), &item.fields) {
+            Some(key) => match seen.get(&key) {
+                Some(target) => Some(*target),
+                None => {
+                    seen.insert(key, Target::New(new.len()));
+                    None
+                }
+            },
+            None => None,
+        };
+        let target = target.unwrap_or(Target::New(new.len()));
+        if let Some((_, vault, id)) = item.source.as_ref().and_then(|s| source_key(&s.id)) {
+            copies.entry((vault.into(), id.into())).or_insert(target);
+        }
+        if target != Target::New(new.len()) {
             report.duplicates += 1;
             if let Some(n) = report.new.get_mut(item.kind) {
                 *n -= 1;
             }
             continue;
+        }
+        if let Some(provider) = item.fields.get("sign-in-with") {
+            *report
+                .sign_in
+                .providers
+                .entry(provider.value.clone())
+                .or_default() += 1;
+            links.extend(item.sign_in_link.map(|link| (new.len(), link)));
         }
         new.push(DataOp::Create {
             kind: item.kind.to_string(),
@@ -502,15 +582,47 @@ pub fn import(
             source: item.source,
         });
     }
+    let given = links.len();
+    let links: Vec<(usize, Target)> = links
+        .into_iter()
+        .filter_map(|(at, link)| {
+            copies
+                .get(&link)
+                .copied()
+                .filter(|to| *to != Target::New(at))
+                .map(|to| (at, to))
+        })
+        .collect();
+    report.sign_in.linked = links.len();
+    if given > links.len() {
+        report.warnings.push(Tally {
+            count: given - links.len(),
+            one: UNLINKED.0.into(),
+            many: UNLINKED.1.into(),
+        });
+    }
     if apply && !new.is_empty() {
         s.update(vault, |v, secret| {
-            v.create_items(secret, new)?;
+            let (ids, _) = v.create_items(secret, new)?;
+            let mut ops = Vec::new();
+            for (at, to) in links {
+                let account = match to {
+                    Target::Here(id) => id,
+                    Target::New(i) => ids[i],
+                };
+                let id = ids[at];
+                let field = Field::new(FieldType::Text, hex(account.as_bytes()));
+                ops.extend(relinked_source(v, &id, &field));
+                ops.push(DataOp::set(id, "sign-in-account", field));
+            }
+            for batch in ops.chunks(LINK_BATCH) {
+                v.write(secret, batch.to_vec())?;
+            }
             Ok(())
         })?;
     }
     Ok(report)
 }
-
 pub fn set(
     s: &mut Loaded,
     vault: Option<&str>,
@@ -777,6 +889,129 @@ mod tests {
             ]
         );
         assert_eq!(count(&s), 8);
+    }
+
+    /// A 1PUX with "Sign in with" logins: one linked to an account later
+    /// in the export, one without a link, one linked to an item not in it.
+    fn sign_in_export(with_account: bool, with_rest: bool) -> String {
+        let sso = |uuid: &str, title: &str, url: &str, value: &str| {
+            format!(
+                r#"{{"uuid": "{uuid}", "state": "active", "categoryUuid": "001", "updatedAt": 1,
+                  "details": {{"sections": [{{"title": "", "fields": [
+                    {{"title": "", "id": "sso", "value": {{"ssoLogin": {value}}}}}]}}]}},
+                  "overview": {{"title": "{title}", "url": "{url}"}}}}"#
+            )
+        };
+        let mut items = Vec::new();
+        if with_rest {
+            items.push(sso(
+                "notion",
+                "Notion",
+                "https://www.notion.so",
+                r#"{"provider": "google", "item": {"itemUuid": "gacct", "vaultUuid": "v1"}}"#,
+            ));
+            items.push(sso(
+                "figma",
+                "Figma",
+                "https://figma.com",
+                r#"{"provider": "twitter"}"#,
+            ));
+            items.push(sso(
+                "linear",
+                "Linear",
+                "https://linear.app",
+                r#"{"provider": "github", "item": {"itemUuid": "gone", "vaultUuid": "v1"}}"#,
+            ));
+        }
+        if with_account {
+            items.push(
+                r#"{"uuid": "gacct", "state": "active", "categoryUuid": "001", "updatedAt": 1,
+                  "details": {"loginFields": [
+                    {"value": "dax@gmail.com", "designation": "username"},
+                    {"value": "google-pw", "fieldType": "P", "designation": "password"}]},
+                  "overview": {"title": "Google", "url": "https://accounts.google.com"}}"#
+                    .to_string(),
+            );
+        }
+        format!(
+            r#"{{"accounts": [{{"attrs": {{"uuid": "USER"}}, "vaults": [{{"attrs": {{"uuid": "v1"}}, "items": [{}]}}]}}]}}"#,
+            items.join(",")
+        )
+    }
+
+    #[test]
+    fn sign_in_methods_are_kept_and_linked_to_their_accounts() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let export = sign_in_export(true, true);
+        let report = import(&mut s, &export, false);
+        let lines = [
+            "kept 3 sign-in methods (GitHub 1, Google 1, X 1)",
+            "linked 1 to their accounts",
+            "warning: 1 sign-in method links to an account not in this export (kept without the link)",
+        ];
+        assert_eq!(report.lines(false)[1..], lines);
+        assert_eq!(count(&s), 0);
+        let report = import(&mut s, &export, true);
+        assert_eq!(report.lines(true)[1..], lines);
+        let vault = s.resolve(None).unwrap();
+        let named = |s: &Loaded, name: &str| {
+            s.vault(&vault)
+                .items()
+                .into_iter()
+                .find(|i| i.name.as_deref() == Some(name))
+                .unwrap()
+        };
+        let google = named(&s, "Google");
+        let notion = named(&s, "Notion");
+        let value = |item: &Item, field: &str| item.fields.get(field).map(|f| f.value.clone());
+        assert_eq!(value(&notion, "sign-in-with").as_deref(), Some("google"));
+        assert_eq!(
+            value(&notion, "sign-in-account"),
+            Some(hex(google.id.as_bytes()))
+        );
+        assert_eq!(value(&notion, "password"), None);
+        // Its source still records the digest of the item as it is.
+        let version = MirrorVersion::parse(&notion.source.as_ref().unwrap().version).unwrap();
+        assert_eq!(
+            version.digest,
+            digest(&notion.kind, notion.name.as_deref(), &notion.fields)
+        );
+        let figma = named(&s, "Figma");
+        assert_eq!(value(&figma, "sign-in-with").as_deref(), Some("x"));
+        assert_eq!(value(&named(&s, "Linear"), "sign-in-account"), None);
+        let listed = list(&s, None, &words("notion"), None).unwrap();
+        assert_eq!(listed[0].detail.as_deref(), Some("Sign in with Google"));
+        // The link is not content: importing again adds nothing.
+        let again = import(&mut s, &export, true);
+        assert_eq!((again.total(), again.duplicates), (0, 4));
+        assert_eq!(again.lines(true)[1..], ["skipped 4 duplicates"]);
+        assert_eq!(count(&s), 4);
+    }
+
+    /// An account imported before, and so a duplicate now, is linked to.
+    #[test]
+    fn sign_in_methods_link_to_an_account_already_here() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        import(&mut s, &sign_in_export(true, false), true);
+        let report = import(&mut s, &sign_in_export(true, true), true);
+        assert_eq!((report.total(), report.duplicates), (3, 1));
+        assert_eq!(report.sign_in.linked, 1);
+        let vault = s.resolve(None).unwrap();
+        let items = s.vault(&vault).items();
+        let google = items
+            .iter()
+            .find(|i| i.name.as_deref() == Some("Google"))
+            .unwrap();
+        let notion = items
+            .iter()
+            .find(|i| i.name.as_deref() == Some("Notion"))
+            .unwrap();
+        assert_eq!(
+            notion.fields["sign-in-account"].value,
+            hex(google.id.as_bytes())
+        );
     }
 
     /// The app saves an edit as one change: fields set, emptied ones
