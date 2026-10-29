@@ -3720,7 +3720,7 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
     let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
         .unwrap();
-    zip.write_all(br#"{"name":"Deadbolt","version":"0.0.0.99","version_name":"0.0.0-dev-99"}"#)
+    zip.write_all(br#"{"name":"Deadbolt","version":"0.0.0.99","version_name":"0.0.0-dev-99","permissions":["storage","nativeMessaging"]}"#)
         .unwrap();
     let extension = zip.finish().unwrap().into_inner();
     let ext_sha = sha(&extension);
@@ -3737,7 +3737,7 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
                 "0.0.0-dev-99",
                 "chromium",
                 extension.len(),
-                ext_sha,
+                ext_sha.clone(),
             ),
         ),
     ]);
@@ -3803,6 +3803,87 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
         std::fs::read_to_string(ext.join(".deadbolt-extension")).unwrap(),
         "manifest.json\n"
     );
+
+    // The standalone build, the same release's other target: `browser
+    // switch` puts it in the same directory although the version is the
+    // same, `update` then finds it current, and switching back works too.
+    let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(br#"{"name":"Deadbolt","version":"0.0.0.99","version_name":"0.0.0-dev-99","permissions":["storage","offscreen"]}"#)
+        .unwrap();
+    zip.start_file("vault.css", zip::write::SimpleFileOptions::default())
+        .unwrap();
+    let standalone = zip.finish().unwrap().into_inner();
+    let standalone_sha = sha(&standalone);
+    let mut both: serde_json::Value = serde_json::from_slice(&manifest(
+        "extension",
+        "dev",
+        "0.0.0-dev-99",
+        "chromium",
+        extension.len(),
+        ext_sha,
+    ))
+    .unwrap();
+    both["sequence"] = 2.into();
+    both["release"]["targets"]["chromium-standalone"] = serde_json::json!({
+        "url": format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
+        "size": standalone.len(),
+        "sha256": standalone_sha,
+    });
+    files.lock().unwrap().extend([
+        (
+            format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
+            standalone,
+        ),
+        (
+            "/release/deadbolt/extension/dev.json".to_string(),
+            both.to_string().into_bytes(),
+        ),
+    ]);
+    // This test's deadbolt (built from source, so it names the channel);
+    // the copy above is the stand-in now.
+    let deadbolt = |args: &[&str]| {
+        let mut cmd = a.cmd(args);
+        cmd.env("DEADBOLT_RELEASE_URL", &base);
+        a.output(&mut cmd)
+    };
+    let output = deadbolt(&["browser", "switch", "--standalone"]);
+    assert!(!output.status.success(), "switched without a channel");
+    let output = deadbolt(&["browser", "switch", "--standalone", "--channel", "dev"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        stdout.contains("Updated the standalone browser extension"),
+        "{stdout}"
+    );
+    assert!(
+        std::fs::read_to_string(ext.join("manifest.json"))
+            .unwrap()
+            .contains("offscreen")
+    );
+    assert_eq!(
+        std::fs::read_to_string(ext.join(".deadbolt-extension")).unwrap(),
+        "manifest.json\nvault.css\n"
+    );
+    let output = deadbolt(&["update", "--check", "--channel", "dev"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Standalone browser extension 0.0.0-dev-99 is up to date"),
+        "{stdout}"
+    );
+    let output = deadbolt(&["browser", "switch", "--native", "--channel", "dev"]);
+    assert!(output.status.success());
+    assert!(
+        std::fs::read_to_string(ext.join("manifest.json"))
+            .unwrap()
+            .contains("nativeMessaging")
+    );
+    assert!(!ext.join("vault.css").exists());
 }
 
 /// The `export.data` of a `.1pux` with an identity and a card, as

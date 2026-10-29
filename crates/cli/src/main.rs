@@ -289,6 +289,26 @@ enum BrowserCommand {
         /// `deadbolt update` (a new or empty directory; update owns it).
         #[arg(long, value_name = "DIR")]
         extension_dir: Option<PathBuf>,
+        /// Keep the standalone build in DIR instead: its own vault in the
+        /// browser, which pairs with this computer's Deadbolt as a device.
+        #[arg(long, requires = "extension_dir")]
+        standalone: bool,
+    },
+    /// Put the other build of the extension in the directory registered with
+    /// `browser install --extension-dir`, then reload Deadbolt in
+    /// chrome://extensions. Both builds have the same id, so the profile
+    /// keeps its place for it; each keeps its own settings.
+    #[command(group(clap::ArgGroup::new("build").required(true).args(["standalone", "native"])))]
+    Switch {
+        /// The standalone build: its own vault in the browser.
+        #[arg(long)]
+        standalone: bool,
+        /// The native build: fills from this computer's Deadbolt.
+        #[arg(long)]
+        native: bool,
+        /// The release channel to fetch it from (default: this build's).
+        #[arg(long, value_parser = ["dev", "beta", "stable"])]
+        channel: Option<String>,
     },
     /// Stop the extension reaching Deadbolt (default: in every browser).
     Uninstall {
@@ -424,6 +444,15 @@ fn main() -> ExitCode {
     }
 }
 
+/// The extension build `--standalone` picks (else the native one).
+fn extension_build(standalone: bool) -> config::ExtensionBuild {
+    if standalone {
+        config::ExtensionBuild::Standalone
+    } else {
+        config::ExtensionBuild::Native
+    }
+}
+
 /// Bare `deadbolt`'s `deadbolt app`, before the CLI's runtime exists.
 fn open_app() -> bool {
     tokio::runtime::Builder::new_current_thread()
@@ -509,7 +538,21 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Browser(BrowserCommand::Install {
             browser,
             extension_dir,
-        }) => browser::install(&browser, extension_dir.as_deref(), &paths.config)?,
+            standalone,
+        }) => browser::install(
+            &browser,
+            extension_dir.as_deref(),
+            extension_build(standalone),
+            &paths.config,
+        )?,
+        Commands::Browser(BrowserCommand::Switch {
+            standalone,
+            native: _,
+            channel,
+        }) => {
+            update::switch_extension(&paths, extension_build(standalone), channel.as_deref())
+                .await?
+        }
         Commands::Update(args) => return update::run(&paths, args).await,
         Commands::Browser(BrowserCommand::Uninstall { browser }) => browser::uninstall(&browser)?,
         Commands::BrowserHost { origin } => browser::host::run(paths, &origin).await?,

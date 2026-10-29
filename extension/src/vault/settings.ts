@@ -8,6 +8,7 @@ import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
+import { aboutSection } from "./about"
 
 function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
   const now = Date.now() / 1000
@@ -235,6 +236,7 @@ export function settingsView(app: App): View {
       ),
     ),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Vault name")), h("div", { class: "reauth-row" }, name, rename), nameHint),
+    aboutSection(app),
     app.surface !== "popup"
       ? ""
       : h("p", { class: "open-tab" }, button("link", ["Open Deadbolt in a tab", glyph("open")], () => {

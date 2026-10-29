@@ -38,7 +38,7 @@
 // synthetic accounts on the demo backend. Toolbar popup stills accompany --video.
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
-import { copyFile, mkdir, mkdtemp, rm, readdir } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, rm, readdir, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { DeviceCommand, DevicePasskey, DeviceReply, VaultDevice } from "../src/messages"
@@ -1216,17 +1216,42 @@ async function joinExistingVault(device: Page, worker: Worker) {
   return fixtures.length
 }
 
+/** Settings' About: the version, no update check for a build from source, and an issue with no vault data. */
+async function about(device: Page) {
+  await device.getByRole("button", { name: "Settings", exact: true }).click()
+  const version = await device.evaluate(() => chrome.runtime.getManifest().version)
+  check((await device.locator("#about-version").innerText()) === version, "settings show this build's version")
+  await device.getByText("Built from source: it doesn't check for updates.").waitFor()
+  check(true, "a build from source doesn't ask the release service")
+  // GitHub is beyond the smoke's reach: answer for it, to read the URL the tab opened.
+  await context!.route("https://github.com/**", (route) => route.fulfill({ body: "issue", contentType: "text/plain" }))
+  const opened = context!.waitForEvent("page")
+  await device.getByRole("button", { name: "Report an issue", exact: true }).click()
+  const issue = await opened
+  await issue.waitForURL(/^https:\/\/github\.com\//)
+  const url = new URL(issue.url())
+  await issue.close()
+  const body = url.searchParams.get("body") ?? ""
+  check(url.origin + url.pathname === "https://github.com/anomalyco/deadbolt/issues/new" && url.searchParams.get("labels") === "standalone", "Report an issue opens a standalone issue on anomalyco/deadbolt")
+  check(body.includes(`Deadbolt standalone extension ${version}`) && /Browser: .+/.test(body) && /OS: linux/.test(body), "the issue carries the version, browser and OS")
+  check(![browserPassword, passphrase, "browser@example.test", "From browser"].some((secret) => url.href.includes(encodeURIComponent(secret)) || url.href.includes(secret)), "the issue carries no vault data")
+  await device.getByRole("button", { name: "Back", exact: true }).click()
+}
+
 try {
   if (!arg("--dist")) {
     const build = Bun.spawnSync(["bun", "scripts/build.ts", "--e2e", dist, "--standalone"], { cwd: join(import.meta.dir, ".."), stdout: "inherit", stderr: "inherit" })
     check(build.success, "standalone build succeeds")
   }
+  // The smoke's copy is one the CLI keeps (`deadbolt update` leaves this
+  // marker), so first run offers Deadbolt on this computer by name.
+  if (smoke) await writeFile(join(dist, ".deadbolt-extension"), "manifest.json\n")
   const { worker, device } = await launch()
   check((await readdir(join(profile, "NativeMessagingHosts")).catch(() => [])).filter((name) => name.endsWith(".json")).length === 0, "profile has no native host manifest")
   if (smoke) {
     const offline = await device.evaluate(() => fetch("https://example.com/", { mode: "no-cors" }).then(() => false, () => true))
     check(offline, "Chromium can't reach the network beyond loopback")
-    await device.getByRole("button", { name: "Pair with an existing device", exact: true }).click()
+    await device.getByRole("button", { name: "Pair with Deadbolt on this computer", exact: true }).click()
     await device.getByRole("heading", { name: "Pairing didn't work", exact: true }).waitFor({ timeout: 60_000 })
     check(/sync service/i.test(await device.locator(".notice .error").innerText()), "offline joining says Deadbolt's sync service can't be reached")
     await device.getByRole("button", { name: "Cancel", exact: true }).click()
@@ -1249,6 +1274,7 @@ try {
   if (smoke) {
     await quick(worker, "From browser", browserPassword, "with no peers")
     await autofill("From browser", "browser@example.test", browserPassword)
+    await about(device)
   } else {
     await pair(device)
     check(await cli("get", "From browser") === browserPassword, "browser-created login arrives on CLI through pairing")

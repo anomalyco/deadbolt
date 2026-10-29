@@ -187,6 +187,48 @@ jobs:
           name: build-extension
           path: ${{ runner.temp }}/dist
 
+  # The standalone extension (its own vault in the browser: the Rust vault in
+  # wasm, extension/scripts/build.ts --standalone), stamped like the one
+  # above and published as the extension artifact's chromium-standalone
+  # target. Only this job installs the wasm toolchain.
+  build-extension-standalone:
+    name: Build standalone extension
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      # Its settings check this channel's feed for a newer build.
+      DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      # The exact wasm-bindgen crates/ext-core pins (scripts/wasm.sh checks it).
+      - run: cargo install wasm-bindgen-cli --version "$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' crates/ext-core/Cargo.toml)" --locked
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.2
+      - name: Build
+        working-directory: extension
+        run: |
+          bun install --frozen-lockfile
+          bun run build:standalone
+          mkdir -p "$RUNNER_TEMP/dist"
+          (cd dist && zip -X -r -q "$RUNNER_TEMP/dist/deadbolt-extension-standalone-$DEADBOLT_VERSION.zip" .)
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-extension-standalone
+          path: ${{ runner.temp }}/dist
+
   # The Touch ID helper for both architectures, signed ad hoc.
   build-enclave:
     name: Build Touch ID helper
@@ -406,11 +448,12 @@ jobs:
   # credential. Publishes the cli, desktop (signed builds only), and extension
   # artifacts.
   publish:
-    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-macos, sign-enclave, sign-macos, verify-macos]
+    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-extension-standalone, build-macos, sign-enclave, sign-macos, verify-macos]
     if: >-
       ${{ !cancelled() && needs.plan.outputs.channel != 'check'
       && needs.build-linux-x64.result == 'success' && needs.build-linux-arm64.result == 'success'
-      && needs.build-extension.result == 'success' && needs.build-macos.result == 'success'
+      && needs.build-extension.result == 'success' && needs.build-extension-standalone.result == 'success'
+      && needs.build-macos.result == 'success'
       && (needs.sign-enclave.outputs.signed != 'true' || needs.verify-macos.result == 'success') }}
     runs-on: ubuntu-24.04
     environment: release
@@ -428,11 +471,12 @@ jobs:
         name: Download
         uses: ./.github/release/download
         with:
-          pattern: ${{ needs.sign-enclave.outputs.signed == 'true' && '{build-cli-linux-*,build-extension,sign-macos}' || '{build-cli-linux-*,build-extension,build-macos-cli}' }}
+          pattern: ${{ needs.sign-enclave.outputs.signed == 'true' && '{build-cli-linux-*,build-extension,build-extension-standalone,sign-macos}' || '{build-cli-linux-*,build-extension,build-extension-standalone,build-macos-cli}' }}
           digests: >-
             build-cli-linux-x64=${{ needs.build-linux-x64.outputs.digest }}
             build-cli-linux-arm64=${{ needs.build-linux-arm64.outputs.digest }}
             build-extension=${{ needs.build-extension.outputs.digest }}
+            build-extension-standalone=${{ needs.build-extension-standalone.outputs.digest }}
             ${{ needs.sign-enclave.outputs.signed == 'true' && format('sign-macos={0}', needs.sign-macos.outputs.digest) || format('build-macos-cli={0}', needs.build-macos.outputs.cli-digest) }}
       - &assemble
         name: Gather the release files
@@ -457,7 +501,7 @@ jobs:
 
   github:
     name: GitHub release
-    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-macos, sign-enclave, sign-macos, publish]
+    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-extension-standalone, build-macos, sign-enclave, sign-macos, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.release-channel == 'stable' }}
     runs-on: ubuntu-24.04
     permissions:
