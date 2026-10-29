@@ -93,6 +93,46 @@ describe("offscreen document", () => {
     await Promise.all([second, hello])
   })
 
+  test("a join's start and finish wait in the same line as a create; its status doesn't", async () => {
+    const start = ask("device-join-start")
+    const create = ask("device-create")
+    const finish = ask("device-join-finish")
+    const status = ask("device-join-status")
+    await settle()
+    expect(types(current())).toEqual(["device-join-start", "device-join-status"])
+    current().answer("device-join-status")
+    expect(await status).toEqual({ reply: { type: "device-join-status", ok: true } })
+    current().answer("device-join-start")
+    await start
+    await settle()
+    expect(types(current())).toEqual(["device-create", "device-join-start", "device-join-status"])
+    current().answer("device-create")
+    await create
+    await settle()
+    expect(types(current())).toContain("device-join-finish")
+    current().answer("device-join-finish")
+    await finish
+  })
+
+  test("lock fails a waiting join and its queued finish, and neither reaches the next worker", async () => {
+    const start = ask("device-join-start")
+    const finish = ask("device-join-finish")
+    const status = ask("device-join-status")
+    await settle()
+    const old = current()
+    expect(types(old)).toEqual(["device-join-start", "device-join-status"])
+    expect(await deliver(fake, { type: VAULT_LOCK }, BACKGROUND)).toBe(true)
+    expect(old.terminated).toBe(true)
+    for (const r of await Promise.all([start, finish, status])) expect(r).toEqual({ error: "Deadbolt locked.", locked: true })
+    old.answer("device-join-start")
+    const after = ask("device-join-status")
+    await settle()
+    expect(FakeWorker.all).toHaveLength(2)
+    expect(types(current())).toEqual(["device-join-status"])
+    current().answer("device-join-status")
+    await after
+  })
+
   test("lock fails what's in flight and waiting, and none of it reaches the next worker", async () => {
     const unlock = ask("device-unlock")
     const queued = ask("device-unlock")

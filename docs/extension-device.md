@@ -24,7 +24,7 @@ an installed native host and offers "Pair with Deadbolt on this Mac" instead of
 creating a separate vault; neither the flip nor that first run is in this proof.
 
 The proof supports a single vault, login create/update/list/fill, passphrase
-lock/unlock, invitation of a CLI joining device, and bidirectional sync. Unsupported
+lock/unlock, joining an existing vault or inviting a CLI device, and bidirectional sync. Unsupported
 operations fail rather than silently delegating to a native host.
 
 The proof deliberately limits login matching to an **exact origin**. The existing
@@ -91,14 +91,52 @@ failures count as unreachable, post-connect failures retry, and the native
 open sync connections; a stale offline replica has the same documented residual
 risk as the CLI.
 
+### First-run join of an existing vault
+
+An uninitialized browser can instead show a code for an existing device to admit.
+`device-join-start {deviceName}` checks relay reachability and starts the shared
+pairing listener before returning `{type: "device-join-start", code, phase:
+"waiting"}`. It uses the same short code, SPAKE2 proof, HMAC confirmation,
+one-guess/single-use policy and default five-minute expiry as `deadbolt join`.
+`device-join-status` returns `waiting` (with the code once listening), `admitted`
+(with the vault name), `failed` (with an explanation), or `idle`. The worker keeps
+the code across device-page reloads, but drops it on admission or failure. Failed
+attempts can start again; codes and secrets are never logged.
+
+Like the CLI's `Fresh`, the joining node uses a fresh device key and refuses all
+sync. It reuses `application::read_offer`, `join_blob` and `verify_welcome`, keeping
+the admitted vault and key only in memory. No local passphrase or OPFS write is
+needed until admission. `device-join-finish {passphrase, deviceName}` writes the
+encrypted key, complete welcome log and peer hints into the exclusive pending
+OPFS file, closes it, and atomically publishes it without replacing an existing
+store. It then starts the normal membership-first background sync and returns
+`{type: "device-join-finish", ok: true}`; local logins are available immediately.
+Pending-write failures retain the admitted vault for retry; after publication,
+a startup failure is recovered by unlocking the saved vault.
+
+This passphrase protects only this browser's local replica. It need not match the
+CLI's passphrase and is not sent to the other device. First run offers "Pair with
+an existing device" before "Create a new vault"; admission then asks the user to
+choose and confirm this local passphrase. The code can be copied, and waiting can
+be cancelled. Expiry, a spent wrong-code attempt, refusal and relay failure are
+explained without logging the code.
+
+The join task has an owned abort handle and generation-checked completion, and
+holds no mutex or RefCell borrow across an await. Create, unlock and another join
+are refused while joining or admitted. The offscreen setup queue also serializes
+start and finish with create/unlock. Cancel uses the same worker termination as
+lock, discarding the code, key and unpersisted welcome. Cancelling after admission
+can leave an unused member on the inviter, just as CLI Fresh does; remove it on
+an existing device. No native control messages or protocol version change.
+
 ## MV3 runtime and lifetime
 
 The service worker is a router, not the owner of unlocked keys or live connections.
 An offscreen document with the `WORKERS` reason owns the dedicated wasm worker.
 Normal service-worker suspension therefore does not discard the unlocked device.
 
-The offscreen document queues only vault creation and unlock, the requests that
-run the KDF and open the store, so those never overlap each other. Everything else
+The offscreen document queues vault creation, unlock, join start and join finish,
+so those setup operations never overlap each other. Everything else
 (hello, list, fill, save, sync, pairing) goes to the worker as it arrives; the Rust
 core interleaves requests at its await points, so a sync or pairing waiting on the
 network does not hold up a list or fill. Locking bypasses all of it: the offscreen
@@ -182,6 +220,7 @@ cd extension
 bun e2e/standalone.ts --smoke
 cargo build -p deadbolt-cli --locked
 bun e2e/standalone.ts --deadbolt "${CARGO_TARGET_DIR:-../target}/debug/deadbolt"
+bun e2e/standalone.ts --join --deadbolt "${CARGO_TARGET_DIR:-../target}/debug/deadbolt"
 ```
 
 The smoke (`--smoke`, run in CI) needs no CLI and no network: Chromium resolves no
@@ -204,7 +243,14 @@ checks hello, list and fill each answer within the limit while that sync waits.
 times are vault RPC round trips from the service worker through the offscreen
 document and worker, not a KDF benchmark.
 
-Both runs trap native messaging, use a profile with no native host manifest, and
+The `--join` run starts with a CLI vault containing five logins on different sites,
+one with TOTP. A fresh extension starts and cancels a join, retries with a new code,
+and retains that code across a page reload. The CLI pairs to that code. The browser
+sets its separate local passphrase, lists both devices and all five logins, and
+fills the synced login and current TOTP. Lock/unlock and browser restart verify the
+joined replica persists. The offline smoke also checks the no-relay failure.
+
+All runs trap native messaging, use a profile with no native host manifest, and
 use only synthetic credentials; the profile and CLI store are deleted at the end.
 The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 `--native` as before.
@@ -213,7 +259,7 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 
 1. Make the standalone device the default build, with a first run that detects an
    installed native host and offers "Pair with Deadbolt on this Mac". Complete
-   first-run pairing in both directions, QR presentation, multi-vault selection and
+   native-host discovery, QR presentation, multi-vault selection and
    error UX, and run the full CLI e2e in CI against a local relay.
 2. Extend the shared application protocol's simulator coverage to browser-client
    storage/lifetime adapters, and exercise

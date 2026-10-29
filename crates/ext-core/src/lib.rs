@@ -2,6 +2,7 @@
 //! JavaScript routes messages; core owns signatures, membership and secrets.
 #![cfg(all(target_family = "wasm", target_os = "unknown"))]
 
+mod join;
 mod opfs;
 mod wire;
 
@@ -590,6 +591,7 @@ async fn dispatch(mut body: Value) -> Result<Value> {
             )
         }
         "device-create" => {
+            join::require_idle()?;
             if node().is_ok() {
                 return Err(Error::Protocol("Lock before creating a device"));
             }
@@ -616,6 +618,7 @@ async fn dispatch(mut body: Value) -> Result<Value> {
             Ok(json!({"type":"device-create", "ok":true}))
         }
         "device-unlock" => {
+            join::require_idle()?;
             if node().is_ok() {
                 return Err(Error::Protocol("The vault is already unlocked"));
             }
@@ -625,6 +628,9 @@ async fn dispatch(mut body: Value) -> Result<Value> {
             start(store, body.get("deviceName").and_then(Value::as_str)).await?;
             Ok(json!({"type":"device-unlock", "ok":true}))
         }
+        "device-join-start" => join::start(&body).await,
+        "device-join-status" => Ok(join::status()),
+        "device-join-finish" => join::finish(&mut body).await,
         "device-sync" => {
             node()?;
             request_sync();

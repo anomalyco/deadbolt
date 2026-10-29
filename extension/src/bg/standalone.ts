@@ -19,7 +19,15 @@ export const OFFSCREEN_PAGE = "offscreen.html"
 export const DEVICE_PAGE = "device.html"
 const TIMEOUT_MS = 30_000
 /** Creating or unlocking runs the passphrase KDF; pairing waits for the other device. */
-const SLOW_MS: Partial<Record<string, number>> = { "device-create": 120_000, "device-unlock": 120_000, "device-pair": 300_000, "device-sync": 120_000 }
+const SLOW_MS: Partial<Record<string, number>> = {
+  "device-create": 120_000,
+  "device-unlock": 120_000,
+  "device-pair": 300_000,
+  "device-sync": 120_000,
+  // Starting a join waits up to 20 s for the relay; finishing runs the KDF.
+  "device-join-start": 60_000,
+  "device-join-finish": 120_000,
+}
 
 /**
  * The Comfortable preset, the contract's default: lock after an hour without
@@ -46,7 +54,15 @@ const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save"])
 const USES = new Set<string>(["fill", "save"])
 
 /** device.html's commands that don't count as use. */
-const PAGE_READS = new Set<string>(["device-status", "device-lock", "device-logins", "device-devices", "list"])
+const PAGE_READS = new Set<string>(["device-status", "device-lock", "device-logins", "device-devices", "list", "device-join-status", "device-join-cancel"])
+/**
+ * Commands that change nothing hello would report. Until a join finishes,
+ * nothing is persisted and hello stays not-set-up, so starting and polling
+ * one don't ask it again.
+ */
+const QUIET = new Set<string>(["device-logins", "device-devices", "device-join-start", "device-join-status"])
+/** Commands that name this browser to the vault's other devices. */
+const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-start", "device-join-finish"])
 
 const unsupported = () => new HostError("failed", "The browser-only Deadbolt can't do this yet.")
 
@@ -156,6 +172,12 @@ export class StandaloneBackend implements VaultBackend {
       await this.lock()
       return { ok: true, reply: { type: "device-lock", ok: true }, ms: Date.now() - started, status: this.status }
     }
+    if (command.type === "device-join-cancel") {
+      // The vault never sees a cancel: ending its worker, as Lock does, drops
+      // the pending join and everything it held in memory.
+      await this.lock()
+      return { ok: true, reply: { type: "device-join-cancel", ok: true }, ms: Date.now() - started, status: this.status }
+    }
     if (command.type === "device-status") {
       await this.hello()
       return { ok: true, reply: { type: "hello" }, ms: Date.now() - started, status: this.status }
@@ -169,7 +191,7 @@ export class StandaloneBackend implements VaultBackend {
       }
     }
     // The vault names this device to the others it pairs with: "Chrome on macOS".
-    const body = command.type === "device-create" || command.type === "device-unlock" ? { ...command, deviceName: deviceName() } : command
+    const body = NAMED.has(command.type) ? { ...command, deviceName: deviceName() } : command
     let raw: Record<string, unknown>
     try {
       raw = await this.raw(body, SLOW_MS[command.type] ?? TIMEOUT_MS)
@@ -181,7 +203,7 @@ export class StandaloneBackend implements VaultBackend {
       await this.hello()
       return fail(typeof raw.message === "string" && raw.message ? raw.message : "The vault refused.")
     }
-    if (command.type === "device-unlock" || command.type === "device-create") {
+    if (command.type === "device-unlock" || command.type === "device-create" || command.type === "device-join-finish") {
       this.used()
       await this.hello("unlocked")
       // Catch up with the other devices now, not at the next sync alarm.
@@ -189,7 +211,7 @@ export class StandaloneBackend implements VaultBackend {
     } else if (command.type === "device-pair" || command.type === "device-sync") {
       this.lastSync = Date.now()
       await this.hello("items")
-    } else if (command.type !== "device-logins" && command.type !== "device-devices") await this.hello()
+    } else if (!QUIET.has(command.type)) await this.hello()
     return { ok: true, reply: raw, ms, status: this.status }
   }
 
@@ -200,9 +222,14 @@ export class StandaloneBackend implements VaultBackend {
    * document doesn't answer, it's closed, which ends the memory just as well.
    */
   async lock(): Promise<void> {
+    const unlocked = this.status.state === "ready"
     const ok = await this.message<boolean>({ type: VAULT_LOCK } satisfies VaultLock, 5_000).catch(() => false)
     if (!ok) await chrome.offscreen.closeDocument().catch(() => {})
     this.capabilities = []
+    // Only an unlocked vault is known to be locked now. Before the first one
+    // (a join waiting, say) there's nothing to unlock: the fresh worker says
+    // how it is.
+    if (!unlocked) return this.hello()
     this.setStatus({ state: "locked", detail: "Unlock Deadbolt to fill passwords" }, "locked")
   }
 
@@ -308,6 +335,12 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
       return text(c.passphrase, 1024) && c.passphrase && text(c.name, 200) ? { type: "device-create", passphrase: c.passphrase, name: c.name } : null
     case "device-unlock":
       return text(c.passphrase, 1024) ? { type: "device-unlock", passphrase: c.passphrase } : null
+    case "device-join-start":
+    case "device-join-status":
+    case "device-join-cancel":
+      return { type: c.type }
+    case "device-join-finish":
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-join-finish", passphrase: c.passphrase } : null
     case "device-pair":
       return text(c.code, 200) && c.code ? { type: "device-pair", code: c.code } : null
     case "list":

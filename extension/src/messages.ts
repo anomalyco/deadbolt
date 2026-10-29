@@ -442,6 +442,17 @@ export type DeviceCommand =
   | { type: "device-lock" }
   /** Admit the device that `deadbolt join` shows this code on. */
   | { type: "device-pair"; code: string }
+  /**
+   * First run, joining a vault another device has: start waiting to be
+   * admitted (`{ type: "device-join-start", code, phase: "waiting" }`; the
+   * background names this browser), ask how it's going (JoinStatus), finish
+   * with this browser's own passphrase once admitted, or cancel. Cancel never
+   * reaches the vault: the background ends its worker, as Lock does.
+   */
+  | { type: "device-join-start" }
+  | { type: "device-join-status" }
+  | { type: "device-join-finish"; passphrase: string }
+  | { type: "device-join-cancel" }
   | { type: "device-sync" }
   /** Every login in the vault, for the page's list: `{ type: "device-logins", accounts: Account[] }`. */
   | { type: "device-logins" }
@@ -449,6 +460,9 @@ export type DeviceCommand =
   | { type: "device-devices" }
   | { type: "list"; origin: string }
   | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
+
+/** device-join-status's reply: `code` while waiting (so a reloaded page shows it again), `vault` once admitted, `message` when it failed. */
+export type JoinStatus = { type: "device-join-status"; phase: "waiting" | "admitted" | "failed" | "idle"; code?: string; vault?: string; message?: string }
 
 /** A member of the vault; `current`: this browser. */
 export type VaultDevice = { id: string; name: string; current: boolean }

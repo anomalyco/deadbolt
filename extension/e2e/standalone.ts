@@ -1,6 +1,6 @@
 // The standalone (browser-only) device in headless Chromium, with no native
 // host: a `--standalone` e2e build, its real wasm vault, real OPFS and the
-// real content script. Two runs:
+// real content script. Three runs:
 //
 //   bun e2e/standalone.ts --smoke [--dist <dir>]
 //     Offline: create, save, list, autofill, lock, wrong passphrase, unlock
@@ -10,6 +10,9 @@
 //     Everything above with a real CLI over n0's public relays: pairing,
 //     background sync both ways without asking the extension to sync, and
 //     quick answers while a background sync waits on a suspended CLI.
+//   bun e2e/standalone.ts --join --deadbolt <path to deadbolt>
+//     Fresh extension joins an existing CLI vault of five logins (one with
+//     TOTP), then lists, fills, locks and reopens its local encrypted replica.
 //
 // `--latency-ms <n>` is the limit for hello, list and fill over the vault's
 // RPC (default 1000 ms, 1500 ms when CI is set). Only synthetic credentials,
@@ -23,6 +26,8 @@ import { VAULT_REQUEST, type VaultResponse } from "../src/bg/vault-messages"
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
 const smoke = process.argv.includes("--smoke")
+const joinExisting = process.argv.includes("--join")
+if (smoke && joinExisting) throw new Error("--join requires the real CLI, not --smoke")
 const binary = arg("--deadbolt")
 if (smoke && binary) throw new Error("--smoke runs without the CLI; drop --deadbolt")
 if (!smoke && !binary) throw new Error("--deadbolt must name the CLI built from this worktree (or pass --smoke)")
@@ -203,6 +208,61 @@ async function pair(device: Page) {
   await drained
 }
 
+/** The first-run direction: the browser shows a code; an existing CLI admits it. */
+async function joinExistingVault(device: Page, worker: Worker) {
+  await cli("init", "existing-demo", "--device-name", "existing-cli")
+  const fixtures = [
+    ["Acme", origin], ["Code Forge", "https://code.example.test"],
+    ["Demo Mail", "https://mail.example.test"], ["Team Docs", "https://docs.example.test"],
+    ["Status Board", "https://status.example.test"],
+  ]
+  for (const [title, url] of fixtures) {
+    await cli("new", "login", "--name", title, `url=${url}`, "username=cli@example.test", `password=${cliPassword}`,
+      ...(title === "Acme" ? ["otp=GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ"] : []))
+  }
+  const begin = async () => {
+    await device.getByRole("button", { name: "Pair with an existing device", exact: true }).click()
+    return until("extension publishes its join code", async () => {
+      const r = (await request(device, { type: "device-join-status" })).reply
+      return r.phase === "waiting" && typeof r.code === "string" ? r.code : null
+    }, 60_000)
+  }
+  const abandoned = await begin()
+  await device.getByRole("button", { name: "Cancel", exact: true }).click()
+  await device.getByRole("button", { name: "Pair with an existing device", exact: true }).waitFor()
+  check((await request(device, { type: "device-join-status" })).reply.phase === "idle", "cancel discards the pending join")
+  check(await state(device) === "not-set-up", "cancel does not create a browser vault")
+
+  const code = await begin()
+  check(/^[a-z]+(?:-[a-z]+){3}$/.test(code) && code !== abandoned, "retry generates a new four-word code")
+  await device.reload()
+  await device.getByText(code, { exact: true }).first().waitFor()
+  check((await request(device, { type: "device-join-status" })).reply.code === code, "waiting join survives device-page reload")
+  // Never print the code or CLI argv to the test log.
+  await cli("pair", code)
+  await until("browser receives the existing vault", async () => (await request(device, { type: "device-join-status" })).reply.phase === "admitted", 60_000)
+  check(await state(device) === "not-set-up", "admission alone does not publish an unencrypted local store")
+  await device.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+  await device.getByLabel("Passphrase again", { exact: true }).fill(passphrase)
+  await device.getByRole("button", { name: "Finish", exact: true }).click()
+  await shown(device, "Acme", 60_000)
+  check((await logins(device)).length === fixtures.length, "all existing CLI logins appear after browser join")
+  const devices = (await request(device, { type: "device-devices" })).reply.devices as VaultDevice[]
+  check(devices.length === 2 && devices.filter(d => d.current).length === 1 && devices.some(d => d.name === "existing-cli"), "joined vault lists both named devices")
+  await quick(worker, "Acme", cliPassword, "after joining the existing CLI vault")
+  await autofill("Acme", "cli@example.test", cliPassword)
+  await until("joined TOTP matches the CLI", async () => {
+    const listed = await vault(worker, { type: "list", origin })
+    const account = (listed.reply.accounts as Array<{ ref: string; title: string; hasTotp: boolean }>).find(a => a.title === "Acme")!
+    if (!account.hasTotp) return false
+    const expected = await cli("code", "Acme")
+    return (await vault(worker, { type: "fill", origin, ref: account.ref, want: ["totp"] })).reply.totp === expected
+  })
+  check(true, "joined OTP field fills the same current code as the CLI")
+  check(!(await command(device, { type: "device-join-start" })).ok, "joining cannot replace an initialized browser vault")
+  return fixtures.length
+}
+
 try {
   if (!arg("--dist")) {
     const build = Bun.spawnSync(["bun", "scripts/build.ts", "--e2e", dist, "--standalone"], { cwd: join(import.meta.dir, ".."), stdout: "inherit", stderr: "inherit" })
@@ -213,7 +273,16 @@ try {
   if (smoke) {
     const offline = await device.evaluate(() => fetch("https://example.com/", { mode: "no-cors" }).then(() => false, () => true))
     check(offline, "Chromium can't reach the network beyond loopback")
+    await device.getByRole("button", { name: "Pair with an existing device", exact: true }).click()
+    await device.getByRole("heading", { name: "Pairing didn't work", exact: true }).waitFor({ timeout: 60_000 })
+    check(/relay/i.test(await device.locator(".error").innerText()), "offline joining reports that no relay is reachable")
+    await device.getByRole("button", { name: "Cancel", exact: true }).click()
   }
+  let count = 1
+  if (joinExisting) {
+    count = await joinExistingVault(device, worker)
+  } else {
+  await device.getByRole("button", { name: "Create a new vault", exact: true }).click()
   await device.getByLabel("Passphrase", { exact: true }).fill(passphrase)
   await device.getByLabel("Passphrase again", { exact: true }).fill(passphrase)
   await device.getByRole("button", { name: "Create vault", exact: true }).click()
@@ -224,7 +293,6 @@ try {
   check(true, "device page lists the saved login without being asked")
   check((await logins(device)).length === 1, "extension writes a login")
 
-  let count = 1
   if (smoke) {
     await quick(worker, "From browser", browserPassword, "with no peers")
     await autofill("From browser", "browser@example.test", browserPassword)
@@ -276,6 +344,7 @@ try {
     process.kill(suspended, "SIGCONT")
     suspended = undefined
   }
+  }
 
   await request(device, { type: "device-lock" })
   check(await state(device) === "locked", "lock closes the vault")
@@ -309,7 +378,9 @@ try {
   check(true, "encrypted vault survives browser restart")
   console.log(smoke
     ? "PASS: standalone smoke: create, save, list, actual fill, lock/unlock and restart, offline"
-    : "PASS: standalone create, pair, background sync both ways, quick answers during sync, actual fill, lock/unlock and restart")
+    : joinExisting
+      ? "PASS: standalone joins existing CLI vault, cancel/retry, five logins, TOTP, actual fill, lock/unlock and restart"
+      : "PASS: standalone create, pair, background sync both ways, quick answers during sync, actual fill, lock/unlock and restart")
 } finally {
   if (suspended) process.kill(suspended, "SIGCONT")
   joining?.kill()

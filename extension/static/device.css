@@ -55,3 +55,22 @@ main > .buttons {
   gap: 8px;
   font-size: 12px;
 }
+
+.join-code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 10px 10px 14px;
+  border-radius: 8px;
+  background: var(--bg);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.join-code .mono {
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  user-select: all;
+  overflow-wrap: anywhere;
+}

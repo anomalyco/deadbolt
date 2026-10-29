@@ -1,7 +1,7 @@
 // The offscreen document: it only owns the vault's worker (vault-worker.ts),
 // which holds the unlocked vault and runs its sync, and passes the service
 // worker's requests to it as they come, so a list never waits behind a sync
-// or a pairing. Only a create or an unlock waits for the one before it:
+// or a pairing. Only a create, an unlock or a join's start or finish waits for the one before it:
 // they set the vault up, and two at once would race. Lock ends the worker at
 // once, even mid-KDF or mid-pairing, fails everything in flight or waiting,
 // and the next request starts a fresh, locked one. So does the engine
@@ -12,7 +12,7 @@ import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type Vault
 
 const BACKGROUND = chrome.runtime.getURL("background.js")
 /** The requests that set the vault up, run one at a time. */
-const SETUP = new Set(["device-create", "device-unlock"])
+const SETUP = new Set(["device-create", "device-unlock", "device-join-start", "device-join-finish"])
 
 interface Pending {
   resolve: (response: VaultResponse) => void
@@ -21,7 +21,7 @@ interface Pending {
 let worker: Worker | null = null
 let nextId = 1
 const pending = new Map<number, Pending>()
-/** The tail of the setup queue: each create or unlock starts once the one before it is answered. */
+/** The tail of the setup queue: each setup request starts once the one before it is answered. */
 let setup: Promise<unknown> = Promise.resolve()
 /** Bumped by every stop, so a setup queued before it never reaches the new worker. */
 let generation = 0

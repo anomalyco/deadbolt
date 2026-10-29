@@ -9,7 +9,7 @@ const HOUR = 60 * 60_000
 
 let fake: FakeChrome
 /** What the vault says hello with. */
-let vault: "ready" | "locked"
+let vault: "ready" | "locked" | "not-set-up"
 
 const requests = () => fake.sent.filter((m): m is VaultRequest => (m as VaultRequest).type === VAULT_REQUEST).map((m) => m.body)
 const locks = () => fake.sent.filter((m) => (m as { type: string }).type === VAULT_LOCK).length
@@ -22,7 +22,8 @@ beforeEach(() => {
   fake.runtimeAnswer = (message) => {
     const m = message as VaultRequest
     if ((m.type as string) === VAULT_LOCK) {
-      vault = "locked"
+      // A fresh worker: locked if a vault was persisted, else still not set up.
+      if (vault === "ready") vault = "locked"
       return true
     }
     if (m.type !== VAULT_REQUEST) return undefined
@@ -31,10 +32,15 @@ beforeEach(() => {
         return { reply: { type: "hello", protocol: 3, version: "test", status: vault, capabilities: [] } }
       case "device-unlock":
       case "device-create":
+      case "device-join-finish":
         vault = "ready"
         return { reply: { type: m.body.type, ok: true } }
       case "device-logins":
         return { reply: { type: "device-logins", accounts: [] } }
+      case "device-join-start":
+        return { reply: { type: "device-join-start", code: "4821-tidy-otter", phase: "waiting" } }
+      case "device-join-status":
+        return { reply: { type: "device-join-status", phase: "waiting", code: "4821-tidy-otter" } }
       default:
         return { reply: { type: m.body.type, ok: true } }
     }
@@ -66,6 +72,69 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "list", origin: "https://a.test/path" })).toBeNull()
     expect(deviceCommand({ type: "fill", origin: "https://a.test", ref: "r" })).toBeNull()
     expect(deviceCommand(null)).toBeNull()
+  })
+
+  test("join commands are rebuilt from their known fields only: the page can't name the device", () => {
+    for (const type of ["device-join-start", "device-join-status", "device-join-cancel"] as const) {
+      expect(deviceCommand({ type, deviceName: "Evil", code: "x", passphrase: "p", vault: "v" })).toEqual({ type })
+    }
+    expect(deviceCommand({ type: "device-join-finish", passphrase: "p", deviceName: "Evil", extra: 1 })).toEqual({ type: "device-join-finish", passphrase: "p" })
+    expect(deviceCommand({ type: "device-join-finish", passphrase: "" })).toBeNull()
+    expect(deviceCommand({ type: "device-join-finish" })).toBeNull()
+    expect(deviceCommand({ type: "device-join-finish", passphrase: 7 })).toBeNull()
+    expect(deviceCommand({ type: "device-join-finish", passphrase: "p".repeat(1025) })).toBeNull()
+    expect(deviceCommand({ type: "device-join" })).toBeNull()
+    expect(deviceCommand({ type: "device-join-start" })).toEqual({ type: "device-join-start" })
+  })
+
+  test("a join starts and polls without counting as use or asking hello again", async () => {
+    vault = "not-set-up"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    fake.sent.length = 0
+    const start = await backend.device({ type: "device-join-start" })
+    expect(start).toEqual({ ok: true, reply: { type: "device-join-start", code: "4821-tidy-otter", phase: "waiting" }, ms: expect.any(Number), status: { state: "not-set-up", detail: undefined } })
+    // Starting is the user at work; the page polling while it waits isn't.
+    await settle()
+    delete fake.session["deadbolt.lastUse"]
+    for (let i = 0; i < 3; i++) await backend.device({ type: "device-join-status" })
+    await settle()
+    expect(requests()).toEqual([{ type: "device-join-start", deviceName: expect.any(String) }, { type: "device-join-status" }, { type: "device-join-status" }, { type: "device-join-status" }])
+    expect(fake.session["deadbolt.lastUse"]).toBeUndefined()
+  })
+
+  test("finishing a join names this browser, unlocks and syncs at once", async () => {
+    vault = "not-set-up"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const changes: Array<string | undefined> = []
+    backend.onChange((_, change) => changes.push(change))
+    const reply = await backend.device({ type: "device-join-finish", passphrase: "browser pass" })
+    expect(reply.ok).toBe(true)
+    expect(reply.status.state).toBe("ready")
+    await settle()
+    const sent = requests()
+    const finish = sent.findIndex((b) => b.type === "device-join-finish")
+    expect(sent[finish]).toEqual({ type: "device-join-finish", passphrase: "browser pass", deviceName: expect.any(String) })
+    expect(sent[finish + 1]?.type).toBe("hello")
+    expect(sent.slice(finish + 2).some((b) => b.type === "device-sync")).toBe(true)
+    expect(changes[0]).toBe("unlocked")
+  })
+
+  test("cancelling a join ends the worker and never reaches the vault", async () => {
+    vault = "not-set-up"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    await backend.device({ type: "device-join-start" })
+    const states: string[] = []
+    backend.onChange((s) => states.push(s.state))
+    fake.sent.length = 0
+    const reply = await backend.device({ type: "device-join-cancel" })
+    expect(reply).toEqual({ ok: true, reply: { type: "device-join-cancel", ok: true }, ms: expect.any(Number), status: { state: "not-set-up", detail: undefined } })
+    expect(locks()).toBe(1)
+    expect(requests()).toEqual([{ type: "hello" }])
+    // Nothing to unlock: the page never sees "locked" for a vault that doesn't exist.
+    expect(states).toEqual(["not-set-up"])
   })
 
   test("create and unlock name this browser, then sync at once", async () => {

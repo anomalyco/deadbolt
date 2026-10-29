@@ -111,7 +111,7 @@ function statusBody(status: Status): HTMLElement | null {
     case "unavailable":
       return state(icon("plug"), "Deadbolt couldn't start", para(status.detail || "The agent didn't answer."))
     case "not-set-up":
-      if (!native) return state(icon("keyhole"), "Set up Deadbolt", para("Create a vault in this browser, then pair it with your other devices."), openButton(true, "Set up"))
+      if (!native) return state(icon("keyhole"), "Set up Deadbolt", para("Pair with a device that has your vault, or create a new vault."), openButton(true, "Set up"))
       return state(icon("keyhole"), "Set up Deadbolt first", para("Create your vault in the Deadbolt app, or run ", code("deadbolt init"), "."), openButton(true))
     case "locked": {
       if (!native) return state(icon("lock"), "Unlock Deadbolt", para(status.detail || "Unlock it to fill passwords."), openButton(true, "Unlock"))
