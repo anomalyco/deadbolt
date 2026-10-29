@@ -385,7 +385,7 @@ export function parseHostMessage(raw: unknown): HostMessage | null {
   return reply ? { kind: "reply", id, reply } : null
 }
 
-function parseReply(raw: Record<string, unknown>): Reply | null {
+export function parseReply(raw: Record<string, unknown>): Reply | null {
   switch (raw.type) {
     case "hello": {
       const status = raw.status as HostStatus

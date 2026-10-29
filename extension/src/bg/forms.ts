@@ -15,7 +15,7 @@ import type { FormCard, FormIdentity, FormKind, FormsReply } from "../protocol"
 import { paymentProvider, securePage } from "../payments"
 import { boxesInTop, isBoxes, menuFrameOf, newToken, sendToFrame, type FrameTarget } from "./frames"
 import { fillError, resizeMessage } from "./autofill"
-import { HostError, type Host } from "./host"
+import { HostError, type VaultBackend } from "./backend"
 import { fillableOrigin, sameSite, senderOrigin, siteOf } from "./site"
 
 const TOKEN_TTL_MS = 2 * 60_000
@@ -100,7 +100,7 @@ export class Forms {
   /** Sites whose fields already showed the locked row on focus since Deadbolt last locked or unlocked. */
   private lockedShown = new Set<string>()
 
-  constructor(private host: Host) {
+  constructor(private host: VaultBackend) {
     host.onChange(() => {
       this.lists.clear()
       this.lockedShown.clear()

@@ -8,7 +8,7 @@
 import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type SignInReply, type Approved, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
-import { HostError, type Host } from "./host"
+import { HostError, type VaultBackend } from "./backend"
 import { isAccountPage, pageAccountOf } from "../signin"
 import type { SignInWith } from "./signinwith"
 import { siteOf } from "./site"
@@ -182,7 +182,7 @@ export class Autofill {
   private lastState: string
 
   constructor(
-    private host: Host,
+    private host: VaultBackend,
     private passkeys?: MenuPasskeys,
     /** The username the user submitted in this tab on `site`, if any (bg/save.ts holds it). */
     private submittedName?: (tabId: number, site: string) => string | undefined,

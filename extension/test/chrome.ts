@@ -1,7 +1,7 @@
 // A small stand-in for the chrome.* APIs the background uses, and a fake host,
 // for testing the background classes without a browser.
 
-import { HostError, type Host } from "../src/bg/host"
+import { HostError, type VaultBackend } from "../src/bg/backend"
 import type { PageFacts, Status } from "../src/messages"
 import type { Account, RequestBody as Request } from "../src/protocol"
 
@@ -99,7 +99,7 @@ export const ACCOUNTS: Account[] = [
 ]
 
 export interface FakeHost {
-  host: Host
+  host: VaultBackend
   requests: Request[]
   setStatus(status: Status): void
   /** Holds the host's fill replies until the returned function is called. */
@@ -149,7 +149,7 @@ export function fakeHost(): FakeHost {
     },
   }
   return {
-    host: host as unknown as Host,
+    host: host as unknown as VaultBackend,
     requests,
     setStatus(status) {
       host.status = status

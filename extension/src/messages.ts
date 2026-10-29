@@ -186,6 +186,8 @@ export type ToBackground =
   | { type: "db:popup-saving-on"; tabId: number }
   /** Start or stop learning the tab's site. Answers with a LearnReply. */
   | { type: "db:popup-learn"; tabId: number; on: boolean }
+  // device.html, the standalone device's own page (bg/standalone.ts): answers with a DeviceReply
+  | { type: "db:device"; command: DeviceCommand }
   // passkeys (bg/passkeys.ts): the content script relays the page's hook
   /** `request`: the hook's id for the call; `options`: the page's options, checked in the background. */
   | { type: "pk:get" | "pk:create"; request: number; options: unknown; allowed: boolean }
@@ -423,3 +425,22 @@ export type PasskeyPrompt = {
 
 /** `fallback`: the browser's own passkey flow, such as a phone or security key. */
 export type PasskeyChoice = { action: "use"; ref: string } | { action: "save" } | { action: "fallback" } | { action: "cancel" }
+
+/**
+ * What device.html asks of the standalone device: set it up, unlock, lock,
+ * pair and sync it, and add or list logins by hand. The background takes
+ * these only from the extension's own device.html.
+ */
+export type DeviceCommand =
+  | { type: "device-status" }
+  | { type: "device-create"; passphrase: string; name: string }
+  | { type: "device-unlock"; passphrase: string }
+  | { type: "device-lock" }
+  /** Admit the device that `deadbolt join` shows this code on. */
+  | { type: "device-pair"; code: string }
+  | { type: "device-sync" }
+  | { type: "list"; origin: string }
+  | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
+
+/** `reply`: the vault's answer as it gave it; `ms`: how long it took. */
+export type DeviceReply = { ok: true; reply: Record<string, unknown>; ms: number; status: Status } | { ok: false; message: string; status: Status }

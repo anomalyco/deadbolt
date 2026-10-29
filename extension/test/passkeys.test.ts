@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { Host, HostError } from "../src/bg/host"
+import { HostError } from "../src/bg/backend"
+import { Host } from "../src/bg/host"
 import { parseOptions, Passkeys, rpIdFor } from "../src/bg/passkeys"
 import { initPasskeyChannel } from "../src/content/passkeys"
 import "../src/passkey-hook"

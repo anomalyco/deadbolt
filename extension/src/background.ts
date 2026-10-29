@@ -1,8 +1,11 @@
-// Service worker: the extension's only link to Deadbolt. It keeps one native
-// messaging port to `deadbolt browser-host` and answers the content scripts,
-// the inline menu and the popup.
+// Service worker: the extension's only link to Deadbolt. By default the
+// extension is a Deadbolt device of its own (bg/standalone.ts: the Rust vault
+// in an offscreen worker); a `--native` build keeps one native messaging port
+// to `deadbolt browser-host` instead (bg/host.ts). It answers the content
+// scripts, the inline menu, the popup and device.html.
 
 import { Autofill } from "./bg/autofill"
+import type { VaultBackend } from "./bg/backend"
 import { Forms } from "./bg/forms"
 import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
@@ -10,9 +13,12 @@ import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
-import type { PopupReply, Status, StatusChanged, ToBackground } from "./messages"
+import { StandaloneBackend } from "./bg/standalone"
+import type { DeviceCommand, DeviceReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
-const host = new Host()
+declare const DEADBOLT_NATIVE: boolean
+const standalone = DEADBOLT_NATIVE ? null : new StandaloneBackend()
+const host: VaultBackend = DEADBOLT_NATIVE ? new Host() : standalone!
 const saver = new Saver(host)
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
 const signInWith = new SignInWith(host)
@@ -35,6 +41,8 @@ function title(status: Status): string {
       return "Deadbolt isn't set up yet"
     case "not-installed":
       return "Deadbolt: run `deadbolt browser install`"
+    case "unavailable":
+      return "Deadbolt couldn't start"
     default:
       return "Deadbolt isn't connected"
   }
@@ -98,6 +106,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
         : { ok: false, message: "This offer has expired.", gone: true }
     case "db:popup-load": {
       if (!fromExtensionPage(sender, "popup.html")) return null
+      host.used?.()
       const reply: PopupReply = await autofill.popupLoad(message.tabId)
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
       const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
@@ -116,7 +125,54 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
         : { ok: false, message: "" }
     case "db:popup-saving-on":
       return fromExtensionPage(sender, "popup.html") ? saver.savingOn(message.tabId) : false
+    case "db:device":
+      return device(message.command, sender)
   }
+}
+
+/** device.html's commands: only from that exact page of this extension, never a content script or another page. */
+async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promise<DeviceReply> {
+  if (sender.id !== chrome.runtime.id || sender.url?.split(/[?#]/)[0] !== chrome.runtime.getURL("device.html")) return { ok: false, message: "", status: host.status }
+  if (!standalone) return { ok: false, message: "This build talks to the Deadbolt app; set it up there.", status: host.status }
+  const command = deviceCommand(raw)
+  if (!command) return { ok: false, message: "Malformed request.", status: host.status }
+  return standalone.device(command)
+}
+
+const text = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max
+const origin = (v: unknown): v is string => {
+  if (!text(v, 2048)) return false
+  try {
+    const u = new URL(v)
+    return (u.protocol === "https:" || u.protocol === "http:") && u.origin === v
+  } catch {
+    return false
+  }
+}
+
+function deviceCommand(raw: unknown): DeviceCommand | null {
+  if (typeof raw !== "object" || raw === null) return null
+  const c = raw as Record<string, unknown>
+  switch (c.type) {
+    case "device-status":
+    case "device-lock":
+    case "device-sync":
+      return { type: c.type }
+    case "device-create":
+      return text(c.passphrase, 1024) && c.passphrase && text(c.name, 200) ? { type: "device-create", passphrase: c.passphrase, name: c.name } : null
+    case "device-unlock":
+      return text(c.passphrase, 1024) ? { type: "device-unlock", passphrase: c.passphrase } : null
+    case "device-pair":
+      return text(c.code, 200) && c.code ? { type: "device-pair", code: c.code } : null
+    case "list":
+      return origin(c.origin) ? { type: "list", origin: c.origin } : null
+    case "save": {
+      const e = c.entry as Record<string, unknown> | undefined
+      if (!origin(c.origin) || !e || !text(e.title, 500) || !text(e.url, 2048) || !text(e.username, 500) || !text(e.password, 4096) || !e.password) return null
+      return { type: "save", origin: c.origin, entry: { title: e.title, url: e.url, username: e.username, password: e.password } }
+    }
+  }
+  return null
 }
 
 chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) => {

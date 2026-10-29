@@ -14,7 +14,7 @@ import type { FieldRole, HookReply, MenuPasskey, PasskeyChoice, PasskeyPrompt, P
 import { IDENTIFIER_ROLES } from "../messages"
 import { isB64url, isRef, type Passkey, type PasskeysReply, type UserVerification } from "../protocol"
 import { frameChain, fromExtensionPage, newToken, type FrameTarget } from "./frames"
-import { HostError, type Host } from "./host"
+import { HostError, type VaultBackend } from "./backend"
 import { openPopupFor } from "./save"
 import { fillableOrigin, senderOrigin, siteOf } from "./site"
 
@@ -154,7 +154,7 @@ export class Passkeys {
   private now: () => number
 
   constructor(
-    private host: Host,
+    private host: VaultBackend,
     options: PasskeyOptions = {},
   ) {
     this.openPopup = options.openPopup ?? openPopupFor

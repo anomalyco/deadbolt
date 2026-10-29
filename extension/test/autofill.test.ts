@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, test } from "bun:test"
 import { Autofill, FLOWS_KEY, menuAccounts, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, stepLabel, stepRoles } from "../src/bg/autofill"
-import { HostError } from "../src/bg/host"
+import { HostError } from "../src/bg/backend"
 import { SignInWith } from "../src/bg/signinwith"
 import { ACCOUNTS, fakeHost, installChrome, menuSender, pageSender, POPUP_URL, SITE, type FakeChrome, type FakeHost } from "./chrome"
 

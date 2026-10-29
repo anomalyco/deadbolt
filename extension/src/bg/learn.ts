@@ -11,7 +11,7 @@
 import { LEARN_TTL_MS, MAX_INPUTS, MAX_STEPS, truthOf, usernameDigest, type LearnEnd, type LearnSession, type LearnStep } from "../learn"
 import type { LearnReply, Learning } from "../messages"
 import { topTarget } from "./frames"
-import type { Host } from "./host"
+import type { VaultBackend } from "./backend"
 import { siteOf } from "./site"
 
 /** After a sign-in works, the page it lands on is recorded too, then the session ends. */
@@ -65,7 +65,7 @@ export class Learner {
   /** The sessions a previous service worker left, back in `tabs`. */
   private ready: Promise<void>
 
-  constructor(private host: Host) {
+  constructor(private host: VaultBackend) {
     this.ready = this.restore()
   }
 

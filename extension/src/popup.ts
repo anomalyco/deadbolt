@@ -9,6 +9,10 @@ import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, timing } from "./ui/motion"
 
+declare const DEADBOLT_NATIVE: boolean | undefined
+/** A `--native` build talks to `deadbolt browser-host`; the default is the browser-only device, set up on device.html. */
+const native = typeof DEADBOLT_NATIVE !== "undefined" && DEADBOLT_NATIVE === true
+
 const root = document.getElementById("app")!
 document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
@@ -42,6 +46,11 @@ function swapIcon(button: HTMLElement, name: "check" | "copy") {
 // Deadbolt has no URL scheme or host message that opens the app, so "Open
 // Deadbolt" says where to find it instead of launching it.
 function openApp() {
+  if (!native) {
+    void chrome.tabs.create({ url: chrome.runtime.getURL("device.html") })
+    window.close()
+    return
+  }
   const help = document.getElementById("open-help")
   if (help) {
     help.hidden = !help.hidden
@@ -102,8 +111,10 @@ function statusBody(status: Status): HTMLElement | null {
     case "unavailable":
       return state(icon("plug"), "Deadbolt couldn't start", para(status.detail || "The agent didn't answer."))
     case "not-set-up":
+      if (!native) return state(icon("keyhole"), "Set up Deadbolt", para("Create a vault in this browser, then pair it with your other devices."), openButton(true, "Set up"))
       return state(icon("keyhole"), "Set up Deadbolt first", para("Create your vault in the Deadbolt app, or run ", code("deadbolt init"), "."), openButton(true))
     case "locked": {
+      if (!native) return state(icon("lock"), "Unlock Deadbolt", para(status.detail || "Unlock it to fill passwords."), openButton(true, "Unlock"))
       return state(
         icon("lock"),
         "Unlock Deadbolt",
@@ -116,8 +127,8 @@ function statusBody(status: Status): HTMLElement | null {
   }
 }
 
-function openButton(primary: boolean): HTMLElement {
-  const b = h("button", { class: `btn${primary ? " primary" : ""}`, type: "button" }, "Open Deadbolt")
+function openButton(primary: boolean, label = "Open Deadbolt"): HTMLElement {
+  const b = h("button", { class: `btn${primary ? " primary" : ""}`, type: "button" }, label)
   b.addEventListener("click", openApp)
   return b
 }

@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "check": "tsc --noEmit && bun test",
-    "e2e": "bun scripts/build.ts && bun e2e/run.ts",
+    "e2e": "bun e2e/run.ts",
+    "e2e:standalone": "bun e2e/standalone.ts",
     "e2e:parallel": "bun scripts/e2e-parallel.ts"
   },
   "devDependencies": {
