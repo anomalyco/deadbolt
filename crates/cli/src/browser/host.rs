@@ -51,6 +51,10 @@ const MAX_URL: usize = 2048;
 /// or hostile caller gets them slowly: a burst, then one per interval.
 const CHECKS: (u32, Duration) = (20, Duration::from_secs(1));
 const FILLS: (u32, Duration) = (60, Duration::from_millis(250));
+/// Learning logs a line per sign-in step and frame: a burst, then a steady trickle.
+const LEARNS: (u32, Duration) = (100, Duration::from_millis(100));
+/// The most one learning session's log grows to; past it lines are refused.
+const MAX_LEARN_LOG: u64 = 4 * 1024 * 1024;
 
 /// A token bucket: `capacity` at once, refilled one per `every`.
 pub(super) struct Bucket {
@@ -123,6 +127,12 @@ enum Request {
     PasskeyCreate(passkeys::Create),
     PasskeyGet(passkeys::Get),
     PasskeyCancel(passkeys::Cancel),
+    /// One line for the log of a "Learn this site" session. The extension
+    /// sends form shapes only, never values; the host just appends it.
+    Learn {
+        session: String,
+        line: serde_json::Map<String, Value>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -151,7 +161,7 @@ pub(super) enum Body {
         status: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
-        capabilities: [&'static str; 5],
+        capabilities: [&'static str; 6],
     },
     List {
         site: String,
@@ -183,6 +193,7 @@ pub(super) enum Body {
     PasskeyCancelled {
         found: bool,
     },
+    Learned,
 }
 
 #[derive(Serialize)]
@@ -401,6 +412,7 @@ struct Serial {
     checks: Bucket,
     fills: Bucket,
     passkey_lists: Bucket,
+    learns: Bucket,
 }
 
 /// Where a request goes once read.
@@ -426,6 +438,7 @@ impl Host {
                 checks: Bucket::new(CHECKS, now),
                 fills: Bucket::new(FILLS, now),
                 passkey_lists: Bucket::new(passkeys::LISTS, now),
+                learns: Bucket::new(LEARNS, now),
             },
             ceremonies: Ceremonies::new(now),
         }
@@ -701,8 +714,66 @@ impl Serial {
             Request::PasskeyCreate(_) | Request::PasskeyGet(_) | Request::PasskeyCancel(_) => {
                 Err(unexpected())
             }
+            Request::Learn { session, line } => {
+                if !self.learns.take(Instant::now()) {
+                    return Err(Refusal::slow_down());
+                }
+                learn(&self.paths, &session, &line)?;
+                Ok(Body::Learned)
+            }
         }
     }
+}
+
+/// A session id is a UUID, as the extension's `crypto.randomUUID()` makes
+/// it: it names the log file, so nothing else gets near the path.
+fn learn_session(session: &str) -> bool {
+    session.len() == 36
+        && session.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit() && !b.is_ascii_uppercase(),
+        })
+}
+
+/// Appends `line` to the session's log, `<learn dir>/<session>.jsonl`, both
+/// readable by this user only. Works locked: it touches no vault.
+fn learn(
+    paths: &Paths,
+    session: &str,
+    line: &serde_json::Map<String, Value>,
+) -> Result<(), Refusal> {
+    use std::io::Write;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    if !learn_session(session) {
+        return Err(Refusal::bad("session is a lowercase UUID"));
+    }
+    let failed = |what: &str, error: std::io::Error| Refusal {
+        code: Code::Failed,
+        message: format!("couldn't {what} the learning log: {error}"),
+    };
+    let dir = paths.learn_dir();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| failed("create", e))?;
+    let path = dir.join(format!("{session}.jsonl"));
+    let mut bytes = serde_json::to_vec(line).map_err(|_| Refusal::bad("line is not JSON"))?;
+    bytes.push(b'\n');
+    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    if size + bytes.len() as u64 > MAX_LEARN_LOG {
+        return Err(Refusal::bad(format!(
+            "a learning log is at most {MAX_LEARN_LOG} bytes"
+        )));
+    }
+    std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .mode(0o600)
+        .open(&path)
+        .and_then(|mut file| file.write_all(&bytes))
+        .map_err(|e| failed("write", e))
 }
 
 /// Starts the agent if none runs, never unlocking it.
@@ -725,7 +796,7 @@ async fn hello(paths: &Paths) -> (Body, bool) {
         version: client::version(),
         status,
         detail,
-        capabilities: ["list", "fill", "check", "save", "passkeys"],
+        capabilities: ["list", "fill", "check", "save", "passkeys", "learn"],
     };
     (body, status != "unavailable")
 }
@@ -1157,6 +1228,63 @@ mod tests {
         let none = host.answer(cancel, &frames).await.unwrap();
         assert_eq!(json(&none)["found"], false);
         assert!(outbox.try_recv().is_err());
+    }
+
+    /// Learning lines go to their session's own log, in order, readable by
+    /// this user only, without an agent; a session id that isn't a UUID
+    /// never becomes a path.
+    #[tokio::test]
+    async fn learn_lines_append_to_the_sessions_log() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let mut host = Host::new(paths.clone());
+        let (frames, _outbox) = mpsc::channel(16);
+        let session = "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b";
+        for seq in 1..=2 {
+            let request = serde_json::json!({
+                "id": seq, "type": "learn", "session": session,
+                "line": {"event": "step", "seq": seq, "inputs": [{"type": "email"}]},
+            });
+            let reply = host
+                .answer(&serde_json::to_vec(&request).unwrap(), &frames)
+                .await
+                .unwrap();
+            assert_eq!(
+                json(&reply),
+                serde_json::json!({"id": seq, "type": "learned"})
+            );
+        }
+        let log = paths.learn_dir().join(format!("{session}.jsonl"));
+        let text = std::fs::read_to_string(&log).unwrap();
+        let lines: Vec<Value> = text
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[1]["seq"], 2);
+        let mode = |p: &std::path::Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&log), 0o600);
+        assert_eq!(mode(&paths.learn_dir()), 0o700);
+
+        for bad in [
+            "../../etc/passwd",
+            "0B5D3C1E-8F6A-4F3E-9A7B-1C2D3E4F5A6B",
+            "",
+        ] {
+            let request = serde_json::json!({"id": 9, "type": "learn", "session": bad, "line": {}});
+            let reply = host
+                .answer(&serde_json::to_vec(&request).unwrap(), &frames)
+                .await
+                .unwrap();
+            assert_eq!(json(&reply)["code"], "bad_request", "{bad:?}");
+        }
+        let line_not_object =
+            br#"{"id": 10, "type": "learn", "session": "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", "line": [1]}"#;
+        let reply = host.answer(line_not_object, &frames).await.unwrap();
+        assert_eq!(json(&reply)["code"], "bad_request");
+        assert_eq!(std::fs::read_dir(paths.learn_dir()).unwrap().count(), 1);
     }
 
     fn framed(request: Value) -> Vec<u8> {
