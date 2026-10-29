@@ -79,6 +79,8 @@ pub struct AgentError {
     pub message: String,
     /// With `not-granted`: what the user would have to allow.
     pub grant: Option<protocol::NotGranted>,
+    /// With `choose-passkey`: the passkeys to choose from.
+    pub passkeys: Option<Vec<protocol::AgentPasskey>>,
 }
 
 impl fmt::Display for AgentError {
@@ -219,24 +221,16 @@ where
                 // Events that arrive while one is being answered wait their turn.
                 let answer = loop {
                     tokio::select! {
-                                biased;
-                                answer = &mut answer => break answer,
-                                message = read_message(&mut lines) => match message? {
-                                    Message::Ok { reply } => return Ok(reply),
-                                    Message::Error {
-                                        code,
-                                        message,
-                                        grant,
-                                    } => {
-                                        return Err(AgentError {
-                        code,
-                        message,
-                        grant,
-                    }.into());
-                                    }
-                                    event => queued.push_back(event),
-                                },
+                        biased;
+                        answer = &mut answer => break answer,
+                        message = read_message(&mut lines) => match message? {
+                            Message::Ok { reply } => return Ok(reply),
+                            Message::Error { code, message, grant, passkeys } => {
+                                return Err(AgentError { code, message, grant, passkeys }.into());
                             }
+                            event => queued.push_back(event),
+                        },
+                    }
                 };
                 if let Some(answer) = answer.map_err(|e| Error::Event(e.into()))? {
                     write.write_all(&encode_line(&Answer { answer })?).await?;
@@ -248,11 +242,13 @@ where
                 code,
                 message,
                 grant,
+                passkeys,
             } => {
                 return Err(AgentError {
                     code,
                     message,
                     grant,
+                    passkeys,
                 }
                 .into());
             }
@@ -372,10 +368,12 @@ impl Watch {
                 code,
                 message,
                 grant,
+                passkeys,
             } => Err(AgentError {
                 code,
                 message,
                 grant,
+                passkeys,
             }
             .into()),
             Message::Event { event } => Err(Error::UnexpectedEvent(event)),
@@ -825,6 +823,7 @@ mod tests {
                     code: ErrorCode::Failed,
                     message: "pairing confirmation code was not confirmed".into(),
                     grant: None,
+                    passkeys: None,
                 };
                 write
                     .write_all(&encode_line(&declined).unwrap())

@@ -685,10 +685,12 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   UV is never set: no finger touched anything. A `required` request fails
   before anything is signed; sites that demand verification don't get
   agents in, which is correct. Client data comes from the frame origin the
-  relay read over CDP, the relying party id is checked as below, and the
-  passkey is the first of `allowCredentials` saved here, or with none the
-  site's only one (a grant for one login narrows it to that login's
-  username).
+  relay read over CDP, and the relying party id is checked as below. The
+  passkey is the one the client names by ref (`agent-logins` lists each
+  with its user name and display name), else the only one the grant covers
+  among `allowCredentials` (all of the site's when empty); with several the
+  agent replies `choose-passkey` listing them, never their keys. A grant for
+  one login covers the passkeys with that login's username.
 - **Client data** is built by the agent from the origin the browser reported
   for the frame (`sender.origin`): `type`, the challenge, that origin, and
   `crossOrigin: false`. Nothing the page says goes into it except the

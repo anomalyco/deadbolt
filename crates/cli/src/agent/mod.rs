@@ -927,6 +927,7 @@ fn fail(code: ErrorCode, message: impl Into<String>) -> anyhow::Error {
         code,
         message: message.into(),
         grant: None,
+        passkeys: None,
     }
     .into()
 }
@@ -1210,11 +1211,13 @@ impl Agent {
                     code: error.code,
                     message: error.message,
                     grant: error.grant,
+                    passkeys: error.passkeys,
                 },
                 Err(error) => Message::Error {
                     code: ErrorCode::Failed,
                     message: format!("{error:#}"),
                     grant: None,
+                    passkeys: None,
                 },
             },
         };

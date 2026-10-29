@@ -385,15 +385,16 @@ pub enum Command {
         id: String,
     },
     /// Lets `client_id` fill `fields` of the logins on `site` (a
-    /// registrable domain, or an exact origin with its scheme), or only of
-    /// `login` (a login's id, short id, title or username on that site),
-    /// and sign in with that site's passkeys if `passkeys`, until
-    /// `expires_at` (Unix seconds; `None` never). Needs the user as
+    /// registrable domain, or an exact origin with its scheme; `None` for
+    /// every site), or only of `login` (a login's id, short id, title or
+    /// username on that site), and sign in with that site's passkeys if
+    /// `passkeys`, until `expires_at` (Unix seconds; `None` never). A login
+    /// still fills only on the site of one of its URLs. Needs the user as
     /// `AgentClientAdd` does, and refuses AIs the same way. Replies
     /// `agent-grant`.
     AgentGrantSet {
         client_id: String,
-        site: String,
+        site: Option<String>,
         login: Option<String>,
         fields: Vec<Fill>,
         passkeys: bool,
@@ -428,15 +429,18 @@ pub enum Command {
     },
     /// From a paired client: signs `challenge` with a passkey for `rp_id`
     /// (the host of `origin` when `None`) that a live grant with
-    /// `passkeys` covers: the first of `allow_credentials` saved here, or
-    /// with none, the site's only one. Client data is built from
-    /// `origin`. User presence is set (the grant is the user's standing
-    /// consent), user verification never, so `required` fails. Replies
-    /// `passkey-assertion` with `verified` false.
+    /// `passkeys` covers: `login` (a passkey ref from `agent-logins`), else
+    /// the only covered one among `allow_credentials` (all of the site's
+    /// when empty); with several, fails `choose-passkey` listing them.
+    /// Client data is built from `origin`. User presence is set (the grant
+    /// is the user's standing consent), user verification never, so
+    /// `required` fails. Replies `passkey-assertion` with `verified` false.
     AgentPasskeyGet {
         client: ClientAuth,
         origin: String,
         rp_id: Option<String>,
+        #[serde(default)]
+        login: Option<LoginRef>,
         challenge: String,
         #[serde(default)]
         allow_credentials: Vec<String>,
@@ -486,8 +490,8 @@ pub struct AgentGrantInfo {
     /// The client's name, if it is still paired.
     pub client_name: Option<String>,
     /// A registrable domain (`github.com`) or an exact origin
-    /// (`https://app.example.com`).
-    pub site: String,
+    /// (`https://app.example.com`); `None` for every site.
+    pub site: Option<String>,
     /// One login only, else every login on the site.
     pub login: Option<LoginRef>,
     /// That login's username, else its title, when the grant was made.
@@ -519,6 +523,21 @@ pub struct AgentLogin {
     pub fields: Vec<Fill>,
     /// Whether a live grant lets this client sign in with its passkey.
     pub passkeys: bool,
+}
+
+/// A passkey an agent client may sign in with, or choose between. Never
+/// its key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentPasskey {
+    #[serde(rename = "ref")]
+    pub passkey: LoginRef,
+    /// The WebAuthn user name the site gave it.
+    pub username: Option<String>,
+    /// The WebAuthn display name, when one was saved.
+    pub display_name: Option<String>,
+    pub rp_id: String,
+    /// Base64url.
+    pub credential_id: String,
 }
 
 /// What a `not-granted` error names, so the client can say what to allow.
@@ -754,6 +773,9 @@ pub enum Message {
         /// With `not-granted`: what the user would have to allow.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant: Option<NotGranted>,
+        /// With `choose-passkey`: the passkeys to choose from, no secrets.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        passkeys: Option<Vec<AgentPasskey>>,
     },
 }
 
@@ -813,6 +835,9 @@ pub enum ErrorCode {
     NotGranted,
     /// Too many requests from this client; try again shortly.
     RateLimited,
+    /// Several passkeys could sign: the error lists them, and the client
+    /// asks again naming one.
+    ChoosePasskey,
     Failed,
 }
 
@@ -963,6 +988,8 @@ pub enum Reply {
         /// Whether any live grant of the client covers the site.
         granted: bool,
         logins: Vec<AgentLogin>,
+        /// The passkeys for the page its grants let it sign in with.
+        passkeys: Vec<AgentPasskey>,
     },
 }
 

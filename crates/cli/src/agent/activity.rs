@@ -254,9 +254,10 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             passkeys,
             ..
         } => {
+            let site = site.as_deref().unwrap_or("every site");
             let what = match login {
                 Some(login) => format!("{login} on {site}"),
-                None => site.clone(),
+                None => site.to_string(),
             };
             let mut names: Vec<String> = fields.iter().map(fill_name).collect();
             if *passkeys {
@@ -276,8 +277,15 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             login(&target.vault, &target.item, origin),
             want.iter().map(fill_name).collect(),
         ),
-        Command::AgentPasskeyGet { origin, .. } => (
-            named(&None, std::slice::from_ref(origin)),
+        Command::AgentPasskeyGet {
+            origin,
+            login: target,
+            ..
+        } => (
+            match target {
+                Some(t) => login(&t.vault, &t.item, origin),
+                None => named(&None, std::slice::from_ref(origin)),
+            },
             vec!["passkey".into()],
         ),
         // The page, and that a password was made for it: never the password

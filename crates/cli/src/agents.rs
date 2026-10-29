@@ -31,10 +31,16 @@ pub enum AgentsCommand {
     /// Unpair an agent client (by id or name) and drop its grants.
     RemoveClient { client: String },
     /// Let an agent client sign in to SITE (a domain, or an exact origin
-    /// such as https://app.example.com) without asking. Asks for Touch ID
-    /// or your passphrase; refused to AI agents.
+    /// such as https://app.example.com), or with --all to every site,
+    /// without asking: usernames, passwords, one-time codes and passkeys
+    /// unless narrowed. A login still fills only on the site of its URLs.
+    /// Asks for Touch ID or your passphrase; refused to AI agents.
     Allow {
-        site: String,
+        #[arg(required_unless_present = "all", conflicts_with = "all")]
+        site: Option<String>,
+        /// Every login on every site.
+        #[arg(long, conflicts_with = "login")]
+        all: bool,
         /// Only this login (its id, username or title), else every login
         /// for the site.
         #[arg(long)]
@@ -43,10 +49,10 @@ pub enum AgentsCommand {
         /// none (default: all three).
         #[arg(long)]
         fields: Option<String>,
-        /// Also sign in with the site's passkeys (user present, never
-        /// verified).
+        /// Don't sign in with the site's passkeys (by default it may, with
+        /// user presence and never verification).
         #[arg(long)]
-        passkeys: bool,
+        no_passkeys: bool,
         /// Expire after this long (30m, 8h, 30d; default never).
         #[arg(long)]
         expires: Option<String>,
@@ -112,12 +118,15 @@ pub async fn run(paths: &Paths, command: AgentsCommand, from_stdin: bool) -> Res
         }
         AgentsCommand::Allow {
             site,
+            all,
             login,
             fields,
-            passkeys,
+            no_passkeys,
             expires,
             client,
         } => {
+            let site = if all { None } else { site };
+            let passkeys = !no_passkeys;
             let client_id = client_id(paths, client.as_deref(), from_stdin).await?;
             let fields = parse_fields(fields.as_deref())?;
             let expires_at = match expires {
@@ -286,7 +295,7 @@ fn grant_line(grant: &AgentGrantInfo) -> String {
         "{}\t{}\t{}\t{}\t{}\t{expires}",
         grant.id,
         grant.client_name.as_deref().unwrap_or(&grant.client_id),
-        grant.site,
+        grant.site.as_deref().unwrap_or("every site"),
         grant.login_label.as_deref().unwrap_or("every login"),
         what.join(",")
     )

@@ -670,19 +670,20 @@ const SCENES: &[Scene] = &[
         vault(s);
         s.open_settings();
         s.toggle_agents();
-        let grant = |id: &str, site: &str, login: Option<&str>, fields, passkeys| AgentGrantInfo {
-            id: id.into(),
-            client_id: "1b48513abb66721c".into(),
-            client_name: Some("browse".into()),
-            site: site.into(),
-            login: None,
-            login_label: login.map(Into::into),
-            fields,
-            passkeys,
-            created: 0,
-            expires_at: None,
-            expired: false,
-        };
+        let grant =
+            |id: &str, site: Option<&str>, login: Option<&str>, fields, passkeys| AgentGrantInfo {
+                id: id.into(),
+                client_id: "1b48513abb66721c".into(),
+                client_name: Some("browse".into()),
+                site: site.map(Into::into),
+                login: None,
+                login_label: login.map(Into::into),
+                fields,
+                passkeys,
+                created: 0,
+                expires_at: None,
+                expired: false,
+            };
         let listing = (
             vec![AgentClientInfo {
                 id: "1b48513abb66721c".into(),
@@ -692,15 +693,22 @@ const SCENES: &[Scene] = &[
             }],
             vec![
                 grant(
+                    "a0",
+                    None,
+                    None,
+                    vec![Fill::Username, Fill::Password, Fill::Totp],
+                    true,
+                ),
+                grant(
                     "a1",
-                    "github.com",
+                    Some("github.com"),
                     None,
                     vec![Fill::Username, Fill::Password],
                     false,
                 ),
                 grant(
                     "a2",
-                    "vercel.com",
+                    Some("vercel.com"),
                     Some("kit@example.com"),
                     vec![Fill::Totp],
                     true,

@@ -142,8 +142,21 @@ pub fn grant_line(grant: &AgentGrantInfo) -> String {
     if grant.passkeys {
         what.push("passkeys");
     }
+    let Some(site) = &grant.site else {
+        let mut line = format!(
+            "All logins · {}",
+            grant
+                .client_name
+                .clone()
+                .unwrap_or_else(|| grant.client_id.clone())
+        );
+        if grant.expired {
+            line.push_str(" · expired");
+        }
+        return line;
+    };
     let mut parts = vec![
-        grant.site.clone(),
+        site.clone(),
         grant
             .login_label
             .clone()
@@ -257,7 +270,7 @@ mod tests {
             id: "g1".into(),
             client_id: "c1".into(),
             client_name: Some("browse".into()),
-            site: "github.com".into(),
+            site: Some("github.com".into()),
             login: None,
             login_label: Some("kit".into()),
             fields: vec![Fill::Username, Fill::Password],
@@ -281,5 +294,12 @@ mod tests {
             grant_line(&site_wide),
             "github.com · every login · username, password · c1 · expired"
         );
+        let all = AgentGrantInfo {
+            site: None,
+            client_name: Some("browse".into()),
+            expired: false,
+            ..site_wide
+        };
+        assert_eq!(grant_line(&all), "All logins · browse");
     }
 }

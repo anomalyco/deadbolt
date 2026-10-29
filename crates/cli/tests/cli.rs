@@ -766,7 +766,7 @@ fn agents_sign_in_unattended_only_where_allowed() {
     );
     let grants = a.run(&["agents", "grants"]);
     assert!(
-        grants.contains("github.com\tkit\ttotp\texpires in "),
+        grants.contains("github.com\tkit\ttotp,passkeys\texpires in "),
         "{grants}"
     );
 
@@ -808,6 +808,38 @@ fn agents_sign_in_unattended_only_where_allowed() {
         &fill("https://github.com", &github, &["password"]),
         "not-granted",
     );
+
+    // By default a grant covers every field and passkeys; --all covers every
+    // login on every site, but each login still fills only on its own site.
+    let (ok, out, _) = detached(
+        &a,
+        &["--passphrase-stdin", "agents", "allow", "example.org"],
+        &proof,
+    );
+    assert!(
+        ok && out.contains("example.org\tevery login\tusername,password,totp,passkeys"),
+        "{out}"
+    );
+    let (ok, out, _) = detached(
+        &a,
+        &["--passphrase-stdin", "agents", "allow", "--all"],
+        &proof,
+    );
+    assert!(
+        ok && out.contains("every site\tevery login\tusername,password,totp,passkeys"),
+        "{out}"
+    );
+    let values = fill("https://github.com", &github, &["password"]);
+    assert_eq!(
+        values["reply"]["values"]["password"], "hunter2-hunter2",
+        "{values}"
+    );
+    agent_error(
+        &fill("https://evil.com", &github, &["password"]),
+        "domain-mismatch",
+    );
+    let activity = a.run(&["activity", "--json"]);
+    assert!(activity.contains("\"title\":\"every site\""), "{activity}");
 
     // Locked, nothing fills.
     a.run(&["lock"]);

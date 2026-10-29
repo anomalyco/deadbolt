@@ -27,8 +27,8 @@ use super::{Agent, Conversation, ErrorCode, fail};
 use crate::browser::host::Bucket;
 use crate::client::AgentError;
 use crate::protocol::{
-    ActivityEntry, AgentClientInfo, AgentGrantInfo, AgentLogin, CallerClass, CallerInfo,
-    ClientAuth, Command, Fill, LoginRef, NotGranted, Reply, Secret, SiteValues, Verify,
+    ActivityEntry, AgentClientInfo, AgentGrantInfo, AgentLogin, AgentPasskey, CallerClass,
+    CallerInfo, ClientAuth, Command, Fill, LoginRef, NotGranted, Reply, Secret, SiteValues, Verify,
 };
 use crate::site::Site;
 use crate::webauthn;
@@ -65,8 +65,10 @@ impl Client {
 struct Grant {
     id: String,
     client_id: String,
-    /// A registrable domain, or an exact origin (it has a scheme).
-    site: String,
+    /// A registrable domain, or an exact origin (it has a scheme); `None`
+    /// for every site.
+    #[serde(default)]
+    site: Option<String>,
     login: Option<LoginRef>,
     login_label: Option<String>,
     fields: Vec<Fill>,
@@ -81,12 +83,24 @@ impl Grant {
     }
 
     /// Whether the grant is for the page at `origin`: the page's own
-    /// origin, or a page on the grant's site.
+    /// origin, a page on the grant's site, or any page for a grant of every
+    /// site. Which site a login fills on is still decided by its URLs.
     fn covers_origin(&self, origin: &str) -> bool {
-        if self.site.contains("://") {
-            canonical_origin(origin).is_some_and(|o| o == self.site)
-        } else {
-            Site::from_origin(origin).is_ok_and(|site| site.domain == self.site)
+        match &self.site {
+            None => true,
+            Some(site) if site.contains("://") => {
+                canonical_origin(origin).is_some_and(|o| &o == site)
+            }
+            Some(site) => Site::from_origin(origin).is_ok_and(|s| &s.domain == site),
+        }
+    }
+
+    /// "kit on github.com", "github.com", "every site".
+    fn scope(&self) -> String {
+        let site = self.site.as_deref().unwrap_or("every site");
+        match &self.login_label {
+            Some(login) => format!("{login} on {site}"),
+            None => site.to_string(),
         }
     }
 
@@ -320,7 +334,8 @@ fn resolve_login(s: &Loaded, site: &str, query: &str) -> Result<(LoginRef, Strin
 /// What `agent-grant-set` asks for.
 pub struct NewGrant<'a> {
     pub client_id: &'a str,
-    pub site: &'a str,
+    /// `None` for every site.
+    pub site: Option<&'a str>,
     pub login: Option<&'a str>,
     pub fields: &'a [Fill],
     pub passkeys: bool,
@@ -335,13 +350,14 @@ pub fn set_grant(s: &Loaded, new: NewGrant, now: u64) -> Result<AgentGrantInfo> 
         new.client_id,
         "agent client",
     )?;
-    let site = grant_site(new.site)?;
-    let (login, login_label) = match new.login {
-        Some(query) => {
-            let (login, label) = resolve_login(s, &site, query)?;
+    let site = new.site.map(grant_site).transpose()?;
+    let (login, login_label) = match (new.login, &site) {
+        (Some(query), Some(site)) => {
+            let (login, label) = resolve_login(s, site, query)?;
             (Some(login), Some(label))
         }
-        None => (None, None),
+        (Some(_), None) => bail!("a grant for every site covers every login; it can't name one"),
+        (None, _) => (None, None),
     };
     let mut fields: Vec<Fill> = Vec::new();
     for fill in new.fields {
@@ -397,10 +413,7 @@ pub fn remove_grant(s: &Loaded, id: &str) -> Result<String> {
     let what = all
         .iter()
         .find(|g| g.id == id)
-        .map(|g| match &g.login_label {
-            Some(login) => format!("{login} on {}", g.site),
-            None => g.site.clone(),
-        })
+        .map(Grant::scope)
         .unwrap_or_default();
     all.retain(|g| g.id != id);
     set_json(&s.store, META_GRANTS, &all)?;
@@ -427,6 +440,7 @@ fn not_granted(site: &str, login: Option<String>) -> anyhow::Error {
             site: site.to_string(),
             login,
         }),
+        passkeys: None,
     }
     .into()
 }
@@ -456,20 +470,74 @@ fn same_user(a: Option<&str>, b: Option<&str>) -> bool {
     }
 }
 
-/// The logins on the site of `origin` that `client` may be shown, and what
-/// its grants cover of each. None when no live grant covers the site.
-pub fn logins(
+/// A passkey as an agent client sees it: never its key.
+fn agent_passkey(passkey: &LoginRef, item: &Item) -> AgentPasskey {
+    AgentPasskey {
+        passkey: passkey.clone(),
+        username: autofill::value(item, "username").map(str::to_string),
+        display_name: autofill::value(item, "display-name").map(str::to_string),
+        rp_id: autofill::value(item, "rp-id").unwrap_or_default().into(),
+        credential_id: autofill::value(item, "credential-id")
+            .unwrap_or_default()
+            .into(),
+    }
+}
+
+/// Which of `found` (passkeys for the page at `origin`) the grants with
+/// `passkeys` in `covering` let the client sign in with. A grant for one
+/// login covers the passkeys with that login's username.
+fn granted_passkeys(
     s: &Loaded,
-    client: &ClientAuth,
+    covering: &[Grant],
     origin: &str,
-    now: u64,
-) -> Result<(String, bool, Vec<AgentLogin>)> {
+    found: Vec<(LoginRef, Item)>,
+) -> Vec<(LoginRef, Item)> {
+    let granted: Vec<&Grant> = covering.iter().filter(|g| g.passkeys).collect();
+    if granted.is_empty() {
+        return Vec::new();
+    }
+    let users: Option<Vec<Option<String>>> = granted
+        .iter()
+        .map(|g| {
+            g.login.as_ref().map(|login| {
+                Site::from_origin(origin)
+                    .ok()
+                    .and_then(|site| autofill::find(s, login, &site).ok())
+                    .and_then(|(_, item)| autofill::value(&item, "username").map(str::to_string))
+            })
+        })
+        .collect();
+    found
+        .into_iter()
+        .filter(|(_, item)| {
+            users.as_ref().is_none_or(|users| {
+                users
+                    .iter()
+                    .any(|u| same_user(u.as_deref(), autofill::value(item, "username")))
+            })
+        })
+        .collect()
+}
+
+/// What `agent-logins` answers: the page's site, whether any live grant
+/// covers it, its logins and the passkeys the client may use there.
+pub type Listing = (String, bool, Vec<AgentLogin>, Vec<AgentPasskey>);
+
+/// The logins on the site of `origin` that `client` may be shown, what its
+/// grants cover of each, and the passkeys it may sign in with. None when no
+/// live grant covers the site.
+pub fn logins(s: &Loaded, client: &ClientAuth, origin: &str, now: u64) -> Result<Listing> {
     let client = authenticate(s, client)?;
     let site = autofill::site(origin)?;
     let covering = covering(s, &client.id, origin, now)?;
     if covering.is_empty() {
-        return Ok((site.domain, false, Vec::new()));
+        return Ok((site.domain, false, Vec::new(), Vec::new()));
     }
+    let passkeys: Vec<AgentPasskey> =
+        granted_passkeys(s, &covering, origin, site_passkeys(s, origin).collect())
+            .iter()
+            .map(|(passkey, item)| agent_passkey(passkey, item))
+            .collect();
     let passkey_users: Vec<Option<String>> = site_passkeys(s, origin)
         .map(|(_, item)| autofill::value(&item, "username").map(str::to_string))
         .collect();
@@ -502,7 +570,7 @@ pub fn logins(
             }
         })
         .collect();
-    Ok((site.domain, true, logins))
+    Ok((site.domain, true, logins, passkeys))
 }
 
 /// The values `want` names of `login` for the frame at `origin`, if live
@@ -543,6 +611,9 @@ pub struct PasskeyRequest<'a> {
     pub challenge: &'a str,
     pub allow_credentials: &'a [String],
     pub user_verification: Verify,
+    /// The passkey the client chose, from `agent-logins` or a
+    /// `choose-passkey` error.
+    pub login: Option<&'a LoginRef>,
 }
 
 /// Signs for the page at `origin` with a passkey a live grant of `client`
@@ -561,25 +632,14 @@ pub fn passkey(
     if request.user_verification == Verify::Required {
         bail!("{rp} requires user verification, which an agent sign-in never gives");
     }
-    let granted: Vec<Grant> = covering(s, &client.id, origin, now)?
-        .into_iter()
-        .filter(|g| g.passkeys)
-        .collect();
-    if granted.is_empty() {
+    let covering = covering(s, &client.id, origin, now)?;
+    if !covering.iter().any(|g| g.passkeys) {
         return Err(not_granted(&domain, None));
     }
-    // A grant for one login covers the passkeys with that login's username.
-    let users: Option<Vec<Option<String>>> = granted
-        .iter()
-        .map(|g| {
-            g.login.as_ref().map(|login| {
-                Site::from_origin(origin)
-                    .ok()
-                    .and_then(|site| autofill::find(s, login, &site).ok())
-                    .and_then(|(_, item)| autofill::value(&item, "username").map(str::to_string))
-            })
-        })
-        .collect();
+    if let Some(login) = request.login {
+        // Refused as for the extension: another relying party's passkey.
+        passkeys::find(s, login, &rp)?;
+    }
     let all: Vec<(LoginRef, Item)> = passkeys::passkeys(s, &rp)
         .map(|(vault, item)| (autofill::login_ref(&vault, &item.id), item))
         .collect();
@@ -589,33 +649,39 @@ pub fn passkey(
             format!("no passkey for {rp} is saved here"),
         ));
     }
-    let allowed = |item: &Item| {
-        users.as_ref().is_none_or(|users| {
-            users
-                .iter()
-                .any(|u| same_user(u.as_deref(), autofill::value(item, "username")))
-        })
-    };
-    let candidates: Vec<&(LoginRef, Item)> = if request.allow_credentials.is_empty() {
-        all.iter().filter(|(_, item)| allowed(item)).collect()
-    } else {
-        request
-            .allow_credentials
-            .iter()
-            .filter_map(|id| {
-                all.iter()
-                    .find(|(_, item)| autofill::value(item, "credential-id") == Some(id))
-            })
-            .filter(|(_, item)| allowed(item))
-            .take(1)
-            .collect()
-    };
-    let passkey = match candidates.as_slice() {
-        [(passkey, _)] => passkey.clone(),
-        [] => return Err(not_granted(&domain, None)),
-        _ => bail!(
-            "several passkeys for {rp} are saved here: allow one login with `deadbolt agents allow {domain} --login <username> --passkeys`"
-        ),
+    let mut candidates = granted_passkeys(s, &covering, origin, all);
+    if !request.allow_credentials.is_empty() {
+        candidates.retain(|(_, item)| {
+            autofill::value(item, "credential-id")
+                .is_some_and(|id| request.allow_credentials.iter().any(|a| a == id))
+        });
+    }
+    let passkey = match request.login {
+        Some(login) => match candidates.iter().find(|(p, _)| p == login) {
+            Some((passkey, _)) => passkey.clone(),
+            None => return Err(not_granted(&domain, None)),
+        },
+        None => match candidates.as_slice() {
+            [(passkey, _)] => passkey.clone(),
+            [] => return Err(not_granted(&domain, None)),
+            several => {
+                return Err(AgentError {
+                    code: ErrorCode::ChoosePasskey,
+                    message: format!(
+                        "{} passkeys for {rp} could sign in: ask again naming one",
+                        several.len()
+                    ),
+                    grant: None,
+                    passkeys: Some(
+                        several
+                            .iter()
+                            .map(|(passkey, item)| agent_passkey(passkey, item))
+                            .collect(),
+                    ),
+                }
+                .into());
+            }
+        },
     };
     let signed = passkeys::sign(s, origin, &rp, &passkey, request.challenge, false)?;
     used(s, &client.id, now)?;
@@ -649,7 +715,10 @@ impl Agent {
                 site, passphrase, ..
             } => (
                 passphrase.clone(),
-                format!("let AI agents sign in to {}", site.trim()),
+                match site {
+                    Some(site) => format!("let AI agents sign in to {}", site.trim()),
+                    None => "let AI agents sign in to every site with any login".into(),
+                },
             ),
             _ => bail!("not an agent pairing or grant"),
         };
@@ -676,7 +745,7 @@ impl Agent {
                         s,
                         NewGrant {
                             client_id: &client_id,
-                            site: &site,
+                            site: site.as_deref(),
                             login: login.as_deref(),
                             fields: &fields,
                             passkeys,
@@ -743,12 +812,13 @@ impl Agent {
         }
         match command {
             Command::AgentLogins { client, origin } => {
-                let (site, granted, logins) =
+                let (site, granted, logins, passkeys) =
                     self.with(|s| logins(s, &client, &origin, session::now()))?;
                 Ok(Reply::AgentLogins {
                     site,
                     granted,
                     logins,
+                    passkeys,
                 })
             }
             Command::AgentFill {
@@ -772,6 +842,7 @@ impl Agent {
                 client,
                 origin,
                 rp_id,
+                login,
                 challenge,
                 allow_credentials,
                 user_verification,
@@ -786,6 +857,7 @@ impl Agent {
                             challenge: &challenge,
                             allow_credentials: &allow_credentials,
                             user_verification,
+                            login: login.as_ref(),
                         },
                         session::now(),
                     )
@@ -906,7 +978,7 @@ mod tests {
     fn allow<'a>(client: &'a str, site: &'a str, fields: &'a [Fill]) -> NewGrant<'a> {
         NewGrant {
             client_id: client,
-            site,
+            site: Some(site),
             login: None,
             fields,
             passkeys: false,
@@ -957,7 +1029,7 @@ mod tests {
             .clone()
             .unwrap();
         assert_eq!((detail.site.as_str(), detail.login), ("github.com", None));
-        let (site, granted, listed) = logins(&s, &me, "https://github.com", NOW).unwrap();
+        let (site, granted, listed, _) = logins(&s, &me, "https://github.com", NOW).unwrap();
         assert_eq!(
             (site.as_str(), granted, listed.len()),
             ("github.com", false, 0)
@@ -973,7 +1045,7 @@ mod tests {
             NOW,
         )
         .unwrap();
-        let (_, granted, listed) = logins(&s, &me, "https://github.com", NOW).unwrap();
+        let (_, granted, listed, _) = logins(&s, &me, "https://github.com", NOW).unwrap();
         assert!(granted);
         assert_eq!(listed[0].fields, [Fill::Username, Fill::Password]);
         assert!(listed[0].has_totp && !listed[0].passkeys);
@@ -1241,6 +1313,7 @@ mod tests {
             challenge: &challenge,
             allow_credentials: &[],
             user_verification: uv,
+            login: None,
         };
         // A grant for the password doesn't cover the passkey.
         set_grant(&s, allow(&client.id, "example.com", &[Fill::Password]), NOW).unwrap();
@@ -1253,8 +1326,11 @@ mod tests {
         grant.passkeys = true;
         grant.login = Some(&kit.item);
         set_grant(&s, grant, NOW).unwrap();
-        let (_, _, listed) = logins(&s, &me, "https://example.com", NOW).unwrap();
+        let (_, _, listed, keys) = logins(&s, &me, "https://example.com", NOW).unwrap();
         assert!(listed[0].has_passkey && listed[0].passkeys);
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].username.as_deref(), Some("kit"));
+        assert_eq!(keys[0].passkey, made.passkey);
         let signed = passkey(&s, &me, request(Verify::Preferred), NOW).unwrap();
         let data = webauthn::unb64(&signed.authenticator_data).unwrap();
         assert_eq!(data[32] & 0x01, 0x01, "user present");
@@ -1292,6 +1368,159 @@ mod tests {
             Some(ErrorCode::NotGranted)
         );
         assert!(passkey(&s, &me, request(Verify::Discouraged), NOW).is_ok());
+    }
+
+    #[test]
+    fn a_grant_for_every_site_still_fills_each_login_only_on_its_own() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let github = login(
+            &mut s,
+            "GitHub",
+            &[
+                ("username", "kit"),
+                ("password", "hunter2"),
+                ("url", "github.com"),
+            ],
+        );
+        let (client, token) = add_client(&s, "browse", NOW).unwrap();
+        let me = auth(&client, &token);
+        let mut every = allow(
+            &client.id,
+            "x",
+            &[Fill::Username, Fill::Password, Fill::Totp],
+        );
+        every.site = None;
+        every.passkeys = true;
+        let made = set_grant(&s, every, NOW).unwrap();
+        assert_eq!(made.site, None);
+        assert!(
+            fill(
+                &s,
+                &me,
+                "https://github.com",
+                &github,
+                &[Fill::Password],
+                FILL_NOW
+            )
+            .is_ok()
+        );
+        let (_, granted, listed, _) = logins(&s, &me, "https://example.org", NOW).unwrap();
+        assert!(granted && listed.is_empty());
+        // Every site, but the GitHub login is still GitHub's.
+        let error = fill(
+            &s,
+            &me,
+            "https://evil.com",
+            &github,
+            &[Fill::Password],
+            FILL_NOW,
+        )
+        .unwrap_err();
+        assert_eq!(code(&error), Some(ErrorCode::DomainMismatch));
+        // It can't name a login, and it is revoked like any other.
+        let mut named = allow(&client.id, "x", &[Fill::Password]);
+        named.site = None;
+        named.login = Some("kit");
+        assert!(set_grant(&s, named, NOW).is_err());
+        assert_eq!(remove_grant(&s, &made.id).unwrap(), "every site");
+        assert!(
+            fill(
+                &s,
+                &me,
+                "https://github.com",
+                &github,
+                &[Fill::Password],
+                FILL_NOW
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn several_passkeys_are_chosen_by_ref_within_the_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let kit = register(&mut s, "https://example.com", None, "kit");
+        let bob = register(&mut s, "https://example.com", None, "bob");
+        let (client, token) = add_client(&s, "browse", NOW).unwrap();
+        let me = auth(&client, &token);
+        let mut grant = allow(&client.id, "example.com", &[]);
+        grant.passkeys = true;
+        set_grant(&s, grant, NOW).unwrap();
+        let challenge = webauthn::b64(&[9; 32]);
+        fn get<'a>(
+            challenge: &'a str,
+            login: Option<&'a LoginRef>,
+            allow: &'a [String],
+        ) -> PasskeyRequest<'a> {
+            PasskeyRequest {
+                origin: "https://example.com",
+                rp_id: None,
+                challenge,
+                allow_credentials: allow,
+                user_verification: Verify::Preferred,
+                login,
+            }
+        }
+        let request = |login, allow| get(&challenge, login, allow);
+        // Both listed, with their user names and refs.
+        let (_, _, _, keys) = logins(&s, &me, "https://example.com", NOW).unwrap();
+        let mut users: Vec<_> = keys.iter().map(|k| k.username.clone().unwrap()).collect();
+        users.sort();
+        assert_eq!(users, ["bob", "kit"]);
+
+        // Unnamed with two candidates: choose-passkey lists them, no secrets.
+        let error = passkey(&s, &me, request(None, &[]), NOW).err().unwrap();
+        let refused = error.downcast_ref::<AgentError>().unwrap();
+        assert_eq!(refused.code, ErrorCode::ChoosePasskey);
+        let choices = refused.passkeys.clone().unwrap();
+        assert_eq!(choices.len(), 2);
+        assert!(choices.iter().any(|c| c.passkey == kit.passkey));
+        let json = serde_json::to_string(&choices).unwrap();
+        assert!(!json.contains("private"), "{json}");
+
+        // The chosen ref is the one that signs.
+        let signed = passkey(&s, &me, request(Some(&bob.passkey), &[]), NOW).unwrap();
+        assert_eq!(signed.credential_id, bob.credential_id);
+        // allowCredentials narrows the candidates to one: no choice needed.
+        let only_kit = [kit.credential_id.clone()];
+        let signed = passkey(&s, &me, request(None, &only_kit), NOW).unwrap();
+        assert_eq!(signed.credential_id, kit.credential_id);
+        // A chosen ref outside allowCredentials, or outside the grant, is refused.
+        let error = passkey(&s, &me, request(Some(&bob.passkey), &only_kit), NOW)
+            .err()
+            .unwrap();
+        assert_eq!(code(&error), Some(ErrorCode::NotGranted));
+        let mut kit_only = allow(&client.id, "example.com", &[]);
+        kit_only.passkeys = true;
+        let mut s2 = s;
+        let kit_login = login(
+            &mut s2,
+            "Example",
+            &[
+                ("username", "kit"),
+                ("password", "pw"),
+                ("url", "example.com"),
+            ],
+        );
+        kit_only.login = Some(&kit_login.item);
+        // Replace the site-wide passkey grant with one for kit's login.
+        let site_wide = list_grants(&s2, NOW).unwrap()[0].id.clone();
+        remove_grant(&s2, &site_wide).unwrap();
+        set_grant(&s2, kit_only, NOW).unwrap();
+        let error = passkey(&s2, &me, request(Some(&bob.passkey), &[]), NOW)
+            .err()
+            .unwrap();
+        assert_eq!(code(&error), Some(ErrorCode::NotGranted));
+        let signed = passkey(&s2, &me, request(None, &[]), NOW).unwrap();
+        assert_eq!(signed.credential_id, kit.credential_id);
+        // Another relying party's passkey, named by ref, is refused as such.
+        let other = register(&mut s2, "https://other.com", None, "kit");
+        let error = passkey(&s2, &me, request(Some(&other.passkey), &[]), NOW)
+            .err()
+            .unwrap();
+        assert_eq!(code(&error), Some(ErrorCode::DomainMismatch));
     }
 
     mod agent {
@@ -1366,7 +1595,7 @@ mod tests {
             }];
             let grant = Command::AgentGrantSet {
                 client_id: "x".into(),
-                site: "github.com".into(),
+                site: Some("github.com".into()),
                 login: None,
                 fields: vec![Fill::Password],
                 passkeys: false,

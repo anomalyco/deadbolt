@@ -439,14 +439,18 @@ only the token's SHA-256, and returns the token once. The client stores it
 request; the agent finds the id and compares the hashes in constant time.
 An unknown id, a wrong token or a removed client is `forbidden`.
 
-**Granting.** `deadbolt agents allow github.com` lets the client fill the
-logins saved for a site; `--login kit` narrows it to one login, `--fields
-username,password,totp` to some fields (default: all three), `--passkeys`
-adds signing in with the site's passkeys, `--expires 30d` ends it (default:
-never). A site is a registrable domain (`www.github.com` is kept as
-`github.com`) or an exact origin with its scheme (`https://app.example.com`,
-that origin only). Setting the same client, site and login again replaces
-the grant. `deadbolt agents grants`, `revoke <id>`, `clients` and
+**Granting.** Allowing everything is meant to be easy.
+`deadbolt agents allow github.com` lets the client fill the username,
+password and one-time code of the logins saved for a site and sign in with
+its passkeys; `--login kit` narrows it to one login, `--fields
+username,password` to some fields, `--no-passkeys` leaves passkeys out,
+`--expires 30d` ends it (default: never). `deadbolt agents allow --all` is
+one grant for every login on every site. Neither loosens where a login
+fills: at fill time the login must still have a URL on the frame's site, so
+under `--all` the GitHub login fills on github.com and nowhere else. A site
+is a registrable domain (`www.github.com` is kept as `github.com`) or an
+exact origin with its scheme (`https://app.example.com`, that origin only).
+Setting the same client, site and login again replaces the grant. `deadbolt agents grants`, `revoke <id>`, `clients` and
 `remove-client <id>` list and narrow; Settings › Agents in the app lists
 clients and grants with Revoke.
 
@@ -475,7 +479,12 @@ code is computed now; the secret never leaves. Anything uncovered is
 `not-granted`, naming the site and (once the site is granted) the login, so
 the client can tell the user exactly what to allow. `agent-passkey-get`
 signs with a passkey for the frame's relying party under a grant with
-`passkeys` (see `docs/autofill.md`, "Passkeys").
+`passkeys` (see `docs/autofill.md`, "Passkeys"). `agent-logins` lists those
+passkeys with their account (WebAuthn user name, display name if saved,
+credential id) and ref; the client passes the ref it chose. Without one, the
+only covered passkey among `allowCredentials` (all of the site's when
+empty) signs; with several the reply is `choose-passkey`, listing them
+without secrets, and the client asks again with one.
 
 **Limits and lock.** Each client gets a burst of 30 requests, then one a
 second (`rate-limited`). Agent requests don't count as use for the idle
@@ -516,14 +525,15 @@ being asked. Each device pairs and grants for itself.
 
 **Protocol (15).** `agent-client-add {name, passphrase?}` → `agent-client-added
 {client, token}`; `agent-client-list` → `agent-clients`; `agent-client-remove
-{id}`; `agent-grant-set {client_id, site, login?, fields, passkeys,
-expires_at?, passphrase?}` → `agent-grant`; `agent-grant-list` →
+{id}`; `agent-grant-set {client_id, site (null: every site), login?, fields,
+passkeys, expires_at?, passphrase?}` → `agent-grant`; `agent-grant-list` →
 `agent-grants`; `agent-grant-remove {id}`; `agent-logins {client, origin}` →
-`agent-logins {site, granted, logins}`; `agent-fill {client, origin, login,
-want}` → `site-fill {values}`; `agent-passkey-get {client, origin, rp_id?,
+`agent-logins {site, granted, logins, passkeys}`; `agent-fill {client, origin, login,
+want}` → `site-fill {values}`; `agent-passkey-get {client, origin, rp_id?, login?,
 challenge, allow_credentials, user_verification}` → `passkey-assertion` with
 `verified: false`. New error codes `forbidden`, `not-granted` (with
-`grant: {site, login}` beside the message) and `rate-limited`; a new tier
+`grant: {site, login}` beside the message), `choose-passkey` (with
+`passkeys: [...]`) and `rate-limited`; a new tier
 `agent` and outcome `refused` in Activity, which also gains `client`.
 
 ## Prior art

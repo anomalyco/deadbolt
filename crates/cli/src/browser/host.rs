@@ -341,6 +341,7 @@ impl From<anyhow::Error> for Refusal {
                 ErrorCode::Version
                 | ErrorCode::Forbidden
                 | ErrorCode::NotGranted
+                | ErrorCode::ChoosePasskey
                 | ErrorCode::Failed,
             ) => Code::Failed,
             None if matches!(
@@ -1319,6 +1320,7 @@ mod tests {
             code: ErrorCode::Version,
             message: "the agent speaks protocol 6".into(),
             grant: None,
+            passkeys: None,
         };
         fake_agent(&paths, vec![vec![refused], vec![]], true);
         let (pushed, announce) = pushes(paths, false, Duration::from_millis(300)).await;
