@@ -51,6 +51,8 @@ pub struct User {
     id: String,
     #[serde(default)]
     name: String,
+    #[serde(default, rename = "displayName")]
+    display_name: String,
 }
 
 #[derive(Deserialize)]
@@ -186,6 +188,9 @@ pub fn create_command(create: Create) -> Result<Command, Refusal> {
     if create.user.name.len() > MAX_USER_NAME * 4 {
         return Err(Refusal::bad("user.name is too long"));
     }
+    if create.user.display_name.len() > MAX_USER_NAME * 4 {
+        return Err(Refusal::bad("user.displayName is too long"));
+    }
     if create.exclude.len() > MAX_EXCLUDE {
         return Err(Refusal::bad(format!(
             "exclude names at most {MAX_EXCLUDE} credentials"
@@ -200,6 +205,7 @@ pub fn create_command(create: Create) -> Result<Command, Refusal> {
         challenge: create.challenge,
         user_id: create.user.id,
         user_name: create.user.name,
+        user_display_name: create.user.display_name,
         exclude: create.exclude,
         verify: create.user_verification,
     })

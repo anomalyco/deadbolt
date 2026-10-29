@@ -304,6 +304,9 @@ pub enum Command {
         challenge: String,
         user_id: String,
         user_name: String,
+        /// The WebAuthn `user.displayName`, kept beside the user name.
+        #[serde(default)]
+        user_display_name: String,
         /// Credential ids the site already has; one of them here fails it.
         exclude: Vec<String>,
         verify: Verify,
