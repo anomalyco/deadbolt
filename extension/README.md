@@ -35,6 +35,8 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/bg/autofill.ts`     | Menu tokens, fills, generated passwords, multi-step sign-in sessions, popup  |
 | `src/bg/save.ts`         | Captured submits, sign-in outcomes, `check`, offers, `save`                  |
 | `src/bg/site.ts`         | Fillable origins and same-site frames                                        |
+| `src/bg/forms.ts`        | Addresses and cards: menu tokens, frames that may get them, fills            |
+| `src/payments.ts`        | Payment providers whose card frames get cards                                |
 | `src/bg/signinwith.ts`   | "Sign in with" sessions: popup, provider pages, chooser account              |
 | `src/bg/passkeys.ts`     | WebAuthn calls: frame and rpId checks, prompts, fallback                     |
 | `src/bg/learn.ts`        | "Learn this site" sessions: saved-username check, log lines                  |
@@ -44,6 +46,7 @@ writes `manifest-key.txt` into the manifest's `key`, which fixes the id at
 | `src/content.ts`         | Content script: scans, submit capture, settled-page signal                   |
 | `src/content/outcome.ts` | What a settled page shows, as yes-or-no facts for `bg/save.ts`               |
 | `src/content/ring.ts`    | Ring and pill around what the user should click, closed shadow               |
+| `src/content/forms.ts`   | Identity and payment field roles and sections; `transform.ts` shapes values  |
 | `src/content/`           | Detection, Shadow DOM, filling, the menu frame, field rules, passkey channel |
 | `src/menu.ts`            | The in-page surface: account list, generated password, fill pill, save offer |
 | `src/popup.ts`           | Toolbar popup: logins, offers, passkeys, Learn this site                     |
