@@ -34,6 +34,9 @@ Release (push dev | production | v*, or workflow_dispatch: channel)
 ├─ plan               plan.sh: channel, version, tag, notes                               [build]
 ├─ build-linux-*      deadbolt-<v>-linux-{x64,arm64}.tar.gz (musl, static)                [build]
 ├─ build-extension    deadbolt-extension-<v>.zip (manifest version stamped)                [build]
+├─ build-extension-standalone
+│                     deadbolt-extension-standalone-<v>.zip (wasm vault; the only job
+│                     with the wasm32 target and wasm-bindgen-cli)                         [build]
 ├─ build-enclave      deadbolt-enclave for arm64 + x86_64, ad hoc                           [build]
 ├─ sign-enclave       Developer ID-signs the two helpers; decides "signed"                  [release]
 ├─ build-macos        deadbolt pinned to those helpers; universal Deadbolt.app (ad hoc);
@@ -113,6 +116,7 @@ Deadbolt has three artifacts, each with a manifest at
 | `desktop` | `macos-arm64`, `macos-x64` | `Deadbolt-<v>-macos-universal.zip` (root `Deadbolt.app`, for an updater) |
 | | `macos-arm64-dmg`, `macos-x64-dmg` | `Deadbolt-<v>-macos-universal.dmg` |
 | `extension` | `chromium` | `deadbolt-extension-<v>.zip` (unpacked MV3 build with its fixed key) |
+| | `chromium-standalone` | `deadbolt-extension-standalone-<v>.zip` (the standalone build, same key and id) |
 
 `publish` uploads each file with its SHA-256, posts each release, then
 downloads every published URL and compares it with the local bytes
@@ -186,15 +190,27 @@ channel's current release isn't the build it runs, a rollback included.
   too.
 - **Root:** as euid 0, `update` only changes an install in a root-owned
   directory with a root-owned `HOME`.
-- **Extension:** `deadbolt browser install --extension-dir <dir>` records an
-  absolute path (`extension_dir` in `config.toml`); the directory must be new
+- **Extension:** `deadbolt browser install [--standalone] --extension-dir <dir>`
+  records an absolute path (`extension_dir` in `config.toml`) and the build it
+  gets (`extension_build`, `native` or `standalone`); the directory must be new
   or empty. `update` compares its `manifest.json` `version_name` with the
-  `extension` manifest and replaces the directory from the `chromium` zip
+  `extension` manifest and replaces the directory from that build's zip
+  (`chromium`, or `chromium-standalone`)
   (regular files and directories only, at most 64 MiB and 4096 entries,
   staged beside it and renamed into place), writing `.deadbolt-extension`
   with the names it installed. It never replaces a directory holding anything
   else. Then it says to reload Deadbolt in `chrome://extensions`. Without a
   registered directory it prints the channel's download link.
+  `deadbolt browser switch --standalone|--native [--channel]` changes the
+  registered build and fetches it at once: a directory holding the other build
+  (told apart by its manifest's `nativeMessaging` or `offscreen` permission)
+  takes the channel's release whatever its version, with no rollout hold,
+  since the user asked. Both builds have the same id, so reloading the
+  extension switches the profile ([extension-device.md](extension-device.md#installing-and-updating-the-standalone-build)).
+  The standalone build's settings read the channel's feed themselves (a
+  release build knows its channel; a build from source checks nothing) and
+  say when a newer build is out, with this command and the download link.
+  Deadbolt.app doesn't update extensions.
 - **Checks:** manifests come only from `https://anoma.ly/release` (no
   redirects, 30 s, at most 1 MiB); file URLs are resolved against the manifest
   URL and must stay under its origin's `/release/deadbolt/files/`; a download
@@ -264,5 +280,6 @@ separately (`cd site && bun run deploy`, with Dax's approval).
   `/Applications/Deadbolt.app/Contents/Helpers/deadbolt` (or the cask's link),
   not at a moved binary (`deadbolt update` replaces files in place, so the
   path stays valid).
-- Update offers in the app itself (it can run `deadbolt update`), periodic
-  checks, and a Chrome Web Store listing for the extension.
+- Update offers in the app itself (it can run `deadbolt update`, which updates
+  a registered extension directory too), periodic checks, and a Chrome Web
+  Store listing for the extension.
