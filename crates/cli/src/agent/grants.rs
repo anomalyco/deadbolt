@@ -237,6 +237,16 @@ pub fn authenticate(s: &Loaded, auth: &ClientAuth) -> Result<AgentClientInfo> {
         })
 }
 
+/// The client `query` names (its id or a unique prefix of it).
+fn client(s: &Loaded, query: &str) -> Result<AgentClientInfo> {
+    let all = clients(s)?;
+    let id = pick(all.iter().map(|c| c.id.as_str()), query, "agent client")?;
+    all.iter()
+        .find(|c| c.id == id)
+        .map(Client::info)
+        .ok_or_else(|| fail(ErrorCode::NotFound, format!("no agent client {query}")))
+}
+
 /// The name of the client `id`, for Activity.
 pub fn client_name(s: &Loaded, id: &str) -> Option<String> {
     clients(s)
@@ -691,6 +701,52 @@ pub fn passkey(
 /// What one client may ask: a burst of 30, then one a second.
 const RATE: (u32, Duration) = (30, Duration::from_secs(1));
 
+/// Wrong passphrases allowed as proof before the agent stops checking them.
+const FREE_FAILURES: u32 = 5;
+const FIRST_WAIT: Duration = Duration::from_secs(30);
+const LONGEST_WAIT: Duration = Duration::from_secs(10 * 60);
+
+/// Backs off wrong passphrases given as proof, for every caller at once: a
+/// local process can't use pairing or grants to guess the passphrase.
+/// After [`FREE_FAILURES`], each wrong one waits [`FIRST_WAIT`], doubling
+/// up to [`LONGEST_WAIT`]; a right one resets it.
+#[derive(Default)]
+pub struct Backoff {
+    failures: u32,
+    until: Option<std::time::Instant>,
+}
+
+impl Backoff {
+    /// How long until a passphrase may be checked again, if it must wait.
+    fn wait(&self, now: std::time::Instant) -> Option<Duration> {
+        self.until
+            .and_then(|until| until.checked_duration_since(now))
+            .filter(|d| !d.is_zero())
+    }
+
+    fn failed(&mut self, now: std::time::Instant) {
+        self.failures += 1;
+        if let Some(over) = self.failures.checked_sub(FREE_FAILURES) {
+            let wait = FIRST_WAIT
+                .saturating_mul(1u32 << over.min(10))
+                .min(LONGEST_WAIT);
+            self.until = Some(now + wait);
+        }
+    }
+
+    fn succeeded(&mut self) {
+        *self = Backoff::default();
+    }
+}
+
+/// A client's name for a Touch ID prompt: quoted, so quotes in it go.
+fn quoted(name: &str) -> String {
+    format!(
+        "\"{}\"",
+        clean_name(name).replace(['"', '\u{201c}', '\u{201d}'], "'")
+    )
+}
+
 impl Agent {
     /// Pairs a client or sets a grant: never for a caller Deadbolt takes
     /// for an AI (or the browser host), and only with the user's proof.
@@ -706,24 +762,37 @@ impl Agent {
                 "an AI can't pair agent clients or allow agent sign-ins: run this yourself, in a terminal",
             ));
         }
+        // Locked fails before anyone is asked anything. The prompt says
+        // plainly what is being allowed, the caller-chosen name quoted.
         let (passphrase, reason) = match &command {
-            Command::AgentClientAdd { name, passphrase } => (
-                passphrase.clone(),
-                format!("let {} sign in to sites for AI agents", clean_name(name)),
-            ),
+            Command::AgentClientAdd { name, passphrase } => {
+                self.with(|_| Ok(()))?;
+                (
+                    passphrase.clone(),
+                    format!("pair a NEW agent client {} with Deadbolt", quoted(name)),
+                )
+            }
             Command::AgentGrantSet {
-                site, passphrase, ..
-            } => (
-                passphrase.clone(),
-                match site {
-                    Some(site) => format!("let AI agents sign in to {}", site.trim()),
-                    None => "let AI agents sign in to every site with any login".into(),
-                },
-            ),
+                client_id,
+                site,
+                passphrase,
+                ..
+            } => {
+                let name = self.with(|s| client(s, client_id))?.name;
+                let site = match site {
+                    Some(site) => grant_site(site)?,
+                    None => "every site".into(),
+                };
+                (
+                    passphrase.clone(),
+                    format!(
+                        "let agent client {} use logins for {site} without asking",
+                        quoted(&name)
+                    ),
+                )
+            }
             _ => bail!("not an agent pairing or grant"),
         };
-        // Locked fails before anyone is asked anything.
-        self.with(|_| Ok(()))?;
         self.prove_user(conv, passphrase, &reason).await?;
         let now = session::now();
         match command {
@@ -770,9 +839,38 @@ impl Agent {
     ) -> Result<()> {
         match passphrase {
             Some(passphrase) => {
-                if !self.with(|s| Ok(s.store.check_passphrase(passphrase.as_bytes())?))? {
+                let Ok(_checking) = self.proof_check.try_lock() else {
+                    return Err(fail(
+                        ErrorCode::RateLimited,
+                        "another passphrase is being checked: try again in a moment",
+                    ));
+                };
+                let waiting = self
+                    .proof_backoff
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .wait(std::time::Instant::now());
+                if let Some(wait) = waiting {
+                    return Err(fail(
+                        ErrorCode::RateLimited,
+                        format!(
+                            "too many wrong passphrases: try again in {}s",
+                            wait.as_secs().max(1)
+                        ),
+                    ));
+                }
+                // The KDF is slow: run it on a copy, never under the
+                // session's lock, so fills and the app carry on.
+                let check = self.with(|s| Ok(s.store.passphrase_check()?))?;
+                let right =
+                    tokio::task::spawn_blocking(move || check.matches(passphrase.as_bytes()))
+                        .await??;
+                let mut backoff = self.proof_backoff.lock().unwrap_or_else(|e| e.into_inner());
+                if !right {
+                    backoff.failed(std::time::Instant::now());
                     return Err(fail(ErrorCode::Failed, "wrong passphrase"));
                 }
+                backoff.succeeded();
                 Ok(())
             }
             None if self.can_verify() => {
@@ -1287,6 +1385,10 @@ mod tests {
             &[],
         )
         .unwrap();
+        let new = passkeys::NewPasskey {
+            display_name: passkeys::user_text(&format!("{user} (display)\n")),
+            ..new
+        };
         passkeys::create_passkey(s, &new, false, 1_798_000_000).unwrap()
     }
 
@@ -1469,6 +1571,10 @@ mod tests {
         let mut users: Vec<_> = keys.iter().map(|k| k.username.clone().unwrap()).collect();
         users.sort();
         assert_eq!(users, ["bob", "kit"]);
+        assert!(
+            keys.iter()
+                .any(|k| k.display_name.as_deref() == Some("kit (display)"))
+        );
 
         // Unnamed with two candidates: choose-passkey lists them, no secrets.
         let error = passkey(&s, &me, request(None, &[]), NOW).err().unwrap();
@@ -1530,7 +1636,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
 
-        use super::super::super::passkeys::tests::agent::{conversation, unlocked};
+        use super::super::super::passkeys::tests::agent::{conversation, unlocked, unlocked_with};
         use super::*;
         use crate::protocol::{Claim, MAX_LINE, Message, Outcome, PROTOCOL_VERSION, Request};
 
@@ -1673,6 +1779,83 @@ mod tests {
                 .await
                 .unwrap_err();
             assert_eq!(code(&error), Some(ErrorCode::Locked));
+        }
+
+        /// The KDF runs off the session's lock: the vault answers while a
+        /// passphrase is checked, and a second check meanwhile is refused.
+        #[tokio::test]
+        async fn a_passphrase_check_never_holds_the_vault() {
+            let f = unlocked_with(deadbolt_store::KdfParams {
+                m_cost_kib: 16 * 1024,
+                t_cost: 3,
+                p_cost: 1,
+            })
+            .await;
+            let checking = {
+                let agent = f.agent.clone();
+                tokio::spawn(async move {
+                    let (conv, _closed) = conversation();
+                    agent.agents_admin(&kit(), add(Some("wrong")), &conv).await
+                })
+            };
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                !checking.is_finished(),
+                "the KDF should take longer than this"
+            );
+            let started = std::time::Instant::now();
+            f.agent.with(|s| list_clients(s)).unwrap();
+            assert!(started.elapsed() < Duration::from_millis(200));
+            let (conv, _closed) = conversation();
+            let error = f
+                .agent
+                .agents_admin(&kit(), add(Some("test")), &conv)
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::RateLimited));
+            assert!(
+                !checking.is_finished(),
+                "the vault answered during the check"
+            );
+            let error = checking.await.unwrap().unwrap_err();
+            assert_eq!(error.to_string(), "wrong passphrase");
+        }
+
+        #[tokio::test]
+        async fn wrong_passphrases_back_off() {
+            let f = unlocked().await;
+            *f.agent.touch_id_available_override.lock().unwrap() = Some(false);
+            let (conv, _closed) = conversation();
+            let me = kit();
+            let try_with = |passphrase| f.agent.agents_admin(&me, add(Some(passphrase)), &conv);
+            for _ in 0..FREE_FAILURES - 1 {
+                assert!(try_with("wrong").await.is_err());
+            }
+            // A right one resets the count.
+            try_with("test").await.unwrap();
+            for _ in 0..FREE_FAILURES {
+                let error = try_with("wrong").await.unwrap_err();
+                assert_eq!(error.to_string(), "wrong passphrase");
+            }
+            // Now even the right one waits.
+            let error = try_with("test").await.unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::RateLimited), "{error}");
+
+            let start = std::time::Instant::now();
+            let mut backoff = Backoff::default();
+            for _ in 0..FREE_FAILURES {
+                backoff.failed(start);
+            }
+            assert_eq!(backoff.wait(start), Some(FIRST_WAIT));
+            backoff.failed(start);
+            assert_eq!(backoff.wait(start), Some(FIRST_WAIT * 2));
+            for _ in 0..20 {
+                backoff.failed(start);
+            }
+            assert_eq!(backoff.wait(start), Some(LONGEST_WAIT));
+            assert_eq!(backoff.wait(start + LONGEST_WAIT), None);
+            backoff.succeeded();
+            assert_eq!(backoff.wait(start), None);
         }
 
         #[tokio::test]

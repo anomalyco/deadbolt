@@ -130,6 +130,10 @@ pub struct Agent {
     activity: Mutex<activity::Ledger>,
     /// Each paired agent client's rate limit, by client id.
     agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
+    /// Wrong passphrases given as proof for pairing and grants.
+    proof_backoff: Mutex<grants::Backoff>,
+    /// Held by the one passphrase check running: they run one at a time.
+    proof_check: tokio::sync::Mutex<()>,
     /// Deadbolt Send's endpoint, started by the first send.
     send_server: tokio::sync::Mutex<Option<deadbolt_send::Server>>,
     /// Set as the agent stops, ending sends and anyone waiting on one.
@@ -169,6 +173,8 @@ impl Agent {
             callers: caller::Callers::new(),
             activity: Mutex::default(),
             agent_rates: Mutex::default(),
+            proof_backoff: Mutex::default(),
+            proof_check: tokio::sync::Mutex::new(()),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
         })

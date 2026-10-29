@@ -213,11 +213,13 @@ fn wrong_passphrase() {
 fn an_open_store_checks_its_passphrase() {
     let tmp = TempDir::new().unwrap();
     let store = init(tmp.path());
-    assert!(store.check_passphrase(PASS).unwrap());
-    assert!(!store.check_passphrase(b"wrong").unwrap());
+    let check = store.passphrase_check().unwrap();
+    assert!(check.matches(PASS).unwrap());
+    assert!(!check.matches(b"wrong").unwrap());
     store.change_passphrase(PASS, b"new one").unwrap();
-    assert!(!store.check_passphrase(PASS).unwrap());
-    assert!(store.check_passphrase(b"new one").unwrap());
+    let check = store.passphrase_check().unwrap();
+    assert!(!check.matches(PASS).unwrap());
+    assert!(check.matches(b"new one").unwrap());
 }
 
 #[test]

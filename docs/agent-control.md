@@ -455,14 +455,21 @@ Setting the same client, site and login again replaces the grant. `deadbolt agen
 clients and grants with Revoke.
 
 **Proof that the user is there.** Pairing and granting need the vault
-unlocked and one of:
+unlocked and one of the following. The Touch ID sheet says plainly what is
+allowed, with the caller-chosen client name in quotes: "pair a NEW agent
+client "browse" with Deadbolt", "let agent client "browse" use logins for
+github.com without asking".
 
 - Touch ID, raised by the agent itself with its own sentence ("let browse
   sign in to sites for AI agents"), when Touch ID unlock is on and set up;
 - the vault passphrase, typed on the CLI's terminal (no echo) or given with
   `--passphrase-stdin`. Never `DEADBOLT_PASSPHRASE`: an AI's shell inherits
   Kit's environment. The CLI checks the agent's identity before it sends the
-  passphrase, as for `unlock`.
+  passphrase, as for `unlock`. The agent checks it on a copy of the wrapped
+  key set, off the session's lock, so fills and the app carry on during the
+  KDF; one check runs at a time, and after 5 wrong ones every check waits 30
+  seconds, doubling up to 10 minutes, until a right one (`rate-limited`), so
+  pairing is no passphrase-guessing oracle.
 
 And the caller must not look like an AI: an AI host among its parents
 (OpenCode, Claude Code, Codex, Cursor, Gemini CLI, Aider) or a claimed
@@ -492,9 +499,11 @@ lock, so a looping AI can't hold the vault open. Locked, every agent request
 is `locked`: nothing unlocks without a person, and no grant can change that.
 
 **Activity.** Every agent request, and every pairing, grant and removal, is
-an entry: the client's name (proved by its token, unlike a claim), the
-caller, the page, the login, the fields asked for, and whether it was
-allowed, refused or locked. Never a value.
+an entry: the client's name, the caller, the page, the login, the fields
+asked for, and whether it was allowed, refused or locked. Never a value. The
+client's name is proved by its token, unlike a claim, but that only means
+"whoever holds that client's token file": any process that can read the file
+appears as that client.
 
 **Kept on this device, not synced.** Clients and grants are rows in this
 device's encrypted store (`cli/agent-clients`, `cli/agent-grants`), not vault
@@ -516,9 +525,14 @@ being asked. Each device pairs and grants for itself.
   no listing beyond the granted site's logins, no export, no writes.
 - An AI that gets a terminal outside its own process tree passes the
   ancestry check; it still needs Kit's finger or passphrase to pair or grant.
-- An AI driving the tab can read `input.value` after a fill. Browse fills and
-  submits in one call so control doesn't return in between; that is a
-  narrower promise than `deadbolt run`, and it is Browse's to keep.
+- What Browse promises, and what it can't. Values never pass through the
+  AI's results, Browse's logs or its HAR recordings, and they aren't exposed
+  by accident or to a prompt-injected page that asks for them. But a
+  deliberately hostile agent driving Browse, with page scripts or network
+  hooks in a page it controls, could capture what is typed into that page.
+  So a grant should cover only what you would let that agent use anyway.
+  A value that leaked outlives revoking the grant and locking the vault:
+  change the password.
 - Passkeys sign with user presence (the grant is Kit's standing consent) and
   never user verification: no finger touched anything. Sites that require
   verification fail, which is correct.
