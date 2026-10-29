@@ -3,9 +3,9 @@
 // them, which fields the user typed into and how the step was submitted) and
 // the native host appends it to a log, one JSON line per step, for building
 // the detector. Values are never recorded: a typed field gets only the shape
-// of its value (email, digits, …), its length band, and whether it was the
-// username of a saved login for the site, which the background decides from
-// a salted digest. See docs/autofill.md, "Learning a site".
+// of its value (email, digits, …), its length band (not for a secret), and
+// whether it was the username of a saved login for the site, which the
+// background decides from a salted digest. See docs/autofill.md, "Learning a site".
 
 /** How long a learning session lasts unless it's stopped or the sign-in works first. */
 export const LEARN_TTL_MS = 5 * 60_000
@@ -43,7 +43,8 @@ export interface Typed {
   /** 1 for the first field the user typed into in this document, then 2, … */
   order: number
   shape: ValueShape
-  length: LengthBand
+  /** Not for a secret: a password's length is left out. */
+  length?: LengthBand
   /** The value is what the user typed into an earlier field of this document (a confirmation box, an echoed username). */
   sameAs?: number
   /** Set by the background from `digest`: the value is the username of a saved login for the site. */
@@ -158,9 +159,16 @@ export function scrub(text: string, typed: Iterable<string> = []): string {
   return out.replace(/[\w.+%'-]+@[\w-]+(?:\.[\w-]+)+/g, "<email>").replace(/\d{4,}/g, "<n>")
 }
 
-/** Where a frame is, without the query's values or the fragment. */
-export function frameOf(url: URL, top: boolean, depth: number): LearnFrame {
-  return { top, depth, origin: url.origin, path: clip(url.pathname, 200), queryKeys: [...new Set(url.searchParams.keys())].slice(0, 30).map((k) => clip(k, 40)) }
+/** Where a frame is, without the query's values or the fragment, its path and parameter names scrubbed like page text. */
+export function frameOf(url: URL, top: boolean, depth: number, typed: Iterable<string> = []): LearnFrame {
+  const values = [...typed]
+  return {
+    top,
+    depth,
+    origin: url.origin,
+    path: scrub(clip(url.pathname, 200), values),
+    queryKeys: [...new Set(url.searchParams.keys())].slice(0, 30).map((k) => scrub(clip(k, 40), values)),
+  }
 }
 
 export async function sha256(text: string): Promise<string> {

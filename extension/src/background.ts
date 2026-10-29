@@ -19,7 +19,7 @@ const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(ta
 const learner = new Learner(host)
 saver.signedIn = (tabId, site) => {
   void autofill.learnFlow(tabId, site)
-  learner.signedIn(tabId, site)
+  void learner.signedIn(tabId, site)
 }
 passkeys.listen()
 
@@ -86,7 +86,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
       const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
       const savingOff = reply.status.state === "ready" ? await saver.savingOff(message.tabId) : undefined
-      const learning = learner.status(message.tabId)
+      const learning = await learner.status(message.tabId)
       return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}), ...(savingOff ? { savingOff } : {}), ...(learning ? { learning } : {}) }
     }
     case "db:popup-learn":

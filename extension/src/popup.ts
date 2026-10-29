@@ -330,6 +330,7 @@ function learningCard(l: Learning): HTMLElement {
     { class: "offer", "aria-label": "Learning this site" },
     h("h2", {}, `Learning ${l.site}`),
     para("Sign in by hand. Deadbolt records how the form is built and which fields you type into, never what you type."),
+    para("Frames from other sites on the page, like chat widgets and ads, are logged too, by shape only."),
     h(
       "div",
       { class: "box" },

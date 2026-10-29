@@ -5,6 +5,8 @@
 // dropping the digest), and has the native host append them, in order, to the
 // session's log. A session ends when the user stops it, a few seconds after a
 // sign-in the save judge saw work, after LEARN_TTL_MS, or with its tab.
+// Sessions are kept in chrome.storage.session too, so a service worker that
+// restarts picks them up where they were.
 
 import { LEARN_TTL_MS, MAX_INPUTS, MAX_STEPS, truthOf, usernameDigest, type LearnEnd, type LearnSession, type LearnStep } from "../learn"
 import type { LearnReply, Learning } from "../messages"
@@ -16,8 +18,11 @@ import { siteOf } from "./site"
 const AFTER_SIGN_IN_MS = 2500
 /** A line the host takes, well under its 64 KiB request limit. */
 const MAX_LINE = 56 * 1024
+/** chrome.storage.session: `learn:<tab id>` → the tab's Stored session. */
+const PREFIX = "learn:"
 
-interface Active {
+/** What outlives a service worker restart. */
+interface Stored {
   id: string
   site: string
   salt: string
@@ -25,6 +30,12 @@ interface Active {
   until: number
   steps: number
   /** Salted digests of the saved usernames for the site. */
+  usernames: string[]
+  /** When the session ends after a sign-in worked. */
+  endAt?: number
+}
+
+interface Active extends Omit<Stored, "usernames"> {
   usernames: Set<string>
   timer: ReturnType<typeof setTimeout>
   /** Lines are written one after another, in order. */
@@ -51,16 +62,22 @@ function bounded(value: unknown, depth = 0): unknown {
 
 export class Learner {
   private tabs = new Map<number, Active>()
+  /** The sessions a previous service worker left, back in `tabs`. */
+  private ready: Promise<void>
 
-  constructor(private host: Host) {}
+  constructor(private host: Host) {
+    this.ready = this.restore()
+  }
 
   /** What the popup shows for the tab. */
-  status(tabId: number): Learning | undefined {
+  async status(tabId: number): Promise<Learning | undefined> {
+    await this.ready
     const a = this.tabs.get(tabId)
     return a ? { site: a.site, steps: a.steps, until: a.until } : undefined
   }
 
   async start(tabId: number): Promise<LearnReply> {
+    await this.ready
     const { target, url } = await topTarget(tabId)
     const site = url && siteOf(url.hostname)
     if (!target || !url || !site) return { ok: false, message: "Deadbolt learns sites only on https pages and local dev hosts." }
@@ -90,6 +107,7 @@ export class Learner {
       writes: Promise.resolve(),
     }
     this.tabs.set(tabId, a)
+    void this.save(tabId, a)
     const started = await this.write(a, {
       event: "start",
       site,
@@ -102,19 +120,22 @@ export class Learner {
     if (!started) {
       clearTimeout(a.timer)
       this.tabs.delete(tabId)
+      void this.forget(tabId)
       return { ok: false, message: "Deadbolt couldn't start the learning log." }
     }
     void this.broadcast(tabId, { id: a.id, salt, until: a.until })
-    return { ok: true, learning: this.status(tabId) }
+    return { ok: true, learning: await this.status(tabId) }
   }
 
   /** For a frame that just loaded: the session it joins, if its tab is learning. */
-  ask(sender: chrome.runtime.MessageSender): LearnSession | null {
+  async ask(sender: chrome.runtime.MessageSender): Promise<LearnSession | null> {
+    await this.ready
     const a = sender.tab?.id === undefined ? undefined : this.tabs.get(sender.tab.id)
     return a && Date.now() < a.until ? { id: a.id, salt: a.salt, until: a.until } : null
   }
 
   async step(sender: chrome.runtime.MessageSender, session: string, step: LearnStep): Promise<boolean> {
+    await this.ready
     const tabId = sender.tab?.id
     const a = tabId === undefined ? undefined : this.tabs.get(tabId)
     if (!a || a.id !== session || Date.now() >= a.until || a.steps >= MAX_STEPS || typeof step !== "object" || step === null) return false
@@ -126,13 +147,15 @@ export class Learner {
       delete typed.digest
       typed.truth = truthOf(typed)
     }
+    // From where Chrome says the frame is, not where the step says it is.
     let frameSite: string | null = null
     try {
-      frameSite = siteOf(new URL(String(step.frame?.origin)).hostname)
+      frameSite = siteOf(new URL(String(sender.origin ?? sender.url)).hostname)
     } catch {
       frameSite = null
     }
     a.steps++
+    void this.save(tabId!, a)
     const line = bounded({ event: "step", seq: a.steps, frameId: sender.frameId ?? 0, sameSite: frameSite === a.site, ...step }) as Record<string, unknown>
     // Too big: the inputs go first, the rest of the step stays.
     if (JSON.stringify(line).length > MAX_LINE) line.inputs = (line.inputs as unknown[]).filter((i) => (i as { typed?: unknown }).typed)
@@ -140,16 +163,21 @@ export class Learner {
   }
 
   /** The save judge saw a sign-in work in the tab: record where it lands, then end. */
-  signedIn(tabId: number, site: string) {
+  async signedIn(tabId: number, site: string) {
+    await this.ready
     const a = this.tabs.get(tabId)
     if (!a || a.site !== site || a.ending) return
+    a.endAt = Date.now() + AFTER_SIGN_IN_MS
     a.ending = setTimeout(() => void this.stop(tabId, "signed-in"), AFTER_SIGN_IN_MS)
+    void this.save(tabId, a)
   }
 
   async stop(tabId: number, reason: LearnEnd): Promise<LearnReply> {
+    await this.ready
     const a = this.tabs.get(tabId)
     if (!a) return { ok: true }
     this.tabs.delete(tabId)
+    void this.forget(tabId)
     clearTimeout(a.timer)
     clearTimeout(a.ending)
     await this.write(a, { event: "end", reason, steps: a.steps, durationMs: Date.now() - a.startedAt })
@@ -159,6 +187,38 @@ export class Learner {
 
   forgetTab(tabId: number) {
     void this.stop(tabId, "closed")
+  }
+
+  /** Takes back the sessions a previous service worker kept; one past its time ends now. */
+  private async restore() {
+    const all = (await chrome.storage.session.get(null).catch(() => ({}))) as Record<string, unknown>
+    const now = Date.now()
+    for (const [key, value] of Object.entries(all)) {
+      const tabId = Number(key.slice(PREFIX.length))
+      const s = value as Stored | undefined
+      if (!key.startsWith(PREFIX) || !Number.isInteger(tabId) || this.tabs.has(tabId)) continue
+      if (!s || typeof s.id !== "string" || typeof s.salt !== "string" || typeof s.until !== "number" || !Array.isArray(s.usernames)) {
+        void this.forget(tabId)
+        continue
+      }
+      const a: Active = {
+        ...s,
+        usernames: new Set(s.usernames),
+        timer: setTimeout(() => void this.stop(tabId, "timeout"), Math.max(0, s.until - now)),
+        writes: Promise.resolve(),
+      }
+      if (s.endAt !== undefined) a.ending = setTimeout(() => void this.stop(tabId, "signed-in"), Math.max(0, s.endAt - now))
+      this.tabs.set(tabId, a)
+    }
+  }
+
+  private save(tabId: number, a: Active): Promise<void> {
+    const stored: Stored = { id: a.id, site: a.site, salt: a.salt, startedAt: a.startedAt, until: a.until, steps: a.steps, usernames: [...a.usernames], ...(a.endAt !== undefined ? { endAt: a.endAt } : {}) }
+    return chrome.storage.session.set({ [PREFIX + tabId]: stored }).catch(() => {})
+  }
+
+  private forget(tabId: number): Promise<void> {
+    return chrome.storage.session.remove(PREFIX + tabId).catch(() => {})
   }
 
   /** Every frame of the tab. */

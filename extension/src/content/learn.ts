@@ -8,7 +8,9 @@
 // two digests from the last trusted keystroke (to tell a repeated value and,
 // in the background, a saved username) and, for fields that aren't password
 // boxes, the value itself in memory only, to scrub it out of page text. Both
-// go when the session ends.
+// go when the session ends. A field that was a password box at any point of
+// the session, or that the detector takes for one, stays secret: a
+// show-password toggle doesn't turn it into a username.
 
 import type { LearnSession, LearnStep, LearnInput, LearnTrigger, SubmitBy, Typed } from "../learn"
 import { clip, frameOf, lengthBand, MAX_FRAMES, MAX_INPUTS, scrub, sha256, shapeOf, truthOf, usernameDigest } from "../learn"
@@ -32,6 +34,8 @@ let session: LearnSession | null = null
 let joinedAt = 0
 let typedCount = 0
 let keyed = new WeakMap<HTMLInputElement, Keyed>()
+/** Fields that were password boxes, or that the detector took for one, this session. */
+let secrets = new WeakSet<HTMLInputElement>()
 /** Values typed into fields that aren't password boxes, to scrub page text. */
 let identifiers = new Set<string>()
 let lastSignature = ""
@@ -82,7 +86,17 @@ function hostOf(url: string): string {
 const eligible = (el: HTMLInputElement) => !SKIP.has((el.getAttribute("type") || "text").toLowerCase())
 
 function inputsNow(): HTMLInputElement[] {
-  return deepQueryAll<HTMLInputElement>("input", openRoots()).slice(0, 300).filter(eligible)
+  const all = deepQueryAll<HTMLInputElement>("input", openRoots()).slice(0, 300).filter(eligible)
+  if (session) for (const el of all) if (el.type === "password") secrets.add(el)
+  return all
+}
+
+/** Forgets what was kept of a field's value that turned out to be secret. */
+function makeSecret(el: HTMLInputElement) {
+  secrets.add(el)
+  const k = keyed.get(el)
+  if (k?.digest) keyed.set(el, { order: k.order, exact: k.exact })
+  identifiers.delete(el.value.trim())
 }
 
 function onInput(event: Event) {
@@ -90,7 +104,8 @@ function onInput(event: Event) {
   const el = event.composedPath()[0]
   if (!(el instanceof HTMLInputElement) || !eligible(el)) return
   const salt = session.salt
-  const secret = (el.getAttribute("type") || "").toLowerCase() === "password"
+  if (el.type === "password") secrets.add(el)
+  const secret = secrets.has(el)
   const order = keyed.get(el)?.order ?? ++typedCount
   const value = el.value
   keyed.set(el, {
@@ -130,8 +145,9 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
     result = null
   }
   const roles = new Map(result?.fields.map((f) => [f.el, f]) ?? [])
+  for (const f of result?.fields ?? []) if (f.role === "password" || f.role === "new-password") makeSecret(f.el)
   const form = result?.fields.find((f) => f.owner.form)?.owner.form ?? null
-  const values = [...identifiers, ...typedEls.filter((el) => el.type !== "password").map((el) => el.value)]
+  const values = [...identifiers, ...typedEls.filter((el) => !secrets.has(el)).map((el) => el.value)]
   const text = (s: string | null | undefined, n?: number) => scrub(clip(s, n), values)
 
   const inputs: LearnInput[] = []
@@ -141,27 +157,35 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
     const k = keyed.get(el)
     let typed: Typed | undefined
     if (k && el.value) {
-      const shape = shapeOf(el.value, type)
+      const secret = secrets.has(el)
+      const shape = shapeOf(el.value, secret ? "password" : type)
       const sameAs = await repeated(el, k, typedEls)
-      const digest = k.digest ? await k.digest : undefined
-      typed = { order: k.order, shape, length: lengthBand(el.value), ...(sameAs ? { sameAs } : {}), ...(digest ? { digest } : {}), truth: truthOf({ shape }) }
+      const digest = !secret && k.digest ? await k.digest : undefined
+      typed = {
+        order: k.order,
+        shape,
+        ...(secret ? {} : { length: lengthBand(el.value) }),
+        ...(sameAs ? { sameAs } : {}),
+        ...(digest ? { digest } : {}),
+        truth: truthOf({ shape }),
+      }
     }
     const owner = el.form ?? el.closest("form")
     inputs.push({
       i,
       type,
-      name: clip(el.getAttribute("name")),
-      id: clip(el.id),
-      autocomplete: clip(el.getAttribute("autocomplete")).toLowerCase(),
+      name: text(el.getAttribute("name")),
+      id: text(el.id),
+      autocomplete: text(el.getAttribute("autocomplete")).toLowerCase(),
       placeholder: text(el.placeholder),
       ariaLabel: text(el.getAttribute("aria-label")),
       label: text(labelOf(el)),
       maxLength: el.maxLength > 0 ? el.maxLength : 0,
-      inputMode: clip(el.getAttribute("inputmode")),
+      inputMode: text(el.getAttribute("inputmode")),
       visible: isVisible(el),
       inShadow: el.getRootNode() instanceof ShadowRoot,
       inForm: !!owner,
-      formActionHost: owner ? hostOf(owner.getAttribute("action") || location.href) : "",
+      formActionHost: owner ? text(hostOf(owner.getAttribute("action") || location.href)) : "",
       rect: rectOf(el),
       role: f?.role ?? null,
       ...(f?.split ? { split: f.split } : {}),
@@ -180,13 +204,13 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
       } catch {
         url = null
       }
-      return { host: url?.hostname ?? "", path: clip(url?.pathname, 120), visible: isVisible(f), rect: rectOf(f) }
+      return { host: text(url?.hostname), path: text(url?.pathname, 120), visible: isVisible(f), rect: rectOf(f) }
     })
 
   return {
     trigger,
     at: Math.round(performance.now() - joinedAt),
-    frame: frameOf(new URL(location.href), isTop, depth()),
+    frame: frameOf(new URL(location.href), isTop, depth(), values),
     title: text(document.title, 120),
     kind: result?.kind ?? null,
     submit: submit
@@ -203,7 +227,12 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
 
 async function record(trigger: LearnTrigger, submitted?: { by: SubmitBy; control: Element | null }) {
   const step = await snapshot(trigger, submitted).catch(() => null)
-  if (step && session) await send({ type: "db:learn-step", session: session.id, step })
+  if (!step || !session) return
+  const id = session.id
+  const taken = await send({ type: "db:learn-step", session: id, step })
+  // The background no longer has the session (it ended, or the service worker
+  // lost it): end it here too, so the inline menu comes back.
+  if (taken !== true && session?.id === id) end()
 }
 
 /** The inputs that show and the detector's verdict: a new one is a new step. */
@@ -270,6 +299,7 @@ function begin(next: LearnSession) {
   joinedAt = performance.now()
   typedCount = 0
   keyed = new WeakMap()
+  secrets = new WeakSet()
   identifiers = new Set()
   lastSubmitAt = -Infinity
   lastSignature = signature()
@@ -280,6 +310,7 @@ function end() {
   session = null
   clearTimeout(timer)
   keyed = new WeakMap()
+  secrets = new WeakSet()
   identifiers = new Set()
   typedCount = 0
   lastSignature = ""
@@ -296,8 +327,14 @@ export function initLearn() {
     if (message.session) begin(message.session)
     else end()
   })
-  void send({ type: "db:learn-ask" }).then((reply) => {
-    const s = reply as LearnSession | null
-    if (s && typeof s.id === "string" && typeof s.salt === "string" && typeof s.until === "number") begin(s)
-  })
+  void ask()
+}
+
+/** Asks the background for the tab's session: joins it, or ends one the background no longer has. */
+async function ask() {
+  const before = session
+  const s = (await send({ type: "db:learn-ask" })) as LearnSession | null
+  if (s && typeof s.id === "string" && typeof s.salt === "string" && typeof s.until === "number") begin(s)
+  // Unless a session started meanwhile.
+  else if (session === before) end()
 }

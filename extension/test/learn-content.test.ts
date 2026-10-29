@@ -8,6 +8,8 @@ import type { LearnSession, LearnStep } from "../src/learn"
 const session: LearnSession = { id: "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b", salt: "pepper", until: Date.now() + 60_000 }
 const sent: Array<{ type: string; session?: string; step?: LearnStep }> = []
 const listeners: Array<(m: unknown) => void> = []
+/** What the background answers to a step. */
+let stepReply: unknown = true
 const settle = () => new Promise((r) => setTimeout(r, 30))
 const steps = () => sent.filter((m) => m.type === "db:learn-step").map((m) => m.step!)
 
@@ -28,7 +30,7 @@ beforeAll(async () => {
     runtime: {
       sendMessage: async (m: { type: string }) => {
         sent.push(m)
-        return m.type === "db:learn-ask" ? session : true
+        return m.type === "db:learn-ask" ? session : stepReply
       },
       onMessage: { addListener: (f: (m: unknown) => void) => listeners.push(f) },
     },
@@ -90,13 +92,59 @@ describe("a learning frame", () => {
     const submit = steps().findLast((s) => s.trigger === "submit")!
     expect(submit.submitted?.by).toBe("enter")
     const [pw, again] = submit.inputs.map((i) => i.typed!)
-    expect(pw).toMatchObject({ order: 2, shape: "secret", length: "9-16", truth: "password" })
+    expect(pw).toMatchObject({ order: 2, shape: "secret", truth: "password" })
     expect(pw.digest).toBeUndefined()
+    expect(pw.length).toBeUndefined()
     expect(again).toMatchObject({ order: 3, sameAs: 2, truth: "password" })
     expect(JSON.stringify(sent)).not.toContain("correct horse")
   })
 
+  test("a password shown as text by a toggle stays secret", async () => {
+    for (const f of listeners) f({ type: "db:learn", session: { ...session, id: "1b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b" } })
+    document.body.innerHTML = `<input id="user" type="text" autocomplete="username"><input id="pw" type="password"><button>Sign In</button>`
+    learnScanned()
+    await settle()
+    const pw = $<HTMLInputElement>("#pw")
+    pw.type = "text"
+    type(pw, "hunter2-plain")
+    await new Promise((r) => setTimeout(r, 850))
+    $("button").dispatchEvent(trusted(new MouseEvent("click", { bubbles: true, composed: true })))
+    await settle()
+    const typed = steps().findLast((s) => s.trigger === "submit")!.inputs.find((i) => i.id === "pw")!.typed!
+    expect(typed).toEqual({ order: 1, shape: "secret", truth: "password" })
+    expect(JSON.stringify(sent)).not.toContain("hunter2-plain")
+  })
+
+  test("page attributes and the address lose what may be the user's", async () => {
+    history.replaceState(null, "", "/u/kit@example.com/login?kit@example.com&token123456=1")
+    // happy-dom loads no iframe pages, and says so on the console.
+    const quiet = console.error
+    console.error = () => {}
+    document.body.innerHTML = `
+      <form action="https://kit@example.com/x"><input id="field-kit@example.com" name="otp-48151623" autocomplete="one-time-code" inputmode="numeric"></form>
+      <iframe src="https://chat.example.net/w/kit@example.com/9876543"></iframe>`
+    console.error = quiet
+    for (const f of listeners) f({ type: "db:learn", session: { ...session, id: "2b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b" } })
+    await settle()
+    const start = steps().findLast((s) => s.trigger === "start")!
+    expect(start.frame).toMatchObject({ path: "/u/<email>/login", queryKeys: ["<email>", "token<n>"] })
+    expect(start.inputs[0]).toMatchObject({ id: "<email>", name: "otp-<n>", autocomplete: "one-time-code", inputMode: "numeric" })
+    expect(start.iframes[0]).toMatchObject({ host: "chat.example.net", path: "/w/<email>/<n>" })
+    expect(JSON.stringify(start)).not.toContain("kit@")
+  })
+
+  test("ends here when the background no longer has the session", async () => {
+    expect(learning()).toBe(true)
+    stepReply = null
+    document.body.innerHTML = `<input id="next" type="text"><button>Next</button>`
+    learnScanned()
+    await settle()
+    expect(learning()).toBe(false)
+    stepReply = true
+  })
+
   test("leaves when the session ends", async () => {
+    for (const f of listeners) f({ type: "db:learn", session })
     for (const f of listeners) f({ type: "db:learn", session: null })
     expect(learning()).toBe(false)
     const before = sent.length

@@ -55,6 +55,9 @@ const FILLS: (u32, Duration) = (60, Duration::from_millis(250));
 const LEARNS: (u32, Duration) = (100, Duration::from_millis(100));
 /// The most one learning session's log grows to; past it lines are refused.
 const MAX_LEARN_LOG: u64 = 4 * 1024 * 1024;
+/// How many session logs are kept, and for how long; a new session prunes the rest, oldest first.
+const MAX_LEARN_LOGS: usize = 50;
+const LEARN_LOG_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// A token bucket: `capacity` at once, refilled one per `every`.
 pub(super) struct Bucket {
@@ -736,14 +739,15 @@ fn learn_session(session: &str) -> bool {
 }
 
 /// Appends `line` to the session's log, `<learn dir>/<session>.jsonl`, both
-/// readable by this user only. Works locked: it touches no vault.
+/// readable by this user only. Works locked: it touches no vault. A new
+/// session's log first prunes the old ones (see `prune_learn_logs`).
 fn learn(
     paths: &Paths,
     session: &str,
     line: &serde_json::Map<String, Value>,
 ) -> Result<(), Refusal> {
     use std::io::Write;
-    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 
     if !learn_session(session) {
         return Err(Refusal::bad("session is a lowercase UUID"));
@@ -758,10 +762,18 @@ fn learn(
         .mode(0o700)
         .create(&dir)
         .map_err(|e| failed("create", e))?;
+    // Also when it was there already, with looser permissions.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| failed("create", e))?;
     let path = dir.join(format!("{session}.jsonl"));
     let mut bytes = serde_json::to_vec(line).map_err(|_| Refusal::bad("line is not JSON"))?;
     bytes.push(b'\n');
-    let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+    let existing = std::fs::metadata(&path).ok();
+    if existing.is_none() {
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(crate::config::now());
+        prune_learn_logs(&dir, now);
+    }
+    let size = existing.map(|m| m.len()).unwrap_or(0);
     if size + bytes.len() as u64 > MAX_LEARN_LOG {
         return Err(Refusal::bad(format!(
             "a learning log is at most {MAX_LEARN_LOG} bytes"
@@ -774,6 +786,33 @@ fn learn(
         .open(&path)
         .and_then(|mut file| file.write_all(&bytes))
         .map_err(|e| failed("write", e))
+}
+
+/// Before a new session's log: removes the logs older than `LEARN_LOG_AGE`,
+/// then the oldest until the new one makes `MAX_LEARN_LOGS`. Best effort: a
+/// log that can't be read or removed is left.
+fn prune_learn_logs(dir: &std::path::Path, now: std::time::SystemTime) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let mut logs: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+        .filter_map(|e| {
+            let e = e.ok()?;
+            let path = e.path();
+            let meta = e.metadata().ok()?;
+            let modified = meta.modified().ok()?;
+            (meta.is_file() && path.extension().is_some_and(|x| x == "jsonl"))
+                .then_some((modified, path))
+        })
+        .collect();
+    logs.sort();
+    let excess = (logs.len() + 1).saturating_sub(MAX_LEARN_LOGS);
+    for (i, (modified, path)) in logs.iter().enumerate() {
+        let old = now.duration_since(*modified).unwrap_or_default() > LEARN_LOG_AGE;
+        if i < excess || old {
+            std::fs::remove_file(path).ok();
+        }
+    }
 }
 
 /// Starts the agent if none runs, never unlocking it.
@@ -1285,6 +1324,77 @@ mod tests {
         let reply = host.answer(line_not_object, &frames).await.unwrap();
         assert_eq!(json(&reply)["code"], "bad_request");
         assert_eq!(std::fs::read_dir(paths.learn_dir()).unwrap().count(), 1);
+    }
+
+    /// A new session's log prunes logs past 30 days and beyond the newest 50,
+    /// oldest first, and leaves the session already being written alone; the
+    /// directory is tightened to 0700 even when it was there.
+    #[tokio::test]
+    async fn learn_logs_are_pruned_when_a_session_starts() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let paths = test_paths(dir.path());
+        let learn = paths.learn_dir();
+        std::fs::create_dir_all(&learn).unwrap();
+        std::fs::set_permissions(&learn, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let now = std::time::UNIX_EPOCH + Duration::from_secs(crate::config::now());
+        let day = Duration::from_secs(24 * 60 * 60);
+        let log = |i: u32| learn.join(format!("{i:08x}-0000-4000-8000-000000000000.jsonl"));
+        // 60 logs, log(i) i days old, plus something that isn't a log.
+        for i in 0..60 {
+            let file = std::fs::File::create(log(i)).unwrap();
+            file.set_modified(now - day * i - Duration::from_secs(60))
+                .unwrap();
+        }
+        std::fs::write(learn.join("notes.txt"), "kept").unwrap();
+
+        let mut host = Host::new(paths.clone());
+        let (frames, _outbox) = mpsc::channel(16);
+        let mut send = async |session: String| {
+            let request = serde_json::json!({"id": 1, "type": "learn", "session": session, "line": {"event": "start"}});
+            let reply = host
+                .answer(&serde_json::to_vec(&request).unwrap(), &frames)
+                .await
+                .unwrap();
+            assert_eq!(json(&reply)["type"], "learned");
+        };
+        // An ongoing session prunes nothing.
+        send(log(45).file_stem().unwrap().to_str().unwrap().to_owned()).await;
+        assert!(log(59).exists());
+        let fresh = "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b";
+        send(fresh.to_owned()).await;
+
+        let mode = std::fs::metadata(&learn).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // Past 30 days: gone, though 50 weren't reached.
+        let kept: Vec<u32> = (0..60).filter(|i| log(*i).exists()).collect();
+        assert_eq!(kept, (0..30).chain([45]).collect::<Vec<_>>());
+        assert!(learn.join(format!("{fresh}.jsonl")).exists());
+        assert!(learn.join("notes.txt").exists());
+
+        // Then at most 50, oldest first: 49 more recent ones push out the 30
+        // left from before and the two oldest of them.
+        let recent = |i: u32| learn.join(format!("{i:08x}-1111-4000-8000-000000000000.jsonl"));
+        for i in 0..49u32 {
+            let file = std::fs::File::create(recent(i)).unwrap();
+            file.set_modified(now - Duration::from_secs(u64::from(49 - i)))
+                .unwrap();
+        }
+        send("ffffffff-2222-4000-8000-000000000000".to_owned()).await;
+        let logs = std::fs::read_dir(&learn)
+            .unwrap()
+            .filter(|e| {
+                e.as_ref()
+                    .unwrap()
+                    .path()
+                    .extension()
+                    .is_some_and(|x| x == "jsonl")
+            })
+            .count();
+        assert_eq!(logs, MAX_LEARN_LOGS);
+        assert!((0..60).all(|i| i == 45 || !log(i).exists()));
+        assert!(!recent(0).exists() && !recent(1).exists() && recent(2).exists());
+        assert!(log(45).exists() && learn.join(format!("{fresh}.jsonl")).exists());
     }
 
     fn framed(request: Value) -> Vec<u8> {
