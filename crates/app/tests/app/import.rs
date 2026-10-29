@@ -4,10 +4,7 @@
 
 // The agent reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
-#![cfg(test)]
 #![cfg(debug_assertions)]
-
-mod support;
 
 use std::path::PathBuf;
 
@@ -18,7 +15,7 @@ use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::Severity;
 use rune::{Env, FileDialogKind, Key, KeyEvent, Mods, Runtime};
 
-use support::{Device, PASSPHRASE, key, shows, until};
+use crate::support::{Device, PASSPHRASE, key, shows, until};
 
 /// A Bitwarden unencrypted JSON export: a login, a card and a secure note
 /// come across; a bank account and a login with nothing in it don't.

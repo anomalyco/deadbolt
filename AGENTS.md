@@ -26,6 +26,13 @@ See `docs/simulation.md` before changing sync or pairing. Simulation controls:
 CLI integration tests use `DEADBOLT_NET=local` and `DEADBOLT_KDF=fast`, which
 only debug builds read (so they don't run under `--release`).
 
+Each crate has at most one integration-test binary, since every binary links
+the whole crate and its dependencies. Add integration tests as modules of it
+(`tests/<crate>/`, declared in its `main.rs`; cli and send have a lone
+`tests/<crate>.rs`), never as a new top-level file in `tests/` (app and net
+set `autotests = false`, so it would never run). Run one module with a
+filter: `cargo test -p deadbolt-app --test app panel::`.
+
 ## Rune
 
 `crates/app` pins Rune to an exact rev on its `dev` branch. At the start of each
@@ -42,6 +49,7 @@ Branch from `dev`, make focused commits, and open a PR against `dev`. Every push
 `dev` publishes a dev build (runs queue, never cancel); `production` is
 fast-forwarded from `dev` to release stable (`docs/releasing.md`). `.github/release/`
 and `.github/workflows/release.yml` are the release security boundary. Coordinate
-shared-file changes with other active worktrees.
+shared-file changes with other active worktrees, and remove your worktree
+(`git worktree remove`) once your PR merges.
 Site deployment is `cd site && bun run deploy`. **Ask first:** it replaces Dax's
 live page. Rust changes do not require a site deploy.

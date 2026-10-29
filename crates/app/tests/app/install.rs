@@ -2,8 +2,6 @@
 //! Settings and the install page take keys before the vault behind them,
 //! and copying a command confirms in place.
 
-#![cfg(test)]
-
 use deadbolt_app::install::{Copied, Installer};
 use deadbolt_app::model::{App, Screen};
 use rune::{Env, Key, KeyEvent, Mods, Runtime};

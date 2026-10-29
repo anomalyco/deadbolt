@@ -2,8 +2,6 @@
 //! appearances, the forms confirm in place, and the moment the vault is ready
 //! moves the way docs/app.md says.
 
-#![cfg(test)]
-
 use deadbolt_app::agent::{Done, Failure};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::worker::{Progress, Stage, Worker};

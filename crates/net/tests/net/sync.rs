@@ -1,8 +1,6 @@
-mod common;
-
 use std::sync::Arc;
 
-use common::*;
+use crate::common::*;
 use deadbolt_net::{Error, NodeConfig, SyncOutcome};
 use tokio::sync::Notify;
 

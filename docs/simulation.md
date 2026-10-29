@@ -58,7 +58,7 @@ Pairing uses the production proof, confirmation and welcome protocol with test
 exporter bytes. The simulator shares the CLI's `Offer`, `JoinBlob`, `WelcomeMeta`,
 consent and welcome-admission helpers; its adapter omits display and live addresses.
 Ticket expiry, single-use admission and TLS exporter wiring
-remain covered by the real-iroh tests in `crates/net/tests/pair.rs`.
+remain covered by the real-iroh tests in `crates/net/tests/net/pair.rs`.
 Focused regressions also cut pairing during its exchange and check persistence
 across reopening. A cut after admission can leave the inviter with a member that
 never received its welcome; these traces check durability rather than convergence.

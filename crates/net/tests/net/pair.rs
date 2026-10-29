@@ -1,10 +1,6 @@
-#![cfg(test)]
-
-mod common;
-
 use std::{sync::Mutex, time::Duration};
 
-use common::*;
+use crate::common::*;
 use deadbolt_net::{
     Blob, ConfirmationCode, Error, HandlerError, Inviter, Joiner, PairingContext, PairingOptions,
     PairingTicket, QrStyle,

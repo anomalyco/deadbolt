@@ -3,8 +3,6 @@
 //! Settings' recorder changes, saves and resets it, and headless scripts reach
 //! the panel through it and through the menus' "Open Quick Panel".
 
-#![cfg(test)]
-
 use std::path::Path;
 use std::process::Command;
 

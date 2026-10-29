@@ -5,10 +5,7 @@
 
 // The agent reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
-#![cfg(test)]
 #![cfg(debug_assertions)]
-
-mod support;
 
 use deadbolt_app::agent::{Agent, Done, Job, Values, Window};
 use deadbolt_app::model::{App, CODE_SLACK, Screen};
@@ -18,7 +15,7 @@ use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 use std::sync::mpsc::{Receiver, Sender};
 
-use support::{Device, until};
+use crate::support::{Device, until};
 
 const FRAME: f64 = 1.0 / 60.0;
 /// github.com's id (its start), the vault scene's selection.

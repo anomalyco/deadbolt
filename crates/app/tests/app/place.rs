@@ -2,8 +2,6 @@
 //! scripted displays and a pointer: Rune resolves `place()` against them and
 //! records the result as `placed` in `--tree`.
 
-#![cfg(test)]
-
 use std::process::Command;
 
 use deadbolt_app::panel;

@@ -1,8 +1,6 @@
 //! A real agent in a temporary home for the app's tests, and running the
 //! headless runtime until something shows.
 
-#![allow(dead_code, reason = "each test crate uses some of it")]
-
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
