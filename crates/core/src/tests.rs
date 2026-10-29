@@ -821,6 +821,114 @@ fn create_items_batches_entries_and_is_all_or_nothing() {
     assert_eq!(a.vault.items().len(), 10);
 }
 
+fn note(name: &str, len: usize) -> DataOp {
+    DataOp::create(
+        "note",
+        Some(name.into()),
+        [(
+            "notes".into(),
+            Field::new(FieldType::Secret, "n".repeat(len)),
+        )],
+    )
+}
+
+/// A realistic import (thousands of logins, a few large notes, one near the sync
+/// limit) lands in entries that all fit a sync frame; the size check is exact.
+#[test]
+fn large_imports_split_into_syncable_entries() {
+    let mut a = Dev::create();
+    let mut items: Vec<_> = (0..5000)
+        .map(|i| {
+            DataOp::create(
+                "login",
+                Some(format!("Site {i}")),
+                [
+                    ("password".into(), secret(&format!("pw-{i:032}"))),
+                    (
+                        "username".into(),
+                        Field::new(FieldType::Text, "me@example.com"),
+                    ),
+                    (
+                        "url".into(),
+                        Field::new(FieldType::Url, format!("https://{i}.example.com/login")),
+                    ),
+                    (
+                        "notes".into(),
+                        Field::new(FieldType::Note, "x".repeat(1 + i % 700)),
+                    ),
+                ],
+            )
+        })
+        .collect();
+    items.extend((0..4).map(|i| note(&format!("big {i}"), 3 * CREATE_BATCH_BYTES / 2)));
+    items.push(note("huge", MAX_ENTRY_LEN - 1024));
+    let total: usize = items.iter().map(DataOp::encoded_len).sum();
+    let (ids, entries) = a.vault.create_items(&a.secret, items).unwrap();
+    assert_eq!(ids.len(), 5005);
+    assert_eq!(a.vault.items().len(), 5005);
+    assert!(
+        entries.len() <= total / CREATE_BATCH_BYTES + 6,
+        "{}",
+        entries.len()
+    );
+    for entry in &entries {
+        let len = entry.encode().len();
+        assert_eq!(entry.encoded_len(), len);
+        let Payload::Data(ops) = entry.payload() else {
+            unreachable!()
+        };
+        let ops_len = ops.iter().map(DataOp::encoded_len).sum();
+        assert_eq!(entry::data_entry_len(entry.deps().len(), ops_len), len);
+        assert!(len <= MAX_ENTRY_LEN);
+        assert!(ops.len() == 1 || ops_len <= CREATE_BATCH_BYTES);
+    }
+}
+
+/// An item too large to ever sync is refused before anything is written, in an
+/// import or on its own, with an error that says so.
+#[test]
+fn entries_too_large_to_sync_are_refused() {
+    let mut a = Dev::create();
+    let heads = a.vault.heads();
+    let items = vec![note("ok", 10), note("huge", MAX_ENTRY_LEN)];
+    let error = a.vault.create_items(&a.secret, items).unwrap_err();
+    assert!(
+        matches!(error, Error::TooLarge { len, max } if len > max && max == MAX_ENTRY_LEN),
+        "{error:?}"
+    );
+    assert!(error.to_string().contains("too large to sync"));
+    assert_eq!(a.vault.heads(), heads);
+
+    let error = a
+        .vault
+        .write(&a.secret, vec![note("huge", MAX_ENTRY_LEN)])
+        .unwrap_err();
+    assert!(matches!(error, Error::TooLarge { .. }), "{error:?}");
+    // Many ops that are each fine but too large together are refused too.
+    let ops = (0..3)
+        .map(|i| note(&i.to_string(), MAX_ENTRY_LEN / 3))
+        .collect();
+    let error = a.vault.write(&a.secret, ops).unwrap_err();
+    assert!(matches!(error, Error::TooLarge { .. }), "{error:?}");
+    assert_eq!(a.vault.heads(), heads);
+    assert!(a.vault.items().is_empty());
+
+    // An edit is held to the same limit.
+    let (id, _) = a
+        .vault
+        .create_item(&a.secret, "note", Some("small".into()), [])
+        .unwrap();
+    let edit = DataOp::set(
+        id,
+        "notes",
+        Field::new(FieldType::Secret, "n".repeat(MAX_ENTRY_LEN)),
+    );
+    assert!(matches!(
+        a.vault.write(&a.secret, vec![edit]),
+        Err(Error::TooLarge { .. })
+    ));
+}
+
 #[test]
 fn schema_is_enforced_at_commit() {
     let mut a = Dev::create();

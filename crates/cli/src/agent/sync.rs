@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use deadbolt_core::{DeviceId, Entry, Heads, Log, VaultId};
-use deadbolt_net::{HandlerError, PeerId, SyncHandler};
+use deadbolt_net::{Blob, HandlerError, PeerId, SyncHandler};
 use serde::{Deserialize, Serialize};
 use tokio::task::JoinSet;
 use tracing::{debug, info, warn};
@@ -29,6 +29,11 @@ pub const SYNC_TIMEOUT: Duration = Duration::from_secs(15);
 /// using the membership learned so far; normal background sync keeps retrying.
 pub const STARTUP_TIMEOUT: Duration = SYNC_TIMEOUT.saturating_mul(2);
 const STARTUP_RETRY: Duration = Duration::from_secs(1);
+
+// Every entry core commits fits one sync frame, and a peer serving a session we
+// opened never gives up before we do.
+const _: () = assert!(deadbolt_core::MAX_ENTRY_LEN + 1 == deadbolt_net::DEFAULT_MAX_FRAME_LEN);
+const _: () = assert!(SYNC_TIMEOUT.as_secs() * 2 <= deadbolt_net::INBOUND_SYNC_TIMEOUT.as_secs());
 
 #[derive(Serialize, Deserialize)]
 struct Hello {
@@ -58,7 +63,7 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> Result<Vec<Vec<u8>>, HandlerError> {
+    ) -> Result<Vec<Blob>, HandlerError> {
         self.0
             .with(|s| {
                 let ready = *self.0.ready.borrow();
@@ -67,7 +72,7 @@ impl SyncHandler for Handler {
             .map_err(handler_error)
     }
 
-    async fn receive(&self, peer: PeerId, entries: Vec<Vec<u8>>) -> Result<(), HandlerError> {
+    async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
         let agent = &self.0;
         let received = agent
             .with(|s| {
@@ -109,7 +114,7 @@ pub(super) fn missing_for(
     peer: &DeviceId,
     bytes: &[u8],
     ready: bool,
-) -> Result<Vec<Vec<u8>>> {
+) -> Result<Vec<Blob>> {
     let hello: Hello = serde_json::from_slice(bytes)?;
     s.learn(peer, Some(&hello.name), hello.addr, hello.peers);
     s.save_peers()?;
@@ -141,7 +146,7 @@ pub(super) fn missing_for(
 pub(super) fn receive(
     s: &mut Loaded,
     peer: &DeviceId,
-    entries: Vec<Vec<u8>>,
+    entries: Vec<Blob>,
     ready: bool,
 ) -> Result<usize> {
     let mut grouped: BTreeMap<VaultId, Vec<Entry>> = BTreeMap::new();
@@ -476,6 +481,124 @@ mod tests {
         let start = tokio::time::Instant::now();
         assert!(!wait_for_membership(std::future::pending::<Result<bool>>).await);
         assert_eq!(start.elapsed(), STARTUP_TIMEOUT);
+    }
+
+    const FAST: deadbolt_store::KdfParams = deadbolt_store::KdfParams {
+        m_cost_kib: 64,
+        t_cost: 1,
+        p_cost: 1,
+    };
+
+    /// The production sync handlers, ready, over a plain in-memory stream.
+    struct Plain(std::sync::Mutex<Loaded>, std::sync::atomic::AtomicUsize);
+
+    impl SyncHandler for Plain {
+        async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
+            let s = self.0.lock().unwrap();
+            hello(&s, &DeviceId::from_bytes(peer), None).map_err(handler_error)
+        }
+
+        async fn missing_for(
+            &self,
+            peer: PeerId,
+            heads: Vec<u8>,
+        ) -> Result<Vec<Blob>, HandlerError> {
+            let mut s = self.0.lock().unwrap();
+            missing_for(&mut s, &DeviceId::from_bytes(peer), &heads, true).map_err(handler_error)
+        }
+
+        async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+            self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut s = self.0.lock().unwrap();
+            receive(&mut s, &DeviceId::from_bytes(peer), entries, true)
+                .map(drop)
+                .map_err(handler_error)
+        }
+    }
+
+    /// A vault the size of a real one (thousands of imported items, large notes,
+    /// one near the entry limit, edits one at a time) pairs to a new device and
+    /// then syncs to it through the production handlers and sync protocol.
+    #[tokio::test]
+    async fn a_large_imported_vault_pairs_and_syncs() {
+        use deadbolt_core::{DataOp, MAX_ENTRY_LEN};
+        let (a_dir, b_dir) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+        let mut a = Loaded::setup(a_dir.path(), b"a", "alpha", FAST).unwrap();
+        let mut b = Loaded::setup(b_dir.path(), b"b", "beta", FAST).unwrap();
+        let vault = a.create_vault("personal").unwrap();
+        let login = |i: usize| {
+            DataOp::create(
+                "login",
+                Some(format!("Site {i}")),
+                [
+                    (
+                        "password".into(),
+                        Field::new(FieldType::Secret, format!("pw-{i}")),
+                    ),
+                    (
+                        "username".into(),
+                        Field::new(FieldType::Text, "me@example.com"),
+                    ),
+                    (
+                        "url".into(),
+                        Field::new(FieldType::Url, format!("https://{i}.example.com")),
+                    ),
+                    (
+                        "notes".into(),
+                        Field::new(FieldType::Note, "x".repeat(1 + i % 500)),
+                    ),
+                ],
+            )
+        };
+        let note = |name: &str, len: usize| {
+            let field = Field::new(FieldType::Secret, "n".repeat(len));
+            DataOp::create("note", Some(name.into()), [("notes".into(), field)])
+        };
+        let import = |s: &mut Loaded, items: Vec<DataOp>| {
+            s.update(vault, |v, secret| Ok(v.create_items(secret, items)?.0))
+                .unwrap()
+        };
+
+        // Pair while the vault already holds a large import.
+        let mut items: Vec<_> = (0..3000).map(login).collect();
+        items.extend((0..4).map(|i| note(&format!("big {i}"), 1 << 20)));
+        import(&mut a, items);
+        let offer_blob = super::super::pairing::offer(&a, vault, None).unwrap();
+        let offer: super::super::pairing::Offer = serde_json::from_slice(&offer_blob).unwrap();
+        let join = super::super::pairing::join_blob(&b, a.id, &offer, None).unwrap();
+        let (welcome, _) =
+            super::super::pairing::welcome(&mut a, vault, b.id, &join, None).unwrap();
+        super::super::pairing::apply_welcome(&mut b, a.id, &offer, welcome).unwrap();
+        assert_eq!(b.vault(&vault).items().len(), 3004);
+
+        // Then sync a second import, one item near the limit and single edits.
+        let mut items: Vec<_> = (3000..6000).map(login).collect();
+        items.push(note("huge", MAX_ENTRY_LEN - 4096));
+        let ids = import(&mut a, items);
+        a.update(vault, |v, secret| {
+            for id in ids.iter().take(200) {
+                let field = Field::new(FieldType::Secret, format!("edited-{id}"));
+                v.write(secret, vec![DataOp::set(*id, "password", field)])?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        let (a_id, b_id) = (*a.id.as_bytes(), *b.id.as_bytes());
+        let a = Plain(std::sync::Mutex::new(a), Default::default());
+        let b = Plain(std::sync::Mutex::new(b), Default::default());
+        let (left, right) = tokio::io::duplex(64 * 1024);
+        let (mut ar, mut aw) = tokio::io::split(left);
+        let (mut br, mut bw) = tokio::io::split(right);
+        let max = deadbolt_net::DEFAULT_MAX_FRAME_LEN;
+        let (sent, received) = tokio::join!(
+            deadbolt_net::run_sync_session(&a, b_id, &mut aw, &mut ar, max, false),
+            deadbolt_net::run_sync_session(&b, a_id, &mut bw, &mut br, max, true),
+        );
+        assert_eq!(sent.unwrap().sent, received.unwrap().received);
+        assert!(b.1.load(std::sync::atomic::Ordering::SeqCst) >= 1);
+        let (a, b) = (a.0.into_inner().unwrap(), b.0.into_inner().unwrap());
+        assert_eq!(b.vault(&vault).heads(), a.vault(&vault).heads());
+        assert_eq!(b.vault(&vault).items().len(), 6005);
     }
 
     #[test]

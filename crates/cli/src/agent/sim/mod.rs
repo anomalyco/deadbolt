@@ -11,7 +11,7 @@ use deadbolt_core::{
     DeviceId, DeviceSecret, Entry, Hash, Log, MembershipOp, Payload, Vault, VaultId,
 };
 use deadbolt_net::{
-    HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PairingStream, PeerId,
+    Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingContext, PairingStream, PeerId,
     SyncHandler, run_sync_session,
 };
 use deadbolt_store::KdfParams;
@@ -164,11 +164,7 @@ impl SyncHandler for Handler {
         )
         .map_err(|e| e.to_string().into())
     }
-    async fn missing_for(
-        &self,
-        peer: PeerId,
-        heads: Vec<u8>,
-    ) -> Result<Vec<Vec<u8>>, HandlerError> {
+    async fn missing_for(&self, peer: PeerId, heads: Vec<u8>) -> Result<Vec<Blob>, HandlerError> {
         let mut guard = self.state.lock().unwrap();
         sync::missing_for(
             guard.as_mut().ok_or("locked")?,
@@ -178,7 +174,7 @@ impl SyncHandler for Handler {
         )
         .map_err(|e| e.to_string().into())
     }
-    async fn receive(&self, peer: PeerId, entries: Vec<Vec<u8>>) -> Result<(), HandlerError> {
+    async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
         let mut guard = self.state.lock().unwrap();
         let s = guard.as_mut().ok_or("locked")?;
         // Local writes and pairing record changes too; judge only this batch.
@@ -215,7 +211,7 @@ impl Inviter for Invitation<'_> {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> Result<Vec<Vec<u8>>, HandlerError> {
+    ) -> Result<Vec<Blob>, HandlerError> {
         self.device
             .with(|s| {
                 pairing::welcome(s, self.vault, DeviceId::from_bytes(ctx.remote), &join, None)
@@ -237,11 +233,7 @@ impl Joiner for Device {
         *self.offer.lock().unwrap() = Some(offer);
         Ok(join)
     }
-    async fn receive(
-        &self,
-        ctx: &PairingContext,
-        welcome: Vec<Vec<u8>>,
-    ) -> Result<(), HandlerError> {
+    async fn receive(&self, ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
         let offer = self.offer.lock().unwrap().take().ok_or("no offer")?;
         self.with(|s| {
             pairing::apply_welcome(s, DeviceId::from_bytes(ctx.remote), &offer, welcome).map(|_| ())

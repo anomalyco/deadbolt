@@ -42,7 +42,7 @@ use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 use crate::{
-    Node, PAIR_ALPN, PeerAddr, PeerId,
+    Blob, Node, PAIR_ALPN, PeerAddr, PeerId,
     error::{Error, HandlerError, Result, close, from_conn},
     frame::{self, tag},
     sync::{fail, truncate},
@@ -55,6 +55,10 @@ const TICKET_PREFIX: &str = "DBPAIR";
 const TICKET_VERSION: u8 = 1;
 const MAX_TICKET_ADDRS: usize = 8;
 const PROOF_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pairing connections waiting to be proved, and proofs running at once. Only one
+/// dialer is legitimate; the rest are refused as busy until a slot frees up, at the
+/// latest after [`PROOF_TIMEOUT`].
+const MAX_PROVING: usize = 16;
 const LINGER_TIMEOUT: Duration = Duration::from_secs(5);
 const EXPORTER_LABEL: &[u8] = b"EXPORTER-deadbolt-pair-v1";
 const TRANSCRIPT_LABEL: &[u8] = b"deadbolt/pair/1";
@@ -278,7 +282,7 @@ pub trait Joiner: Send + Sync {
     fn receive(
         &self,
         ctx: &PairingContext,
-        welcome: Vec<Vec<u8>>,
+        welcome: Vec<Blob>,
     ) -> impl Future<Output = Result<(), HandlerError>> + Send;
 }
 
@@ -299,7 +303,7 @@ pub trait Inviter: Send + Sync {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> impl Future<Output = Result<Vec<Vec<u8>>, HandlerError>> + Send;
+    ) -> impl Future<Output = Result<Vec<Blob>, HandlerError>> + Send;
 }
 
 /// Options for [`Node::start_pairing`].
@@ -427,7 +431,8 @@ impl PairingStream {
         let offer = inviter.offer(&ctx).await.map_err(Error::Handler)?;
         frame::write(send, tag::OFFER, &offer).await?;
         confirm_exchange(send, recv, inviter.confirm(&ctx)).await?;
-        let join = frame::expect(recv, tag::JOIN, max).await?;
+        let mut join = frame::expect(recv, tag::JOIN, max).await?;
+        let join = std::mem::take(&mut *join);
         let welcome = inviter.welcome(&ctx, join).await.map_err(Error::Handler)?;
         frame::write_entries(send, &welcome).await?;
         if let Err(error) = send.shutdown().await {
@@ -460,7 +465,8 @@ impl ProvenPairing {
             &mac(&self.0.secret, LISTENER_LABEL, &self.0.transcript),
         )
         .await?;
-        let offer = frame::expect(recv, tag::OFFER, max).await?;
+        let mut offer = frame::expect(recv, tag::OFFER, max).await?;
+        let offer = std::mem::take(&mut *offer);
         confirm_exchange(send, recv, joiner.confirm(&ctx, &offer)).await?;
         let join = joiner.join(&ctx, offer).await.map_err(Error::Handler)?;
         frame::write(send, tag::JOIN, &join).await?;
@@ -498,7 +504,7 @@ impl PairingListener {
         let proven = loop {
             tokio::select! {
                 _ = tokio::time::sleep_until(self.expires_at) => return Err(Error::PairingExpired),
-                conn = self.rx.recv() => {
+                conn = self.rx.recv(), if proving.len() < MAX_PROVING => {
                     let Some(conn) = conn else { return Err(Error::PairingCancelled) };
                     proving.spawn(listener_prove(conn, local, secret.clone()));
                 }
@@ -617,7 +623,7 @@ impl Node {
                 .collect(),
         };
         let expires_at = Instant::now() + options.ttl;
-        let (tx, rx) = mpsc::channel(16);
+        let (tx, rx) = mpsc::channel(MAX_PROVING);
         let slot = self.inner.gate.open_pairing(expires_at, tx);
         Ok(PairingListener {
             node: self.clone(),
@@ -692,7 +698,7 @@ async fn confirm_exchange(
         frame::write(send, tag::CONFIRM, &[1]),
         frame::expect(recv, tag::CONFIRM, 64),
     )?;
-    if peer != [1] {
+    if *peer != [1] {
         return Err(Error::PairingDeclined);
     }
     Ok(())
@@ -809,6 +815,75 @@ mod tests {
     fn ticket_qr_renders() {
         let qr = ticket().to_qr(crate::QrStyle::LightOnDark).unwrap();
         assert!(qr.lines().count() > 10);
+    }
+
+    struct NeverJoins;
+
+    impl Joiner for NeverJoins {
+        async fn confirm(&self, _: &PairingContext, _: &[u8]) -> bool {
+            false
+        }
+        async fn join(&self, _: &PairingContext, _: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
+            Err("unused".into())
+        }
+        async fn receive(&self, _: &PairingContext, _: Vec<Blob>) -> Result<(), HandlerError> {
+            Err("unused".into())
+        }
+    }
+
+    /// Dialers that never prove the secret hold at most `MAX_PROVING` proof tasks
+    /// and `MAX_PROVING` queue slots; the next one is refused as busy.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn proofs_in_flight_are_capped() {
+        let members = std::sync::Arc::new(|_: &PeerId| false);
+        let spawn = || async {
+            let key = iroh::SecretKey::generate().to_bytes();
+            Node::spawn(
+                crate::NodeConfig::local_only(key),
+                members.clone(),
+                crate::node::tests::Nothing,
+            )
+            .await
+            .unwrap()
+        };
+        let new = spawn().await;
+        let dialer = spawn().await;
+        let listener = new
+            .start_pairing(PairingOptions {
+                ttl: Duration::from_secs(60),
+                online_timeout: Duration::ZERO,
+            })
+            .await
+            .unwrap();
+        let waiting = tokio::spawn(async move { listener.complete(&NeverJoins).await });
+        let addr = new.addr().to_endpoint_addr().unwrap();
+        let mut conns = Vec::new();
+        for _ in 0..=2 * MAX_PROVING {
+            let conn = dialer.inner.endpoint.connect(addr.clone(), PAIR_ALPN);
+            let conn = tokio::time::timeout(Duration::from_secs(10), conn).await;
+            conns.push(conn.unwrap().unwrap());
+        }
+        let mut closed = JoinSet::new();
+        for (index, conn) in conns.iter().enumerate() {
+            let conn = conn.clone();
+            closed.spawn(async move {
+                conn.closed().await;
+                index
+            });
+        }
+        let index = tokio::time::timeout(Duration::from_secs(10), closed.join_next())
+            .await
+            .expect("one dialer is refused")
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            from_conn(&conns[index], Error::Timeout),
+            Error::Rejected(reason) if reason == "busy"
+        ));
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let open = conns.iter().filter(|c| c.close_reason().is_none()).count();
+        assert_eq!(open, 2 * MAX_PROVING);
+        waiting.abort();
     }
 
     #[test]

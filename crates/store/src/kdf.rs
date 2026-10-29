@@ -28,16 +28,21 @@ impl KdfParams {
         p_cost: 1,
     };
 
-    // Upper bounds applied to parameters read from disk so a tampered header
-    // cannot make unlock allocate unbounded memory or spin forever.
-    const MAX_M_COST_KIB: u32 = 4 * 1024 * 1024;
+    // Upper bounds on parameters, checked at creation and on every header read,
+    // so a tampered header cannot make unlock allocate more than 1 GiB or run for
+    // more than about the time of 4 GiB of passes (seconds, not hours). They leave
+    // 16x headroom in memory and 21x in work over `DEFAULT`.
+    const MAX_M_COST_KIB: u32 = 1024 * 1024;
     const MAX_T_COST: u32 = 64;
     const MAX_P_COST: u32 = 64;
+    /// Memory times passes, in KiB.
+    const MAX_WORK_KIB: u64 = 4 * 1024 * 1024;
 
     fn argon2_params(&self) -> Result<Params> {
         if self.m_cost_kib > Self::MAX_M_COST_KIB
             || self.t_cost > Self::MAX_T_COST
             || self.p_cost > Self::MAX_P_COST
+            || u64::from(self.m_cost_kib) * u64::from(self.t_cost) > Self::MAX_WORK_KIB
         {
             return Err(Error::InvalidKdfParams(format!(
                 "{self:?} exceeds the supported maximum"
@@ -121,8 +126,15 @@ impl KdfHeader {
         let params = self.params.argon2_params()?;
         let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params.clone());
         // Allocated here (rather than by argon2) so the working memory, which
-        // holds passphrase-derived state, is wiped when dropped.
-        let mut memory = Zeroizing::new(vec![Block::new(); params.block_count()]);
+        // holds passphrase-derived state, is wiped when dropped. Fallibly, so a
+        // machine short of memory gets an error rather than an abort.
+        let mut memory = Zeroizing::new(Vec::new());
+        memory
+            .try_reserve_exact(params.block_count())
+            .map_err(|_| {
+                Error::InvalidKdfParams(format!("not enough memory for {:?}", self.params))
+            })?;
+        memory.resize(params.block_count(), Block::new());
         let mut key = Zeroizing::new([0u8; KEY_LEN]);
         argon2
             .hash_password_into_with_memory(

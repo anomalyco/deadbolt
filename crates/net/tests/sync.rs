@@ -3,7 +3,7 @@ mod common;
 use std::sync::Arc;
 
 use common::*;
-use deadbolt_net::{Error, SyncOutcome};
+use deadbolt_net::{Error, NodeConfig, SyncOutcome};
 use tokio::sync::Notify;
 
 #[tokio::test(flavor = "multi_thread")]
@@ -61,6 +61,59 @@ async fn large_entries_sync() {
     let outcome = within(b.node.sync(a.node.addr())).await.unwrap();
     assert_eq!(outcome.received, 3);
     assert_eq!(b.store.entries.lock().unwrap().len(), 4);
+}
+
+/// More entries than one receive batch holds arrive in several bounded, ordered
+/// batches, and all of them are accepted.
+#[tokio::test(flavor = "multi_thread")]
+async fn many_entries_arrive_in_bounded_batches() {
+    let entries: Vec<String> = (0..70_000).map(|i| format!("e{i}")).collect();
+    let refs: Vec<&str> = entries.iter().map(String::as_str).collect();
+    let (a, b) = pair_of_members(&refs, &[]).await;
+    let outcome = within(b.node.sync(a.node.addr())).await.unwrap();
+    assert_eq!(outcome.received, entries.len());
+    let batches = b.store.received.lock().unwrap().clone();
+    assert!(batches.len() > 1, "{} batches", batches.len());
+    assert!(batches.iter().all(|batch| batch.len() <= 64 * 1024));
+    let received: Vec<Vec<u8>> = batches.into_iter().flatten().collect();
+    let sent: Vec<Vec<u8>> = entries.iter().map(|e| e.as_bytes().to_vec()).collect();
+    assert_eq!(received, sent);
+}
+
+/// A peer that stalls a session it opened has its connection closed at the
+/// responder's deadline.
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_inbound_session_times_out() {
+    let entered = Arc::new(Notify::new());
+    let release = Arc::new(Notify::new());
+    let store = Store {
+        block: Some((entered.clone(), release.clone())),
+        ..Default::default()
+    };
+    let a = TestNode::new(Arc::new(store)).await;
+    let mut config = NodeConfig::local_only(key());
+    config.inbound_sync_timeout = std::time::Duration::from_millis(500);
+    let b = TestNode::with_config(Store::with(&["b1"]), config).await;
+    a.members.add(b.id());
+    b.members.add(a.id());
+
+    let conn = within(a.node.connect(b.node.addr())).await.unwrap();
+    // A stalls in its own handler, so B waits for entries that never come.
+    let session = tokio::spawn(async move { conn.sync().await });
+    within(entered.notified()).await;
+    within(async {
+        while !b.node.connected_peers().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+    release.notify_one();
+    let result = within(session).await.unwrap();
+    assert!(
+        matches!(&result, Err(Error::Protocol(m)) if m.contains("timeout")),
+        "{result:?}"
+    );
+    assert!(b.store.received.lock().unwrap().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread")]
