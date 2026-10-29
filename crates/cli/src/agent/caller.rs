@@ -286,6 +286,29 @@ fn from_proc(peer: Peer, process: Process) -> CallerInfo {
     info
 }
 
+/// Whether the caller looks like an AI: an AI host (OpenCode, Claude Code…)
+/// among its parents, or a claim to be an OpenCode session. A hint, never
+/// proof: an AI can start a terminal outside its own tree. So it only ever
+/// refuses (pairing agent clients, granting sign-ins), never allows.
+pub fn is_ai(info: &CallerInfo) -> bool {
+    let host = |name: &str| {
+        let name = name.trim_start_matches('-');
+        HOSTS
+            .iter()
+            .any(|(host, _)| host.eq_ignore_ascii_case(name))
+    };
+    info.ancestry.iter().any(|a| {
+        host(&a.name)
+            || a.path
+                .as_deref()
+                .and_then(|p| Path::new(p).file_name())
+                .is_some_and(|n| host(&n.to_string_lossy()))
+    }) || info
+        .claimed
+        .as_ref()
+        .is_some_and(|c| c.opencode_session.is_some())
+}
+
 /// Nobody in particular: a status asked for without a connection.
 pub fn nobody() -> CallerInfo {
     CallerInfo::unverified("nobody")
@@ -385,6 +408,32 @@ mod tests {
     }
 
     /// Whatever a client claims, its class comes from its code alone.
+    #[test]
+    fn an_ai_host_among_the_parents_or_an_opencode_claim_is_an_ai() {
+        let mut info = CallerInfo::unverified("zsh › deadbolt");
+        info.ancestry = vec![ancestor(10, "zsh", "/bin/zsh")];
+        assert!(!is_ai(&info));
+        info.ancestry.push(ancestor(
+            9,
+            "opencode-cli",
+            "/Users/k/.opencode/bin/opencode-cli",
+        ));
+        assert!(is_ai(&info));
+        info.ancestry = vec![ancestor(9, "node", "/opt/homebrew/bin/claude")];
+        assert!(is_ai(&info));
+        info.ancestry = vec![ancestor(10, "-zsh", "/bin/zsh")];
+        info.claimed = Some(Claim {
+            caller: Some("me".into()),
+            opencode_session: None,
+        });
+        assert!(!is_ai(&info));
+        info.claimed = Some(Claim {
+            caller: None,
+            opencode_session: Some("ses_1".into()),
+        });
+        assert!(is_ai(&info));
+    }
+
     #[test]
     fn a_claim_never_upgrades_the_class() {
         let callers = Callers::new();

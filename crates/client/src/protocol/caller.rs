@@ -127,14 +127,19 @@ pub enum Tier {
     Always,
     /// Site commands, for the browser host.
     Browser,
+    /// Agent sign-ins: a paired client using its standing grants.
+    Agent,
 }
 
-/// How a request ended. Nothing is refused yet, so it ran or it failed.
+/// How a request ended. Only agent sign-ins are refused so far: a client
+/// that isn't paired, a grant that doesn't cover the request, a client past
+/// its rate limit, or an AI pairing or granting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Outcome {
     Allowed,
     Locked,
+    Refused,
     Failed,
 }
 
@@ -175,4 +180,8 @@ pub struct ActivityEntry {
     /// (`more-past-budget`). 0 for an ordinary entry.
     #[serde(default)]
     pub more: u64,
+    /// The paired agent client the request came from (its name, else its
+    /// id), for agent sign-ins: the token proved it, unlike a claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
 }

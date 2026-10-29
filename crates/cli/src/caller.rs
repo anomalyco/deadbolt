@@ -189,16 +189,20 @@ fn activity_line(entry: &ActivityEntry) -> String {
     let outcome = match entry.outcome {
         Outcome::Allowed => "",
         Outcome::Locked => "\tlocked",
+        Outcome::Refused => "\trefused",
         Outcome::Failed => "\tfailed",
     };
     let more = match entry.more {
         0 => String::new(),
         n => format!("\t{n} more"),
     };
+    let who = match &entry.client {
+        Some(client) => format!("agent client {client} · {}", entry.caller.label),
+        None => entry.caller.label.clone(),
+    };
     format!(
-        "{}\t{}\t{}\t{}\t{}{outcome}{more}",
+        "{}\t{who}\t{}\t{}\t{}{outcome}{more}",
         crate::ago(entry.time),
-        entry.caller.label,
         entry.command,
         items.join(", "),
         entry.fields.join(",")
@@ -255,6 +259,7 @@ mod tests {
             fields: vec!["username".into(), "password".into()],
             outcome: Outcome::Locked,
             more: 0,
+            client: None,
         };
         assert_eq!(
             activity_line(&entry),

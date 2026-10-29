@@ -56,7 +56,10 @@ fn passkey_ref(vault: &VaultId, item: &ItemId) -> LoginRef {
 }
 
 /// Every passkey for the relying party `rp`, in every vault.
-fn passkeys<'a>(s: &'a Loaded, rp: &'a str) -> impl Iterator<Item = (VaultId, Item)> + 'a {
+pub(super) fn passkeys<'a>(
+    s: &'a Loaded,
+    rp: &'a str,
+) -> impl Iterator<Item = (VaultId, Item)> + 'a {
     s.vaults.iter().flat_map(move |(id, vault)| {
         vault
             .items()
@@ -90,6 +93,8 @@ pub struct NewPasskey {
     pub challenge: String,
     pub user_id: String,
     pub user_name: String,
+    /// The WebAuthn display name; empty when the site gave none.
+    pub display_name: String,
     /// The site's credential ids it doesn't want a second passkey beside.
     pub exclude: Vec<String>,
 }
@@ -123,19 +128,26 @@ pub fn check_create(
     webauthn::challenge(challenge)?;
     webauthn::user_handle(user_id)?;
     check_excluded(s, &rp, exclude)?;
-    let user_name: String = user_name
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_USER_NAME)
-        .collect();
     Ok(NewPasskey {
         origin: origin.into(),
         rp_id: rp,
         challenge: challenge.into(),
         user_id: user_id.into(),
-        user_name: user_name.trim().into(),
+        user_name: user_text(user_name),
+        display_name: String::new(),
         exclude: exclude.to_vec(),
     })
+}
+
+/// A user name or display name a page gave, as kept: no control
+/// characters, at most [`MAX_USER_NAME`] characters, trimmed.
+pub fn user_text(text: &str) -> String {
+    let text: String = text
+        .chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_USER_NAME)
+        .collect();
+    text.trim().into()
 }
 
 pub struct Created {
@@ -176,6 +188,9 @@ pub fn create_passkey(
     if !new.user_name.is_empty() {
         fields.push(("username", new.user_name.as_str()));
     }
+    if !new.display_name.is_empty() {
+        fields.push(("display-name", new.display_name.as_str()));
+    }
 
     let same_user = passkeys(s, &new.rp_id)
         .find(|(_, item)| value(item, "user-handle") == Some(new.user_id.as_str()));
@@ -191,6 +206,9 @@ pub fn create_passkey(
             .collect();
         if new.user_name.is_empty() && item.fields.contains_key("username") {
             ops.push(DataOp::remove(item.id, "username"));
+        }
+        if new.display_name.is_empty() && item.fields.contains_key("display-name") {
+            ops.push(DataOp::remove(item.id, "display-name"));
         }
         s.update(vault, |v, secret| Ok(v.write(secret, ops)?))?;
         passkey_ref(&vault, &item.id)
@@ -297,10 +315,11 @@ impl Agent {
                 challenge,
                 user_id,
                 user_name,
+                user_display_name,
                 exclude,
                 verify,
             } => {
-                let new = self.with(|s| {
+                let mut new = self.with(|s| {
                     check_create(
                         s,
                         &origin,
@@ -311,6 +330,7 @@ impl Agent {
                         &exclude,
                     )
                 })?;
+                new.display_name = user_text(&user_display_name);
                 let reason = format!("save a passkey for {}", new.rp_id);
                 let verified = self.verify_user(conv, verify, &reason).await?;
                 let now = i64::try_from(session::now()).unwrap_or(i64::MAX);
@@ -355,7 +375,7 @@ impl Agent {
 
     /// Whether a ceremony now can verify the user: Touch ID is on, the
     /// Mac has it, and this store has a current enrollment.
-    fn can_verify(&self) -> bool {
+    pub(super) fn can_verify(&self) -> bool {
         self.touch_id_on()
             && self
                 .with(|s| Ok(s.store.biometric_token()?))
@@ -375,7 +395,12 @@ impl Agent {
     /// when the site discourages it or Touch ID can't verify; an error if
     /// the site requires it then, or the user cancels, or the client hangs
     /// up (which cancels the prompt).
-    async fn verify_user(&self, conv: &Conversation, verify: Verify, reason: &str) -> Result<bool> {
+    pub(super) async fn verify_user(
+        &self,
+        conv: &Conversation,
+        verify: Verify,
+        reason: &str,
+    ) -> Result<bool> {
         if verify == Verify::Discouraged {
             return Ok(false);
         }
@@ -451,7 +476,7 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::{Signature, VerifyingKey};
     use p256::pkcs8::DecodePublicKey;
@@ -659,7 +684,7 @@ mod tests {
         assert_eq!(list(&s, "https://example.com", None).unwrap().1.len(), 2);
     }
 
-    mod agent {
+    pub(in crate::agent) mod agent {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
@@ -671,19 +696,24 @@ mod tests {
         use super::super::super::{sync, tests::test_paths};
         use super::*;
 
-        struct Fixture {
-            agent: Arc<Agent>,
-            key: [u8; 32],
+        pub(in crate::agent) struct Fixture {
+            pub(in crate::agent) agent: Arc<Agent>,
+            pub(in crate::agent) key: [u8; 32],
             _dir: tempfile::TempDir,
         }
 
-        async fn unlocked() -> Fixture {
-            let dir = tempfile::tempdir().unwrap();
-            let fast = deadbolt_store::KdfParams {
+        pub(in crate::agent) async fn unlocked() -> Fixture {
+            unlocked_with(deadbolt_store::KdfParams {
                 m_cost_kib: 64,
                 t_cost: 1,
                 p_cost: 1,
-            };
+            })
+            .await
+        }
+
+        /// An unlocked agent whose passphrase ("test") derives with `fast`.
+        pub(in crate::agent) async fn unlocked_with(fast: deadbolt_store::KdfParams) -> Fixture {
+            let dir = tempfile::tempdir().unwrap();
             let secret = [61; 32];
             drop(deadbolt_store::init_with_params(dir.path(), b"test", secret, fast).unwrap());
             let mut loaded = Loaded::open(dir.path(), b"test").unwrap();
@@ -711,7 +741,7 @@ mod tests {
             }
         }
 
-        fn conversation() -> (Conversation, watch::Sender<bool>) {
+        pub(in crate::agent) fn conversation() -> (Conversation, watch::Sender<bool>) {
             let (socket, _client) = UnixStream::pair().unwrap();
             let (_, write) = socket.into_split();
             let (closed, rx) = watch::channel(false);
@@ -730,6 +760,7 @@ mod tests {
                 challenge: webauthn::b64(&[3; 32]),
                 user_id: webauthn::b64(user.as_bytes()),
                 user_name: user.into(),
+                user_display_name: String::new(),
                 exclude: Vec::new(),
                 verify,
             }

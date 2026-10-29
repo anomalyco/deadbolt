@@ -156,6 +156,7 @@ pub struct App {
     pub import: crate::import::Import,
     pub mirror: crate::mirror::Mirror,
     pub activity: crate::activity::Activity,
+    pub agents: crate::agents::Agents,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
@@ -212,6 +213,7 @@ impl App {
             import: crate::import::Import::default(),
             mirror: crate::mirror::Mirror::default(),
             activity: crate::activity::Activity::default(),
+            agents: crate::agents::Agents::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
@@ -416,6 +418,7 @@ impl App {
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
             Done::Activity { seq, result } => self.on_activity(seq, result, tx),
+            Done::Agents { seq, result } => self.on_agents(seq, result, tx),
             Done::Reported => {}
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
@@ -449,7 +452,10 @@ impl App {
                 self.refresh();
             }
             Change::Devices { .. } => self.agent.send(Job::Status),
-            Change::Activity => self.on_activity_changed(),
+            Change::Activity => {
+                self.on_activity_changed();
+                self.on_agents_changed();
+            }
             Change::Items { vault } if self.shows(&vault) => self.refresh(),
             Change::Stopping => self.on_agent_gone(tx),
             // Another launch (`deadbolt app`): only the main window's watch hears it.
@@ -663,6 +669,7 @@ impl App {
         self.forget_edit();
         self.mirror.forget();
         self.activity.forget();
+        self.agents.forget();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -1293,6 +1300,7 @@ impl App {
         self.touch_id_error = None;
         self.mirror.result = None;
         self.activity.forget();
+        self.agents.forget();
     }
 
     /// App-level keys: before the focused field when there is none, after it

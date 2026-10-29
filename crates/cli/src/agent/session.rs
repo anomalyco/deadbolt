@@ -152,14 +152,14 @@ pub struct Loaded {
     pub changes: Changes,
 }
 
-fn get_json<T: DeserializeOwned>(store: &Unlocked, name: &str) -> Result<Option<T>> {
+pub(super) fn get_json<T: DeserializeOwned>(store: &Unlocked, name: &str) -> Result<Option<T>> {
     store
         .meta_get(name)?
         .map(|bytes| serde_json::from_slice(&bytes).with_context(|| format!("reading {name}")))
         .transpose()
 }
 
-fn set_json<T: Serialize>(store: &Unlocked, name: &str, value: &T) -> Result<()> {
+pub(super) fn set_json<T: Serialize>(store: &Unlocked, name: &str, value: &T) -> Result<()> {
     store.meta_set(name, &serde_json::to_vec(value)?)?;
     Ok(())
 }

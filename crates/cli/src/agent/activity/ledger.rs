@@ -99,6 +99,7 @@ pub fn bound(entry: &mut ActivityEntry) {
     for field in &mut entry.fields {
         cut(field);
     }
+    cut_opt(&mut entry.client);
 }
 
 /// What a grant would be tied to (`docs/agent-control.md`): the terminal
@@ -160,9 +161,9 @@ impl Fold {
 }
 
 /// Whether requests of `tier` read, change or remove something, so their
-/// entries always say what.
+/// entries always say what. Agent sign-ins hand values to a client.
 fn sensitive(tier: Tier) -> bool {
-    matches!(tier, Tier::Read | Tier::Write | Tier::Never)
+    matches!(tier, Tier::Read | Tier::Write | Tier::Never | Tier::Agent)
 }
 
 /// What makes two entries repeats of one request: everything they name.
@@ -174,6 +175,7 @@ fn kind(entry: &ActivityEntry) -> String {
         entry.outcome,
         &entry.items,
         &entry.fields,
+        &entry.client,
     ))
     .unwrap_or_default()
 }
@@ -345,6 +347,7 @@ mod tests {
             fields: vec!["password".into()],
             outcome: Outcome::Allowed,
             more: 0,
+            client: None,
         }
     }
 
@@ -441,6 +444,36 @@ mod tests {
     /// Past the limit, a read, a change or a removal keeps what it named:
     /// each kind's first is an entry of its own, at once, and only exact
     /// repeats fold, into an entry naming the same items and fields.
+    #[test]
+    fn agent_fills_past_the_limit_keep_their_login_and_client() {
+        let mut ledger = Ledger::default();
+        for _ in 0..PER_ANCHOR {
+            assert_eq!(ledger.admit(look(100, "node")).len(), 1);
+        }
+        let fill = |client: &str| ActivityEntry {
+            tier: Tier::Agent,
+            command: "agent-fill".into(),
+            items: vec![ActivityItem {
+                vault: Some("v1".into()),
+                id: Some("i1".into()),
+                title: "GitHub (https://github.com)".into(),
+            }],
+            client: Some(client.into()),
+            ..entry(101, "node")
+        };
+        let due = ledger.admit(fill("browse"));
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].client.as_deref(), Some("browse"));
+        assert_eq!(due[0].items[0].id.as_deref(), Some("i1"));
+        assert!(ledger.admit(fill("browse")).is_empty());
+        // Another client's fill of the same login is no repeat of it.
+        assert_eq!(ledger.admit(fill("other")).len(), 1);
+        let folded = ledger.due(101 + WINDOW_SECS, false);
+        let repeat = folded.iter().find(|e| e.command == "agent-fill").unwrap();
+        assert_eq!((repeat.more, repeat.client.as_deref()), (1, Some("browse")));
+        assert_eq!(repeat.items[0].id.as_deref(), Some("i1"));
+    }
+
     #[test]
     fn sensitive_entries_past_the_limit_keep_their_items() {
         let mut ledger = Ledger::default();

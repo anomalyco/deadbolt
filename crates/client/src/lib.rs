@@ -118,6 +118,10 @@ async fn check_for(stream: &UnixStream, command: &Command) -> Result<(), Error> 
 pub struct AgentError {
     pub code: ErrorCode,
     pub message: String,
+    /// With `not-granted`: what the user would have to allow.
+    pub grant: Option<protocol::NotGranted>,
+    /// With `choose-passkey`: the passkeys to choose from.
+    pub passkeys: Option<Vec<protocol::AgentPasskey>>,
 }
 
 impl fmt::Display for AgentError {
@@ -266,8 +270,8 @@ where
                         answer = &mut answer => break answer,
                         message = read_message(&mut lines) => match message? {
                             Message::Ok { reply } => return Ok(reply),
-                            Message::Error { code, message } => {
-                                return Err(AgentError { code, message }.into());
+                            Message::Error { code, message, grant, passkeys } => {
+                                return Err(AgentError { code, message, grant, passkeys }.into());
                             }
                             event => queued.push_back(event),
                         },
@@ -279,7 +283,20 @@ where
             }
             Message::Change { change } => return Err(Error::UnexpectedChange(change)),
             Message::Ok { reply } => return Ok(reply),
-            Message::Error { code, message } => return Err(AgentError { code, message }.into()),
+            Message::Error {
+                code,
+                message,
+                grant,
+                passkeys,
+            } => {
+                return Err(AgentError {
+                    code,
+                    message,
+                    grant,
+                    passkeys,
+                }
+                .into());
+            }
         }
     }
 }
@@ -429,7 +446,18 @@ impl Watch {
         match serde_json::from_slice::<Message>(&line).map_err(Error::InvalidReply)? {
             Message::Change { change } => Ok(Some(change)),
             Message::Ok { .. } => Ok(None),
-            Message::Error { code, message } => Err(AgentError { code, message }.into()),
+            Message::Error {
+                code,
+                message,
+                grant,
+                passkeys,
+            } => Err(AgentError {
+                code,
+                message,
+                grant,
+                passkeys,
+            }
+            .into()),
             Message::Event { event } => Err(Error::UnexpectedEvent(event)),
         }
     }
@@ -1024,6 +1052,8 @@ mod tests {
                 let declined = Message::Error {
                     code: ErrorCode::Failed,
                     message: "pairing confirmation code was not confirmed".into(),
+                    grant: None,
+                    passkeys: None,
                 };
                 write
                     .write_all(&encode_line(&declined).unwrap())

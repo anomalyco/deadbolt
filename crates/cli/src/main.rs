@@ -2,6 +2,7 @@
 compile_error!("deadbolt currently supports Unix platforms only");
 
 mod agent;
+mod agents;
 mod app;
 mod browser;
 mod caller;
@@ -126,6 +127,11 @@ enum Commands {
         #[arg(long)]
         json: bool,
     },
+    /// Let AI agents sign in to sites without asking: pair an agent client
+    /// (such as Browse) and allow it logins, site by site. Values never
+    /// reach the AI; every fill is in `deadbolt activity`.
+    #[command(subcommand)]
+    Agents(agents::AgentsCommand),
     /// Run the background agent in the foreground, or manage it.
     Agent {
         #[command(subcommand)]
@@ -394,6 +400,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Whoami { .. }
                 | Commands::Activity { .. }
                 | Commands::Agent { .. }
+                | Commands::Agents(_)
                 | Commands::TouchId { .. }
                 | Commands::Vault(_)
                 | Commands::App
@@ -441,6 +448,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             }
         }
         Commands::Agent { command: None } => agent::serve(paths).await?,
+        Commands::Agents(command) => agents::run(&paths, command, from_stdin).await?,
         Commands::App => app::open(&paths).await?,
         Commands::Desktop(DesktopCommand::Install) => desktop::install()?,
         Commands::Desktop(DesktopCommand::Uninstall) => desktop::uninstall()?,

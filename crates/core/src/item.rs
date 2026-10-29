@@ -281,6 +281,7 @@ static SCHEMAS: [Schema; 6] = [
         fields: &[
             known("rp-id", FieldType::Text, true),
             known("username", FieldType::Text, false),
+            known("display-name", FieldType::Text, false),
             known("credential-id", FieldType::Text, true),
             known("user-handle", FieldType::Text, true),
             known("private-key", FieldType::Secret, true),

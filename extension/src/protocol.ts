@@ -46,7 +46,7 @@ export type Request =
       origin: string
       rpId?: string
       challenge: string
-      user: { id: string; name: string }
+      user: { id: string; name: string; displayName?: string }
       exclude: string[]
       userVerification: UserVerification
     }

@@ -48,6 +48,7 @@ for theme in dark light; do
   "$bin" --scene shortcut-conflict --theme "$theme" --snap "$out/shortcut-conflict-$theme.png" "$@"
   "$bin" --scene settings-unavailable --theme "$theme" --snap "$out/settings-unavailable-$theme.png" "$@"
   "$bin" --scene settings-touch-id --theme "$theme" --snap "$out/settings-touch-id-$theme.png" "$@"
+  "$bin" --scene settings-agents --script scripts/settings-agents.json --at 1.5 --theme "$theme" --snap "$out/settings-agents-$theme.png" "$@"
   "$bin" --scene locked-touch-id --theme "$theme" --snap "$out/locked-touch-id-$theme.png" "$@"
   "$bin" --scene locked-touch-id-reset --theme "$theme" --snap "$out/locked-touch-id-reset-$theme.png" "$@"
 done
