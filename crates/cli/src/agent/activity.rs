@@ -13,7 +13,7 @@ use deadbolt_client::peer::Peer;
 use deadbolt_store::{Budget, Dropped};
 use tracing::warn;
 
-pub use ledger::Ledger;
+pub use ledger::{Ledger, anchor};
 
 use super::{Agent, Conversation, caller, fail, session};
 use crate::client::code;

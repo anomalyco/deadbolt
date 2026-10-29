@@ -40,7 +40,10 @@ pub struct RunArgs {
     /// values that are references are resolved, others set as they are.
     #[arg(long, value_name = "FILE")]
     env_file: Vec<PathBuf>,
-    /// Don't conceal the values in the command's output.
+    /// Don't conceal the values in the command's output. Masking makes the
+    /// command's stdout and stderr pipes, so it sees no terminal (no
+    /// colors or full-screen UIs, and its pager may change); --no-mask
+    /// leaves them on the terminal.
     #[arg(long)]
     no_mask: bool,
     /// The command and its arguments, after `--`.
@@ -54,7 +57,8 @@ pub struct InjectArgs {
     /// stdin).
     #[arg(short = 'i', long = "in-file", value_name = "FILE")]
     input: Option<PathBuf>,
-    /// Where to write (default: stdout). Written 0600, replacing it only if
+    /// Where to write (default: stdout, which counts as reading the values,
+    /// so AI agents need Touch ID). Written 0600, replacing it only if
     /// `deadbolt inject` wrote it and it hasn't changed since.
     #[arg(short = 'o', long = "out-file", value_name = "FILE")]
     output: Option<PathBuf>,
@@ -155,6 +159,10 @@ fn environment(args: &RunArgs) -> Result<IndexMap<String, EnvValue>> {
             bail!("--env takes NAME=deadbolt://vault/item/field");
         };
         check_name(name)?;
+        // Never echo a value that isn't a reference: it may be a secret.
+        if !value.trim_start().starts_with(SCHEME) {
+            bail!("--env {name}: the value isn't a deadbolt:// reference");
+        }
         let reference = Reference::parse(value).map_err(|e| anyhow!("--env {name}: {e}"))?;
         vars.insert(name.to_string(), EnvValue::Reference(reference.to_string()));
     }
@@ -246,7 +254,12 @@ impl Masker {
         self.scan(false)
     }
 
-    /// The rest, at the end of the stream.
+    /// Whether output is held back, waiting for the next read.
+    pub fn holding(&self) -> bool {
+        !self.held.is_empty()
+    }
+
+    /// The rest, at the end of the stream (or after a quiet spell).
     pub fn finish(&mut self) -> Vec<u8> {
         self.scan(true)
     }
@@ -283,6 +296,10 @@ impl Masker {
     }
 }
 
+/// How long held-back output waits for the rest of a value before it goes
+/// out as it is: a prompt ending in what could start a value mustn't stall.
+const QUIET: std::time::Duration = std::time::Duration::from_millis(100);
+
 /// Copies `from` to `to`, masked, flushing as it goes.
 async fn pump(
     mut from: impl AsyncRead + Unpin,
@@ -291,7 +308,23 @@ async fn pump(
 ) -> std::io::Result<()> {
     let mut buf = Zeroizing::new(vec![0u8; 16 * 1024]);
     loop {
-        let n = from.read(&mut buf).await?;
+        let holding = masker.as_ref().is_some_and(Masker::holding);
+        let n = if holding {
+            match tokio::time::timeout(QUIET, from.read(&mut buf)).await {
+                Ok(read) => read?,
+                Err(_) => {
+                    // Quiet: write what was held. A value written in pieces
+                    // further apart than this may show.
+                    if let Some(m) = &mut masker {
+                        to.write_all(&m.finish()).await?;
+                        to.flush().await?;
+                    }
+                    continue;
+                }
+            }
+        } else {
+            from.read(&mut buf).await?
+        };
         let out = match (&mut masker, n) {
             (Some(m), 0) => m.finish(),
             (Some(m), n) => m.push(&buf[..n]),
@@ -430,6 +463,10 @@ fn template(text: &str) -> Result<Vec<Part<'_>>> {
             let reference = Reference::parse(content).map_err(|e| anyhow!(e))?;
             parts.push(Part::Text(&rest[..start]));
             parts.push(Part::Reference(reference.to_string()));
+        } else if content.contains(SCHEME) {
+            bail!(
+                "a {{{{ … }}}} holds a deadbolt:// reference beside other text; a reference must be all of it: {{{{ deadbolt://vault/item/field }}}}"
+            );
         } else {
             // Another templating language's: left as it is.
             parts.push(Part::Text(&rest[..start + 2 + end + 2]));
@@ -473,10 +510,21 @@ fn written_list(paths: &Paths) -> PathBuf {
 }
 
 fn read_written(paths: &Paths) -> Vec<Written> {
-    std::fs::read(written_list(paths))
-        .ok()
-        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-        .unwrap_or_default()
+    let list = written_list(paths);
+    let read = std::fs::read(&list)
+        .map_err(|e| (e.kind() != std::io::ErrorKind::NotFound).then(|| e.to_string()))
+        .and_then(|bytes| serde_json::from_slice(&bytes).map_err(|e| Some(e.to_string())));
+    match read {
+        Ok(written) => written,
+        Err(None) => Vec::new(),
+        Err(Some(error)) => {
+            eprintln!(
+                "warning: {} is unreadable ({error}); existing outputs count as not written by inject: delete it, or pass --force",
+                list.display()
+            );
+            Vec::new()
+        }
+    }
 }
 
 /// The output path, its directory resolved, so one file has one name.
@@ -565,7 +613,15 @@ pub async fn inject(paths: &Paths, args: InjectArgs, from_stdin: bool) -> Result
             refs.push(r.clone());
         }
     }
-    let values = resolve(paths, refs, Purpose::Inject, from_stdin).await?;
+    // Written to stdout, the values go to whoever runs this: that's a read,
+    // which an AI can't do on an inject grant.
+    let to_stdout = args.output.as_ref().is_none_or(|f| f.as_os_str() == "-");
+    let purpose = if to_stdout {
+        Purpose::Read
+    } else {
+        Purpose::Inject
+    };
+    let values = resolve(paths, refs, purpose, from_stdin).await?;
     let mut out = Zeroizing::new(String::with_capacity(text.len()));
     for part in &parts {
         match part {
@@ -655,6 +711,28 @@ mod tests {
         assert_eq!(masker.push(b"ready> "), b"ready> ");
     }
 
+    /// Held-back output goes out after a quiet spell, so a prompt ending
+    /// in what could start a value doesn't stall.
+    #[tokio::test]
+    async fn held_output_flushes_when_the_command_goes_quiet() {
+        let (mut child, from) = tokio::io::duplex(64);
+        let (to, mut seen) = tokio::io::duplex(64);
+        let pumping = tokio::spawn(pump(from, to, Some(Masker::new(["hunter2"]))));
+        child.write_all(b"password? hunt").await.unwrap();
+        let mut got = vec![0u8; 64];
+        let mut text = Vec::new();
+        while text.len() < b"password? hunt".len() {
+            let n = tokio::time::timeout(std::time::Duration::from_secs(2), seen.read(&mut got))
+                .await
+                .expect("held output never flushed")
+                .unwrap();
+            text.extend_from_slice(&got[..n]);
+        }
+        assert_eq!(text, b"password? hunt");
+        drop(child);
+        pumping.await.unwrap().unwrap();
+    }
+
     #[test]
     fn env_files_and_templates_parse_without_echoing_values() {
         let file = Path::new(".env.tpl");
@@ -700,6 +778,7 @@ mod tests {
         );
         assert!(template("{{ deadbolt://GitHub/token").is_err());
         assert!(template("{{ deadbolt://GitHub }}").is_err());
+        assert!(template("{{ other {{ deadbolt://x/y }}").is_err());
         assert_eq!(
             template("{{ unclosed").unwrap(),
             [Part::Text("{{ unclosed")]

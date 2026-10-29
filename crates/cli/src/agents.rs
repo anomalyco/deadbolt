@@ -64,9 +64,12 @@ pub enum AgentsCommand {
         client: Option<String>,
     },
     /// Let AI agents use ITEMs (titles or short ids, in --vault) in
-    /// `deadbolt run` and `deadbolt inject` without asking. Never `deadbolt
-    /// read`: an AI reading a value needs Touch ID each time. Asks for
-    /// Touch ID or your passphrase; refused to AI agents.
+    /// `deadbolt run` and `deadbolt inject -o FILE` without asking. Using a
+    /// value means being able to learn it (a command can print it, a file
+    /// can be read): masking guards against accidents only, so allow only
+    /// what you would hand that agent. Printing a value (`deadbolt read`,
+    /// `inject` to stdout) still needs Touch ID each time. Asks for Touch
+    /// ID or your passphrase; refused to AI agents.
     AllowSecrets {
         #[arg(required = true, value_name = "ITEM")]
         items: Vec<String>,

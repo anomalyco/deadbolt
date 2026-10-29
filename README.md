@@ -30,7 +30,7 @@ deadbolt inject -i config.tpl -o config.json          # {{ deadbolt://… }}, wr
 deadbolt read deadbolt://personal/GitHub/password     # prints one value
 ```
 
-`run` conceals the values in the command's output, passes stdin and signals through and exits with the command's code. AI agents (OpenCode, Claude Code and the like) are refused until you allow them, item by item, and never read a value without Touch ID:
+`run` conceals the values in the command's output (so the command's output is a pipe, not your terminal: `--no-mask` keeps the terminal), passes stdin and signals through and exits with the command's code. AI agents (OpenCode, Claude Code and the like) are refused until you allow them, item by item. Allowing an AI to use a value lets it learn the value (it chooses the command, and masking only stops accidents), so allow only what you would hand it. Printing a value, with `read` or `inject` to stdout, needs Touch ID every time:
 
 ```sh
 deadbolt agents allow-secrets GitHub --fields token --purpose run --expires 8h

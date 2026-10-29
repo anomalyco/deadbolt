@@ -467,13 +467,20 @@ its process group). It exits with the command's code, or 128 + the signal
 that ended it. Its stdout and stderr have each value, its URL encoding and
 its base64 (unpadded) replaced with `<concealed by deadbolt>` as they
 stream: output whose tail could begin a value is held until the next read
-says, so values split across writes are concealed and everything else
-flows at once. Values shorter than 3 characters aren't masked. `--no-mask`
-turns it off. Masking stops accidents, not a command that means to leak.
+says, or until 100 ms pass with no output (so a prompt doesn't stall), so
+values split across writes are concealed and everything else flows at
+once. A value written in pieces more than 100 ms apart may show. Values
+shorter than 3 characters aren't masked. Masking makes the command's
+stdout and stderr pipes, so it sees no terminal: no colors, no full-screen
+UIs, and a pager may behave differently. `--no-mask` turns masking off and
+leaves them on the terminal. Masking stops accidents, not a command that
+means to leak.
 
 **`deadbolt inject`.** Replaces each `{{ deadbolt://… }}` in the template
 (`-i`, default stdin; other `{{ … }}` are left alone) and writes the result
-to `-o` (default stdout) through a 0600 temporary file renamed into place.
+to `-o` through a 0600 temporary file renamed into place. Written to
+stdout (no `-o`, or `-o -`), the values go to whoever ran it, so it resolves
+as a `read`: an AI needs Touch ID for it, whatever it was granted.
 An existing output is replaced only if `inject` wrote it and it hasn't
 changed since (same device, inode, size and modification time, recorded in
 `injected.json` in the data directory, no values), or with `--force`.
@@ -488,13 +495,20 @@ changed since (same device, inode, size and modification time, recorded in
 - An AI, for `run` or `inject`: only what live grants cover, each item,
   field and purpose; otherwise `not-granted`, naming what is missing and
   the `deadbolt agents allow-secrets` line that would allow it.
-- An AI, for `read`: Touch ID raised by the agent every time, with its own
-  sentence ("show personal › GitHub › password to an AI agent"); no grant
-  covers it. Without Touch ID (Linux, no sensor, off) it is `forbidden`.
+- An AI, for `read` (and `inject` to stdout): Touch ID raised by the agent
+  every time, with its own sentence ("show personal › GitHub › password to
+  an AI agent"). No grant skips that prompt, but a run or inject grant
+  lets the AI learn the value another way (below). Without Touch ID
+  (Linux, no sensor, off) it is `forbidden`.
 - The browser host: `forbidden`.
 
 Refused, the CLI exits 4 (`not-granted` or `forbidden`), beside 3 for
-locked. Resolves don't count as use for the idle lock.
+locked. An AI's resolves are rate-limited: a burst of 20, then one a
+second, per anchor (its terminal, else its label and claimed session), and
+60 then two a second for all AIs together (`rate-limited`). That bounds what
+trying names teaches it and how often a read raises Touch ID. Resolves
+don't count as use for the idle lock, but one waiting on Touch ID holds it
+off until answered, as does a grant waiting on the user's proof.
 
 **Granting.** `deadbolt agents allow-secrets ITEM… [--vault V] [--fields
 a,b] [--purpose run|inject]… [--expires 8h]` makes one grant per item
@@ -504,8 +518,15 @@ sign-in grants do (below): Touch ID or the passphrase, never
 `DEADBOLT_PASSPHRASE`. `deadbolt agents grants` lists them beside the
 sign-in grants ("AI agents › vault › title"), and `deadbolt agents revoke
 <id>` removes either kind at once. Grants name items by id (a rename keeps
-them), live in this device's store (`cli/secret-grants`), never sync, and
-cover nothing for reading.
+them), live in this device's store (`cli/secret-grants`) and never sync.
+
+**What a grant gives.** Using a value means being able to learn it: the AI
+picks the command (`sh -c 'echo $T | base64'`), or reads the file it
+injected. Masking guards against accidents, not against an AI that wants
+the value. So a run or inject grant is, in practice, a grant to know those
+fields; what it spares is the value landing in a transcript by mistake.
+Allow only what you would hand that agent, and change a value it no longer
+should have.
 
 **Activity.** Every resolve is an entry, from anyone: `resolve-run` and
 `resolve-inject` (tier Use) or `resolve-read` (Read), the caller (verified
@@ -521,8 +542,9 @@ value. Granting is a `secret-grant-set` entry.
 - Telling an AI from Kit is ancestry, a hint. An AI that starts a terminal
   outside its own tree is "not an AI" and gets values like Kit does, until
   build order 3 makes every caller ask.
-- A command run with a value can send it anywhere; masking only keeps it
-  out of the transcript by accident.
+- A command run with a value can send it anywhere, including back to the
+  AI; masking only keeps it out of the transcript by accident (see "What a
+  grant gives").
 
 **Protocol (17).** `resolve {refs, purpose}` → `secrets {secrets: [{vault,
 item, title, field, value}]}` in reference order; `secret-grant-set {vault,

@@ -162,8 +162,14 @@ enum Commands {
     /// are resolved too. The command's stdin passes through, its stdout and
     /// stderr have each value (and its URL and base64 forms) replaced with
     /// <concealed by deadbolt>, signals go on to it, and deadbolt exits with
-    /// its code. AI agents need `deadbolt agents allow-secrets` first;
-    /// refused, deadbolt exits 4.
+    /// its code. Masking makes its stdout and stderr pipes: it sees no
+    /// terminal (no colors or full-screen UIs; its pager may change), and
+    /// output held back as a possible value goes out after 100 ms of quiet.
+    /// --no-mask keeps the terminal. Masking stops accidents, not a
+    /// command that means to show a value.
+    ///
+    /// AI agents need `deadbolt agents allow-secrets` first; refused,
+    /// deadbolt exits 4.
     #[command(verbatim_doc_comment)]
     Run(secrets::RunArgs),
     /// Fill a template's {{ deadbolt://… }} references and write it 0600.
@@ -172,7 +178,8 @@ enum Commands {
     ///
     /// Replaces an existing output file only if `deadbolt inject` wrote it
     /// and it hasn't changed since, or with --force. AI agents need
-    /// `deadbolt agents allow-secrets --purpose inject` first.
+    /// `deadbolt agents allow-secrets --purpose inject` first, and Touch ID
+    /// each time to write to stdout, which is reading the values.
     #[command(verbatim_doc_comment)]
     Inject(secrets::InjectArgs),
     /// Print the value a reference names (deadbolt://[vault/]item/field).

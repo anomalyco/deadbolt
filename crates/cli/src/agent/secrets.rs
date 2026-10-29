@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 use super::items::{Listing, label};
 use super::session::{self, Loaded, get_json, set_json};
 use super::{Agent, Conversation, ErrorCode, caller, fail};
+use crate::browser::host::Bucket;
 use crate::client::AgentError;
 use crate::items::line;
 use crate::protocol::{
@@ -38,6 +39,15 @@ const META_GRANTS: &str = "cli/secret-grants";
 const MAX_GRANTS: usize = 256;
 /// The most references one `resolve` names.
 const MAX_REFS: usize = 256;
+/// What one AI caller (by anchor) may resolve: a burst of 20, then one a
+/// second. That bounds what it learns about items by trying names, and
+/// how often a `read` can raise Touch ID.
+const AI_RATE: (u32, Duration) = (20, Duration::from_secs(1));
+/// What all AI callers together may resolve, so making up a claimed
+/// session per request doesn't help.
+const ALL_AI_RATE: (u32, Duration) = (60, Duration::from_millis(500));
+/// The most anchors' limits kept.
+const MAX_RATES: usize = 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Grant {
@@ -323,6 +333,31 @@ fn not_granted(missing: &[&Found], purpose: Purpose) -> anyhow::Error {
 }
 
 impl Agent {
+    /// Takes one of an AI caller's `resolve`s against its rate limits.
+    fn ai_rate(&self, caller: &CallerInfo) -> Result<()> {
+        let now = std::time::Instant::now();
+        let mut rates = self.resolve_rates.lock().unwrap_or_else(|e| e.into_inner());
+        if rates.len() >= MAX_RATES {
+            rates.clear();
+        }
+        let mine = rates
+            .entry(super::activity::anchor(caller))
+            .or_insert_with(|| Bucket::new(AI_RATE, now))
+            .take(now);
+        let all = mine
+            && rates
+                .entry("*".into())
+                .or_insert_with(|| Bucket::new(ALL_AI_RATE, now))
+                .take(now);
+        if !all {
+            return Err(fail(
+                ErrorCode::RateLimited,
+                "too many references resolved by AI agents; try again shortly",
+            ));
+        }
+        Ok(())
+    }
+
     /// Answers `resolve`: the values `refs` name, if `caller` may have them
     /// for `purpose`.
     pub(super) async fn resolve(
@@ -348,6 +383,10 @@ impl Agent {
                 "the browser host doesn't resolve references",
             ));
         }
+        let ai = caller::is_ai(caller);
+        if ai {
+            self.ai_rate(caller)?;
+        }
         let lookup = |s: &Loaded| -> Result<Vec<Found>> {
             let now = crate::config::wall_clock();
             parsed.iter().map(|r| find(s, r, now)).collect()
@@ -355,7 +394,7 @@ impl Agent {
         // Locked, or a reference that names nothing, fails before anyone
         // is asked anything.
         let mut found = self.with(|s| lookup(s))?;
-        if caller::is_ai(caller) {
+        if ai {
             match purpose {
                 Purpose::Read => {
                     if !self.can_verify() {
@@ -366,7 +405,11 @@ impl Agent {
                     }
                     let names: Vec<String> = found.iter().map(named).collect();
                     let reason = format!("show {} to an AI agent", names.join(", "));
-                    self.verify_user(conv, Verify::Required, &reason).await?;
+                    {
+                        // Waiting on the finger mustn't let the idle lock fire.
+                        let _busy = self.busy();
+                        self.verify_user(conv, Verify::Required, &reason).await?;
+                    }
                     // A one-time code may have moved on during the prompt.
                     found = self.with(|s| lookup(s))?;
                 }
@@ -580,6 +623,56 @@ mod tests {
         remove_grant(&s, &both[0].id[..5]).unwrap();
         assert_eq!(uncovered_names(Purpose::Run, NOW).len(), 3);
         assert!(remove_grant(&s, &both[0].id).is_err());
+    }
+
+    /// An AI caller is limited by anchor; anyone else isn't.
+    #[tokio::test]
+    async fn ai_callers_are_rate_limited() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent::new(
+            super::super::tests::test_paths(dir.path()),
+            true,
+            deadbolt_store::KdfParams::DEFAULT,
+        );
+        agent
+            .setup(Zeroizing::new("test".into()), "laptop".into())
+            .await
+            .unwrap();
+        agent
+            .with(|s| {
+                s.create_vault("personal")?;
+                new(s, "login", "GitHub", &[("token", "t0k3n")]);
+                Ok(())
+            })
+            .unwrap();
+        let (conv, _client, _closed) = super::super::tests::conversation();
+        let refs = ["deadbolt://GitHub/token".to_string()];
+        let mut ai = CallerInfo::unverified("zsh › deadbolt");
+        ai.claimed = Some(crate::protocol::Claim {
+            caller: None,
+            opencode_session: Some("ses_1".into()),
+        });
+        for _ in 0..20 {
+            let error = agent
+                .resolve(&ai, &refs, Purpose::Run, &conv)
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::NotGranted));
+        }
+        let error = agent
+            .resolve(&ai, &refs, Purpose::Run, &conv)
+            .await
+            .unwrap_err();
+        assert_eq!(code(&error), Some(ErrorCode::RateLimited));
+        let person = CallerInfo::unverified("zsh › deadbolt");
+        for _ in 0..30 {
+            assert!(
+                agent
+                    .resolve(&person, &refs, Purpose::Read, &conv)
+                    .await
+                    .is_ok()
+            );
+        }
     }
 
     #[test]

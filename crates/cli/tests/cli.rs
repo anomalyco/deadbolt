@@ -899,9 +899,10 @@ fn run_inject_and_read_resolve_references() {
     let seen = a.path("seen");
 
     // The command gets the value, its stdin and its exit code come through,
-    // and its output shows the value concealed, even split across writes.
+    // and its output shows the value concealed, even split across writes
+    // (closer together than the 100 ms after which held output goes out).
     let script = format!(
-        r#"printf %s "$TOKEN" >'{}'; echo "t=$TOKEN"; printf %s "$TOKEN" >&2; printf ghp-secret; sleep 0.3; printf '%s\n' -token-123; cat; exit 7"#,
+        r#"printf %s "$TOKEN" >'{}'; echo "t=$TOKEN"; printf %s "$TOKEN" >&2; printf ghp-secret; sleep 0.02; printf '%s\n' -token-123; cat; exit 7"#,
         seen.display()
     );
     let (code, out, err) = detached_code(
@@ -962,6 +963,14 @@ fn run_inject_and_read_resolve_references() {
     assert_ne!(code, 0);
     assert!(
         err.contains("names 2 items") && !err.contains("one-one-one"),
+        "{err}"
+    );
+    // A value that isn't a reference is never echoed.
+    let (code, _, err) = detached_code(&a, &["run", "--env", "X=hunter2-pasted", "--", "true"], "");
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("--env X: the value isn't a deadbolt:// reference")
+            && !err.contains("hunter2"),
         "{err}"
     );
     let (code, _, err) = detached_code(
@@ -1067,7 +1076,16 @@ fn ai_agents_use_secrets_only_with_a_grant() {
         "-c",
         r#"echo "t=$T""#,
     ];
-    let inject = ["inject", "-i", template.to_str().unwrap()];
+    let injected = a.path("t.out");
+    let inject = [
+        "inject",
+        "-i",
+        template.to_str().unwrap(),
+        "-o",
+        injected.to_str().unwrap(),
+    ];
+    // To stdout, the values reach the AI itself: that's a read.
+    let inject_stdout = ["inject", "-i", template.to_str().unwrap()];
     let read = ["read", "deadbolt://GitHub/token"];
     let refused = |out: &Output, says: &str| {
         let err = String::from_utf8_lossy(&out.stderr);
@@ -1079,6 +1097,7 @@ fn ai_agents_use_secrets_only_with_a_grant() {
     // No grant: refused, saying what to allow.
     refused(&as_ai(&a, &run_token), "deadbolt agents allow-secrets");
     refused(&as_ai(&a, &inject), "--purpose inject");
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
     refused(&as_ai(&a, &read), "Touch ID");
 
     // An AI can't allow itself, passphrase or not.
@@ -1126,6 +1145,24 @@ fn ai_agents_use_secrets_only_with_a_grant() {
     refused(&as_ai(&a, &inject), "--purpose inject");
     refused(&as_ai(&a, &read), "Touch ID");
 
+    // Allowed inject too, it writes the file, but stdout is still a read.
+    let (ok, _, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow-secrets",
+            "GitHub",
+            "--fields",
+            "token",
+        ],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(ok);
+    assert!(as_ai(&a, &inject).status.success());
+    assert_eq!(std::fs::read_to_string(&injected).unwrap(), TOKEN);
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
+
     // Revoking takes effect at once.
     let grants = a.run(&["agents", "grants"]);
     let id = grants
@@ -1167,7 +1204,7 @@ fn ai_agents_use_secrets_only_with_a_grant() {
         .iter()
         .filter(|e| e["command"] == "resolve-read")
         .collect();
-    assert_eq!(reads.len(), 2, "{raw}");
+    assert_eq!(reads.len(), 4, "{raw}");
     assert!(
         reads
             .iter()

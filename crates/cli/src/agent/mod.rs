@@ -133,6 +133,8 @@ pub struct Agent {
     activity: Mutex<activity::Ledger>,
     /// Each paired agent client's rate limit, by client id.
     agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
+    /// AI callers' `resolve` rate limits, by anchor, and one for them all.
+    resolve_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
     /// Every passphrase check: one at a time, wrong ones backed off.
     guesses: guesses::Guesses,
     /// Deadbolt Send's endpoint, started by the first send.
@@ -174,10 +176,18 @@ impl Agent {
             callers: caller::Callers::new(),
             activity: Mutex::default(),
             agent_rates: Mutex::default(),
+            resolve_rates: Mutex::default(),
             guesses: guesses::Guesses::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
         })
+    }
+
+    /// Holds off the idle lock until dropped: for a request waiting on the
+    /// user (a Touch ID prompt, a passphrase check).
+    fn busy(&self) -> Busy<'_> {
+        self.busy.fetch_add(1, Ordering::SeqCst);
+        Busy(&self.busy)
     }
 
     fn interrupt_op(&self) {
@@ -214,6 +224,15 @@ impl Agent {
         {
             prompt.cancel();
         }
+    }
+}
+
+/// See [`Agent::busy`].
+struct Busy<'a>(&'a AtomicUsize);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
     }
 }
 
@@ -646,7 +665,7 @@ mod tests {
         (agent, pid)
     }
 
-    fn conversation() -> (Conversation, UnixStream, watch::Sender<bool>) {
+    pub(super) fn conversation() -> (Conversation, UnixStream, watch::Sender<bool>) {
         let (socket, client) = UnixStream::pair().unwrap();
         let (_, write) = socket.into_split();
         let (closed, closed_rx) = watch::channel(false);

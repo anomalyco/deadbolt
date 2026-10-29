@@ -771,14 +771,18 @@ impl Agent {
                 (
                     passphrase.clone(),
                     format!(
-                        "let AI agents use {} (vault {vault}) in commands without asking",
+                        "let AI agents use (and so learn) {} (vault {vault}) in commands without asking",
                         items.join(", ")
                     ),
                 )
             }
             _ => bail!("not an agent pairing or grant"),
         };
-        self.prove_user(conv, passphrase, &reason).await?;
+        {
+            // Waiting on the user mustn't let the idle lock fire.
+            let _busy = self.busy();
+            self.prove_user(conv, passphrase, &reason).await?;
+        }
         let now = session::now();
         match command {
             Command::AgentClientAdd { name, .. } => {
