@@ -654,7 +654,8 @@ function show(reply: MenuLoadReply) {
     return say("")
   }
   rowsEl.replaceChildren(...accounts.map(row))
-  setCaption(accounts.length >= 2 ? reply.site : "")
+  // No site over logins: they're only ever the page's own site's (or a same-site frame's), which the page shows.
+  setCaption("")
   say("")
   // The list is already at rest when it opens: no slide on the first paint.
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)

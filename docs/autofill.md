@@ -113,14 +113,18 @@ not running without sending hello, which would start the agent again.
 
 - **Inline menu.** Focusing a username, email, password or code field in the
   top page after a click or keypress opens a menu of that site's logins,
-  title and username, under the field. ↓/↑ choose, ⏎ fills, esc closes, and
-  ↓ reopens it. While Deadbolt is locked, the menu's "locked" row opens on
-  focus once per site until Deadbolt locks or unlocks again; after that it
-  takes a click into the field or ↓. A login field in a frame of the page's
-  own site gets the menu too, opened in the top page under the field; any
-  other frame's fields get none (see Frames). It's an extension page in an
-  iframe inside a closed shadow root, so the page can't read it or click it
-  for you.
+  title and username, under the field. It's as wide as the field and
+  left-aligned with it, at least 240 px (room for the avatar, title,
+  username and ⏎) and at most the viewport less 4 px each side. It doesn't
+  name the site: logins are only ever offered for the page's own site, or a
+  same-site frame's own site, which the page already shows. ↓/↑ choose, ⏎
+  fills, esc closes, and ↓ reopens it. While Deadbolt is locked, the menu's
+  "locked" row opens on focus once per site until Deadbolt locks or unlocks
+  again; after that it takes a click into the field or ↓. A login field in a
+  frame of the page's own site gets the menu too, opened in the top page
+  under the field; any other frame's fields get none (see Frames). It's an
+  extension page in an iframe inside a closed shadow root, so the page can't
+  read it or click it for you.
 - **Menu in the top layer.** The host element of Deadbolt's surface (the
   menu, the pill it folds into and the save offer, see One surface) gets a
   fresh random custom-element name and inline `!important` styles, so page
@@ -1013,9 +1017,10 @@ A field in a frame can't open the surface itself (the page around the frame
 decides where and how the frame shows). It says where the field shows in
 its own viewport; the background carries that box up through every frame
 above, with the checks a fill makes at each one (`boxesInTop` in
-`bg/frames.ts`), and opens the surface in the top page under it, following
-the page's scroll. A card's surface names both when a provider's frame
-takes it: "Into Stripe on shop.com". One pick hands a card to one party
+`bg/frames.ts`), and opens the surface in the top page under it, as wide
+as the box (the logins' rule), following the page's scroll. A card's
+surface names both when a provider's frame takes it: "Into Stripe on
+shop.com". One pick hands a card to one party
 only. From a provider's frame, it fills that frame and the same
 provider's other frames that reported card fields (a Braintree page has a
 frame per field), never the page around them or another provider. From the

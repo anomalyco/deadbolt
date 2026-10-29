@@ -2,8 +2,8 @@
    offer. One object with a 14px radius; the content script springs the frame
    to each mode's size and draws the hairline and the soft layered shadow
    outside it. Account rows are 44px, and 6px of padding sits around them
-   (plus a caption over two or more), which the content script uses to size
-   the frame before this page loads. */
+   (plus a caption over identities and cards), which the content script uses
+   to size the frame before this page loads. */
 
 html,
 body {
