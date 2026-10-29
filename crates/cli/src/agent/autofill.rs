@@ -3,18 +3,16 @@
 //! names the page's origin, and a login is only listed, filled or updated
 //! for a page on the site of one of its URLs (see [`crate::site`]).
 //!
-//! A site's logins are listed closest first (see [`Closeness`]), then the
+//! A site's logins are listed closest first (see [`autofill::rank`]), then the
 //! most recently filled on this device, then by title.
 
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use deadbolt_core::autofill::{item_name, same_password, same_username};
+use deadbolt_core::autofill::{self, Status, item_name};
 pub(super) use deadbolt_core::autofill::{otp, urls, value};
 use deadbolt_core::totp::Totp;
-use deadbolt_core::{
-    DataOp, Field, FieldType, Item, ItemId, VaultId, item::check_new_value, schema,
-};
+use deadbolt_core::{Item, ItemId, VaultId};
 
 use super::items::{create, label};
 use super::session::{Loaded, hex, unhex};
@@ -22,7 +20,7 @@ use super::{ErrorCode, fail};
 use crate::protocol::{
     FieldInput, Fill, LoginRef, Secret, SignIn, SiteLogin, SiteStatus, SiteValues,
 };
-use crate::site::{Closeness, Site, closeness, page_url};
+use crate::site::{Site, page_url};
 
 pub(super) fn site(origin: &str) -> Result<Site> {
     Site::from_origin(origin).map_err(|reason| anyhow!("{origin}: {reason}"))
@@ -98,7 +96,7 @@ pub(super) fn sign_in(s: &Loaded, item: &Item) -> Option<SignIn> {
 pub fn list(s: &Loaded, origin: &str) -> Result<(String, Vec<SiteLogin>)> {
     let site = site(origin)?;
     let filled = s.filled();
-    let mut found: Vec<(Closeness, u64, SiteLogin)> = logins(s, &site)
+    let mut found: Vec<_> = logins(s, &site)
         .map(|(vault, item)| {
             let login = SiteLogin {
                 login: login_ref(&vault, &item.id),
@@ -113,33 +111,15 @@ pub fn list(s: &Loaded, origin: &str) -> Result<(String, Vec<SiteLogin>)> {
                     .collect(),
                 sign_in: sign_in(s, &item),
             };
-            let close = login
-                .urls
-                .iter()
-                .filter_map(|url| closeness(origin, url))
-                .min()
-                .unwrap_or(Closeness::Site);
             let used = filled.get(&filled_key(&login.login)).copied().unwrap_or(0);
-            (close, used, login)
+            (autofill::rank(origin, &item, used), login)
         })
         .collect();
-    found.sort_by(|(ca, ua, a), (cb, ub, b)| {
-        ca.cmp(cb).then(ub.cmp(ua)).then_with(|| {
-            (
-                a.title.to_lowercase(),
-                &a.username,
-                &a.login.vault,
-                &a.login.item,
-            )
-                .cmp(&(
-                    b.title.to_lowercase(),
-                    &b.username,
-                    &b.login.vault,
-                    &b.login.item,
-                ))
-        })
+    found.sort_by(|(ra, a), (rb, b)| {
+        ra.cmp(rb)
+            .then_with(|| (&a.login.vault, &a.login.item).cmp(&(&b.login.vault, &b.login.item)))
     });
-    Ok((site.domain, found.into_iter().map(|(_, _, l)| l).collect()))
+    Ok((site.domain, found.into_iter().map(|(_, l)| l).collect()))
 }
 
 /// The values `want` names that the login has, at `now` for a code.
@@ -181,26 +161,31 @@ pub fn check(
     password: &Secret,
 ) -> Result<(SiteStatus, Vec<LoginRef>)> {
     let site = site(origin)?;
-    let mut same = Vec::new();
-    let mut other = Vec::new();
-    for (vault, item) in logins(s, &site) {
-        if !username.is_none_or(|u| same_username(value(&item, "username"), u)) {
-            continue;
+    let mut status = Status::New;
+    let mut matches = Vec::new();
+    for (vault, saved) in &s.vaults {
+        let items = saved.items();
+        let (checked, ids) = autofill::check(
+            items
+                .iter()
+                .filter(|item| item.kind == "login" && site.matches(urls(item))),
+            username,
+            password.expose(),
+        );
+        if checked > status {
+            status = checked;
+            matches.clear();
         }
-        let login = login_ref(&vault, &item.id);
-        if same_password(value(&item, "password"), password.expose()) {
-            same.push(login);
-        } else {
-            other.push(login);
+        if checked == status {
+            matches.extend(ids.iter().map(|id| login_ref(vault, id)));
         }
     }
-    Ok(if !same.is_empty() {
-        (SiteStatus::Same, same)
-    } else if !other.is_empty() && username.is_some() {
-        (SiteStatus::Update, other)
-    } else {
-        (SiteStatus::New, Vec::new())
-    })
+    let status = match status {
+        Status::New => SiteStatus::New,
+        Status::Update => SiteStatus::Update,
+        Status::Same => SiteStatus::Same,
+    };
+    Ok((status, matches))
 }
 
 /// What to save from a page.
@@ -229,13 +214,11 @@ pub fn save(s: &mut Loaded, save: Save) -> Result<(LoginRef, bool)> {
     }
     if let Some(login) = save.login {
         let (vault, item) = find(s, login, &site)?;
-        let kind = schema("login")
-            .and_then(|s| s.field("password"))
-            .map_or(FieldType::Secret, |f| f.kind.clone());
-        let field = Field::new(kind, save.password.expose());
-        check_new_value("password", &field)?;
         s.update(vault, |v, secret| {
-            Ok(v.write(secret, vec![DataOp::set(item.id, "password", field)])?)
+            Ok(v.write(
+                secret,
+                vec![autofill::password_update(item.id, save.password.expose())],
+            )?)
         })?;
         return Ok((login_ref(&vault, &item.id), false));
     }
@@ -483,6 +466,115 @@ mod tests {
         assert_eq!(status, SiteStatus::Update);
     }
 
+    #[test]
+    fn checks_share_case_whitespace_and_password_rules_with_the_browser() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let origin = "https://example.com";
+        let kit = login(
+            &mut s,
+            &[("url", origin), ("username", "Kit"), ("password", "old")],
+        );
+        let changed = login(
+            &mut s,
+            &[("url", origin), ("username", "kit"), ("password", "new")],
+        );
+        let unnamed = login(&mut s, &[("url", origin), ("password", "anonymous")]);
+        login(
+            &mut s,
+            &[
+                ("url", "https://elsewhere.com"),
+                ("username", "Kit"),
+                ("password", "old"),
+            ],
+        );
+        for (username, password, status, mut expected) in [
+            (Some(" KIT "), "old", SiteStatus::Same, vec![kit.clone()]),
+            (
+                Some("kit"),
+                "OLD",
+                SiteStatus::Update,
+                vec![kit.clone(), changed],
+            ),
+            (Some("other"), "old", SiteStatus::New, vec![]),
+            (None, "old", SiteStatus::Same, vec![kit]),
+            (None, "missing", SiteStatus::New, vec![]),
+            (Some("  "), "anonymous", SiteStatus::Same, vec![unnamed]),
+        ] {
+            let (actual, mut matches) =
+                check(&s, origin, username, &Secret::new(password)).unwrap();
+            matches.sort_by(|a, b| a.item.cmp(&b.item));
+            expected.sort_by(|a, b| a.item.cmp(&b.item));
+            assert_eq!((actual, matches), (status, expected));
+        }
+    }
+
+    #[test]
+    fn same_password_wins_over_updates_across_vaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let origin = "https://example.com";
+        let first = login(
+            &mut s,
+            &[("url", origin), ("username", "kit"), ("password", "old")],
+        );
+        let vault = s.create_vault("work").unwrap();
+        let second = create(
+            &mut s,
+            Some("work"),
+            "login",
+            None,
+            [("url", origin), ("username", "kit"), ("password", "new")]
+                .into_iter()
+                .map(|(name, value)| FieldInput {
+                    name: name.into(),
+                    kind: None,
+                    value: value.into(),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let second = LoginRef {
+            vault: hex(vault.as_bytes()),
+            item: second.id,
+        };
+        for (password, expected) in [("old", first.clone()), ("new", second.clone())] {
+            assert_eq!(
+                check(&s, origin, Some("kit"), &Secret::new(password)).unwrap(),
+                (SiteStatus::Same, vec![expected])
+            );
+        }
+        let (status, matches) = check(&s, origin, Some("kit"), &Secret::new("different")).unwrap();
+        assert_eq!(status, SiteStatus::Update);
+        assert_eq!(matches.len(), 2);
+        assert!(matches.contains(&first) && matches.contains(&second));
+    }
+
+    #[test]
+    fn page_updates_change_only_the_password() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let password = Secret::new("original");
+        let (saved, _) = super::save(
+            &mut s,
+            save("Original title", "https://example.com/login", &password),
+        )
+        .unwrap();
+        let page = site("https://example.com").unwrap();
+        let (_, before) = find(&s, &saved, &page).unwrap();
+        let password = Secret::new("replacement");
+        let mut update = save("Replacement title", "https://example.com/other", &password);
+        update.login = Some(&saved);
+        update.username = "different";
+        assert_eq!(super::save(&mut s, update).unwrap(), (saved.clone(), false));
+        let (_, mut after) = find(&s, &saved, &page).unwrap();
+        assert_eq!(value(&after, "password"), Some("replacement"));
+        after
+            .fields
+            .insert("password".into(), before.fields["password"].clone());
+        assert_eq!(after, before);
+    }
+
     /// A "Sign in with" login lists its provider and the username of the
     /// login it signs in with, and fills nothing of that login.
     #[test]
@@ -506,6 +598,18 @@ mod tests {
             ],
         );
         let gone = "0".repeat(32);
+        let github = login(
+            &mut s,
+            &[("url", "https://www.github.com"), ("password", "github-pw")],
+        );
+        login(
+            &mut s,
+            &[
+                ("url", "https://notion.so"),
+                ("sign-in-with", "github"),
+                ("sign-in-account", &github.item),
+            ],
+        );
         login(
             &mut s,
             &[
@@ -523,6 +627,10 @@ mod tests {
         assert!(sign_ins.contains(&Some(SignIn {
             provider: "github".into(),
             account: None,
+        })));
+        assert!(sign_ins.contains(&Some(SignIn {
+            provider: "github".into(),
+            account: Some("github.com".into()),
         })));
         assert!(
             logins
@@ -570,6 +678,13 @@ mod tests {
         let name = item.name.unwrap();
         assert!(name.starts_with("Example — Sign in xxx"), "{name:?}");
         assert_eq!(name.chars().count(), 128);
+        for title in ["", " \t\n\u{7}", "example.com"] {
+            let (saved, _) =
+                super::save(&mut s, save(title, "https://example.com/login", &password)).unwrap();
+            let (_, item) = find(&s, &saved, &site("https://example.com").unwrap()).unwrap();
+            assert_eq!(item.name, None);
+            assert_eq!(autofill::login_title(&item), "example.com");
+        }
     }
 
     #[test]

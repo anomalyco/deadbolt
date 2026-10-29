@@ -65,6 +65,51 @@ const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "ge
 /** Requests that count as use for the idle lock. Listing a page's logins or forms doesn't (docs/autofill.md). */
 const USES = new Set<string>(["fill", "save", "fill-form", "generate"])
 
+/**
+ * As the native host (crates/cli/src/browser/host.rs): checks are a password
+ * oracle and fills hand out secrets, so a runaway or hostile caller gets them
+ * slowly: a burst, then one per interval.
+ */
+const CHECKS_RATE = { capacity: 20, everyMs: 1000 }
+const FILLS_RATE = { capacity: 60, everyMs: 250 }
+const RATED: Partial<Record<string, "checks" | "fills">> = {
+  check: "checks",
+  "generate-check": "checks",
+  fill: "fills",
+  generate: "fills",
+  "fill-form": "fills",
+}
+
+/** A token bucket: `capacity` at once, refilled one per `everyMs`. The host's Bucket, on Date.now(). */
+class Bucket {
+  private tokens: number
+  private since: number
+
+  constructor(
+    private readonly rate: { capacity: number; everyMs: number },
+    now = Date.now(),
+  ) {
+    this.tokens = rate.capacity
+    this.since = now
+  }
+
+  take(now = Date.now()): boolean {
+    // The wall clock went back: start counting from now, earning nothing for it.
+    if (now < this.since) this.since = now
+    const earned = Math.floor((now - this.since) / this.rate.everyMs)
+    if (earned > 0) {
+      this.tokens = Math.min(this.rate.capacity, this.tokens + earned)
+      this.since = this.tokens === this.rate.capacity ? now : this.since + earned * this.rate.everyMs
+    }
+    if (this.tokens === 0) return false
+    this.tokens -= 1
+    return true
+  }
+}
+
+/** The native host's refusal, word for word. */
+const slowDown = () => new HostError("rate_limited", "too many requests; try again in a moment")
+
 /** device.html's commands that don't count as use. */
 const PAGE_READS = new Set<string>([
   "device-status",
@@ -104,6 +149,12 @@ interface Pending {
   body: Extract<RequestBody, { type: "fill-form" }>
   /** The device.html tab opened to ask, closed again once it's answered. */
   opened?: number
+  /**
+   * A passphrase for it is being checked (`true`) or was (`false`). While one
+   * is, the fill doesn't time out, so a slow KDF isn't dropped under the user;
+   * once none is and the fill still waits (a wrong one), it gets REAUTH_MS again.
+   */
+  checking(on: boolean): void
   settle(result: { reply: FillFormReply } | { error: HostError }): void
 }
 
@@ -127,6 +178,7 @@ export class StandaloneBackend implements VaultBackend {
    * a newer fill never counts on one of them to show its prompt.
    */
   private closing = new Set<number>()
+  private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE) }
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -220,6 +272,9 @@ export class StandaloneBackend implements VaultBackend {
     if (signal?.aborted) throw cancelled()
     // `onId` names a request for passkey-cancel; passkeys aren't supported here.
     if (!SUPPORTED.has(body.type)) throw unsupported()
+    // Refused before the vault sees it, and before it counts as use.
+    const rated = RATED[body.type]
+    if (rated && !this.buckets[rated].take()) throw slowDown()
     if (USES.has(body.type)) this.used()
     const reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
     if (reply.type === "error") {
@@ -358,12 +413,24 @@ export class StandaloneBackend implements VaultBackend {
     this.endReauth(cancelled())
     return new Promise<FillFormReply>((resolve, reject) => {
       let done = false
-      const timer = setTimeout(() => p.settle({ error: cancelled() }), REAUTH_MS)
+      let timer: ReturnType<typeof setTimeout> | undefined
+      /** Passphrases being checked for it now (the popup and device.html may both answer). */
+      let checks = 0
+      const expire = () => {
+        clearTimeout(timer)
+        timer = setTimeout(() => p.settle({ error: cancelled() }), REAUTH_MS)
+      }
       const abort = () => p.settle({ error: cancelled() })
       const p: Pending = {
         prompt: { id: newId(), title: ask.title, site: ask.site },
         tabId: ask.tabId,
         body: { type: "fill-form", origin: body.origin, ref: body.ref, fields: [...body.fields] },
+        checking: (on) => {
+          if (done) return
+          checks = Math.max(0, checks + (on ? 1 : -1))
+          if (checks) clearTimeout(timer)
+          else expire()
+        },
         settle: (result) => {
           if (done) return
           done = true
@@ -380,11 +447,18 @@ export class StandaloneBackend implements VaultBackend {
           else reject(result.error)
         },
       }
+      expire()
       signal.addEventListener("abort", abort, { once: true })
       this.pending = p
       reauthChanged()
       void this.askFor(p)
     })
+  }
+
+  /** Strict asks for the passphrase before a card's number or code is filled (the vault holds the same preset). */
+  async asksPassphrase(): Promise<boolean> {
+    await this.loaded
+    return PRESETS[this.preset].reauth
   }
 
   /** Drops the waiting fill, if any, with `error`. */
@@ -460,15 +534,19 @@ export class StandaloneBackend implements VaultBackend {
     const p = this.pending
     if (!p || p.prompt.id !== id) return fail(EXPIRED, "expired")
     let raw: Record<string, unknown>
+    // The KDF may outlast the time left to answer: the fill waits on it, not the clock.
+    p.checking(true)
     try {
       raw = await this.raw({ ...p.body, passphrase }, SLOW_MS["device-reauth-confirm"]!)
     } catch (err) {
+      p.checking(false)
       const error = err instanceof HostError ? err : new HostError("failed", UNREADABLE)
       p.settle({ error })
       // The worker ended under it (Lock, or Chrome discarding it): say how the vault is now.
       if ((error.code === "locked" || error.code === "disconnected") && this.status.state === "ready") await this.hello()
       return fail(error.message, error.code === "locked" ? "locked" : undefined)
     }
+    p.checking(false)
     await this.tried(raw.type === "error" && raw.code === "wrong_passphrase" ? "wrong" : raw.type === "error" ? "other" : "right")
     // Cancelled, locked or replaced while the passphrase was checked: its values go nowhere.
     if (this.pending !== p) return fail(EXPIRED, "expired")

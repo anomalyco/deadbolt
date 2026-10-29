@@ -624,6 +624,8 @@ async function fillCard(page: Page, device: Page, passphrases: string[] = []) {
   // As a person would, scroll the card block into view first: fields out of view take nothing.
   await page.locator("#cc-number").evaluate((el) => el.scrollIntoView({ block: "center" }))
   const menu = await menuOn(page, "#cc-number", "4242")
+  const hint = menu.getByText("Deadbolt asks for your passphrase first.", { exact: true })
+  check(await hint.isVisible() === (passphrases.length > 0), "the card menu explains passphrase reauthentication only under Strict")
   await pick(menu, "4242")
   const nothing = async () => await page.inputValue("#cc-number") === "" && await page.inputValue("#cc-csc") === ""
   let prompt: Prompt | null = null
@@ -680,8 +682,17 @@ async function formFlows(device: Page, worker: Worker, url: string) {
     await request(device, { type: "device-preset", preset: "strict" })
     const forms = (await vault(worker, { type: "forms", origin: new URL(url).origin, kinds: ["card"] })).reply
     const card = (forms.cards as Array<{ ref: string; last4: string }>).find((c) => c.last4 === "4242")!
+    const injected = (await vault(worker, { type: "fill-form", origin: new URL(url).origin, ref: card.ref, fields: ["number", "cvv"], preset: "relaxed" })).reply
+    check(injected.type === "error" && injected.code === "passphrase_needed" && !("values" in injected), "a preset smuggled into fill-form cannot weaken Strict")
+    for (const type of ["device-create", "device-unlock", "device-join-finish"]) {
+      const failed = (await vault(worker, { type, preset: "relaxed", passphrase: "wrong" })).reply
+      check(failed.type === "error", `${type} refuses to open an already-open vault`)
+      const guarded = (await vault(worker, { type: "fill-form", origin: new URL(url).origin, ref: card.ref, fields: ["number", "cvv"] })).reply
+      check(guarded.code === "passphrase_needed" && !("values" in guarded), `a failed ${type} leaves Strict unchanged`)
+    }
+    await vault(worker, { type: "hello", preset: "relaxed" })
     const refused = (await vault(worker, { type: "fill-form", origin: new URL(url).origin, ref: card.ref, fields: ["number", "cvv"] })).reply
-    check(refused.type === "error" && refused.code === "passphrase_needed" && !("values" in refused), "Rust refuses Strict card secrets without a passphrase, even without the UI gate")
+    check(refused.type === "error" && refused.code === "passphrase_needed" && !("values" in refused), "Rust keeps Strict after a preset smuggled into hello, even without the UI gate")
     const strict = await fillCard(page, device, ["wrong fixture passphrase", passphrase])
     check(strict.number === "4242424242424242" && strict.code === "123", `Strict fills the card on ${host} after the passphrase`)
     await fillCard(page, device, [passphrase])

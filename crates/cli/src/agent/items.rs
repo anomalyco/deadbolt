@@ -60,11 +60,7 @@ pub fn label(item: &Item) -> String {
         return name.clone();
     }
     match item.kind.as_str() {
-        "login" => value(item, "url")
-            .map(host)
-            .filter(|h| !h.is_empty())
-            .or_else(|| value(item, "username").map(str::to_string))
-            .unwrap_or_else(|| "login".into()),
+        "login" => deadbolt_core::autofill::login_title(item),
         "card" | "identity" => deadbolt_core::forms::title(item),
         "ssh" => value(item, "comment").unwrap_or("SSH key").into(),
         "passkey" => value(item, "rp-id").unwrap_or("passkey").into(),
@@ -1427,6 +1423,33 @@ mod tests {
         assert!(matches(&branded, &q(&["visa", "4444"])));
         assert!(matches(&unbranded, &q(&["4242"])));
         assert!(matches(&named, &q(&["travel", "9424"])));
+    }
+
+    #[test]
+    fn login_labels_use_the_browser_title_rules() {
+        for (name, fields, expected) in [
+            (
+                Some("Personal"),
+                vec![("url", "https://www.github.com")],
+                "Personal",
+            ),
+            (None, vec![("url", "https://www.github.com")], "github.com"),
+            (
+                None,
+                vec![("url", "https://[2001:DB8::1]")],
+                "[2001:db8::1]",
+            ),
+            (None, vec![("url", "not a url"), ("username", "kit")], "kit"),
+            (
+                None,
+                vec![("url", "https://www."), ("username", "kit")],
+                "kit",
+            ),
+            (None, vec![("url", "https://www.")], "login"),
+            (None, vec![("password", "never a title")], "login"),
+        ] {
+            assert_eq!(label(&item("login", name, &fields)), expected);
+        }
     }
 
     #[test]

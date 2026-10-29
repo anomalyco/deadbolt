@@ -1,6 +1,91 @@
 //! Shared login fields and comparison rules for the native agent and browser device.
 
-use crate::{Field, FieldType, Item};
+use std::cmp::Reverse;
+
+use crate::site::{Closeness, closeness, url_host};
+use crate::{DataOp, Field, FieldType, Item, ItemId};
+
+/// How a submitted login compares with the site's saved logins, in priority order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Status {
+    New,
+    Update,
+    Same,
+}
+
+/// Callers supply only live logins on the page's site. Without a username,
+/// any username with the same password is `Same`, and nothing is `Update`.
+pub fn check<'a>(
+    items: impl IntoIterator<Item = &'a Item>,
+    username: Option<&str>,
+    password: &str,
+) -> (Status, Vec<ItemId>) {
+    let mut same = Vec::new();
+    let mut other = Vec::new();
+    for item in items {
+        if !username.is_none_or(|u| same_username(value(item, "username"), u)) {
+            continue;
+        }
+        if same_password(value(item, "password"), password) {
+            same.push(item.id);
+        } else {
+            other.push(item.id);
+        }
+    }
+    if !same.is_empty() {
+        (Status::Same, same)
+    } else if !other.is_empty() && username.is_some() {
+        (Status::Update, other)
+    } else {
+        (Status::New, Vec::new())
+    }
+}
+
+/// A login's name, else its URL host, username, or kind. Never a secret.
+pub fn login_title(item: &Item) -> String {
+    item.name.clone().unwrap_or_else(|| {
+        value(item, "url")
+            .and_then(url_host)
+            .map(|host| {
+                let host = host.strip_prefix("www.").unwrap_or(&host);
+                if host.contains(':') {
+                    format!("[{host}]")
+                } else {
+                    host.to_owned()
+                }
+            })
+            .filter(|host| !host.is_empty())
+            .or_else(|| value(item, "username").map(str::to_owned))
+            .unwrap_or_else(|| "login".into())
+    })
+}
+
+/// Closest site match, then most recently filled, title and username.
+/// Callers break remaining ties by vault and item reference.
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Rank {
+    closeness: Closeness,
+    used: Reverse<u64>,
+    title: String,
+    username: Option<String>,
+}
+
+pub fn rank(origin: &str, item: &Item, used: u64) -> Rank {
+    Rank {
+        closeness: urls(item)
+            .filter_map(|url| closeness(origin, url))
+            .min()
+            .unwrap_or(Closeness::Site),
+        used: Reverse(used),
+        title: login_title(item).to_lowercase(),
+        username: value(item, "username").map(str::to_owned),
+    }
+}
+
+/// A submitted page may update only the saved password, never other fields.
+pub fn password_update(id: ItemId, password: &str) -> DataOp {
+    DataOp::set(id, "password", Field::new(FieldType::Secret, password))
+}
 
 pub fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
     item.fields

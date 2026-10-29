@@ -29,10 +29,10 @@ pub struct Site {
 impl Site {
     /// The site of the page at `origin`, if Deadbolt fills logins there.
     pub fn from_origin(origin: &str) -> Result<Self, &'static str> {
-        let host = fillable_host(origin).ok_or("not a secure web page")?;
+        let host = fillable_host(origin).ok_or("Not a secure web page")?;
         let domain = registrable_domain(&host);
         if !valid_domain(&domain) {
-            return Err("the page is not on a site of its own");
+            return Err("The page is not on a site of its own");
         }
         Ok(Self { domain })
     }
@@ -485,6 +485,14 @@ mod tests {
 
     #[test]
     fn only_secure_pages_with_a_site_get_logins() {
+        assert_eq!(
+            Site::from_origin("http://example.com"),
+            Err("Not a secure web page")
+        );
+        assert_eq!(
+            Site::from_origin("https://github.io"),
+            Err("The page is not on a site of its own")
+        );
         for origin in [
             "http://github.com",
             "http://192.168.1.10",

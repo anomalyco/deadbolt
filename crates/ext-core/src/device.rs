@@ -8,8 +8,8 @@ mod opfs;
 mod wire;
 
 use crate::policy::{self, Preset};
-use deadbolt_core::autofill::{item_name, otp, same_password, same_username, urls, value};
-use deadbolt_core::site::{Closeness, Site, closeness, page_url, url_host};
+use deadbolt_core::autofill::{self, Status, item_name, login_title, otp, urls, value};
+use deadbolt_core::site::{Site, page_url};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{DataOp, DeviceId, DeviceSecret, Entry, Field, FieldType, Item, ItemId, Vault};
 use deadbolt_net::{Node, NodeConfig, PairingOptions, PeerAddr, PeerId};
@@ -473,13 +473,7 @@ fn item_ref(vault: &Vault, value: &str) -> Result<ItemId> {
 }
 
 fn account(item: &Item, vault: &Vault) -> Value {
-    let title = item.name.clone().unwrap_or_else(|| {
-        value(item, "url")
-            .and_then(url_host)
-            .map(|host| host.strip_prefix("www.").unwrap_or(&host).to_owned())
-            .or_else(|| value(item, "username").map(str::to_owned))
-            .unwrap_or_else(|| "login".into())
-    });
+    let title = login_title(item);
     let mut account = json!({"ref": reference(vault, item.id), "vault": vault.name(), "title": title,
         "hasPassword": value(item, "password").is_some(), "hasTotp": otp(item).is_some_and(|f| !f.value.is_empty()),
         "urls": urls(item).collect::<Vec<_>>()});
@@ -498,8 +492,7 @@ fn account(item: &Item, vault: &Vault) -> Value {
             sign_in["account"] = json!(
                 value(&linked, "username")
                     .map(str::to_owned)
-                    .or(linked.name)
-                    .unwrap_or_else(|| "login".into())
+                    .unwrap_or_else(|| login_title(&linked))
             );
         }
         account["signIn"] = sign_in;
@@ -524,32 +517,17 @@ fn list_logins(body: &Value) -> Result<Value> {
             .map(|i| {
                 let mut account = account(i, &s.vault);
                 let urls: Vec<_> = urls(i).filter(|url| page.matches_url(url)).collect();
-                let close = urls
-                    .iter()
-                    .filter_map(|url| closeness(origin, url))
-                    .min()
-                    .unwrap_or(Closeness::Site);
                 account["urls"] = json!(urls);
                 let used = filled.get(&reference(&s.vault, i.id)).copied().unwrap_or(0);
-                (close, used, account)
+                (autofill::rank(origin, i, used), account)
             })
             .collect();
-        accounts.sort_by(|(ca, ua, a), (cb, ub, b)| {
-            ca.cmp(cb).then(ub.cmp(ua)).then_with(|| {
-                (
-                    a["title"].as_str().unwrap_or_default().to_lowercase(),
-                    a["username"].as_str(),
-                    a["ref"].as_str(),
-                )
-                    .cmp(&(
-                        b["title"].as_str().unwrap_or_default().to_lowercase(),
-                        b["username"].as_str(),
-                        b["ref"].as_str(),
-                    ))
-            })
+        accounts.sort_by(|(ra, a), (rb, b)| {
+            ra.cmp(rb)
+                .then_with(|| a["ref"].as_str().cmp(&b["ref"].as_str()))
         });
         Ok(json!({"type": "list", "site": page.domain,
-            "accounts": accounts.into_iter().map(|(_, _, account)| account).collect::<Vec<_>>()}))
+            "accounts": accounts.into_iter().map(|(_, account)| account).collect::<Vec<_>>()}))
     })
 }
 
@@ -595,50 +573,37 @@ fn fill_login(body: &Value) -> Result<Value> {
 }
 
 fn check_login(body: &Value) -> Result<Value> {
-    let page = site(text(body, "origin")?)?;
     let origin = text(body, "origin")?;
+    let page = site(origin)?;
     let username = body.get("username").and_then(Value::as_str);
     if username.is_some_and(|u| u.chars().count() > 500) {
         return Err(Error::Protocol("The username is too long"));
     }
     state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, body)?;
-        let mut same = Vec::new();
-        let mut other = Vec::new();
-        for item in s.vault.items().iter().filter(|i| matches(i, &page)) {
-            if !username.is_none_or(|u| same_username(value(item, "username"), u)) {
-                continue;
-            }
-            let reference = reference(&s.vault, item.id);
-            if same_password(value(item, "password"), &password) {
-                same.push(reference);
-            } else {
-                other.push(reference);
-            }
-        }
-        let (status, matches) = if !same.is_empty() {
-            ("same", same)
-        } else if !other.is_empty() && username.is_some() {
-            ("update", other)
-        } else {
-            ("new", Vec::new())
+        let (status, ids) = autofill::check(
+            s.vault.items().iter().filter(|i| matches(i, &page)),
+            username,
+            &password,
+        );
+        let status = match status {
+            Status::New => "new",
+            Status::Update => "update",
+            Status::Same => "same",
         };
+        let matches: Vec<_> = ids.into_iter().map(|id| reference(&s.vault, id)).collect();
         Ok(json!({"type": "check", "status": status, "matches": matches}))
     })
 }
 
 fn save_login(body: &Value) -> Result<Value> {
-    let page = site(text(body, "origin")?)?;
+    let origin = text(body, "origin")?;
+    let page = site(origin)?;
     let input = body.get("entry").ok_or(Error::Protocol("Missing login"))?;
     let url = page_url(text(input, "url")?).map_err(Error::Protocol)?;
-    let origin = text(body, "origin")?;
     let username = text(input, "username")?.trim();
-    let title = text(input, "title")?.trim();
-    if url.len() > 2048
-        || username.chars().count() > 500
-        || title.is_empty()
-        || title.chars().count() > 128
-    {
+    let title = text(input, "title")?;
+    if url.len() > 2048 || username.chars().count() > 500 {
         return Err(Error::Protocol("The login is too long"));
     }
     if !page.matches_url(url) {
@@ -649,14 +614,9 @@ fn save_login(body: &Value) -> Result<Value> {
         let mut staged = s.vault.clone();
         let (id, created) = if body.get("ref").is_some() {
             let item = find_login(s, body, &page)?;
-            // An update from a submitted page changes only the password.
             staged.write(
                 &s.secret,
-                vec![DataOp::set(
-                    item.id,
-                    "password",
-                    Field::new(FieldType::Secret, &*password),
-                )],
+                vec![autofill::password_update(item.id, &password)],
             )?;
             (item.id, false)
         } else {
@@ -871,15 +831,15 @@ async fn wait_ready() -> Result<()> {
 }
 
 async fn dispatch(mut body: Value) -> Result<Value> {
-    // The service worker sends its lock preset with every unlock and change.
-    if let Some(preset) = body
-        .get("preset")
-        .and_then(Value::as_str)
-        .and_then(Preset::parse)
-    {
-        PRESET.with(|p| p.set(preset));
-    }
-    match text(&body, "type")? {
+    // Apply trusted preset changes only after the command succeeds.
+    let preset = policy::accepts_preset(text(&body, "type")?)
+        .then(|| {
+            body.get("preset")
+                .and_then(Value::as_str)
+                .and_then(Preset::parse)
+        })
+        .flatten();
+    let reply = match text(&body, "type")? {
         "device-preset" => Ok(json!({"type": "device-preset", "ok": true})),
         "device-generate" => generate(&body),
         "hello" | "device-status" => {
@@ -976,7 +936,11 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "check" => check_login(&body),
         "save" => save_login(&body),
         _ => Err(Error::Protocol("Deadbolt in the browser can't do this yet")),
+    }?;
+    if let Some(preset) = preset {
+        PRESET.with(|p| p.set(preset));
     }
+    Ok(reply)
 }
 
 /// Said when this browser's own storage fails under the vault.

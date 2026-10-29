@@ -378,9 +378,10 @@ export type MenuLoadReply =
    * An identity or card field's menu: the identities or cards to pick from.
    * `into`: a card goes into a payment provider's frame too ("Stripe").
    * `verify`: the agent asks for Touch ID before a card's number goes out.
+   * `passphrase`: the browser-only vault, under Strict, asks for the passphrase first.
    */
   /** `fills`: for each identity, by ref, what of the section it has values for ("name", "email", "address"). */
-  | { kind: "forms"; form: FormKind; site: string; identities: FormIdentity[]; cards: FormCard[]; into?: string; verify: boolean; fills?: Record<string, string[]> }
+  | { kind: "forms"; form: FormKind; site: string; identities: FormIdentity[]; cards: FormCard[]; into?: string; verify: boolean; passphrase?: boolean; fills?: Record<string, string[]> }
   /** A pill on a field a sign-in session's step just filled ("Password filled"). */
   | { kind: "notice"; label: string; title: string }
   | { kind: "status"; status: Status }

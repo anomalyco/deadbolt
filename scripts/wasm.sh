@@ -34,7 +34,9 @@ if [ "$have" != "$want" ]; then
   echo "  cargo install wasm-bindgen-cli --version $want --locked" >&2
   exit 1
 fi
-cargo build -p "$package" --target wasm32-unknown-unknown --release --locked
+# Browser downloads favour size; keep the native release profile unchanged.
+# Apply this to dependencies too, including the public-suffix lookup tables.
+CARGO_PROFILE_RELEASE_OPT_LEVEL=z cargo build -p "$package" --target wasm32-unknown-unknown --release --locked
 # Wherever cargo put it: CARGO_TARGET_DIR, a config's build.target-dir, or target/.
 target=$(cargo metadata --format-version 1 --no-deps --locked | sed -n 's/.*"target_directory":"\([^"]*\)".*/\1/p')
 wasm-bindgen --target web --out-dir "$out" \
