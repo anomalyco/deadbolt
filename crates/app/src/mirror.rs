@@ -82,7 +82,7 @@ pub fn setting(s: &App, k: &Kit) -> (El, El) {
             .color(k.c.danger.fg),
         None => text("Copies new and changed items from the 1Password app")
             .key("about")
-            .font(crate::vault::FACT.lh(16.0))
+            .font(crate::view::theme::FACT.lh(16.0))
             .color(k.c.text_faint),
     };
     let line = line.wrap().w_full().transition(Transition::opacity());

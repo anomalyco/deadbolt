@@ -261,6 +261,29 @@ fn option_enter_copies_the_code_or_the_next_one() {
         Some("654321"),
         "the code asked for, however little time it has left"
     );
+
+    // Pressing ⌥⏎ before an item's values land also copies a 0 ms code on arrival
+    // without asking for a second one.
+    let item = rt.state.detail.clone().unwrap();
+    rt.update(|s, _| {
+        s.detail = None;
+        s.otp = None;
+    });
+    jobs.try_iter().count();
+    option_enter(&mut rt);
+    let seq = rt.state.seq();
+    replies
+        .send(Done::Item {
+            seq,
+            result: Ok(Values::with_code(
+                item,
+                Ok(code("112233", 2_000_000_070, 0)),
+            )),
+        })
+        .unwrap();
+    rt.frame(FRAME);
+    assert_eq!(text(&board).as_deref(), Some("112233"));
+    assert!(code_jobs(&jobs).is_empty());
 }
 
 /// A code that arrives at its period's very end isn't asked for again

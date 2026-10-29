@@ -181,7 +181,8 @@ fn name(job: &Job) -> String {
             format!("get {seq}{}", if *cached { " cached" } else { "" })
         }
         Job::Peek { id, .. } => format!("peek {id}"),
-        Job::List { .. } => "list".into(),
+        Job::List { generation } => format!("list {generation}"),
+        Job::Code { seq, .. } => format!("code {seq}"),
         _ => "other".into(),
     }
 }
@@ -209,19 +210,32 @@ fn the_worker_runs_the_newest_get_and_reads_ahead_last() {
         peek("c", 2),
         Job::List { generation: 0 },
     ];
-    assert_eq!(order(jobs), ["list", "peek b + peek c + get 2 cached"]);
+    assert_eq!(order(jobs), ["list 0", "peek b + peek c + get 2 cached"]);
     // A page with nothing to show goes first; reads run a few at once.
     let jobs = vec![peek("a", 1), get(3, false)];
     assert_eq!(order(jobs), ["get 3 + peek a"]);
     // A copy hurries a cached one.
     let jobs = vec![get(4, true), peek("a", 1), get(4, false)];
     assert_eq!(order(jobs), ["get 4 + peek a"]);
-    // Anything else runs alone, in turn.
+    // Duplicate lists and stale code asks collapse to the newest.
     let jobs = vec![
+        Job::List { generation: 0 },
+        Job::Code {
+            id: "1".into(),
+            seq: 1,
+        },
         peek("a", 1),
         peek("b", 1),
-        Job::List { generation: 0 },
+        Job::List { generation: 1 },
+        Job::Code {
+            id: "5".into(),
+            seq: 5,
+        },
+        Job::Code {
+            id: "5".into(),
+            seq: 5,
+        },
         get(5, false),
     ];
-    assert_eq!(order(jobs), ["list", "get 5 + peek a + peek b"]);
+    assert_eq!(order(jobs), ["list 1", "code 5", "get 5 + peek a + peek b"]);
 }

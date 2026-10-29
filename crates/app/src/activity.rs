@@ -5,7 +5,7 @@
 
 use deadbolt_client::Paths;
 use deadbolt_client::protocol::{ActivityEntry, AppAction, Command, Outcome, Reply};
-use rune::{El, ScrollSpec, Tx, col, text};
+use rune::{El, Tx, col, text};
 use rune_kit::Kit;
 
 use crate::agent::{Done, Failure, Job};
@@ -100,43 +100,37 @@ impl App {
     }
 }
 
-pub(crate) async fn run(paths: &Paths, job: Job) -> Done {
-    match job {
-        Job::Activity { seq } => {
-            let command = Command::ActivityList {
-                since: None,
-                limit: Some(SHOWN),
-                before: None,
-            };
-            let result = match deadbolt_client::simple(paths, command).await {
-                Ok(Reply::Activity { entries }) => Ok(entries),
-                Ok(_) => Err(Failure {
-                    code: None,
-                    message: "unexpected reply from the agent".into(),
-                }),
-                Err(error) => Err(error.into()),
-            };
-            Done::Activity { seq, result }
-        }
-        Job::Report {
-            action,
-            item,
-            title,
-            field,
-        } => {
-            let command = Command::ActivityReport {
-                action,
-                vault: None,
-                item,
-                title,
-                field,
-            };
-            // A report the agent missed (locked, gone) isn't the user's problem.
-            drop(deadbolt_client::simple(paths, command).await);
-            Done::Reported
-        }
-        _ => Done::Reported,
-    }
+pub(crate) async fn list(paths: &Paths, seq: u64) -> Done {
+    let command = Command::ActivityList {
+        since: None,
+        limit: Some(SHOWN),
+        before: None,
+    };
+    let result = crate::agent::call(paths, command, |r| match r {
+        Reply::Activity { entries } => Some(entries),
+        _ => None,
+    })
+    .await;
+    Done::Activity { seq, result }
+}
+
+pub(crate) async fn report(
+    paths: &Paths,
+    action: AppAction,
+    item: String,
+    title: String,
+    field: String,
+) -> Done {
+    let command = Command::ActivityReport {
+        action,
+        vault: None,
+        item,
+        title,
+        field,
+    };
+    // A report the agent missed (locked, gone) isn't the user's problem.
+    drop(deadbolt_client::simple(paths, command).await);
+    Done::Reported
 }
 
 /// "2m ago  OpenCode › zsh › deadbolt  item-get GitHub (password)".
@@ -212,15 +206,10 @@ pub fn setting(s: &App, k: &Kit) -> (El, Option<El>) {
         quiet("activity-empty", empty.into(), k.c.text_muted)
     } else {
         let now = now();
-        col()
-            .key("activity-list")
+        crate::view::scroll_col("activity-list")
             .w_full()
             .max_h(220.0)
             .gap(6.0)
-            .scroll(ScrollSpec {
-                stick_bottom: false,
-            })
-            .scroll_edge_fade(crate::view::LIST_EDGE)
             .children(a.entries.iter().map(|entry| {
                 text(line(entry, now))
                     .key(format!("activity-{}", entry.id))
