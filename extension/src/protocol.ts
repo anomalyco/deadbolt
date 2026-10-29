@@ -52,6 +52,10 @@ export type Request =
     }
   | { id: number; type: "passkey-get"; origin: string; rpId?: string; ref: string; challenge: string; userVerification: UserVerification }
   | { id: number; type: "passkey-cancel"; request: number }
+  /** Identities and cards a page's forms can use: metadata only (see FormsReply). */
+  | { id: number; type: "forms"; origin: string; kinds: FormItemKind[] }
+  /** Values of one identity or card, only the named fields. A card's number and security code ask for Touch ID. */
+  | { id: number; type: "fill-form"; origin: string; ref: string; fields: string[] }
   /** Appends one line to the learning log of `session` (see src/learn.ts). No values, ever. */
   | { id: number; type: "learn"; session: string; line: Record<string, unknown> }
 
@@ -154,6 +158,31 @@ export interface PasskeyCancelledReply {
 export interface LearnedReply {
   type: "learned"
 }
+export type FormItemKind = "identity" | "card"
+/** An identity as a form's menu lists it: "Home", "Kit Langton · 123 Main St, Brooklyn". */
+export interface FormIdentity {
+  ref: string
+  title: string
+  summary: string
+}
+/** A card as a form's menu lists it; never its number or code. `expiry` is YYYY-MM. */
+export interface FormCard {
+  ref: string
+  title: string
+  brand?: string
+  last4: string
+  expiry?: string
+  cardholder?: string
+}
+export interface FormsReply {
+  type: "forms"
+  identities: FormIdentity[]
+  cards: FormCard[]
+}
+export interface FillFormReply {
+  type: "fill-form"
+  values: Record<string, string>
+}
 export interface ErrorReply {
   type: "error"
   code: ErrorCode
@@ -173,6 +202,8 @@ export type Reply =
   | PasskeyAssertionReply
   | PasskeyCancelledReply
   | LearnedReply
+  | FormsReply
+  | FillFormReply
   | ErrorReply
 
 /** What a request of each type is answered with, besides an error. */
@@ -191,6 +222,8 @@ export interface ReplyFor {
   "passkey-get": PasskeyAssertionReply
   "passkey-cancel": PasskeyCancelledReply
   learn: LearnedReply
+  forms: FormsReply
+  "fill-form": FillFormReply
 }
 
 /** The reply type each request expects. */
@@ -209,6 +242,8 @@ export const REPLY_TYPE: { [K in keyof ReplyFor]: ReplyFor[K]["type"] } = {
   "passkey-get": "passkey-assertion",
   "passkey-cancel": "passkey-cancelled",
   learn: "learned",
+  forms: "forms",
+  "fill-form": "fill-form",
 }
 
 export type HostMessage =
@@ -353,6 +388,27 @@ function parseReply(raw: Record<string, unknown>): Reply | null {
       return { type: "passkey-cancelled", found: raw.found === true }
     case "learned":
       return { type: "learned" }
+    case "forms": {
+      if (!Array.isArray(raw.identities) || !Array.isArray(raw.cards)) return null
+      const identities = raw.identities.flatMap((v): FormIdentity[] => {
+        const title = isObject(v) ? line(v.title, 500) : undefined
+        return isObject(v) && isRef(v.ref) && title ? [{ ref: v.ref, title, summary: line(v.summary, 500) ?? "" }] : []
+      })
+      const cards = raw.cards.flatMap((v): FormCard[] => {
+        if (!isObject(v) || !isRef(v.ref)) return []
+        const title = line(v.title, 500)
+        const last4 = str(v.last4, 4)
+        if (!title || !last4 || !/^\d{2,4}$/.test(last4)) return []
+        const expiry = str(v.expiry, 7)
+        return [{ ref: v.ref, title, last4, brand: line(v.brand, 40), expiry: expiry && /^\d{4}-\d{2}$/.test(expiry) ? expiry : undefined, cardholder: line(v.cardholder, 200) }]
+      })
+      return { type: "forms", identities, cards }
+    }
+    case "fill-form": {
+      const values: Record<string, string> = {}
+      if (isObject(raw.values)) for (const [k, v] of Object.entries(raw.values)) if (/^[a-z0-9-]{1,32}$/.test(k) && typeof v === "string" && v.length <= 4096) values[k] = v
+      return { type: "fill-form", values }
+    }
     case "error": {
       const code = CODES.includes(raw.code as ErrorCode) ? (raw.code as ErrorCode) : "failed"
       return { type: "error", code, message: str(raw.message, 1000) ?? "" }
