@@ -1,9 +1,10 @@
 # AI agents using Deadbolt
 
 2026-10-27. Design, mostly not built yet: build order 1 (caller identity
-and Activity) and standing grants for agent sign-ins (below) are. How AI
-agents (OpenCode sessions and the like) may use Deadbolt, carefully.
-Questions for Kit are at the end.
+and Activity), standing grants for agent sign-ins and secrets for
+commands (`deadbolt run`, `inject`, `read`, with standing grants for AIs;
+both below) are. How AI agents (OpenCode sessions and the like) may use
+Deadbolt, carefully. Questions for Kit are at the end.
 
 Words: **the agent** is Deadbolt's background agent (`deadbolt agent`), as
 everywhere else in these docs. **An AI** is an AI agent calling Deadbolt.
@@ -423,13 +424,112 @@ Later:
    `code`), Never refuses AIs, site commands only from a paired browser
    and extension (pairing tap, challenge on connect; the extension side
    ships in the same PR), `ItemGet.fields`. Kit's terminal starts asking here (Decision 1).
-4. **`deadbolt run`.** `resolve`, references, env files, masking.
-5. **`deadbolt inject` and `read`** on references.
+4. **`deadbolt run`.** `resolve`, references, env files, masking. Built,
+   with standing grants in place of approvals (see "Secrets for commands").
+5. **`deadbolt inject` and `read`** on references. Built, the same way.
 6. **Writes from callers.** Add without asking, with "added by" in the
    app and the browser menu; ask on secret and URL changes, showing the
    title and field names.
 7. **The OpenCode skill**, and the threat model in `docs/autofill.md`
    updated to match.
+
+## Secrets for commands (built)
+
+2026-10-29. Build orders 4 and 5, without the approval panel of build
+order 2: until approvals exist, standing grants stand in for "Allow 15
+min", and Touch ID raised by the agent for each read.
+
+```sh
+deadbolt run --env GH_TOKEN=deadbolt://personal/GitHub/token -- gh release create v1
+deadbolt run --env-file .env.tpl -- bun run dev       # KEY=deadbolt://… lines
+deadbolt inject -i config.tpl -o config.json          # {{ deadbolt://… }}; written 0600
+deadbolt read deadbolt://personal/GitHub/password
+deadbolt agents allow-secrets GitHub --fields token --purpose run --expires 8h
+```
+
+**References.** `deadbolt://[vault/]item/field`. The vault is a name or id
+(default: the default vault); the item is its title (any case) or its id
+or a unique prefix of it (4+ hex digits), and must match exactly one item,
+else the error lists the candidates by short id; the field is its exact
+name, else the error lists the item's field names. A `/` or `%` in a name
+is `%2F` or `%25`. A one-time password field gives its current code, never
+its secret; a passkey's private key is never a field. The field is always
+named: a two-part reference is item and field.
+
+**`deadbolt run`.** Resolves `--env NAME=REF`, `--env-file` lines
+(`NAME=VALUE`, `#` comments, `export`, quotes; values that aren't
+references are set as they are) and inherited variables whose value is a
+reference, later ones winning, in one request. Then it starts the command
+(after `--`) with them in its environment and its stdin, and passes on
+SIGTERM, SIGHUP, SIGUSR1 and SIGUSR2, and SIGINT and SIGQUIT unless stdin is
+a terminal (the terminal already sent those to the command, which shares
+its process group). It exits with the command's code, or 128 + the signal
+that ended it. Its stdout and stderr have each value, its URL encoding and
+its base64 (unpadded) replaced with `<concealed by deadbolt>` as they
+stream: output whose tail could begin a value is held until the next read
+says, so values split across writes are concealed and everything else
+flows at once. Values shorter than 3 characters aren't masked. `--no-mask`
+turns it off. Masking stops accidents, not a command that means to leak.
+
+**`deadbolt inject`.** Replaces each `{{ deadbolt://… }}` in the template
+(`-i`, default stdin; other `{{ … }}` are left alone) and writes the result
+to `-o` (default stdout) through a 0600 temporary file renamed into place.
+An existing output is replaced only if `inject` wrote it and it hasn't
+changed since (same device, inode, size and modification time, recorded in
+`injected.json` in the data directory, no values), or with `--force`.
+
+**`deadbolt read`.** Prints one value, the Read tier.
+
+**Who gets values.** The agent's `resolve {refs, purpose}` (`run`,
+`inject` or `read`) decides from the caller:
+
+- Not an AI (no AI host among its parents, no claimed OpenCode session):
+  allowed while unlocked, as `deadbolt get` is (build order 3 will ask).
+- An AI, for `run` or `inject`: only what live grants cover, each item,
+  field and purpose; otherwise `not-granted`, naming what is missing and
+  the `deadbolt agents allow-secrets` line that would allow it.
+- An AI, for `read`: Touch ID raised by the agent every time, with its own
+  sentence ("show personal › GitHub › password to an AI agent"); no grant
+  covers it. Without Touch ID (Linux, no sensor, off) it is `forbidden`.
+- The browser host: `forbidden`.
+
+Refused, the CLI exits 4 (`not-granted` or `forbidden`), beside 3 for
+locked. Resolves don't count as use for the idle lock.
+
+**Granting.** `deadbolt agents allow-secrets ITEM… [--vault V] [--fields
+a,b] [--purpose run|inject]… [--expires 8h]` makes one grant per item
+(default: every field, both purposes, no expiry), replacing an item's
+earlier grant. It needs the user's proof and refuses AIs exactly as the
+sign-in grants do (below): Touch ID or the passphrase, never
+`DEADBOLT_PASSPHRASE`. `deadbolt agents grants` lists them beside the
+sign-in grants ("AI agents › vault › title"), and `deadbolt agents revoke
+<id>` removes either kind at once. Grants name items by id (a rename keeps
+them), live in this device's store (`cli/secret-grants`), never sync, and
+cover nothing for reading.
+
+**Activity.** Every resolve is an entry, from anyone: `resolve-run` and
+`resolve-inject` (tier Use) or `resolve-read` (Read), the caller (verified
+and claimed), the items found (vault, id, title) or as named when nothing
+was found, the fields, and allowed, refused, locked or failed. Never a
+value. Granting is a `secret-grant-set` entry.
+
+**Trust model, honestly.**
+
+- A grant is for "callers that look like an AI", not for one session: there
+  is no anchor yet (build order 2). Any AI on this computer can use what is
+  granted. Keep grants to the fields a task needs, with an expiry.
+- Telling an AI from Kit is ancestry, a hint. An AI that starts a terminal
+  outside its own tree is "not an AI" and gets values like Kit does, until
+  build order 3 makes every caller ask.
+- A command run with a value can send it anywhere; masking only keeps it
+  out of the transcript by accident.
+
+**Protocol (17).** `resolve {refs, purpose}` → `secrets {secrets: [{vault,
+item, title, field, value}]}` in reference order; `secret-grant-set {vault,
+items, fields, purposes, expires_at, passphrase?}` → `secret-grants
+{grants}`; `secret-grant-list` → `secret-grants`; `agent-grant-remove`
+removes either kind. Not yet: `Event::Waiting`, `argv`/`cwd`/`mask` in the
+purpose (the panel's facts), `--no-prompt`, `needs-approval`.
 
 ## Standing grants: agent sign-ins (built)
 
