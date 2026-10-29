@@ -15,8 +15,8 @@ use rune_kit::{
 
 use super::{Conflict, Delete, Field, Form, Input, KINDS, LENGTHS, editable};
 use crate::model::{App, title_case};
-use crate::onboarding::{Notice, Severity};
 use crate::view::theme::{PLUS, REGENERATE, TRASH};
+use crate::view::{Notice, Severity};
 use crate::view::{replace, reveal_button, scroll_col};
 
 /// A shown secret's text area grows to this, then scrolls inside.
@@ -129,7 +129,7 @@ fn conflict(k: &Kit, f: &Form) -> Option<El> {
         .w_full()
         .gap(8.0)
         .transition(Transition::opacity())
-        .child(crate::onboarding::view::banner(k, &notice));
+        .child(crate::view::banner(k, &notice));
     if conflict == Conflict::Changed {
         block = block.child(
             row().key("theirs").child(
@@ -161,7 +161,7 @@ fn mirrored(k: &Kit, f: &Form) -> Option<El> {
             .key("mirrored")
             .w_full()
             .transition(Transition::opacity())
-            .child(crate::onboarding::view::banner(k, &notice)),
+            .child(crate::view::banner(k, &notice)),
     )
 }
 

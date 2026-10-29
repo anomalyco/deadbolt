@@ -5,7 +5,8 @@
 use deadbolt_app::agent::{Done, Failure};
 use deadbolt_app::model::{App, Screen};
 use deadbolt_app::onboarding::worker::{Progress, Stage, Worker};
-use deadbolt_app::onboarding::{Flow, Severity, Step, moment};
+use deadbolt_app::onboarding::{Flow, Step, moment};
+use deadbolt_app::view::Severity;
 use rune::clipboard::MemoryClipboard;
 use rune::{Env, Key, KeyEvent, Mods, Runtime};
 
@@ -415,6 +416,29 @@ fn failure(message: &str) -> Failure {
     }
 }
 
+/// A click after idle stamps the clock before the poll catches up; "Copied"
+/// must still last its whole time from the first frame.
+#[test]
+fn copied_command_survives_a_stale_clock() {
+    let mut rt = runtime("empty", true);
+    settle(&mut rt, 0.1);
+    rt.update(|s, tx| {
+        s.clock = 0.0;
+        s.copy_command("deadbolt agent", tx);
+    });
+    rt.frame(FRAME);
+    assert!(
+        rt.state
+            .onboarding
+            .copied_command
+            .is_some_and(|(_, at)| at.is_some())
+    );
+    settle(&mut rt, 0.5);
+    assert!(rt.state.onboarding.copied_command.is_some(), "still copied");
+    settle(&mut rt, 1.5);
+    assert!(rt.state.onboarding.copied_command.is_none(), "then lapses");
+}
+
 #[test]
 fn a_copied_ticket_leaves_the_clipboard_with_the_screen() {
     // Closing the window.
@@ -509,7 +533,7 @@ fn cancelling_while_the_device_is_set_up_waits_for_it() {
 fn a_tall_step_stays_under_the_title_bar_and_scrolls() {
     let mut rt = runtime("create-typing", true);
     rt.update(|s, _| {
-        s.onboarding.notice = Some(deadbolt_app::onboarding::Notice {
+        s.onboarding.notice = Some(deadbolt_app::view::Notice {
             severity: Severity::Danger,
             title: "Couldn't create the vault".into(),
             body: "Connecting to the agent: connection refused. Try again.".into(),

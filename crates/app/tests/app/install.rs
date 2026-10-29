@@ -214,16 +214,34 @@ fn copying_a_command_confirms_in_place() {
     settle(&mut rt, 0.6);
     assert!(shows(&rt, "sudo ln -s"));
     assert!(shows(&rt, "Copy command") && shows(&rt, "Copy PATH command"));
-    rt.update(|s, tx| {
-        let now = s.clock;
-        s.installer.as_mut().unwrap().copy(Copied::Path, now, tx);
-    });
+    rt.update(|s, tx| s.installer.as_mut().unwrap().copy(Copied::Path, tx));
     settle(&mut rt, 0.6);
     assert!(shows(&rt, "Copied"));
     assert!(shows(&rt, "Copy command"), "only the PATH command confirms");
     assert!(!shows(&rt, "Copy PATH command"));
     settle(&mut rt, 1.4);
     assert!(shows(&rt, "Copy PATH command"));
+    assert!(!shows(&rt, "Copied"));
+}
+
+/// A click after idle copies before the poll catches the clock up; "Copied"
+/// still lasts its whole time from the first frame.
+#[test]
+fn copied_survives_a_stale_clock() {
+    let mut rt = runtime("install-command");
+    rt.update(|s, _| {
+        let scan = s.installer.as_mut().unwrap().scan.as_mut().unwrap();
+        scan.manual = true;
+        scan.on_path = false;
+    });
+    settle(&mut rt, 3.0);
+    rt.update(|s, tx| {
+        s.clock = 0.0;
+        s.installer.as_mut().unwrap().copy(Copied::Path, tx);
+    });
+    settle(&mut rt, 0.5);
+    assert!(shows(&rt, "Copied"));
+    settle(&mut rt, 1.5);
     assert!(!shows(&rt, "Copied"));
 }
 

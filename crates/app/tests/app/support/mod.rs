@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use deadbolt_app::model::App;
@@ -18,6 +19,11 @@ pub const PASSPHRASE: &str = "correct horse";
 /// built here into the test's own target dir, which doesn't wait on the outer
 /// build's lock but compiles the CLI from scratch.
 pub fn deadbolt() -> PathBuf {
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT.get_or_init(find_deadbolt).clone()
+}
+
+fn find_deadbolt() -> PathBuf {
     if let Some(bin) = std::env::var_os("DEADBOLT_BIN") {
         return bin.into();
     }

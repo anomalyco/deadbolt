@@ -8,7 +8,8 @@ use rune::Tx;
 use crate::agent::{self, Agent, Job};
 use crate::model::{App, Screen};
 use crate::onboarding::worker::Stage;
-use crate::onboarding::{Flow, Notice, Pairing, Severity, Step};
+use crate::onboarding::{Flow, Pairing, Step};
+use crate::view::{Notice, Severity};
 use crate::{import, install, shortcut};
 
 /// How long the `vault-243` scene's agent takes over each request, about

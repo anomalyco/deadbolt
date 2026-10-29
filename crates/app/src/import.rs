@@ -14,7 +14,8 @@ use rune::{FileDialogOptions, Key, KeyEvent, Tx};
 
 use crate::agent::{ImportFailure, Imported, Job};
 use crate::model::{App, Screen};
-use crate::onboarding::{Notice, Severity, sentence};
+use crate::onboarding::sentence;
+use crate::view::{Notice, Severity};
 
 /// What the window takes from a drag, and Choose File… offers.
 pub const EXTENSIONS: &[&str] = &["1pux", "csv", "json"];

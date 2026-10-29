@@ -177,6 +177,7 @@ impl App {
         self.tick_code(now, tx);
         changed |= self.tick_import(now);
         if let Some(installer) = &mut self.installer {
+            installer.stamp_copy(now, tx);
             changed |= installer.poll(now);
         }
         // The install page and Settings belong to the vault; leaving it closes them.

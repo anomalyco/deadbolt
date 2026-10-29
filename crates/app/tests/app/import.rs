@@ -12,7 +12,7 @@ use deadbolt_app::agent::{Agent, Job, Window};
 use deadbolt_app::import::Phase;
 use deadbolt_app::install::Installer;
 use deadbolt_app::model::{App, Screen};
-use deadbolt_app::onboarding::Severity;
+use deadbolt_app::view::Severity;
 use rune::{Env, FileDialogKind, Key, KeyEvent, Mods, Runtime};
 
 use crate::support::{Device, PASSPHRASE, key, shows, until};

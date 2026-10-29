@@ -13,7 +13,8 @@ use rune::{SecretCopy, Tx};
 use crate::agent;
 use crate::model::{App, Screen};
 use crate::onboarding::worker::{Progress, Stage, Worker};
-use crate::onboarding::{self, Flow, Notice, Severity, Step};
+use crate::onboarding::{self, Flow, Step};
+use crate::view::{Notice, Severity};
 use crate::{import, install, settings, shortcut};
 use fixtures::{
     FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault, fixture_ticket,
