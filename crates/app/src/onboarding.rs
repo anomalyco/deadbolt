@@ -7,7 +7,6 @@
 //! passphrase and asks only for what's left.
 
 mod ceremony;
-pub mod qr;
 pub mod view;
 pub mod worker;
 
@@ -26,8 +25,8 @@ use worker::{NewDevice, Progress, Stage, Worker};
 pub const MIN_PASSPHRASE: usize = 8;
 /// How long a copied command's button shows a check, in seconds.
 pub const COPIED_FOR: f64 = 1.6;
-/// How long a copied ticket stays on the clipboard: as long as it works.
-const TICKET_LIFETIME: Duration = Duration::from_secs(10 * 60);
+/// How long a copied code stays on the clipboard: as long as it works.
+const CODE_LIFETIME: Duration = Duration::from_secs(5 * 60);
 
 /// The moment a vault is created or joined, from the bolt throwing to the vault
 /// opening. See `onboarding/ceremony.rs` for what happens when.
@@ -67,14 +66,8 @@ pub enum Step {
     Join,
     /// A request is running; `Onboarding::plan` lists its stages.
     Working(Flow),
-    /// The ticket is up, waiting for the other device.
-    Ticket,
-    /// Comparing the confirmation code.
-    Confirm {
-        code: String,
-        vault: String,
-        inviter: String,
-    },
+    /// The code is up, waiting for the other device.
+    Code,
     /// Created or joined: the moment, then the vault.
     Done {
         flow: Flow,
@@ -97,13 +90,6 @@ pub struct Pairing {
     pub inviter: String,
 }
 
-/// The pairing ticket: until it's used or expires, anyone holding it can ask
-/// to join the vault, so it's wiped when dropped.
-pub struct Ticket {
-    pub text: Zeroizing<String>,
-    pub qr: Option<qr::Matrix>,
-}
-
 pub struct Onboarding {
     pub step: Step,
     /// The stages the running request will report, in order.
@@ -119,20 +105,20 @@ pub struct Onboarding {
     /// Submit was pressed with something missing: every problem shows.
     pub attempted: bool,
     pub notice: Option<Notice>,
-    pub ticket: Option<Ticket>,
-    /// The copied ticket, while it's still on the clipboard.
+    /// The pairing code: until it's used or expires, whoever types it first
+    /// pairs with this device, so it's wiped when dropped.
+    pub code: Option<Zeroizing<String>>,
+    /// The copied `deadbolt pair` command, while it's still on the clipboard.
     pub copied: Option<SecretCopy>,
     /// A command copied from the empty vault's guide, and when.
     pub copied_command: Option<(&'static str, Option<f64>)>,
-    /// The vault being joined and the device inviting this one, once the code shows.
+    /// The vault joined and the device that invited this one, once paired.
     pub pairing: Option<Pairing>,
     /// When the vault was created or joined, on the app's clock.
     pub done_at: Option<f64>,
     /// How many of `moment::PHASES` have passed.
     pub phase: usize,
     pub worker: Worker,
-    /// The person answered "they don't match".
-    declined: bool,
     /// The person cancelled the join.
     cancelled: bool,
     /// The running request set this device up (it wasn't before).
@@ -152,21 +138,20 @@ impl Onboarding {
             device_ready: false,
             attempted: false,
             notice: None,
-            ticket: None,
+            code: None,
             copied: None,
             copied_command: None,
             pairing: None,
             done_at: None,
             phase: 0,
             worker,
-            declined: false,
             cancelled: false,
             set_up_now: false,
         }
     }
 
     /// Back to the welcome screen with empty fields; keeps the worker. Only
-    /// through [`App::reset_onboarding`], which clears a copied ticket first.
+    /// through [`App::reset_onboarding`], which clears a copied code first.
     fn reset(&mut self, device_ready: bool) {
         let worker = std::mem::replace(&mut self.worker, Worker::offline());
         *self = Onboarding {
@@ -183,10 +168,7 @@ impl Onboarding {
     /// A request is running or its result is showing: status changes from
     /// elsewhere must not move the screen.
     pub fn busy(&self) -> bool {
-        matches!(
-            self.step,
-            Step::Working(_) | Step::Ticket | Step::Confirm { .. } | Step::Done { .. }
-        )
+        matches!(self.step, Step::Working(_) | Step::Code | Step::Done { .. })
     }
 
     pub fn strength(&self) -> Strength {
@@ -362,10 +344,10 @@ impl App {
         self.onboarding.reset(device_ready);
     }
 
-    /// Leaving onboarding (or the app): takes a copied ticket off the clipboard
-    /// if it's still there, wipes the ticket and passphrases, and hangs up a join.
+    /// Leaving onboarding (or the app): takes a copied code off the clipboard
+    /// if it's still there, wipes the code and passphrases, and hangs up a join.
     pub(crate) fn forget_onboarding(&mut self) {
-        self.forget_ticket();
+        self.forget_code();
         self.onboarding.worker.cancel();
         self.onboarding.forget();
     }
@@ -435,12 +417,11 @@ impl App {
         }
         o.notice = None;
         o.blur();
-        o.declined = false;
         o.cancelled = false;
         o.set_up_now = false;
         let next = match flow {
             Flow::Create => Stage::CreatingVault,
-            Flow::Join => Stage::MakingTicket,
+            Flow::Join => Stage::MakingCode,
         };
         o.plan = if o.needs_device() {
             vec![Stage::Protecting, next]
@@ -458,41 +439,25 @@ impl App {
         }
     }
 
-    /// The person compared the codes.
-    pub fn answer_code(&mut self, matches: bool) {
-        let o = &mut self.onboarding;
-        if !matches!(o.step, Step::Confirm { .. }) || o.declined || o.cancelled {
-            return;
-        }
-        if matches {
-            o.plan = vec![Stage::Joining];
-            o.stage = Some(Stage::Joining);
-            o.step = Step::Working(Flow::Join);
-        } else {
-            o.declined = true;
-        }
-        o.worker.answer(matches);
-    }
-
     /// Hangs up the join; the device stays set up.
     pub fn cancel_join(&mut self) {
         let o = &mut self.onboarding;
         let joining = matches!(o.step, Step::Working(Flow::Join)) && o.pairing.is_none();
-        if o.cancelled || !(joining || matches!(o.step, Step::Ticket | Step::Confirm { .. })) {
+        if o.cancelled || !(joining || o.step == Step::Code) {
             return;
         }
         o.cancelled = true;
         o.worker.cancel();
     }
 
-    /// Copies `deadbolt pair <ticket>`, the command to run on the other device.
-    pub fn copy_ticket(&mut self, tx: &mut Tx) {
-        let Some(ticket) = &self.onboarding.ticket else {
+    /// Copies `deadbolt pair <code>`, the command to run on the other device.
+    pub fn copy_code(&mut self, tx: &mut Tx) {
+        let Some(code) = &self.onboarding.code else {
             return;
         };
-        let command = format!("deadbolt pair {}", ticket.text.as_str());
+        let command = format!("deadbolt pair {}", code.as_str());
         self.onboarding.notice = None;
-        self.onboarding.copied = Some(tx.copy_secret(command, TICKET_LIFETIME));
+        self.onboarding.copied = Some(tx.copy_secret(command, CODE_LIFETIME));
     }
 
     /// Copies a command from the empty vault's guide.
@@ -501,18 +466,18 @@ impl App {
         self.onboarding.copied_command = Some((command, None));
     }
 
-    /// Takes the copied ticket off the clipboard if it's still there, and
-    /// wipes the ticket.
-    fn forget_ticket(&mut self) {
+    /// Takes the copied code off the clipboard if it's still there, and
+    /// wipes the code.
+    fn forget_code(&mut self) {
         if let Some(copied) = self.onboarding.copied.take() {
             copied.clear_now();
         }
-        self.onboarding.ticket = None;
+        self.onboarding.code = None;
     }
 
-    /// The copied ticket's write failed, or something else took its place
+    /// The copied code's write failed, or something else took its place
     /// on the clipboard: the button stops saying it's copied. True when so.
-    fn check_ticket_copy(&mut self) -> bool {
+    fn check_code_copy(&mut self) -> bool {
         let o = &mut self.onboarding;
         match o.copied.as_ref().map(SecretCopy::state) {
             Some(SecretState::Failed(error)) => {
@@ -533,7 +498,7 @@ impl App {
             *at = Some(now);
             tx.wake_after(Duration::from_secs_f64(COPIED_FOR));
         }
-        let mut changed = self.check_ticket_copy()
+        let mut changed = self.check_code_copy()
             || !progress.is_empty()
             || self
                 .onboarding
@@ -579,36 +544,24 @@ impl App {
                 o.device_ready = true;
             }
             // A cancel is on its way; its result will say so.
-            Progress::Ticket(_) | Progress::Code { .. } if o.cancelled => {}
-            Progress::Ticket(text) => {
-                let qr = qr::Matrix::new(&text);
-                o.ticket = Some(Ticket { text, qr });
+            Progress::Code(_) | Progress::Paired { .. } if o.cancelled => {}
+            Progress::Code(code) => {
+                o.code = Some(code);
                 o.device_ready = true;
-                o.step = Step::Ticket;
+                o.step = Step::Code;
             }
-            Progress::Code {
-                code,
-                vault,
-                inviter,
-            } => {
-                self.forget_ticket();
+            // The vault arrives with the reply, right behind this.
+            Progress::Paired { vault, inviter } => {
+                self.forget_code();
                 let inviter = inviter.name.unwrap_or_else(|| short(&inviter.id).into());
-                self.onboarding.pairing = Some(Pairing {
-                    vault: vault.clone(),
-                    inviter: inviter.clone(),
-                });
-                self.onboarding.step = Step::Confirm {
-                    code,
-                    vault,
-                    inviter,
-                };
+                self.onboarding.pairing = Some(Pairing { vault, inviter });
             }
             Progress::Created(result) => match result {
                 Ok(vault) => self.done(Flow::Create, vault, None, now),
                 Err(failure) => self.onboarding_failed(Flow::Create, failure),
             },
             Progress::Joined(result) => {
-                self.forget_ticket();
+                self.forget_code();
                 match result {
                     Ok(vault) => {
                         let from = self.onboarding.pairing.take().map(|p| p.inviter);
@@ -650,24 +603,15 @@ impl App {
         let notice = if flow == Flow::Join && o.cancelled {
             let body = if o.set_up_now {
                 "Nothing was shared. This device is set up now, with the passphrase you \
-                 chose. Make a new ticket when you're ready."
+                 chose. Make a new code when you're ready."
             } else {
-                "Nothing was shared. Make a new ticket when you're ready."
+                "Nothing was shared. Make a new code when you're ready."
             };
             Notice::new(Severity::Neutral, "Join cancelled", body)
-        } else if flow == Flow::Join && o.declined {
-            Notice::new(
-                Severity::Caution,
-                "Stopped: the codes didn't match",
-                "Nothing was shared and the ticket no longer works. Make a new one and \
-                 compare again. If you didn't start pairing on your other device, \
-                 someone else may have seen the ticket.",
-            )
         } else {
             failure_notice(flow, &failure)
         };
         o.cancelled = false;
-        o.declined = false;
         o.set_up_now = false;
         o.notice = Some(notice);
         o.attempted = false;
@@ -692,18 +636,19 @@ fn failure_notice(flow: Flow, failure: &Failure) -> Notice {
              passphrase it was set up with is the one that unlocks it."
                 .to_owned(),
         )
-    } else if message.contains("not confirmed") {
+    } else if message.contains("wrong code") {
         (
             Severity::Caution,
-            "The other device didn't confirm",
-            "Nothing was shared. Make a new ticket and compare the codes on both screens."
+            "Someone tried a wrong code",
+            "Nothing was shared, and that code no longer works. Make a new one. If you \
+             didn't try one yourself, someone may be trying to get in."
                 .to_owned(),
         )
     } else if message.contains("expired") {
         (
             Severity::Neutral,
-            "The ticket expired",
-            "Tickets work for 10 minutes. Make a new one.".to_owned(),
+            "The code expired",
+            "Codes work for 5 minutes. Make a new one.".to_owned(),
         )
     } else if message.contains("already exists") {
         (
@@ -756,7 +701,7 @@ pub fn key(s: &mut App, ev: &KeyEvent, tx: &mut Tx) -> bool {
     }
     match s.onboarding.step {
         Step::Create | Step::Join => s.onboarding_back(),
-        Step::Ticket | Step::Confirm { .. } => s.cancel_join(),
+        Step::Code => s.cancel_join(),
         Step::Working(Flow::Join) if s.onboarding.pairing.is_none() => s.cancel_join(),
         _ => return false,
     }
