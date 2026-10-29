@@ -571,6 +571,9 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
+      // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
+      case "/centred":
+        return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
       case "/login": {
         const form = loginForm(url.searchParams.get("next") === "home" ? "/home" : "/mfa")
         // A password the page enables only once the email box is focused.
@@ -2053,6 +2056,62 @@ async function coveredMenu() {
   }
 }
 
+/**
+ * The browser resizing the viewport (an infobar such as "started debugging this
+ * browser" coming or going) reflows a centred form, and the menu moves with
+ * it: that doesn't restart the dwell. The page moving the menu itself still
+ * does, even in the frame right after a resize.
+ */
+async function viewportResize() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  const viewport = page.viewportSize()!
+  const shrink = (by: number) => page.setViewportSize({ width: viewport.width, height: viewport.height - by })
+  try {
+    await page.goto(`${site}/centred`)
+    let menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "viewport resize"))
+    const at = async () => (await (await menu!.frameElement()).boundingBox())?.y ?? 0
+    const before = await at()
+    // 40 px less, just before the press, and back just after it.
+    await shrink(40)
+    check(!!(await until("the centred menu moves with the resize", async () => Math.abs((await at()) - before) >= 10, 2000)), "a 40 px resize moves the centred menu")
+    await Bun.sleep(150)
+    await menu.locator("button.row").first().click()
+    await Bun.sleep(150)
+    await shrink(0)
+    const filled = await until("a pick after a resize fills", async () => (await page.inputValue("#password")) === "correct horse", 4000)
+    check(!!filled, `a pick right after the browser resized the viewport fills (${filled ? "" : await footText(menu)})`)
+
+    // The page moves the form itself, 200 ms before the press.
+    await page.goto(`${site}/centred`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "viewport resize: page move"))
+    await page.evaluate(() => (document.querySelector("main")!.style.transform = "translateY(-24px)"))
+    await Bun.sleep(200)
+    await menu.locator("button.row").first().click()
+    await Bun.sleep(1200)
+    check((await page.inputValue("#password")) === "" && (await fillCount(run)) === 1, `a menu the page moved 200 ms before the press fills nothing (${await footText(menu)})`)
+    check((await footText(menu)).includes("in a moment"), "and asks for the pick again")
+
+    // The page moves the form further than the viewport changed, on the resize itself.
+    await page.goto(`${site}/centred`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "viewport resize: piggyback"))
+    await page.evaluate(() => addEventListener("resize", () => (document.querySelector("main")!.style.transform = "translateY(-120px)"), { once: true }))
+    await shrink(40)
+    await Bun.sleep(200)
+    await menu.locator("button.row").first().click()
+    await Bun.sleep(1200)
+    check((await page.inputValue("#password")) === "" && (await fillCount(run)) === 1, `a page moving the menu further than a resize did fills nothing (${await footText(menu)})`)
+  } catch (err) {
+    check(false, `viewport resize threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "viewport resize")
+  } finally {
+    await close(run)
+  }
+}
+
 /** The menu's host: a popover with a random name, raised over what the page puts in the top layer, and inside a login modal. */
 async function topLayer() {
   const run = await launch()
@@ -3040,13 +3099,14 @@ const once: Record<string, () => Promise<void>> = {
   keyboardEntry,
   coveredMenu,
   topLayer,
+  viewportResize,
   occlusionSweep,
   midFill,
   coveredPill,
   backForward,
   passkeys,
 }
-const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
+const groups: Record<string, string[]> = { security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
@@ -3056,7 +3116,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 const cost: Record<string, number> = {
   detection: 108, occlusionSweep: 55, signInSessions: 52, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
-  coldSave: 8, backForward: 7, narrowing: 6, midFill: 6, coveredPill: 5, locked: 2, notInstalled: 1,
+  coldSave: 8, backForward: 7, narrowing: 6, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
 }
 const units = [
   ...(["light", "dark"] as const).flatMap((scheme) =>
