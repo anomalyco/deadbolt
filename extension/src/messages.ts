@@ -79,6 +79,30 @@ export const fieldsFor = (roles: FormRole[]) => [...new Set(roles.flatMap((r) =>
 /** Host fields that make the agent ask for Touch ID. */
 export const VERIFIED_FIELDS: HostField[] = ["number", "cvv"]
 
+/** How the menu names what an identity fills, by role, in the order it lists them. */
+export const FILLS_WORD: Partial<Record<FormRole, string>> = {
+  name: "name", "honorific-prefix": "name", "given-name": "name", "additional-name": "name", "family-name": "name",
+  email: "email", tel: "phone", "tel-national": "phone", "tel-country-code": "phone", organization: "company", "organization-title": "company",
+  "street-address": "address", "address-line1": "address", "address-line2": "address", "address-line3": "address", "address-level1": "address",
+  "address-level2": "address", "postal-code": "address", country: "address", bday: "birthday", "bday-day": "birthday", "bday-month": "birthday", "bday-year": "birthday",
+}
+const FILLS_ORDER = ["name", "email", "phone", "company", "address", "birthday"]
+
+/**
+ * What an identity with values for `has` (host field names) fills of a
+ * section with these roles, in words. A role counts when the identity has
+ * its own field (a phone box needs the phone, not just the country).
+ */
+export function fillsWords(roles: FormRole[], has: string[]): string[] {
+  const words = new Set<string>()
+  for (const r of roles) {
+    const own = FIELDS_FOR[r].filter((f) => f !== "country" || r === "country")
+    const word = FILLS_WORD[r]
+    if (word && own.some((f) => has.includes(f))) words.add(word)
+  }
+  return FILLS_ORDER.filter((w) => words.has(w))
+}
+
 /** An identity's or card's values, by the host's field names (see FIELDS_FOR). */
 export type FormValues = Record<string, string>
 
@@ -314,7 +338,8 @@ export type MenuLoadReply =
    * `into`: a card goes into a payment provider's frame too ("Stripe").
    * `verify`: the agent asks for Touch ID before a card's number goes out.
    */
-  | { kind: "forms"; form: FormKind; site: string; identities: FormIdentity[]; cards: FormCard[]; into?: string; verify: boolean }
+  /** `fills`: for each identity, by ref, what of the section it has values for ("name", "email", "address"). */
+  | { kind: "forms"; form: FormKind; site: string; identities: FormIdentity[]; cards: FormCard[]; into?: string; verify: boolean; fills?: Record<string, string[]> }
   /** A pill on a field a sign-in session's step just filled ("Password filled"). */
   | { kind: "notice"; label: string; title: string }
   | { kind: "status"; status: Status }

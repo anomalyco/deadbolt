@@ -400,6 +400,16 @@ describe("identity and payment forms", () => {
     expect(scanForms()).toEqual([])
   })
 
+  test("labels ending in name that aren't a person's name", () => {
+    page(`<form>
+      <label for="a">Street name</label><input id="a"><label for="b">City name</label><input id="b">
+      <label for="c">State name</label><input id="c"><label for="d">Country name</label><input id="d">
+      <label for="e">Company name</label><input id="e"><label for="f">Region name</label><input id="f">
+      <label for="g">Name</label><input id="g">
+    </form>`, "/checkout")
+    expect(formRoles()).toEqual(["address-line1", "address-level2", "address-level1", "country", "organization", "address-level1", "name"])
+  })
+
   test("a lone email box isn't an address form, unless the site marks it", () => {
     page(`<form><label for="n">Newsletter</label><input id="n" type="email"></form><form><label for="e">Your email</label><input id="e" type="email"></form>`, "/")
     expect(scanForms()).toEqual([])

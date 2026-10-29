@@ -4,6 +4,7 @@ import { ownerOf, type Field } from "../src/content/detect"
 import { scanForms } from "../src/content/forms"
 import { fillForm } from "../src/content/formfill"
 import { splitNumber, valueFor } from "../src/content/transform"
+import { fillsWords } from "../src/messages"
 
 function input(): HTMLInputElement {
   document.body.innerHTML = `<input type="password">`
@@ -291,6 +292,21 @@ describe("form values", () => {
     expect(valueFor("cc-exp-month", el(`<select><option value="07">07</option><option value="08">08</option></select>`), card)).toBe("08")
     expect(valueFor("cc-exp-year", el(`<select><option value="27">27</option><option value="28">28</option></select>`), card)).toBe("28")
     expect(valueFor("cc-exp-year", el(`<input maxlength="2">`), card)).toBe("28")
+  })
+
+  test("an expiry year box: two digits only for YY, four for YYYY", () => {
+    expect(valueFor("cc-exp-year", el(`<input placeholder="YYYY">`), card)).toBe("2028")
+    expect(valueFor("cc-exp-year", el(`<input placeholder="YY">`), card)).toBe("28")
+    expect(valueFor("cc-exp-year", el(`<input>`), card)).toBe("2028")
+    expect(valueFor("cc-exp", el(`<input placeholder="MM / YYYY">`), card)).toBe("08 / 2028")
+    expect(valueFor("cc-exp", el(`<input placeholder="mm/yy">`), card)).toBe("08/28")
+  })
+
+  test("what an identity fills, in words", () => {
+    const roles = ["given-name", "family-name", "email", "tel", "address-line1", "country"] as const
+    expect(fillsWords([...roles], ["given-name", "email", "phone", "address-line1", "country"])).toEqual(["name", "email", "phone", "address"])
+    // A country alone doesn't fill a phone box.
+    expect(fillsWords(["tel"], ["country"])).toEqual([])
   })
 
   test("card number with or without spaces, and split over boxes", () => {

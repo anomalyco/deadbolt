@@ -287,7 +287,7 @@ export function valueFor(role: FormRole, el: FormControl, v: FormValues): string
       if (role === "cc-exp") return select ? undefined : expiryText(el, e.y, e.m)
       if (role === "cc-exp-month") return select ? monthOption(select, e.m) : maxLen(el) === 1 ? String(e.m) : pad(e.m)
       if (select) return yearOption(select, e.y)
-      return maxLen(el) === 2 || /yy(?!yy)/.test(attr(el, "placeholder")) ? pad(e.y % 100) : String(e.y)
+      return maxLen(el) === 2 || /(?<!y)yy(?!y)/.test(attr(el, "placeholder")) ? pad(e.y % 100) : String(e.y)
     }
   }
 }

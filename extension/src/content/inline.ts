@@ -33,7 +33,7 @@ import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, t
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import { findAccountTile, findProviderButton, type Field, type FormControl } from "./detect"
-import { approvedForms, approveForms, fillForm, takeApproved, type FormsState } from "./formfill"
+import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
 import { provider } from "../signin"
@@ -635,7 +635,9 @@ async function maybeOpenForms(el: FormControl, how: Asked) {
   querying = (async () => {
     const box = isTop ? undefined : fillable(el) ? visibleBox(el) : null
     if (box === null) return
-    const roles = [...new Set(sectionFields(state.formFields(), f.section, f.kind).map((x) => x.role))]
+    // What the menu says an identity fills: only the fields it would fill now, those on screen.
+    const fillsNow = (x: FormField) => f.kind !== "identity" || x.el === el || onScreen(x.el)
+    const roles = [...new Set(sectionFields(state.formFields(), f.section, f.kind).filter(fillsNow).map((x) => x.role))]
     const reply = await send<QueryReply>({ type: "db:forms-query", kind: f.kind, form: state.formsForm(), section: f.section, roles, explicit, ...(box ? { box } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
     else if (isTop && reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
@@ -806,7 +808,7 @@ async function applyFormsFill(message: Extract<ToContent, { type: "db:forms-fill
   if (!targets?.length) return { filled: [] }
   if (mode === "pill") await pillSettled(700)
   if (state.formsForm() !== message.form) return { filled: [] }
-  const { filled } = await fillForm(targets, values, (el) => fillable(el, ownPill()))
+  const { filled } = await fillForm(targets, values, (el) => fillCheck(targets[0].kind, ownPill())(el))
   return { filled }
 }
 

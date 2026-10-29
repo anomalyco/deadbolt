@@ -9,7 +9,7 @@ import type { FormKind } from "../protocol"
 import { Approvals } from "./approvals"
 import type { FormControl } from "./detect"
 import { ownBoxes } from "./embed"
-import { fillable } from "./fill"
+import { clippedBox, fillable, hiddenByStyle, noteFilled, onTop, typedByUser } from "./fill"
 import { formFieldInPlace, sectionFields, type FormField } from "./forms"
 import { splitNumber, valueFor } from "./transform"
 
@@ -34,6 +34,7 @@ export function setFormValue(el: FormControl, value: string, guard: (el: FormCon
   const setter = Object.getOwnPropertyDescriptor(proto, "value")!.set!
   el.focus({ preventScroll: true })
   if (!guard(el)) return false
+  noteFilled(el, value)
   setter.call(el, value)
   if (el instanceof HTMLSelectElement && el.value !== value) return false
   el.dispatchEvent(new InputEvent("input", { bubbles: true, composed: true, inputType: "insertReplacementText", data: el instanceof HTMLSelectElement ? null : value }))
@@ -41,11 +42,34 @@ export function setFormValue(el: FormControl, value: string, guard: (el: FormCon
   return true
 }
 
+/** The smallest an identity field may be, in CSS pixels: anything smaller is there to be missed. */
+const MIN_IDENTITY = { width: 40, height: 16 }
+
+/**
+ * Whether an identity field may be filled as it stands, without scrolling
+ * to it: enabled, at least 40×16, not hidden by style, all of it on screen,
+ * and what's under its middle is the field (`ours`, Deadbolt's own surface,
+ * doesn't count). An address goes only into fields the user can see now;
+ * a page that tucks a field away gets nothing in it.
+ */
+export function onScreen(el: FormControl, ours?: Element | null): boolean {
+  if (!el.isConnected || el.disabled || ("readOnly" in el && el.readOnly)) return false
+  const r = el.getBoundingClientRect()
+  if (r.width < MIN_IDENTITY.width || r.height < MIN_IDENTITY.height || hiddenByStyle(el)) return false
+  const box = clippedBox(el)
+  if (!box || (box.right - box.left) * (box.bottom - box.top) < 0.95 * r.width * r.height) return false
+  return onTop(el, box, ours)
+}
+
+/** The check a field of `kind` gets before it's approved and again before it's written. */
+export const fillCheck = (kind: FormKind, ours?: Element | null) => (el: FormControl) => (kind === "identity" ? onScreen(el, ours) : fillable(el, ours))
+
 /**
  * Fills one section's fields from `values`: each field gets what its role
  * and its element want (see transform.ts); a card number split over boxes
  * goes in only as a whole, one slice per box. Fields with nothing to write
- * are left alone. Returns the roles written.
+ * are left alone, and so are fields holding what the user typed themselves
+(a value Deadbolt filled before may be replaced). Returns the roles written.
  */
 export async function fillForm(fields: FormField[], values: FormValues, check: (el: FormControl) => boolean = fillable): Promise<{ filled: FormRole[]; last?: FormControl }> {
   const filled: FormRole[] = []
@@ -59,6 +83,7 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
       const boxes = ordered.filter((b) => b.role === "cc-number" && b.split && b.form === f.form)
       boxes.forEach((b) => done.add(b))
       if (!values.number || !boxes.every((b) => ok(boxes)(b.el))) continue
+      if ((await Promise.all(boxes.map((b) => typedByUser(b.el, b.el.value)))).some(Boolean)) continue
       const parts = splitNumber(values.number, boxes.map((b) => b.el))
       let i = 0
       if (filled.length) await sleep(30)
@@ -72,6 +97,7 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
     done.add(f)
     const value = valueFor(f.role, f.el, values)
     if (value === undefined || value === "" || !ok([f])(f.el)) continue
+    if (!(f.el instanceof HTMLSelectElement) && (await typedByUser(f.el, f.el.value))) continue
     // A beat between fields for pages that react to each one (a country that redraws the region list).
     if (filled.length) await sleep(30)
     if (setFormValue(f.el, value, ok([f]))) {
@@ -86,7 +112,7 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
 export async function approveForms(state: FormsState, form: number, kind: FormKind, section: string | undefined, measure: boolean, ours?: Element | null): Promise<FormsApproved | null> {
   state.rescan()
   if (state.form() !== form) return null
-  const fields = sectionFields(state.fields(), section, kind).filter((f) => fillable(f.el, ours))
+  const fields = sectionFields(state.fields(), section, kind).filter((f) => fillCheck(kind, ours)(f.el))
   if (!fields.length) return null
   const boxes = measure ? await ownBoxes(fields) : undefined
   if (boxes === null || state.form() !== form) return null

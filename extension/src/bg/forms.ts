@@ -10,7 +10,7 @@
 // too, and into a payment provider's cross-origin frame (src/payments.ts) on
 // an https page. Every other frame gets nothing.
 
-import { FORM_ROLES, fieldsFor, VERIFIED_FIELDS, type Box, type FormRole, type FormsAck, type FormsApproved, type MenuLoadReply, type PickReply, type QueryReply } from "../messages"
+import { FORM_ROLES, fieldsFor, fillsWords, VERIFIED_FIELDS, type Box, type FormRole, type FormsAck, type FormsApproved, type MenuLoadReply, type PickReply, type QueryReply } from "../messages"
 import type { FormCard, FormIdentity, FormKind, FormsReply } from "../protocol"
 import { paymentProvider, securePage } from "../payments"
 import { boxesInTop, isBoxes, menuFrameOf, newToken, sendToFrame, type FrameTarget } from "./frames"
@@ -34,11 +34,13 @@ interface FormsToken {
   section: string
   /** The host fields the section's fields need: an item with none of them isn't listed. */
   needs: string[]
+  /** The section's roles, to say what each identity fills. */
+  roles: FormRole[]
   createdAt: number
   menuDocumentId?: string
 }
 
-interface FormsReport extends FrameTarget {
+interface FormsReport extends Placed {
   kinds: FormKind[]
   form: number
 }
@@ -165,7 +167,8 @@ export class Forms {
     if (!this.host.capabilities.includes("forms")) return { rows: 0 }
     const state = this.host.status.state
     const site = siteOf(new URL(owner.origin).hostname) ?? owner.origin
-    const needs: string[] = fieldsFor(cleanRoles(roles))
+    const sectionRoles = cleanRoles(roles)
+    const needs: string[] = fieldsFor(sectionRoles)
     let rows = 0
     if (state === "locked") {
       if (explicit || !this.lockedShown.has(site)) rows = 1
@@ -177,19 +180,27 @@ export class Forms {
     if (!rows) return { rows: 0 }
     for (const [t, v] of this.tokens) if (Date.now() - v.createdAt > TOKEN_TTL_MS) this.tokens.delete(t)
     const token = newToken()
-    this.tokens.set(token, { owner, source, kind, form: form as number, section, needs, createdAt: Date.now() })
+    this.tokens.set(token, { owner, source, kind, form: form as number, section, needs, roles: sectionRoles, createdAt: Date.now() })
     if (!at) return { token, rows }
     const opened = await sendToFrame<boolean>(owner, { type: "db:forms-open", token, rows, box: at })
     if (!opened) this.tokens.delete(token)
     return { rows: opened ? rows : 0 }
   }
 
-  /** The frames a pick of `t` fills: its own section, and for a card, every other frame of the tab with card fields it may get. */
+  /**
+   * The frames a pick of `t` fills: its own section, and for a card, the
+   * other frames of the same party that reported card fields. From a payment
+   * provider's frame, only that provider's other frames (a Braintree page has
+   * one per field), never the page or another provider; from the top page or
+   * a frame of its site, only the top page and frames of its site, never a
+   * provider's frame. One pick never hands a card to two parties.
+   */
   private targets(t: FormsToken): Array<{ target: Placed; form: number; section?: string }> {
-    const own = { target: t.source as Placed, form: t.form, section: t.section }
+    const source = t.source as Placed
+    const own = { target: source, form: t.form, section: t.section }
     if (t.kind !== "card") return [own]
     const others = [...(this.pages.get(t.owner.tabId)?.values() ?? [])]
-      .filter((p) => p.kinds.includes("card") && p.frameId !== t.source.frameId)
+      .filter((p) => p.kinds.includes("card") && p.frameId !== source.frameId && p.provider === source.provider)
       .map((p) => ({ target: p as Placed, form: p.form }))
     return [own, ...others]
   }
@@ -201,7 +212,8 @@ export class Forms {
     try {
       const reply = await this.list(t.source.origin)
       const site = siteOf(new URL(t.owner.origin).hostname) ?? new URL(t.owner.origin).hostname
-      const into = t.kind === "card" ? this.targets(t).find((x) => x.target.provider)?.target.provider : undefined
+      // Every destination of a pick is the source's party (see targets): a provider's frames, or the site's own.
+      const into = (t.source as Placed).provider
       const items = usable(reply, t.kind, t.needs)
       return {
         kind: "forms",
@@ -210,6 +222,7 @@ export class Forms {
         identities: t.kind === "identity" ? (items as FormIdentity[]) : [],
         cards: t.kind === "card" ? (items as FormCard[]) : [],
         verify: t.kind === "card" && reply.canVerify,
+        ...(t.kind === "identity" ? { fills: Object.fromEntries(items.map((i) => [i.ref, fillsWords(t.roles, i.fields)])) } : {}),
         ...(into ? { into } : {}),
       }
     } catch {

@@ -88,7 +88,6 @@ const CLUES: Array<[FormRole, RegExp]> = ([
   ["given-name", /\b(first ?name|given ?name|forename|fname|first|vorname|prenom|nombre(?! (de usuario|completo))|nome(?! (completo|utente))|voornaam|primeiro nome|имя)\b/],
   ["family-name", /\b(last ?name|surname|family ?name|lname|last|nachname|familienname|nom de famille|nom(?! complet)|apellidos?|cognome|achternaam|sobrenome|фамилия)\b/],
   ["honorific-prefix", /\b(salutation|honorific|anrede|civilite|tratamiento|prefix)\b/],
-  ["name", /\b(full ?name|your name|name|nombre completo|nom complet|vollstandiger name|nome completo|お名前|氏名|姓名)\b/],
   ["address-line3", /\b(address ?(line)? ?3|address3|addr3|street3)\b/],
   ["address-line2", /\b(address ?(line)? ?2|address2|addr2|street2|apt|apartment|suite|unit|flat|floor|building|adresszusatz|complemento|complement( d adresse)?|piso)\b/],
   ["address-line1", /\b(address ?(line)? ?1|address1|addr1|street1|street( address)?|address|strasse|stra[sß]e und hausnummer|calle|rue|straat|direccion|adresse|indirizzo|endereco|住所|地址|адрес)\b/],
@@ -96,6 +95,8 @@ const CLUES: Array<[FormRole, RegExp]> = ([
   ["address-level2", /\b(city|town|suburb|locality|ort|stadt|ciudad|ville|citta|localidad|cidade|plaats|市区町村|城市|город)\b/],
   ["address-level1", /\b(state|province|region|county|prov|bundesland|estado|provincia|departement|都道府県|省|область)\b/],
   ["country", /\b(country|nation|land|pais|pays|paese|国|страна)\b/],
+  // After every role whose label ends in "name" (street, city, state, country, company…), and never for those.
+  ["name", /\b(full ?name|your name|(?<!(street|city|town|country|state|province|region|company|business|user|account|card|display|screen|nick|middle|first|last|family|given) )name|nombre completo|nom complet|vollstandiger name|nome completo|お名前|氏名|姓名)\b/],
   ["bday", /\b(birth|birthday|birthdate|dob|date of birth|geburts\w*|nacimiento|naissance|nascita|geboortedatum|生年月日|出生)\b/],
 ] as Array<[FormRole, RegExp]>).map(([role, re]) => [role, w(re)])
 

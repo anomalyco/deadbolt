@@ -141,6 +141,11 @@ describe("payment provider frames", () => {
     expect(provider("https://js.stripe.com:8443/")).toBeNull()
     expect(provider("https://evil-stripe.com/")).toBeNull()
     expect(provider("https://stripe.com.evil.test/")).toBeNull()
+    // PayPal's own site takes a card only in its hosted card fields.
+    expect(provider("https://www.paypal.com/smart/card-fields?sessionID=x")).toBe("PayPal")
+    expect(provider("https://www.paypal.com/smart/card-field?type=number")).toBe("PayPal")
+    expect(provider("https://www.paypal.com/myaccount/")).toBeNull()
+    expect(provider("https://www.paypal.com/checkoutnow")).toBeNull()
     // The e2e aliases exist only in e2e builds.
     expect(provider("http://js.stripe.test:8080/")).toBeNull()
   })

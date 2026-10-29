@@ -123,7 +123,7 @@ export function cardLine(card: FormCard): string {
 function row(item: Row, i: number): HTMLElement {
   const [tile, title, sub] =
     "identity" in item
-      ? [avatar(item.identity.title), item.identity.title, item.identity.summary || "Fill this address"]
+      ? [avatar(item.identity.title), item.identity.title, [fills[item.identity.ref]?.length ? `Fills ${fills[item.identity.ref].join(", ")}` : "", item.identity.summary].filter(Boolean).join(" · ") || "Fill this address"]
       : "card" in item
       ? [avatar(item.card.brand || item.card.title, icon("card")), cardLine(item.card), item.card.brand && item.card.title !== item.card.brand ? item.card.title : item.card.cardholder || item.card.title]
       : "generate" in item
@@ -639,7 +639,11 @@ function show(reply: MenuLoadReply) {
  * says where it goes when that's a payment provider's frame ("Into Stripe
  * on shop.com"), and that Deadbolt may ask for Touch ID first.
  */
+/** For each identity listed, what of the section it fills (see fillsWords). */
+let fills: Record<string, string[]> = {}
+
 function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
+  fills = reply.fills ?? {}
   accounts = reply.form === "card" ? reply.cards.map((card) => ({ card })) : reply.identities.map((identity) => ({ identity }))
   continueAs = false
   active = Math.min(active, Math.max(accounts.length - 1, 0))
@@ -650,7 +654,8 @@ function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
     return say("")
   }
   rowsEl.replaceChildren(...accounts.map(row))
-  setCaption(reply.into ? `Into ${reply.into} on ${reply.site}` : accounts.length >= 2 ? reply.site : "")
+  // Where a pick goes, always: a payment provider's frames on the site, or the site itself.
+  setCaption(reply.into ? `Into ${reply.into} on ${reply.site}` : `On ${reply.site}`)
   say(reply.verify ? "Deadbolt may ask for Touch ID." : "")
   if (query) for (const [i, r] of Array.from(rowsEl.querySelectorAll<HTMLElement>("button.row")).entries()) r.hidden = !matches(accounts[i], query)
   const left = visible()

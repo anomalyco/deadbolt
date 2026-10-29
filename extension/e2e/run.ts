@@ -434,7 +434,7 @@ const countries = `<option value="">Country</option><option value="CA">Canada</o
 const sel = (id: string, label: string, options: string, extra = "") => `<label for="${id}">${label}</label><select id="${id}" name="${id}"${extra}>${options}</select>`
 const FORMS: Record<string, string> = {
   // A US shipping address, with autocomplete tokens.
-  tokens: `<h1>Shipping</h1><form>
+  tokens: `<style>main{margin-top:24px}#tokens label{margin:4px 0 2px}#tokens input,#tokens select{height:30px}</style><h1>Shipping</h1><form id="tokens">
     <label for="ship-name">Full name</label><input id="ship-name" autocomplete="shipping name">
     <label for="ship-a1">Address</label><input id="ship-a1" autocomplete="shipping address-line1">
     <label for="ship-a2">Apartment</label><input id="ship-a2" autocomplete="shipping address-line2">
@@ -443,6 +443,9 @@ const FORMS: Record<string, string> = {
     <label for="ship-zip">ZIP</label><input id="ship-zip" autocomplete="shipping postal-code">
     ${sel("ship-country", "Country", countries, ` autocomplete="shipping country"`)}
     <label for="ship-tel">Phone</label><input id="ship-tel" type="tel" autocomplete="shipping tel">
+    <input id="ship-org" autocomplete="shipping organization" style="width:24px;height:12px;padding:0">
+    <div style="position:relative"><input id="ship-a3" autocomplete="shipping address-line3"><div style="position:absolute;inset:0;background:#f4f4f5"></div></div>
+    <div style="height:900px"></div><label for="ship-email">Email</label><input id="ship-email" type="email" autocomplete="shipping email">
     <button type="button">Continue</button></form>`,
   // The same without tokens, in German, the name split in two, the region and country as selects.
   labels: `<h1>Lieferadresse</h1><form>
@@ -3034,11 +3037,15 @@ async function formsSurface(scheme: Scheme) {
     const menu = await formsMenu(run, page, "#ship-name", "/forms/tokens")
     if (menu) {
       check((await menu.locator(".row .title").allTextContents()).join(",") === "Home,Work", "an address field lists the identities")
-      check((await menu.locator(".row .sub").first().textContent()) === "Kit Langton · 123 Main St, Brooklyn", "with their summary")
+      const sub = await menu.locator(".row .sub").first().textContent()
+      check(sub === "Fills name, phone, address · Kit Langton · 123 Main St, Brooklyn", `with what each fills and its summary (${sub})`)
       await shotAround(page, `forms-address-${scheme}`, menu, "#ship-name")
       check((await pickRow(menu, "Home")) === "ok", "picking an identity says Filled")
       const got = await values(page, ["ship-name", "ship-a1", "ship-a2", "ship-city", "ship-state", "ship-zip", "ship-country", "ship-tel"])
       check(JSON.stringify(got) === JSON.stringify(["Kit Langton", "123 Main St", "Apt 4", "Brooklyn", "NY", "11201", "US", "+14155550123"]), `the whole address fills, selects included (${got.join(" | ")})`)
+      const skipped = await values(page, ["ship-org", "ship-a3", "ship-email"])
+      check(skipped.every((v) => !v), `a tiny field, a covered one and one off screen get nothing (${skipped.join(" | ")})`)
+      check((await page.evaluate(() => scrollY)) === 0, "and the page isn't scrolled to fill")
       const asked = (await formFills(run))[0]
       check(!!asked && !asked.fields.includes("number") && !asked.fields.includes("birthday") && asked.fields.includes("phone"), `fill-form asks only for what the fields need (${asked?.fields.join(",")})`)
     }
@@ -3067,10 +3074,23 @@ async function formsShapes() {
   const page = await run.context.newPage()
   try {
     await page.goto(`${site}/forms/labels`)
+    // What the user types themselves stays: the city, typed before the pick.
+    await formsFound(run, page, "/forms/labels")
+    await page.click("#ort")
+    await Bun.sleep(400)
+    await page.keyboard.type("Berlin")
+    await page.keyboard.press("Escape")
     const menu = await formsMenu(run, page, "#vn", "/forms/labels")
     if (menu && (await pickRow(menu, "Home")) === "ok") {
       const got = await values(page, ["vn", "nn", "str", "plz", "ort", "bl", "land"])
-      check(JSON.stringify(got) === JSON.stringify(["Kit", "Langton", "123 Main St", "11201", "Brooklyn", "NY", "US"]), `a labels-only address fills, the name split, region and country selects matched (${got.join(" | ")})`)
+      check(JSON.stringify(got) === JSON.stringify(["Kit", "Langton", "123 Main St", "11201", "Berlin", "NY", "US"]), `a labels-only address fills, the name split, region and country selects matched, the typed city kept (${got.join(" | ")})`)
+      await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+      // Another pick replaces what Deadbolt filled, never what was typed.
+      const again = await formsMenu(run, page, "#vn", "/forms/labels")
+      if (again && (await pickRow(again, "Work")) === "ok") {
+        const next = await values(page, ["str", "plz", "ort", "bl"])
+        check(JSON.stringify(next) === JSON.stringify(["1 Market St", "94105", "Berlin", "CA"]), `picking another identity replaces Deadbolt's values, not the user's (${next.join(" | ")})`)
+      } else check(false, "a second pick fills")
     } else check(false, "the labels-only address fills")
 
     await page.goto(`${site}/forms/card-selects`)
@@ -3119,8 +3139,20 @@ async function formsFrames() {
         check((await pickRow(menu, "Visa")) === "ok", "picking the card says Filled")
         const got = await values(frame, ["cardnumber", "exp-date", "cvc"])
         check(JSON.stringify(got) === JSON.stringify(["4242424242424242", "08 / 28", "123"]), `the card fills into the provider's frame (${got.join(" | ")})`)
-        check((await page.inputValue("#holder")) === "Kit Langton", "and the page's own name-on-card box")
-        check((await formFills(run)).length === 1, "with one fill-form for both")
+        check((await page.inputValue("#holder")) === "", "but not the page's own name-on-card box: one pick, one party")
+        const asked = (await formFills(run)).at(-1)
+        check(JSON.stringify(asked?.fields.sort()) === JSON.stringify(["cvv", "expiry", "number"]), `fill-form asks only for the provider frame's fields (${asked?.fields.join(",")})`)
+        await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
+        // From the page's own field: the page only, never the provider's frame.
+        const own = await formsMenu(run, page, "#holder", "/forms/stripe")
+        if (own) {
+          check(((await own.locator("#caption").textContent()) ?? "").trim() === "On localhost", "the page's own card menu names only the site")
+          await frame.fill("#cardnumber", "")
+          check((await pickRow(own, "Visa")) === "ok", "picking the card from the page's field fills")
+          check((await page.inputValue("#holder")) === "Kit Langton", "the page's name-on-card box")
+          check((await frame.inputValue("#cardnumber")) === "", "and nothing goes into the provider's frame from it")
+          check(!(await formFills(run)).at(-1)?.fields.includes("number"), "nor is the number asked for")
+        }
       }
     }
 

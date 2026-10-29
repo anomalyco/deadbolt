@@ -817,8 +817,11 @@ surface under it, on the logins' rules: only right after the user's own
 click or keypress, a token bound to the one menu document and the field's
 document, the half second of rest and the visibility checks before a pick
 counts, and Enter only after the user came into the menu themselves. An
-identity field lists identities ("Home · Kit Langton · 123 Main St,
-Brooklyn"), a card field lists cards ("Visa ••4242 · 08/28") and, when the
+identity field lists identities, each with what it will fill of the
+section and its summary ("Home: Fills name, phone, address · Kit Langton ·
+123 Main St, Brooklyn"); a card field lists cards ("Visa ••4242 · 08/28").
+The caption names where a pick goes: "On shop.com", or "Into Stripe on
+shop.com" from a provider's frame. A card field also says, when the
 host says Touch ID is on (`canVerify`), that Deadbolt may ask for it. Only
 items with at least one value the section's fields need are listed (from
 the reply's `fields`). Nothing shows while the host doesn't list the
@@ -839,6 +842,15 @@ birthday whole (in the order a placeholder shows) or in parts, an expiry as
 number with spaces when the placeholder shows groups, or one slice per box
 (all the boxes or none). A select with no matching option is left alone.
 
+An identity goes only into fields the user can see as the page stands:
+nothing is scrolled into view to fill it, and a field smaller than 40×16
+CSS pixels, not wholly on screen, or covered at its middle (Deadbolt's own
+pill aside) is skipped, so a page can't collect an address through boxes
+tucked out of sight. The menu's "Fills …" counts only those fields. A field
+holding what the user typed themselves is never overwritten (the same keyed
+digest of the last trusted input as for logins); a value Deadbolt filled
+before is, so picking Work after Home replaces Home's values.
+
 A card's number and security code make the agent ask for Touch ID; the
 extension waits up to 90 seconds for that answer with the pill on
 "Filling…". Turned down, nothing is written, not even the cardholder's
@@ -857,7 +869,7 @@ cross-origin frame, only when:
   | -------------- | -------------------------------------------------------------------------------- |
   | Stripe         | `js.stripe.com`                                                                  |
   | Braintree      | `assets.braintreegateway.com`                                                    |
-  | PayPal         | `www.paypal.com` (card fields)                                                   |
+  | PayPal         | `www.paypal.com`, only paths starting `/smart/card-field` (the JS SDK's hosted CardFields) |
   | Adyen          | `checkoutshopper-live.adyen.com`, `checkoutshopper-test.adyen.com` and regional `checkoutshopper-live-<region>.adyen.com` |
   | Checkout.com   | `js.checkout.com`                                                                |
   | Square         | `web.squarecdn.com`, `sandbox.web.squarecdn.com`, `pci-connect.squareup.com`     |
@@ -870,7 +882,11 @@ purpose (PCI scope), so the number can only be typed into their frame. A
 cross-origin frame is otherwise someone else's content, an ad or a widget,
 and gets no card; the list is short and exact (no suffix matching) so a
 look-alike host gets nothing, and https on both sides keeps the card off
-the network in the clear. Sandboxed and opaque frames, incognito tabs and
+the network in the clear. PayPal is the one provider whose card frames
+share a host with its whole site, so for it the path counts too: only the
+hosted card fields take a card. That path is what PayPal's SDK uses today
+and isn't a documented contract; if it moves, PayPal card fields stop
+filling (closed, not open) until the list is updated. Sandboxed and opaque frames, incognito tabs and
 every other cross-origin frame get nothing, identity or card.
 
 A field in a frame can't open the surface itself (the page around the frame
@@ -879,11 +895,14 @@ its own viewport; the background carries that box up through every frame
 above, with the checks a fill makes at each one (`boxesInTop` in
 `bg/frames.ts`), and opens the surface in the top page under it, following
 the page's scroll. A card's surface names both when a provider's frame
-takes it: "Into Stripe on shop.com". A pick fills the card into the frame
-it was opened from and every other frame of the tab that reported card
-fields and may get a card (a Braintree page has a frame per field; the
-cardholder's name is often in the page itself), with one `fill-form` and
-so one Touch ID prompt. Each frame below the top page fills only if all
+takes it: "Into Stripe on shop.com". One pick hands a card to one party
+only. From a provider's frame, it fills that frame and the same
+provider's other frames that reported card fields (a Braintree page has a
+frame per field), never the page around them or another provider. From the
+top page or a frame of its site, it fills the top page and that site's
+frames, never a provider's frame; a cardholder's name in the page and the
+number in Stripe's frame are two picks. Each pick is one `fill-form`, so
+one Touch ID prompt. Each frame below the top page fills only if all
 its fields show through every frame above, checked before the host is asked
 and again once the values are in hand. While those checks run, the pill
 steps out of the top layer for a moment (Chromium reads nothing as fully
