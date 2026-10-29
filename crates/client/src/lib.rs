@@ -77,6 +77,8 @@ async fn check_agent(stream: &UnixStream) -> Result<(), Error> {
 pub struct AgentError {
     pub code: ErrorCode,
     pub message: String,
+    /// With `not-granted`: what the user would have to allow.
+    pub grant: Option<protocol::NotGranted>,
 }
 
 impl fmt::Display for AgentError {
@@ -217,16 +219,24 @@ where
                 // Events that arrive while one is being answered wait their turn.
                 let answer = loop {
                     tokio::select! {
-                        biased;
-                        answer = &mut answer => break answer,
-                        message = read_message(&mut lines) => match message? {
-                            Message::Ok { reply } => return Ok(reply),
-                            Message::Error { code, message } => {
-                                return Err(AgentError { code, message }.into());
+                                biased;
+                                answer = &mut answer => break answer,
+                                message = read_message(&mut lines) => match message? {
+                                    Message::Ok { reply } => return Ok(reply),
+                                    Message::Error {
+                                        code,
+                                        message,
+                                        grant,
+                                    } => {
+                                        return Err(AgentError {
+                        code,
+                        message,
+                        grant,
+                    }.into());
+                                    }
+                                    event => queued.push_back(event),
+                                },
                             }
-                            event => queued.push_back(event),
-                        },
-                    }
                 };
                 if let Some(answer) = answer.map_err(|e| Error::Event(e.into()))? {
                     write.write_all(&encode_line(&Answer { answer })?).await?;
@@ -234,7 +244,18 @@ where
             }
             Message::Change { change } => return Err(Error::UnexpectedChange(change)),
             Message::Ok { reply } => return Ok(reply),
-            Message::Error { code, message } => return Err(AgentError { code, message }.into()),
+            Message::Error {
+                code,
+                message,
+                grant,
+            } => {
+                return Err(AgentError {
+                    code,
+                    message,
+                    grant,
+                }
+                .into());
+            }
         }
     }
 }
@@ -347,7 +368,16 @@ impl Watch {
         match serde_json::from_slice::<Message>(&line).map_err(Error::InvalidReply)? {
             Message::Change { change } => Ok(Some(change)),
             Message::Ok { .. } => Ok(None),
-            Message::Error { code, message } => Err(AgentError { code, message }.into()),
+            Message::Error {
+                code,
+                message,
+                grant,
+            } => Err(AgentError {
+                code,
+                message,
+                grant,
+            }
+            .into()),
             Message::Event { event } => Err(Error::UnexpectedEvent(event)),
         }
     }
@@ -794,6 +824,7 @@ mod tests {
                 let declined = Message::Error {
                     code: ErrorCode::Failed,
                     message: "pairing confirmation code was not confirmed".into(),
+                    grant: None,
                 };
                 write
                     .write_all(&encode_line(&declined).unwrap())

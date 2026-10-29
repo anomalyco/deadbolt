@@ -51,7 +51,7 @@ pub use caller::{
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
 
-pub const PROTOCOL_VERSION: u32 = 14;
+pub const PROTOCOL_VERSION: u32 = 15;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -368,14 +368,166 @@ pub enum Command {
         title: String,
         field: String,
     },
+    /// Agent sign-ins (`docs/agent-control.md`, "Standing grants"): pairs a
+    /// new agent client, such as Browse's relay, and replies
+    /// `agent-client-added` with its token, shown once. Needs the user:
+    /// Touch ID raised by the agent, or `passphrase`, which the CLI reads
+    /// from the terminal or `--passphrase-stdin`, never the environment.
+    /// Refused (`forbidden`) to a caller Deadbolt takes for an AI.
+    AgentClientAdd {
+        name: String,
+        passphrase: Option<Zeroizing<String>>,
+    },
+    /// The paired agent clients; replies `agent-clients`.
+    AgentClientList,
+    /// Unpairs a client and drops its grants; replies `done`.
+    AgentClientRemove {
+        id: String,
+    },
+    /// Lets `client_id` fill `fields` of the logins on `site` (a
+    /// registrable domain, or an exact origin with its scheme), or only of
+    /// `login` (a login's id, short id, title or username on that site),
+    /// and sign in with that site's passkeys if `passkeys`, until
+    /// `expires_at` (Unix seconds; `None` never). Needs the user as
+    /// `AgentClientAdd` does, and refuses AIs the same way. Replies
+    /// `agent-grant`.
+    AgentGrantSet {
+        client_id: String,
+        site: String,
+        login: Option<String>,
+        fields: Vec<Fill>,
+        passkeys: bool,
+        expires_at: Option<u64>,
+        passphrase: Option<Zeroizing<String>>,
+    },
+    /// Every grant, expired ones too; replies `agent-grants`.
+    AgentGrantList,
+    /// Removes a grant; replies `done`.
+    AgentGrantRemove {
+        id: String,
+    },
+    /// From a paired client: the logins on the site of the page at
+    /// `origin`, without values, and what its grants cover of each;
+    /// replies `agent-logins`. Empty, with `granted` false, when no live
+    /// grant of the client covers the site.
+    AgentLogins {
+        client: ClientAuth,
+        origin: String,
+    },
+    /// From a paired client: the values `want` names of `login` for the
+    /// frame at `origin`, only if live grants cover the client, the site,
+    /// the login and every wanted field (else `not-granted` naming the site
+    /// and login), and one of the login's URLs is on the site (else
+    /// `domain-mismatch`). A one-time password comes as its current code.
+    /// Replies `site-fill`.
+    AgentFill {
+        client: ClientAuth,
+        origin: String,
+        login: LoginRef,
+        want: Vec<Fill>,
+    },
+    /// From a paired client: signs `challenge` with a passkey for `rp_id`
+    /// (the host of `origin` when `None`) that a live grant with
+    /// `passkeys` covers: the first of `allow_credentials` saved here, or
+    /// with none, the site's only one. Client data is built from
+    /// `origin`. User presence is set (the grant is the user's standing
+    /// consent), user verification never, so `required` fails. Replies
+    /// `passkey-assertion` with `verified` false.
+    AgentPasskeyGet {
+        client: ClientAuth,
+        origin: String,
+        rp_id: Option<String>,
+        challenge: String,
+        #[serde(default)]
+        allow_credentials: Vec<String>,
+        user_verification: Verify,
+    },
 }
 
 impl Command {
     /// Whether the request carries the vault passphrase, so the client must
     /// check who it is talking to before sending it.
     pub fn carries_passphrase(&self) -> bool {
-        matches!(self, Self::Setup { .. } | Self::Unlock { .. })
+        match self {
+            Self::Setup { .. } | Self::Unlock { .. } => true,
+            Self::AgentClientAdd { passphrase, .. } | Self::AgentGrantSet { passphrase, .. } => {
+                passphrase.is_some()
+            }
+            _ => false,
+        }
     }
+}
+
+/// A paired agent client's credentials, on every request it makes: its id
+/// and the token `agent-client-add` gave it (64 hex digits). The agent keeps
+/// only the token's SHA-256.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClientAuth {
+    pub id: String,
+    pub token: Secret,
+}
+
+/// A paired agent client, never its token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentClientInfo {
+    pub id: String,
+    pub name: String,
+    /// Unix seconds.
+    pub created: u64,
+    /// When it last filled or signed in, Unix seconds.
+    pub last_used: Option<u64>,
+}
+
+/// What a standing grant lets one client do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentGrantInfo {
+    pub id: String,
+    pub client_id: String,
+    /// The client's name, if it is still paired.
+    pub client_name: Option<String>,
+    /// A registrable domain (`github.com`) or an exact origin
+    /// (`https://app.example.com`).
+    pub site: String,
+    /// One login only, else every login on the site.
+    pub login: Option<LoginRef>,
+    /// That login's username, else its title, when the grant was made.
+    pub login_label: Option<String>,
+    pub fields: Vec<Fill>,
+    pub passkeys: bool,
+    /// Unix seconds.
+    pub created: u64,
+    pub expires_at: Option<u64>,
+    /// Whether it has expired.
+    pub expired: bool,
+}
+
+/// A login an agent client may be shown, without values, and what its
+/// grants cover of it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentLogin {
+    #[serde(rename = "ref")]
+    pub login: LoginRef,
+    pub title: String,
+    pub username: Option<String>,
+    pub has_password: bool,
+    pub has_totp: bool,
+    /// A passkey for the page's relying party, for this login's username.
+    pub has_passkey: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_in: Option<SignIn>,
+    /// The fields live grants let this client fill; empty if none.
+    pub fields: Vec<Fill>,
+    /// Whether a live grant lets this client sign in with its passkey.
+    pub passkeys: bool,
+}
+
+/// What a `not-granted` error names, so the client can say what to allow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotGranted {
+    /// The page's registrable domain.
+    pub site: String,
+    /// The login's username, else its title; `None` for the whole site.
+    pub login: Option<String>,
 }
 
 /// What a site asks of user verification in a passkey ceremony.
@@ -599,6 +751,9 @@ pub enum Message {
     Error {
         code: ErrorCode,
         message: String,
+        /// With `not-granted`: what the user would have to allow.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        grant: Option<NotGranted>,
     },
 }
 
@@ -651,6 +806,13 @@ pub enum ErrorCode {
     Version,
     /// A site's rules allow only weak generated passwords.
     Weak,
+    /// The agent client isn't paired (unknown or removed id, wrong token),
+    /// or the caller may not do this (an AI pairing a client or granting).
+    Forbidden,
+    /// No live grant covers this client, site, login and field.
+    NotGranted,
+    /// Too many requests from this client; try again shortly.
+    RateLimited,
     Failed,
 }
 
@@ -780,6 +942,27 @@ pub enum Reply {
     },
     Activity {
         entries: Vec<ActivityEntry>,
+    },
+    /// A new agent client and its token, shown only now.
+    AgentClientAdded {
+        client: AgentClientInfo,
+        token: Secret,
+    },
+    AgentClients {
+        clients: Vec<AgentClientInfo>,
+    },
+    AgentGrant {
+        grant: AgentGrantInfo,
+    },
+    AgentGrants {
+        grants: Vec<AgentGrantInfo>,
+    },
+    AgentLogins {
+        /// The page's site: its registrable domain.
+        site: String,
+        /// Whether any live grant of the client covers the site.
+        granted: bool,
+        logins: Vec<AgentLogin>,
     },
 }
 

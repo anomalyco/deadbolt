@@ -63,7 +63,7 @@ const MAX_LEARN_LOGS: usize = 50;
 const LEARN_LOG_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// A token bucket: `capacity` at once, refilled one per `every`.
-pub(super) struct Bucket {
+pub(crate) struct Bucket {
     capacity: u32,
     every: Duration,
     tokens: u32,
@@ -71,7 +71,7 @@ pub(super) struct Bucket {
 }
 
 impl Bucket {
-    pub(super) fn new((capacity, every): (u32, Duration), now: Instant) -> Self {
+    pub(crate) fn new((capacity, every): (u32, Duration), now: Instant) -> Self {
         Self {
             capacity,
             every,
@@ -80,7 +80,7 @@ impl Bucket {
         }
     }
 
-    pub(super) fn take(&mut self, now: Instant) -> bool {
+    pub(crate) fn take(&mut self, now: Instant) -> bool {
         let earned = now.saturating_duration_since(self.since).as_nanos() / self.every.as_nanos();
         if earned > 0 {
             let earned = u32::try_from(earned).unwrap_or(u32::MAX);
@@ -335,7 +335,14 @@ impl From<anyhow::Error> for Refusal {
             Some(ErrorCode::DomainMismatch) => Code::DomainMismatch,
             Some(ErrorCode::Exists) => Code::Exists,
             Some(ErrorCode::Weak) => Code::Weak,
-            Some(ErrorCode::Version | ErrorCode::Failed) => Code::Failed,
+            Some(ErrorCode::RateLimited) => Code::RateLimited,
+            // Agent sign-ins only; the browser host never asks for them.
+            Some(
+                ErrorCode::Version
+                | ErrorCode::Forbidden
+                | ErrorCode::NotGranted
+                | ErrorCode::Failed,
+            ) => Code::Failed,
             None if matches!(
                 error.downcast_ref::<deadbolt_client::Error>(),
                 Some(deadbolt_client::Error::Connect(_))
@@ -1311,6 +1318,7 @@ mod tests {
         let refused = Message::Error {
             code: ErrorCode::Version,
             message: "the agent speaks protocol 6".into(),
+            grant: None,
         };
         fake_agent(&paths, vec![vec![refused], vec![]], true);
         let (pushed, announce) = pushes(paths, false, Duration::from_millis(300)).await;

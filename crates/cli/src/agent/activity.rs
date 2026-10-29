@@ -87,6 +87,17 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::SendWait { .. } => (T::Always, "send-wait"),
         C::ActivityList { .. } => (T::Look, "activity-list"),
         C::ActivityReport { .. } => (T::Always, "activity-report"),
+        // Pairing and granting need the user, and are refused to AIs;
+        // removing only narrows what agents may do.
+        C::AgentClientAdd { .. } => (T::Never, "agent-client-add"),
+        C::AgentClientList => (T::Look, "agent-client-list"),
+        C::AgentClientRemove { .. } => (T::Always, "agent-client-remove"),
+        C::AgentGrantSet { .. } => (T::Never, "agent-grant-set"),
+        C::AgentGrantList => (T::Look, "agent-grant-list"),
+        C::AgentGrantRemove { .. } => (T::Always, "agent-grant-remove"),
+        C::AgentLogins { .. } => (T::Agent, "agent-logins"),
+        C::AgentFill { .. } => (T::Agent, "agent-fill"),
+        C::AgentPasskeyGet { .. } => (T::Agent, "agent-passkey-get"),
     }
 }
 
@@ -96,6 +107,8 @@ pub struct Draft {
     command: &'static str,
     items: Vec<ActivityItem>,
     fields: Vec<String>,
+    /// The agent client's id, for agent sign-ins.
+    client: Option<String>,
 }
 
 fn named(vault: &Option<String>, query: &[String]) -> Vec<ActivityItem> {
@@ -138,22 +151,34 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
     if matches!(command, Command::ActivityList { .. }) {
         return None;
     }
-    let recorded = match class {
-        CallerClass::App => false,
-        CallerClass::BrowserHost => matches!(
-            command,
-            Command::SiteFill { .. }
-                | Command::SiteGenerate { .. }
-                | Command::SiteGenerateKeep { .. }
-                | Command::SiteSave { .. }
-                | Command::PasskeyCreate { .. }
-                | Command::PasskeyGet { .. }
-        ),
-        CallerClass::Caller => !matches!(
-            command,
-            Command::Status | Command::Watch { .. } | Command::AppActivate { .. }
-        ),
-    };
+    // Agent sign-ins, and what changes them, are entries from anyone.
+    let agent = matches!(
+        command,
+        Command::AgentClientAdd { .. }
+            | Command::AgentClientRemove { .. }
+            | Command::AgentGrantSet { .. }
+            | Command::AgentGrantRemove { .. }
+            | Command::AgentLogins { .. }
+            | Command::AgentFill { .. }
+            | Command::AgentPasskeyGet { .. }
+    );
+    let recorded = agent
+        || match class {
+            CallerClass::App => false,
+            CallerClass::BrowserHost => matches!(
+                command,
+                Command::SiteFill { .. }
+                    | Command::SiteGenerate { .. }
+                    | Command::SiteGenerateKeep { .. }
+                    | Command::SiteSave { .. }
+                    | Command::PasskeyCreate { .. }
+                    | Command::PasskeyGet { .. }
+            ),
+            CallerClass::Caller => !matches!(
+                command,
+                Command::Status | Command::Watch { .. } | Command::AppActivate { .. }
+            ),
+        };
     if !recorded {
         return None;
     }
@@ -216,6 +241,45 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::PasskeyCreate { origin, .. } => {
             (named(&None, std::slice::from_ref(origin)), Vec::new())
         }
+        Command::AgentClientAdd { name, .. } => {
+            (named(&None, std::slice::from_ref(name)), Vec::new())
+        }
+        Command::AgentClientRemove { id } | Command::AgentGrantRemove { id } => {
+            (named(&None, std::slice::from_ref(id)), Vec::new())
+        }
+        Command::AgentGrantSet {
+            site,
+            login,
+            fields,
+            passkeys,
+            ..
+        } => {
+            let what = match login {
+                Some(login) => format!("{login} on {site}"),
+                None => site.clone(),
+            };
+            let mut names: Vec<String> = fields.iter().map(fill_name).collect();
+            if *passkeys {
+                names.push("passkey".into());
+            }
+            (named(&None, &[what]), names)
+        }
+        Command::AgentLogins { origin, .. } => {
+            (named(&None, std::slice::from_ref(origin)), Vec::new())
+        }
+        Command::AgentFill {
+            origin,
+            login: target,
+            want,
+            ..
+        } => (
+            login(&target.vault, &target.item, origin),
+            want.iter().map(fill_name).collect(),
+        ),
+        Command::AgentPasskeyGet { origin, .. } => (
+            named(&None, std::slice::from_ref(origin)),
+            vec!["passkey".into()],
+        ),
         // The page, and that a password was made for it: never the password
         // or its id.
         Command::SiteGenerate { origin, .. }
@@ -227,11 +291,18 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         ),
         _ => (Vec::new(), Vec::new()),
     };
+    let client = match command {
+        Command::AgentLogins { client, .. }
+        | Command::AgentFill { client, .. }
+        | Command::AgentPasskeyGet { client, .. } => Some(client.id.clone()),
+        _ => None,
+    };
     Some(Draft {
         tier,
         command: name,
         items,
         fields,
+        client,
     })
 }
 
@@ -248,9 +319,18 @@ impl Draft {
                 self.learn(reply);
                 Outcome::Allowed
             }
-            Err(error) if code(error) == Some(ErrorCode::Locked) => Outcome::Locked,
-            Err(_) => Outcome::Failed,
+            Err(error) => match code(error) {
+                Some(ErrorCode::Locked) => Outcome::Locked,
+                Some(ErrorCode::Forbidden | ErrorCode::NotGranted | ErrorCode::RateLimited) => {
+                    Outcome::Refused
+                }
+                _ => Outcome::Failed,
+            },
         };
+        // An id the token didn't prove names no client.
+        if matches!(result, Err(error) if code(error) == Some(ErrorCode::Forbidden)) {
+            self.client = None;
+        }
         ActivityEntry {
             id: 0,
             time,
@@ -261,6 +341,7 @@ impl Draft {
             fields: self.fields,
             outcome,
             more: 0,
+            client: self.client,
         }
     }
 
@@ -331,6 +412,7 @@ pub fn reported(
         fields: vec![field],
         outcome: Outcome::Allowed,
         more: 0,
+        client: None,
     }
 }
 
@@ -346,6 +428,7 @@ fn past_budget(dropped: Dropped) -> ActivityEntry {
         fields: Vec::new(),
         outcome: Outcome::Allowed,
         more: dropped.count,
+        client: None,
     }
 }
 
@@ -367,12 +450,18 @@ impl Agent {
         let draft = draft(&request.command, caller.class);
         let mut result = match request.command {
             command @ Command::ActivityReport { .. } => self.report(&caller, command),
-            command => self.dispatch(command, conv).await,
+            command @ (Command::AgentClientAdd { .. } | Command::AgentGrantSet { .. }) => {
+                self.agents_admin(&caller, command, conv).await
+            }
+            command => self.clone().dispatch(command, conv).await,
         };
         if let Ok(Reply::Status(status)) = &mut result {
             status.caller = caller.clone();
         }
-        let entry = draft.map(|draft| draft.finish(caller, session::now(), &result));
+        let mut entry = draft.map(|draft| draft.finish(caller, session::now(), &result));
+        if let Some(entry) = &mut entry {
+            self.name_agent_entry(entry);
+        }
         (result, entry)
     }
 

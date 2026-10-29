@@ -56,7 +56,10 @@ fn passkey_ref(vault: &VaultId, item: &ItemId) -> LoginRef {
 }
 
 /// Every passkey for the relying party `rp`, in every vault.
-fn passkeys<'a>(s: &'a Loaded, rp: &'a str) -> impl Iterator<Item = (VaultId, Item)> + 'a {
+pub(super) fn passkeys<'a>(
+    s: &'a Loaded,
+    rp: &'a str,
+) -> impl Iterator<Item = (VaultId, Item)> + 'a {
     s.vaults.iter().flat_map(move |(id, vault)| {
         vault
             .items()
@@ -355,7 +358,7 @@ impl Agent {
 
     /// Whether a ceremony now can verify the user: Touch ID is on, the
     /// Mac has it, and this store has a current enrollment.
-    fn can_verify(&self) -> bool {
+    pub(super) fn can_verify(&self) -> bool {
         self.touch_id_on()
             && self
                 .with(|s| Ok(s.store.biometric_token()?))
@@ -375,7 +378,12 @@ impl Agent {
     /// when the site discourages it or Touch ID can't verify; an error if
     /// the site requires it then, or the user cancels, or the client hangs
     /// up (which cancels the prompt).
-    async fn verify_user(&self, conv: &Conversation, verify: Verify, reason: &str) -> Result<bool> {
+    pub(super) async fn verify_user(
+        &self,
+        conv: &Conversation,
+        verify: Verify,
+        reason: &str,
+    ) -> Result<bool> {
         if verify == Verify::Discouraged {
             return Ok(false);
         }
@@ -451,7 +459,7 @@ impl Agent {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use p256::ecdsa::signature::Verifier;
     use p256::ecdsa::{Signature, VerifyingKey};
     use p256::pkcs8::DecodePublicKey;
@@ -659,7 +667,7 @@ mod tests {
         assert_eq!(list(&s, "https://example.com", None).unwrap().1.len(), 2);
     }
 
-    mod agent {
+    pub(in crate::agent) mod agent {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::time::Duration;
 
@@ -671,13 +679,13 @@ mod tests {
         use super::super::super::{sync, tests::test_paths};
         use super::*;
 
-        struct Fixture {
-            agent: Arc<Agent>,
-            key: [u8; 32],
+        pub(in crate::agent) struct Fixture {
+            pub(in crate::agent) agent: Arc<Agent>,
+            pub(in crate::agent) key: [u8; 32],
             _dir: tempfile::TempDir,
         }
 
-        async fn unlocked() -> Fixture {
+        pub(in crate::agent) async fn unlocked() -> Fixture {
             let dir = tempfile::tempdir().unwrap();
             let fast = deadbolt_store::KdfParams {
                 m_cost_kib: 64,
@@ -711,7 +719,7 @@ mod tests {
             }
         }
 
-        fn conversation() -> (Conversation, watch::Sender<bool>) {
+        pub(in crate::agent) fn conversation() -> (Conversation, watch::Sender<bool>) {
             let (socket, _client) = UnixStream::pair().unwrap();
             let (_, write) = socket.into_split();
             let (closed, rx) = watch::channel(false);

@@ -561,6 +561,265 @@ fn whoami_and_activity_name_the_caller_never_values() {
     );
 }
 
+/// Runs deadbolt with `input` on stdin, reparented away from the test's
+/// process tree, as from a person's own terminal: the tests may run under
+/// an AI host such as OpenCode, whom the agent refuses pairing and grants.
+fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, String) {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static RUNS: AtomicUsize = AtomicUsize::new(0);
+    let n = RUNS.fetch_add(1, Ordering::SeqCst);
+    let file = |what: &str| device.path(&format!("detached-{n}.{what}"));
+    let script = r#"( sleep 0.5; printf %s "$DB_INPUT" | "$0" "$@" >"$DB_OUT" 2>"$DB_ERR"; echo $? >"$DB_CODE.tmp"; mv "$DB_CODE.tmp" "$DB_CODE" ) >/dev/null 2>&1 &"#;
+    let mut sh_args = vec!["-c", script, BIN];
+    sh_args.extend_from_slice(args);
+    let mut cmd = device.cmd_of("/bin/sh".as_ref(), &sh_args);
+    cmd.env("DB_INPUT", input)
+        .env("DB_OUT", file("out"))
+        .env("DB_ERR", file("err"))
+        .env("DB_CODE", file("code"))
+        .env_remove("OPENCODE_SESSION_ID")
+        .env_remove("DEADBOLT_CALLER");
+    assert!(cmd.status().unwrap().success());
+    eventually("the detached deadbolt", || file("code").exists());
+    let read = |what| std::fs::read_to_string(file(what)).unwrap();
+    let (out, err) = (read("out"), read("err"));
+    eprintln!("$ (detached) {args:?}\n{out}{err}");
+    (read("code").trim() == "0", out, err)
+}
+
+/// One request to the agent, as an agent client sends it.
+fn agent_request(device: &Device, request: serde_json::Value) -> serde_json::Value {
+    use std::os::unix::net::UnixStream;
+    let paths = deadbolt_client::Paths::from_vars(|name| match name {
+        "DEADBOLT_HOME" => Some(device.path("home").into()),
+        "XDG_RUNTIME_DIR" => Some(device.path("run").into()),
+        "XDG_STATE_HOME" => Some(device.path("state").into()),
+        "XDG_CONFIG_HOME" => Some(device.path("config").into()),
+        _ => None,
+    });
+    let mut socket = UnixStream::connect(&paths.socket).unwrap();
+    let mut request = request;
+    request["v"] = deadbolt_client::protocol::PROTOCOL_VERSION.into();
+    socket.write_all(format!("{request}\n").as_bytes()).unwrap();
+    let mut reply = String::new();
+    socket.read_to_string(&mut reply).unwrap();
+    serde_json::from_str(&reply).unwrap()
+}
+
+fn agent_error(reply: &serde_json::Value, code: &str) {
+    assert_eq!(reply["type"], "error", "{reply}");
+    assert_eq!(reply["code"], code, "{reply}");
+}
+
+#[test]
+fn agents_sign_in_unattended_only_where_allowed() {
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            "username=kit",
+            "password=hunter2-hunter2",
+            "url=github.com",
+            &format!("otp={OTP_SECRET}"),
+        ],
+    );
+    let proof = format!("{PASSPHRASE}\n");
+
+    // An AI (here, by its claim) can't pair a client, passphrase or not.
+    let out = a.with_stdin(
+        {
+            let mut cmd = a.cmd(&["--passphrase-stdin", "agents", "add-client", "browse"]);
+            cmd.env("OPENCODE_SESSION_ID", "ses_test");
+            cmd
+        },
+        &proof,
+    );
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI can't"));
+
+    // The user can, and the token is shown once.
+    let (ok, out, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "add-client",
+            "browse",
+            "--json",
+        ],
+        &proof,
+    );
+    assert!(ok);
+    let paired: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let client = serde_json::json!({"id": paired["id"], "token": paired["token"]});
+    assert_eq!(paired["token"].as_str().unwrap().len(), 64);
+    assert!(
+        !a.run(&["agents", "clients", "--json"])
+            .contains(paired["token"].as_str().unwrap())
+    );
+    let logins = |origin: &str| {
+        agent_request(
+            &a,
+            serde_json::json!({"cmd": "agent-logins", "client": client, "origin": origin}),
+        )
+    };
+    let fill = |origin: &str, login: &serde_json::Value, want: &[&str]| {
+        agent_request(
+            &a,
+            serde_json::json!({
+                "cmd": "agent-fill", "client": client, "origin": origin,
+                "login": login, "want": want,
+            }),
+        )
+    };
+
+    // Nothing allowed yet: the site is named, and nothing is listed.
+    let listed = logins("https://github.com");
+    assert_eq!(listed["reply"]["granted"], false, "{listed}");
+    assert_eq!(listed["reply"]["logins"], serde_json::json!([]));
+
+    // A wrong passphrase allows nothing.
+    let (ok, _, err) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow",
+            "github.com",
+            "--fields",
+            "username,password",
+        ],
+        "wrong\n",
+    );
+    assert!(!ok && err.contains("wrong passphrase"), "{err}");
+    let (ok, out, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow",
+            "www.github.com",
+            "--fields",
+            "username,password",
+        ],
+        &proof,
+    );
+    assert!(
+        ok && out.contains("github.com\tevery login\tusername,password"),
+        "{out}"
+    );
+    let listed = logins("https://github.com");
+    assert_eq!(listed["reply"]["granted"], true, "{listed}");
+    let login = &listed["reply"]["logins"][0];
+    assert_eq!(login["username"], "kit");
+    assert_eq!(login["has_totp"], true);
+    let github = login["ref"].clone();
+    let values = fill("https://github.com", &github, &["username", "password"]);
+    assert_eq!(
+        values["reply"]["values"]["password"], "hunter2-hunter2",
+        "{values}"
+    );
+    assert_eq!(values["reply"]["values"]["username"], "kit");
+
+    // The code isn't allowed: not-granted names the site and the login.
+    let refused = fill("https://github.com", &github, &["totp"]);
+    agent_error(&refused, "not-granted");
+    assert_eq!(
+        refused["grant"],
+        serde_json::json!({"site": "github.com", "login": "kit"})
+    );
+    // Another site's frame gets nothing.
+    agent_error(
+        &fill("https://evil.com", &github, &["password"]),
+        "not-granted",
+    );
+
+    let (ok, _, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow",
+            "github.com",
+            "--login",
+            "kit",
+            "--fields",
+            "totp",
+            "--expires",
+            "1h",
+        ],
+        &proof,
+    );
+    assert!(ok);
+    let code = fill("https://github.com", &github, &["totp"]);
+    let code = code["reply"]["values"]["totp"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()),
+        "{code}"
+    );
+    let grants = a.run(&["agents", "grants"]);
+    assert!(
+        grants.contains("github.com\tkit\ttotp\texpires in "),
+        "{grants}"
+    );
+
+    // Everything is in Activity, by client, never a value.
+    let activity = a.run(&["activity", "--json"]);
+    assert!(
+        !activity.contains("hunter2") && !activity.contains(&code),
+        "{activity}"
+    );
+    let fills: Vec<serde_json::Value> = activity
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .filter(|e: &serde_json::Value| e["command"] == "agent-fill")
+        .collect();
+    assert_eq!(fills.len(), 4, "{activity}");
+    assert!(fills.iter().all(|e| e["client"] == "browse"));
+    assert!(fills.iter().any(|e| e["outcome"] == "refused"));
+    assert!(
+        fills[0]["items"][0]["title"]
+            .as_str()
+            .unwrap()
+            .starts_with("GitHub (")
+    );
+
+    // Revoking the site grant leaves only the code.
+    let id = grants
+        .lines()
+        .find(|l| l.contains("every login"))
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        a.run(&["agents", "revoke", &id]).trim(),
+        format!("revoked {id}")
+    );
+    agent_error(
+        &fill("https://github.com", &github, &["password"]),
+        "not-granted",
+    );
+
+    // Locked, nothing fills.
+    a.run(&["lock"]);
+    agent_error(&fill("https://github.com", &github, &["totp"]), "locked");
+    a.run(&["unlock"]);
+
+    // A removed client is forbidden.
+    a.run(&["agents", "remove-client", "browse"]);
+    agent_error(&fill("https://github.com", &github, &["totp"]), "forbidden");
+    assert_eq!(a.run(&["agents", "grants"]), "");
+}
+
 #[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();

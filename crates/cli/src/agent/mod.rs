@@ -6,6 +6,7 @@ mod autofill;
 pub mod biometric;
 mod caller;
 mod generate;
+mod grants;
 mod items;
 mod mirror;
 mod pairing;
@@ -20,7 +21,7 @@ mod system;
 mod watch_tests;
 mod watchers;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File, TryLockError};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -127,6 +128,8 @@ pub struct Agent {
     /// Activity not stored yet: entries recorded while locked, and each
     /// caller's count against its limit.
     activity: Mutex<activity::Ledger>,
+    /// Each paired agent client's rate limit, by client id.
+    agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
     /// Deadbolt Send's endpoint, started by the first send.
     send_server: tokio::sync::Mutex<Option<deadbolt_send::Server>>,
     /// Set as the agent stops, ending sends and anyone waiting on one.
@@ -165,6 +168,7 @@ impl Agent {
             watchers: Watchers::default(),
             callers: caller::Callers::new(),
             activity: Mutex::default(),
+            agent_rates: Mutex::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
         })
@@ -309,7 +313,7 @@ mod tests {
             other => panic!("expected a password, got {other:?}"),
         }
         match ask(4, true).await {
-            Message::Error { code, message } => {
+            Message::Error { code, message, .. } => {
                 assert_eq!(code, ErrorCode::Failed);
                 assert_eq!(message, "a generated password must be 8 to 256 characters");
             }
@@ -349,7 +353,7 @@ mod tests {
                     let mut reply = String::new();
                     client.read_to_string(&mut reply).await.unwrap();
                     match serde_json::from_str::<Message>(&reply).unwrap() {
-                        Message::Error { code, message } => {
+                        Message::Error { code, message, .. } => {
                             assert!(matches!(code, ErrorCode::Failed));
                             assert_eq!(message, "request too large");
                         }
@@ -922,6 +926,7 @@ fn fail(code: ErrorCode, message: impl Into<String>) -> anyhow::Error {
     AgentError {
         code,
         message: message.into(),
+        grant: None,
     }
     .into()
 }
@@ -1204,10 +1209,12 @@ impl Agent {
                 Ok(error) => Message::Error {
                     code: error.code,
                     message: error.message,
+                    grant: error.grant,
                 },
                 Err(error) => Message::Error {
                     code: ErrorCode::Failed,
                     message: format!("{error:#}"),
+                    grant: None,
                 },
             },
         };
@@ -1250,6 +1257,10 @@ impl Agent {
                     | Command::SiteGenerateCheck { .. }
                     | Command::SiteGenerateDrop { .. }
                     | Command::AppActivate { .. }
+                    // An AI signing in unattended mustn't hold the vault open.
+                    | Command::AgentLogins { .. }
+                    | Command::AgentFill { .. }
+                    | Command::AgentPasskeyGet { .. }
             );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
         // and a lock stops it before it writes anything. Nor does waiting
@@ -1578,6 +1589,27 @@ impl Agent {
             command @ (Command::PasskeyList { .. }
             | Command::PasskeyCreate { .. }
             | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,
+            Command::AgentClientAdd { .. } | Command::AgentGrantSet { .. } => {
+                bail!("pairing and grants are answered with the caller")
+            }
+            Command::AgentClientList => Ok(Reply::AgentClients {
+                clients: self.with(|s| grants::list_clients(s))?,
+            }),
+            Command::AgentClientRemove { id } => {
+                let (id, _) = self.with(|s| grants::remove_client(s, &id))?;
+                self.forget_agent_client(&id);
+                Ok(Reply::Done)
+            }
+            Command::AgentGrantList => Ok(Reply::AgentGrants {
+                grants: self.with(|s| grants::list_grants(s, session::now()))?,
+            }),
+            Command::AgentGrantRemove { id } => {
+                self.with(|s| grants::remove_grant(s, &id))?;
+                Ok(Reply::Done)
+            }
+            command @ (Command::AgentLogins { .. }
+            | Command::AgentFill { .. }
+            | Command::AgentPasskeyGet { .. }) => self.agent_client(command),
         }
     }
 

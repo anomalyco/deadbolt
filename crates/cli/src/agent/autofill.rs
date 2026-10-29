@@ -22,11 +22,11 @@ use crate::protocol::{
 };
 use crate::site::{Closeness, Site, closeness, page_url};
 
-fn site(origin: &str) -> Result<Site> {
+pub(super) fn site(origin: &str) -> Result<Site> {
     Site::from_origin(origin).map_err(|reason| anyhow!("{origin}: {reason}"))
 }
 
-fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
+pub(super) fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
     item.fields
         .get(field)
         .map(|f| f.value.as_str())
@@ -34,7 +34,7 @@ fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
 }
 
 /// A login's URLs: its fields of type url (`url`, and `url-2`… from imports).
-fn urls(item: &Item) -> impl Iterator<Item = &str> {
+pub(super) fn urls(item: &Item) -> impl Iterator<Item = &str> {
     item.fields
         .values()
         .filter(|f| f.kind == FieldType::Url)
@@ -42,14 +42,14 @@ fn urls(item: &Item) -> impl Iterator<Item = &str> {
 }
 
 /// The `otp` field, else the first of type otp, as `ItemCode` picks it.
-fn otp(item: &Item) -> Option<&Field> {
+pub(super) fn otp(item: &Item) -> Option<&Field> {
     item.fields
         .get("otp")
         .filter(|f| f.kind == FieldType::Otp)
         .or_else(|| item.fields.values().find(|f| f.kind == FieldType::Otp))
 }
 
-fn login_ref(vault: &VaultId, item: &ItemId) -> LoginRef {
+pub(super) fn login_ref(vault: &VaultId, item: &ItemId) -> LoginRef {
     LoginRef {
         vault: hex(vault.as_bytes()),
         item: hex(item.as_bytes()),
@@ -57,7 +57,10 @@ fn login_ref(vault: &VaultId, item: &ItemId) -> LoginRef {
 }
 
 /// Every login on `site`, in every vault.
-fn logins<'a>(s: &'a Loaded, site: &'a Site) -> impl Iterator<Item = (VaultId, Item)> + 'a {
+pub(super) fn logins<'a>(
+    s: &'a Loaded,
+    site: &'a Site,
+) -> impl Iterator<Item = (VaultId, Item)> + 'a {
     s.vaults.iter().flat_map(move |(id, vault)| {
         vault
             .items()
@@ -68,7 +71,7 @@ fn logins<'a>(s: &'a Loaded, site: &'a Site) -> impl Iterator<Item = (VaultId, I
 }
 
 /// The login `login` names, refused unless it's on `site`.
-fn find(s: &Loaded, login: &LoginRef, site: &Site) -> Result<(VaultId, Item)> {
+pub(super) fn find(s: &Loaded, login: &LoginRef, site: &Site) -> Result<(VaultId, Item)> {
     let not_found = || fail(ErrorCode::NotFound, "no such login");
     let vault = VaultId::from_bytes(unhex(&login.vault).map_err(|_| not_found())?);
     let id = ItemId::from_bytes(unhex(&login.item).map_err(|_| not_found())?);
@@ -94,7 +97,7 @@ fn filled_key(login: &LoginRef) -> String {
 /// How a login signs in with another account: its `sign-in-with`, and the
 /// username (else the title) of its `sign-in-account`, if that login is in
 /// one of the vaults here. Nothing else of that login.
-fn sign_in(s: &Loaded, item: &Item) -> Option<SignIn> {
+pub(super) fn sign_in(s: &Loaded, item: &Item) -> Option<SignIn> {
     let provider = value(item, "sign-in-with")?.to_string();
     let account = value(item, "sign-in-account")
         .and_then(|id| unhex(id).ok())

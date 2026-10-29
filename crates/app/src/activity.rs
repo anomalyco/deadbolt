@@ -160,12 +160,16 @@ fn line(entry: &ActivityEntry, now: u64) -> String {
     match entry.outcome {
         Outcome::Allowed => {}
         Outcome::Locked => what.push_str(", locked"),
+        Outcome::Refused => what.push_str(", refused"),
         Outcome::Failed => what.push_str(", failed"),
     }
     if entry.more > 0 {
         what.push_str(&format!(", {} more", entry.more));
     }
-    format!("{ago} · {} · {what}", entry.caller.label)
+    match &entry.client {
+        Some(client) => format!("{ago} · agent client {client} · {what}"),
+        None => format!("{ago} · {} · {what}", entry.caller.label),
+    }
 }
 
 #[expect(
@@ -254,6 +258,7 @@ mod tests {
             fields: vec!["password".into()],
             outcome: Outcome::Allowed,
             more: 0,
+            client: None,
         };
         assert_eq!(
             line(&entry, 1_120),

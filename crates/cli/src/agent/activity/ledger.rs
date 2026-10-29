@@ -86,6 +86,7 @@ pub fn bound(entry: &mut ActivityEntry) {
     for field in &mut entry.fields {
         cut(field);
     }
+    cut_opt(&mut entry.client);
 }
 
 /// What a grant would be tied to (`docs/agent-control.md`): the terminal
@@ -259,6 +260,7 @@ mod tests {
             fields: vec!["password".into()],
             outcome: Outcome::Allowed,
             more: 0,
+            client: None,
         }
     }
 
