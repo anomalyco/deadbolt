@@ -1190,3 +1190,71 @@ main.vault.popup {
   justify-content: center;
   padding-top: 2px;
 }
+
+/* A setting that's on or off: the row is its label, the switch at its end. */
+.switch-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--layer-01);
+  box-shadow: inset 0 0 0 1px var(--border-muted);
+  cursor: pointer;
+}
+
+.switch-row .text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.switch-row .title {
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.switch-row .sub {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--muted);
+  text-wrap: pretty;
+}
+
+.vault input[role="switch"] {
+  appearance: none;
+  flex-shrink: 0;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  margin: 0;
+  border-radius: 999px;
+  background: var(--layer-03);
+  box-shadow: inset 0 0 0 1px var(--border);
+  cursor: pointer;
+  transition: background-color 160ms ease-out;
+}
+
+.vault input[role="switch"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--bg);
+  box-shadow: var(--shadow-xs);
+  transition: transform 220ms var(--settle);
+}
+
+.vault input[role="switch"]:checked {
+  background: var(--contrast);
+  box-shadow: none;
+}
+
+.vault input[role="switch"]:checked::after {
+  transform: translateX(12px);
+}

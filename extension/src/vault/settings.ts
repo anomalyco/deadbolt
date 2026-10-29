@@ -1,18 +1,13 @@
 // Settings: the vault's devices (pair another, remove one), the lock preset
 // and the vault's name.
 
+import { describePreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { LockPreset, VaultDevice } from "../messages"
 import { h } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
+import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
-
-/** The presets as the user reads them (bg/standalone.ts PRESETS holds what they do). */
-export const PRESET_INFO: Record<LockPreset, { name: string; short: string; line: string }> = {
-  strict: { name: "Strict", short: "locks after 5 min idle", line: "Locks after 5 minutes idle and when the screen locks. Asks for your passphrase to show or copy a password." },
-  comfortable: { name: "Comfortable", short: "locks after 1 hour idle", line: "Locks after an hour idle and when the screen locks." },
-  relaxed: { name: "Relaxed", short: "locks after 12 hours idle", line: "Locks after 12 hours idle. Stays unlocked when the screen locks." },
-}
 
 function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
   const now = Date.now() / 1000
@@ -25,9 +20,9 @@ function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
     h("span", { class: "text" }, h("span", { class: "title" }, d.name), h("span", { class: "sub" }, sub)),
   )
   if (!d.current) {
-    const remove = iconButton(glyph("trash"), `Remove ${d.name}`, () => confirm())
+    const remove = iconButton(glyph("trash"), `Remove ${d.name}`, () => askRemove())
     row.append(h("span", { class: "vrow-actions" }, remove))
-    const confirm = () => {
+    const askRemove = () => {
       const no = button("btn", "Cancel", () => repaint())
       const label = h("span", { class: "roll-label" }, "Remove")
       label.dataset.text = "Remove"
@@ -63,7 +58,7 @@ export function settingsView(app: App): View {
   const name = h("input", { class: "input", value: app.vaultName, maxlength: "64", "aria-label": "Vault name", spellcheck: "false" })
   const rename = button("btn", "Rename", async (b) => {
     const value = name.value.trim()
-    if (!/^[a-z][a-z0-9_-]{0,63}$/.test(value)) {
+    if (!VAULT_NAME.test(value)) {
       nameHint.textContent = "Start with a lowercase letter; then lowercase letters, digits, - or _."
       nameHint.classList.add("error")
       return refuse(name)
@@ -138,19 +133,31 @@ export function settingsView(app: App): View {
   const presets = h("div", { class: "presets", role: "radiogroup", "aria-label": "Lock" })
   const paintPresets = () => {
     presets.replaceChildren(
-      ...(Object.keys(PRESET_INFO) as LockPreset[]).map((p) => {
-        const info = PRESET_INFO[p]
+      ...(Object.keys(PRESETS) as LockPreset[]).map((p) => {
+        const info = PRESETS[p]
         const input = h("input", { type: "radio", name: "preset", value: p, ...(p === app.preset ? { checked: "" } : {}) })
         input.addEventListener("change", async () => {
+          // Strict clears copied passwords if Chrome allows it: ask now, from this click.
+          const asking = info.reauth && !(await app.clears()) ? app.askClearing() : null
           const r = await app.run({ type: "device-preset", preset: p })
           if (r.ok) app.preset = p
+          if (asking) clearing.checked = await asking
           paintPresets()
           app.announce(`${info.name}.`)
         })
-        return h("label", { class: `preset${p === app.preset ? " on" : ""}` }, input, h("span", { class: "text" }, h("span", { class: "title" }, info.name, p === "comfortable" ? h("span", { class: "faint" }, " · default") : null), h("span", { class: "sub" }, info.line)))
+        return h("label", { class: `preset${p === app.preset ? " on" : ""}` }, input, h("span", { class: "text" }, h("span", { class: "title" }, info.name, p === "comfortable" ? h("span", { class: "faint" }, " · default") : null), h("span", { class: "sub" }, describePreset(p))))
       }),
     )
   }
+
+  // Clearing copied passwords needs Chrome's clipboard permissions, asked for here.
+  const clearing = h("input", { type: "checkbox", role: "switch", "aria-describedby": "clearing-hint" })
+  void app.clears().then((on) => (clearing.checked = on))
+  clearing.addEventListener("change", async () => {
+    if (clearing.checked) clearing.checked = await app.askClearing()
+    else await chrome.permissions.remove({ permissions: CLIPBOARD_PERMISSIONS }).catch(() => false)
+    app.announce(clearing.checked ? "Copied passwords clear after 30 seconds." : "Copied passwords stay until you copy something else.")
+  })
 
   const paint = () => {
     // This browser first, then the others by name.
@@ -167,6 +174,17 @@ export function settingsView(app: App): View {
     toolbar("Settings", () => app.go({ name: "list" }, -1)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Devices")), devices, pairArea),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Lock")), presets, h("p", { class: "hint" }, "Every preset locks when the browser quits.")),
+    h(
+      "section",
+      { class: "group" },
+      h("div", { class: "section-head" }, h("span", { class: "label" }, "Clipboard")),
+      h(
+        "label",
+        { class: "switch-row" },
+        h("span", { class: "text" }, h("span", { class: "title" }, "Clear copied passwords after 30 seconds"), h("span", { class: "sub", id: "clearing-hint" }, "Chrome asks to let Deadbolt read the clipboard, so it clears only what it copied.")),
+        clearing,
+      ),
+    ),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Vault name")), h("div", { class: "reauth-row" }, name, rename), nameHint),
     app.surface !== "popup"
       ? ""

@@ -8,7 +8,7 @@ import { avatar, h, icon } from "../ui/dom"
 import { offerCard } from "../ui/offer"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
-import { button, copied, favicon, field, generatePassword, glyph, hostOf, iconButton, para, refuse, slidingHighlight, toolbar } from "./kit"
+import { button, copied, favicon, field, glyph, hostOf, iconButton, para, refuse, slidingHighlight, toolbar } from "./kit"
 
 const url = (a: Account) => a.urls.find(Boolean) ?? ""
 
@@ -29,7 +29,13 @@ function avatarFor(title: string, link: string): HTMLElement {
 async function secret(app: App, ref: string, passphrase?: string): Promise<{ password?: string; message?: string; reauth?: boolean }> {
   const r = await app.run(passphrase ? { type: "device-secret", ref, passphrase } : { type: "device-secret", ref })
   if (r.ok && typeof r.reply.password === "string") return { password: r.reply.password }
-  return { message: r.ok ? "Deadbolt didn't answer." : r.message, reauth: !r.ok && /passphrase/i.test(r.message) }
+  return { message: r.ok ? "Deadbolt didn't answer." : r.message, reauth: !r.ok && r.code === "passphrase_needed" }
+}
+
+/** Copies a password or one-time code; the background clears it in 30 s if Chrome lets it. */
+async function copySecret(app: App, b: HTMLElement, value: string) {
+  if (await copied(b, value)) app.announce(await app.copiedSecret(value))
+  else app.announce("Couldn't copy.")
 }
 
 function row(app: App, a: Account, fill: boolean): HTMLElement {
@@ -42,9 +48,10 @@ function row(app: App, a: Account, fill: boolean): HTMLElement {
   const user = iconButton(glyph("user"), "Copy username", (b) => a.username && void copied(b, a.username, say, "Copied the username"))
   if (!a.username) user.disabled = true
   const pass = iconButton(icon("key"), "Copy password", async (b) => {
+    await app.offerClearing()
     if (app.preset === "strict") return app.go({ name: "item", ref: a.ref, then: "copy" })
     const s = await secret(app, a.ref)
-    if (s.password !== undefined) return void copied(b, s.password, say, "Copied the password")
+    if (s.password !== undefined) return void copySecret(app, b, s.password)
     if (s.reauth) return app.go({ name: "item", ref: a.ref, then: "copy" })
     say(s.message ?? "Couldn't copy.")
   })
@@ -174,7 +181,21 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
   let reauth: "reveal" | "copy" | null = app.preset === "strict" && then ? then : null
   const say = (m: string) => app.announce(m)
 
+  /** Shows the password, out of sight again after half a minute. */
+  const show = (password: string) => {
+    revealed = password
+    reauth = null
+    paint()
+    clearTimeout(hideTimer)
+    hideTimer = setTimeout(() => {
+      revealed = null
+      if (el.isConnected) paint()
+    }, 30_000)
+  }
+
   const load = async () => {
+    // Opening a login is use, once; its later reads (each new code) aren't.
+    void app.run({ type: "device-used" })
     const r = await app.run({ type: "device-item", ref })
     if (!el.isConnected && detail) return
     if (!r.ok) {
@@ -188,6 +209,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
 
   const copyPassword = async (b: HTMLElement | null, passphrase?: string) => {
     if (!detail || !b) return
+    await app.offerClearing()
     const s = revealed !== null && !passphrase ? { password: revealed } : await secret(app, ref, passphrase)
     if (s.password === undefined) {
       if (s.reauth) {
@@ -196,7 +218,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       }
       return say(s.message ?? "Couldn't copy.")
     }
-    await copied(b, s.password, say, "Copied the password")
+    await copySecret(app, b, s.password)
   }
 
   const reveal = async (passphrase?: string) => {
@@ -212,15 +234,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       }
       return say(s.message ?? "Couldn't show the password.")
     }
-    revealed = s.password
-    reauth = null
-    paint()
-    // Out of sight again after half a minute.
-    clearTimeout(hideTimer)
-    hideTimer = setTimeout(() => {
-      revealed = null
-      if (el.isConnected) paint()
-    }, 30_000)
+    show(s.password)
   }
 
   /** Strict: the passphrase, once per reveal or copy. */
@@ -244,18 +258,11 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
         refuse(input)
         return input.focus()
       }
-      reauth = null
-      if (kind === "reveal") {
-        revealed = s.password
-        clearTimeout(hideTimer)
-        hideTimer = setTimeout(() => {
-          revealed = null
-          if (el.isConnected) paint()
-        }, 30_000)
+      if (kind === "reveal") show(s.password)
+      else {
+        reauth = null
         paint()
-      } else {
-        paint()
-        await copied(el.querySelector<HTMLElement>(".copy-password")!, s.password, say, "Copied the password")
+        await copySecret(app, el.querySelector<HTMLElement>(".copy-password")!, s.password)
       }
     })
     queueMicrotask(() => input.focus())
@@ -286,7 +293,10 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
         line(
           "One-time code",
           h("span", { class: "totp" }, h("span", { class: "mono code-value" }, code), h("span", { class: `countdown${left <= 5 ? " ending" : ""}` }, totpRing(t.period, left), secs)),
-          iconButton(icon("copy"), "Copy one-time code", (b) => void copied(b, t.code, say, "Copied the code")),
+          iconButton(icon("copy"), "Copy one-time code", async (b) => {
+            await app.offerClearing()
+            await copySecret(app, b, t.code)
+          }),
         ),
       )
       tick = setInterval(() => {
@@ -328,6 +338,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
 }
 
 export function editView(app: App, ref?: string): View {
+  // An edit shows what's saved: from the list if it's loaded, and from the vault either way.
   const existing = ref ? app.logins?.find((a) => a.ref === ref) : undefined
   const siteUrl = !ref && app.site ? `https://${app.site.host}` : ""
   const title = field("Title", { value: existing?.title ?? (app.site && !ref ? app.site.host : ""), maxlength: "500", placeholder: "Acme" })
@@ -343,32 +354,36 @@ export function editView(app: App, ref?: string): View {
   const pass = field(ref ? "New password" : "Password", { type: "password", autocomplete: "new-password", maxlength: "4096", placeholder: ref ? "Unchanged" : "" }, show, dice)
   pass.input.classList.add("mono-input")
 
-  // The generator: random characters from this page's CSPRNG, never sent anywhere until saved.
-  const length = h("input", { type: "range", min: "12", max: "48", value: "20", "aria-label": "Length" })
-  const lengthOut = h("output", { class: "mono" }, "20")
-  const digits = h("input", { type: "checkbox", checked: "" })
+  // The generator: the core's (letters, digits and, if chosen, symbols, at least one of each).
+  const length = h("input", { type: "range", min: "12", max: "48", value: "24", "aria-label": "Length" })
+  const lengthOut = h("output", { class: "mono" }, "24")
   const symbols = h("input", { type: "checkbox", checked: "" })
   const preview = h("span", { class: "mono gen-value" })
-  const regenerate = () => {
+  let asked = 0
+  const regenerate = async () => {
     lengthOut.textContent = length.value
-    const value = generatePassword(Number(length.value), digits.checked, symbols.checked)
-    preview.textContent = value
-    pass.input.value = value
+    const n = ++asked
+    const r = await app.run({ type: "device-generate", length: Number(length.value), symbols: symbols.checked })
+    // Only the latest slider position's password lands.
+    if (n !== asked) return
+    if (!r.ok || typeof r.reply.password !== "string") return fail(r.ok ? "Deadbolt didn't make a password." : r.message)
+    preview.textContent = r.reply.password
+    pass.input.value = r.reply.password
     pass.input.type = "text"
     show.replaceChildren(glyph("eyeOff"))
   }
   const generator = h(
     "div",
     { class: "generator", hidden: "" },
-    h("div", { class: "gen-head" }, preview, iconButton(glyph("sync"), "Another password", regenerate)),
+    h("div", { class: "gen-head" }, preview, iconButton(glyph("sync"), "Another password", () => void regenerate())),
     h("label", { class: "gen-length" }, h("span", {}, "Length"), length, lengthOut),
-    h("div", { class: "gen-options" }, h("label", { class: "check" }, digits, "Digits"), h("label", { class: "check" }, symbols, "Symbols")),
+    h("div", { class: "gen-options" }, h("label", { class: "check" }, symbols, "Symbols")),
   )
-  for (const c of [length, digits, symbols]) c.addEventListener("input", regenerate)
+  for (const c of [length, symbols]) c.addEventListener("input", () => void regenerate())
   const toggleGenerator = () => {
     generator.hidden = !generator.hidden
     dice.classList.toggle("on", !generator.hidden)
-    if (!generator.hidden) regenerate()
+    if (!generator.hidden) void regenerate()
   }
 
   const error = h("p", { class: "error", role: "alert" })
@@ -398,6 +413,19 @@ export function editView(app: App, ref?: string): View {
     }
   }
   for (const i of [title.input, site.input, user.input, pass.input]) i.addEventListener("input", () => i.classList.remove("invalid"))
+  // Editing: Save waits until the saved login is in the form, so an edit
+  // opened before the list loaded never saves blanks over it.
+  if (ref) {
+    save.disabled = true
+    void app.run({ type: "device-item", ref }).then((r) => {
+      if (!r.ok) return fail(r.message)
+      const d = r.reply as unknown as LoginDetail
+      if (!title.input.value) title.input.value = d.title
+      if (!site.input.value) site.input.value = d.url
+      if (!user.input.value) user.input.value = d.username
+      save.disabled = false
+    })
+  }
   form.addEventListener("submit", async (e) => {
     e.preventDefault()
     const raw = site.input.value.trim()

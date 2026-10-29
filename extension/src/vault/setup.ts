@@ -4,12 +4,12 @@
 // worker, so a popup that closes, or a reloaded page, asks for it again and
 // carries on where it was.
 
+import { describePreset, duration, PRESETS, VAULT_NAME } from "../device-rules"
 import type { JoinStatus } from "../messages"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { button, copied, field, glyph, para, refuse, toolbar } from "./kit"
-import { PRESET_INFO } from "./settings"
 
 type Join =
   | { step: "choose" }
@@ -173,7 +173,7 @@ export class Setup {
         toolbar("Pair with a device", () => void this.cancel()),
         para("On a device that has your vault, run ", h("code", {}, "deadbolt pair"), " with this code, or choose Pair in the Deadbolt app."),
         h("div", { class: "code-box" }, shown, copy),
-        h("div", { class: "waiting" }, h("span", { class: "sync-dot busy", "aria-hidden": "true" }), h("span", {}, code ? "Waiting for the other device…" : "Reaching Deadbolt's relay…")),
+        h("div", { class: "waiting" }, h("span", { class: "sync-dot busy", "aria-hidden": "true" }), h("span", {}, code ? "Waiting for the other device…" : "Connecting to Deadbolt's sync service…")),
         h("p", { class: "faint small" }, "The code works once, for five minutes. Keep this open, or come back to it: it waits either way."),
         h("div", { class: "buttons end" }, button("btn", "Cancel", () => void this.cancel())),
       ),
@@ -237,8 +237,7 @@ export class Setup {
       this.app.status = r.status
       if (r.ok) {
         this.set({ step: "choose" })
-        this.app.render()
-        return void this.app.refresh()
+        return this.app.opened()
       }
       submit.disabled = false
       rollLabel(label, "Finish")
@@ -270,7 +269,7 @@ export class Setup {
     form.addEventListener("submit", async (e) => {
       e.preventDefault()
       const vault = name.input.value.trim() || "personal"
-      if (!/^[a-z][a-z0-9_-]{0,63}$/.test(vault)) {
+      if (!VAULT_NAME.test(vault)) {
         p.error.textContent = "Start the name with a lowercase letter; then use lowercase letters, digits, - or _."
         p.error.hidden = false
         return refuse(name.input)
@@ -282,8 +281,7 @@ export class Setup {
       p.pass.value = p.again.value = ""
       if (r.ok) {
         this.set({ step: "choose" })
-        this.app.render()
-        return void this.app.refresh()
+        return this.app.opened()
       }
       submit.disabled = false
       rollLabel(label, "Create vault")
@@ -301,7 +299,7 @@ export function unlockView(app: App): View {
   const label = h("span", { class: "roll-label" }, "Unlock")
   label.dataset.text = "Unlock"
   const submit = h("button", { class: "btn primary wide", type: "submit" }, label)
-  const info = PRESET_INFO[app.preset]
+  const preset = PRESETS[app.preset]
   const form = h(
     "form",
     { class: "view center unlock", novalidate: "" },
@@ -309,7 +307,7 @@ export function unlockView(app: App): View {
     input,
     error,
     submit,
-    h("p", { class: "preset-note", title: info.line }, icon("clock"), h("span", {}, `${info.name} · ${info.short}`)),
+    h("p", { class: "preset-note", title: describePreset(app.preset) }, icon("clock"), h("span", {}, `${preset.name} · locks after ${duration(preset.idleMs)} idle`)),
   )
   input.addEventListener("input", () => {
     input.classList.remove("invalid")
@@ -322,13 +320,11 @@ export function unlockView(app: App): View {
     rollLabel(label, "Unlocking…")
     const r = await app.run({ type: "device-unlock", passphrase: input.value })
     input.value = ""
-    if (r.ok || r.status.state !== "locked") {
-      app.render()
-      return void app.refresh()
-    }
+    if (r.ok || r.status.state !== "locked") return app.opened()
     submit.disabled = false
     rollLabel(label, "Unlock")
-    error.textContent = /passphrase|decrypt|key/i.test(r.message) ? "That passphrase isn't right." : r.message
+    if (!r.ok && r.code === "wrong_passphrase") error.textContent = "That passphrase isn't right."
+    else error.textContent = r.ok ? "" : r.message
     error.hidden = false
     refuse(input)
     input.focus()

@@ -277,7 +277,7 @@ try {
     check(offline, "Chromium can't reach the network beyond loopback")
     await device.getByRole("button", { name: "Pair with an existing device", exact: true }).click()
     await device.getByRole("heading", { name: "Pairing didn't work", exact: true }).waitFor({ timeout: 60_000 })
-    check(/relay/i.test(await device.locator(".notice .error").innerText()), "offline joining reports that no relay is reachable")
+    check(/sync service/i.test(await device.locator(".notice .error").innerText()), "offline joining says Deadbolt's sync service can't be reached")
     await device.getByRole("button", { name: "Cancel", exact: true }).click()
   }
   let count = 1

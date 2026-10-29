@@ -6,11 +6,13 @@ import type { DeviceCommand, DeviceReply, Status } from "../messages"
 import { h, icon, svg } from "../ui/dom"
 import { reducedMotion, Spring, timing } from "../ui/motion"
 
+const NO_ANSWER = "Deadbolt didn't answer. Reload the extension and try again."
+
 /** Sends a command to the standalone device; never throws. */
 export function run(command: DeviceCommand, status: () => Status): Promise<DeviceReply> {
   return (chrome.runtime.sendMessage({ type: "db:device", command }) as Promise<DeviceReply | null>).then(
-    (r) => r ?? { ok: false, message: "Deadbolt's background worker didn't answer.", status: status() },
-    (err) => ({ ok: false, message: String((err as Error)?.message ?? err), status: status() }),
+    (r) => r ?? { ok: false, message: NO_ANSWER, status: status() },
+    () => ({ ok: false, message: NO_ANSWER, status: status() }),
   )
 }
 
@@ -74,13 +76,16 @@ export function toolbar(title: string, back: (() => void) | null, ...actions: No
   )
 }
 
-/** Writes `text` and shows a check on `b` for a moment. */
-export async function copied(b: HTMLElement, text: string, announce?: (message: string) => void, what = "Copied") {
+/** Writes `text` and shows a check on `b` for a moment. Answers whether it was copied. */
+export async function copied(b: HTMLElement, text: string, announce?: (message: string) => void, what = "Copied"): Promise<boolean> {
   const ok = await navigator.clipboard.writeText(text).then(
     () => true,
     () => false,
   )
-  if (!ok) return announce?.("Couldn't copy.")
+  if (!ok) {
+    announce?.("Couldn't copy.")
+    return false
+  }
   const was = [...b.childNodes]
   // A labelled button says so; an icon button shows the check alone.
   b.replaceChildren(icon("check"), ...(b.classList.contains("btn") ? ["Copied"] : []))
@@ -90,6 +95,7 @@ export async function copied(b: HTMLElement, text: string, announce?: (message: 
     b.replaceChildren(...was)
     b.classList.remove("confirmed")
   }, 1400)
+  return true
 }
 
 /** "just now", "4 min ago", "3 h ago", "2 d ago": when something was, from `now` (both unix seconds). */
@@ -225,27 +231,4 @@ export function refuse(el: HTMLElement) {
   el.classList.add("invalid")
   if (reducedMotion() || typeof el.animate !== "function") return
   el.animate([{ transform: "translateX(0)" }, { transform: "translateX(-4px)" }, { transform: "translateX(3px)" }, { transform: "translateX(-2px)" }, { transform: "translateX(0)" }], { duration: 320, easing: "ease-out" })
-}
-
-/** Random characters for a new password, from the browser's CSPRNG, without modulo bias. */
-export function generatePassword(length: number, digits: boolean, symbols: boolean): string {
-  const LOWER = "abcdefghijkmnopqrstuvwxyz"
-  const UPPER = "ABCDEFGHJKLMNPQRSTUVWXYZ"
-  const DIGITS = "23456789"
-  const SYMBOLS = "!#$%&*+-=?@^_~"
-  const sets = [LOWER, UPPER, ...(digits ? [DIGITS] : []), ...(symbols ? [SYMBOLS] : [])]
-  const all = sets.join("")
-  const pick = (chars: string) => {
-    const limit = 256 - (256 % chars.length)
-    const byte = new Uint8Array(1)
-    for (;;) {
-      crypto.getRandomValues(byte)
-      if (byte[0] < limit) return chars[byte[0] % chars.length]
-    }
-  }
-  for (;;) {
-    const out = Array.from({ length }, () => pick(all)).join("")
-    // One of each chosen kind, as most sites ask.
-    if (sets.every((set) => [...out].some((c) => set.includes(c)))) return out
-  }
 }

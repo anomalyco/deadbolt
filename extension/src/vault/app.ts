@@ -7,6 +7,7 @@
 // background in one message and are never kept here or in storage.
 
 import type { DeviceCommand, DeviceReply, LockPreset, PopupReply, Status, StatusChanged, VaultDevice } from "../messages"
+import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
@@ -16,6 +17,9 @@ import { settingsView } from "./settings"
 import { Setup, unlockView } from "./setup"
 
 export type Surface = "popup" | "page"
+
+/** Set once Strict's first copy asked for the clipboard permissions, so it asks once. */
+const ASKED_KEY = "deadbolt.clipboardAsked"
 
 export type Route = { name: "list" } | { name: "item"; ref: string; then?: "reveal" | "copy" } | { name: "edit"; ref?: string } | { name: "settings" }
 
@@ -179,12 +183,43 @@ export class App {
     if (this.syncing) return
     this.syncing = true
     this.paintSync()
+    // The sync pushes "items" when it's done, which refreshes the lists.
     const r = await this.run({ type: "device-sync", wait: true })
     this.syncing = false
-    if (!r.ok) this.announce(r.message)
-    await this.refresh()
     this.paintSync()
-    this.announce("Synced.")
+    this.announce(r.ok ? "Synced." : r.message)
+  }
+
+  /** Whether a copied password gets cleared off the clipboard (the optional clipboard permissions). */
+  clears(): Promise<boolean> {
+    return chrome.permissions.contains({ permissions: CLIPBOARD_PERMISSIONS }).catch(() => false)
+  }
+
+  /** Asks for the clipboard permissions, from the user's click. Answers whether they were granted. */
+  askClearing(): Promise<boolean> {
+    return chrome.permissions.request({ permissions: CLIPBOARD_PERMISSIONS }).catch(() => false)
+  }
+
+  /** Under Strict, the first copy asks once for the clipboard permissions, so copied passwords get cleared. */
+  async offerClearing() {
+    if (this.preset !== "strict" || (await this.clears())) return
+    const got = await chrome.storage.local.get(ASKED_KEY).catch(() => ({}) as Record<string, unknown>)
+    if (got[ASKED_KEY]) return
+    await chrome.storage.local.set({ [ASKED_KEY]: true }).catch(() => {})
+    await this.askClearing()
+  }
+
+  /** The page copied a password or code: the background clears it in 30 s if it may. */
+  async copiedSecret(value: string): Promise<string> {
+    const r = await this.run({ type: "device-copied", value })
+    return r.ok && r.reply.clears === true ? "Copied. It clears in 30 seconds." : "Copied."
+  }
+
+  /** The vault just opened (unlock, create, join): show it, unless a status push already did. */
+  opened() {
+    if (this.shell === this.status.state) return
+    this.render()
+    void this.refresh()
   }
 
   private async lock(b: HTMLButtonElement) {
