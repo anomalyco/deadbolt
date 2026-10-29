@@ -1,0 +1,80 @@
+# Newsletter and mailing-list boxes, which Deadbolt leaves alone.
+#
+# Display clues match the form's text and header, the page title and headings
+# and its buttons; code clues match the form's id, name, action and the frame URL.
+
+kind = "newsletter"
+
+[[clue]]
+phrase = "subscribe"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "newsletter"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "mailing list"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "stay in touch"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "stay updated"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "get updates"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "sign up for"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "join our"
+score = 1
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "password"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "sign in"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "log in"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "first order"
+langs = ["exclusive offers", "special offers", "latest news", "be the first to know"]
+score = 3
+channel = "display"
+why = "Newsletter boxes promise a discount or news ('10% off your first order')"
+

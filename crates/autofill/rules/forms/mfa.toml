@@ -1,0 +1,123 @@
+# Second-step forms that ask for a one-time code.
+#
+# Display clues match the form's text and header, the page title and headings
+# and its buttons; code clues match the form's id, name, action and the frame URL.
+
+kind = "mfa"
+
+[[clue]]
+phrase = "two factor"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "2 step"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "two step"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "verification code"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "enter the code"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "enter code"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "sent a code"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "we sent"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "authenticator app"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "verify it s you"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "check your phone"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "code de verification"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "bestatigungscode"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "確認コード"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Japanese)"
+
+[[clue]]
+phrase = "card number"
+score = -4
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "checkout"
+score = -4
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "pay"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "shipping"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "login"
+langs = ["logon", "signin", "signon", "auth", "sso", "saml", "session", "identifier", "challenge", "mfa", "2fa", "twofactor", "verify", "webauthn", "passkey"]
+score = 1
+channel = "code"
+mode = "sanitised"
+why = "Ported from detect.ts LOGIN_URL: code steps live under sign-in paths too; counts once"
+

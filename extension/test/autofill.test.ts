@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { Autofill, nextStep } from "../src/bg/autofill"
+import { Autofill, FLOWS_KEY, menuAccounts, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, stepLabel, stepRoles } from "../src/bg/autofill"
 import { HostError } from "../src/bg/host"
+import { SignInWith } from "../src/bg/signinwith"
 import { ACCOUNTS, fakeHost, installChrome, menuSender, pageSender, POPUP_URL, SITE, type FakeChrome, type FakeHost } from "./chrome"
 
 let fake: FakeChrome
@@ -170,7 +171,7 @@ describe("filling only the fields approved before the host is asked", () => {
 describe("generated passwords", () => {
   const approve = () => (fake.answer = (message) => (message.type === "db:approve" ? { approval: "fixed", roles: ["email", "new-password"] } : true))
   const generating = async (kind: string, rules?: unknown) => {
-    const reply = await autofill.query(pageSender(), ["email", "new-password"], "new-password", 1, kind, rules)
+    const reply = await autofill.query(pageSender(), ["email", "new-password"], "new-password", 1, false, undefined, false, kind, rules)
     if (reply.token) await autofill.menuLoad(reply.token, menuSender(), SITE)
     return reply
   }
@@ -178,7 +179,7 @@ describe("generated passwords", () => {
   test("a new-password box offers one only on sign-up and change-password forms", async () => {
     for (const kind of ["login", "mfa", null, "bogus"]) expect(await generating(kind as string)).toEqual({ rows: 0 })
     for (const kind of ["signup", "change-password"]) expect(await generating(kind)).toMatchObject({ rows: 1 })
-    const reply = await autofill.query(pageSender(), ["email", "new-password"], "new-password", 1, "signup")
+    const reply = await autofill.query(pageSender(), ["email", "new-password"], "new-password", 1, false, undefined, false, "signup")
     expect(await autofill.menuLoad(reply.token!, menuSender(), SITE)).toEqual({ kind: "generate", site: "www.example.com" })
     expect(host.requests.filter((r) => r.type !== "generate-check")).toEqual([])
   })
@@ -433,7 +434,7 @@ describe("filling a frame's form from the popup", () => {
   })
 })
 
-describe("email-first continuation", () => {
+describe("sign-in sessions", () => {
   const passwordPage = () => autofill.page(pageSender({ url: "https://www.example.com/password", documentId: "pw-doc" }), "login", ["password"], 1)
   const toPasswordPage = () => void (fake.frames["1:0"] = { url: "https://www.example.com/password", documentId: "pw-doc" })
 
@@ -448,11 +449,14 @@ describe("email-first continuation", () => {
     fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc" }
   })
 
+  /** Picks a login on the email step, then the user submits it themselves. */
   async function fillEmail(ack: string[], account = ACCOUNTS[1]) {
     fake.fillAck = () => ({ filled: ack })
     const token = await autofill.query(pageSender(), ["email"], "email", 1)
     await autofill.menuLoad(token.token!, menuSender(), SITE)
-    return autofill.menuPick(token.token!, account.ref, menuSender())
+    const reply = await autofill.menuPick(token.token!, account.ref, menuSender())
+    await autofill.submitted(pageSender())
+    return reply
   }
 
   test("nextStep follows what was actually filled", () => {
@@ -460,6 +464,20 @@ describe("email-first continuation", () => {
     expect(nextStep(["password"], { hasPassword: true, hasTotp: true })).toBe("otp")
     expect(nextStep(["password"], { hasPassword: true, hasTotp: false })).toBeUndefined()
     expect(nextStep([], { hasPassword: true, hasTotp: true })).toBeUndefined()
+  })
+
+  test("a new document isn't a step without the user's own submit in the last one", async () => {
+    fake.fillAck = () => ({ filled: ["email"] })
+    const token = await autofill.query(pageSender(), ["email"], "email", 1)
+    await autofill.menuLoad(token.token!, menuSender(), SITE)
+    await autofill.menuPick(token.token!, ACCOUNTS[1].ref, menuSender())
+    toPasswordPage()
+    await passwordPage()
+    expect(fills()).toHaveLength(1)
+    // A submit from some other document doesn't count either.
+    await autofill.submitted(pageSender({ documentId: "elsewhere-doc" }))
+    await passwordPage()
+    expect(fills()).toHaveLength(1)
   })
 
   test("a fill the page didn't take arms nothing", async () => {
@@ -474,10 +492,10 @@ describe("email-first continuation", () => {
     fake.fillAck = () => ({ filled: [] })
     await passwordPage()
     expect(fills().map((r) => (r as { want: string[] }).want)).toEqual([["username"], ["password"]])
-    // Reporting the step again doesn't fill again.
+    // Reporting the step again doesn't fill again; the session waits for the next step.
     await passwordPage()
     expect(fills()).toHaveLength(2)
-    expect(fake.session).toEqual({})
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
   })
 
   test("a page without the next step doesn't use it up, another step's page doesn't fill", async () => {
@@ -485,22 +503,24 @@ describe("email-first continuation", () => {
     fake.frames["1:0"] = { url: "https://www.example.com/mfa", documentId: "mfa-doc" }
     await autofill.page(pageSender({ url: "https://www.example.com/mfa", documentId: "mfa-doc" }), "mfa", ["otp"], 1)
     expect(fills()).toHaveLength(1)
-    expect(Object.keys(fake.session)).toEqual(["continue:1"])
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
   })
 
-  test("typing an address, or going to another origin, ends it", async () => {
+  test("typing an address, or going to another site, ends it; another origin of the site doesn't", async () => {
     await fillEmail(["email"])
     await autofill.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/password", transitionType: "typed" })
     expect(fake.session).toEqual({})
     await fillEmail(["email"])
     await autofill.navigated({ tabId: 1, frameId: 0, url: "https://accounts.example.com/password", transitionType: "form_submit" })
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
+    await autofill.navigated({ tabId: 1, frameId: 0, url: "https://elsewhere.net/", transitionType: "form_submit" })
     expect(fake.session).toEqual({})
   })
 
   test("submitting to the next step on the same origin keeps it", async () => {
     await fillEmail(["email"])
     await autofill.navigated({ tabId: 1, frameId: 0, url: "https://www.example.com/password", transitionType: "form_submit" })
-    expect(Object.keys(fake.session)).toEqual(["continue:1"])
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
   })
 
   test("a matching form in the same document isn't a step until the user submits or the filled fields go", async () => {
@@ -508,7 +528,7 @@ describe("email-first continuation", () => {
     // The page shows a password box next to the email box it just got.
     await autofill.page(pageSender(), "login", ["email", "password"], 2)
     expect(fills()).toHaveLength(1)
-    expect(Object.keys(fake.session)).toEqual(["continue:1"])
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
     await autofill.page(pageSender(), "login", ["password"], 3, true)
     expect(fills()).toHaveLength(2)
     expect(delivered("db:fill")[1]).toMatchObject({ options: { documentId: "top-doc" }, message: { form: 3 } })
@@ -610,5 +630,280 @@ describe("email-first continuation", () => {
     const token = await autofill.query(pageSender(), ["email"], "email", 1)
     await autofill.menuClose(token.token!, true, pageSender())
     expect(fake.session).toEqual({})
+  })
+})
+
+describe("a sign-in session across steps", () => {
+  const at = (url: string, documentId: string) => {
+    fake.frames["1:0"] = { url, documentId }
+    return pageSender({ url, origin: new URL(url).origin, documentId })
+  }
+  const notices = () => delivered("db:fill").map((d) => d.message.notice).filter(Boolean) as string[]
+  async function pick(account = ACCOUNTS[0], ack = ["email"]) {
+    fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc" }
+    fake.fillAck = () => ({ filled: ack })
+    const token = await autofill.query(pageSender(), ["email"], "email", 1)
+    await autofill.menuLoad(token.token!, menuSender(), SITE)
+    const reply = await autofill.menuPick(token.token!, account.ref, menuSender())
+    await autofill.submitted(pageSender())
+    return reply
+  }
+  /** The user submits the step in `documentId` themselves. */
+  const submit = (url: string, documentId: string) => autofill.submitted(pageSender({ url, origin: new URL(url).origin, documentId }))
+  /** The login, with these saved URLs. */
+  function withUrls(urls: string[], account = ACCOUNTS[0]) {
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: { type: string }) =>
+      req.type === "list" ? { type: "list", site: "example.com", accounts: [{ ...account, urls }, ...ACCOUNTS.filter((a) => a !== account)] } : send(req as never)) as typeof host.host.send
+  }
+
+  test("step roles, labels and the username a form names", () => {
+    expect(sameHost("https://accounts.example.com/login", "https://accounts.example.com")).toBe(true)
+    expect(sameHost("accounts.example.com", "https://accounts.example.com")).toBe(true)
+    expect(sameHost("https://example.com", "https://accounts.example.com")).toBe(false)
+    expect(sameHost("http://accounts.example.com", "https://accounts.example.com")).toBe(false)
+    const both = { hasPassword: true, hasTotp: true }
+    expect(stepRoles(["email", "password"], both, false)).toEqual(["password"])
+    expect(stepRoles(["email", "password"], both, true)).toEqual(["password", "email"])
+    expect(stepRoles(["otp"], both, false)).toEqual(["otp"])
+    expect(stepRoles(["otp"], { hasPassword: true, hasTotp: false }, false)).toEqual([])
+    expect(stepRoles(["email"], both, true)).toEqual([])
+    expect(stepLabel(["password"])).toBe("Password filled")
+    expect(stepLabel(["otp"])).toBe("Code filled")
+    expect(namedBy(ACCOUNTS, " ADMIN ").map((a) => a.ref)).toEqual([ACCOUNTS[1].ref])
+    expect(namedBy(ACCOUNTS, "adm")).toEqual([])
+  })
+
+  test("email, then password on another origin a saved URL names, then the code: each step fills from the same login, with its pill", async () => {
+    withUrls(["https://accounts.example.com/login"])
+    await pick()
+    fake.fillAck = () => ({ filled: ["password"] })
+    await autofill.page(at("https://accounts.example.com/password", "pw-doc"), "login", ["password"], 1)
+    await submit("https://accounts.example.com/password", "pw-doc")
+    fake.fillAck = () => ({ filled: ["otp"] })
+    await autofill.page(at("https://accounts.example.com/verify", "code-doc"), "mfa", ["otp"], 1)
+    expect(fills().map((r) => [(r as { origin: string }).origin, (r as { want: string[] }).want])).toEqual([
+      ["https://www.example.com", ["username"]],
+      ["https://accounts.example.com", ["password"]],
+      ["https://accounts.example.com", ["totp"]],
+    ])
+    // The two steps filled without a pick say so (the pick folded its own menu);
+    // a pill whose page is gone gets nothing.
+    expect(notices()).toHaveLength(2)
+    expect(await autofill.menuLoad(notices()[0], menuSender({ documentId: "pill-1" }), "https://accounts.example.com")).toBeNull()
+    // Done: nothing waits for another step.
+    expect(fake.session).toEqual({})
+  })
+
+  test("a step's pill frame gets its label, and picks nothing", async () => {
+    await pick()
+    fake.fillAck = () => ({ filled: ["password"] })
+    await autofill.page(at("https://www.example.com/password", "pw-doc"), "login", ["password"], 1)
+    const token = notices()[0]
+    const sender = menuSender({ documentId: "pill-doc" })
+    expect(await autofill.menuLoad(token, sender, SITE)).toEqual({ kind: "notice", label: "Password filled", title: "Example" })
+    expect(await autofill.menuPick(token, ACCOUNTS[0].ref, sender)).toEqual({ ok: false, message: "This menu has expired." })
+  })
+
+  test("an origin of the site the login doesn't match gets nothing, and the session waits", async () => {
+    await pick()
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: { type: string; origin?: string }) =>
+      req.type === "list" && req.origin === "https://shop.example.com" ? { type: "list", site: "example.com", accounts: [] } : send(req as never)) as typeof host.host.send
+    await autofill.page(at("https://shop.example.com/password", "shop-doc"), "login", ["password"], 1)
+    expect(fills()).toHaveLength(1)
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
+  })
+
+  test("a sibling subdomain the agent lists the login for, but no saved URL names, gets nothing", async () => {
+    // The agent lists a login on every subdomain of its site; the session holds to exact hosts.
+    withUrls(["https://www.example.com/login"])
+    await pick()
+    await autofill.page(at("https://user-content.example.com/phish", "uc-doc"), "login", ["password"], 1)
+    expect(fills()).toHaveLength(1)
+  })
+
+  test("the username asked again beside the password is filled too", async () => {
+    await pick(ACCOUNTS[1])
+    fake.fillAck = () => ({ filled: ["email", "password"] })
+    await autofill.page(at("https://www.example.com/again", "again-doc"), "login", ["email", "password"], 1, false, true)
+    expect((fills()[1] as { want: string[] }).want).toEqual(["username", "password"])
+  })
+
+  test("\"Use a different account\": an empty username step ends the session, whatever was filled", async () => {
+    await pick()
+    await autofill.page(at("https://www.example.com/login", "back-doc"), "login", ["email"], 1, false, true)
+    expect(fake.session).toEqual({})
+    await autofill.page(at("https://www.example.com/password", "pw-doc"), "login", ["password"], 1)
+    expect(fills()).toHaveLength(1)
+    // Picked on the password step: an empty username step after ends it too.
+    fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc" }
+    fake.fillAck = () => ({ filled: ["password"] })
+    const token = await autofill.query(pageSender(), ["password"], "password", 1)
+    await autofill.menuLoad(token.token!, menuSender(), SITE)
+    await autofill.menuPick(token.token!, ACCOUNTS[0].ref, menuSender())
+    await autofill.submitted(pageSender())
+    expect(Object.keys(fake.session)).toEqual(["session:1"])
+    await autofill.page(at("https://www.example.com/login", "back-2"), "login", ["email"], 1, false, true)
+    expect(fake.session).toEqual({})
+  })
+
+  test("locking ends sessions a restarted worker didn't start, from session storage", async () => {
+    fake.session["session:7"] = { ref: ACCOUNTS[0].ref, site: "example.com", origin: SITE, documentId: "x", filledAt: Date.now(), filled: ["email"], startedAt: Date.now(), until: Date.now() + 60_000 }
+    host.setStatus({ state: "locked" })
+    await waitFor(() => !("session:7" in fake.session))
+  })
+
+  test("a session ends when Deadbolt locks, and when its time is up", async () => {
+    await pick()
+    host.setStatus({ state: "locked" })
+    host.setStatus({ state: "ready", version: "0" })
+    await waitFor(() => !("session:1" in fake.session))
+    await pick()
+    ;(fake.session["session:1"] as { until: number }).until = Date.now() - 1
+    await autofill.page(at("https://www.example.com/password", "pw-doc"), "login", ["password"], 1)
+    expect(fills()).toHaveLength(2)
+  })
+
+  test("a password field's menu narrows to the login the form's username names, or stays away", async () => {
+    const ask = (identifier?: string, again = false) => autofill.query(pageSender(), ["email", "password"], "password", 1, true, identifier, again)
+    const named = await ask("Admin")
+    expect(named.rows).toBe(1)
+    const reply = await autofill.menuLoad(named.token!, menuSender(), SITE)
+    expect(reply?.kind === "accounts" && reply.accounts.map((a) => a.username)).toEqual(["admin"])
+    expect(await autofill.menuPick(named.token!, ACCOUNTS[0].ref, menuSender())).toMatchObject({ ok: false })
+    // A username no login has: no menu on focus, the full list on ↓.
+    expect(await ask("nobody@example.com")).toEqual({ rows: 0 })
+    expect((await ask("nobody@example.com", true)).rows).toBe(2)
+    expect((await ask()).rows).toBe(2)
+  })
+
+  test("with no username box on the step, the one submitted before names the login", async () => {
+    autofill = new Autofill(host.host, undefined, (tabId, site) => (tabId === 1 && site === "example.com" ? "admin" : undefined))
+    expect((await autofill.query(pageSender(), ["password"], "password", 1)).rows).toBe(1)
+  })
+
+  test("a sign-in that worked teaches the site's shape; one login on an identifier-first site says Continue as", async () => {
+    await autofill.page(at("https://www.example.com/login", "id-doc"), "login", ["email"], 1)
+    await autofill.page(at("https://www.example.com/password", "pw-doc"), "login", ["password"], 2)
+    await autofill.page(at("https://www.example.com/verify", "code-doc"), "mfa", ["otp"], 3)
+    await autofill.learnFlow(1, "example.com")
+    const flows = fake.local[FLOWS_KEY] as Record<string, object>
+    expect(Object.values(flows)).toMatchObject([{ identifierFirst: true, code: true, navigates: true, seen: 1 }])
+    // Kept under a salted hash of the site, with no usernames.
+    expect(JSON.stringify(fake.local)).not.toContain("example.com")
+    expect(JSON.stringify(fake.local)).not.toContain("@")
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: { type: string }) => (req.type === "list" ? { type: "list", site: "example.com", accounts: [ACCOUNTS[0]] } : send(req as never))) as typeof host.host.send
+    fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc" }
+    const token = await autofill.query(pageSender(), ["email"], "email", 1)
+    expect(await autofill.menuLoad(token.token!, menuSender(), SITE)).toMatchObject({ kind: "accounts", continueAs: true })
+  })
+})
+
+describe("while Deadbolt is locked", () => {
+  test("a focused field shows the locked row once per site; a click or ↓ always does; locking again starts over", async () => {
+    host.setStatus({ state: "locked" })
+    const ask = (explicit = false, sender = pageSender()) => autofill.query(sender, ["email", "password"], "email", 1, explicit)
+    expect((await ask()).rows).toBe(1)
+    expect(await ask()).toEqual({ rows: 0 })
+    expect((await ask(true)).rows).toBe(1)
+    // Another site has its own once; another page of this site doesn't.
+    fake.frames["1:0"] = { url: "https://other.test/login", documentId: "other", parentFrameId: -1 }
+    expect((await ask(false, pageSender({ url: "https://other.test/login", origin: "https://other.test", documentId: "other" }))).rows).toBe(1)
+    fake.frames["1:0"] = { url: "https://app.example.com/login", documentId: "app", parentFrameId: -1 }
+    expect(await ask(false, pageSender({ url: "https://app.example.com/login", origin: "https://app.example.com", documentId: "app" }))).toEqual({ rows: 0 })
+    host.setStatus({ state: "ready", version: "0" })
+    host.setStatus({ state: "locked" })
+    fake.frames["1:0"] = { url: "https://www.example.com/login", documentId: "top-doc", parentFrameId: -1 }
+    expect((await ask()).rows).toBe(1)
+  })
+})
+
+describe("surface sizes", () => {
+  test("a frame's asked-for size is kept within bounds, and it may only fold into a pill", () => {
+    expect(resizeMessage("t", 2000, 9000, "save")).toEqual({ type: "db:resize-menu", token: "t", height: 400, width: 420 })
+    expect(resizeMessage("t", 1, 1, "pill")).toEqual({ type: "db:resize-menu", token: "t", height: 28, width: 28, mode: "pill" })
+    expect(resizeMessage("t", Number.NaN, "wide")).toEqual({ type: "db:resize-menu", token: "t", height: 40 })
+  })
+})
+
+describe("sign in with a provider", () => {
+  const google = { ref: `${"a".repeat(64)}:${"3".repeat(32)}`, vault: "Personal", title: "Example", hasPassword: false, hasTotp: false, urls: [], signIn: { provider: "google", account: "kit@gmail.com" } }
+  const both = { ...ACCOUNTS[1], signIn: { provider: "github" } }
+  const providerLogin = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"4".repeat(32)}`, title: "Google", username: "kit@gmail.com" }
+  let withs: SignInWith
+
+  beforeEach(() => {
+    withs = new SignInWith(host.host)
+    autofill = new Autofill(host.host, undefined, undefined, withs)
+    const send = host.host.send.bind(host.host)
+    host.host.send = (async (req: { type: string }) =>
+      req.type === "list" ? { type: "list", site: "example.com", accounts: [ACCOUNTS[0], both, google, providerLogin] } : send(req as never)) as typeof host.host.send
+  })
+
+  test("a sign-in-with login shows on password fields too, never on code fields, and one with a password too is two rows", () => {
+    expect(menuAccounts([google, ACCOUNTS[0]], "password")).toEqual([google, ACCOUNTS[0]])
+    expect(menuAccounts([google], "otp")).toEqual([])
+    expect(menuRowCount([google, both, ACCOUNTS[0]], "email")).toBe(4)
+  })
+
+  test("picking it starts following the sign-in and points at the page's button; it never fills", async () => {
+    fake.answer = (m) => (m.type === "db:point" ? true : m.type === "db:approve" ? { approval: "x", roles: ["email"] } : true)
+    const token = await autofill.query(pageSender(), ["email", "password"], "email", 1)
+    await autofill.menuLoad(token.token!, menuSender(), SITE)
+    expect(await autofill.menuPick(token.token!, google.ref, menuSender())).toEqual({ ok: false, message: "This login signs in with another account." })
+    expect(await autofill.menuSignIn(token.token!, google.ref, menuSender())).toEqual({ ok: true, found: true, provider: "google" })
+    expect(delivered("db:point")[0].message).toEqual({ type: "db:point", provider: "google" })
+    expect(fills()).toEqual([])
+    expect(await autofill.menuSignIn(token.token!, ACCOUNTS[0].ref, menuSender())).toMatchObject({ ok: false })
+  })
+
+  test("the popup never fills one with no password", async () => {
+    await autofill.page(pageSender(), "login", ["email", "password"], 4)
+    expect(await autofill.popupFill(1, google.ref)).toEqual({ ok: false, message: "This login signs in with another account." })
+    expect(fills()).toEqual([])
+  })
+
+  test("only Google's chooser, over https, gets the account; other providers' pages never do", async () => {
+    withs.start(1, { provider: "github", account: "kit" }, "example.com")
+    await withs.loaded({ tabId: 1, frameId: 0, url: "https://github.com/login", documentId: "g-doc" })
+    withs.start(1, google.signIn, "example.com")
+    await withs.loaded({ tabId: 1, frameId: 0, url: "http://accounts.google.com/signin", documentId: "g-doc" })
+    expect(delivered("db:chooser")).toEqual([])
+    expect(withs.accountFor(1, "http://accounts.google.com")).toBeUndefined()
+  })
+
+  test("on the provider's page with no login for the linked account, the name on the form narrows as usual", async () => {
+    withs.start(1, { provider: "google", account: "nobody@gmail.com" }, "example.com")
+    const sender = pageSender({ url: "https://accounts.google.com/signin", origin: "https://accounts.google.com", documentId: "g-doc" })
+    // "admin" only: its fill row and its own sign-in-with row, not all five.
+    expect((await autofill.query(sender, ["password"], "password", 1, false, "admin")).rows).toBe(2)
+  })
+
+  test("on the provider's chooser, only its top page gets the account; the menu there narrows to its login", async () => {
+    withs.start(1, google.signIn, "example.com")
+    withs.navigated(1, "https://accounts.google.com/signin")
+    expect(withs.accountFor(1, "https://accounts.google.com")).toBe("kit@gmail.com")
+    expect(withs.accountFor(1, "https://evil.example.net")).toBeUndefined()
+    fake.frames["1:0"] = { url: "https://accounts.google.com/signin", documentId: "g-doc" }
+    await withs.loaded({ tabId: 1, frameId: 0, url: "https://accounts.google.com/signin", documentId: "g-doc" })
+    await withs.loaded({ tabId: 1, frameId: 0, url: "https://evil.example.net/", documentId: "g-doc" })
+    await withs.loaded({ tabId: 1, frameId: 2, url: "https://accounts.google.com/frame", documentId: "f-doc" })
+    expect(delivered("db:chooser").map((d) => [d.message, d.options])).toEqual([[{ type: "db:chooser", account: "kit@gmail.com" }, { documentId: "g-doc" }]])
+    const sender = pageSender({ url: "https://accounts.google.com/signin", origin: "https://accounts.google.com", documentId: "g-doc" })
+    const menu = await autofill.query(sender, ["email"], "email", 1)
+    expect(menu.rows).toBe(1)
+  })
+
+  test("a popup follows the sign-in; coming back to the site, closing the tab or locking ends it", async () => {
+    withs.start(1, google.signIn, "example.com")
+    withs.opened(1, 2)
+    expect(withs.accountFor(2, "https://accounts.google.com")).toBe("kit@gmail.com")
+    withs.navigated(1, "https://accounts.google.com/x")
+    withs.navigated(1, "https://www.example.com/home")
+    expect(withs.accountFor(1, "https://accounts.google.com")).toBeUndefined()
+    host.setStatus({ state: "locked" })
+    expect(withs.accountFor(2, "https://accounts.google.com")).toBeUndefined()
   })
 })

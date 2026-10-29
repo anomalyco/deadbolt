@@ -15,7 +15,7 @@ use super::{
     Reason, Summary, TAG, UNKNOWN_TYPE, address, array, field_name, item_name, join, month, number,
     scalar, text,
 };
-use crate::protocol::ImportSource;
+use crate::protocol::{ImportSource, sign_in_provider};
 
 /// Item categories that are skipped, by `categoryUuid`.
 fn skipped(category: &str) -> Reason {
@@ -64,6 +64,9 @@ struct Entries {
     entries: Vec<Entry>,
     references: usize,
     files: usize,
+    /// A "Sign in with" field (`ssoLogin`): the provider, and the vault and
+    /// item ids of the login it signs in with, if it names one.
+    sign_in: Option<(String, Option<(String, String)>)>,
 }
 
 impl Entries {
@@ -72,6 +75,7 @@ impl Entries {
             entries: Vec::new(),
             references: 0,
             files: 0,
+            sign_in: None,
         };
         for field in array(details, "loginFields") {
             let Some(value) = text(field, "value") else {
@@ -99,6 +103,17 @@ impl Entries {
                 match key.as_str() {
                     "reference" => out.references += 1,
                     "file" => out.files += 1,
+                    "ssoLogin" => {
+                        if out.sign_in.is_none()
+                            && let Some(provider) = text(value, "provider")
+                        {
+                            let link = value.get("item").and_then(|item| {
+                                Some((text(item, "vaultUuid")?, text(item, "itemUuid")?))
+                            });
+                            out.sign_in = Some((provider, link));
+                        }
+                        continue;
+                    }
                     _ => {}
                 }
                 let Some(value) = section_value(key, value) else {
@@ -241,8 +256,17 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
     b.known_or_extra("otp", entries.take(Entry::is_totp), BAD_OTP, summary);
     b.known("notes", text(details, "notesPlain"));
     b.urls(urls(overview), summary);
+    let sign_in = entries.sign_in.take();
+    let mut link = None;
+    if let Some((provider, to)) = sign_in
+        && b.known("sign-in-with", sign_in_provider(&provider))
+    {
+        link = to;
+    }
     entries.extras(&mut b, summary);
-    b.finish("login", item_name(text(overview, "title")), summary)
+    let mut item = b.finish("login", item_name(text(overview, "title")), summary)?;
+    item.sign_in_link = link;
+    Some(item)
 }
 
 fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
@@ -462,6 +486,7 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
                     let source = source(&user_id, vault_id, &item_id, &version);
                     mapped.source = valid_source(&source).then_some(source);
                 }
+
                 out.push(mapped);
             }
         }

@@ -1,0 +1,222 @@
+# Sign-up (registration) forms.
+#
+# Display clues match the form's text and header, the page title and headings
+# and its buttons; code clues match the form's id, name, action and the frame URL.
+
+kind = "signup"
+
+[[clue]]
+phrase = "sign up"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "signup"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "create account"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "create an account"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "create your account"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "register"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "registration"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "join now"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "get started"
+score = 1
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "confirm password"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "i agree"
+score = 2
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "terms of service"
+score = 1
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "already have an account"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "s inscrire"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "inscription"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "creer un compte"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "registrieren"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "konto erstellen"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "crear cuenta"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "registrarse"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "registrati"
+score = 3
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "crea account"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "新規登録"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Chinese)"
+
+[[clue]]
+phrase = "アカウント作成"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Japanese)"
+
+[[clue]]
+phrase = "注册"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Chinese)"
+
+[[clue]]
+phrase = "регистрация"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form (Russian)"
+
+[[clue]]
+phrase = "회원가입"
+score = 4
+channel = "display"
+why = "Ported from clues.ts: wording around this kind of form"
+
+[[clue]]
+phrase = "forgot password"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "remember me"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "welcome back"
+score = -2
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "don t have an account"
+score = -3
+channel = "display"
+why = "Ported from clues.ts: wording of another kind of form"
+
+[[clue]]
+phrase = "signup"
+langs = ["register", "join", "createaccount", "onboard"]
+score = 2
+channel = "code"
+mode = "sanitised"
+why = "Ported from detect.ts SIGNUP_URL: /signup, /register, /join paths; counts once"
+
+[[clue]]
+phrase = "already a member"
+langs = ["already registered"]
+score = 3
+channel = "display"
+why = "Sign-up forms link back to sign-in with this wording (pinterest.com 'Already a member? Log in')"
+
+[[clue]]
+phrase = "date of birth"
+langs = ["birthdate", "birthday", "fecha de nacimiento", "geburtsdatum", "date de naissance"]
+score = 2
+channel = "display"
+why = "Sign-up forms ask for a birth date; sign-in forms never do (pinterest.com)"
+
+[[clue]]
+phrase = "create a password"
+langs = ["create password", "choose a password"]
+score = 2
+channel = "display"
+why = "Only a sign-up or reset asks to create a password (pinterest.com)"
+

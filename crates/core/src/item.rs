@@ -137,6 +137,13 @@ pub enum Format {
         min: usize,
         max: usize,
     },
+    /// One line: no control characters or surrounding whitespace, at most
+    /// this many characters.
+    Line {
+        max: usize,
+    },
+    /// Another item's id: 32 lowercase hex digits.
+    ItemRef,
 }
 
 /// A known field of an item type.
@@ -196,7 +203,22 @@ const fn digits(name: &'static str, required: bool, min: usize, max: usize) -> S
     }
 }
 
+/// A plain text field with a format.
+const fn formatted(name: &'static str, format: Format) -> SchemaField {
+    SchemaField {
+        name,
+        kind: FieldType::Text,
+        required: false,
+        format,
+        multiline: false,
+    }
+}
+
 static SCHEMAS: [Schema; 6] = [
+    // `sign-in-with` names the provider of a "Sign in with Google" login
+    // (`google`, `apple`, ...; see `deadbolt_client::protocol::sign_in_provider`)
+    // and `sign-in-account` the login it signs in with, by id. Neither is
+    // secret. See docs/autofill.md.
     Schema {
         kind: "login",
         fields: &[
@@ -205,6 +227,8 @@ static SCHEMAS: [Schema; 6] = [
             known("url", FieldType::Url, false),
             known("otp", FieldType::Otp, false),
             known("notes", FieldType::Note, false),
+            formatted("sign-in-with", Format::Line { max: 64 }),
+            formatted("sign-in-account", Format::ItemRef),
         ],
     },
     Schema {
@@ -429,14 +453,60 @@ pub fn check_field(schema: &Schema, name: &str, field: &Field) -> Result<(), Ite
                 expected: known.kind.clone(),
             });
         }
-        if let Format::Digits { min, max } = known.format {
-            let n = field.value.len();
-            if !field.value.bytes().all(|b| b.is_ascii_digit()) || n < min || n > max {
-                return Err(invalid(name, format!("must be {min}-{max} digits")));
+        let value = field.value.as_str();
+        match known.format {
+            Format::Any => {}
+            Format::Digits { min, max } => {
+                let n = value.len();
+                if !value.bytes().all(|b| b.is_ascii_digit()) || n < min || n > max {
+                    return Err(invalid(name, format!("must be {min}-{max} digits")));
+                }
+            }
+            Format::Line { max } => {
+                if value.chars().any(char::is_control)
+                    || value.trim() != value
+                    || value.chars().count() > max
+                {
+                    return Err(invalid(
+                        name,
+                        format!("must be one line of at most {max} characters"),
+                    ));
+                }
+            }
+            Format::ItemRef => {
+                let hex = |b: &u8| b.is_ascii_digit() || (b'a'..=b'f').contains(b);
+                if value.len() != 32 || !value.bytes().all(|b| hex(&b)) {
+                    return Err(invalid(name, "not an item id"));
+                }
             }
         }
     }
     Ok(())
+}
+
+#[test]
+fn sign_in_fields() {
+    let login = schema("login").unwrap();
+    let text = |v: &str| Field::new(FieldType::Text, v);
+    assert!(check_field(login, "sign-in-with", &text("google")).is_ok());
+    assert!(check_field(login, "sign-in-with", &text("My company SSO")).is_ok());
+    for bad in [" google", "a\nb", &"x".repeat(65)] {
+        assert!(
+            check_field(login, "sign-in-with", &text(bad)).is_err(),
+            "{bad:?}"
+        );
+    }
+    let id = "0123456789abcdef0123456789abcdef";
+    assert!(check_field(login, "sign-in-account", &text(id)).is_ok());
+    for bad in [&id[1..], &id.to_uppercase(), &format!("{}g", &id[1..])] {
+        assert!(
+            check_field(login, "sign-in-account", &text(bad)).is_err(),
+            "{bad}"
+        );
+    }
+    // Not secret: never masked.
+    let secret = Field::new(FieldType::Secret, "google");
+    assert!(check_field(login, "sign-in-with", &secret).is_err());
 }
 
 /// Checks what only values written now must satisfy: an otp must be a TOTP

@@ -28,8 +28,8 @@ use super::{EXTENSION_ID, extension_origin};
 use crate::client;
 use crate::paths::Paths;
 use crate::protocol::{
-    Change, Command, ErrorCode, Fill, LoginRef, PagePassword, Reply, Secret, SiteField, SiteStatus,
-    SiteValues,
+    Change, Command, ErrorCode, Fill, LoginRef, PagePassword, Reply, Secret, SignIn, SiteField,
+    SiteStatus, SiteValues,
 };
 use crate::site::Site;
 
@@ -263,6 +263,9 @@ pub(super) struct Account {
     has_password: bool,
     has_totp: bool,
     urls: Vec<String>,
+    /// `{provider, account?}` for a "Sign in with Google" login.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sign_in: Option<SignIn>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -675,6 +678,7 @@ impl Serial {
                         has_password: l.has_password,
                         has_totp: l.has_otp,
                         urls: l.urls,
+                        sign_in: l.sign_in,
                     })
                     .collect();
                 Ok(Body::List { site, accounts })
@@ -994,22 +998,41 @@ mod tests {
             id: Some(2.into()),
             body: Body::List {
                 site: "github.com".into(),
-                accounts: vec![Account {
-                    login: "a:b".into(),
-                    vault: "personal".into(),
-                    title: "GitHub".into(),
-                    username: None,
-                    has_password: true,
-                    has_totp: false,
-                    urls: vec!["https://github.com".into()],
-                }],
+                accounts: vec![
+                    Account {
+                        login: "a:b".into(),
+                        vault: "personal".into(),
+                        title: "GitHub".into(),
+                        username: None,
+                        has_password: true,
+                        has_totp: false,
+                        urls: vec!["https://github.com".into()],
+                        sign_in: None,
+                    },
+                    Account {
+                        login: "a:c".into(),
+                        vault: "personal".into(),
+                        title: "GitHub".into(),
+                        username: None,
+                        has_password: false,
+                        has_totp: false,
+                        urls: vec!["https://github.com".into()],
+                        sign_in: Some(SignIn {
+                            provider: "google".into(),
+                            account: Some("dax@example.com".into()),
+                        }),
+                    },
+                ],
             },
         };
         assert_eq!(
             json(&list),
             serde_json::json!({"id": 2, "type": "list", "site": "github.com", "accounts": [
                 {"ref": "a:b", "vault": "personal", "title": "GitHub", "hasPassword": true,
-                 "hasTotp": false, "urls": ["https://github.com"]}
+                 "hasTotp": false, "urls": ["https://github.com"]},
+                {"ref": "a:c", "vault": "personal", "title": "GitHub", "hasPassword": false,
+                 "hasTotp": false, "urls": ["https://github.com"],
+                 "signIn": {"provider": "google", "account": "dax@example.com"}}
             ]})
         );
         let changed = Envelope {
@@ -1064,6 +1087,7 @@ mod tests {
                         has_password: true,
                         has_totp: false,
                         urls: vec![],
+                        sign_in: None,
                     })
                     .collect(),
             },
