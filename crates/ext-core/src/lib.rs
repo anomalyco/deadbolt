@@ -231,7 +231,6 @@ fn start_sync() {
             if sync_round().await.is_err() {
                 sync_failed();
             }
-            items_changed();
         }
     });
     SYNC.with(|slot| *slot.borrow_mut() = Some(SyncTask { wake, task }));

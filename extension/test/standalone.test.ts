@@ -217,6 +217,18 @@ describe("idle lock", () => {
     expect(fake.alarmsCreated).toEqual({ "deadbolt-idle": 1, "deadbolt-sync": 1 })
   })
 
+  test("existing alarms with different or missing periods are updated once", async () => {
+    fake.alarms["deadbolt-idle"] = { periodInMinutes: 2 }
+    fake.alarms["deadbolt-sync"] = {}
+    new StandaloneBackend()
+    await settle()
+    expect(fake.alarms).toEqual({ "deadbolt-idle": { periodInMinutes: 1 }, "deadbolt-sync": { periodInMinutes: 5 } })
+    expect(fake.alarmsCreated).toEqual({ "deadbolt-idle": 1, "deadbolt-sync": 1 })
+    new StandaloneBackend()
+    await settle()
+    expect(fake.alarmsCreated).toEqual({ "deadbolt-idle": 1, "deadbolt-sync": 1 })
+  })
+
   test("the vault's worker stopping is heard only from the offscreen document", async () => {
     const backend = new StandaloneBackend()
     await backend.connect()

@@ -143,6 +143,11 @@ network does not hold up a list or fill. Locking bypasses all of it: the offscre
 document terminates the worker and rejects in-flight and queued requests. A new
 worker reopens the encrypted file only after passphrase unlock.
 
+Pairing's Argon2 rendezvous-key derivation is an exception: on wasm it runs
+synchronously on the vault worker and can stall its other requests for about
+one second (hardware-dependent). Background network waits do not block local
+reads, but this CPU-bound pairing step still does; isolating it is follow-up work.
+
 Sync runs in the background. Create and unlock start the startup membership round,
 a five-minute alarm and user wakeups (at most every 30 seconds) catch up, and the
 device page refreshes its login list on worker change events. Local list/fill

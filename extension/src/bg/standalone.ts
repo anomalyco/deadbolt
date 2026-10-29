@@ -301,7 +301,7 @@ function fromOffscreen(sender: chrome.runtime.MessageSender): boolean {
 
 async function ensureAlarm(name: string, periodInMinutes: number) {
   const existing = await chrome.alarms.get(name).catch(() => undefined)
-  if (!existing) await chrome.alarms.create(name, { periodInMinutes })
+  if (existing?.periodInMinutes !== periodInMinutes) await chrome.alarms.create(name, { periodInMinutes })
 }
 
 /** Only this extension's own device.html (in any tab, with any query or hash) may manage the vault: never a content script, the inline menu or another page. */

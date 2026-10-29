@@ -25,7 +25,8 @@ if (standalone && process.argv.includes("--native")) throw new Error("--native a
 const native = !standalone
 const wasm = join(root, "wasm")
 
-const entries = ["background", "content", "passkey-hook", "popup", "menu", "device", "offscreen", "vault-worker"].map((name) => join(root, "src", `${name}.ts`))
+const entries = ["background", "content", "passkey-hook", "popup", "menu", ...(native ? [] : ["device", "offscreen", "vault-worker"])].map((name) => join(root, "src", `${name}.ts`))
+const standaloneStatic = ["device.css", "device.html", "offscreen.html"].map((name) => join(root, "static", name))
 
 async function build() {
   if (!native) {
@@ -49,7 +50,7 @@ async function build() {
     for (const log of result.logs) console.error(log)
     throw new Error("build failed")
   }
-  await cp(join(root, "static"), outdir, { recursive: true })
+  await cp(join(root, "static"), outdir, { recursive: true, filter: (path) => !native || !standaloneStatic.includes(path) })
   if (!native) {
     await cp(wasm, join(outdir, "wasm"), { recursive: true })
   }
