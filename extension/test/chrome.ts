@@ -36,7 +36,9 @@ export interface FakeChrome {
   runtimeAnswer: (message: unknown) => unknown
   /** chrome.runtime.onMessage listeners; `deliver` calls them as Chrome would. */
   listeners: Array<(message: unknown, sender: chrome.runtime.MessageSender, respond: (reply: unknown) => void) => unknown>
-  alarms: Record<string, { periodInMinutes?: number }>
+  alarms: Record<string, { periodInMinutes?: number; when?: number }>
+  /** Optional permissions granted (chrome.permissions). */
+  granted: Set<string>
   /** How many times each alarm was created. */
   alarmsCreated: Record<string, number>
   alarmListeners: Array<(alarm: { name: string }) => void>
@@ -84,6 +86,7 @@ export function installChrome(): FakeChrome {
     runtimeAnswer: () => undefined,
     listeners: [],
     alarms: {},
+    granted: new Set(),
     alarmsCreated: {},
     alarmListeners: [],
     idleListeners: [],
@@ -107,11 +110,15 @@ export function installChrome(): FakeChrome {
     },
     alarms: {
       get: async (name: string) => (fake.alarms[name] ? { name, ...fake.alarms[name] } : undefined),
-      create: async (name: string, info: { periodInMinutes?: number }) => {
+      create: async (name: string, info: { periodInMinutes?: number; when?: number }) => {
         fake.alarms[name] = info
         fake.alarmsCreated[name] = (fake.alarmsCreated[name] ?? 0) + 1
       },
+      clear: async (name: string) => delete fake.alarms[name],
       onAlarm: { addListener: (l: (alarm: { name: string }) => void) => void fake.alarmListeners.push(l) },
+    },
+    permissions: {
+      contains: async ({ permissions = [] }: { permissions?: string[] }) => permissions.every((p) => fake.granted.has(p)),
     },
     idle: { onStateChanged: { addListener: (l: (state: string) => void) => void fake.idleListeners.push(l) } },
     webNavigation: {
@@ -131,7 +138,8 @@ export function installChrome(): FakeChrome {
     },
     storage: {
       session: {
-        get: async (key: string | null) => (key === null ? { ...fake.session } : key in fake.session ? { [key]: fake.session[key] } : {}),
+        get: async (key: string | string[] | null) =>
+          key === null ? { ...fake.session } : Object.fromEntries((Array.isArray(key) ? key : [key]).filter((k) => k in fake.session).map((k) => [k, fake.session[k]])),
         set: async (items: Record<string, unknown>) => void Object.assign(fake.session, items),
         remove: async (key: string | string[]) => void (Array.isArray(key) ? key : [key]).forEach((k) => delete fake.session[k]),
       },

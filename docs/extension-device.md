@@ -175,10 +175,11 @@ JS strings, structured-clone copies and browser process memory cannot be reliabl
 wiped. Lock terminates the worker and closes its network endpoint; it does not
 promise forensic erasure from RAM. No key is persisted unencrypted in this proof.
 
-The management command route accepts only the exact extension device page; content
+The management command route accepts only the exact extension device page and the
+toolbar popup, which show the same vault UI (`extension/src/vault`); content
 scripts and web pages cannot create/unlock/pair a device or invoke arbitrary worker
 commands. The offscreen route accepts only the extension service worker. Neither
-the device page, offscreen document, worker nor wasm module is web-accessible.
+the pages, offscreen document, worker nor wasm module is web-accessible.
 There is no externally-connectable API and no native-host fallback. Extension CSP
 allows local wasm execution, not remotely hosted executable code. Passphrases and
 vault contents must never enter logs or telemetry.
@@ -203,12 +204,50 @@ security review before anything implements it.
 | Touch ID / passkey unlock | allowed | allowed | allowed |
 | Reveal/copy password; card number/CVV | re-auth every time | re-auth card number/CVV | no re-auth |
 
-Use means a pick, fill, save, opening the popup, or reveal. Passive listing for a
-page menu is not use. Phase 1 implements passphrase locking, a one-hour idle limit
-and screen-lock handling, without exposing the unimplemented preset selector or
-biometric promises. The unwrapped key stays in worker memory only under every
-preset. Session-key restoration and passkey PRF wrapping need their own security
-review and browser capability handling.
+Use means a pick, fill, save, opening the popup, opening a login, or reveal. Passive
+listing for a page menu is not use, and neither is a page reading the vault again
+(an open login's details ask for each new one-time code). The standalone build
+implements the three presets' idle limits and screen-lock handling, and Strict's
+passphrase check before a password is shown or copied. The choice is a setting in
+`chrome.storage.local`, never a key. The service worker sends it to the vault's
+worker with every unlock and change, and the Rust core enforces Strict itself
+(`crates/ext-core/src/policy.rs`): under Strict it returns no password without a
+passphrase, which it checks against the open store's key set, and a worker that
+was never told assumes Strict. Card fields and Touch ID/passkey unlock don't exist
+in this build yet. The unwrapped key stays in worker memory only under every
+preset: session-key restoration and passkey PRF wrapping need their own security
+review and browser capability handling, so an offscreen restart still locks under
+Comfortable and Relaxed.
+
+Wrong passphrases back off. After three in a row, for unlocking or for Strict's
+check before a password, the service worker refuses the next try for 1 s, then 2,
+4, … up to 60 s, without reaching the vault; a right passphrase starts over. The
+count lives in `chrome.storage.session`, so a restarted service worker keeps it.
+This slows guessing through Deadbolt's own pages: someone at an unattended browser,
+or a script driving the popup. It does nothing against an attacker who has copied
+the encrypted OPFS file, who meets only the passphrase KDF.
+
+### Copied passwords
+
+The vault UI copies a password or one-time code when asked (the native popup still
+never copies passwords). It can clear it again 30 seconds later, or when Deadbolt
+locks, whichever is first, and only if the clipboard still holds that value, so
+nothing the user copied since is lost. The service worker keeps no copy: only a
+salted SHA-256 of the value, in memory and in `chrome.storage.session`, and a
+one-shot alarm. The offscreen document (opened with the `CLIPBOARD` reason too)
+reads the clipboard, compares, and empties it.
+
+Reading and writing the clipboard from there needs `clipboardRead` and
+`clipboardWrite`. Each adds an install warning ("Read data you copy and paste",
+"Modify data you copy and paste", measured with
+`chrome.management.getPermissionWarningsByManifest`), so both are optional
+permissions, asked for together: by the "Clear copied passwords after 30 seconds"
+switch in Settings, when the user chooses Strict, and once on the first copy under
+Strict. Without them nothing is cleared, and nothing is cleared blindly.
+
+The `favicon` permission, for site icons in the list from Chrome's own cache, adds
+no warning to this manifest: alone it says "Read the icons of the websites you
+visit", which the content scripts' all-sites access already covers.
 
 ## Verification
 
@@ -270,8 +309,8 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
    storage/lifetime adapters, and exercise
    suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
    startup contacts (the proof dials sequentially within the same 30-second budget).
-3. Finish the three lock presets, trusted-use accounting, offscreen session-key
-   restoration, browser-quit semantics and re-authentication gates.
+3. Trusted-use accounting, offscreen session-key restoration (security review
+   first), browser-quit semantics and the card re-authentication gate.
 4. Add WebAuthn PRF/passkey unlock with capability detection; review key wrapping,
    extension origin binding and memory/permission boundaries.
 5. Reach native autofill feature parity (PSL policy, OTP editing, generation, passkeys,

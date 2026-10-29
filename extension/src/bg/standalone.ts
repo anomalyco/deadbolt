@@ -10,10 +10,12 @@
 // in chrome.storage; closing the browser, a crash of the offscreen document or
 // its worker, and Lock all end that memory, so each leaves the vault locked.
 
-import type { DeviceCommand, DeviceReply, Status } from "../messages"
+import { DEFAULT_PRESET, isPreset, PRESETS, VAULT_NAME } from "../device-rules"
+import type { DeviceCommand, DeviceReply, LockPreset, Status } from "../messages"
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type SendOptions, type VaultBackend } from "./backend"
-import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
+import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, isCopied, record, type Copied } from "./clipboard"
+import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultClipboard, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
 
 export const OFFSCREEN_PAGE = "offscreen.html"
 export const DEVICE_PAGE = "device.html"
@@ -27,22 +29,28 @@ const SLOW_MS: Partial<Record<string, number>> = {
   // Starting a join waits up to 20 s for the relay; finishing runs the KDF.
   "device-join-start": 60_000,
   "device-join-finish": 120_000,
+  // Strict checks the passphrase (the KDF) before a password is shown.
+  "device-secret": 120_000,
 }
 
-/**
- * The Comfortable preset, the contract's default: lock after an hour without
- * use, when the screen locks, and when the browser quits. Strict (5 min) and
- * Relaxed (12 h, screen lock ignored) are a follow-up, as is keeping the key
- * in chrome.storage.session so an offscreen restart doesn't lock (a proposal
- * requiring its own security review).
- */
-const IDLE_LOCK_MS = 60 * 60_000
+/** The chosen preset (src/device-rules.ts), in chrome.storage.local: a setting, nothing secret. */
+const PRESET_KEY = "deadbolt.lockPreset"
 const SYNC_EVERY_MIN = 5
 /** A sync on wake (the popup opening, say) at most this often. */
 const SYNC_AFTER_MS = 30_000
 const TICK_ALARM = "deadbolt-idle"
 const SYNC_ALARM = "deadbolt-sync"
 const LAST_USE_KEY = "deadbolt.lastUse"
+/**
+ * Wrong passphrases in a row, and until when another try is refused: after
+ * three, 1 s, then 2, 4, … up to a minute (backoff). In chrome.storage.session
+ * so a restarted service worker keeps counting.
+ */
+const TRIES_KEY = "deadbolt.passphraseTries"
+const FREE_TRIES = 3
+const MAX_WAIT_MS = 60_000
+/** How long to refuse after `fails` wrong passphrases in a row. */
+export const backoff = (fails: number) => (fails < FREE_TRIES ? 0 : Math.min(MAX_WAIT_MS, 1000 * 2 ** (fails - FREE_TRIES)))
 
 /**
  * What this device does today. Anything else is refused here, before the
@@ -54,16 +62,33 @@ const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save"])
 const USES = new Set<string>(["fill", "save"])
 
 /** device.html's commands that don't count as use. */
-const PAGE_READS = new Set<string>(["device-status", "device-lock", "device-logins", "device-devices", "list", "device-join-status", "device-join-cancel"])
+const PAGE_READS = new Set<string>([
+  "device-status",
+  "device-lock",
+  "device-logins",
+  "device-devices",
+  // A login's details, which an open detail asks again for every new one-time code.
+  "device-item",
+  "list",
+  "device-join-status",
+  "device-join-cancel",
+  "device-settings",
+  "device-copied",
+])
 /**
  * Commands that change nothing hello would report. Until a join finishes,
  * nothing is persisted and hello stays not-set-up, so starting and polling
  * one don't ask it again.
  */
-const QUIET = new Set<string>(["device-logins", "device-devices", "device-join-start", "device-join-status"])
+const QUIET = new Set<string>(["device-logins", "device-devices", "device-item", "device-secret", "device-generate", "device-join-start", "device-join-status"])
 /** Commands that name this browser to the vault's other devices. */
 const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-start", "device-join-finish"])
+/** Commands that open the vault: the worker is told the lock preset with them, and keeps Strict itself. */
+const OPENS = new Set<string>(["device-create", "device-unlock", "device-join-finish"])
+/** Commands that check a passphrase, and back off after wrong ones. */
+const CHECKS = new Set<string>(["device-unlock", "device-secret"])
 
+const UNREADABLE = "Deadbolt's vault gave an answer it couldn't read. Reload the extension and try again."
 const unsupported = () => new HostError("failed", "The browser-only Deadbolt can't do this yet.")
 
 export class StandaloneBackend implements VaultBackend {
@@ -76,6 +101,9 @@ export class StandaloneBackend implements VaultBackend {
   /** The last use, read back after the service worker restarts. */
   private loaded: Promise<void>
   private lastSync = 0
+  preset: LockPreset = DEFAULT_PRESET
+  private tries = { fails: 0, until: 0 }
+  private copied: Copied | null = null
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -86,21 +114,40 @@ export class StandaloneBackend implements VaultBackend {
     chrome.alarms.onAlarm.addListener((alarm) => {
       if (alarm.name === TICK_ALARM) void this.tick()
       if (alarm.name === SYNC_ALARM) void this.sync()
+      if (alarm.name === CLIPBOARD_ALARM) void this.clearClipboard()
     })
     chrome.idle.onStateChanged.addListener((state) => {
-      if (state === "locked") void this.lock()
+      if (state === "locked") void this.loaded.then(() => {
+        if (PRESETS[this.preset].screenLock) return this.lock()
+      })
     })
     // Creating an alarm that exists starts its period over, and the service
     // worker starts far more often than once a minute: only make missing ones.
     void ensureAlarm(TICK_ALARM, 1)
     void ensureAlarm(SYNC_ALARM, SYNC_EVERY_MIN)
-    this.loaded = chrome.storage.session.get(LAST_USE_KEY).then(
-      (got) => {
-        const at = got[LAST_USE_KEY]
-        if (typeof at === "number") this.lastUse = Math.max(this.lastUse, at)
-      },
-      () => {},
-    )
+    this.loaded = Promise.all([
+      chrome.storage.session.get(LAST_USE_KEY).then(
+        (got) => {
+          const at = got[LAST_USE_KEY]
+          if (typeof at === "number") this.lastUse = Math.max(this.lastUse, at)
+        },
+        () => {},
+      ),
+      chrome.storage.local.get(PRESET_KEY).then(
+        (got) => {
+          if (isPreset(got[PRESET_KEY])) this.preset = got[PRESET_KEY]
+        },
+        () => {},
+      ),
+      chrome.storage.session.get([TRIES_KEY, COPIED_KEY]).then(
+        (got) => {
+          const t = got[TRIES_KEY] as { fails?: unknown; until?: unknown } | undefined
+          if (typeof t?.fails === "number" && typeof t.until === "number") this.tries = { fails: t.fails, until: t.until }
+          if (isCopied(got[COPIED_KEY])) this.copied ??= got[COPIED_KEY]
+        },
+        () => {},
+      ),
+    ]).then(() => {})
   }
 
   onChange(listener: Listener): () => void {
@@ -132,10 +179,10 @@ export class StandaloneBackend implements VaultBackend {
   async hello(change?: Change): Promise<void> {
     try {
       const reply = await this.request({ type: "hello" }, TIMEOUT_MS)
-      if (reply.type !== "hello") throw new HostError("failed", `Expected a hello reply, got ${reply.type}.`)
+      if (reply.type !== "hello") throw new HostError("failed", UNREADABLE)
       this.capabilities = reply.capabilities
       if (reply.protocol !== PROTOCOL) {
-        this.setStatus({ state: "unavailable", detail: `This extension speaks protocol ${PROTOCOL}, but its vault speaks ${reply.protocol}.` }, change)
+        this.setStatus({ state: "unavailable", detail: "This extension and its vault are different versions. Reload the extension." }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
       else this.setStatus({ state: reply.status, detail: reply.detail }, change)
     } catch (err) {
@@ -155,15 +202,15 @@ export class StandaloneBackend implements VaultBackend {
       throw new HostError(reply.code, reply.message)
     }
     const expected = REPLY_TYPE[body.type as T]
-    if (reply.type !== expected) throw new HostError("failed", `Expected a ${expected} reply, got ${reply.type}.`)
+    if (reply.type !== expected) throw new HostError("failed", UNREADABLE)
     if (body.type === "save") void this.hello("items")
     return reply as ReplyFor[T]
   }
 
-  /** device.html's commands (see DeviceCommand); the background checks the sender (fromDevicePage). */
+  /** device.html's commands (see DeviceCommand); the background checks the sender (fromVaultPage). */
   async device(command: DeviceCommand): Promise<DeviceReply> {
     const started = Date.now()
-    const fail = (message: string): DeviceReply => ({ ok: false, message, status: this.status })
+    const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
     // The user working on the vault's own page is use. The page reading the
     // vault (its status, logins and devices, which it does again on every
     // change) isn't, so an open page never keeps the vault unlocked; nor is Lock.
@@ -178,6 +225,32 @@ export class StandaloneBackend implements VaultBackend {
       await this.lock()
       return { ok: true, reply: { type: "device-join-cancel", ok: true }, ms: Date.now() - started, status: this.status }
     }
+    if (command.type === "device-used") return { ok: true, reply: { type: "device-used" }, ms: 0, status: this.status }
+    if (command.type === "device-settings" || command.type === "device-preset") {
+      await this.loaded
+      if (command.type === "device-preset") {
+        this.preset = command.preset
+        await chrome.storage.local.set({ [PRESET_KEY]: command.preset }).catch(() => {})
+        // The worker keeps the preset too, to hold Strict itself.
+        if (this.status.state === "ready") await this.raw({ type: "device-preset", preset: command.preset }, TIMEOUT_MS).catch(() => null)
+      }
+      return { ok: true, reply: { type: "device-settings", preset: this.preset }, ms: Date.now() - started, status: this.status }
+    }
+    if (command.type === "device-copied") {
+      const clears = await this.copiedNow(command.value)
+      return { ok: true, reply: { type: "device-copied", clears }, ms: Date.now() - started, status: this.status }
+    }
+    if (command.type === "device-secret" && !command.passphrase) {
+      await this.loaded
+      // Strict: showing a password asks for the passphrase every time.
+      if (PRESETS[this.preset].reauth) return fail("Enter your passphrase to show this password.", "passphrase_needed")
+    }
+    const checks = CHECKS.has(command.type) && (command.type === "device-unlock" || !!(command as { passphrase?: string }).passphrase)
+    if (checks) {
+      await this.loaded
+      const wait = this.tries.until - Date.now()
+      if (wait > 0) return fail(`Too many wrong passphrases. Try again in ${Math.ceil(wait / 1000)} s.`, "backoff")
+    }
     if (command.type === "device-status") {
       await this.hello()
       return { ok: true, reply: { type: "hello" }, ms: Date.now() - started, status: this.status }
@@ -191,7 +264,12 @@ export class StandaloneBackend implements VaultBackend {
       }
     }
     // The vault names this device to the others it pairs with: "Chrome on macOS".
-    const body = NAMED.has(command.type) ? { ...command, deviceName: deviceName() } : command
+    if (OPENS.has(command.type)) await this.loaded
+    const body = {
+      ...command,
+      ...(NAMED.has(command.type) ? { deviceName: deviceName() } : {}),
+      ...(OPENS.has(command.type) ? { preset: this.preset } : {}),
+    }
     let raw: Record<string, unknown>
     try {
       raw = await this.raw(body, SLOW_MS[command.type] ?? TIMEOUT_MS)
@@ -199,9 +277,10 @@ export class StandaloneBackend implements VaultBackend {
       return fail((err as Error).message)
     }
     const ms = Date.now() - started
+    if (checks) await this.tried(raw.type === "error" && raw.code === "wrong_passphrase" ? "wrong" : raw.type === "error" ? "other" : "right")
     if (raw.type === "error") {
       await this.hello()
-      return fail(typeof raw.message === "string" && raw.message ? raw.message : "The vault refused.")
+      return fail(typeof raw.message === "string" && raw.message ? raw.message : "Deadbolt couldn't do that.", typeof raw.code === "string" ? raw.code : undefined)
     }
     if (command.type === "device-unlock" || command.type === "device-create" || command.type === "device-join-finish") {
       this.used()
@@ -223,6 +302,8 @@ export class StandaloneBackend implements VaultBackend {
    */
   async lock(): Promise<void> {
     const unlocked = this.status.state === "ready"
+    // A copied password goes with the vault.
+    await this.clearClipboard()
     const ok = await this.message<boolean>({ type: VAULT_LOCK } satisfies VaultLock, 5_000).catch(() => false)
     if (!ok) await chrome.offscreen.closeDocument().catch(() => {})
     this.capabilities = []
@@ -233,12 +314,46 @@ export class StandaloneBackend implements VaultBackend {
     this.setStatus({ state: "locked", detail: "Unlock Deadbolt to fill passwords" }, "locked")
   }
 
+  /** Counts a passphrase check: wrong ones back off, a right one starts over, anything else leaves it. */
+  private async tried(outcome: "right" | "wrong" | "other") {
+    if (outcome === "other") return
+    const fails = outcome === "wrong" ? this.tries.fails + 1 : 0
+    this.tries = { fails, until: fails ? Date.now() + backoff(fails) : 0 }
+    await chrome.storage.session.set({ [TRIES_KEY]: this.tries }).catch(() => {})
+  }
+
+  /**
+   * The page copied a password or code: with the clipboard permissions,
+   * remember its salted hash and clear it in 30 s (bg/clipboard.ts).
+   * Answers whether it will be cleared.
+   */
+  private async copiedNow(value: string): Promise<boolean> {
+    const granted = await chrome.permissions.contains({ permissions: CLIPBOARD_PERMISSIONS }).catch(() => false)
+    if (!granted) return false
+    this.copied = await record(value)
+    await chrome.storage.session.set({ [COPIED_KEY]: this.copied }).catch(() => {})
+    await chrome.alarms.create(CLIPBOARD_ALARM, { when: Date.now() + CLEAR_AFTER_MS })
+    return true
+  }
+
+  /** Empties the clipboard if it still holds what Deadbolt copied; forgets it either way. */
+  async clearClipboard(): Promise<void> {
+    await this.loaded
+    const copied = this.copied
+    if (!copied) return
+    this.copied = null
+    await chrome.storage.session.remove(COPIED_KEY).catch(() => {})
+    await chrome.alarms.clear(CLIPBOARD_ALARM).catch(() => false)
+    if (!(await chrome.permissions.contains({ permissions: CLIPBOARD_PERMISSIONS }).catch(() => false))) return
+    await this.message<boolean>({ type: VAULT_CLIPBOARD, ...copied } satisfies VaultClipboard, 5_000).catch(() => false)
+  }
+
   private async tick() {
     await this.loaded
     // Woken by the alarm, the service worker may not have heard from the vault yet.
     if (this.status.state === "connecting") await this.connect()
     if (this.status.state !== "ready") return
-    if (Date.now() - this.lastUse >= IDLE_LOCK_MS) await this.lock()
+    if (Date.now() - this.lastUse >= PRESETS[this.preset].idleMs) await this.lock()
   }
 
   private async sync() {
@@ -252,20 +367,20 @@ export class StandaloneBackend implements VaultBackend {
   private async request(body: Record<string, unknown> & { type: string }, timeout: number) {
     const raw = await this.raw(body, timeout)
     const reply = parseReply(raw)
-    if (!reply) throw new HostError("failed", "The vault's reply was malformed.")
+    if (!reply) throw new HostError("failed", UNREADABLE)
     return reply
   }
 
   private async raw(body: Record<string, unknown> & { type: string }, timeout: number): Promise<Record<string, unknown>> {
     const response = await this.message<VaultResponse>({ type: VAULT_REQUEST, body } satisfies VaultRequest, timeout)
-    if (!response) throw new HostError("disconnected", "Deadbolt's vault didn't start.")
+    if (!response) throw new HostError("disconnected", "Deadbolt's vault didn't start. Reload the extension and try again.")
     if ("error" in response) throw new HostError(response.locked ? "locked" : "failed", response.error)
     const reply = response.reply
-    if (typeof reply !== "object" || reply === null || Array.isArray(reply)) throw new HostError("failed", "The vault's reply was malformed.")
+    if (typeof reply !== "object" || reply === null || Array.isArray(reply)) throw new HostError("failed", UNREADABLE)
     return reply as Record<string, unknown>
   }
 
-  private async message<T>(message: VaultRequest | VaultLock, timeout: number): Promise<T | null> {
+  private async message<T>(message: VaultRequest | VaultLock | VaultClipboard, timeout: number): Promise<T | null> {
     await this.offscreen()
     let timer: ReturnType<typeof setTimeout> | undefined
     const expired = new Promise<never>((_, reject) => (timer = setTimeout(() => reject(new HostError("timeout", "Deadbolt's vault didn't answer in time.")), timeout)))
@@ -273,7 +388,8 @@ export class StandaloneBackend implements VaultBackend {
       return (await Promise.race([chrome.runtime.sendMessage(message), expired])) as T | null
     } catch (err) {
       if (err instanceof HostError) throw err
-      throw new HostError("disconnected", String((err as Error)?.message ?? err))
+      // Chrome's own words ("Receiving end does not exist") mean nothing to a person.
+      throw new HostError("disconnected", "Deadbolt's vault didn't start. Reload the extension and try again.")
     } finally {
       clearTimeout(timer)
     }
@@ -285,7 +401,11 @@ export class StandaloneBackend implements VaultBackend {
     const open = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"], documentUrls: [url] })
     if (open.length) return
     this.creating ??= chrome.offscreen
-      .createDocument({ url: OFFSCREEN_PAGE, reasons: ["WORKERS"], justification: "Runs the vault and its sync in a worker that outlives the service worker." })
+      .createDocument({
+        url: OFFSCREEN_PAGE,
+        reasons: ["WORKERS", "CLIPBOARD"],
+        justification: "Runs the vault and its sync in a worker that outlives the service worker, and clears a copied password off the clipboard.",
+      })
       .catch((err) => {
         // Another call opened it first.
         if (!/single offscreen/i.test(String(err?.message ?? err))) throw err
@@ -304,9 +424,16 @@ async function ensureAlarm(name: string, periodInMinutes: number) {
   if (existing?.periodInMinutes !== periodInMinutes) await chrome.alarms.create(name, { periodInMinutes })
 }
 
-/** Only this extension's own device.html (in any tab, with any query or hash) may manage the vault: never a content script, the inline menu or another page. */
-export function fromDevicePage(sender: chrome.runtime.MessageSender): boolean {
-  return sender.id === chrome.runtime.id && sender.url?.split(/[?#]/)[0] === chrome.runtime.getURL(DEVICE_PAGE)
+export const POPUP_PAGE = "popup.html"
+
+/**
+ * Only this extension's own device.html (in any tab, with any query or hash)
+ * and its toolbar popup may manage the vault: never a content script, the
+ * inline menu or another page. Neither page is web-accessible.
+ */
+export function fromVaultPage(sender: chrome.runtime.MessageSender): boolean {
+  const url = sender.url?.split(/[?#]/)[0]
+  return sender.id === chrome.runtime.id && (url === chrome.runtime.getURL(DEVICE_PAGE) || url === chrome.runtime.getURL(POPUP_PAGE))
 }
 
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max
@@ -327,10 +454,39 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
   switch (c.type) {
     case "device-status":
     case "device-lock":
-    case "device-sync":
     case "device-logins":
     case "device-devices":
+    case "device-settings":
       return { type: c.type }
+    case "device-sync":
+      return c.wait === true ? { type: "device-sync", wait: true } : { type: "device-sync" }
+    case "device-item":
+      return text(c.ref, 200) && c.ref ? { type: "device-item", ref: c.ref } : null
+    case "device-secret":
+      if (!text(c.ref, 200) || !c.ref) return null
+      if (c.passphrase === undefined) return { type: "device-secret", ref: c.ref }
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-secret", ref: c.ref, passphrase: c.passphrase } : null
+    case "device-save": {
+      const e = c.entry as Record<string, unknown> | undefined
+      if (!e || !text(e.title, 500) || !text(e.url, 2048) || !text(e.username, 500) || !text(e.password, 4096)) return null
+      const entry = { title: e.title, url: e.url, username: e.username, password: e.password }
+      if (c.ref === undefined) return { type: "device-save", entry }
+      return text(c.ref, 200) && c.ref ? { type: "device-save", ref: c.ref, entry } : null
+    }
+    case "device-remove":
+      return typeof c.id === "string" && /^[0-9a-f]{64}$/.test(c.id) ? { type: "device-remove", id: c.id } : null
+    case "device-rename":
+      return text(c.name, 64) && VAULT_NAME.test(c.name) ? { type: "device-rename", name: c.name } : null
+    case "device-preset":
+      return isPreset(c.preset) ? { type: "device-preset", preset: c.preset } : null
+    case "device-used":
+      return { type: "device-used" }
+    case "device-generate":
+      return Number.isInteger(c.length) && (c.length as number) >= 8 && (c.length as number) <= 256 && typeof c.symbols === "boolean"
+        ? { type: "device-generate", length: c.length as number, symbols: c.symbols }
+        : null
+    case "device-copied":
+      return text(c.value, 4096) && c.value ? { type: "device-copied", value: c.value } : null
     case "device-create":
       return text(c.passphrase, 1024) && c.passphrase && text(c.name, 200) ? { type: "device-create", passphrase: c.passphrase, name: c.name } : null
     case "device-unlock":

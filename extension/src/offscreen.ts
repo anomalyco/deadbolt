@@ -5,10 +5,12 @@
 // they set the vault up, and two at once would race. Lock ends the worker at
 // once, even mid-KDF or mid-pairing, fails everything in flight or waiting,
 // and the next request starts a fresh, locked one. So does the engine
-// failing (a WebAssembly trap), which also gives up its storage lock. Only
-// the service worker may ask (checked by its exact URL).
+// failing (a WebAssembly trap), which also gives up its storage lock. It also
+// empties the clipboard of a password Deadbolt copied, if it's still there
+// (bg/clipboard.ts). Only the service worker may ask (checked by its exact URL).
 
-import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultRequest, type VaultResponse, type WorkerResponse } from "./bg/vault-messages"
+import { holds } from "./bg/clipboard"
+import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultClipboard, type VaultRequest, type VaultResponse, type WorkerResponse } from "./bg/vault-messages"
 
 const BACKGROUND = chrome.runtime.getURL("background.js")
 /** The requests that set the vault up, run one at a time. */
@@ -46,7 +48,7 @@ function start(): Worker {
   // A worker that fails has lost its unlocked vault; say so.
   w.onerror = (event) => {
     event.preventDefault()
-    if (w === worker) fail(`Deadbolt's vault stopped: ${event.message || "it failed"}.`)
+    if (w === worker) fail("Deadbolt's vault stopped. Unlock it again.")
   }
   return w
 }
@@ -85,9 +87,47 @@ function request(body: VaultRequest["body"]): Promise<VaultResponse> {
   return run
 }
 
-chrome.runtime.onMessage.addListener((message: { type?: unknown; body?: unknown }, sender, respond) => {
-  if (message?.type !== VAULT_REQUEST && message?.type !== VAULT_LOCK) return
+/** What the clipboard holds, read by pasting (needs clipboardRead), or null if it can't be read. */
+function readClipboard(): string | null {
+  const area = document.createElement("textarea")
+  document.body.append(area)
+  area.focus()
+  const ok = document.execCommand("paste")
+  const text = area.value
+  area.remove()
+  return ok ? text : null
+}
+
+/** Puts `text` on the clipboard by copying (needs clipboardWrite). */
+function writeClipboard(text: string): boolean {
+  const copy = (e: ClipboardEvent) => {
+    e.clipboardData?.setData("text/plain", text)
+    e.preventDefault()
+  }
+  document.addEventListener("copy", copy)
+  try {
+    return document.execCommand("copy")
+  } finally {
+    document.removeEventListener("copy", copy)
+  }
+}
+
+/** Empties the clipboard only if it still holds what Deadbolt copied: never what the user copied since. */
+async function clearIfOurs(copied: { salt: string; hash: string }): Promise<boolean> {
+  const text = readClipboard()
+  if (text === null || !(await holds(copied, text))) return false
+  return writeClipboard("")
+}
+
+chrome.runtime.onMessage.addListener((message: { type?: unknown; body?: unknown; salt?: unknown; hash?: unknown }, sender, respond) => {
+  if (message?.type !== VAULT_REQUEST && message?.type !== VAULT_LOCK && message?.type !== VAULT_CLIPBOARD) return
   if (sender.id !== chrome.runtime.id || sender.tab || sender.url !== BACKGROUND) return
+  if (message.type === VAULT_CLIPBOARD) {
+    const m = message as VaultClipboard
+    if (typeof m.salt !== "string" || typeof m.hash !== "string") return void respond(false)
+    void clearIfOurs(m).then(respond, () => respond(false))
+    return true
+  }
   if (message.type === VAULT_LOCK) {
     stop("Deadbolt locked.")
     respond(true)
@@ -95,7 +135,7 @@ chrome.runtime.onMessage.addListener((message: { type?: unknown; body?: unknown 
   }
   const body = message.body
   if (typeof body !== "object" || body === null || typeof (body as { type?: unknown }).type !== "string") {
-    respond({ error: "Malformed request." } satisfies VaultResponse)
+    respond({ error: "Deadbolt didn't understand that request. Reload the extension and try again." } satisfies VaultResponse)
     return
   }
   void request(body as VaultRequest["body"]).then(respond)

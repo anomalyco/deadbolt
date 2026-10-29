@@ -9,7 +9,7 @@ pub(crate) use deadbolt_net::application::Addr;
 use deadbolt_net::application::{self, Hint, State, clean_name};
 use deadbolt_net::{Blob, HandlerError, Inviter, PairingContext, PeerId, SyncHandler};
 
-use crate::{Error, Loaded, Result, enforce_membership, unhex};
+use super::{Error, Loaded, Result, enforce_membership, unhex};
 
 impl State for Loaded {
     type Error = Error;
@@ -108,8 +108,8 @@ impl State for Loaded {
         Ok(())
     }
 
-    fn received(&mut self, _: &DeviceId) -> Result<()> {
-        Ok(())
+    fn received(&mut self, peer: &DeviceId) -> Result<()> {
+        self.saw(peer)
     }
 }
 

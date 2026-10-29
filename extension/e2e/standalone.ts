@@ -97,10 +97,9 @@ async function logins(page: Page) {
 async function state(page: Page) {
   return (await request(page, { type: "device-status" })).status.state
 }
-/** The device page's Logins list shows `title` by itself, without a click. */
+/** The device page's list of logins shows `title` by itself, without a click. */
 async function shown(page: Page, title: string, ms = 15_000) {
-  const list = page.locator(".card").filter({ has: page.getByRole("heading", { name: "Logins", exact: true }) })
-  await list.getByText(title, { exact: true }).first().waitFor({ timeout: ms })
+  await page.locator(".list-view .vrow .title").getByText(title, { exact: true }).first().waitFor({ timeout: ms })
 }
 /** One request to the vault, as the service worker sends it to the offscreen document and its worker, timed there. */
 async function vault(worker: Worker, body: Record<string, unknown> & { type: string }) {
@@ -162,12 +161,15 @@ async function autofill(title: string, username: string, password: string) {
   await page.close()
 }
 async function addLogin(device: Page, title: string, username: string, password: string) {
-  const add = device.locator("form").filter({ has: device.getByRole("heading", { name: "Add a login" }) })
-  await add.getByLabel("Website", { exact: true }).fill(origin)
-  await add.getByLabel("Title", { exact: true }).fill(title)
-  await add.getByLabel("Username", { exact: true }).fill(username)
-  await add.getByLabel("Password", { exact: true }).fill(password)
-  await add.getByRole("button", { name: "Save", exact: true }).click()
+  await device.getByRole("button", { name: "Add login", exact: true }).click()
+  await device.getByLabel("Website", { exact: true }).fill(origin)
+  await device.getByLabel("Title", { exact: true }).fill(title)
+  await device.getByLabel("Username", { exact: true }).fill(username)
+  await device.getByLabel("Password", { exact: true }).fill(password)
+  await device.getByRole("button", { name: "Save", exact: true }).click()
+  // Saved, it shows the new login; back to the list.
+  await device.getByRole("button", { name: "Edit", exact: true }).waitFor()
+  await device.getByRole("button", { name: "Back", exact: true }).click()
 }
 async function unlockOnPage(device: Page) {
   await device.reload()
@@ -275,7 +277,7 @@ try {
     check(offline, "Chromium can't reach the network beyond loopback")
     await device.getByRole("button", { name: "Pair with an existing device", exact: true }).click()
     await device.getByRole("heading", { name: "Pairing didn't work", exact: true }).waitFor({ timeout: 60_000 })
-    check(/relay/i.test(await device.locator(".error").innerText()), "offline joining reports that no relay is reachable")
+    check(/sync service/i.test(await device.locator(".notice .error").innerText()), "offline joining says Deadbolt's sync service can't be reached")
     await device.getByRole("button", { name: "Cancel", exact: true }).click()
   }
   let count = 1
@@ -286,7 +288,7 @@ try {
   await device.getByLabel("Passphrase", { exact: true }).fill(passphrase)
   await device.getByLabel("Passphrase again", { exact: true }).fill(passphrase)
   await device.getByRole("button", { name: "Create vault", exact: true }).click()
-  await device.getByRole("heading", { name: "Add a login" }).waitFor({ timeout: 60_000 })
+  await device.getByRole("searchbox", { name: "Search logins" }).waitFor({ timeout: 60_000 })
   check(await state(device) === "ready", "extension creates and opens its own vault")
   await addLogin(device, "From browser", "browser@example.test", browserPassword)
   await shown(device, "From browser")

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test"
-import { deviceCommand, deviceName, fromDevicePage, StandaloneBackend } from "../src/bg/standalone"
-import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultRequest } from "../src/bg/vault-messages"
+import { CLIPBOARD_ALARM, COPIED_KEY, digest, holds, record } from "../src/bg/clipboard"
+import { backoff, deviceCommand, deviceName, fromVaultPage, StandaloneBackend } from "../src/bg/standalone"
+import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultClipboard, type VaultRequest } from "../src/bg/vault-messages"
 import { ID, installChrome, pageSender, POPUP_URL, settle, type FakeChrome } from "./chrome"
 
 const DEVICE_URL = `chrome-extension://${ID}/device.html`
@@ -31,6 +32,11 @@ beforeEach(() => {
       case "hello":
         return { reply: { type: "hello", protocol: 3, version: "test", status: vault, capabilities: [] } }
       case "device-unlock":
+      case "device-secret":
+        // The vault's own check: "wrong" is a wrong passphrase.
+        if (m.body.passphrase === "wrong") return { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } }
+        if (m.body.type === "device-secret") return { reply: { type: "device-secret", password: "pw" } }
+      // falls through
       case "device-create":
       case "device-join-finish":
         vault = "ready"
@@ -50,18 +56,18 @@ beforeEach(() => {
 afterEach(() => setSystemTime())
 
 describe("device page commands", () => {
-  test("only this extension's own device.html may send them", () => {
-    expect(fromDevicePage({ id: ID, url: DEVICE_URL })).toBe(true)
-    expect(fromDevicePage({ id: ID, url: `${DEVICE_URL}?from=popup#unlock`, tab: { id: 3 } as chrome.tabs.Tab, frameId: 0 })).toBe(true)
-    // The popup, the inline menu, a content script, another extension and look-alike paths may not.
-    expect(fromDevicePage({ id: ID, url: POPUP_URL })).toBe(false)
-    expect(fromDevicePage({ id: ID, url: `chrome-extension://${ID}/menu.html` })).toBe(false)
-    expect(fromDevicePage(pageSender())).toBe(false)
-    expect(fromDevicePage(pageSender({ url: DEVICE_URL, id: "someone-else" }))).toBe(false)
-    expect(fromDevicePage({ id: "other", url: DEVICE_URL })).toBe(false)
-    expect(fromDevicePage({ id: ID, url: `chrome-extension://${ID}/device.html.js` })).toBe(false)
-    expect(fromDevicePage({ id: ID, url: `chrome-extension://${ID}/sub/device.html` })).toBe(false)
-    expect(fromDevicePage({ id: ID })).toBe(false)
+  test("only this extension's own device.html and popup may send them", () => {
+    expect(fromVaultPage({ id: ID, url: DEVICE_URL })).toBe(true)
+    expect(fromVaultPage({ id: ID, url: `${DEVICE_URL}?from=popup#unlock`, tab: { id: 3 } as chrome.tabs.Tab, frameId: 0 })).toBe(true)
+    expect(fromVaultPage({ id: ID, url: POPUP_URL })).toBe(true)
+    // The inline menu, a content script, another extension and look-alike paths may not.
+    expect(fromVaultPage({ id: ID, url: `chrome-extension://${ID}/menu.html` })).toBe(false)
+    expect(fromVaultPage(pageSender())).toBe(false)
+    expect(fromVaultPage(pageSender({ url: DEVICE_URL, id: "someone-else" }))).toBe(false)
+    expect(fromVaultPage({ id: "other", url: DEVICE_URL })).toBe(false)
+    expect(fromVaultPage({ id: ID, url: `chrome-extension://${ID}/device.html.js` })).toBe(false)
+    expect(fromVaultPage({ id: ID, url: `chrome-extension://${ID}/sub/device.html` })).toBe(false)
+    expect(fromVaultPage({ id: ID })).toBe(false)
   })
 
   test("are rebuilt from their known fields only", () => {
@@ -85,6 +91,36 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-join-finish", passphrase: "p".repeat(1025) })).toBeNull()
     expect(deviceCommand({ type: "device-join" })).toBeNull()
     expect(deviceCommand({ type: "device-join-start" })).toEqual({ type: "device-join-start" })
+  })
+
+  test("the vault page's own commands are rebuilt from their known fields only", () => {
+    const id = "ab".repeat(32)
+    expect(deviceCommand({ type: "device-sync", wait: true, extra: 1 })).toEqual({ type: "device-sync", wait: true })
+    expect(deviceCommand({ type: "device-sync", wait: "yes" })).toEqual({ type: "device-sync" })
+    expect(deviceCommand({ type: "device-item", ref: "v:i", origin: "x" })).toEqual({ type: "device-item", ref: "v:i" })
+    expect(deviceCommand({ type: "device-item" })).toBeNull()
+    expect(deviceCommand({ type: "device-secret", ref: "v:i" })).toEqual({ type: "device-secret", ref: "v:i" })
+    expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "" })).toBeNull()
+    expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "p" })).toEqual({ type: "device-secret", ref: "v:i", passphrase: "p" })
+    const entry = { title: "Acme", url: "https://acme.test", username: "alex", password: "" }
+    expect(deviceCommand({ type: "device-save", entry: { ...entry, extra: 1 } })).toEqual({ type: "device-save", entry })
+    expect(deviceCommand({ type: "device-save", ref: "v:i", entry })).toEqual({ type: "device-save", ref: "v:i", entry })
+    expect(deviceCommand({ type: "device-save", ref: "", entry })).toBeNull()
+    expect(deviceCommand({ type: "device-save", entry: { ...entry, password: 7 } })).toBeNull()
+    expect(deviceCommand({ type: "device-remove", id })).toEqual({ type: "device-remove", id })
+    expect(deviceCommand({ type: "device-remove", id: "AB".repeat(32) })).toBeNull()
+    expect(deviceCommand({ type: "device-remove", id: "ab" })).toBeNull()
+    expect(deviceCommand({ type: "device-rename", name: "work" })).toEqual({ type: "device-rename", name: "work" })
+    expect(deviceCommand({ type: "device-rename", name: "Work" })).toBeNull()
+    expect(deviceCommand({ type: "device-preset", preset: "strict" })).toEqual({ type: "device-preset", preset: "strict" })
+    expect(deviceCommand({ type: "device-preset", preset: "toString" })).toBeNull()
+    expect(deviceCommand({ type: "device-settings", preset: "relaxed" })).toEqual({ type: "device-settings" })
+    expect(deviceCommand({ type: "device-used", ref: "x" })).toEqual({ type: "device-used" })
+    expect(deviceCommand({ type: "device-generate", length: 24, symbols: false })).toEqual({ type: "device-generate", length: 24, symbols: false })
+    expect(deviceCommand({ type: "device-generate", length: 4, symbols: true })).toBeNull()
+    expect(deviceCommand({ type: "device-generate", length: 24.5, symbols: true })).toBeNull()
+    expect(deviceCommand({ type: "device-copied", value: "pw", extra: 1 })).toEqual({ type: "device-copied", value: "pw" })
+    expect(deviceCommand({ type: "device-copied", value: "" })).toBeNull()
   })
 
   test("a join starts and polls without counting as use or asking hello again", async () => {
@@ -115,7 +151,7 @@ describe("device page commands", () => {
     await settle()
     const sent = requests()
     const finish = sent.findIndex((b) => b.type === "device-join-finish")
-    expect(sent[finish]).toEqual({ type: "device-join-finish", passphrase: "browser pass", deviceName: expect.any(String) })
+    expect(sent[finish]).toEqual({ type: "device-join-finish", passphrase: "browser pass", deviceName: expect.any(String), preset: "comfortable" })
     expect(sent[finish + 1]?.type).toBe("hello")
     expect(sent.slice(finish + 2).some((b) => b.type === "device-sync")).toBe(true)
     expect(changes[0]).toBe("unlocked")
@@ -148,7 +184,7 @@ describe("device page commands", () => {
     await settle()
     const sent = requests()
     const unlock = sent.findIndex((b) => b.type === "device-unlock")
-    expect(sent[unlock]).toEqual({ type: "device-unlock", passphrase: "correct horse", deviceName: expect.any(String) })
+    expect(sent[unlock]).toEqual({ type: "device-unlock", passphrase: "correct horse", deviceName: expect.any(String), preset: "comfortable" })
     expect(sent[unlock + 1]?.type).toBe("hello")
     // No waiting for the five-minute sync alarm.
     expect(sent.slice(unlock + 2).some((b) => b.type === "device-sync")).toBe(true)
@@ -208,6 +244,62 @@ describe("idle lock", () => {
     expect(backend.status.state).toBe("locked")
   })
 
+  test("Strict locks after five minutes; the preset is kept in local storage", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const reply = await backend.device({ type: "device-preset", preset: "strict" })
+    expect(reply.ok && reply.reply).toEqual({ type: "device-settings", preset: "strict" })
+    expect(fake.local["deadbolt.lockPreset"]).toBe("strict")
+    backend.used()
+    setSystemTime(new Date(start.getTime() + 5 * 60_000 - 1000))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(0)
+    setSystemTime(new Date(start.getTime() + 5 * 60_000))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(1)
+    // A restarted service worker reads it back.
+    const again = new StandaloneBackend()
+    const settings = await again.device({ type: "device-settings" })
+    expect(settings.ok && settings.reply.preset).toBe("strict")
+  })
+
+  test("Relaxed stays unlocked when the screen locks, and for longer than an hour", async () => {
+    fake.local["deadbolt.lockPreset"] = "relaxed"
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    backend.used()
+    fake.idleListeners.forEach((l) => l("locked"))
+    setSystemTime(new Date(start.getTime() + 11 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(0)
+    expect(backend.status.state).toBe("ready")
+    setSystemTime(new Date(start.getTime() + 12 * HOUR))
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(1)
+  })
+
+  test("Strict asks for the passphrase before a password is shown", async () => {
+    fake.local["deadbolt.lockPreset"] = "strict"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    fake.sent.length = 0
+    const secrets = () => requests().filter((b) => b.type === "device-secret")
+    const refused = await backend.device({ type: "device-secret", ref: "v:i" })
+    expect(refused.ok).toBe(false)
+    expect(secrets()).toEqual([])
+    const asked = await backend.device({ type: "device-secret", ref: "v:i", passphrase: "p" })
+    expect(asked.ok).toBe(true)
+    expect(secrets()).toEqual([{ type: "device-secret", ref: "v:i", passphrase: "p" }])
+  })
+
   test("a service worker restart doesn't start the alarms over", async () => {
     new StandaloneBackend()
     await settle()
@@ -254,5 +346,137 @@ describe("device name", () => {
     expect(deviceName({ userAgent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36 Edg/130.0.0.0" })).toBe("Edge on Linux")
     expect(deviceName({ userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36" })).toBe("Chrome on macOS")
     expect(deviceName({})).toBe("Chromium")
+  })
+})
+
+describe("use", () => {
+  test("a login's details left open, asking for each new one-time code, still idle-lock", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    // Opening it is use, once.
+    await backend.device({ type: "device-used" })
+    await backend.device({ type: "device-item", ref: "v:i" })
+    // Then a poll every 30 s, for over an hour.
+    for (let t = 30_000; t <= HOUR; t += 30_000) {
+      setSystemTime(new Date(start.getTime() + t))
+      await backend.device({ type: "device-item", ref: "v:i" })
+    }
+    fireAlarm("deadbolt-idle")
+    await settle()
+    expect(locks()).toBe(1)
+    expect(backend.status.state).toBe("locked")
+  })
+})
+
+describe("lock preset in the worker", () => {
+  test("goes with every unlock, and to an unlocked worker when it changes", async () => {
+    fake.local["deadbolt.lockPreset"] = "strict"
+    vault = "locked"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    await backend.device({ type: "device-unlock", passphrase: "p" })
+    expect(requests().find((b) => b.type === "device-unlock")).toMatchObject({ preset: "strict" })
+    await backend.device({ type: "device-preset", preset: "relaxed" })
+    expect(requests().filter((b) => b.type === "device-preset")).toEqual([{ type: "device-preset", preset: "relaxed" }])
+  })
+})
+
+describe("wrong passphrases", () => {
+  test("back off after three: 1 s, 2 s, 4 s, … at most a minute", () => {
+    expect([1, 2, 3, 4, 5, 6, 9, 20].map(backoff)).toEqual([0, 0, 1000, 2000, 4000, 8000, 60_000, 60_000])
+  })
+
+  test("refused during the wait without reaching the vault, and a right one starts over", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    vault = "locked"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const unlocks = () => requests().filter((b) => b.type === "device-unlock").length
+    for (let i = 0; i < 3; i++) expect((await backend.device({ type: "device-unlock", passphrase: "wrong" })).ok).toBe(false)
+    expect(unlocks()).toBe(3)
+    const refused = await backend.device({ type: "device-unlock", passphrase: "right" })
+    expect(refused).toMatchObject({ ok: false, code: "backoff" })
+    expect(unlocks()).toBe(3)
+    // Kept across a service worker restart.
+    const again = new StandaloneBackend()
+    await again.connect()
+    expect(await again.device({ type: "device-unlock", passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
+    setSystemTime(new Date(start.getTime() + 1000))
+    expect((await again.device({ type: "device-unlock", passphrase: "right" })).ok).toBe(true)
+    // Starting over: three more wrong ones before any wait.
+    vault = "locked"
+    for (let i = 0; i < 2; i++) await again.device({ type: "device-unlock", passphrase: "wrong" })
+    expect(await again.device({ type: "device-unlock", passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
+  })
+
+  test("Strict's passphrase for a password counts too", async () => {
+    fake.local["deadbolt.lockPreset"] = "strict"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    for (let i = 0; i < 3; i++) await backend.device({ type: "device-secret", ref: "v:i", passphrase: "wrong" })
+    expect(await backend.device({ type: "device-secret", ref: "v:i", passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
+  })
+})
+
+describe("clipboard", () => {
+  const clears = () => fake.sent.filter((m): m is VaultClipboard => (m as { type: string }).type === VAULT_CLIPBOARD)
+
+  test("a salted hash tells our copy from anything else, and keeps no value", async () => {
+    const a = await record("Acme-demo-only-2026!")
+    const b = await record("Acme-demo-only-2026!")
+    expect(a.salt).not.toBe(b.salt)
+    expect(a.hash).not.toBe(b.hash)
+    expect(JSON.stringify(a)).not.toContain("Acme")
+    expect(await holds(a, "Acme-demo-only-2026!")).toBe(true)
+    expect(await holds(a, "something the user copied since")).toBe(false)
+    expect(await digest(a.salt, "x")).toBe(await digest(a.salt, "x"))
+  })
+
+  test("without the clipboard permissions nothing is kept, nothing scheduled, nothing cleared", async () => {
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const r = await backend.device({ type: "device-copied", value: "pw" })
+    expect(r.ok && r.reply.clears).toBe(false)
+    expect(fake.alarms[CLIPBOARD_ALARM]).toBeUndefined()
+    expect(fake.session[COPIED_KEY]).toBeUndefined()
+    await backend.lock()
+    expect(clears()).toEqual([])
+  })
+
+  test("with them, it's cleared 30 s later, if the clipboard still holds it", async () => {
+    fake.granted = new Set(["clipboardRead", "clipboardWrite"])
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const r = await backend.device({ type: "device-copied", value: "pw" })
+    expect(r.ok && r.reply.clears).toBe(true)
+    expect(fake.alarms[CLIPBOARD_ALARM]).toEqual({ when: start.getTime() + 30_000 })
+    const kept = fake.session[COPIED_KEY] as { salt: string; hash: string }
+    expect(JSON.stringify(kept)).not.toContain("pw\"")
+    expect(await holds(kept, "pw")).toBe(true)
+    fireAlarm(CLIPBOARD_ALARM)
+    await settle()
+    expect(clears()).toEqual([{ type: VAULT_CLIPBOARD, salt: kept.salt, hash: kept.hash }])
+    expect(fake.session[COPIED_KEY]).toBeUndefined()
+    // Once.
+    fireAlarm(CLIPBOARD_ALARM)
+    await settle()
+    expect(clears()).toHaveLength(1)
+  })
+
+  test("locking clears it at once, even after a service worker restart", async () => {
+    fake.granted = new Set(["clipboardRead", "clipboardWrite"])
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    await backend.device({ type: "device-copied", value: "pw" })
+    const restarted = new StandaloneBackend()
+    await restarted.connect()
+    await restarted.lock()
+    expect(clears()).toHaveLength(1)
+    expect(fake.alarms[CLIPBOARD_ALARM]).toBeUndefined()
   })
 })

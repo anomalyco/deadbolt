@@ -17,7 +17,7 @@ use deadbolt_store::KdfParams;
 use n0_future::task::JoinHandle;
 use serde_json::{Value, json};
 
-use crate::{
+use super::{
     Error, Loaded, Result, backend, items_changed, storage_exists, storage_publish, take_secret,
     text,
 };
@@ -61,7 +61,7 @@ struct Fresh {
 pub(super) fn require_idle() -> Result<()> {
     JOIN.with(|slot| match slot.borrow().phase {
         Phase::Idle | Phase::Failed(_) => Ok(()),
-        _ => Err(Error::Protocol("Finish or cancel the current join first")),
+        _ => Err(Error::Protocol("Finish pairing, or cancel it, first")),
     })
 }
 
@@ -101,8 +101,10 @@ fn set_phase(generation: u64, phase: Phase) {
 
 pub(super) async fn start(body: &Value) -> Result<Value> {
     require_idle()?;
-    if crate::node().is_ok() || crate::state().with(|_| Ok(())).is_ok() {
-        return Err(Error::Protocol("This browser already has a vault"));
+    if super::node().is_ok() || super::state().with(|_| Ok(())).is_ok() {
+        return Err(Error::Protocol(
+            "This browser already has a vault; unlock it instead",
+        ));
     }
     let name = name(body)?;
     // Reserve before the first await. Setup requests are also serialized by
@@ -124,7 +126,7 @@ pub(super) async fn start(body: &Value) -> Result<Value> {
 async fn listen(name: String, generation: u64) -> Result<Value> {
     if storage_exists()
         .await
-        .map_err(|_| Error::Protocol("Cannot read browser storage"))?
+        .map_err(|_| Error::Protocol(super::STORAGE))?
         .as_bool()
         == Some(true)
     {
@@ -139,9 +141,7 @@ async fn listen(name: String, generation: u64) -> Result<Value> {
     let node = Node::spawn(config, Arc::new(|_: &PeerId| false), NoSync).await?;
     if !node.online(Duration::from_secs(20)).await {
         node.shutdown().await;
-        return Err(Error::Protocol(
-            "Cannot reach an iroh relay; check your connection and try again",
-        ));
+        return Err(Error::Protocol(super::OFFLINE));
     }
     let listener = match node.start_pairing(&code, PairingOptions::default()).await {
         Ok(listener) => listener,
@@ -167,7 +167,9 @@ async fn listen(name: String, generation: u64) -> Result<Value> {
                 .welcomed
                 .into_inner()
                 .map_err(|_| Error::State)?
-                .ok_or(Error::Protocol("Pairing finished without a vault"))?;
+                .ok_or(Error::Protocol(
+                    "The other device didn't send its vault. Start again.",
+                ))?;
             Ok(Fresh {
                 secret: device.secret,
                 welcomed,
@@ -183,15 +185,15 @@ async fn listen(name: String, generation: u64) -> Result<Value> {
     Ok(json!({"type":"device-join-start", "code":code, "phase":"waiting"}))
 }
 
+/// Why a join failed. A wrong code here means another device tried this
+/// browser's code and got it wrong, which is worth saying.
 fn explain(error: &Error) -> String {
     match error {
         Error::Net(deadbolt_net::Error::PairingExpired) =>
-            "The code expired (codes work for 5 minutes). Start joining again.".into(),
+            "The code expired (codes work for five minutes). Start again.".into(),
         Error::Net(deadbolt_net::Error::PairingCodeMismatch) =>
-            "A device tried a wrong code, so this code no longer works. If that wasn't you, someone may be trying to get in. Start joining again.".into(),
-        Error::Net(deadbolt_net::Error::Remote(message)) =>
-            format!("The other device refused: {message}"),
-        _ => error.to_string(),
+            "A device tried a wrong code, so this code no longer works. If that wasn't you, someone may be trying to get in. Start again.".into(),
+        _ => super::plain(error),
     }
 }
 
@@ -199,7 +201,7 @@ pub(super) async fn finish(body: &mut Value) -> Result<Value> {
     let name = name(body)?;
     let passphrase = take_secret(body, "passphrase")?;
     if passphrase.is_empty() {
-        return Err(Error::Protocol("The passphrase cannot be empty"));
+        return Err(Error::Protocol("Choose a passphrase"));
     }
     let (generation, fresh) = JOIN.with(|slot| {
         let mut join = slot.borrow_mut();
@@ -244,11 +246,26 @@ pub(super) async fn finish(body: &mut Value) -> Result<Value> {
         drop(loaded);
         storage_publish()
             .await
-            .map_err(|_| Error::Protocol("Cannot publish joined browser storage"))?;
+            .map_err(|_| Error::Protocol(super::STORAGE))?;
         published = true;
         let store =
             deadbolt_store::unlock_with_backend(backend(false).await?, passphrase.as_bytes())?;
-        crate::start(store, None).await
+        super::start(store, None).await?;
+        // The vault came in the welcome, but the inviter hasn't heard from
+        // this device since: until its first sync it lists it as never seen.
+        // Give that sync a moment, so joined means the other device knows.
+        let inviter = fresh.welcomed.inviter.to_string();
+        n0_future::time::timeout(Duration::from_secs(10), async {
+            while !super::state()
+                .with(|s| Ok(s.seen.contains_key(&inviter)))
+                .unwrap_or(true)
+            {
+                n0_future::time::sleep(Duration::from_millis(100)).await;
+            }
+        })
+        .await
+        .unwrap_or_default();
+        Ok(())
     }
     .await;
     match result {

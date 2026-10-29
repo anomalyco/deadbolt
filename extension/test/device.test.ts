@@ -2,8 +2,9 @@ import { afterEach, beforeEach, describe, expect, jest, spyOn, test } from "bun:
 import type { DeviceReply, Status } from "../src/messages"
 import { installChrome, type FakeChrome } from "./chrome"
 
-// device.html's first run: choosing between pairing and a new vault, joining
-// a vault another device has, and what survives a reload, a cancel and a poll.
+// device.html's first run (src/vault, as the popup shows it too): choosing
+// between pairing and a new vault, joining a vault another device has, and
+// what survives a reload, a cancel and a poll.
 
 const CODE = "dress-garment-tiger-strategy"
 const POLL_MS = 1500
@@ -56,10 +57,16 @@ function hold(type: string): () => void {
 const commands = () => fake.sent.filter((m) => (m as { type: string }).type === "db:device").map((m) => (m as { command: Command }).command)
 const sentTypes = () => commands().map((c) => c.type)
 const app = () => document.getElementById("app")!
-const headings = () => [...app().querySelectorAll("h2")].map((h) => h.textContent)
-const buttons = () => [...app().querySelectorAll("button")].map((b) => b.textContent)
-const buttonNamed = (name: string) => [...app().querySelectorAll("button")].find((b) => b.textContent === name)!
-const input = (label: string) => app().querySelector<HTMLInputElement>(`input[aria-label="${label}"]`)!
+const headings = () => [...app().querySelectorAll(".stage h1, .stage h2")].map((h) => h.textContent).filter(Boolean)
+/** A button's name: its label if it has one (icon buttons, the first-run choices), else its text. */
+const nameOf = (b: Element) => b.getAttribute("aria-label") ?? b.textContent
+const buttons = () => [...app().querySelectorAll(".stage button")].map(nameOf)
+const buttonNamed = (name: string) => [...app().querySelectorAll<HTMLButtonElement>(".stage button")].find((b) => nameOf(b) === name)!
+const input = (label: string) => {
+  const l = [...app().querySelectorAll("label")].find((l) => l.textContent === label)
+  return (l ? document.getElementById(l.htmlFor) : app().querySelector(`input[aria-label="${label}"]`)) as HTMLInputElement
+}
+const shownError = () => app().querySelector(".error:not([hidden])")
 
 /** Lets the page's message round trips finish (they're promises, not timers). */
 async function flush() {
@@ -107,7 +114,7 @@ describe("first run", () => {
     expect(headings()).toEqual(["Set up Deadbolt"])
     expect(buttons()).toEqual(["Pair with an existing device", "Create a new vault"])
     buttonNamed("Create a new vault").click()
-    expect(headings()).toEqual(["Set up Deadbolt", "Create a vault in this browser"])
+    expect(headings()).toEqual(["Create a vault"])
     expect(buttons()).toContain("Create vault")
     expect(sentTypes()).toEqual(["device-status", "device-join-status"])
   })
@@ -118,33 +125,33 @@ describe("first run", () => {
     await flush()
     expect(commands().at(-1)).toEqual({ type: "device-join-start" })
     expect(app().querySelector("#join-code")!.textContent).toBe(CODE)
-    expect(app().textContent).toContain(`On a device that has your vault, run deadbolt pair ${CODE}, or use Pair in the Deadbolt app.`)
-    expect(app().querySelector("code")!.textContent).toBe(`deadbolt pair ${CODE}`)
-    expect(buttons()).toEqual(["Copy", "Cancel"])
+    expect(app().textContent).toContain("On a device that has your vault, run deadbolt pair with this code, or choose Pair in the Deadbolt app.")
+    expect(app().querySelector("code")!.textContent).toBe("deadbolt pair")
+    expect(buttons()).toEqual(["Back", "Copy", "Cancel"])
 
     const writes: string[] = []
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async (t: string) => void writes.push(t) } })
     buttonNamed("Copy").click()
     await flush()
     expect(writes).toEqual([CODE])
-    expect(buttons()).toEqual(["Copied", "Cancel"])
+    expect(buttons()).toEqual(["Back", "Copied", "Cancel"])
   })
 
   test("a poll that changes nothing redraws nothing; admission asks this browser's passphrase", async () => {
     await open()
     buttonNamed("Pair with an existing device").click()
     await flush()
-    const card = app().querySelector(".card")
+    const card = app().querySelector(".code-box")
     jest.advanceTimersByTime(POLL_MS)
     await flush()
     expect(sentTypes().filter((t) => t === "device-join-status")).toHaveLength(2)
-    expect(app().querySelector(".card")).toBe(card)
+    expect(app().querySelector(".code-box")).toBe(card)
 
     phase = { phase: "admitted", vault: "personal" }
     jest.advanceTimersByTime(POLL_MS)
     await flush()
-    expect(headings()).toEqual(["Choose a passphrase for this browser"])
-    expect(app().textContent).toContain("in this browser only")
+    expect(headings()).toEqual(["Joined personal"])
+    expect(app().textContent).toContain("It unlocks Deadbolt here only")
     expect(buttons()).toEqual(["Finish", "Cancel"])
     // Admitted, nothing more to wait for: no more polls.
     const polls = sentTypes().length
@@ -165,7 +172,7 @@ describe("first run", () => {
     input("Passphrase again").value = "something else"
     submit(app().querySelector("form")!)
     await flush()
-    expect(app().querySelector("#note")!.textContent).toBe("The passphrases don't match.")
+    expect(shownError()!.textContent).toBe("The passphrases don't match.")
     expect(sentTypes()).not.toContain("device-join-finish")
 
     input("Passphrase").value = "browser pass"
@@ -173,9 +180,10 @@ describe("first run", () => {
     submit(app().querySelector("form")!)
     await flush()
     expect(commands().find((c) => c.type === "device-join-finish")).toEqual({ type: "device-join-finish", passphrase: "browser pass" })
-    expect(headings()).toContain("Devices")
-    expect(headings()).toContain("Logins")
-    expect(app().textContent).toContain("Chrome on macOS")
+    // The vault: its (empty) logins, and the footer saying no other device shares it yet.
+    expect(app().querySelector('input[type="search"]')).not.toBeNull()
+    expect(app().textContent).toContain("No logins yet")
+    expect(app().querySelector(".bottom")!.textContent).toContain("Only on this browser")
   })
 
   test("a failure says why, and can be tried again or cancelled", async () => {
@@ -187,7 +195,7 @@ describe("first run", () => {
     await flush()
     expect(headings()).toEqual(["Pairing didn't work"])
     expect(app().querySelector(".error")!.textContent).toBe("The pairing code expired.")
-    expect(buttons()).toEqual(["Try again", "Cancel"])
+    expect(buttons()).toEqual(["Back", "Cancel", "Try again"])
 
     buttonNamed("Try again").click()
     await flush()
@@ -234,7 +242,7 @@ describe("first run", () => {
     fake.listeners.forEach((l) => l({ type: "db:status", status }, {}, () => {}))
     await flush()
     expect(headings()).toEqual(["Pairing didn't work"])
-    expect(buttons()).toEqual(["Try again", "Cancel"])
+    expect(buttons()).toEqual(["Back", "Cancel", "Try again"])
   })
 })
 
@@ -267,7 +275,7 @@ describe("cancel", () => {
     const release = hold("device-join-start")
     buttonNamed("Pair with an existing device").click()
     await flush()
-    expect(app().textContent).toContain("Getting a pairing code…")
+    expect(app().textContent).toContain("Getting a code…")
     buttonNamed("Cancel").click()
     await flush()
     release()
@@ -294,7 +302,7 @@ describe("cancel", () => {
     release()
     await flush()
     expect(buttons()).toEqual(["Pair with an existing device", "Create a new vault"])
-    expect(app().querySelector("#note")).toBeNull()
+    expect(shownError()).toBeNull()
   })
 })
 

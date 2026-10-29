@@ -26,7 +26,7 @@ const native = !standalone
 const wasm = join(root, "wasm")
 
 const entries = ["background", "content", "passkey-hook", "popup", "menu", ...(native ? [] : ["device", "offscreen", "vault-worker"])].map((name) => join(root, "src", `${name}.ts`))
-const standaloneStatic = ["device.css", "device.html", "offscreen.html"].map((name) => join(root, "static", name))
+const standaloneStatic = ["device.css", "device.html", "offscreen.html", "vault.css"].map((name) => join(root, "static", name))
 
 async function build() {
   if (!native) {
@@ -53,6 +53,9 @@ async function build() {
   await cp(join(root, "static"), outdir, { recursive: true, filter: (path) => !native || !standaloneStatic.includes(path) })
   if (!native) {
     await cp(wasm, join(outdir, "wasm"), { recursive: true })
+    // The popup is the vault itself here (src/vault): it takes the vault's styles too.
+    const popup = join(outdir, "popup.html")
+    await writeFile(popup, (await readFile(popup, "utf8")).replace(`<link rel="stylesheet" href="popup.css" />`, `<link rel="stylesheet" href="popup.css" />\n    <link rel="stylesheet" href="vault.css" />`))
   }
   // The key fixes the extension id to the one `deadbolt browser install`
   // allows (docs/autofill.md), so the native host accepts it.
@@ -62,7 +65,11 @@ async function build() {
   else {
     // The vault's worker lives in an offscreen document; alarms catch up the
     // idle lock and sync, idle sees the screen lock; the vault is WebAssembly.
-    manifest.permissions.push("offscreen", "alarms", "idle")
+    // favicon: the vault's rows show a site's icon from Chrome's own cache, never fetched.
+    manifest.permissions.push("offscreen", "alarms", "idle", "favicon")
+    // Clearing a copied password reads and writes the clipboard: asked for at
+    // runtime (src/bg/clipboard.ts), since each adds an install warning.
+    manifest.optional_permissions = ["clipboardRead", "clipboardWrite"]
     manifest.content_security_policy = { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }
     manifest.options_ui = { page: "device.html", open_in_tab: true }
   }

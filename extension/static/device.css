@@ -1,76 +1,65 @@
-/* device.html: the browser-only Deadbolt's own page, built on the popup's styles. */
+/* device.html: the browser-only Deadbolt in a tab. The popup's views
+   (vault.css) in a wider frame, drawn like the inline menu's surface: one
+   object, a 14px radius, a hairline and a soft layered shadow. */
+
+html {
+  background: var(--layer-01);
+}
+
+@media (prefers-color-scheme: dark) {
+  html {
+    background: #0e0e0e;
+  }
+}
 
 body {
   width: auto;
-  max-width: 480px;
-  margin: 0 auto;
-}
-
-main {
-  gap: 14px;
-  padding-bottom: 32px;
-}
-
-main > p,
-main > .buttons {
-  padding: 0 14px;
-}
-
-.card {
+  min-height: 100vh;
   display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 0 14px;
-  padding: 14px;
-  border-radius: 10px;
-  background: var(--layer-01);
-  box-shadow: inset 0 0 0 1px var(--border-muted);
+  align-items: flex-start;
+  justify-content: center;
+  padding: 40px 16px;
 }
 
-.card h2 {
-  font-size: 13px;
-  font-weight: 600;
-}
-
-.input {
-  height: 30px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 7px;
+main.vault.page {
+  width: 460px;
+  height: min(720px, calc(100vh - 80px));
+  min-height: 520px;
+  border-radius: 14px;
   background: var(--bg);
-  box-shadow: 0 0 0 1px var(--border);
-  color: var(--text);
-  font: inherit;
-  font-size: 12px;
+  box-shadow:
+    0 0 0 1px var(--border),
+    0 1px 2px #0000000a,
+    0 8px 24px -6px #00000014,
+    0 24px 48px -12px #0000000f;
+  overflow: hidden;
 }
 
-.buttons {
-  display: flex;
-  gap: 8px;
+@media (prefers-color-scheme: dark) {
+  main.vault.page {
+    box-shadow:
+      0 0 0 1px var(--border),
+      0 24px 48px -12px #00000080;
+  }
 }
 
-.row {
-  display: flex;
-  justify-content: space-between;
-  gap: 8px;
-  font-size: 12px;
+.page .top {
+  height: 52px;
+  padding: 0 16px;
 }
 
-.join-code {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  padding: 10px 10px 10px 14px;
-  border-radius: 8px;
-  background: var(--bg);
-  box-shadow: 0 0 0 1px var(--border);
+.page .view {
+  padding-left: 18px;
+  padding-right: 18px;
 }
 
-.join-code .mono {
-  font-size: 22px;
-  font-weight: 600;
-  letter-spacing: 0.06em;
-  user-select: all;
-  overflow-wrap: anywhere;
+.page .search-row {
+  margin-left: -18px;
+  margin-right: -18px;
+  padding-left: 18px;
+  padding-right: 18px;
+}
+
+.page .bottom {
+  padding: 0 16px;
 }

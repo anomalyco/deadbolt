@@ -3,18 +3,20 @@
 // never copied: anything on the clipboard can be read by every app, and
 // clipboard managers keep it.
 
-import type { ChooseReply, LearnReply, Learning, OfferChoice, PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, SaveOffer, Status, StatusChanged, ToBackground } from "./messages"
+import type { LearnReply, Learning, PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 import type { Account } from "./protocol"
 import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
-import { animateTo, reducedMotion, rollLabel, ROLL_CSS, timing } from "./ui/motion"
+import { offerCard } from "./ui/offer"
+import { mountVault } from "./vault/app"
+import { animateTo, reducedMotion, ROLL_CSS, timing } from "./ui/motion"
 
 declare const DEADBOLT_NATIVE: boolean | undefined
 /** Native builds use `deadbolt browser-host`; `--standalone` uses the browser-only device on device.html. */
 const native = typeof DEADBOLT_NATIVE !== "undefined" && DEADBOLT_NATIVE === true
 
 const root = document.getElementById("app")!
-document.head.append(h("style", {}, ROLL_CSS))
+if (native) document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
 let rendered = ""
 let learningShown = false
@@ -180,56 +182,6 @@ function showError(message: string) {
   if (!el) return
   el.textContent = message
   el.hidden = false
-}
-
-/** "Save login for acme.com?": browser UI, where the page can't see it. */
-function offerCard(offer: SaveOffer): HTMLElement {
-  const status = h("p", { class: "error", role: "status" })
-  status.hidden = true
-  const card = h(
-    "section",
-    { class: "offer", "aria-label": offer.update ? "Update password" : "Save login" },
-    h("h2", {}, offer.update ? `Update password for ${offer.username}?` : `Save login for ${offer.site}?`),
-    h(
-      "div",
-      { class: "box" },
-      h("div", { class: "line" }, h("span", { class: "muted" }, offer.update ? "Site" : "Username"), h("span", { class: "value" }, offer.update ? offer.site : offer.username)),
-      h("div", { class: "line" }, h("span", { class: "muted" }, offer.update ? "New password" : "Password"), h("span", { class: "value dots" }, "••••••••••")),
-    ),
-    status,
-  )
-  const choose = async (choice: OfferChoice, button: HTMLElement) => {
-    if (tabId === undefined) return
-    card.classList.add("busy")
-    button.setAttribute("disabled", "")
-    if (choice === "save") rollLabel(saveLabel, "Saving…")
-    const reply = await send<ChooseReply>({ type: "db:popup-offer", tabId, id: offer.id, choice })
-    card.classList.remove("busy")
-    button.removeAttribute("disabled")
-    if (choice === "save" && !reply?.ok) rollLabel(saveLabel, "Save")
-    // Another offer took this one's place: show that one instead.
-    if (reply && !reply.ok && reply.gone) return void render(true)
-    if (!reply?.ok) {
-      status.textContent = reply?.message || "Couldn't save."
-      status.hidden = false
-      return
-    }
-    if (choice !== "save") return void render(true)
-    const doneEl = h("div", { class: "done" }, h("span", { class: "done-mark" }, icon("check")), h("span", {}, reply.message))
-    card.replaceChildren(doneEl)
-    doneEl.animate(reducedMotion() ? [{ opacity: 0 }, { opacity: 1 }] : [{ opacity: 0, filter: "blur(4px)", transform: "scale(0.96)" }, { opacity: 1, filter: "none", transform: "none" }], timing(0.3))
-    setTimeout(() => void render(true), 1200)
-  }
-  const never = h("button", { class: "link", type: "button" }, "Never for this site")
-  const later = h("button", { class: "btn", type: "button" }, "Not now")
-  const saveLabel = h("span", { class: "roll-label" }, "Save")
-  saveLabel.dataset.text = "Save"
-  const save = h("button", { class: "btn primary", type: "button" }, saveLabel)
-  never.addEventListener("click", () => void choose("never", never))
-  later.addEventListener("click", () => void choose("later", later))
-  save.addEventListener("click", () => void choose("save", save))
-  card.append(h("div", { class: "buttons" }, never, later, save))
-  return card
 }
 
 /**
@@ -431,7 +383,7 @@ function paint(reply: PopupReply | null, changed: boolean) {
         ? [passkeyCard(reply.passkey)]
         : [
             reply?.learning ? learningCard(reply.learning) : null,
-            reply?.offer ? offerCard(reply.offer) : null,
+            reply?.offer ? offerCard(reply.offer, tabId, () => void render(true)) : null,
             body,
             reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff) : null,
             // Learning keeps no logins, so it works locked too; it needs a page to learn.
@@ -459,15 +411,20 @@ function paint(reply: PopupReply | null, changed: boolean) {
   )
 }
 
-chrome.runtime.onMessage.addListener((message: StatusChanged) => {
-  if (message?.type === "db:status") void render()
-})
+if (native) {
+  chrome.runtime.onMessage.addListener((message: StatusChanged) => {
+    if (message?.type === "db:status") void render()
+  })
 
-// While learning, the step count follows along.
-setInterval(() => {
-  if (learningShown) void render()
-}, 1000)
+  // While learning, the step count follows along.
+  setInterval(() => {
+    if (learningShown) void render()
+  }, 1000)
 
-// A vault that's slow to answer shows that it's connecting, never an empty popup.
-const slow = setTimeout(() => rendered === "" && paint({ status: { state: "connecting" }, accounts: [] }, false), 300)
-void render().finally(() => clearTimeout(slow))
+  // A vault that's slow to answer shows that it's connecting, never an empty popup.
+  const slow = setTimeout(() => rendered === "" && paint({ status: { state: "connecting" }, accounts: [] }, false), 300)
+  void render().finally(() => clearTimeout(slow))
+} else {
+  // The browser-only Deadbolt has no app: the popup is the vault itself (src/vault).
+  mountVault(root, "popup")
+}
