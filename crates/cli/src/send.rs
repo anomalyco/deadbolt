@@ -298,6 +298,7 @@ pub async fn send(
             node: Node::Entry(Entry::text("secret", value.as_str(), true)),
         });
     }
+    let mut walk = Walk::new(MAX_SEALED_LEN);
     for source in &sources {
         let part = match source {
             Source::Stdin => Part {
@@ -305,7 +306,7 @@ pub async fn send(
                 node: stdin_entry(args.sensitive)?,
             },
             Source::Path(path) => {
-                let node = path_node(path, args.sensitive)?;
+                let node = walk.node(path, args.sensitive)?;
                 let kind = match node {
                     Node::Group(_) => Kind::Folder,
                     Node::Entry(_) => Kind::File,
@@ -833,20 +834,96 @@ fn stdin_entry(sensitive: bool) -> Result<Node> {
     Ok(Node::Entry(entry))
 }
 
-/// A file as an entry, a folder as a group of its files and folders.
-fn path_node(path: &Path, sensitive: bool) -> Result<Node> {
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .or_else(|| {
-            std::fs::canonicalize(path)
-                .ok()?
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-        })
-        .unwrap_or_else(|| "files".into());
-    let meta = std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
-    if meta.is_dir() {
+/// Reads files and folders for one send: never more than a bundle holds
+/// ([`MAX_SEALED_LEN`]), and never a folder inside itself through a link.
+struct Walk {
+    /// What's left for contents and names, counted as the bundle encodes
+    /// them (at least), so nothing the bundle could hold is turned away.
+    left: u64,
+    /// The folders being read, outermost first, by device and inode.
+    open: Vec<(u64, u64)>,
+}
+
+fn too_large(path: &Path) -> anyhow::Error {
+    anyhow!(
+        "too large to send: {} goes past about {} MB",
+        path.display(),
+        MAX_SEALED_LEN / 1024 / 1024
+    )
+}
+
+/// What the bundle spends on an entry and a group besides its name and data.
+const ENTRY_COST: u64 = 15;
+const GROUP_COST: u64 = 10;
+
+impl Walk {
+    fn new(limit: usize) -> Self {
+        Walk {
+            left: limit as u64,
+            open: Vec::new(),
+        }
+    }
+
+    fn spend(&mut self, path: &Path, n: u64) -> Result<()> {
+        self.left = self.left.checked_sub(n).ok_or_else(|| too_large(path))?;
+        Ok(())
+    }
+
+    /// A file as an entry, a folder as a group of its files and folders.
+    fn node(&mut self, path: &Path, sensitive: bool) -> Result<Node> {
+        use std::os::unix::fs::MetadataExt;
+
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .or_else(|| {
+                std::fs::canonicalize(path)
+                    .ok()?
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .unwrap_or_else(|| "files".into());
+        let meta =
+            std::fs::metadata(path).with_context(|| format!("reading {}", path.display()))?;
+        if meta.is_dir() {
+            self.spend(path, GROUP_COST + name.len() as u64)?;
+            self.open.push((meta.dev(), meta.ino()));
+            let entries = self.children(path, sensitive);
+            self.open.pop();
+            return Ok(Node::Group(Group {
+                name: Some(name),
+                entries: entries?,
+            }));
+        }
+        if !meta.is_file() {
+            bail!("{} is not a file or folder", path.display());
+        }
+        if meta.len() > MAX_SEALED_LEN as u64 {
+            bail!("{} is too large to send", path.display());
+        }
+        let room = self.left.saturating_sub(ENTRY_COST + name.len() as u64);
+        if meta.len() > room {
+            return Err(too_large(path));
+        }
+        // At most one byte past the room, should the file grow meanwhile.
+        let mut data = Vec::new();
+        std::fs::File::open(path)
+            .and_then(|file| file.take(room.saturating_add(1)).read_to_end(&mut data))
+            .with_context(|| format!("reading {}", path.display()))?;
+        self.spend(path, ENTRY_COST + name.len() as u64 + data.len() as u64)?;
+        let mime = mime(&name, &data);
+        let sensitive = sensitive || looks_secret(&name);
+        Ok(Node::Entry(Entry {
+            name,
+            data,
+            mime: Some(mime.into()),
+            sensitive,
+        }))
+    }
+
+    fn children(&mut self, path: &Path, sensitive: bool) -> Result<Vec<Node>> {
+        use std::os::unix::fs::MetadataExt;
+
         let mut children: Vec<_> = std::fs::read_dir(path)
             .with_context(|| format!("reading {}", path.display()))?
             .collect::<Result<_, _>>()
@@ -856,39 +933,28 @@ fn path_node(path: &Path, sensitive: bool) -> Result<Node> {
         for child in children {
             let kind = child.file_type()?;
             let child_path = child.path();
-            // Symlinks are followed; sockets, fifos and devices are skipped.
+            // Symlinks are followed, except back into a folder being read;
+            // sockets, fifos and devices are skipped.
             let target = if kind.is_symlink() {
                 std::fs::metadata(&child_path).ok()
             } else {
                 Some(child.metadata()?)
             };
             match target {
+                Some(m) if m.is_dir() && self.open.contains(&(m.dev(), m.ino())) => {
+                    eprintln!(
+                        "skipping {}: it links back to a folder it's in",
+                        child_path.display()
+                    )
+                }
                 Some(m) if m.is_dir() || m.is_file() => {
-                    entries.push(path_node(&child_path, sensitive)?)
+                    entries.push(self.node(&child_path, sensitive)?)
                 }
                 _ => eprintln!("skipping {}", child_path.display()),
             }
         }
-        return Ok(Node::Group(Group {
-            name: Some(name),
-            entries,
-        }));
+        Ok(entries)
     }
-    if !meta.is_file() {
-        bail!("{} is not a file or folder", path.display());
-    }
-    if meta.len() > MAX_SEALED_LEN as u64 {
-        bail!("{} is too large to send", path.display());
-    }
-    let data = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-    let mime = mime(&name, &data);
-    let sensitive = sensitive || looks_secret(&name);
-    Ok(Node::Entry(Entry {
-        name,
-        data,
-        mime: Some(mime.into()),
-        sensitive,
-    }))
 }
 
 /// The media type from the content's magic bytes, else the extension, else
@@ -1168,6 +1234,66 @@ mod tests {
             preview(&parts[..1], 3, 900, None, None)
                 .starts_with("About to send (opens 3 times, expires in 15m):\n")
         );
+    }
+
+    fn names(node: &Node) -> Vec<String> {
+        match node {
+            Node::Entry(e) => vec![e.name.clone()],
+            Node::Group(g) => g
+                .entries
+                .iter()
+                .flat_map(|n| {
+                    let inner = names(n);
+                    let prefix = node_name(n);
+                    match n {
+                        Node::Entry(_) => inner,
+                        Node::Group(_) => {
+                            inner.into_iter().map(|i| format!("{prefix}/{i}")).collect()
+                        }
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn folder_links_are_followed_but_never_back_into_themselves() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("a/deeper")).unwrap();
+        std::fs::create_dir(dir.path().join("shared")).unwrap();
+        std::fs::write(root.join("a/x.txt"), "x").unwrap();
+        std::fs::write(dir.path().join("shared/s.txt"), "s").unwrap();
+        std::os::unix::fs::symlink(&root, root.join("a/deeper/up")).unwrap();
+        std::os::unix::fs::symlink("..", root.join("a/parent")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("shared"), root.join("one")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("shared"), root.join("two")).unwrap();
+        let node = Walk::new(MAX_SEALED_LEN).node(&root, false).unwrap();
+        assert_eq!(names(&node), ["a/x.txt", "one/s.txt", "two/s.txt"]);
+    }
+
+    #[test]
+    fn a_folder_stops_at_what_a_bundle_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a"), [0u8; 40]).unwrap();
+        std::fs::write(dir.path().join("b"), [0u8; 40]).unwrap();
+        let name = dir.path().file_name().unwrap().len() as u64;
+        let exact = GROUP_COST + name + 2 * (ENTRY_COST + 1 + 40);
+        let fits = Walk::new(exact as usize).node(dir.path(), false).unwrap();
+        assert_eq!(names(&fits), ["a", "b"]);
+        let error = Walk::new(exact as usize - 1)
+            .node(dir.path(), false)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("too large to send"), "{error}");
+        assert!(error.ends_with("/b goes past about 32 MB"), "{error}");
+        // What the walk counts is never more than the bundle encodes.
+        let bundle = Bundle {
+            title: None,
+            note: None,
+            entries: vec![fits],
+        };
+        assert!(exact <= bundle.encode().len() as u64);
     }
 
     #[test]

@@ -60,6 +60,14 @@ pub fn search_dirs(path: &OsStr, home: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
+/// This program's path with symlinks resolved, so a link named like a
+/// bundle's executable (`Some.app/Contents/MacOS/Deadbolt`) doesn't make its
+/// directory this app's bundle, with that bundle's helper as the agent.
+pub fn resolved(exe: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&exe).unwrap_or(exe)
+}
+
+/// The agent program for the app at `exe` ([`resolved`]).
 pub fn discover(
     exe: Option<&Path>,
     override_bin: Option<&OsStr>,
@@ -114,6 +122,31 @@ mod tests {
             Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt")
         );
         assert!(bundled(Path::new("/tmp/MacOS/Deadbolt")).is_none());
+    }
+
+    #[test]
+    fn a_link_shaped_like_a_bundle_is_not_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("bin/deadbolt-ui");
+        let link = dir.path().join("Fake.app/Contents/MacOS/Deadbolt");
+        std::fs::create_dir_all(real.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        std::fs::write(&real, "").unwrap();
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(bundled(&link).is_some());
+        let exe = resolved(link);
+        assert!(bundled(&exe).is_none());
+        assert_eq!(
+            discover(
+                Some(&exe),
+                Some(OsStr::new("/override")),
+                OsStr::new(""),
+                None
+            ),
+            Path::new("/override")
+        );
+        let gone = dir.path().join("gone");
+        assert_eq!(resolved(gone.clone()), gone);
     }
 
     #[test]

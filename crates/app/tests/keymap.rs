@@ -193,6 +193,26 @@ fn o_opens_the_website() {
 }
 
 #[test]
+fn o_opens_only_a_web_address_from_a_url_field() {
+    let mut rt = scene("vault");
+    blur(&mut rt);
+    for (kind, value) in [
+        ("url", "file:///Applications/Calculator.app"),
+        ("url", "javascript:alert(1)"),
+        ("url", "x-apple.systempreferences://"),
+        ("text", "https://github.com"),
+    ] {
+        let detail = rt.state.detail.as_mut().unwrap();
+        let url = detail.fields.iter_mut().find(|f| f.name == "url").unwrap();
+        url.kind = kind.into();
+        url.value = value.into();
+        assert_eq!(rt.state.site(), None, "{kind} {value}");
+        text(&mut rt, "o");
+        assert!(rt.take_url_requests().is_empty(), "{kind} {value}");
+    }
+}
+
+#[test]
 fn command_k_lists_the_actions_and_runs_one() {
     let mut rt = scene("vault");
     command(&mut rt, 'k');

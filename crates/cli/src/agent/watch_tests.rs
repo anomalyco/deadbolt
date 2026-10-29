@@ -165,7 +165,7 @@ async fn a_watcher_sees_lock_state_local_writes_and_one_change_per_sync_batch() 
         [Change::Vaults, devices_in(vault)]
     );
     let mut theirs = agent.with(|s| Ok(s.vault(&vault).clone())).unwrap();
-    let batch: Vec<Vec<u8>> = (0..3)
+    let batch: Vec<deadbolt_net::Blob> = (0..3)
         .map(|n| {
             let field = Field::new(FieldType::Secret, format!("theirs-{n}"));
             let (_, entry) = theirs

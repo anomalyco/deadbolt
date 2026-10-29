@@ -16,7 +16,9 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use deadbolt_core::{DeviceId, Entry, Signature, Vault, VaultId, valid_name};
-use deadbolt_net::{HandlerError, Inviter, Joiner, PairingContext, PairingOptions, PairingTicket};
+use deadbolt_net::{
+    Blob, HandlerError, Inviter, Joiner, PairingContext, PairingOptions, PairingTicket,
+};
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
@@ -88,7 +90,7 @@ pub(super) fn welcome(
     device: DeviceId,
     join: &[u8],
     fallback_addr: Option<Addr>,
-) -> Result<(Vec<Vec<u8>>, DeviceInfo)> {
+) -> Result<(Vec<Blob>, DeviceInfo)> {
     let join: JoinBlob = serde_json::from_slice(join)?;
     let consent = Signature::from_bytes(unhex(&join.consent)?);
     let held = s.vault(&vault);
@@ -114,10 +116,10 @@ pub(super) fn welcome(
         BTreeMap::new(),
     );
     s.save_peers()?;
-    let mut blobs = vec![serde_json::to_vec(&WelcomeMeta {
+    let mut blobs = vec![Blob::new(serde_json::to_vec(&WelcomeMeta {
         v: 1,
         peers: s.hints_for(&device),
-    })?];
+    })?)];
     blobs.extend(s.vault(&vault).entries().into_iter().map(Entry::encode));
     Ok((blobs, s.device_info(&device, &HashSet::new())))
 }
@@ -126,7 +128,7 @@ pub(super) fn apply_welcome(
     s: &mut Loaded,
     inviter: DeviceId,
     offer: &Offer,
-    welcome: Vec<Vec<u8>>,
+    welcome: Vec<Blob>,
 ) -> Result<VaultInfo> {
     let mut blobs = welcome.into_iter();
     let meta: WelcomeMeta =
@@ -209,11 +211,7 @@ impl Joiner for NewDevice<'_> {
         Ok(join)
     }
 
-    async fn receive(
-        &self,
-        ctx: &PairingContext,
-        welcome: Vec<Vec<u8>>,
-    ) -> Result<(), HandlerError> {
+    async fn receive(&self, ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
         let offer = self
             .offer
             .lock()
@@ -231,7 +229,7 @@ impl NewDevice<'_> {
         &self,
         ctx: &PairingContext,
         offer: Offer,
-        welcome: Vec<Vec<u8>>,
+        welcome: Vec<Blob>,
     ) -> Result<VaultInfo> {
         let inviter = DeviceId::from_bytes(ctx.remote);
         self.agent.with(|s| {
@@ -300,7 +298,7 @@ impl Inviter for ExistingDevice<'_> {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> Result<Vec<Vec<u8>>, HandlerError> {
+    ) -> Result<Vec<Blob>, HandlerError> {
         let device = DeviceId::from_bytes(ctx.remote);
         let (blobs, info) = self
             .agent
@@ -533,7 +531,7 @@ mod tests {
                 &self,
                 _: &PairingContext,
                 _: Vec<u8>,
-            ) -> Result<Vec<Vec<u8>>, HandlerError> {
+            ) -> Result<Vec<Blob>, HandlerError> {
                 unreachable!("joiner must decline before sending join")
             }
         }

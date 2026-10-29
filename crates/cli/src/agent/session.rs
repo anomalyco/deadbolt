@@ -581,9 +581,10 @@ fn resolve_by_name_or_id<'a, T: Copy + std::fmt::Display>(
 }
 
 fn persist<'a>(store: &Unlocked, entries: impl IntoIterator<Item = &'a Entry>) -> Result<()> {
+    // Plaintext, wiped as soon as the batch is sealed.
     let encoded: Vec<_> = entries.into_iter().map(Entry::encode).collect();
     if !encoded.is_empty() {
-        store.append_batch(encoded.iter().map(Vec::as_slice))?;
+        store.append_batch(encoded.iter().map(|entry| entry.as_slice()))?;
     }
     Ok(())
 }

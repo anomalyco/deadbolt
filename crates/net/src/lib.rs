@@ -38,7 +38,7 @@ pub use pair::{PairingStream, ProvenPairing};
 pub use qr::{QrStyle, render_qr};
 #[cfg(feature = "sim")]
 pub use sync::run_sync_session;
-pub use sync::{SyncConnection, SyncHandler, SyncOutcome};
+pub use sync::{INBOUND_SYNC_TIMEOUT, SyncConnection, SyncHandler, SyncOutcome};
 
 /// ALPN of the sync protocol. Membership-gated.
 pub const SYNC_ALPN: &[u8] = b"deadbolt/sync/1";
@@ -47,6 +47,10 @@ pub const PAIR_ALPN: &[u8] = b"deadbolt/pair/1";
 
 /// A device's Ed25519 public key, which is also its iroh endpoint id.
 pub type PeerId = [u8; 32];
+
+/// An entry as sent or received: opaque bytes that may hold secret values, wiped when
+/// dropped.
+pub type Blob = zeroize::Zeroizing<Vec<u8>>;
 
 /// The current member set, as seen by this device.
 pub trait Membership: Send + Sync {
