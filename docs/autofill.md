@@ -273,6 +273,18 @@ not running without sending hello, which would start the agent again.
   hand, and the field opens no menu, unless they press ↓ or click it again.
   So a failed sign-in that comes back with an unknown username doesn't
   offer the whole list on its password field.
+- **A provider's own password step.** Google's password page already names
+  the account it's for (it remembered it, so the user typed nothing): a chip
+  carrying `data-profile-identifier`, and a hidden `identifier` box in the
+  page (no `<form>`). On `https://accounts.google.com` only (a provider marked
+  `pageAccount` in `signin.ts`, exact host, over https), with no username of
+  the user's own, the content script sends that account as `pageAccount`
+  (the visible chip first, then the hidden box; an email address or plain
+  username of at most 500 characters). The background takes it only when
+  the asking frame's origin is that exact origin, and uses it after the
+  linked sign-in-with account and the user's own username. It only narrows:
+  when it names logins, the menu shows those; when it names none, the menu
+  shows the whole list, as if nothing were sent. It never hides the menu.
 - **What's remembered of a site's sign-in.** When a sign-in works (judged as
   for saving: confirmed or likely), the extension records its shape in
   local storage under `signinFlows`, with no usernames or values: whether
@@ -1055,6 +1067,18 @@ other build defines that branch away.
   sees the text anyway, learns whether Deadbolt holds a login for this site
   whose title or username contains it. Only the user's own typing narrows
   it; a page's script can't type into it to ask.
+
+  A username the page set itself counts in one place only: the account a
+  provider's own password step shows, on `https://accounts.google.com`
+  (the background checks the frame's origin; the content script's word for
+  the host isn't trusted). That host serves nothing but Google's sign-in
+  pages, so the name there is Google's, not one a site or its users chose,
+  and the page already knows which account it asks for. Even there it only
+  narrows: a name matching no login shows the whole list, so whether a menu
+  shows never depends on it, and the menu's height (one row or all of
+  them) tells Google at most whether Deadbolt holds a login for the account
+  it named. Anywhere else, including Google's other hosts, a page-set name
+  is ignored.
 
   The probe itself puts nothing in the page. A fill's values reach only the content script's isolated world
   and the fields it writes. The host rate-limits checks and fills as well, so

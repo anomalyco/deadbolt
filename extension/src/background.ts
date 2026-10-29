@@ -48,7 +48,7 @@ host.onChange((status) => {
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
   switch (message.type) {
     case "db:query":
-      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules)
+      return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount)
     case "db:page":
       if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true, message.idEmpty === true)

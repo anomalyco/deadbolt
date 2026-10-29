@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { findAccountTile, findProviderButton, scanPage, signInWithText } from "../src/content/detect"
-import { isChooserPage, isProviderPage, provider } from "../src/signin"
+import { isAccountPage, isChooserPage, isProviderPage, pageAccountOf, provider } from "../src/signin"
 import { pageFacts } from "../src/content/outcome"
 import { scanForms } from "../src/content/forms"
 
@@ -296,6 +296,15 @@ describe("sign in with a provider", () => {
     expect(isChooserPage(google, "https://accounts.google.com/")).toBe(true)
     expect(isChooserPage(provider("github"), "https://github.com/login")).toBe(false)
     expect(isProviderPage(provider("github"), "https://github.com/login")).toBe(true)
+    // A page-set account narrows the menu only on Google's sign-in host.
+    expect(isAccountPage("https://accounts.google.com/v3/signin/challenge/pwd")).toBe(true)
+    expect(isAccountPage("http://accounts.google.com/")).toBe(false)
+    expect(isAccountPage("https://github.com/login")).toBe(false)
+    expect(isAccountPage("https://accounts.google.com.evil.example/")).toBe(false)
+    expect(pageAccountOf(" ryan@anoma.ly ")).toBe("ryan@anoma.ly")
+    expect(pageAccountOf("kit")).toBe("kit")
+    expect(pageAccountOf("Ryan Vogel")).toBeUndefined()
+    expect(pageAccountOf(`${"a".repeat(496)}@b.co`)).toBeUndefined()
     const g = globalThis as { DEADBOLT_E2E?: boolean }
     g.DEADBOLT_E2E = true
     try {

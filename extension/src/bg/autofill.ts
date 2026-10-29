@@ -9,6 +9,7 @@ import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type ToConte
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { cleanApproved, menuFrameOf, newToken, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type Host } from "./host"
+import { isAccountPage, pageAccountOf } from "../signin"
 import type { SignInWith } from "./signinwith"
 import { siteOf } from "./site"
 
@@ -235,6 +236,12 @@ export class Autofill {
    * none, the user is signing in by hand: no menu, unless they ask with ↓
    * or a second click (`again`).
    *
+   * With neither, on a provider's own sign-in page whose page-set account
+   * is trusted (`https://accounts.google.com`, see isAccountPage, checked
+   * here on the frame's origin, not the content script's word), the account
+   * the page shows (`pageAccount`) narrows the menu to the logins it names.
+   * Naming none, it's ignored: the whole list shows. It never hides the menu.
+   *
    * On a sign-up or change-password form's new-password box (`kind`), the
    * menu offers a generated password within the page's `rules` instead, if
    * the agent says they allow a strong one.
@@ -249,6 +256,7 @@ export class Autofill {
     again = false,
     kind?: unknown,
     rules?: unknown,
+    pageAccount?: unknown,
   ): Promise<QueryReply> {
     const target = await targetFor(sender)
     const clean = sanitizeRoles(roles)
@@ -287,6 +295,13 @@ export class Autofill {
           shown = matches
           only = matches.map((a) => a.ref)
         } else if (!again) shown = []
+      } else if (later && isAccountPage(target.origin)) {
+        const account = pageAccountOf(pageAccount)
+        const matches = account ? namedBy(shown, account) : []
+        if (matches.length) {
+          shown = matches
+          only = matches.map((a) => a.ref)
+        }
       }
       rows = menuRowCount(shown, focused as FieldRole) + (this.passkeys?.menuPasskeys(target, focused as FieldRole).length ?? 0)
     }
