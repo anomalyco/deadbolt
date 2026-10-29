@@ -458,6 +458,42 @@ describe("new passwords", () => {
     expect(saver.pending(1)).toMatchObject({ username: "kit@example.com", update: true })
   })
 
+  test("a change-password form with a username asks the host the same whether or not the current password matched", async () => {
+    const changes: Array<[string, string, object]> = [
+      // The saved password: an update of that login.
+      ["admin", "hunter2", { username: "admin", update: true }],
+      // Another current password: the saved login still updates.
+      ["admin", "forgotten", { username: "admin", update: true }],
+      // No login here for the username: a new one.
+      ["new@example.com", "anything", { username: "new@example.com", update: false }],
+    ]
+    for (const [username, password, offer] of changes) {
+      host.requests.length = 0
+      await submit({ username, password, newPassword: "a new one" }, "change-password")
+      expect(requests("check")).toEqual([
+        { type: "check", origin: "https://www.example.com", username, password },
+        { type: "check", origin: "https://www.example.com", username, password: "a new one" },
+      ])
+      expect(requests("list")).toEqual([])
+      expect(saver.pending(1)).toMatchObject(offer)
+      await saver.choose(1, saver.pending(1)!.id, "later")
+    }
+    host.requests.length = 0
+    await submit({ username: "admin", password: "hunter2", newPassword: "a new one" }, "change-password")
+    await saver.choose(1, saver.pending(1)!.id, "save")
+    expect(entry()).toMatchObject({ ref: "a".repeat(64) + ":" + "2".repeat(32), entry: { username: "admin", password: "a new one" } })
+  })
+
+  test("a new password that's the current one offers nothing", async () => {
+    const forms: Array<Record<string, string>> = [{ username: "admin", password: "hunter2", newPassword: "hunter2" }, { password: "hunter2", newPassword: "hunter2" }, { username: "admin", password: "other", newPassword: "other" }]
+    for (const fields of forms) {
+      await submit(fields, "change-password")
+      expect(saver.pending(1)).toBeUndefined()
+      expect(fake.badges[1] ?? "").toBe("")
+    }
+    expect(requests("save")).toEqual([])
+  })
+
   test("a generated sign-up whose form still shows offers nothing", async () => {
     await saver.capture(pageSender(), { username: "new@example.com", generated: "g3", title: "", kind: "signup", roles: ["email", "new-password"], submission: 1 })
     saver.failed(pageSender(), 1)
