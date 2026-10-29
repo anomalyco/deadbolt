@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 
-use crate::encoding::{Reader, Writer};
+use zeroize::Zeroizing;
+
+use crate::encoding::{DynWriter, Reader, encoded_len, zeroizing};
 use crate::error::{DecodeError, Error};
 use crate::id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 use crate::item::{Field, FieldType};
@@ -188,6 +190,18 @@ impl DataOp {
     fn edit(item: ItemId, change: Change) -> Self {
         Self::Edit { item, change }
     }
+
+    /// The length of this op's canonical encoding.
+    pub fn encoded_len(&self) -> usize {
+        encoded_len(|w| write_data_op(w, self))
+    }
+}
+
+/// [`Entry::encoded_len`] of a data entry with `deps` dependencies whose ops
+/// encode to `ops_len` bytes: vault, author, seq, dep count and deps, payload
+/// tag, op count, ops and signature.
+pub(crate) fn data_entry_len(deps: usize, ops_len: usize) -> usize {
+    32 + 32 + 8 + 4 + 32 * deps + 1 + 4 + ops_len + 64
 }
 
 /// A signed entry in one author's log.
@@ -215,9 +229,8 @@ impl Entry {
         deps.sort();
         deps.dedup();
         let author = secret.device_id();
-        let mut w = Writer::default();
-        write_body(&mut w, &vault, &author, seq, &deps, &payload);
-        let hash = Hash(blake3::derive_key(HASH_CONTEXT, &w.finish()));
+        let body = zeroizing(|w| write_body(w, &vault, &author, seq, &deps, &payload));
+        let hash = Hash(blake3::derive_key(HASH_CONTEXT, &body));
         let signature = secret.sign(&signature_message(&hash));
         Self {
             vault,
@@ -243,10 +256,19 @@ impl Entry {
     }
 
     /// Canonical wire/storage encoding: body followed by the 64-byte signature.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut w = Writer::default();
+    /// Data entries carry secret values, so the buffer is wiped on drop.
+    pub fn encode(&self) -> Zeroizing<Vec<u8>> {
+        zeroizing(|w| self.write(w))
+    }
+
+    /// The length of [`Entry::encode`], without encoding.
+    pub fn encoded_len(&self) -> usize {
+        encoded_len(|w| self.write(w))
+    }
+
+    fn write(&self, w: &mut DynWriter<'_>) {
         write_body(
-            &mut w,
+            w,
             &self.vault,
             &self.author,
             self.seq,
@@ -254,7 +276,6 @@ impl Entry {
             &self.payload,
         );
         w.bytes(self.signature.as_bytes());
-        w.finish()
     }
 
     /// Strictly decodes [`Entry::encode`] output. Does not check the signature.
@@ -333,7 +354,7 @@ impl Entry {
 }
 
 fn write_body(
-    w: &mut Writer,
+    w: &mut DynWriter<'_>,
     vault: &VaultId,
     author: &DeviceId,
     seq: u64,
@@ -392,7 +413,7 @@ fn write_body(
     }
 }
 
-fn write_opt_str(w: &mut Writer, v: Option<&str>) {
+fn write_opt_str(w: &mut DynWriter<'_>, v: Option<&str>) {
     match v {
         None => w.u8(0),
         Some(v) => {
@@ -402,12 +423,12 @@ fn write_opt_str(w: &mut Writer, v: Option<&str>) {
     }
 }
 
-fn write_field(w: &mut Writer, field: &Field) {
+fn write_field(w: &mut DynWriter<'_>, field: &Field) {
     w.str(field.kind.as_str());
     w.str(&field.value);
 }
 
-fn write_data_op(w: &mut Writer, op: &DataOp) {
+fn write_data_op(w: &mut DynWriter<'_>, op: &DataOp) {
     match op {
         DataOp::Create {
             kind,
@@ -457,7 +478,7 @@ fn write_data_op(w: &mut Writer, op: &DataOp) {
     }
 }
 
-fn write_source(w: &mut Writer, source: Option<&Source>) {
+fn write_source(w: &mut DynWriter<'_>, source: Option<&Source>) {
     match source {
         None => w.u8(0),
         Some(source) => {

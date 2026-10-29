@@ -1,19 +1,57 @@
+use zeroize::Zeroizing;
+
 use crate::error::DecodeError;
 
-#[derive(Default)]
-pub(crate) struct Writer(Vec<u8>);
+/// Where a [`Writer`] puts bytes.
+pub(crate) trait Sink {
+    fn put(&mut self, bytes: &[u8]);
+}
 
-impl Writer {
+impl Sink for Vec<u8> {
+    fn put(&mut self, bytes: &[u8]) {
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// Plaintext output, wiped on drop. Callers pre-size it with [`Count`] so it
+/// never reallocates and leaves an unwiped copy behind.
+impl Sink for Zeroizing<Vec<u8>> {
+    fn put(&mut self, bytes: &[u8]) {
+        debug_assert!(
+            self.capacity() - self.len() >= bytes.len(),
+            "pre-size the buffer"
+        );
+        self.extend_from_slice(bytes);
+    }
+}
+
+/// Counts the bytes an encoding would take without writing them.
+#[derive(Default)]
+pub(crate) struct Count(pub(crate) usize);
+
+impl Sink for Count {
+    fn put(&mut self, bytes: &[u8]) {
+        self.0 += bytes.len();
+    }
+}
+
+pub(crate) struct Writer<S>(S);
+
+impl<S: Sink> Writer<S> {
+    pub(crate) fn new(sink: S) -> Self {
+        Self(sink)
+    }
+
     pub(crate) fn u8(&mut self, v: u8) {
-        self.0.push(v);
+        self.0.put(&[v]);
     }
 
     pub(crate) fn u32(&mut self, v: u32) {
-        self.0.extend_from_slice(&v.to_be_bytes());
+        self.0.put(&v.to_be_bytes());
     }
 
     pub(crate) fn u64(&mut self, v: u64) {
-        self.0.extend_from_slice(&v.to_be_bytes());
+        self.0.put(&v.to_be_bytes());
     }
 
     #[expect(
@@ -25,7 +63,7 @@ impl Writer {
     }
 
     pub(crate) fn bytes(&mut self, v: &[u8]) {
-        self.0.extend_from_slice(v);
+        self.0.put(v);
     }
 
     pub(crate) fn str(&mut self, v: &str) {
@@ -33,8 +71,33 @@ impl Writer {
         self.bytes(v.as_bytes());
     }
 
-    pub(crate) fn finish(self) -> Vec<u8> {
+    pub(crate) fn finish(self) -> S {
         self.0
+    }
+}
+
+/// A writer over any sink, so one encoding function serves counting and writing.
+pub(crate) type DynWriter<'a> = Writer<&'a mut dyn Sink>;
+
+/// The length of what `write` encodes.
+pub(crate) fn encoded_len(write: impl Fn(&mut DynWriter<'_>)) -> usize {
+    let mut count = Count::default();
+    write(&mut Writer::new(&mut count as &mut dyn Sink));
+    count.0
+}
+
+/// Encodes with `write` into an exactly sized buffer that is wiped on drop.
+pub(crate) fn zeroizing(write: impl Fn(&mut DynWriter<'_>)) -> Zeroizing<Vec<u8>> {
+    let len = encoded_len(&write);
+    let mut out = Zeroizing::new(Vec::with_capacity(len));
+    write(&mut Writer::new(&mut out as &mut dyn Sink));
+    debug_assert_eq!(out.len(), len);
+    out
+}
+
+impl<S: Sink + ?Sized> Sink for &mut S {
+    fn put(&mut self, bytes: &[u8]) {
+        (**self).put(bytes);
     }
 }
 
