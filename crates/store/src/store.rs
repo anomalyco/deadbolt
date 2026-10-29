@@ -309,6 +309,18 @@ impl Unlocked {
         Ok(())
     }
 
+    /// Whether `passphrase` is the store's passphrase, for a request that
+    /// needs the user although the store is open. Slow: it runs the KDF.
+    pub fn check_passphrase(&self, passphrase: &[u8]) -> Result<bool> {
+        let txn = self.db.begin_read()?;
+        let header = Header::read(&txn.open_table(HEADER)?)?;
+        match KeySet::unwrap(&header.kdf, &header.keyset, passphrase) {
+            Ok(keyset) => Ok(keyset.encode() == self.keys.keyset.encode()),
+            Err(Error::WrongPassphrase) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     /// The KDF parameters currently protecting the store.
     pub fn kdf_params(&self) -> Result<KdfParams> {
         let txn = self.db.begin_read()?;
