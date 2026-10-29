@@ -81,7 +81,8 @@ fn head(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
         .label("Name");
     let mut head = col().key("head").w_full().gap(8.0);
     if f.is_new() {
-        head = head.child(type_row(s, k, f, layer));
+        // Spaced from the name as the fields are from each other.
+        head = head.child(type_row(s, k, f, layer).mb(6.0));
     }
     head.child(name)
         .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
