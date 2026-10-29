@@ -109,7 +109,7 @@ pub fn locate(exe: &Path, macos: bool) -> Result<Target, Vec<PathBuf>> {
 }
 
 /// `X.app` for `X.app/Contents/Helpers/deadbolt`.
-fn bundle_of(exe: &Path) -> Option<PathBuf> {
+pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
     let helpers = exe.parent()?;
     let contents = helpers.parent()?;
     let bundle = contents.parent()?;

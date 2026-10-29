@@ -189,7 +189,10 @@ fn pick(chosen: &[Browser], dirs: &Dirs) -> Result<Vec<Browser>> {
 }
 
 /// Registers this binary as the native messaging host with `browsers`.
-pub fn install(browsers: &[Browser]) -> Result<()> {
+pub fn install(browsers: &[Browser], extension_dir: Option<&Path>, config: &Path) -> Result<()> {
+    if let Some(dir) = extension_dir {
+        register_extension_dir(dir, config)?;
+    }
     let dirs = Dirs::get()?;
     let program = std::env::current_exe().context("finding this binary")?;
     let body = manifest(&program)?;
@@ -204,6 +207,28 @@ pub fn install(browsers: &[Browser]) -> Result<()> {
         "The Deadbolt extension ({EXTENSION_ID}) can now reach {}.\n\
          Run this again if you move that binary.",
         program.display()
+    );
+    Ok(())
+}
+
+/// Records `dir` as the unpacked extension `deadbolt update` keeps current:
+/// it must not exist yet, be empty, or already hold Deadbolt's extension, as
+/// updating replaces everything in it.
+fn register_extension_dir(dir: &Path, config: &Path) -> Result<()> {
+    let dir = std::path::absolute(dir).with_context(|| format!("finding {}", dir.display()))?;
+    let dir = dir.canonicalize().unwrap_or(dir);
+    if !crate::update::extension_dir_ok(&dir) {
+        bail!(
+            "{} holds something other than Deadbolt's extension; \
+             choose an empty or new directory",
+            dir.display()
+        );
+    }
+    crate::config::set_extension_dir(config, &dir)?;
+    println!(
+        "`deadbolt update` keeps the extension in {} current; load it unpacked \
+         from there (chrome://extensions, Developer mode, Load unpacked)",
+        dir.display()
     );
     Ok(())
 }

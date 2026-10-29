@@ -17,7 +17,7 @@ brew install --cask anomalyco/tap/deadbolt   # Deadbolt.app for macOS, with its 
 
 Then run `deadbolt` from a terminal for the CLI, or `deadbolt app` (or Deadbolt from Applications, Spotlight or your launcher) for the desktop app. Bare `deadbolt` started outside a terminal opens the app too; set `DEADBOLT_NO_UI=1` in scripts that must never get a window. On Linux, `deadbolt desktop install` adds Deadbolt to the app launcher; the app's program, `deadbolt-ui`, goes beside `deadbolt` or in `<prefix>/lib/deadbolt/`.
 
-Or download from [GitHub releases](https://github.com/anomalyco/deadbolt/releases) (CLI tarballs for macOS and Linux, x64 and arm64; the macOS app; the browser extension). The install script installs the current release from the Anomaly release service and verifies its SHA-256; set `DEADBOLT_CHANNEL=dev` for the latest build of `dev`, `DEADBOLT_VERSION` to pin a stable version, and `DEADBOLT_INSTALL` to change the directory (default `~/.local/bin`). Releases: [`docs/releasing.md`](docs/releasing.md).
+Or download from [GitHub releases](https://github.com/anomalyco/deadbolt/releases) (CLI tarballs for macOS and Linux, x64 and arm64; the macOS app; the browser extension). The install script installs the current release from the Anomaly release service and verifies its SHA-256; set `DEADBOLT_CHANNEL=dev` for the latest build of `dev`, `DEADBOLT_VERSION` to pin a stable version, and `DEADBOLT_INSTALL` to change the directory (default `~/.local/bin`). `deadbolt update` updates the install it runs from (Deadbolt.app or a standalone `deadbolt`) from its channel; Homebrew installs update with `brew upgrade`. Releases: [`docs/releasing.md`](docs/releasing.md).
 
 ## Docs
 

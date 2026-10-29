@@ -1033,8 +1033,10 @@ dependencies = [
  "memchr",
  "p256",
  "psl",
+ "reqwest",
  "rpassword",
  "rustix 1.1.5",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",
@@ -1046,6 +1048,7 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "zeroize",
+ "zip",
 ]
 
 [[package]]

@@ -256,6 +256,6 @@ Releases are built by the Release workflow ([releasing.md](releasing.md)), which
 
 Remaining work:
 
-- An in-app updater reading `https://anoma.ly/release/deadbolt/desktop/<channel>.json` (Hex's protocol), requiring `crates/app/update-requirement.txt` of the new bundle.
+- An update offer in the app itself. `deadbolt update` run from the bundled helper (or the command link to it) already replaces Deadbolt.app from the `desktop` manifest, requiring `crates/app/update-requirement.txt` of the new bundle, and restarts the agent ([releasing.md](releasing.md#updater)).
 - After installing or updating, point the browser's native messaging host (`deadbolt browser install`) at `/Applications/Deadbolt.app/Contents/Helpers/deadbolt`.
 - A Mac download button on deadbolt.pw, from the `desktop` manifest. Site publishing needs Dax's approval.

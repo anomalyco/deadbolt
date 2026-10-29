@@ -13,9 +13,13 @@
 //! # Unlock with Touch ID on macOS after unlocking once with your passphrase
 //! # (default false).
 //! touch_id = true
+//!
+//! # An unpacked copy of the browser extension that `deadbolt update` keeps
+//! # current (`deadbolt browser install --extension-dir <dir>` sets it).
+//! extension_dir = "/Users/me/Deadbolt Extension"
 //! ```
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -82,6 +86,8 @@ pub struct Config {
     pub lock_on_sleep: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touch_id: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extension_dir: Option<PathBuf>,
 }
 
 impl Config {
@@ -115,8 +121,18 @@ impl Config {
 
 /// Updates `touch_id` in `path` (`config.toml`), preserving other settings.
 pub fn set_touch_id(path: &Path, enabled: bool) -> Result<()> {
+    change(path, |cfg| cfg.touch_id = Some(enabled))
+}
+
+/// Records the extension directory `deadbolt update` keeps current.
+pub fn set_extension_dir(path: &Path, dir: &Path) -> Result<()> {
+    change(path, |cfg| cfg.extension_dir = Some(dir.to_path_buf()))
+}
+
+/// Changes `path` (`config.toml`) with `edit`, preserving other settings.
+fn change(path: &Path, edit: impl FnOnce(&mut Config)) -> Result<()> {
     let mut cfg = Config::load(path)?;
-    cfg.touch_id = Some(enabled);
+    edit(&mut cfg);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("creating {}", parent.display()))?;

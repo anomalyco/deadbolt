@@ -22,8 +22,8 @@ A newer push to `dev` cancels a dev run in progress; other channels queue.
 are display text: each channel has one current release, and installs follow it.
 Release builds stamp the version into `Cargo.toml` (`scripts/set-crate-version.sh`,
 never committed) and the channel into the binary (`DEADBOLT_BUILD_CHANNEL`,
-shown by `deadbolt --version`, e.g. `deadbolt 0.0.0-dev-42 (dev)`), for a future
-updater.
+shown by `deadbolt --version`, e.g. `deadbolt 0.0.0-dev-42 (dev)`), which
+`deadbolt update` follows ([Updater](#updater)).
 
 ## The pipeline
 
@@ -120,8 +120,67 @@ safe. Distributions: `cli` lists `brew` (formula `anomalyco/tap/deadbolt`),
 only after the tap serves it (`record-brew`). `site/public/install` reads the
 `cli` manifest for `${DEADBOLT_CHANNEL:-stable}` and checks size and SHA-256;
 `DEADBOLT_VERSION` installs a pinned stable version from its GitHub release.
-Auto-update is not built yet; the desktop manifest follows Hex's updater
-protocol so one can be added.
+
+## Updater
+
+`deadbolt update [--check] [--channel dev|beta|stable] [--yes]`
+(`crates/cli/src/update.rs`) follows the release service's client rules
+(`anomalyco/release` `docs/protocol.md`, `src/protocol/decide.ts`): versions
+are display text, tested only for equality, so an install updates whenever its
+channel's current release isn't the build it runs, a rollback included.
+
+- **Channel:** the build's (`DEADBOLT_BUILD_CHANNEL`). Builds from source have
+  none and need `--channel`. Another channel than the build's is a switch: it
+  asks on a terminal, else needs `--yes`, and ignores the rollout.
+- **Rollout:** `required` installs at once; otherwise the install's bucket
+  (0–99, drawn once from a local random number and kept in
+  `$XDG_STATE_HOME/deadbolt/rollout-bucket`, never sent) must be under
+  `rollout_percent`.
+- **What it updates** depends on where the running `deadbolt` is, symlinks
+  resolved:
+  - `Deadbolt.app/Contents/Helpers/deadbolt` (or `~/.local/bin/deadbolt`
+    linked to it): the `desktop` artifact's `macos-arm64`/`macos-x64` zip.
+    Unzipped with `ditto`, it must pass `codesign --verify --deep --strict`
+    against `crates/app/update-requirement.txt` (compiled in) and
+    `spctl --assess --type execute`; then the app is quit, the agent stopped,
+    the old bundle renamed aside within its directory and moved to
+    `~/.Trash/Deadbolt-<old version>.app`, the new one renamed into place,
+    quarantine cleared if present, and the agent restarted from the new
+    helper (the vault comes back locked). An app on a disk image or under App
+    Translocation is refused, and one whose cask record exists
+    (`<brew prefix>/Caskroom/deadbolt`) gets the manifest's
+    `brew upgrade --cask` instead.
+  - Anything else (the install script, a tarball, a build): the `cli`
+    artifact's tarball for this OS and architecture. `deadbolt` and, on macOS,
+    `deadbolt-enclave` are renamed over the running ones from a staging
+    directory beside them. A Developer ID-signed `deadbolt` only gives way to
+    one that satisfies the same requirement with identifier `pw.deadbolt.cli`
+    (and `pw.deadbolt.app.enclave` for the helper), without `notarized`, as
+    bare executables aren't stapled; an ad-hoc build (source, unsigned dev)
+    relies on the checksum, as the install script does. If the running agent
+    is this binary it is stopped and started again from the new one.
+  - A path under Homebrew's `Cellar`, `/nix/store`, `/usr` (not `/usr/local`)
+    or `~/.cargo/bin` belongs to that package manager: `update` prints the
+    manifest's `command` (or a hint) and changes nothing.
+- **Extension:** `deadbolt browser install --extension-dir <dir>` records an
+  unpacked copy (`extension_dir` in `config.toml`; the directory must be new,
+  empty or already Deadbolt's extension). `update` then compares its
+  `manifest.json` `version_name` with the `extension` manifest, replaces the
+  directory with the `chromium` zip (staged beside it, renamed into place) and
+  says to reload Deadbolt in `chrome://extensions`. Without one it prints the
+  channel's download link.
+- **Checks:** manifests come only from `https://anoma.ly/release` (no
+  redirects, 30 s, at most 1 MiB); file URLs are resolved against the manifest
+  URL and must stay under its origin's `/release/deadbolt/files/`; a download
+  stops past the manifest's size and must match its size and SHA-256 before
+  it's unpacked, run or moved. Nothing needs the vault, so it works locked.
+  `--check` prints what's available and exits 10 if anything is, else 0.
+  Requests send `User-Agent: deadbolt/<build channel or source>/<version>/cli`.
+- **Tests** point it at a fake service with `DEADBOLT_RELEASE_URL`, which only
+  debug builds read and only for a URL on 127.0.0.1 or [::1].
+- It doesn't require the protocol's `install.json` receipt: `update` is a
+  command the user runs on the install in front of them, and package-manager
+  paths are refused instead.
 
 ## Homebrew
 
@@ -175,8 +234,9 @@ separately (`cd site && bun run deploy`, with Dax's approval).
 ## Follow-ups
 
 - `deadbolt browser install` writes its own executable as the native messaging
-  host. After installing or updating the app, the host should point at
+  host. After installing the app, the host should point at
   `/Applications/Deadbolt.app/Contents/Helpers/deadbolt` (or the cask's link),
-  not at a moved or replaced binary.
-- An in-app updater (`desktop` manifest, `update-requirement.txt`) and a
-  Chrome Web Store listing for the extension.
+  not at a moved binary (`deadbolt update` replaces files in place, so the
+  path stays valid).
+- Update offers in the app itself (it can run `deadbolt update`), periodic
+  checks, and a Chrome Web Store listing for the extension.

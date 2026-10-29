@@ -17,6 +17,7 @@ mod items;
 mod prompt;
 mod send;
 mod site;
+mod update;
 mod webauthn;
 
 use std::io::IsTerminal;
@@ -204,6 +205,15 @@ enum Commands {
     /// Connect Deadbolt's browser extension to this computer's Deadbolt.
     #[command(subcommand)]
     Browser(BrowserCommand),
+    /// Update this Deadbolt from its release channel: Deadbolt.app when
+    /// this is its `deadbolt`, else this standalone `deadbolt`, plus an
+    /// unpacked extension registered with `browser install --extension-dir`.
+    ///
+    /// Downloads are checked against the release's size and SHA-256 and, on
+    /// macOS, its code signature before anything is replaced. Installs from
+    /// Homebrew or another package manager get its command instead. The agent
+    /// restarts on the new build, locked. Works while the vault is locked.
+    Update(update::UpdateArgs),
     /// Serve the browser extension at ORIGIN over stdin/stdout. Browsers
     /// run this; `deadbolt browser install` sets it up.
     #[command(hide = true)]
@@ -225,6 +235,10 @@ enum BrowserCommand {
     Install {
         #[arg(long, value_enum)]
         browser: Vec<browser::Browser>,
+        /// Also keep an unpacked copy of the extension in DIR current with
+        /// `deadbolt update` (new, empty, or already the extension).
+        #[arg(long, value_name = "DIR")]
+        extension_dir: Option<PathBuf>,
     },
     /// Stop the extension reaching Deadbolt (default: in every browser).
     Uninstall {
@@ -390,6 +404,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Desktop(_)
                 | Commands::Browser(_)
                 | Commands::BrowserHost { .. }
+                | Commands::Update(_)
                 | Commands::Sends(_)
         )
     {
@@ -433,7 +448,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::App => app::open(&paths).await?,
         Commands::Desktop(DesktopCommand::Install) => desktop::install()?,
         Commands::Desktop(DesktopCommand::Uninstall) => desktop::uninstall()?,
-        Commands::Browser(BrowserCommand::Install { browser }) => browser::install(&browser)?,
+        Commands::Browser(BrowserCommand::Install {
+            browser,
+            extension_dir,
+        }) => browser::install(&browser, extension_dir.as_deref(), &paths.config)?,
+        Commands::Update(args) => return update::run(&paths, args).await,
         Commands::Browser(BrowserCommand::Uninstall { browser }) => browser::uninstall(&browser)?,
         Commands::BrowserHost { origin } => browser::host::run(paths, &origin).await?,
         Commands::Agent {
