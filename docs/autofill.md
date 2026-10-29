@@ -324,11 +324,15 @@ not running without sending hello, which would start the agent again.
     frame an opaque origin, which never gets logins at all, and every frame
     above checks the element the frame below sits in for a `sandbox`
     attribute as the field's box goes up (from the menu's opening to the
-    fill), whatever its flags. That's the side that can tell: from inside, a
-    document can't read its own sandbox flags. Two gaps follow, both only
-    open to the site itself: flags set by a `Content-Security-Policy:
-    sandbox` header with `allow-same-origin`, and an attribute removed after
-    the frame loaded. Schwab (a 630×65 sign-in bar framed from
+    fill), whatever its flags, and answers only if its own origin isn't
+    opaque. That last check catches a frame on the way sandboxed by a
+    `Content-Security-Policy: sandbox` header without `allow-same-origin`,
+    whose URL (all the browser's frame records show) still names the site.
+    Chromium also gives the frames inside such a frame its flags, so the
+    login frame's own origin is opaque too and the sender check refuses it
+    first; the check above is there in case that ever changes. Two gaps
+    remain, both open only to the site itself: a CSP `sandbox` header with
+    `allow-same-origin`, and an attribute removed after the frame loaded. Schwab (a 630×65 sign-in bar framed from
     sws-gateway-nr.schwab.com) and account.apple.com qualify, as does App
     Store Connect. The reason is what a page can do with a frame it embeds:
     where it sits, how big it is, what's over it and what's under the
@@ -349,14 +353,20 @@ not running without sending hello, which would start the agent again.
     readings in the top page, trusted events only, the user's recent click
     or keypress in the frame, and, before the host is asked and again once
     the values are in hand, the frame's fields through every frame above
-    (with Deadbolt's pill put away while they're measured). The fields get
-    the checks a top page's fields get, and every frame above takes a fresh
-    `trackVisibility` reading of the element the frame below sits in, so a
-    cover over the frame that lets clicks through still stops the fill. (A
+    (with Deadbolt's login pill put away while they're measured; with any
+    other surface showing, a card's pill say, nothing is measured or
+    filled). The fields get the checks a top page's fields get, and every
+    frame above takes a fresh `trackVisibility` reading of the element the
+    frame below sits in, so a cover over the frame that lets clicks through
+    still stops the fill. That element only has to be unobscured and partly
+    on screen, since a sign-in frame can be taller than the viewport; the
+    fields' boxes are cut to what shows separately. (A
     reading of the field itself, as the popup takes, says no on Apple's
     widget: its label floats over its own field.) Typing in the
-    field, clicking elsewhere in the frame or esc there (which the top page
-    can't see) puts the menu away. A frame never gets a generated password.
+    field, clicking elsewhere in the frame, scrolling the field elsewhere,
+    or esc there (which the top page can't see) puts the menu away. Esc on
+    an open menu ends the sign-in session, as in the top page; once a pick
+    has filled, it says nothing of it. A frame never gets a generated password.
   - **The popup.** Any same-site frame's form also fills from the popup,
     and only if the user can see it through every frame above it, checked
     when the user clicks Fill and again once the values are in hand.

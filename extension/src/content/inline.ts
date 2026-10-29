@@ -119,6 +119,22 @@ const PILL_MAX = { width: 260, height: 32 }
 let dismissedFor: Element | null = null
 /** In a frame: the field the background last opened the menu for in the top page, which can't see the frame's events (see db:menu-away). */
 let framedFor: Element | null = null
+/** Where that field was in this frame's viewport then: the frame scrolling it elsewhere puts the menu away (see onFrameScroll). */
+let framedAt: { left: number; top: number } | null = null
+
+/** In a frame: the menu the background opened in the top page for one of its fields goes (or went), with `tell`, by the user's doing here. */
+function framedGone(tell: boolean, dismissed = false) {
+  if (!framedFor) return
+  framedFor = framedAt = null
+  if (tell) void send({ type: "db:menu-away", ...(dismissed ? { dismissed } : {}) })
+}
+
+/** In a frame: a scroll that moved the field the menu is for. The top page's menu can't follow it, so it goes. */
+function onFrameScroll() {
+  if (!framedFor || !framedAt) return
+  const r = framedFor.getBoundingClientRect()
+  if (Math.abs(r.left - framedAt.left) > 2 || Math.abs(r.top - framedAt.top) > 2) framedGone(true)
+}
 /**
  * Fields whose typing narrowed the menu to nothing (or that the user typed a
  * password into by hand): the menu doesn't come back on focus until the field
@@ -666,7 +682,11 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
         ? null
         : await send<QueryReply>({ type: "db:query", roles, focused: t.role, form: state.form(), kind, rules, explicit, again: how === "again", ...(named ? { identifier: named } : {}), ...(onPage ? { pageAccount: onPage } : {}), ...(at ? { box: at } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
-    else if (!isTop) framedFor = el
+    else if (!isTop) {
+      framedFor = el
+      const r = el.getBoundingClientRect()
+      framedAt = { left: r.left, top: r.top }
+    }
     else if (reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
   })().finally(() => (querying = null))
 }
@@ -739,10 +759,9 @@ function onInput(event: Event) {
   }
   // In a frame, the menu in the top page can't narrow as the user types: it goes.
   if (!isTop && el === framedFor) {
-    framedFor = null
     const role = targetFor(el)?.role
     if (role && !IDENTIFIER_ROLES.includes(role)) quiet.add(el)
-    return void send({ type: "db:menu-away" })
+    return framedGone(true)
   }
   if (!host || mode !== "accounts" || el !== anchor || closing) return
   typedSinceOpen = true
@@ -780,10 +799,7 @@ function onPointerDown(event: PointerEvent) {
   lastGestureAt = Date.now()
   const target = event.composedPath()[0]
   lastPointer = target ?? null
-  if (!isTop && framedFor && target !== framedFor) {
-    framedFor = null
-    void send({ type: "db:menu-away" })
-  }
+  if (!isTop && framedFor && target !== framedFor) framedGone(true)
   // Clicking a field that already has focus (e.g. autofocus) opens the menu too.
   if (isControl(target) && target === deepActiveElement() && !host) {
     if (dismissedFor === target) dismissedFor = null
@@ -810,8 +826,7 @@ function onKeyDown(event: KeyboardEvent) {
   const target = event.composedPath()[0]
   if (!isTop && event.key === "Escape" && framedFor && target === framedFor) {
     dismissedFor = framedFor
-    framedFor = null
-    return void send({ type: "db:menu-away", dismissed: true })
+    return framedGone(true, true)
   }
   if (!host) {
     // ↓ in a field that has no menu (dismissed, or focused from script) asks for one.
@@ -850,6 +865,8 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
   // Filling focuses each field. Without this, the keypress that chose the
   // login would reopen the menu on the first field, covering the next one.
   lastGestureAt = 0
+  // In a frame, the menu this fill was picked from is a pill now: Esc or a click here is about nothing of it.
+  framedGone(false)
   state.rescan()
   if (state.form() !== message.form) return { filled: [] }
   // A generated password the boxes' pattern won't take (the page changed it since the menu opened).
@@ -1027,6 +1044,7 @@ export function initMenu(page: PageState) {
   document.addEventListener("keydown", onKeyDown, true)
   document.addEventListener("input", onInput, true)
   window.addEventListener("pointermove", onPointerMove, { capture: true, passive: true })
+  if (!isTop) window.addEventListener("scroll", onFrameScroll, { capture: true, passive: true })
   // Leaving the page (or entering the back/forward cache) takes the menu
   // along; coming back is a new visit.
   window.addEventListener("pagehide", () => {
@@ -1057,12 +1075,17 @@ export function initMenu(page: PageState) {
       case "db:open-at":
         return void respond(openAt(String(message.token), Number(message.rows), message.box, message.mode === "pill" ? "pill" : "accounts"))
       case "db:hold":
-        if (message.token !== undefined && message.token !== token) return void respond(false)
+        // Only the surface the asker owns. Asked about another, it says
+        // whether nothing of Deadbolt's shows, which the measuring needs.
+        if (message.token !== token) return void respond(!host)
         if (!message.hold) return void respond(hold(false))
         pillSettled(900).then(() => respond(hold(true)))
         return true
       case "db:generated":
         keptGenerated(String(message.generated))
+        return void respond(true)
+      case "db:menu-gone":
+        framedGone(false)
         return void respond(true)
       case "db:close-menu":
         if (message.token === token) {

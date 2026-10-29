@@ -113,10 +113,16 @@ export function initFrameChecks(state: PageState) {
         approved(state, String(message.approval), message.sameSite === true).then((b) => respond(reply(b)), () => respond(null))
         return true
       case "db:frame-child":
+        // For a login frame (`unsandboxed`): not through a frame that is
+        // sandboxed itself, by attribute or by a CSP `sandbox` header
+        // without allow-same-origin, which leaves its URL's origin but makes
+        // its real one opaque (the browser's frame records show the URL's).
+        if (message.unsandboxed === true && self.origin === "null") return void respond(null)
         announcements.from(message.nonce, ANNOUNCE_WAIT_MS).then(async (source) => {
           const el = source ? deepQueryAll<HTMLIFrameElement>("iframe, frame").find((f) => f.contentWindow === source) : undefined
           const boxes = el ? throughFrame(el, message.boxes, message.unsandboxed === true) : null
-          respond(reply(boxes && el && message.track === true && !(await visibleNow(1000, el)) ? null : boxes))
+          // The frame element may be taller than the viewport: unobscured and on screen is enough (the fields' boxes are cut to what shows).
+          respond(reply(boxes && el && message.track === true && !(await visibleNow(1000, el, true)) ? null : boxes))
         }, () => respond(null))
         return true
       case "db:frame-announce":

@@ -91,7 +91,12 @@ export interface Flow {
   at: number
 }
 
-/** What a tab's top page (or its same-site login frame) has shown of the current sign-in, to learn its Flow from. */
+/**
+ * What a tab's top page, or one of its login frames (see sameSiteTop), has
+ * shown of the current sign-in, to learn its Flow from. Each frame has its
+ * own: a top page's identifier and a frame's password box aren't one form's
+ * steps.
+ */
 interface Track {
   site: string
   identifierDoc?: string
@@ -175,8 +180,8 @@ export class Autofill {
   private lists = new Map<string, { at: number; reply: ListReply }>()
   private pages = new Map<number, Map<number, PageReport>>()
   private sessionTimers = new Map<number, ReturnType<typeof setTimeout>>()
-  /** What each tab's top page has shown of its sign-in, to learn the site's Flow from. */
-  private tracks = new Map<number, Track>()
+  /** What each tab's top page and login frames have shown of its sign-in, by frame, to learn the site's Flow from. */
+  private tracks = new Map<number, Map<number, Track>>()
   /** The last time the user themselves submitted a login form in each tab's top page (or same-site login frame), and in which document. */
   private submits = new Map<number, { documentId: string; at: number }>()
   /** Each tab's session work runs one piece at a time, so a step is used once. */
@@ -381,7 +386,7 @@ export class Autofill {
     t.picked = true
     if (!t.owner) return this.fillAndArm(t, account, t.roles, t.form)
     // A frame's fields: only those that show through every frame above, checked now and again once the values are in hand.
-    const framed = await this.measured(t.tabId, () => shownInPage(t, t.form, true))
+    const framed = await this.measured(t.tabId, () => shownInPage(t, t.form, true), null)
     if (!framed) return { ok: false, message: NOT_SHOWN }
     return this.fillAndArm(t, account, t.roles, t.form, framed)
   }
@@ -476,12 +481,15 @@ export class Autofill {
   async menuAway(sender: chrome.runtime.MessageSender, dismissed: boolean) {
     const target = await targetFor(sender)
     if (!target || target.frameId === 0) return
+    let open = false
     for (const [token, t] of this.tokens) {
       if (!t.owner || t.picked || t.notice || t.tabId !== target.tabId || t.frameId !== target.frameId || t.documentId !== target.documentId) continue
+      open = true
       this.tokens.delete(token)
       await sendToFrame(t.owner, { type: "db:close-menu", token })
     }
-    if (dismissed) await this.cancel(target.tabId)
+    // Esc said no to an open menu, as in the top page; with none open (it was picked), it says nothing of the sign-in.
+    if (dismissed && open) await this.cancel(target.tabId)
   }
 
   /** The page closed its menu; with `dismissed`, the user said no (esc). */
@@ -489,6 +497,8 @@ export class Autofill {
     const t = this.tokens.get(token)
     if (!t || sender.tab?.id !== t.tabId || sender.documentId !== (t.owner ?? t).documentId) return
     this.tokens.delete(token)
+    // A frame's field: its frame hears the menu went (see db:menu-gone).
+    if (t.owner) await sendToFrame(t, { type: "db:menu-gone" })
     if (dismissed) await this.cancel(t.tabId)
   }
 
@@ -511,7 +521,7 @@ export class Autofill {
     const reply = await this.host.send({ type: "fill", origin: target.origin, ref: account.ref, want })
     // Esc, or the user leaving, while the host answered: nothing goes out.
     if (generation !== this.generation(target.tabId)) return []
-    if (framed && !(await this.measured(target.tabId, () => stillShown(target, framed)))) throw new Error(NOT_SHOWN)
+    if (framed && !(await this.measured(target.tabId, () => stillShown(target, framed), false))) throw new Error(NOT_SHOWN)
     if (generation !== this.generation(target.tabId)) return []
     const values: FillValues = {}
     if (want.includes("username") && reply.username) values.username = reply.username
@@ -536,17 +546,35 @@ export class Autofill {
 
   /**
    * Runs `measure` (a frame's fields checked through every frame above) with
-   * Deadbolt's pill in the tab's top page out of sight: Chromium reads nothing
+   * the login pill in the tab's top page out of sight: Chromium reads nothing
    * as fully visible while anything shows in the top layer (see db:hold).
+   * Only a pill of this tab's logins is put away, never another surface (a
+   * card's pill): with one showing, nothing is measured, and `fallback` is
+   * the answer.
    */
-  private async measured<T>(tabId: number, measure: () => Promise<T>): Promise<T> {
+  private async measured<T>(tabId: number, measure: () => Promise<T>, fallback: T): Promise<T> {
     const { target: top } = await topTarget(tabId)
-    if (top) await sendToFrame(top, { type: "db:hold", hold: true })
+    if (!top) return fallback
+    const token = this.pillIn(top)
+    if ((await sendToFrame<boolean>(top, { type: "db:hold", token, hold: true })) !== true) {
+      if (token) await sendToFrame(top, { type: "db:hold", token, hold: false })
+      return fallback
+    }
     try {
       return await measure()
     } finally {
-      if (top) await sendToFrame(top, { type: "db:hold", hold: false })
+      await sendToFrame(top, { type: "db:hold", token, hold: false })
     }
+  }
+
+  /** The newest login pill (a pick's or a step's) in the top page document `top`, if any ("" if none). */
+  private pillIn(top: FrameTarget): string {
+    let pill = ""
+    for (const [token, t] of this.tokens) {
+      const owner = t.owner ?? t
+      if ((t.picked || t.notice) && owner.tabId === top.tabId && owner.frameId === 0 && owner.documentId === top.documentId) pill = token
+    }
+    return pill
   }
 
   /** Fill, and say what the session is now if this fill, in the top page or a frame that may have the menu, wrote something (null: over). */
@@ -662,8 +690,12 @@ export class Autofill {
   private track(tabId: number, target: FrameTarget, roles: FieldRole[]) {
     const site = siteOf(new URL(target.origin).hostname)
     if (!site) return
-    let t = this.tracks.get(tabId)
-    if (!t || t.site !== site) this.tracks.set(tabId, (t = { site, otp: false }))
+    const frames = this.tracks.get(tabId) ?? new Map<number, Track>()
+    this.tracks.set(tabId, frames)
+    // Another site's sign-in starts over, in every frame.
+    for (const [id, other] of frames) if (other.site !== site) frames.delete(id)
+    let t = frames.get(target.frameId)
+    if (!t) frames.set(target.frameId, (t = { site, otp: false }))
     const id = roles.some((r) => IDENTIFIER_ROLES.includes(r))
     if (roles.includes("password")) t.passwordDoc ??= target.documentId
     else if (id) t.identifierDoc ??= target.documentId
@@ -675,9 +707,11 @@ export class Autofill {
    * its shape (see Flow), from what the top page showed of it.
    */
   async learnFlow(tabId: number, site: string) {
-    const t = this.tracks.get(tabId)
+    const frames = [...(this.tracks.get(tabId) ?? new Map<number, Track>())]
     this.tracks.delete(tabId)
-    if (!t || t.site !== site || !t.passwordDoc) return
+    // The top page's sign-in if it showed a password, else the login frame's that did.
+    const t = frames.sort(([a], [b]) => a - b).map(([, x]) => x).find((x) => x.site === site && x.passwordDoc)
+    if (!t) return
     const flows = await readFlows()
     const key = await flowKey(site)
     const before = flows[key]
@@ -743,7 +777,7 @@ export class Autofill {
       if (target.origin !== s.origin && !account.urls.some((u) => sameHost(u, target.origin))) return
       const step = stepRoles(clean, account, idEmpty).filter((r) => !s.filled.includes(r) || IDENTIFIER_ROLES.includes(r))
       if (!step.length) return
-      const shown = framed ? await this.measured(target.tabId, () => shownInPage(target, form as number, true)) : undefined
+      const shown = framed ? await this.measured(target.tabId, () => shownInPage(target, form as number, true), null) : undefined
       // A frame's step fills only fields that show through every frame above. One
       // that shows none of them yet (a password box still collapsed) isn't the
       // step yet: the frame reports again once more of its fields show.
@@ -772,7 +806,8 @@ export class Autofill {
     else this.pages.get(d.tabId)?.delete(d.frameId)
     for (const [token, t] of this.tokens) if (t.tabId === d.tabId && (d.frameId === 0 || t.frameId === d.frameId)) this.tokens.delete(token)
     if (d.frameId !== 0) return
-    if (this.tracks.get(d.tabId)?.site !== siteOfUrl(d.url)) this.tracks.delete(d.tabId)
+    const tracked = this.tracks.get(d.tabId)
+    if (tracked && [...tracked.values()].some((t) => t.site !== siteOfUrl(d.url))) this.tracks.delete(d.tabId)
     if (UNRELATED.has(d.transitionType ?? "") || d.transitionQualifiers?.includes("forward_back")) return this.cancel(d.tabId)
     const s = await this.serial(d.tabId, () => this.session(d.tabId))
     if (s && siteOfUrl(d.url) !== s.site) await this.cancel(d.tabId)

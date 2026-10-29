@@ -260,12 +260,15 @@ export type ToContent =
   /** An identity's or card's values for the fields `approval` named, in form snapshot `form`. */
   | { type: "db:forms-fill"; values: FormValues; form: number; approval: string }
   /**
-   * Puts the surface (folded into its pill; with `token`, only that one) out
-   * of sight while frames below are measured, and back after (`hold` false):
-   * Chromium reads nothing as fully visible while anything shows in the top
-   * layer.
+   * Puts the surface `token` (folded into its pill) out of sight while
+   * frames below are measured, and back after (`hold` false): Chromium reads
+   * nothing as fully visible while anything shows in the top layer. Answers
+   * whether nothing of Deadbolt's shows now; asked about another token (or
+   * ""), it touches nothing.
    */
-  | { type: "db:hold"; token?: string; hold: boolean }
+  | { type: "db:hold"; token: string; hold: boolean }
+  /** To a frame: the menu the top page showed for its field went. */
+  | { type: "db:menu-gone" }
   /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
   | { type: "db:surface"; token: string }
   // Can the user see a frame's form? (see shownInPage)
