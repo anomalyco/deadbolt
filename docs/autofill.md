@@ -276,7 +276,7 @@ not running without sending hello, which would start the agent again.
 - **A provider's own password step.** Google's password page already names
   the account it's for (it remembered it, so the user typed nothing): a chip
   carrying `data-profile-identifier`, and a hidden `identifier` box in the
-  form. On `https://accounts.google.com` only (a provider marked
+  page (no `<form>`). On `https://accounts.google.com` only (a provider marked
   `pageAccount` in `signin.ts`, exact host, over https), with no username of
   the user's own, the content script sends that account as `pageAccount`
   (the visible chip first, then the hidden box; an email address or plain

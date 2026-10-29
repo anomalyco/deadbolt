@@ -655,15 +655,16 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
 /**
  * The account a provider's own password step shows, on a provider host whose
  * page-set account is trusted (see isAccountPage): its visible account chip,
- * else the hidden username its form carries. Google's: a chip with
- * `data-profile-identifier`, and `<input name="identifier" id="hiddenEmail">`.
+ * else the hidden username box beside the field. Google's: a chip with
+ * `data-profile-identifier`, and `<input name="identifier" id="hiddenEmail">`
+ * in the same `<main>` as the password field (the page has no `<form>`).
  */
 function pageAccount(field: HTMLInputElement): string | undefined {
   if (!isAccountPage(location.href)) return undefined
   const chip = [...document.querySelectorAll("[data-profile-identifier]")].find((c) => c.getClientRects().length > 0)
   const shown = pageAccountOf(chip?.textContent?.slice(0, 501))
   if (shown) return shown
-  const hidden = (field.form ?? document).querySelector<HTMLInputElement>('input[name="identifier"], input#hiddenEmail')
+  const hidden = (field.closest("main") ?? document).querySelector<HTMLInputElement>('input[name="identifier"], input#hiddenEmail')
   return pageAccountOf(hidden?.value)
 }
 

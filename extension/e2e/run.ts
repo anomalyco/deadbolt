@@ -53,6 +53,9 @@ if (video) await mkdir(video, { recursive: true })
 
 // ---- Test pages ---------------------------------------------------------------
 
+/** Google's password step, the real page's markup (see the /v3/signin/challenge/pwd route). */
+const GOOGLE_PWD = await readFile(join(import.meta.dir, "google-pwd-step.html"), "utf8")
+
 const html = (title: string, body: string, headers: Record<string, string> = {}) =>
   new Response(
     `<!doctype html><html><head><meta charset="utf-8"><title>${title}</title><style>
@@ -579,22 +582,19 @@ const server = Bun.serve({
         )
       case "/social/done":
         return html("Acme", `<h1>Welcome</h1><p>Signed in as <strong>${(url.searchParams.get("as") ?? "").replace(/[<>&"]/g, "")}</strong> with Google.</p>`)
-      // Google's password step, as accounts.google.com shows it (2026-10):
-      // the account it's for in a chip (?nochip: only in the form's hidden
-      // username box), set by the page, never typed by the user.
+      // Google's password step: a cleaned copy of the real page's <main>
+      // (google-pwd-step.html, no <form>). The page itself sets the account:
+      // the chip's text (?as; ?nochip takes the chip out) and the hidden
+      // username boxes' values (?hidden, else ?as).
       case "/v3/signin/challenge/pwd": {
-        const as = (url.searchParams.get("as") ?? "").replace(/[<>&"]/g, "")
-        const chip = url.searchParams.has("nochip")
-          ? ""
-          : `<div role="link" tabindex="0" aria-label="${as} selected. Switch account" jsname="af8ijd" style="display:inline-flex;gap:8px;align-items:center;border:1px solid #d4d4d8;border-radius:16px;padding:4px 12px;margin-bottom:16px"><div class="IxcUte" jsname="bQIQze" data-profile-identifier translate="no">${as}</div></div>`
-        return html(
-          "Sign in - Google Accounts",
-          `<main><h1 style="font-weight:400">Hi Ryan</h1>${chip}<form method="post" action="/auth/complete" novalidate>
-            <input type="email" name="identifier" id="hiddenEmail" autocomplete="off" tabindex="-1" aria-hidden="true" value="${as}" style="display:none">
-            <input type="hidden" id="identifierId" value="${as}">
-            <label for="pw">Enter your password</label><input id="pw" type="password" name="Passwd" autocomplete="current-password webauthn" aria-label="Enter your password">
-            <button type="submit">Next</button></form></main>`,
-        )
+        const clean = (v: string | null) => (v ?? "").replace(/[<>&"']/g, "")
+        const as = clean(url.searchParams.get("as"))
+        const hidden = url.searchParams.has("hidden") ? clean(url.searchParams.get("hidden")) : as
+        let page = GOOGLE_PWD.replaceAll("person@example.com", as)
+          .replace('id="hiddenEmail">', `id="hiddenEmail" value="${hidden}">`)
+          .replace('id="identifierId">', `id="identifierId" value="${hidden}">`)
+        if (url.searchParams.has("nochip")) page = page.replace(/<div jsname="bQIQze"[^>]*data-profile-identifier[^>]*>[^<]*<\/div>/, "")
+        return new Response(page, { headers: { "content-type": "text/html; charset=utf-8" } })
       }
       case "/o/oauth2/chooser": {
         const back = url.searchParams.get("return") ?? "/"
@@ -2544,15 +2544,17 @@ async function googleAccount() {
   const page = await run.context.newPage()
   const rows = async (path: string) => {
     await page.goto(path)
-    const menu = await menuOn(page, "#pw")
+    const menu = await menuOn(page, 'input[name="Passwd"]')
     return menu ? ((await menu.locator("button.row .sub").allTextContents()) ?? []).map((t) => t.trim()) : null
   }
   try {
     const google = `http://accounts.google.test:${server.port}/v3/signin/challenge/pwd`
-    const chip = await rows(`${google}?as=ryan@anoma.ly`)
+    const chip = await rows(`${google}?as=ryan@anoma.ly&hidden=`)
     check(JSON.stringify(chip) === JSON.stringify(["ryan@anoma.ly"]), `on Google's password step, the menu lists only the login for the account shown (${JSON.stringify(chip)})`)
-    const hidden = await rows(`${google}?as=kit@gmail.com&nochip`)
-    check(JSON.stringify(hidden) === JSON.stringify(["kit@gmail.com"]), `with no chip, the form's hidden username names it (${JSON.stringify(hidden)})`)
+    const first = await rows(`${google}?as=ryan@anoma.ly&hidden=kit@gmail.com`)
+    check(JSON.stringify(first) === JSON.stringify(["ryan@anoma.ly"]), `the chip the user sees comes before the hidden box (${JSON.stringify(first)})`)
+    const hidden = await rows(`${google}?as=ryan@anoma.ly&hidden=kit@gmail.com&nochip`)
+    check(JSON.stringify(hidden) === JSON.stringify(["kit@gmail.com"]), `with no chip, the hidden username box names it, with no <form> around it (${JSON.stringify(hidden)})`)
     const none = await rows(`${google}?as=nobody@anoma.ly`)
     check(none?.length === 3, `an account no login has shows the whole list (${JSON.stringify(none)})`)
     const elsewhere = await rows(`http://www.acme.test:${server.port}/v3/signin/challenge/pwd?as=ryan@anoma.ly`)
