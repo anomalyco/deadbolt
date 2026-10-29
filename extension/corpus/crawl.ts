@@ -59,6 +59,12 @@ export interface CapturedFrame extends FrameProbe {
   /** Where the frame sits in the screenshot. */
   offset: { x: number; y: number }
   crossOrigin: boolean
+  /** The frame's size on the page (a subframe's element box). */
+  size?: { w: number; h: number }
+  /** The index of the frame it's in, among the captured frames (0: the top page; -1: one not captured). */
+  parent?: number
+  /** Its frame element's `sandbox` attribute, read from the page around it (null: none). */
+  sandbox?: string | null
 }
 
 export interface Summary {
@@ -153,22 +159,26 @@ export async function probeFrames(page: Page, code: string, clock: Clock): Promi
   const topOrigin = new URL(page.url()).origin
   const frames: CapturedFrame[] = []
   const scroll = await within(page.evaluate(() => ({ x: scrollX, y: scrollY })), 2000, { x: 0, y: 0 })
+  const index = new Map<Frame, number>()
   for (const frame of page.frames().slice(0, 25)) {
     if (clock.left() < 2500) break
     if (frame.isDetached() || !/^https?:/.test(frame.url())) continue
     let offset = { x: 0, y: 0 }
+    let size: CapturedFrame["size"]
+    let sandbox: string | null = null
     if (frame !== page.mainFrame()) {
-      const box = await within(
-        frame.frameElement().then((el) => el.boundingBox()),
-        1500,
-        null,
-      )
-      if (!box || box.width < 10 || box.height < 10) continue
+      const element = await within(frame.frameElement(), 1500, null)
+      const box = element ? await within(element.boundingBox(), 1500, null) : null
+      if (!element || !box || box.width < 10 || box.height < 10) continue
       offset = { x: Math.round(box.x + scroll.x), y: Math.round(box.y + scroll.y) }
+      size = { w: Math.round(box.width), h: Math.round(box.height) }
+      sandbox = await within(element.getAttribute("sandbox"), 1500, null)
     }
     const probe = await within(runProbe(frame, code), Math.min(4000, clock.left() - 1000), null)
     if (!probe) continue
-    const captured = { ...probe, offset, crossOrigin: probe.origin !== topOrigin }
+    const up = frame.parentFrame()
+    const captured = { ...probe, offset, crossOrigin: probe.origin !== topOrigin, ...(size ? { size, parent: up ? (index.get(up) ?? -1) : -1, sandbox } : {}) }
+    index.set(frame, frames.length)
     frameObjects.set(captured, frame)
     frames.push(captured)
   }
