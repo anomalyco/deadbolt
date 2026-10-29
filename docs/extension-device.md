@@ -204,15 +204,50 @@ security review before anything implements it.
 | Touch ID / passkey unlock | allowed | allowed | allowed |
 | Reveal/copy password; card number/CVV | re-auth every time | re-auth card number/CVV | no re-auth |
 
-Use means a pick, fill, save, opening the popup, or reveal. Passive listing for a
-page menu is not use. The standalone build implements the three presets' idle
-limits and screen-lock handling, and Strict's passphrase check before a password is
-shown or copied (the Rust core checks it against the open store's key set); the
-choice is a setting in `chrome.storage.local`, never a key. Card fields and
-Touch ID/passkey unlock don't exist in this build yet. The unwrapped key stays in
-worker memory only under every preset: session-key restoration and passkey PRF
-wrapping need their own security review and browser capability handling, so an
-offscreen restart still locks under Comfortable and Relaxed.
+Use means a pick, fill, save, opening the popup, opening a login, or reveal. Passive
+listing for a page menu is not use, and neither is a page reading the vault again
+(an open login's details ask for each new one-time code). The standalone build
+implements the three presets' idle limits and screen-lock handling, and Strict's
+passphrase check before a password is shown or copied. The choice is a setting in
+`chrome.storage.local`, never a key. The service worker sends it to the vault's
+worker with every unlock and change, and the Rust core enforces Strict itself
+(`crates/ext-core/src/policy.rs`): under Strict it returns no password without a
+passphrase, which it checks against the open store's key set, and a worker that
+was never told assumes Strict. Card fields and Touch ID/passkey unlock don't exist
+in this build yet. The unwrapped key stays in worker memory only under every
+preset: session-key restoration and passkey PRF wrapping need their own security
+review and browser capability handling, so an offscreen restart still locks under
+Comfortable and Relaxed.
+
+Wrong passphrases back off. After three in a row, for unlocking or for Strict's
+check before a password, the service worker refuses the next try for 1 s, then 2,
+4, … up to 60 s, without reaching the vault; a right passphrase starts over. The
+count lives in `chrome.storage.session`, so a restarted service worker keeps it.
+This slows guessing through Deadbolt's own pages: someone at an unattended browser,
+or a script driving the popup. It does nothing against an attacker who has copied
+the encrypted OPFS file, who meets only the passphrase KDF.
+
+### Copied passwords
+
+The vault UI copies a password or one-time code when asked (the native popup still
+never copies passwords). It can clear it again 30 seconds later, or when Deadbolt
+locks, whichever is first, and only if the clipboard still holds that value, so
+nothing the user copied since is lost. The service worker keeps no copy: only a
+salted SHA-256 of the value, in memory and in `chrome.storage.session`, and a
+one-shot alarm. The offscreen document (opened with the `CLIPBOARD` reason too)
+reads the clipboard, compares, and empties it.
+
+Reading and writing the clipboard from there needs `clipboardRead` and
+`clipboardWrite`. Each adds an install warning ("Read data you copy and paste",
+"Modify data you copy and paste", measured with
+`chrome.management.getPermissionWarningsByManifest`), so both are optional
+permissions, asked for together: by the "Clear copied passwords after 30 seconds"
+switch in Settings, when the user chooses Strict, and once on the first copy under
+Strict. Without them nothing is cleared, and nothing is cleared blindly.
+
+The `favicon` permission, for site icons in the list from Chrome's own cache, adds
+no warning to this manifest: alone it says "Read the icons of the websites you
+visit", which the content scripts' all-sites access already covers.
 
 ## Verification
 
