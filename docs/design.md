@@ -35,6 +35,7 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 - Each device appends to its own signed log. Entries reference the entries they were based on (causal), never wall-clock time.
 - Items are maps of fields. An edit replaces a field only if it was based on the previous value; truly concurrent edits keep one (tie broken by entry hash) and push the other into the item's history, so nothing is silently lost.
 - Sync = "here are my heads, send me what I'm missing", over iroh. Entries are signed; confidentiality in transit comes from iroh.
+- Limits: an entry travels as one frame (16 MiB), so core refuses at commit an entry that would encode larger (`MAX_ENTRY_LEN`) rather than store one that can never sync; an import splits into ~1 MiB entries and fails only on an item too large on its own. A receiver hands entries on in batches of at most 64 Ki entries or 32 MiB plus one frame, so a session's size is unbounded but its memory is not, and closes a session a peer opened that runs past 60 seconds (the CLI gives up on its own after 15). A new device accepts at most 16 pairing dialers proving the ticket at once and queues 16 more.
 - No compaction in v1. Deleted items stay in the history on your own devices, encrypted at rest under the local unlock key. (Later: snapshots.)
 
 ## Items

@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use deadbolt_net::{HandlerError, Membership, Node, NodeConfig, PeerId, SyncHandler};
+use deadbolt_net::{Blob, HandlerError, Membership, Node, NodeConfig, PeerId, SyncHandler};
 use tokio::sync::Notify;
 
 pub const T: Duration = Duration::from_secs(10);
@@ -88,7 +88,7 @@ impl SyncHandler for Store {
         &self,
         _peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> Result<Vec<Vec<u8>>, HandlerError> {
+    ) -> Result<Vec<Blob>, HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some((entered, release)) = &self.block {
             entered.notify_one();
@@ -101,12 +101,13 @@ impl SyncHandler for Store {
             .unwrap()
             .iter()
             .filter(|e| !theirs.contains(e.as_slice()))
-            .cloned()
+            .map(|e| Blob::new(e.clone()))
             .collect())
     }
 
-    async fn receive(&self, _peer: PeerId, entries: Vec<Vec<u8>>) -> Result<(), HandlerError> {
+    async fn receive(&self, _peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
+        let entries: Vec<Vec<u8>> = entries.iter().map(|e| e.to_vec()).collect();
         self.received.lock().unwrap().push(entries.clone());
         self.entries.lock().unwrap().extend(entries);
         Ok(())
@@ -121,14 +122,14 @@ pub struct TestNode {
 
 impl TestNode {
     pub async fn new(store: Arc<Store>) -> Self {
+        Self::with_config(store, NodeConfig::local_only(key())).await
+    }
+
+    pub async fn with_config(store: Arc<Store>, config: NodeConfig) -> Self {
         let members = Arc::new(Members::default());
-        let node = Node::spawn(
-            NodeConfig::local_only(key()),
-            members.clone(),
-            store.clone(),
-        )
-        .await
-        .unwrap();
+        let node = Node::spawn(config, members.clone(), store.clone())
+            .await
+            .unwrap();
         Self {
             node,
             members,
