@@ -33,6 +33,12 @@ impl Paths {
         Self::from_vars(|name| env::var_os(name))
     }
 
+    /// Where the browser extension's "Learn this site" sessions are logged,
+    /// one JSON-lines file per session, beside the agent's log.
+    pub fn learn_dir(&self) -> PathBuf {
+        self.log.with_file_name("learn")
+    }
+
     /// The paths for an environment given by `vars` instead of the process's
     /// own (`$TMPDIR` aside), e.g. for a test that starts its own agent.
     pub fn from_vars(vars: impl Fn(&str) -> Option<OsString>) -> Self {

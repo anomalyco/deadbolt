@@ -27,6 +27,7 @@ import { findAccountTile, findProviderButton, type Field } from "./detect"
 import { hideRing, showRing } from "./ring"
 import { provider } from "../signin"
 import { fillable, fillFields, ownValue } from "./fill"
+import { learning } from "./learn"
 import { deepActiveElement } from "./shadow"
 
 export interface PageState {
@@ -411,7 +412,8 @@ const emptyUntil = new WeakMap<Element, number>()
 type Asked = "focus" | "click" | "again"
 
 async function maybeOpen(el: HTMLInputElement, how: Asked = "focus") {
-  if (!isTop || querying || dismissedFor === el || !recentGesture()) return
+  // While the tab learns its site, the user signs in by hand.
+  if (!isTop || querying || dismissedFor === el || !recentGesture() || learning()) return
   // The save offer stays until it's answered or its time runs out.
   if (host && mode === "save") return
   const explicit = how !== "focus"

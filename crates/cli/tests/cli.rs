@@ -1465,7 +1465,7 @@ fn browser_host_lists_and_fills_only_for_the_page_site() {
     assert_eq!(hello["protocol"], 1);
     assert_eq!(
         hello["capabilities"],
-        serde_json::json!(["list", "fill", "check", "save", "passkeys"])
+        serde_json::json!(["list", "fill", "check", "save", "passkeys", "learn"])
     );
 
     // Only the github.com login, on github.com and its subdomains, and no

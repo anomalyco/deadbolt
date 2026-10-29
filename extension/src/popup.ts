@@ -3,7 +3,7 @@
 // never copied: anything on the clipboard can be read by every app, and
 // clipboard managers keep it.
 
-import type { ChooseReply, OfferChoice, PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, SaveOffer, Status, StatusChanged, ToBackground } from "./messages"
+import type { ChooseReply, LearnReply, Learning, OfferChoice, PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, SaveOffer, Status, StatusChanged, ToBackground } from "./messages"
 import type { Account } from "./protocol"
 import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
@@ -13,6 +13,7 @@ const root = document.getElementById("app")!
 document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
 let rendered = ""
+let learningShown = false
 
 function send<T>(message: ToBackground): Promise<T | null> {
   return chrome.runtime.sendMessage(message).catch(() => null) as Promise<T | null>
@@ -302,6 +303,54 @@ function savingOffLine(site: string): HTMLElement {
   return h("p", { class: "note saving-off" }, h("span", {}, `Saving is off for ${site}.`), on)
 }
 
+async function learn(on: boolean, button: HTMLElement, status: HTMLElement) {
+  if (tabId === undefined) return
+  button.setAttribute("disabled", "")
+  const reply = await send<LearnReply>({ type: "db:popup-learn", tabId, on })
+  button.removeAttribute("disabled")
+  if (reply && !reply.ok) {
+    status.textContent = reply.message || "Couldn't start learning."
+    status.hidden = false
+    return
+  }
+  // Learning starts with the user signing in by hand: out of the way.
+  if (on) return window.close()
+  void render(true)
+}
+
+/** "Learning acme.com": sign in by hand, Deadbolt records the form's shape. */
+function learningCard(l: Learning): HTMLElement {
+  const status = h("p", { class: "error", role: "status" })
+  status.hidden = true
+  const stop = h("button", { class: "btn primary", type: "button" }, "Stop")
+  stop.addEventListener("click", () => void learn(false, stop, status))
+  const minutes = Math.max(1, Math.ceil((l.until - Date.now()) / 60_000))
+  return h(
+    "section",
+    { class: "offer", "aria-label": "Learning this site" },
+    h("h2", {}, `Learning ${l.site}`),
+    para("Sign in by hand. Deadbolt records how the form is built and which fields you type into, never what you type."),
+    para("Frames from other sites on the page, like chat widgets and ads, are logged too, by shape only."),
+    h(
+      "div",
+      { class: "box" },
+      h("div", { class: "line" }, h("span", { class: "muted" }, "Steps logged"), h("span", { class: "value" }, String(l.steps))),
+      h("div", { class: "line" }, h("span", { class: "muted" }, "Stops"), h("span", { class: "value" }, `after you sign in, or in ${minutes} min`)),
+    ),
+    status,
+    h("div", { class: "buttons" }, stop),
+  )
+}
+
+/** "Form not filling here? Learn this site". */
+function learnLine(): HTMLElement {
+  const status = h("p", { class: "error", role: "status" })
+  status.hidden = true
+  const start = h("button", { class: "link", type: "button" }, "Learn this site")
+  start.addEventListener("click", () => void learn(true, start, status))
+  return h("div", {}, h("p", { class: "note saving-off" }, h("span", {}, "Deadbolt missing the form here?"), start), status)
+}
+
 function siteBody(reply: PopupReply): HTMLElement {
   if (reply.unfillable === "scheme") return state(icon("keyhole"), "Nothing to fill here", para("Open a website to see its logins."))
   if (reply.unfillable === "insecure")
@@ -336,7 +385,8 @@ async function render(changed = false) {
   const body = statusBody(status) ?? (reply ? siteBody(reply) : null)
 
   // Status pushes re-render; skip it when nothing visible changed.
-  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff])
+  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff, reply?.learning])
+  learningShown = !!reply?.learning
   if (key === rendered && !changed) return
   const first = rendered === ""
   rendered = key
@@ -350,7 +400,16 @@ async function render(changed = false) {
   const body2 = h(
       "div",
       { class: "body" },
-      ...(reply?.passkey ? [passkeyCard(reply.passkey)] : [reply?.offer ? offerCard(reply.offer) : null, body, reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff) : null]),
+      ...(reply?.passkey
+        ? [passkeyCard(reply.passkey)]
+        : [
+            reply?.learning ? learningCard(reply.learning) : null,
+            reply?.offer ? offerCard(reply.offer) : null,
+            body,
+            reply?.savingOff && !reply.offer ? savingOffLine(reply.savingOff) : null,
+            // Learning keeps no logins, so it works locked too; it needs a page to learn.
+            reply && !reply.learning && !reply.unfillable && reply.host && (status.state === "ready" || status.state === "locked") ? learnLine() : null,
+          ]),
   )
   root.replaceChildren(
     h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill(status)),
@@ -376,5 +435,10 @@ async function render(changed = false) {
 chrome.runtime.onMessage.addListener((message: StatusChanged) => {
   if (message?.type === "db:status") void render()
 })
+
+// While learning, the step count follows along.
+setInterval(() => {
+  if (learningShown) void render()
+}, 1000)
 
 void render()
