@@ -36,6 +36,18 @@ describe("menu tokens", () => {
     expect(delivered("db:fill")[0].message).toEqual({ type: "db:fill", values: { username: "kit@example.com", password: "correct horse" }, form: 1, approval: "ok-1" })
   })
 
+  test("once picked, a token only resizes its pill: no second pick, load or dismiss", async () => {
+    const token = await menu()
+    await autofill.menuLoad(token, menuSender(), SITE)
+    expect(await autofill.menuPick(token, ACCOUNTS[0].ref, menuSender())).toEqual({ ok: true })
+    // The pill says how the fill went at its own width.
+    await autofill.menuResize(token, 32, menuSender(), 101, "pill")
+    expect(delivered("db:resize-menu").at(-1)?.message).toEqual({ type: "db:resize-menu", token, height: 32, width: 101, mode: "pill" })
+    expect(await autofill.menuPick(token, ACCOUNTS[0].ref, menuSender())).toEqual({ ok: false, message: "This menu has expired." })
+    expect(await autofill.menuLoad(token, menuSender(), SITE)).toBeNull()
+    expect(fills()).toHaveLength(1)
+  })
+
   test("a token used from another tab, another origin's frame, or another extension page is refused", async () => {
     const token = await menu()
     expect(await autofill.menuLoad(token, menuSender({ tab: { id: 2 } as chrome.tabs.Tab }), SITE)).toBeNull()

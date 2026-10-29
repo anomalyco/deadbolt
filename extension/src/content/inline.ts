@@ -586,12 +586,17 @@ export function ownPill(): Element | null {
   return placed && r.width <= PILL_MAX.width + 1 && r.height <= PILL_MAX.height + 1 ? host : null
 }
 
-/** Resolves once the surface has folded into its pill (or after `ms`, whatever happens). */
+/**
+ * Resolves once the surface has folded into its pill (or after `ms`, whatever
+ * happens): Deadbolt's own pill (see ownPill), within a pixel of its place.
+ * Its springs' last sub-pixel tail isn't waited out; that left the pill
+ * sitting there, landed, before anything was written.
+ */
 function pillSettled(ms: number): Promise<void> {
   const until = performance.now() + ms
   return new Promise((resolve) => {
     const check = () => {
-      const still = mode === "pill" && Object.values(offset).every((s) => s.done)
+      const still = mode === "pill" && Object.values(offset).every((s) => Math.abs(s.value - s.target) < 1) && ownPill() !== null
       if (still || !host || performance.now() > until) return resolve()
       requestAnimationFrame(check)
     }

@@ -40,6 +40,8 @@ interface MenuToken extends FrameTarget {
   only?: string[]
   /** A pill showing that a session's step filled, not a menu: it picks nothing. */
   notice?: { label: string; title: string }
+  /** Picked: the menu folds into its pill and resizes it to say how the fill went, but answers nothing more. */
+  picked?: boolean
 }
 
 /**
@@ -208,11 +210,12 @@ export class Autofill {
   /**
    * A menu token, used by the menu frame it was made for. The first load
    * (with `parent`, see menuFrameOf) binds it to that menu document; after
-   * that, only that document may use it.
+   * that, only that document may use it. A picked token serves only
+   * `resize` (its pill's size), and nothing else.
    */
-  private async token(token: string, sender: chrome.runtime.MessageSender, parent?: string): Promise<MenuToken | undefined> {
+  private async token(token: string, sender: chrome.runtime.MessageSender, parent?: string, resize = false): Promise<MenuToken | undefined> {
     const t = this.tokens.get(token)
-    if (!t || Date.now() - t.createdAt > TOKEN_TTL_MS || !sender.documentId) return undefined
+    if (!t || Date.now() - t.createdAt > TOKEN_TTL_MS || !sender.documentId || (t.picked && !resize)) return undefined
     if (t.menuDocumentId === undefined) {
       if (parent === undefined || !(await menuFrameOf(sender, t, parent))) return undefined
       t.menuDocumentId = sender.documentId
@@ -345,7 +348,8 @@ export class Autofill {
     if (!account) return { ok: false, message: "That login isn't here anymore." }
     // A login that signs in with a provider and has no password is never a fill.
     if (account.signIn && !account.hasPassword) return { ok: false, message: "This login signs in with another account." }
-    this.tokens.delete(token)
+    // Picked once: its pill may still resize to say how the fill went (see token).
+    t.picked = true
     return this.fillAndArm(t, account, t.roles, t.form)
   }
 
@@ -362,7 +366,7 @@ export class Autofill {
   async menuGenerate(token: string, sender: chrome.runtime.MessageSender): Promise<PickReply> {
     const t = await this.token(token, sender)
     if (!t?.generate) return { ok: false, message: "This menu has expired." }
-    this.tokens.delete(token)
+    t.picked = true
     const generation = this.generation(t.tabId)
     const approved = cleanApproved(await sendToFrame(t, { type: "db:approve", form: t.form, measure: false }))
     if (!approved?.roles.includes("new-password")) return { ok: false, message: "The page changed. Try again." }
@@ -418,7 +422,7 @@ export class Autofill {
   }
 
   async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender, width?: unknown, mode?: unknown) {
-    const t = await this.token(token, sender)
+    const t = await this.token(token, sender, undefined, true)
     if (t) await sendToFrame(t, resizeMessage(token, height, width, mode))
   }
 
