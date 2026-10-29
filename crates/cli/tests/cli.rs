@@ -718,6 +718,12 @@ fn whoami_and_activity_name_the_caller_never_values() {
 /// process tree, as from a person's own terminal: the tests may run under
 /// an AI host such as OpenCode, whom the agent refuses pairing and grants.
 fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, String) {
+    let (code, out, err) = detached_code(device, args, input);
+    (code == 0, out, err)
+}
+
+/// [`detached`], with the exit code.
+fn detached_code(device: &Device, args: &[&str], input: &str) -> (i32, String, String) {
     use std::sync::atomic::{AtomicUsize, Ordering};
     static RUNS: AtomicUsize = AtomicUsize::new(0);
     let n = RUNS.fetch_add(1, Ordering::SeqCst);
@@ -737,7 +743,7 @@ fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, Strin
     let read = |what| std::fs::read_to_string(file(what)).unwrap();
     let (out, err) = (read("out"), read("err"));
     eprintln!("$ (detached) {args:?}\n{out}{err}");
-    (read("code").trim() == "0", out, err)
+    (read("code").trim().parse().unwrap(), out, err)
 }
 
 /// One request to the agent, as an agent client sends it.
@@ -1003,6 +1009,358 @@ fn agents_sign_in_unattended_only_where_allowed() {
     a.run(&["agents", "remove-client", "browse"]);
     agent_error(&fill("https://github.com", &github, &["totp"]), "forbidden");
     assert_eq!(a.run(&["agents", "grants"]), "");
+}
+
+const CONCEALED: &str = "<concealed by deadbolt>";
+const TOKEN: &str = "ghp-secret-token-123";
+
+/// Runs deadbolt as an AI would: claiming an OpenCode session.
+fn as_ai(device: &Device, args: &[&str]) -> Output {
+    let mut cmd = device.cmd(args);
+    cmd.env("OPENCODE_SESSION_ID", "ses_test")
+        .env_remove("DEADBOLT_CALLER");
+    device.output(&mut cmd)
+}
+
+fn activity(device: &Device) -> Vec<serde_json::Value> {
+    device
+        .run(&["activity", "--json"])
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect()
+}
+
+#[test]
+fn run_inject_and_read_resolve_references() {
+    let a = Device::new();
+    a.run(&["init"]);
+    let github = new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            "password=hunter2-hunter2",
+        ],
+    );
+    new(&a, &["login", "--name", "Dup", "password=one-one-one"]);
+    new(&a, &["login", "--name", "Dup", "password=two-two-two"]);
+    let seen = a.path("seen");
+
+    // The command gets the value, its stdin and its exit code come through,
+    // and its output shows the value concealed, even split across writes
+    // (two writes, back to back: well inside the 100 ms after which held
+    // output goes out, however slow the machine).
+    let script = format!(
+        r#"printf %s "$TOKEN" >'{}'; echo "t=$TOKEN"; printf %s "$TOKEN" >&2; printf ghp-secret; printf '%s\n' -token-123; cat; exit 7"#,
+        seen.display()
+    );
+    let (code, out, err) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env",
+            "TOKEN=deadbolt://personal/GitHub/token",
+            "--",
+            "sh",
+            "-c",
+            &script,
+        ],
+        "from stdin",
+    );
+    assert_eq!(code, 7, "{err}");
+    assert_eq!(std::fs::read_to_string(&seen).unwrap(), TOKEN);
+    assert_eq!(out, format!("t={CONCEALED}\n{CONCEALED}\nfrom stdin"));
+    assert_eq!(err, CONCEALED);
+
+    // By short id, from an env file, unmasked on request; plain values pass.
+    let env_file = a.path("env.tpl");
+    std::fs::write(
+        &env_file,
+        format!("# for tests\nexport PW=\"deadbolt://{github}/password\"\nPLAIN=just text\n"),
+    )
+    .unwrap();
+    let (code, out, _) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env-file",
+            env_file.to_str().unwrap(),
+            "--no-mask",
+            "--",
+            "sh",
+            "-c",
+            r#"echo "$PW $PLAIN""#,
+        ],
+        "",
+    );
+    assert_eq!((code, out.as_str()), (0, "hunter2-hunter2 just text\n"));
+
+    // A title two items share is an error naming both; nothing runs.
+    let (code, _, err) = detached_code(
+        &a,
+        &[
+            "run",
+            "--env",
+            "X=deadbolt://Dup/password",
+            "--",
+            "sh",
+            "-c",
+            "echo ran",
+        ],
+        "",
+    );
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("names 2 items") && !err.contains("one-one-one"),
+        "{err}"
+    );
+    // A value that isn't a reference is never echoed.
+    let (code, _, err) = detached_code(&a, &["run", "--env", "X=hunter2-pasted", "--", "true"], "");
+    assert_ne!(code, 0);
+    assert!(
+        err.contains("--env X: the value isn't a deadbolt:// reference")
+            && !err.contains("hunter2"),
+        "{err}"
+    );
+    let (code, _, err) = detached_code(
+        &a,
+        &["run", "--env", "X=deadbolt://GitHub", "--", "true"],
+        "",
+    );
+    assert_ne!(code, 0);
+    assert!(err.contains("deadbolt://[vault/]item/field"), "{err}");
+
+    // inject writes 0600, and replaces only its own, unchanged output.
+    let template = a.path("config.tpl");
+    std::fs::write(
+        &template,
+        "token: {{ deadbolt://GitHub/token }}\nkeep: {{ other }}\n",
+    )
+    .unwrap();
+    let out_file = a.path("config.yml");
+    let inject = |extra: &[&str]| {
+        let mut args = vec![
+            "inject",
+            "-i",
+            template.to_str().unwrap(),
+            "-o",
+            out_file.to_str().unwrap(),
+        ];
+        args.extend_from_slice(extra);
+        detached_code(&a, &args, "")
+    };
+    std::fs::write(&out_file, "mine").unwrap();
+    let (code, _, err) = inject(&[]);
+    assert_ne!(code, 0);
+    assert!(err.contains("--force"), "{err}");
+    assert_eq!(std::fs::read_to_string(&out_file).unwrap(), "mine");
+    assert_eq!(inject(&["--force"]).0, 0);
+    let expected = format!("token: {TOKEN}\nkeep: {{{{ other }}}}\n");
+    assert_eq!(std::fs::read_to_string(&out_file).unwrap(), expected);
+    use std::os::unix::fs::PermissionsExt;
+    let mode = std::fs::metadata(&out_file).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
+    assert_eq!(inject(&[]).0, 0, "its own output is replaced");
+    std::fs::write(&out_file, "edited").unwrap();
+    assert_ne!(inject(&[]).0, 0, "an edited output is not");
+
+    // read prints one value.
+    let (code, out, _) = detached_code(&a, &["read", "deadbolt://personal/GitHub/token"], "");
+    assert_eq!((code, out), (0, format!("{TOKEN}\n")));
+
+    // Each resolve is an entry naming the item, field and purpose, never a
+    // value.
+    let raw = a.run(&["activity", "--json"]);
+    assert!(
+        !raw.contains(TOKEN) && !raw.contains("hunter2-hunter2"),
+        "{raw}"
+    );
+    let entries = activity(&a);
+    for (command, tier) in [
+        ("resolve-run", "use"),
+        ("resolve-inject", "use"),
+        ("resolve-read", "read"),
+    ] {
+        let entry = entries
+            .iter()
+            .find(|e| {
+                e["command"] == command
+                    && e["outcome"] == "allowed"
+                    && e["fields"] == serde_json::json!(["token"])
+            })
+            .unwrap_or_else(|| panic!("no {command} in {raw}"));
+        assert_eq!(entry["tier"], tier);
+        assert_eq!(entry["items"][0]["title"], "GitHub");
+        assert!(
+            entry["items"][0]["id"]
+                .as_str()
+                .unwrap()
+                .starts_with(&github)
+        );
+    }
+}
+
+#[test]
+fn ai_agents_use_secrets_only_with_a_grant() {
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            "password=hunter2-hunter2",
+        ],
+    );
+    let template = a.path("t.tpl");
+    std::fs::write(&template, "{{ deadbolt://GitHub/token }}").unwrap();
+    let run_token = [
+        "run",
+        "--env",
+        "T=deadbolt://GitHub/token",
+        "--",
+        "sh",
+        "-c",
+        r#"echo "t=$T""#,
+    ];
+    let injected = a.path("t.out");
+    let inject = [
+        "inject",
+        "-i",
+        template.to_str().unwrap(),
+        "-o",
+        injected.to_str().unwrap(),
+    ];
+    // To stdout, the values reach the AI itself: that's a read.
+    let inject_stdout = ["inject", "-i", template.to_str().unwrap()];
+    let read = ["read", "deadbolt://GitHub/token"];
+    let refused = |out: &Output, says: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(4), "{err}");
+        assert!(err.contains(says), "{err}");
+        assert!(!err.contains(TOKEN) && out.stdout.is_empty(), "{err}");
+    };
+
+    // No grant: refused, saying what to allow.
+    refused(&as_ai(&a, &run_token), "deadbolt agents allow-secrets");
+    refused(&as_ai(&a, &inject), "--purpose inject");
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
+    refused(&as_ai(&a, &read), "Touch ID");
+
+    // An AI can't allow itself, passphrase or not.
+    let mut cmd = a.cmd(&["--passphrase-stdin", "agents", "allow-secrets", "GitHub"]);
+    cmd.env("OPENCODE_SESSION_ID", "ses_test");
+    let out = a.with_stdin(cmd, &format!("{PASSPHRASE}\n"));
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI can't"));
+
+    // The user allows the token for run.
+    let (ok, out, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow-secrets",
+            "github",
+            "--fields",
+            "token",
+            "--purpose",
+            "run",
+            "--expires",
+            "1h",
+        ],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(
+        ok && out.contains("AI agents\tpersonal › GitHub\ttoken\trun\texpires in"),
+        "{out}"
+    );
+    let ran = as_ai(&a, &run_token);
+    assert!(ran.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        format!("t={CONCEALED}\n")
+    );
+    // Still not another field, not inject, and never read without Touch ID.
+    refused(
+        &as_ai(
+            &a,
+            &["run", "--env", "P=deadbolt://GitHub/password", "--", "true"],
+        ),
+        "--fields password",
+    );
+    refused(&as_ai(&a, &inject), "--purpose inject");
+    refused(&as_ai(&a, &read), "Touch ID");
+
+    // Allowed inject too, it writes the file, but stdout is still a read.
+    let (ok, _, _) = detached(
+        &a,
+        &[
+            "--passphrase-stdin",
+            "agents",
+            "allow-secrets",
+            "GitHub",
+            "--fields",
+            "token",
+        ],
+        &format!("{PASSPHRASE}\n"),
+    );
+    assert!(ok);
+    assert!(as_ai(&a, &inject).status.success());
+    assert_eq!(std::fs::read_to_string(&injected).unwrap(), TOKEN);
+    refused(&as_ai(&a, &inject_stdout), "Touch ID");
+
+    // Revoking takes effect at once.
+    let grants = a.run(&["agents", "grants"]);
+    let id = grants
+        .lines()
+        .find(|l| l.contains("AI agents"))
+        .unwrap()
+        .split('\t')
+        .next()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        a.run(&["agents", "revoke", &id]).trim(),
+        format!("revoked {id}")
+    );
+    refused(&as_ai(&a, &run_token), "allow-secrets");
+    assert_eq!(a.run(&["agents", "grants"]), "");
+
+    // Activity has each resolve, allowed or refused, with the AI's claim
+    // and never a value.
+    let raw = a.run(&["activity", "--json"]);
+    assert!(!raw.contains(TOKEN), "{raw}");
+    let runs: Vec<serde_json::Value> = activity(&a)
+        .into_iter()
+        .filter(|e| e["command"] == "resolve-run")
+        .collect();
+    assert_eq!(runs.len(), 4, "{raw}");
+    assert_eq!(runs.iter().filter(|e| e["outcome"] == "allowed").count(), 1);
+    assert!(
+        runs.iter()
+            .all(|e| e["caller"]["claimed"]["opencode_session"] == "ses_test")
+    );
+    let entries = activity(&a);
+    assert!(
+        entries
+            .iter()
+            .any(|e| e["command"] == "secret-grant-set" && e["outcome"] == "allowed")
+    );
+    let reads: Vec<&serde_json::Value> = entries
+        .iter()
+        .filter(|e| e["command"] == "resolve-read")
+        .collect();
+    assert_eq!(reads.len(), 4, "{raw}");
+    assert!(
+        reads
+            .iter()
+            .all(|e| e["outcome"] == "refused" && e["tier"] == "read")
+    );
 }
 
 #[test]
