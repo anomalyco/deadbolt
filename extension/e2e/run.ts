@@ -3257,6 +3257,11 @@ async function passkeys() {
     await startCall(page, "native", "create", other)
     const choose = await prompt("passkey-other-device")
     if (choose) {
+      // The real popup is a bubble over the site's tab, which stays shown;
+      // here it is a tab of its own, and Chromium refuses the browser's
+      // WebAuthn ("the page does not have focus") unless the site's tab is
+      // the one shown. Show it, as the real popup leaves it.
+      await page.bringToFront()
       await press(choose, "Use another device")
       const r = await outcome(page, "native", "fallback registration settles")
       const v = r?.ok ? await verifyRegistrationResponse({ response: r.value, expectedChallenge: other.challenge, expectedOrigin: site, expectedRPID: rpID }).catch(() => null) : null
