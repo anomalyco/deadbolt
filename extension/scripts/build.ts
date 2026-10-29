@@ -67,6 +67,9 @@ async function build() {
     // idle lock and sync, idle sees the screen lock; the vault is WebAssembly.
     // favicon: the vault's rows show a site's icon from Chrome's own cache, never fetched.
     manifest.permissions.push("offscreen", "alarms", "idle", "favicon")
+    // Clearing a copied password reads and writes the clipboard: asked for at
+    // runtime (src/bg/clipboard.ts), since each adds an install warning.
+    manifest.optional_permissions = ["clipboardRead", "clipboardWrite"]
     manifest.content_security_policy = { extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'self'" }
     manifest.options_ui = { page: "device.html", open_in_tab: true }
   }

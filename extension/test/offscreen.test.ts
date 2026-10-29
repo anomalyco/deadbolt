@@ -1,5 +1,6 @@
 import { beforeAll, beforeEach, describe, expect, test } from "bun:test"
-import { VAULT_CHANGED, VAULT_LOCK, VAULT_REQUEST, type VaultResponse, type WorkerRequest } from "../src/bg/vault-messages"
+import { record } from "../src/bg/clipboard"
+import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultResponse, type WorkerRequest } from "../src/bg/vault-messages"
 import { deliver, ID, installChrome, pageSender, POPUP_URL, settle, type FakeChrome } from "./chrome"
 
 const BACKGROUND = { id: ID, url: `chrome-extension://${ID}/background.js` }
@@ -209,8 +210,45 @@ describe("offscreen document", () => {
     await settle()
     const old = current()
     old.onerror?.({ message: "RuntimeError: unreachable", preventDefault() {} })
-    expect(await unlock).toEqual({ error: "Deadbolt's vault stopped: RuntimeError: unreachable.", locked: true })
+    expect(await unlock).toEqual({ error: "Deadbolt's vault stopped. Unlock it again.", locked: true })
     expect(old.terminated).toBe(true)
     expect(fake.sent).toContainEqual({ type: VAULT_CHANGED, change: "locked" })
+  })
+})
+
+describe("clearing a copied password", () => {
+  let clipboard = ""
+  beforeEach(() => {
+    // The offscreen document reads by pasting and writes by copying.
+    document.execCommand = ((command: string) => {
+      if (command === "paste") {
+        document.querySelector("textarea")!.value = clipboard
+        return true
+      }
+      if (command === "copy") {
+        const event = Object.assign(new Event("copy", { cancelable: true }), { clipboardData: { setData: (_: string, value: string) => void (clipboard = value) } })
+        document.dispatchEvent(event)
+        return true
+      }
+      return false
+    }) as typeof document.execCommand
+  })
+
+  test("empties the clipboard only while it still holds what Deadbolt copied", async () => {
+    const copied = await record("Acme-demo-only-2026!")
+    clipboard = "Acme-demo-only-2026!"
+    expect(await deliver(fake, { type: VAULT_CLIPBOARD, ...copied }, BACKGROUND)).toBe(true)
+    expect(clipboard).toBe("")
+    clipboard = "a note the user copied since"
+    expect(await deliver(fake, { type: VAULT_CLIPBOARD, ...copied }, BACKGROUND)).toBe(false)
+    expect(clipboard).toBe("a note the user copied since")
+    expect(document.querySelector("textarea")).toBeNull()
+  })
+
+  test("takes the request from the service worker only", async () => {
+    const copied = await record("pw")
+    clipboard = "pw"
+    expect(await deliver(fake, { type: VAULT_CLIPBOARD, ...copied }, { id: ID, url: POPUP_URL })).toBeNull()
+    expect(clipboard).toBe("pw")
   })
 })

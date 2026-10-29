@@ -35,7 +35,7 @@ function load(): Promise<Core> {
 /** Background wasm tasks can trap outside any request's promise. */
 function fatal(error: unknown, id?: number): boolean {
   if (!(error instanceof WebAssembly.RuntimeError)) return false
-  dead = `Deadbolt's vault stopped: ${error.message || "it failed"}.`
+  dead = "Deadbolt's vault stopped. Reload the extension and unlock it again."
   scope.postMessage({ id, error: dead, fatal: true })
   return true
 }
@@ -55,7 +55,7 @@ scope.onmessage = async (event) => {
     engine = await load()
   } catch (err) {
     if (fatal(err, id)) return
-    return scope.postMessage({ id, error: `Deadbolt's vault engine didn't load: ${(err as Error)?.message ?? err}` })
+    return scope.postMessage({ id, error: "Deadbolt's vault didn't start. Reload the extension and try again." })
   }
   try {
     scope.postMessage({ id, reply: await engine.request(body) })

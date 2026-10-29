@@ -8,6 +8,7 @@ import type { Change } from "../protocol"
 export const VAULT_REQUEST = "db-vault:request"
 export const VAULT_LOCK = "db-vault:lock"
 export const VAULT_CHANGED = "db-vault:changed"
+export const VAULT_CLIPBOARD = "db-vault:clipboard-clear"
 
 /** Service worker to offscreen: one request for the vault (a protocol request or a device-* command). */
 export interface VaultRequest {
@@ -17,6 +18,12 @@ export interface VaultRequest {
 /** Service worker to offscreen: end the vault's worker now. Answered with true. */
 export interface VaultLock {
   type: typeof VAULT_LOCK
+}
+/** Service worker to offscreen: empty the clipboard if it still holds what Deadbolt copied (bg/clipboard.ts). Answered with whether it did. */
+export interface VaultClipboard {
+  type: typeof VAULT_CLIPBOARD
+  salt: string
+  hash: string
 }
 /** Offscreen to service worker: the vault changed without being asked (its worker stopped, say). */
 export interface VaultChanged {

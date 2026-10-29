@@ -475,6 +475,12 @@ export type DeviceCommand =
   /** This browser's settings: `{ type: "device-settings", preset }`. */
   | { type: "device-settings" }
   | { type: "device-preset"; preset: LockPreset }
+  /** The user opened something (a login's details): counts as use for the idle lock, once, never on a poll. */
+  | { type: "device-used" }
+  /** A new password from the core's generator: `{ type: "device-generate", password }`. */
+  | { type: "device-generate"; length: number; symbols: boolean }
+  /** The page copied a password or code: clear it in 30 s if the clipboard permissions allow (`{ clears }`). */
+  | { type: "device-copied"; value: string }
   | { type: "list"; origin: string }
   | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
 
@@ -499,4 +505,7 @@ export interface LoginDetail {
 }
 
 /** `reply`: the vault's answer as it gave it; `ms`: how long it took. */
-export type DeviceReply = { ok: true; reply: Record<string, unknown>; ms: number; status: Status } | { ok: false; message: string; status: Status }
+export type DeviceReply =
+  | { ok: true; reply: Record<string, unknown>; ms: number; status: Status }
+  /** `code`: why, for the page to act on ("wrong_passphrase", "passphrase_needed", "backoff", "locked"). */
+  | { ok: false; message: string; status: Status; code?: string }

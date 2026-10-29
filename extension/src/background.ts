@@ -141,7 +141,7 @@ async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promi
   if (!fromVaultPage(sender)) return { ok: false, message: "", status: host.status }
   if (!standalone) return { ok: false, message: "This build talks to the Deadbolt app; set it up there.", status: host.status }
   const command = deviceCommand(raw)
-  if (!command) return { ok: false, message: "Malformed request.", status: host.status }
+  if (!command) return { ok: false, message: "Deadbolt didn't understand that request. Reload the extension and try again.", status: host.status }
   return standalone.device(command)
 }
 
