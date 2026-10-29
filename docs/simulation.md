@@ -54,14 +54,18 @@ and compares its wire digest.
   heads and items within twelve rounds. Stop early once they agree and their
   membership barriers are open. Removed devices need not converge.
 
-Pairing uses the production proof, confirmation and welcome protocol with test
-exporter bytes. The simulator shares the CLI's `Offer`, `JoinBlob`, `WelcomeMeta`,
-consent and welcome-admission helpers; its adapter omits display and live addresses.
-Ticket expiry, single-use admission and TLS exporter wiring
-remain covered by the real-iroh tests in `crates/net/tests/net/pair.rs`.
+Pairing uses the production PAKE, key confirmation and welcome protocol with a
+fixed code, rendezvous key and test exporter bytes, and fixed seeds in place of
+the OS randomness of the SPAKE2 scalars, so a trace replays byte for byte. The
+simulator shares the CLI's `Offer`, join consent and welcome helpers; its
+adapter omits display and live addresses. Rendezvous, code expiry, single use,
+burning on a wrong guess and TLS exporter wiring remain covered by the
+real-iroh tests in `crates/net/src/pair.rs` and `crates/net/tests/net/pair.rs`.
 Focused regressions also cut pairing during its exchange and check persistence
 across reopening. A cut after admission can leave the inviter with a member that
-never received its welcome; these traces check durability rather than convergence.
+never received its welcome; these traces check durability rather than
+convergence, and pairing such a device again finishes the join without a second
+`Add` (`pairing_again_after_a_cut_finishes_the_join`).
 
 Crashes drop and reopen stores between actions. Connection cuts cover protocol
 cancellation during a session. Failed-write actions inject an error at the
@@ -86,8 +90,8 @@ Set `DEADBOLT_SIM_TIMING=1` and add `-- --nocapture` for per-action timings.
 `run_sync_session` accepts generic async byte streams and the existing three-method
 `SyncHandler`. `PairingStream::invite`, `PairingStream::prove`, and
 `ProvenPairing::complete` share the pairing exchange with the iroh adapter. The
-adapter supplies authenticated identities, exporter bytes, ticket lifetime and
-connection cancellation. The stream constructors and membership gate are exported
+adapter supplies authenticated identities, exporter bytes, the rendezvous, code
+lifetime and connection cancellation. The stream constructors and membership gate are exported
 only with the net crate's `sim` feature, enabled by the CLI's dev-dependency.
 
 `Loaded` owns transport-independent unlocked state. A `Session` adds its iroh
