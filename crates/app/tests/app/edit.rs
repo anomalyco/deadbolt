@@ -922,3 +922,98 @@ fn a_login_saves_without_a_password() {
     r.command('s');
     assert_eq!(pairs(&r.take_create().3), [("username", "kit")]);
 }
+
+/// The picker offers every type, each with its own fields in the core's
+/// schema order.
+#[test]
+fn add_offers_every_type() {
+    let mut r = rig("vault");
+    r.command('n');
+    r.settle(0.3);
+    for label in [
+        "API", "Database", "Server", "Wi-Fi", "License", "Bank", "Document",
+    ] {
+        assert!(r.shows(label), "the picker offers {label}");
+    }
+    for (kind, first, count) in [
+        ("api", "credential", 8),
+        ("database", "type", 8),
+        ("server", "url", 5),
+        ("wifi", "ssid", 4),
+        ("license", "product", 9),
+        ("bank", "bank", 8),
+        ("document", "file", 2),
+        ("passport", "full-name", 12),
+        ("driver-license", "full-name", 12),
+        ("id-document", "full-name", 7),
+        ("membership", "organization", 9),
+        ("crypto", "recovery-phrase", 5),
+    ] {
+        r.rt.update(|s, _| s.pick_kind(kind));
+        r.settle(0.05);
+        let form = r.rt.state.edit.form.as_ref().unwrap();
+        assert_eq!(form.kind, kind);
+        assert_eq!(form.fields[0].name, first, "{kind}");
+        assert_eq!(form.fields.len(), count, "{kind}");
+    }
+    // An API credential needs its credential, as the agent says.
+    r.rt.update(|s, _| s.pick_kind("api"));
+    r.fill("username", "deploy-bot");
+    r.command('s');
+    let form = r.rt.state.edit.form.as_ref().unwrap();
+    assert_eq!(
+        form.problem_for("credential"),
+        Some("Credential can't be empty.")
+    );
+    r.fill("credential", "sk_live_1");
+    r.sent();
+    r.command('s');
+    let (_, kind, _, fields) = r.take_create();
+    assert_eq!(kind, "api");
+    assert_eq!(
+        pairs(&fields),
+        [("credential", "sk_live_1"), ("username", "deploy-bot")]
+    );
+}
+
+/// A document's file is chosen, not typed: the app reads it and sends its
+/// name and contents; one over 10 MiB says so on the field.
+#[test]
+fn a_document_takes_a_chosen_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let scan = dir.path().join("scan.pdf");
+    std::fs::write(&scan, b"%PDF").unwrap();
+    let big = dir.path().join("big.bin");
+    std::fs::File::create(&big)
+        .unwrap()
+        .set_len(10 * 1024 * 1024 + 1)
+        .unwrap();
+
+    let mut r = rig("vault");
+    r.command('n');
+    r.rt.update(|s, _| s.pick_kind("document"));
+    r.settle(0.3);
+    assert!(r.shows("No file chosen") && r.shows("Choose File…"));
+    r.click_at("choose");
+    r.settle(0.05);
+    let (kind, _) = r.rt.file_dialog().expect("an Open dialog");
+    assert_eq!(kind, rune::FileDialogKind::Open);
+    r.rt.resolve_file_dialog(Some(big)).unwrap();
+    r.settle(0.05);
+    let form = r.rt.state.edit.form.as_ref().unwrap();
+    let problem = form.problem_for("file").unwrap();
+    assert!(problem.contains("larger than 10 MiB"), "{problem}");
+
+    r.click_at("choose");
+    r.settle(0.05);
+    r.rt.resolve_file_dialog(Some(scan)).unwrap();
+    r.settle(0.05);
+    assert!(r.shows("scan.pdf") && r.shows("Choose Another…"));
+    assert!(r.rt.state.edit.form.as_ref().unwrap().problem.is_none());
+    r.rt.update(|s, _| s.edit.form.as_mut().unwrap().name.replace_text("Scan"));
+    r.sent();
+    r.command('s');
+    let (_, kind, name, fields) = r.take_create();
+    assert_eq!((kind.as_str(), name.as_deref()), ("document", Some("Scan")));
+    assert_eq!(pairs(&fields), [("file", "scan.pdf\nJVBERg==")]);
+}

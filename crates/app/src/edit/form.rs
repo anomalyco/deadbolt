@@ -66,6 +66,119 @@ fn schema(kind: &str) -> &'static [(&'static str, &'static str, bool, bool)] {
             ("license", "secret", false, false),
             ("notes", "note", false, true),
         ],
+        "api" => &[
+            ("credential", "secret", true, false),
+            ("username", "text", false, false),
+            ("type", "text", false, false),
+            ("url", "url", false, false),
+            ("host", "text", false, false),
+            ("environment", "text", false, false),
+            ("expires", "date", false, false),
+            ("notes", "note", false, true),
+        ],
+        "database" => &[
+            ("type", "text", false, false),
+            ("host", "text", false, false),
+            ("port", "text", false, false),
+            ("database", "text", false, false),
+            ("username", "text", false, false),
+            ("password", "secret", false, false),
+            ("connection-string", "secret", false, false),
+            ("notes", "note", false, true),
+        ],
+        "server" => &[
+            ("url", "url", false, false),
+            ("username", "text", false, false),
+            ("password", "secret", false, false),
+            ("admin-console", "url", false, false),
+            ("notes", "note", false, true),
+        ],
+        "wifi" => &[
+            ("ssid", "text", false, false),
+            ("password", "secret", false, false),
+            ("security", "text", false, false),
+            ("notes", "note", false, true),
+        ],
+        "license" => &[
+            ("product", "text", false, false),
+            ("version", "text", false, false),
+            ("license-key", "secret", false, true),
+            ("licensed-to", "text", false, false),
+            ("email", "email", false, false),
+            ("order-number", "text", false, false),
+            ("purchased", "date", false, false),
+            ("expires", "date", false, false),
+            ("notes", "note", false, true),
+        ],
+        "bank" => &[
+            ("bank", "text", false, false),
+            ("account-holder", "text", false, false),
+            ("account-number", "secret", false, false),
+            ("routing-number", "text", false, false),
+            ("iban", "secret", false, false),
+            ("swift", "text", false, false),
+            ("pin", "secret", false, false),
+            ("notes", "note", false, true),
+        ],
+        "document" => &[
+            ("file", "file", true, false),
+            ("notes", "note", false, true),
+        ],
+        "passport" => &[
+            ("full-name", "text", false, false),
+            ("number", "secret", false, false),
+            ("type", "text", false, false),
+            ("issuing-country", "text", false, false),
+            ("issuing-authority", "text", false, false),
+            ("nationality", "text", false, false),
+            ("sex", "text", false, false),
+            ("birthday", "date", false, false),
+            ("birthplace", "text", false, false),
+            ("issued", "date", false, false),
+            ("expires", "date", false, false),
+            ("notes", "note", false, true),
+        ],
+        "driver-license" => &[
+            ("full-name", "text", false, false),
+            ("number", "secret", false, false),
+            ("class", "text", false, false),
+            ("conditions", "text", false, false),
+            ("state", "text", false, false),
+            ("country", "text", false, false),
+            ("address", "note", false, true),
+            ("birthday", "date", false, false),
+            ("sex", "text", false, false),
+            ("height", "text", false, false),
+            ("expires", "month", false, false),
+            ("notes", "note", false, true),
+        ],
+        "membership" => &[
+            ("organization", "text", false, false),
+            ("member-name", "text", false, false),
+            ("member-id", "text", false, false),
+            ("pin", "secret", false, false),
+            ("url", "url", false, false),
+            ("phone", "text", false, false),
+            ("member-since", "month", false, false),
+            ("expires", "month", false, false),
+            ("notes", "note", false, true),
+        ],
+        "crypto" => &[
+            ("recovery-phrase", "secret", false, true),
+            ("password", "secret", false, false),
+            ("address", "text", false, false),
+            ("network", "text", false, false),
+            ("notes", "note", false, true),
+        ],
+        "id-document" => &[
+            ("full-name", "text", false, false),
+            ("number", "secret", false, false),
+            ("type", "text", false, false),
+            ("country", "text", false, false),
+            ("issued", "date", false, false),
+            ("expires", "date", false, false),
+            ("notes", "note", false, true),
+        ],
         _ => &[],
     }
 }
@@ -140,7 +253,9 @@ impl Input {
             _ => String::new(),
         };
         let mut edit = TextEdit::new(value);
-        if secret {
+        // A file's value (its name, or a chosen file's name and contents)
+        // is never drawn as text, but held as securely as a secret.
+        if secret || kind == "file" {
             edit.set_secure(true);
         }
         Input {
@@ -158,10 +273,18 @@ impl Input {
         is_secret(&self.kind)
     }
 
-    /// One line that may run long (an SSH public key or fingerprint): a text
-    /// area that wraps, where ⏎ saves as in any one-line field.
+    /// A file: chosen with Choose File…, never typed (`App::choose_field_file`).
+    pub fn file(&self) -> bool {
+        self.kind == "file"
+    }
+
+    /// One line that may run long (an SSH public key or fingerprint, a
+    /// wallet's address): a text area that wraps, where ⏎ saves as in any
+    /// one-line field.
     pub fn wraps(&self) -> bool {
-        !self.lines && matches!(self.name.as_str(), "public-key" | "fingerprint")
+        !self.lines
+            && !self.secret()
+            && matches!(self.name.as_str(), "public-key" | "fingerprint" | "address")
     }
 
     /// Standing for the item's value, with nothing typed in its place.
@@ -288,7 +411,7 @@ impl Form {
         } in item.map_or(&[][..], |i| &i.fields[..])
         {
             if !fields.iter().any(|f| &f.name == field) {
-                let lines = ty == "note" || value.contains('\n');
+                let lines = ty == "note" || (ty != "file" && value.contains('\n'));
                 fields.push(Input::from_item(field, ty, false, lines, Some(value)));
             }
         }

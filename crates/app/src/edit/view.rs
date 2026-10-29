@@ -81,31 +81,124 @@ fn head(k: &Kit, f: &Form) -> El {
         .label("Name");
     let mut head = col().key("head").w_full().gap(8.0);
     if f.is_new() {
-        // "Note": "Secure note" doesn't fit a fifth of the pane.
-        let labels: Vec<String> = KINDS
-            .iter()
-            .map(|kind| match *kind {
-                "note" => "Note".to_owned(),
-                kind => title_case(deadbolt_client::protocol::noun(kind, 1)),
-            })
-            .collect();
-        let at = KINDS.iter().position(|kind| *kind == f.kind);
-        let kinds = SegmentedControl::new(&labels, at)
-            .width(None)
-            .on_pick(|s: &mut App, i, _| {
-                if let Some(kind) = KINDS.get(i) {
-                    s.pick_kind(kind);
-                }
-            });
-        head = head.child(
-            row()
-                .key("kinds")
-                .w_full()
-                .child(disable(kinds, labels.len(), f.saving).build(k)),
-        );
+        head = head.child(picker(k, f));
     }
     head.child(name)
         .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
+}
+
+/// Each type's name in the New Item picker, short enough for a quarter of
+/// the pane. Beside Passport and ID, License is a driver's license.
+fn short_name(kind: &str) -> &'static str {
+    match kind {
+        "login" => "Login",
+        "card" => "Card",
+        "note" => "Note",
+        "identity" => "Identity",
+        "ssh" => "SSH key",
+        "api" => "API",
+        "database" => "Database",
+        "server" => "Server",
+        "wifi" => "Wi-Fi",
+        "license" => "Software",
+        "bank" => "Bank",
+        "document" => "Document",
+        "crypto" => "Wallet",
+        "passport" => "Passport",
+        "driver-license" => "License",
+        "id-document" => "ID",
+        "membership" => "Membership",
+        _ => "Other",
+    }
+}
+
+/// How many types each row of the picker holds, in `KINDS` order: the
+/// everyday ones, machines, money and files, then documents of identity.
+const PICKER_ROWS: [usize; 4] = [5, 4, 4, 4];
+const _: () =
+    assert!(PICKER_ROWS[0] + PICKER_ROWS[1] + PICKER_ROWS[2] + PICKER_ROWS[3] == KINDS.len());
+
+/// The New Item picker: every type, in rows of segments, the current one
+/// selected. ⌃⇥ and ⌃⇧⇥ step through them in this order.
+fn picker(k: &Kit, f: &Form) -> El {
+    let mut rows = col().key("kinds").w_full().gap(4.0);
+    let mut first = 0;
+    for (n, len) in PICKER_ROWS.into_iter().enumerate() {
+        let kinds = &KINDS[first..first + len];
+        let labels: Vec<String> = kinds.iter().map(|k| short_name(k).to_owned()).collect();
+        let at = kinds.iter().position(|kind| *kind == f.kind);
+        let control =
+            SegmentedControl::new(&labels, at)
+                .width(None)
+                .on_pick(move |s: &mut App, i, _| {
+                    if let Some(kind) = KINDS.get(first + i) {
+                        s.pick_kind(kind);
+                    }
+                });
+        rows = rows.child(
+            row()
+                .key(format!("kinds-{n}"))
+                .w_full()
+                .child(disable(control, labels.len(), f.saving).build(k)),
+        );
+        first += len;
+    }
+    rows.label("Type")
+}
+
+/// A file field: the file's name (or none yet), Choose File… and, unless
+/// it's required, Remove.
+fn file_control(k: &Kit, input: &Input, i: usize, invalid: bool, saving: bool) -> El {
+    let name = input.value().map(deadbolt_client::file::name);
+    let shown = text(name.unwrap_or("No file chosen").to_owned())
+        .key("file-name")
+        .font(k.ty.ui)
+        .color(if name.is_some() {
+            k.c.text_base
+        } else {
+            k.c.text_faint
+        })
+        .truncate_fade()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0);
+    let mut control = row()
+        .key("file")
+        .w_full()
+        .gap(8.0)
+        .center_y()
+        .padding(8.0)
+        .radius(k.radius.md)
+        .fill(k.c.layer_01)
+        .child(shown)
+        .child(
+            Button::new(if name.is_some() {
+                "Choose Another…"
+            } else {
+                "Choose File…"
+            })
+            .variant(ButtonVariant::Neutral)
+            .control_size(ControlSize::Small)
+            .disabled(saving)
+            .on_press_tx(move |s: &mut App, tx| s.choose_field_file(i, tx))
+            .build(k)
+            .key("choose"),
+        );
+    if name.is_some() && !input.required {
+        control = control.child(
+            Button::new("Remove")
+                .variant(ButtonVariant::GhostMuted)
+                .control_size(ControlSize::Small)
+                .disabled(saving)
+                .on_press(move |s: &mut App| s.remove_file(i))
+                .build(k)
+                .key("remove"),
+        );
+    }
+    if invalid {
+        control = control.outline(1.0, 0.0, k.c.danger.fg);
+    }
+    control
 }
 
 /// Another device changed or deleted the item while it was open here.
@@ -165,7 +258,7 @@ fn mirrored(k: &Kit, f: &Form) -> Option<El> {
     )
 }
 
-fn placeholder(input: &Input) -> &'static str {
+fn placeholder(kind: &str, input: &Input) -> &'static str {
     if input.held {
         return "Kept · type to replace";
     }
@@ -175,15 +268,20 @@ fn placeholder(input: &Input) -> &'static str {
     match input.name.as_str() {
         "url" => "example.com",
         "expiry" => "MM/YY",
-        "number" => "Card number",
+        "number" if kind == "card" => "Card number",
         "cvv" => "3 or 4 digits",
         "otp" => "otpauth:// link or secret",
         "email" => "name@example.com",
         "birthday" => "YYYY-MM-DD",
         "phone" => "+1 555 010 0100",
-        "country" => "US, GB, DE…",
+        "country" if kind == "identity" => "US, GB, DE…",
         "public-key" => "ssh-ed25519 AAAA…",
         "fingerprint" => "SHA256:…",
+        "credential" => "Token or key",
+        "port" => "5432",
+        "expires" | "issued" | "purchased" if input.kind == "date" => "YYYY-MM-DD",
+        "expires" | "member-since" if input.kind == "month" => "MM/YY",
+        "admin-console" => "example.com/admin",
         _ if input.required => "Required",
         _ => "",
     }
@@ -195,7 +293,9 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
     let problem_text = f.problem_for(&input.name);
     let invalid = problem_text.is_some();
     let generates = f.generates() == Some(i);
-    let control = if input.lines && input.secret() {
+    let control = if input.file() {
+        file_control(k, input, i, invalid, f.saving).label(named.clone())
+    } else if input.lines && input.secret() {
         // A secret over several lines: hidden, one fixed row of dots, or
         // empty for a value kept (`Input::kept`); shown, the whole value,
         // wrapping and editable anywhere. Still secure either way.
@@ -215,7 +315,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                             .width(None)
                             .auto_grow(1, SECRET_LINES)
                             .max_height(SECRET_MAX_H)
-                            .placeholder(placeholder(input))
+                            .placeholder(placeholder(&f.kind, input))
                             .invalid(invalid)
                             .on_edit(move |s: &mut App| s.input_mut(i))
                             .on_key(move |s: &mut App, ev, tx| {
@@ -235,7 +335,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         let area = TextArea::new(&input.edit)
             .wrap_anywhere()
             .width(None)
-            .placeholder(placeholder(input))
+            .placeholder(placeholder(&f.kind, input))
             .invalid(invalid)
             .on_edit(move |s: &mut App| s.input_mut(i));
         let area = if input.lines {
@@ -253,7 +353,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
     } else {
         let mut t = TextInput::new(&input.edit)
             .width(None)
-            .placeholder(placeholder(input))
+            .placeholder(placeholder(&f.kind, input))
             .invalid(invalid)
             .on_edit(move |s: &mut App| s.input_mut(i))
             .on_change(|s: &mut App, _| s.form_changed())

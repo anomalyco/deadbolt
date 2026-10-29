@@ -23,9 +23,10 @@ done
 "$bin" --scene locked --theme light --snap "$out/locked-light.png" "$@"
 # Item kinds, dark and light: a login, a secure note (masked, then shown), an
 # SSH key (its public key wrapping, then its private key shown), an identity,
-# a passkey (delete only), then its delete confirm, and a card.
+# a passkey (delete only), then its delete confirm, a card, an API
+# credential, a database, a Wi-Fi network, a document and a passport.
 for theme in dark light; do
-  for scene in vault note note-revealed ssh ssh-revealed identity passkey passkey-delete card; do
+  for scene in vault note note-revealed ssh ssh-revealed identity passkey passkey-delete card api database wifi document passport; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done
@@ -61,12 +62,13 @@ for theme in dark light; do
   done
 done
 # Adding, changing and deleting, dark and light: a new login with a generated
-# password, a new card, a new secure note, a new SSH key, a new identity, an
+# password, a new card, a new secure note, a new SSH key, a new identity, a
+# new API credential, database, Wi-Fi network and document, an
 # edit, an SSH key's edit (its private key hidden, then shown), a refused
 # card number, the delete confirm, and an edit another device changed
 # meanwhile.
 for theme in dark light; do
-  for scene in new-login new-card new-note new-ssh new-identity edit edit-ssh edit-ssh-revealed edit-invalid delete-confirm edit-conflict; do
+  for scene in new-login new-card new-note new-ssh new-identity new-api new-database new-wifi new-document edit edit-ssh edit-ssh-revealed edit-invalid delete-confirm edit-conflict; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done

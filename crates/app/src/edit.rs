@@ -4,7 +4,10 @@
 //! the field it names. An edit saves only the fields it changed, in one
 //! change, so another device's edit to the other fields stays. If the item
 //! changes or goes elsewhere while it's open, the form says so and keeps
-//! what was typed. Passwords come from the agent's generator.
+//! what was typed. Passwords come from the agent's generator. A file field
+//! (a document's file, an attachment) is chosen with Choose File…, read
+//! here, and sent whole; a file already saved stays as it is unless another
+//! is chosen or it's removed.
 //! Locking, or the agent stopping, wipes the form wherever it was.
 
 mod form;
@@ -29,8 +32,27 @@ const DEFAULT_LENGTH: usize = 24;
 pub const NEW: &str = "New Item";
 pub const EDIT: &str = "Edit Item";
 pub const DELETE: &str = "Delete Item…";
-/// What ⌘N can add, in the order its picker shows them.
-pub const KINDS: [&str; 5] = ["login", "card", "note", "ssh", "identity"];
+/// What ⌘N can add, in the order its picker shows them: the everyday
+/// types, then credentials for machines, then documents and the rest.
+pub const KINDS: [&str; 17] = [
+    "login",
+    "card",
+    "note",
+    "identity",
+    "ssh",
+    "api",
+    "database",
+    "server",
+    "wifi",
+    "license",
+    "bank",
+    "document",
+    "crypto",
+    "passport",
+    "driver-license",
+    "id-document",
+    "membership",
+];
 
 pub struct Edit {
     pub form: Option<Form>,
@@ -391,6 +413,69 @@ impl App {
         }
         if let Some(name) = shown {
             self.report(AppAction::Reveal, &name);
+        }
+    }
+
+    /// Choose File… on a file field: the chosen file replaces the field's.
+    pub fn choose_field_file(&mut self, field: usize, tx: &mut Tx) {
+        let Some(input) = self
+            .edit
+            .form
+            .as_ref()
+            .filter(|f| !f.saving)
+            .and_then(|f| f.fields.get(field))
+            .filter(|i| i.file())
+        else {
+            return;
+        };
+        let options = rune::FileDialogOptions {
+            title: format!("Choose {}", crate::model::field_words(&input.name)),
+            ..rune::FileDialogOptions::default()
+        };
+        let name = input.name.clone();
+        tx.open_file(options, move |s: &mut App, result, _| {
+            if let Ok(Some(path)) = result {
+                s.on_file_chosen(&name, &path);
+            }
+        });
+    }
+
+    /// Reads the chosen file into the field named `name`, if the form still
+    /// has it; one too large, or unreadable, says so on the field.
+    pub fn on_file_chosen(&mut self, name: &str, path: &std::path::Path) {
+        let Some(form) = self.edit.form.as_mut().filter(|f| !f.saving) else {
+            return;
+        };
+        let Some(input) = form.fields.iter_mut().find(|i| i.name == name && i.file()) else {
+            return;
+        };
+        match deadbolt_client::file::read(path) {
+            Ok(mut value) => {
+                input.edit.replace_text(std::mem::take(&mut *value));
+                form.problem = None;
+                form.nudge = false;
+            }
+            Err(error) => {
+                form.problem = Some(Problem {
+                    field: Some(name.to_owned()),
+                    message: sentence(&error.to_string()),
+                })
+            }
+        }
+    }
+
+    /// Remove on a file field that isn't required: saving removes the file.
+    pub fn remove_file(&mut self, field: usize) {
+        if let Some(input) = self
+            .edit
+            .form
+            .as_mut()
+            .filter(|f| !f.saving)
+            .and_then(|f| f.fields.get_mut(field))
+            .filter(|i| i.file() && !i.required)
+        {
+            input.edit.clear();
+            self.form_changed();
         }
     }
 

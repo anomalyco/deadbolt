@@ -179,6 +179,11 @@ pub(crate) const SCENES: &[Scene] = &[
         s.toggle_reveal("private-key");
     }),
     ("identity", |s| kind_scene(s, "identity")),
+    ("api", |s| kind_scene(s, "api")),
+    ("database", |s| kind_scene(s, "database")),
+    ("wifi", |s| kind_scene(s, "wifi")),
+    ("document", |s| kind_scene(s, "document")),
+    ("passport", |s| kind_scene(s, "passport")),
     ("passkey", |s| kind_scene(s, "passkey")),
     ("passkey-delete", |s| {
         kind_scene(s, "passkey");
@@ -312,6 +317,33 @@ pub(crate) const SCENES: &[Scene] = &[
         new_of(s, "ssh", "Deploy key");
         typed(s, "private-key", FIXTURE_PRIVATE_KEY);
         typed(s, "public-key", FIXTURE_PUBLIC_KEY);
+    }),
+    // A new API credential: its key hidden, what it's for typed.
+    ("new-api", |s| {
+        new_of(s, "api", "Stripe");
+        typed(s, "credential", "sk_live_51HxY2c");
+        typed(s, "username", "deploy-bot");
+        typed(s, "type", "bearer");
+        typed(s, "environment", "production");
+    }),
+    // A new database: where it is and how to sign in.
+    ("new-database", |s| {
+        new_of(s, "database", "Production");
+        typed(s, "type", "postgres");
+        typed(s, "host", "db.anoma.ly");
+        typed(s, "port", "5432");
+        typed(s, "database", "app");
+        typed(s, "username", "app");
+        typed(s, "password", "pg-secret");
+    }),
+    // A new document, its file not chosen yet.
+    ("new-document", |s| new_of(s, "document", "Passport scan")),
+    // A new Wi-Fi network.
+    ("new-wifi", |s| {
+        new_of(s, "wifi", "Home");
+        typed(s, "ssid", "Raad Home 5G");
+        typed(s, "password", "correct-horse");
+        typed(s, "security", "WPA3");
     }),
     // ⌘E on an SSH key: its private key kept, empty under its placeholder.
     ("edit-ssh", |s| {

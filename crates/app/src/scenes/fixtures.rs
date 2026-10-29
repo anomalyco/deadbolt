@@ -359,6 +359,11 @@ pub(super) fn kind_scene(s: &mut App, kind: &str) {
         ("d2a9f0", "ssh", "Deploy key", Some("deploy@anoma.ly")),
         ("5e8b31", "identity", "Dax Raad", Some("dax@anoma.ly")),
         ("9c4f7a", "passkey", "github.com", Some("thdxr")),
+        ("a41c09", "api", "Stripe", Some("deploy-bot")),
+        ("c3e870", "database", "app on db.anoma.ly", Some("app")),
+        ("e6d215", "wifi", "Raad Home 5G", Some("WPA3")),
+        ("f09b44", "document", "Passport scan", Some("812.4 KB")),
+        ("1b7d62", "passport", "Dax Raad", Some("United States")),
     ] {
         s.items.push(fixture_item(id, item_kind, label, detail));
     }
@@ -432,6 +437,46 @@ pub(super) fn detail_for_selection(s: &mut App) {
             field("credential-id", "text", "q5Zt0bJ8xW1cR4mN7pLs2A"),
             field("user-handle", "text", "MTIzNDU2Nzg"),
             field("created", "date", "2026-10-27"),
+        ],
+        "api" => vec![
+            field("credential", "secret", "sk_live_51HxY2cQx8"),
+            field("username", "text", "deploy-bot"),
+            field("type", "text", "bearer"),
+            field("url", "url", "https://api.stripe.com"),
+            field("environment", "text", "production"),
+            field("expires", "date", "2027-06-30"),
+        ],
+        "database" => vec![
+            field("type", "text", "postgres"),
+            field("host", "text", "db.anoma.ly"),
+            field("port", "text", "5432"),
+            field("database", "text", "app"),
+            field("username", "text", "app"),
+            field("password", "secret", "pg-secret-77"),
+            field(
+                "connection-string",
+                "secret",
+                "postgres://app:pg-secret-77@db.anoma.ly:5432/app",
+            ),
+        ],
+        "wifi" => vec![
+            field("ssid", "text", "Raad Home 5G"),
+            field("password", "secret", "correct-horse"),
+            field("security", "text", "WPA3"),
+        ],
+        // As the agent lists it: the file's name, not its contents.
+        "document" => vec![
+            field("file", "file", "passport-scan.pdf"),
+            field("notes", "note", "Scanned 2026-03-02."),
+        ],
+        "passport" => vec![
+            field("full-name", "text", "Dax Raad"),
+            field("number", "secret", "X12345678"),
+            field("issuing-country", "text", "United States"),
+            field("nationality", "text", "American"),
+            field("birthday", "date", "1990-03-01"),
+            field("issued", "date", "2021-05-10"),
+            field("expires", "date", "2031-05-09"),
         ],
         "identity" => vec![
             field("given-name", "text", "Dax"),

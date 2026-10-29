@@ -406,5 +406,5 @@ fn control_tab_picks_the_new_items_type() {
     };
     press(&mut rt, Key::Tab, back);
     press(&mut rt, Key::Tab, back);
-    assert_eq!(kind(&rt), "identity", "round from the start");
+    assert_eq!(kind(&rt), "membership", "round from the start");
 }
