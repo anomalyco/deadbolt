@@ -5,6 +5,7 @@
 import { Autofill } from "./bg/autofill"
 import { fromExtensionPage } from "./bg/frames"
 import { Host } from "./bg/host"
+import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
@@ -15,7 +16,11 @@ const saver = new Saver(host)
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
 const signInWith = new SignInWith(host)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
-saver.signedIn = (tabId, site) => void autofill.learnFlow(tabId, site)
+const learner = new Learner(host)
+saver.signedIn = (tabId, site) => {
+  void autofill.learnFlow(tabId, site)
+  learner.signedIn(tabId, site)
+}
 passkeys.listen()
 
 function title(status: Status): string {
@@ -50,6 +55,10 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return saver.capture(sender, message)
     case "db:submitted":
       return autofill.submitted(sender)
+    case "db:learn-ask":
+      return learner.ask(sender)
+    case "db:learn-step":
+      return learner.step(sender, String(message.session), message.step)
     // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
       if (saver.ownsSurface(message.token)) return saver.surfaceClosed(String(message.token), sender)
@@ -77,8 +86,12 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       const offer = reply.status.state === "ready" ? saver.pending(message.tabId) : undefined
       const passkey = reply.status.state === "ready" ? passkeys.prompt(message.tabId) : undefined
       const savingOff = reply.status.state === "ready" ? await saver.savingOff(message.tabId) : undefined
-      return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}), ...(savingOff ? { savingOff } : {}) }
+      const learning = learner.status(message.tabId)
+      return { ...reply, ...(offer ? { offer } : {}), ...(passkey ? { passkey } : {}), ...(savingOff ? { savingOff } : {}), ...(learning ? { learning } : {}) }
     }
+    case "db:popup-learn":
+      if (!fromExtensionPage(sender, "popup.html")) return { ok: false, message: "" }
+      return message.on ? learner.start(message.tabId) : learner.stop(message.tabId, "stopped")
     case "db:popup-fill":
       return fromExtensionPage(sender, "popup.html") ? autofill.popupFill(message.tabId, String(message.ref)) : { ok: false, message: "" }
     case "db:popup-offer":
@@ -103,6 +116,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   autofill.forgetTab(tabId)
   saver.forgetTab(tabId)
   signInWith.forgetTab(tabId)
+  learner.forgetTab(tabId)
 })
 chrome.webNavigation.onCommitted.addListener((d) => {
   void autofill.navigated(d)

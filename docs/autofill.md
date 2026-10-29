@@ -382,12 +382,55 @@ not running without sending hello, which would start the agent again.
   noise out of the popup; they don't prove where a password came from (see
   the threat model).
 - **No password generator.** The host's capabilities are
-  `list`, `fill`, `check`, `save` and `passkeys`; there's no `generate`
+  `list`, `fill`, `check`, `save`, `passkeys` and `learn`; there's no `generate`
   message yet, so sign-up forms get no suggested password.
 - **Passkeys.** A script in the page's own world answers
   `navigator.credentials.create` and `get` from Deadbolt, through the
   toolbar popup or the inline menu, and hands anything Deadbolt can't do back
   to the browser (see Passkeys).
+
+## Learning a site
+
+When Deadbolt misses a site's form, the popup's **Learn this site** records
+the user signing in by hand, to build the detector from. It isn't a fill:
+the inline menu stays away while the tab learns.
+
+- **A session** belongs to one tab. It ends when the user clicks Stop, 2.5 s
+  after the save judge sees the sign-in work (so the page it lands on is
+  recorded), after 5 minutes, or with the tab. It needs no unlocked vault;
+  unlocked, it can also tell a saved username (below).
+- **Every frame** of the tab joins, from any site, including frames that load
+  later (they ask the background on load). Steps from frames on another site
+  than the top page are marked `sameSite: false`.
+- **A step** is recorded when the session starts, when the inputs a frame
+  shows or the detector's verdict change, and when the user submits: a
+  trusted click on a button, Enter in an input or a trusted submit event,
+  found without the detector, since a page it gets wrong is what learning
+  is for. A step holds each input in the corpus probe's terms
+  (`extension/corpus/probe.ts`: type, name, id, autocomplete, label,
+  placeholder, size and place, shadow root, form), the detector's role for
+  it and the page's kind, the submit control it picked, what the user
+  clicked and whether that was the same control, the frame's place (origin,
+  path, the query's parameter names, never values) and its iframes.
+- **Typed fields** get what the typing shows instead of the value: the order
+  they were typed in, the value's shape (`secret` in a password box, then
+  `email`, `phone`, `digits` or `text`), a length band, whether it repeats an
+  earlier field (`sameAs`), whether it's the username of a saved login for
+  the site (`savedUsername`), and from those the field's `truth`: the role the
+  detector is judged against. For `sameAs` and `savedUsername` the content
+  script keeps SHA-256 digests of the session's random salt and the value,
+  from the last trusted keystroke; only the username digest of a field that
+  isn't a password box leaves the frame, and the background compares it with
+  the saved usernames' digests, then drops it before logging.
+- **Page text** in a step (labels, placeholders, the title, button text) has
+  email addresses, runs of four or more digits and the values typed into the
+  frame's non-password fields replaced (`<email>`, `<n>`, `<typed>`), since
+  a step 2 often names the account.
+- **The log** is `~/.local/state/deadbolt/learn/<session>.jsonl` (beside the
+  agent's log), one `start` line, then `step` lines, then an `end` line with
+  its reason. The native host writes it (see `learn` under Host messages);
+  the agent and the vault are never involved, and nothing syncs.
+  `bun corpus/learned.ts` reports on the logs.
 
 ## Which logins a page gets
 
@@ -809,7 +852,7 @@ The host exits when the port closes.
 ```json
 { "id": "1", "type": "hello" }
 { "id": "1", "type": "hello", "protocol": 1, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save", "passkeys"] }
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "passkeys", "learn"] }
 ```
 
 `status` is one of:
@@ -944,6 +987,22 @@ Signs with the passkey `ref`, which must be for that relying party
 Stops the `passkey-create` or `passkey-get` whose id is `request` and closes
 its Touch ID prompt. That request is answered first, with a `cancelled`
 error. `found` is false when it had already finished.
+
+### learn: a line of a learning log
+
+```json
+{ "id": 10, "type": "learn", "session": "0b5d3c1e-8f6a-4f3e-9a7b-1c2d3e4f5a6b",
+  "line": { "event": "step", "seq": 3, "inputs": [] } }
+{ "id": 10, "type": "learned" }
+```
+
+Appends `line`, a JSON object, as one line of
+`~/.local/state/deadbolt/learn/<session>.jsonl` (see Learning a site).
+`session` is a lowercase UUID, since it names the file; the directory is
+`0700` and the file `0600`. The host doesn't read the line: the extension
+puts no values in it. Lines come at most 100 at once, then one per 100 ms
+(`rate_limited`), and a session's log stops at 4 MiB (`bad_request`). It
+works without an agent and while locked.
 
 ### changed (pushed)
 

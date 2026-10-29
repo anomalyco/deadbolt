@@ -8,6 +8,7 @@ import { scanPage, type Field } from "./content/detect"
 import { initFrameChecks } from "./content/embed"
 import { ownValue, trackUserInput } from "./content/fill"
 import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
+import { initLearn, learnScanned } from "./content/learn"
 import { pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
 import { deepActiveElement, openRoots } from "./content/shadow"
@@ -57,6 +58,7 @@ function scan() {
   }
   refresh()
   void report(false)
+  learnScanned()
 
   // Autofocused login fields get the menu once the form is recognised.
   const active = deepActiveElement()
@@ -286,6 +288,7 @@ initPasskeyChannel(send)
 const state = { targets: () => fields, form: () => formId, rescan: refresh }
 initMenu(state)
 initFrameChecks(state)
+initLearn()
 // On window, in the capture phase, from document_start: these run before any
 // listener a page script can add, so a page can't swap a value in first.
 window.addEventListener("input", trackUserInput, true)

@@ -11,6 +11,12 @@ bun corpus/crawl.ts --top 1000          # resumable: rerun to continue
 bun corpus/report.ts                    # report.md, report.json, contact.html
 ```
 
+`bun corpus/learned.ts` reports on "Learn this site" logs instead
+(`--dir`, default `~/.local/state/deadbolt/learn`; `--out file.md`): every
+field the user typed into while signing in by hand, with the role their typing
+shows next to the detector's, so its labels are ground truth rather than the
+crawl's weak ones (see docs/autofill.md, "Learning a site").
+
 Flags for `crawl.ts`: `--top N` (Tranco top N, default 1000), `--sites file.txt`
 (one domain per line instead), `--urls file.txt` (open each listed page
 directly, one hop to a clear "Sign in" control if it has no fields),
