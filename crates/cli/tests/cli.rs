@@ -3424,11 +3424,22 @@ fn forms_fill_from_an_imported_identity_and_card() {
         .map(|l| serde_json::from_str(l).unwrap())
         .filter(|e: &serde_json::Value| e["command"].as_str().unwrap().starts_with("form-"))
         .collect();
-    assert_eq!(entries.len(), 1, "{entries:?}");
-    assert_eq!(entries[0]["command"], "form-fill");
-    assert_eq!(entries[0]["items"][0]["title"], format!("Visa · {origin}"));
+    // The browser host is known by its signature (macOS); elsewhere it is
+    // an unverified caller, whose every request is an entry.
+    let card = entries
+        .iter()
+        .find(|e| e["items"][0]["title"] == format!("Visa · {origin}"))
+        .expect("the card fill is an entry");
+    assert_eq!(card["command"], "form-fill");
     assert_eq!(
-        entries[0]["fields"],
+        card["fields"],
         serde_json::json!(["cvv", "expiry", "number"])
     );
+    let browser = card["caller"]["class"] == "browser-host";
+    let identity = entries
+        .iter()
+        .any(|e| e["items"][0]["title"] == format!("Home · {origin}"));
+    let looked_up = entries.iter().any(|e| e["command"] == "form-items");
+    assert_eq!((identity, looked_up), (!browser, !browser), "{entries:?}");
+    assert_eq!(entries.len(), if browser { 1 } else { 3 });
 }

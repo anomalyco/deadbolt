@@ -10,12 +10,18 @@ against the spec's title and URL rules. Generated passwords are held per
 origin, as the agent holds them: candidates until generate-keep, then
 pending, and check and save resolve only pending ones. Fields that allow
 under 60 bits are weak, as the agent's floor.
+
+`forms` lists two identities and a card, and `fill-form` answers with only
+the fields asked for. DEADBOLT_FAKE_TOUCHID=deny answers a fill-form that
+asks for a card's number or code with `failed`, as the agent does when
+Touch ID is turned down; DEADBOLT_FAKE_FILL_DELAY holds fill-form too.
 """
 import json, math, os, secrets, string, struct, sys, time
 
 STATUS = os.environ.get("DEADBOLT_FAKE_STATUS", "ready")
 LOG = os.environ.get("DEADBOLT_FAKE_LOG")
 RATE_LIMIT = os.environ.get("DEADBOLT_FAKE_RATE_LIMIT", "")
+TOUCHID = os.environ.get("DEADBOLT_FAKE_TOUCHID", "")
 FILL_DELAY = float(os.environ.get("DEADBOLT_FAKE_FILL_DELAY") or 0)
 REF1 = "a" * 64 + ":" + "1" * 32
 REF2 = "a" * 64 + ":" + "2" * 32
@@ -23,6 +29,22 @@ ACCOUNTS = [
     {"ref": REF1, "vault": "Personal", "title": "Acme", "username": "kit@acme.test", "hasPassword": True, "hasTotp": True, "urls": ["http://www.acme.test", "http://accounts.acme.test"]},
     {"ref": REF2, "vault": "Work", "title": "Acme admin", "username": "admin", "hasPassword": True, "hasTotp": False, "urls": []},
 ]
+HOME = "c" * 64 + ":" + "1" * 32
+WORK = "c" * 64 + ":" + "2" * 32
+VISA = "c" * 64 + ":" + "3" * 32
+IDENTITIES = [
+    {"ref": HOME, "title": "Home", "summary": "Kit Langton · 123 Main St, Brooklyn"},
+    {"ref": WORK, "title": "Work", "summary": "Kit Langton · 1 Market St, San Francisco"},
+]
+CARDS = [{"ref": VISA, "title": "Personal Visa", "brand": "Visa", "last4": "4242", "expiry": "2028-08", "cardholder": "Kit Langton"}]
+FORM_VALUES = {
+    HOME: {"given-name": "Kit", "family-name": "Langton", "email": "kit@acme.test", "phone": "+14155550123", "organization": "Acme",
+           "address-line1": "123 Main St", "address-line2": "Apt 4", "city": "Brooklyn", "region": "NY", "postal-code": "11201",
+           "country": "US", "birthday": "1990-07-04"},
+    WORK: {"given-name": "Kit", "family-name": "Langton", "address-line1": "1 Market St", "city": "San Francisco", "region": "CA",
+           "postal-code": "94105", "country": "US"},
+    VISA: {"number": "4242424242424242", "cvv": "123", "expiry": "2028-08", "cardholder": "Kit Langton", "brand": "Visa"},
+}
 VALUES = {REF1: {"username": "kit@acme.test", "password": "correct horse", "totp": "492039"}, REF2: {"username": "admin", "password": "hunter2"}}
 # DEADBOLT_FAKE_SIGNIN=1 adds a "Sign in with Google" login for the site, and
 # the Google account's own login it signs in with.
@@ -114,7 +136,7 @@ while True:
         why = refusal(req)
         write({"id": rid, "type": "error", "code": why, "message": "No strong password fits."} if why else {"id": rid, "type": "generate-check"})
     elif kind == "hello":
-        write({"id": rid, "type": "hello", "protocol": 2, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate"]})
+        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms"]})
     elif STATUS != "ready":
         write({"id": rid, "type": "error", "code": "locked", "message": "Deadbolt is locked."})
     elif kind == "list":
@@ -125,6 +147,17 @@ while True:
         time.sleep(FILL_DELAY)
         values = {k: v for k, v in VALUES.get(req["ref"], {}).items() if k in req["want"]}
         write({"id": rid, "type": "fill", **values})
+    elif kind == "forms":
+        def listed(item):
+            return {**item, "vault": "Personal", "fields": sorted(FORM_VALUES[item["ref"]])}
+        write({"id": rid, "type": "forms", "canVerify": True, "identities": [listed(i) for i in IDENTITIES], "cards": [listed(c) for c in CARDS]})
+    elif kind == "fill-form":
+        time.sleep(FILL_DELAY)
+        if TOUCHID == "deny" and set(req["fields"]) & {"number", "cvv"}:
+            write({"id": rid, "type": "error", "code": "failed", "message": "Touch ID was cancelled."})
+        else:
+            values = {k: v for k, v in FORM_VALUES.get(req["ref"], {}).items() if k in req["fields"]}
+            write({"id": rid, "type": "fill-form", "values": values, "verified": bool(set(values) & {"number", "cvv"})})
     elif kind == "generate":
         made = generate(req)
         write({"id": rid, "type": "generate", **made} if isinstance(made, dict) else {"id": rid, "type": "error", "code": made, "message": "No password fits."})
