@@ -208,26 +208,34 @@ pub struct Values(ItemInfo, Option<Result<Code, Failure>>);
 
 impl Values {
     pub fn new(item: ItemInfo) -> Values {
-        Values(item, None)
+        Values(without_otp(item), None)
     }
 
     pub fn with_code(item: ItemInfo, code: Result<Code, Failure>) -> Values {
-        Values(item, Some(code))
+        Values(without_otp(item), Some(code))
     }
 
-    /// The item, for the taker to wipe (`model::forget`), and its code. Any
-    /// one-time password secret is wiped here, should one have come.
+    /// The item, for the taker to wipe (`model::forget`), and its code.
     pub fn take(mut self) -> (ItemInfo, Option<Result<Code, Failure>>) {
-        let mut fields = std::mem::take(&mut self.0.fields);
-        for field in fields.iter_mut().filter(|f| f.kind == "otp") {
-            field.value.zeroize();
-        }
         let item = ItemInfo {
-            fields,
-            ..self.0.clone()
+            id: std::mem::take(&mut self.0.id),
+            short: std::mem::take(&mut self.0.short),
+            kind: std::mem::take(&mut self.0.kind),
+            label: std::mem::take(&mut self.0.label),
+            detail: self.0.detail.take(),
+            fields: std::mem::take(&mut self.0.fields),
+            source: self.0.source.take(),
         };
         (item, self.1.take())
     }
+}
+
+/// Wipes any one-time password secret on arrival, should one have come.
+fn without_otp(mut item: ItemInfo) -> ItemInfo {
+    for field in item.fields.iter_mut().filter(|f| f.kind == "otp") {
+        field.value.zeroize();
+    }
+    item
 }
 
 impl Drop for Values {
@@ -314,14 +322,19 @@ fn error_chain(error: &dyn std::error::Error) -> String {
     message
 }
 
-pub struct Agent {
-    jobs: Option<Sender<Job>>,
-    inbox: Receiver<Done>,
-    waker: Arc<Mutex<Option<Waker>>>,
-    /// Dropping it ends the watch thread.
-    _watching: Option<oneshot::Sender<()>>,
+pub struct Agent(Mode);
+
+enum Mode {
+    Offline,
     /// A worker on this thread, on the app's clock, for scenes and tests.
-    loopback: Option<RefCell<Loopback>>,
+    Loopback(RefCell<Loopback>),
+    Channel {
+        jobs: Sender<Job>,
+        inbox: Receiver<Done>,
+        waker: Arc<Mutex<Option<Waker>>>,
+        /// Dropping it ends the watch thread.
+        _watching: Option<oneshot::Sender<()>>,
+    },
 }
 
 /// Item reads (`Get`, `Peek`) the worker runs at once, each on its own
@@ -355,31 +368,62 @@ fn take_next<T>(queue: &mut VecDeque<T>, seen: usize, job: impl Fn(&T) -> &Job) 
     jobs
 }
 
-/// Drops what waits that nobody needs any more: every item request but the
-/// newest (an older one's reply would be dropped as stale, and so would a
-/// code asked for it), a `cached` one when the same was hurried (a copy
-/// waiting), and every `Peek` but the newest batch's.
+/// Drops what waits that nobody needs any more: every list, item or code
+/// request but the newest (an older one's reply would be dropped as stale),
+/// a `cached` `Get` when the same was hurried (a copy waiting), and every
+/// `Peek` but the newest batch's.
 pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
-    let get = |j: &Job| match j {
-        Job::Get { seq, cached, .. } => Some((*seq, !*cached)),
-        _ => None,
-    };
-    let keep = (0..queue.len()).max_by_key(|&i| (get(job(&queue[i])), std::cmp::Reverse(i)));
-    let newest = keep.and_then(|i| get(job(&queue[i]))).map(|(seq, _)| seq);
+    let keep_get = queue
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| match job(item) {
+            Job::Get { seq, cached, .. } => Some(((*seq, !*cached), std::cmp::Reverse(i), i)),
+            _ => None,
+        })
+        .max()
+        .map(|(_, _, i)| i);
+    let keep_list = queue
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| match job(item) {
+            Job::List { generation } => Some((*generation, std::cmp::Reverse(i), i)),
+            _ => None,
+        })
+        .max()
+        .map(|(_, _, i)| i);
+    let newest_seq = queue
+        .iter()
+        .filter_map(|item| match job(item) {
+            Job::Get { seq, .. } | Job::Code { seq, .. } => Some(*seq),
+            _ => None,
+        })
+        .max();
+    let keep_code = queue
+        .iter()
+        .enumerate()
+        .filter_map(|(i, item)| match job(item) {
+            Job::Code { seq, .. } if newest_seq.is_none_or(|n| *seq >= n) => {
+                Some((*seq, std::cmp::Reverse(i), i))
+            }
+            _ => None,
+        })
+        .max()
+        .map(|(_, _, i)| i);
     let newest_batch = queue
         .iter()
-        .filter_map(|j| match job(j) {
+        .filter_map(|item| match job(item) {
             Job::Peek { batch, .. } => Some(*batch),
             _ => None,
         })
         .max();
     let mut i = 0;
-    queue.retain(|j| {
+    queue.retain(|item| {
         let at = i;
         i += 1;
-        match job(j) {
-            Job::Get { .. } => Some(at) == keep,
-            Job::Code { seq, .. } => newest.is_none_or(|n| *seq >= n),
+        match job(item) {
+            Job::Get { .. } => keep_get == Some(at),
+            Job::List { .. } => keep_list == Some(at),
+            Job::Code { .. } => keep_code == Some(at),
             Job::Peek { batch, .. } => newest_batch.is_none_or(|n| *batch >= n),
             _ => true,
         }
@@ -426,64 +470,54 @@ impl Agent {
         let waker: Arc<Mutex<Option<Waker>>> = Arc::default();
         let (watching, stop) = oneshot::channel();
         let post = Post {
-            results: results.clone(),
+            results,
             waker: waker.clone(),
         };
+        let watch_post = post.clone();
         let watch_paths = paths.clone();
         std::thread::Builder::new()
             .name("deadbolt-watch".into())
-            .spawn(move || watch(watch_paths, window == Window::Main, post, stop))
+            .spawn(move || watch(watch_paths, window == Window::Main, watch_post, stop))
             .expect("spawning the watch thread");
-        let wake = waker.clone();
         std::thread::Builder::new()
             .name("deadbolt-agent".into())
-            .spawn(move || work(paths, launch, requests, results, wake))
+            .spawn(move || work(paths, launch, requests, post))
             .expect("spawning the agent thread");
-        Agent {
-            jobs: Some(jobs),
+        Agent(Mode::Channel {
+            jobs,
             inbox,
             waker,
             _watching: Some(watching),
-            loopback: None,
-        }
+        })
     }
 
     /// A connection that never answers, for scenes and snapshots.
     pub fn offline() -> Agent {
-        let (_, inbox) = channel();
-        Agent {
-            jobs: None,
-            inbox,
-            waker: Arc::default(),
-            _watching: None,
-            loopback: None,
-        }
+        Agent(Mode::Offline)
     }
 
     /// An agent `answer` answers, each request taking `cost` seconds of the
     /// app's clock, for scenes and tests that need replies without a socket.
     pub fn loopback(answer: fn(Job) -> Option<Done>, cost: f64) -> Agent {
-        let (_, inbox) = channel();
-        Agent {
-            jobs: None,
-            inbox,
-            waker: Arc::default(),
-            _watching: None,
-            loopback: Some(RefCell::new(Loopback {
-                queue: VecDeque::new(),
-                answer,
-                cost,
-                free_at: 0.0,
-                last: 0.0,
-                most: 0,
-            })),
-        }
+        Agent(Mode::Loopback(RefCell::new(Loopback {
+            queue: VecDeque::new(),
+            answer,
+            cost,
+            free_at: 0.0,
+            last: 0.0,
+            most: 0,
+        })))
     }
 
     /// A loopback's requests still waiting, and the most that ever were.
     pub fn backlog(&self) -> Option<(usize, usize)> {
-        let lb = self.loopback.as_ref()?.borrow();
-        Some((lb.queue.len(), lb.most))
+        match &self.0 {
+            Mode::Loopback(lb) => {
+                let lb = lb.borrow();
+                Some((lb.queue.len(), lb.most))
+            }
+            _ => None,
+        }
     }
 
     /// A connection the caller answers for, in tests: it reads the jobs and
@@ -491,64 +525,71 @@ impl Agent {
     pub fn scripted() -> (Agent, Receiver<Job>, Sender<Done>) {
         let (jobs, requests) = channel();
         let (results, inbox) = channel();
-        let agent = Agent {
-            jobs: Some(jobs),
+        let agent = Agent(Mode::Channel {
+            jobs,
             inbox,
             waker: Arc::default(),
             _watching: None,
-            loopback: None,
-        };
+        });
         (agent, requests, results)
     }
 
     pub fn is_live(&self) -> bool {
-        self.jobs.is_some() || self.loopback.is_some()
+        !matches!(self.0, Mode::Offline)
     }
 
     pub fn send(&self, job: Job) {
-        if let Some(lb) = &self.loopback {
-            let mut lb = lb.borrow_mut();
-            let at = lb.last;
-            lb.queue.push_back((at, job));
-            prune(&mut lb.queue, |(_, j)| j);
-            lb.most = lb.most.max(lb.queue.len());
-            return;
-        }
-        if let Some(jobs) = &self.jobs {
-            // The worker only stops when this sender drops, so sending cannot fail while
-            // `self` lives.
-            jobs.send(job).ok();
+        match &self.0 {
+            Mode::Offline => {}
+            Mode::Loopback(lb) => {
+                let mut lb = lb.borrow_mut();
+                let at = lb.last;
+                lb.queue.push_back((at, job));
+                prune(&mut lb.queue, |(_, j)| j);
+                lb.most = lb.most.max(lb.queue.len());
+            }
+            Mode::Channel { jobs, .. } => {
+                // The worker only stops when this sender drops, so sending cannot fail while
+                // `self` lives.
+                jobs.send(job).ok();
+            }
         }
     }
 
     pub fn set_waker(&self, waker: Waker) {
-        *self.waker.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
+        if let Mode::Channel { waker: slot, .. } = &self.0 {
+            *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(waker);
+        }
     }
 
     /// What's landed by `now`, on the app's clock.
     pub fn drain(&self, now: f64) -> Vec<Done> {
-        let mut done: Vec<Done> = self.inbox.try_iter().collect();
-        if let Some(lb) = &self.loopback {
-            let lb = &mut *lb.borrow_mut();
-            let mut at = lb.free_at;
-            while let Some((sent, _)) = lb.queue.front() {
-                at = at.max(*sent);
-                if at + lb.cost > now + 1e-9 {
-                    break;
+        match &self.0 {
+            Mode::Offline => Vec::new(),
+            Mode::Channel { inbox, .. } => inbox.try_iter().collect(),
+            Mode::Loopback(lb) => {
+                let lb = &mut *lb.borrow_mut();
+                let mut done = Vec::new();
+                let mut at = lb.free_at;
+                while let Some((sent, _)) = lb.queue.front() {
+                    at = at.max(*sent);
+                    if at + lb.cost > now + 1e-9 {
+                        break;
+                    }
+                    // What was sent by the time the worker's free: sent times only grow.
+                    let seen = lb.queue.iter().take_while(|(sent, _)| *sent <= at).count();
+                    let jobs = take_next(&mut lb.queue, seen, |(_, j)| j);
+                    if jobs.is_empty() {
+                        break;
+                    }
+                    at += lb.cost;
+                    done.extend(jobs.into_iter().filter_map(|(_, job)| (lb.answer)(job)));
                 }
-                // What was sent by the time the worker's free: sent times only grow.
-                let seen = lb.queue.iter().take_while(|(sent, _)| *sent <= at).count();
-                let jobs = take_next(&mut lb.queue, seen, |(_, j)| j);
-                if jobs.is_empty() {
-                    break;
-                }
-                at += lb.cost;
-                done.extend(jobs.into_iter().filter_map(|(_, job)| (lb.answer)(job)));
+                lb.free_at = at;
+                lb.last = now;
+                done
             }
-            lb.free_at = at;
-            lb.last = now;
         }
-        done
     }
 }
 
@@ -623,13 +664,7 @@ async fn follow(paths: &Paths, app: bool, post: &Post, delay: &mut Duration) -> 
     }
 }
 
-fn work(
-    paths: Paths,
-    launch: Launch,
-    requests: Receiver<Job>,
-    results: Sender<Done>,
-    waker: Arc<Mutex<Option<Waker>>>,
-) {
+fn work(paths: Paths, launch: Launch, requests: Receiver<Job>, main: Post) {
     let runtime = match tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -640,13 +675,9 @@ fn work(
                 code: None,
                 message: format!("starting the agent thread: {error}"),
             };
-            results.send(Done::Connected(Err(failure))).ok();
+            main.send(Done::Connected(Err(failure)));
             return;
         }
-    };
-    let main = Post {
-        results: results.clone(),
-        waker: waker.clone(),
     };
     let mut queue = VecDeque::new();
     loop {
@@ -673,10 +704,6 @@ fn work(
             continue;
         };
         if let Job::SyncOnePassword { seq } = job {
-            let post = || Post {
-                results: results.clone(),
-                waker: waker.clone(),
-            };
             let failed = move |error: std::io::Error| Done::Mirrored {
                 seq,
                 result: Err(Failure {
@@ -685,7 +712,7 @@ fn work(
                 }),
             };
             let paths = paths.clone();
-            let thread = post();
+            let thread = main.clone();
             let spawned = std::thread::Builder::new()
                 .name("deadbolt-1password".into())
                 .spawn(move || {
@@ -698,8 +725,10 @@ fn work(
                     };
                     thread.send(done);
                 });
-            if let Err(error) = spawned {
-                post().send(failed(error));
+            if let Err(error) = spawned
+                && !main.send(failed(error))
+            {
+                return;
             }
             continue;
         }
@@ -745,70 +774,25 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         ),
         Job::Status => Done::Status(deadbolt_client::status(paths).await),
         // The agent may have stopped while the unlock screen was up.
-        Job::Unlock(passphrase) => Done::Unlocked(
-            async {
-                deadbolt_client::ensure_running(paths, launch).await?;
-                let command = Command::Unlock {
-                    passphrase,
-                    timeout_secs: None,
-                };
-                deadbolt_client::simple(paths, command).await?;
-                Ok::<_, Error>(deadbolt_client::status(paths).await)
-            }
-            .await
-            .map_err(Failure::from)
-            .and_then(|status| {
-                status.ok_or_else(|| Failure {
-                    code: None,
-                    message: "The agent stopped.".into(),
-                })
-            }),
-        ),
-        Job::UnlockBiometric => {
-            let result = async {
-                deadbolt_client::ensure_running(paths, launch).await?;
-                let command = Command::UnlockBiometric { timeout_secs: None };
-                deadbolt_client::simple(paths, command).await?;
-                Ok::<_, Error>(deadbolt_client::status(paths).await)
-            }
-            .await
-            .map_err(Failure::from)
-            .and_then(|status| {
-                status.ok_or_else(|| Failure {
-                    code: None,
-                    message: "The agent stopped.".into(),
-                })
-            });
-            match result {
-                Ok(status) => Done::UnlockedBiometric(Ok(status)),
-                Err(failure) => {
-                    let status = deadbolt_client::status(paths).await.map(Box::new);
-                    Done::UnlockedBiometric(Err((failure, status)))
-                }
-            }
-        }
-        Job::TouchIdSet(enabled) => {
-            let result = async {
-                deadbolt_client::simple(paths, Command::TouchIdSet { enabled }).await?;
-                Ok::<_, Error>(deadbolt_client::status(paths).await)
-            }
-            .await
-            .map_err(Failure::from)
-            .and_then(|status| {
-                status.ok_or_else(|| Failure {
-                    code: None,
-                    message: "The agent stopped.".into(),
-                })
-            });
-            let result = match result {
-                Ok(status) => Ok(status),
-                Err(failure) => {
-                    let status = deadbolt_client::status(paths).await.map(Box::new);
-                    Err((failure, status))
-                }
+        Job::Unlock(passphrase) => {
+            let command = Command::Unlock {
+                passphrase,
+                timeout_secs: None,
             };
-            Done::TouchIdSet { enabled, result }
+            Done::Unlocked(
+                status_after(paths, Some(launch), command, false)
+                    .await
+                    .map_err(|(f, _)| f),
+            )
         }
+        Job::UnlockBiometric => {
+            let command = Command::UnlockBiometric { timeout_secs: None };
+            Done::UnlockedBiometric(status_after(paths, Some(launch), command, true).await)
+        }
+        Job::TouchIdSet(enabled) => Done::TouchIdSet {
+            enabled,
+            result: status_after(paths, None, Command::TouchIdSet { enabled }, true).await,
+        },
         Job::Lock => Done::Locked(
             deadbolt_client::simple(paths, Command::Lock)
                 .await
@@ -821,11 +805,11 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 query: Vec::new(),
                 kind: None,
             };
-            let result = match deadbolt_client::simple(paths, command).await {
-                Ok(Reply::Items { items }) => Ok(items),
-                Ok(_) => Err(unexpected()),
-                Err(error) => Err(error.into()),
-            };
+            let result = call(paths, command, |r| match r {
+                Reply::Items { items } => Some(items),
+                _ => None,
+            })
+            .await;
             Done::Items { generation, result }
         }
         Job::Get { id, seq, .. } => Done::Item {
@@ -851,7 +835,13 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             }
         }
         Job::SyncOnePassword { seq } => mirror(paths, seq).await,
-        job @ (Job::Activity { .. } | Job::Report { .. }) => crate::activity::run(paths, job).await,
+        Job::Activity { seq } => crate::activity::list(paths, seq).await,
+        Job::Report {
+            action,
+            item,
+            title,
+            field,
+        } => crate::activity::report(paths, action, item, title, field).await,
         Job::Agents { seq, revoke } => crate::agents::run(paths, seq, revoke).await,
         Job::Create {
             kind,
@@ -905,14 +895,61 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             seq,
         } => {
             let command = Command::Generate { length, symbols };
-            let result = match deadbolt_client::simple(paths, command).await {
-                Ok(Reply::Password { password }) => Ok(password),
-                Ok(_) => Err(unexpected()),
-                Err(error) => Err(error.into()),
-            };
+            let result = call(paths, command, |r| match r {
+                Reply::Password { password } => Some(password),
+                _ => None,
+            })
+            .await;
             Done::Generated { seq, result }
         }
     }
+}
+
+/// Runs `command` (starting the agent first when `launch` is given) and reads
+/// back the fresh `Status`. When `status_on_err` is set, a failure still reads
+/// `Status` so Touch ID sees whether its biometric slot was reset.
+async fn status_after(
+    paths: &Paths,
+    launch: Option<&Launch>,
+    command: Command,
+    status_on_err: bool,
+) -> Result<Status, (Failure, Option<Box<Status>>)> {
+    let result = async {
+        if let Some(launch) = launch {
+            deadbolt_client::ensure_running(paths, launch).await?;
+        }
+        deadbolt_client::simple(paths, command).await?;
+        Ok::<_, Error>(deadbolt_client::status(paths).await)
+    }
+    .await
+    .map_err(Failure::from)
+    .and_then(|status| {
+        status.ok_or_else(|| Failure {
+            code: None,
+            message: "The agent stopped.".into(),
+        })
+    });
+    match result {
+        Ok(status) => Ok(status),
+        Err(failure) => {
+            let status = if status_on_err {
+                deadbolt_client::status(paths).await.map(Box::new)
+            } else {
+                None
+            };
+            Err((failure, status))
+        }
+    }
+}
+
+/// Sends `command` and extracts the expected `Reply` variant.
+pub(crate) async fn call<T>(
+    paths: &Paths,
+    command: Command,
+    take: impl FnOnce(Reply) -> Option<T>,
+) -> Result<T, Failure> {
+    let reply = deadbolt_client::simple(paths, command).await?;
+    take(reply).ok_or_else(unexpected)
 }
 
 /// One item with its values, and its one-time code if it has one.
@@ -922,23 +959,21 @@ async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
         query: vec![id.clone()],
         otp: false,
     };
-    match deadbolt_client::simple(paths, command).await {
-        Ok(Reply::Item { item }) if code_field(&item.fields).is_some() => {
-            Ok(Values::with_code(item, code(paths, id).await))
-        }
-        Ok(Reply::Item { item }) => Ok(Values::new(item)),
-        Ok(_) => Err(unexpected()),
-        Err(error) => Err(error.into()),
+    let got = item(paths, command).await?;
+    if code_field(&got.fields).is_some() {
+        Ok(Values::with_code(got, code(paths, id).await))
+    } else {
+        Ok(Values::new(got))
     }
 }
 
-/// A write that replies with the item, without its values.
+/// A write or read that replies with `Reply::Item`.
 async fn item(paths: &Paths, command: Command) -> Result<ItemInfo, Failure> {
-    match deadbolt_client::simple(paths, command).await {
-        Ok(Reply::Item { item }) => Ok(item),
-        Ok(_) => Err(unexpected()),
-        Err(error) => Err(error.into()),
-    }
+    call(paths, command, |r| match r {
+        Reply::Item { item } => Some(item),
+        _ => None,
+    })
+    .await
 }
 
 /// The export's text goes into the request, and with it is wiped once sent.
@@ -959,12 +994,13 @@ async fn import(
         export,
         apply: *applied,
     };
-    let report = match deadbolt_client::simple(paths, command).await {
-        Ok(Reply::Import { report }) => report,
-        Ok(_) => return Err(ImportFailure::Agent(unexpected())),
-        Err(error) => return Err(ImportFailure::Agent(error.into())),
-    };
-    Ok(if apply.is_some() && !changed {
+    let report = call(paths, command, |r| match r {
+        Reply::Import { report } => Some(report),
+        _ => None,
+    })
+    .await
+    .map_err(ImportFailure::Agent)?;
+    Ok(if *applied {
         Imported::Done(report)
     } else {
         Imported::Preview {
@@ -982,11 +1018,11 @@ async fn mirror(paths: &Paths, seq: u64) -> Done {
         op_vaults: Vec::new(),
         dry_run: false,
     };
-    let result = match deadbolt_client::simple(paths, command).await {
-        Ok(Reply::Mirror { report }) => Ok(report),
-        Ok(_) => Err(unexpected()),
-        Err(error) => Err(error.into()),
-    };
+    let result = call(paths, command, |r| match r {
+        Reply::Mirror { report } => Some(report),
+        _ => None,
+    })
+    .await;
     Done::Mirrored { seq, result }
 }
 
@@ -995,11 +1031,11 @@ async fn code(paths: &Paths, id: String) -> Result<Code, Failure> {
         vault: None,
         query: vec![id],
     };
-    match deadbolt_client::simple(paths, command).await {
-        Ok(Reply::Code { code }) => Ok(code),
-        Ok(_) => Err(unexpected()),
-        Err(error) => Err(error.into()),
-    }
+    call(paths, command, |r| match r {
+        Reply::Code { code } => Some(code),
+        _ => None,
+    })
+    .await
 }
 
 fn unexpected() -> Failure {

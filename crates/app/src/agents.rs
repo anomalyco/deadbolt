@@ -54,12 +54,7 @@ impl App {
     }
 
     fn load_agents(&mut self) {
-        self.agents.seq += 1;
-        self.agents.loading = true;
-        self.agent.send(Job::Agents {
-            seq: self.agents.seq,
-            revoke: None,
-        });
+        self.send_agents(None);
     }
 
     /// Something changed in the agent (pairing and grants are Activity
@@ -71,11 +66,15 @@ impl App {
     }
 
     pub fn revoke_agent(&mut self, revoke: Revoke) {
+        self.send_agents(Some(revoke));
+    }
+
+    fn send_agents(&mut self, revoke: Option<Revoke>) {
         self.agents.seq += 1;
         self.agents.loading = true;
         self.agent.send(Job::Agents {
             seq: self.agents.seq,
-            revoke: Some(revoke),
+            revoke,
         });
     }
 
@@ -100,7 +99,7 @@ impl App {
 }
 
 pub(crate) async fn run(paths: &Paths, seq: u64, revoke: Option<Revoke>) -> Done {
-    let result = async {
+    let result: Result<Listing, Failure> = async {
         match revoke {
             Some(Revoke::Client(id)) => {
                 deadbolt_client::simple(paths, Command::AgentClientRemove { id }).await?;
@@ -110,21 +109,19 @@ pub(crate) async fn run(paths: &Paths, seq: u64, revoke: Option<Revoke>) -> Done
             }
             None => {}
         }
-        let clients = deadbolt_client::simple(paths, Command::AgentClientList).await?;
-        let grants = deadbolt_client::simple(paths, Command::AgentGrantList).await?;
-        Ok::<_, deadbolt_client::Error>((clients, grants))
+        let clients = crate::agent::call(paths, Command::AgentClientList, |r| match r {
+            Reply::AgentClients { clients } => Some(clients),
+            _ => None,
+        })
+        .await?;
+        let grants = crate::agent::call(paths, Command::AgentGrantList, |r| match r {
+            Reply::AgentGrants { grants } => Some(grants),
+            _ => None,
+        })
+        .await?;
+        Ok((clients, grants))
     }
     .await;
-    let result = match result {
-        Ok((Reply::AgentClients { clients }, Reply::AgentGrants { grants })) => {
-            Ok((clients, grants))
-        }
-        Ok(_) => Err(Failure {
-            code: None,
-            message: "unexpected reply from the agent".into(),
-        }),
-        Err(error) => Err(error.into()),
-    };
     Done::Agents { seq, result }
 }
 
@@ -138,35 +135,26 @@ fn fill_name(fill: &Fill) -> &'static str {
 
 /// "github.com · kit · username, password, passkeys · browse".
 pub fn grant_line(grant: &AgentGrantInfo) -> String {
-    let mut what: Vec<&str> = grant.fields.iter().map(fill_name).collect();
-    if grant.passkeys {
-        what.push("passkeys");
-    }
-    let Some(site) = &grant.site else {
-        let mut line = format!(
-            "All logins · {}",
-            grant
-                .client_name
-                .clone()
-                .unwrap_or_else(|| grant.client_id.clone())
-        );
-        if grant.expired {
-            line.push_str(" · expired");
+    let client = grant.client_name.as_deref().unwrap_or(&grant.client_id);
+    let mut parts = match &grant.site {
+        None => vec!["All logins".to_owned(), client.to_owned()],
+        Some(site) => {
+            let mut what: Vec<&str> = grant.fields.iter().map(fill_name).collect();
+            if grant.passkeys {
+                what.push("passkeys");
+            }
+            vec![
+                site.clone(),
+                grant
+                    .login_label
+                    .as_deref()
+                    .unwrap_or("every login")
+                    .to_owned(),
+                what.join(", "),
+                client.to_owned(),
+            ]
         }
-        return line;
     };
-    let mut parts = vec![
-        site.clone(),
-        grant
-            .login_label
-            .clone()
-            .unwrap_or_else(|| "every login".into()),
-        what.join(", "),
-        grant
-            .client_name
-            .clone()
-            .unwrap_or_else(|| grant.client_id.clone()),
-    ];
     if grant.expired {
         parts.push("expired".into());
     }
