@@ -189,15 +189,21 @@ export function watchVisibility(dwell: Dwell) {
 
 // Sub-pixel heights mean a strict 100% can be unreachable.
 const fullyVisible = (e: IntersectionObserverEntry) => (e as IntersectionObserverEntry & { isVisible?: boolean }).isVisible === true && e.intersectionRatio >= 0.9
+/**
+ * Unobscured (not faded, transformed or covered), though maybe only partly on
+ * screen: for a frame element taller than the viewport, whose fields'
+ * boxes are cut to what shows separately (see placeBoxes).
+ */
+const partlyVisible = (e: IntersectionObserverEntry) => (e as IntersectionObserverEntry & { isVisible?: boolean }).isVisible === true && e.intersectionRatio > 0
 
 /**
  * Whether `target` is fully on screen and unobscured, through every frame
  * above it: not faded, clipped, transformed or covered, even by something
- * that lets clicks through. One fresh Intersection Observer v2 reading; fails
+ * that lets clicks through. With `partly`, on screen at all is enough. One fresh Intersection Observer v2 reading; fails
  * closed: no v2 visibility, an error or no answer means no. Adapted from
  * Foyer's menu and dialog.
  */
-export function visibleNow(timeoutMs = 1000, target: Element = document.body): Promise<boolean> {
+export function visibleNow(timeoutMs = 1000, target: Element = document.body, partly = false): Promise<boolean> {
   return new Promise((resolve) => {
     let observer: IntersectionObserver | undefined
     const finish = (visible: boolean) => {
@@ -209,7 +215,7 @@ export function visibleNow(timeoutMs = 1000, target: Element = document.body): P
     try {
       observer = new IntersectionObserver(
         (entries) => {
-          finish(fullyVisible(entries[entries.length - 1]))
+          finish((partly ? partlyVisible : fullyVisible)(entries[entries.length - 1]))
         },
         { threshold: [0, 0.5, 0.9, 1], trackVisibility: true, delay: 100 } as IntersectionObserverInit,
       )

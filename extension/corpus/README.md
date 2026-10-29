@@ -12,6 +12,14 @@ bun corpus/report.ts                    # report.md, report.json, contact.html
 bun corpus/compare.ts                   # engine vs detect.ts: compare.md, compare.json
 ```
 
+`corpus/frame-logins.txt` lists sign-ins whose form is in a frame of the
+page's own site (Schwab, account.apple.com, App Store Connect; issue #88).
+Crawl them with `bun corpus/crawl.ts --urls corpus/frame-logins.txt --out <dir>`,
+then `bun corpus/frames.ts --out <dir>` prints every frame of each page (host,
+size, same site as the top page all the way up, `sandbox` on the way, the
+detector's kind and roles) and fails unless each has a frame login the
+inline menu serves. `--all` lists the frames of every crawled page instead.
+
 `bun corpus/learned.ts` reports on "Learn this site" logs instead
 (`--dir`, default `~/.local/state/deadbolt/learn`; `--out file.md`): every
 field the user typed into while signing in by hand, with the role their typing
@@ -37,7 +45,9 @@ Needs Playwright's Chromium (`bunx playwright-core install chromium`).
   `/signin`. It never types, submits or dismisses anything, and stops at bot
   challenges. On the page it ends on it saves a screenshot (`shots/`), the HTML
   (`html/`) and a line in `results.jsonl`.
-- `probe.ts`: bundled to an IIFE and evaluated in every reachable frame. It
+- `probe.ts`: bundled to an IIFE and evaluated in every reachable frame
+  (`crawl.ts` adds each subframe's size, its parent and its frame element's
+  `sandbox` attribute). It
   records every input (type, name, id, autocomplete, label, visibility, shadow
   root, form action host, position), runs `scanPage()`, and notes each field's
   role, the page kind and the submit control. Runs in the page's main world,

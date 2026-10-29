@@ -13,7 +13,7 @@
 import { FORM_ROLES, fieldsFor, fillsWords, VERIFIED_FIELDS, type Box, type FormRole, type FormsAck, type FormsApproved, type MenuLoadReply, type PickReply, type QueryReply } from "../messages"
 import type { FormCard, FormIdentity, FormKind, FormsReply } from "../protocol"
 import { paymentProvider, securePage } from "../payments"
-import { boxesInTop, isBoxes, menuFrameOf, newToken, sendToFrame, type FrameTarget } from "./frames"
+import { boxesInTop, cleanBox, isBoxes, menuFrameOf, newToken, sendToFrame, type FrameTarget } from "./frames"
 import { fillError, resizeMessage } from "./autofill"
 import { HostError, type VaultBackend } from "./backend"
 import { fillableOrigin, sameSite, senderOrigin, siteOf } from "./site"
@@ -86,10 +86,6 @@ function cleanApproved(reply: unknown): FormsApproved | null {
   const roles = cleanRoles(a.roles)
   if (!roles.length || (a.boxes !== undefined && !isBoxes(a.boxes))) return null
   return { approval: a.approval, roles, boxes: a.boxes }
-}
-
-function cleanBox(box: unknown): Box | null {
-  return isBoxes([box]) ? (box as Box) : null
 }
 
 export class Forms {
@@ -182,7 +178,7 @@ export class Forms {
     const token = newToken()
     this.tokens.set(token, { owner, source, kind, form: form as number, section, needs, roles: sectionRoles, createdAt: Date.now() })
     if (!at) return { token, rows }
-    const opened = await sendToFrame<boolean>(owner, { type: "db:forms-open", token, rows, box: at })
+    const opened = await sendToFrame<boolean>(owner, { type: "db:open-at", token, rows, box: at })
     if (!opened) this.tokens.delete(token)
     return { rows: opened ? rows : 0 }
   }
@@ -246,10 +242,10 @@ export class Forms {
     if (!item) return { ok: false, message: "That isn't here anymore." }
     this.tokens.delete(token)
     const targets = this.targets(t)
-    // Frames below are measured with the pill put away (see db:forms-hold).
+    // Frames below are measured with the pill put away (see db:hold).
     const framed = targets.some((x) => x.target.frameId !== 0)
     const hold = async (on: boolean) => {
-      if (framed) await sendToFrame(t.owner, { type: "db:forms-hold", token, hold: on })
+      if (framed) await sendToFrame(t.owner, { type: "db:hold", token, hold: on })
     }
     await hold(true)
     let approved: Array<{ target: Placed; form: number; approved: FormsApproved }>

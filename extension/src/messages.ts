@@ -136,9 +136,11 @@ export type ToBackground =
    * from such a page's exact https origin, and it only narrows the menu,
    * never hides it. `again`: the user pressed ↓ or clicked the field a
    * second time, asking for the whole list. `rules`: on a new-password box,
-   * what the page asks of the password.
+   * what the page asks of the password. From a frame, `box` is where the
+   * field shows in the frame's viewport, so the menu can open in the top
+   * page under it (see Autofill.query).
    */
-  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string }
+  | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
   | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean }
@@ -152,6 +154,12 @@ export type ToBackground =
   /** The user themselves submitted a login form here: a trusted click on its submit control, or Enter in one of its fields. */
   | { type: "db:submitted" }
   | { type: "db:menu-close"; token: string; dismissed?: boolean }
+  /**
+   * From a frame whose login field's menu the background opened in the top
+   * page: the user typed in the field, clicked elsewhere in the frame, or
+   * (`dismissed`) pressed esc. The menu goes.
+   */
+  | { type: "db:menu-away"; dismissed?: boolean }
   /**
    * The user clicked into an identity or card field (see content/forms.ts):
    * the menu for it. `section` names the field's section in form snapshot
@@ -215,11 +223,14 @@ export type ToContent =
   | { type: "db:generated"; generated: string }
   /**
    * Which of the form's fields may be filled now (see Approved). With
-   * `measure`, for a frame: where they show, and only if they all do.
+   * `measure`, for a frame: where they show, and only if they all do. With
+   * `sameSite`, a frame whose every frame up to the top page is its site
+   * (see sameSiteTop): its fields get a top page's field checks, without the
+   * visibility reading, which the frames above take of the frame instead.
    */
-  | { type: "db:approve"; form: number; measure: boolean }
-  /** Where the fields of `approval` show now, if every one of them still does. */
-  | { type: "db:approved"; approval: string }
+  | { type: "db:approve"; form: number; measure: boolean; sameSite?: boolean }
+  /** Where the fields of `approval` show now, if every one of them still does (`sameSite`: as for db:approve). */
+  | { type: "db:approved"; approval: string; sameSite?: boolean }
   /**
    * What the top page shows now, to tell whether a sign-in worked (see
    * PageFacts). `username`: the one just submitted, to look for on the page.
@@ -236,8 +247,12 @@ export type ToContent =
   | { type: "db:report" }
   | { type: "db:close-menu"; token: string }
   | { type: "db:resize-menu"; token: string; height: number; width?: number; mode?: SurfaceMode }
-  /** Open the forms menu under `box` (in this page's viewport), for a field in a frame below. Top page only. */
-  | { type: "db:forms-open"; token: string; rows: number; box: Box }
+  /**
+   * Open the menu under `box` (in this page's viewport), for a login,
+   * identity or card field in a frame below; with `mode` "pill", a sign-in
+   * session step's pill on that field instead. Top page only.
+   */
+  | { type: "db:open-at"; token: string; rows: number; box: Box; mode?: "pill" }
   /** Which of the form's identity or card fields may be filled now: those of `section`, or every one of `kind` (see Approved). */
   | { type: "db:forms-approve"; form: number; kind: FormKind; section?: string; measure: boolean }
   /** Where the fields of a forms approval show now, if every one of them still does. */
@@ -245,16 +260,25 @@ export type ToContent =
   /** An identity's or card's values for the fields `approval` named, in form snapshot `form`. */
   | { type: "db:forms-fill"; values: FormValues; form: number; approval: string }
   /**
-   * Puts the surface `token` (folded into its pill) out of the top layer
-   * while frames below are measured, and back after (`hold` false): Chromium
-   * reads nothing as fully visible while anything shows in the top layer.
+   * Puts the surface `token` (folded into its pill) out of sight while
+   * frames below are measured, and back after (`hold` false): Chromium reads
+   * nothing as fully visible while anything shows in the top layer. Answers
+   * whether nothing of Deadbolt's shows now; asked about another token (or
+   * ""), it touches nothing.
    */
-  | { type: "db:forms-hold"; token: string; hold: boolean }
+  | { type: "db:hold"; token: string; hold: boolean }
+  /** To a frame: the menu the top page showed for its field went. */
+  | { type: "db:menu-gone" }
   /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
   | { type: "db:surface"; token: string }
   // Can the user see a frame's form? (see shownInPage)
-  /** To the frame above: where those boxes show in it, through the element `nonce` names. */
-  | { type: "db:frame-child"; nonce: string; boxes: Box[] }
+  /**
+   * To the frame above: where those boxes show in it, through the element
+   * `nonce` names; with `track`, only if a fresh visibility reading of that
+   * element says it's unobscured; with `unsandboxed`, only if that element
+   * has no `sandbox` attribute.
+   */
+  | { type: "db:frame-child"; nonce: string; boxes: Box[]; track?: boolean; unsandboxed?: boolean }
   /** To the frame below: tell the frame above which element you're in. */
   | { type: "db:frame-announce"; nonce: string }
   /** To every frame of a tab: the learning session it joins, or null when it ends. */
@@ -306,6 +330,8 @@ export interface Approved {
   roles: FieldRole[]
   /** With `measure`: where each field shows in the frame's viewport. */
   boxes?: Box[]
+  /** Background only: measured as a same-site frame (see shownInPage). */
+  sameSite?: boolean
 }
 
 /** A content script's answer to db:forms-approve: which identity or card fields may be filled. */
@@ -325,6 +351,8 @@ export interface FillAck {
   filled: FieldRole[]
   /** A generated password a new-password box's `pattern` doesn't take: nothing was written. */
   rejected?: boolean
+  /** A sign-in session's step in a frame: where the last field written shows in the frame's viewport, for its pill in the top page. */
+  box?: Box
 }
 
 /** Broadcast to open extension pages (popup, menus) when the host's state changes. */
