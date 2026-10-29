@@ -757,7 +757,8 @@ async function formFlows(device: Page, worker: Worker, url: string) {
 const DEADBOLT_AAGUID = "3a31ecda-fefc-f251-1f3e-a11bfdc1de5f"
 async function devicePasskeys(device: Page) {
   const reply = (await request(device, { type: "device-passkeys" })).reply
-  if (/private|secret/i.test(JSON.stringify(reply))) throw new Error("device-passkeys holds a passkey's private key")
+  const metadata = new Set(["ref", "vault", "rpId", "credentialId", "username", "created"])
+  if (!Array.isArray(reply.passkeys) || reply.passkeys.some((k) => Object.keys(k).some((key) => !metadata.has(key)))) throw new Error("device-passkeys returned more than public metadata")
   return reply.passkeys as DevicePasskey[]
 }
 type Outcome = { ok: boolean; value: any }
@@ -1065,6 +1066,11 @@ async function passkeyFlows(device: Page, worker: Worker) {
     check(strictRequired.ok && strictRequired.value.id === nativeInfo.credential.id, `Strict hands required UV to the browser too (${strictRequired.ok ? "the browser's passkey" : strictRequired.value})`)
     await request(device, { type: "device-preset", preset: "comfortable" })
 
+    // The offline CI run also chooses among several accounts, not only the
+    // online run that adds a CLI key. Verify the chosen account's actual key.
+    const multiple = await signInInPage(page, device, "multiple", "strict@acme.test", "multiple-account sign-in", { listed: ["kit@acme.test", "strict@acme.test", ...(cliCredential ? ["cli@acme.test"] : [])] })
+    await verifyAssertion(multiple.response, multiple.challenge, strictMade, "multiple-account sign-in")
+
     // Delete through Settings, including the confirmation, not a worker shortcut.
     await device.bringToFront()
     const settings = device.getByRole("button", { name: "Settings", exact: true })
@@ -1089,7 +1095,10 @@ async function passkeyFlows(device: Page, worker: Worker) {
     const cancelled = await outcome(page, "after-delete", "cancelled sign-in settles")
     check(!cancelled.ok && String(cancelled.value).startsWith("NotAllowedError"), `Cancel rejects with NotAllowedError (${cancelled.value})`)
     if (host) {
-      await until("the deletion reaches the CLI", async () => !(await cliPasskeys(host)).some((k) => k.credentialId === kit.id), 90_000)
+      await until("the deletion reaches the CLI", async () => {
+        const ids = (await cliPasskeys(host)).map((k) => k.credentialId)
+        return !ids.includes(kit.id) && ids.includes(cliCredential!.id) && ids.includes(strictMade.id)
+      }, 90_000)
       check(true, "the deletion syncs to the CLI")
     }
   } finally {
