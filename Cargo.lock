@@ -985,7 +985,7 @@ checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
 
 [[package]]
 name = "deadbolt-app"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "deadbolt-client",
@@ -1003,7 +1003,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-autofill"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "aho-corasick",
  "serde",
@@ -1014,7 +1014,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-cli"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-client"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "nix",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "data-encoding",
@@ -1080,7 +1080,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-net"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "data-encoding",
  "getrandom 0.4.3",
@@ -1096,7 +1096,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-send"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "chacha20poly1305",
@@ -1116,7 +1116,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-send-web"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "deadbolt-send",
  "js-sys",
@@ -1128,7 +1128,7 @@ dependencies = [
 
 [[package]]
 name = "deadbolt-store"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "argon2",
  "blake3",

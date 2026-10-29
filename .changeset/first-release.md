@@ -1,5 +1,0 @@
----
-"deadbolt": minor
----
-
-First release: the deadbolt CLI, with prebuilt binaries for macOS and Linux.
