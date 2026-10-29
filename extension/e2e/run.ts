@@ -541,6 +541,31 @@ const appleLogin = (port: string, frame: string, via?: string, cover = false, sa
     <script>addEventListener("message", (e) => { if (e.data?.type === "signed-in") location.assign("/apple/apps?u=" + encodeURIComponent(e.data.account)) })</script>`
 }
 
+/**
+ * Schwab's sign-in bar as www.schwab.com shows it (issue #88): a 630×65
+ * frame in the header (`#schwablmslogin`, "log in form") from
+ * sws-gateway-nr.schwab.com, holding a Login ID box (type text, no name, no
+ * autocomplete), a password box (autocomplete=off) and a "Log in" button,
+ * with no form. Too small to hold a menu: it has to open in the page.
+ */
+const SCHWAB_BAR = `<!doctype html><html><head><meta charset="utf-8"><title>Log in</title><style>
+  body{margin:0;font:13px system-ui,sans-serif;background:#fff}
+  .bar{display:flex;gap:8px;align-items:center;height:65px;padding:0 10px;box-sizing:border-box}
+  input{width:200px;height:34px;box-sizing:border-box;padding:0 8px;border:1px solid #9ca3af;border-radius:4px;font:inherit}
+  button{height:34px;padding:0 16px;border:0;border-radius:4px;background:#00a0df;color:#fff;font:inherit}
+  .sr{position:absolute;left:-9999px}
+</style></head><body><div class="bar">
+  <label class="sr" for="loginIdInput">Login ID</label><input type="text" id="loginIdInput" placeholder="Login ID" maxlength="40">
+  <label class="sr" for="passwordInput">Password</label><input type="password" id="passwordInput" placeholder="Password" autocomplete="off">
+  <button type="button" id="btnLogin">Log in</button>
+</div></body></html>`
+const SCHWAB_HOME = (port: string) => `<!doctype html><html><head><meta charset="utf-8"><title>Charles Schwab | A modern approach to investing &amp; retirement</title><style>
+  body{margin:0;font:15px system-ui,sans-serif;background:#f4f4f5}header{display:flex;justify-content:space-between;align-items:center;height:80px;padding:0 20px;background:#fff;border-bottom:1px solid #e4e4e7}
+  main{padding:40px}
+</style></head><body><header><strong>charles SCHWAB</strong>
+  <iframe id="schwablmslogin" title="log in form" src="http://sws-gateway-nr.schwab.test:${port}/ui/host/?clientId=schwab-prospect&startInSetId=1&redirectUri=https%3A%2F%2Fclient.schwab.test%2F&enableappd=false" width="630" height="65" style="border:0"></iframe>
+</header><main><h1>Own your tomorrow</h1><p>Invest, trade and plan with Schwab.</p></main></body></html>`
+
 const changeForm = `<h1>Change your password</h1><form method="post" action="/home" novalidate>
   <label for="current">Current password</label><input id="current" name="current" type="password" autocomplete="current-password">
   <label for="new">New password</label><input id="new" name="new" type="password" autocomplete="new-password">
@@ -600,6 +625,11 @@ const server = Bun.serve({
         const src = /^http:\/\/[a-z.]+\.test:\d+\/appleauth\//.test(inner) ? inner.replace(/"/g, "") : "about:blank"
         return new Response(`<!doctype html><body style="margin:0"><iframe src="${src}" style="width:100%;height:320px;border:0"></iframe></body>`, { headers: { "content-type": "text/html; charset=utf-8" } })
       }
+      // Schwab's homepage (see SCHWAB_BAR): the sign-in bar is a 65 px frame from another host of the site.
+      case "/schwab/":
+        return new Response(SCHWAB_HOME(url.port), { headers: { "content-type": "text/html; charset=utf-8" } })
+      case "/ui/host/":
+        return new Response(SCHWAB_BAR, { headers: { "content-type": "text/html; charset=utf-8" } })
       case "/apple/apps":
         return html("App Store Connect", `<h1>Apps</h1><p>Signed in as <strong>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</strong>.</p><a href="/apple/login">Sign out</a>`)
       // Step one, the username alone. With ?accounts, the next step is on
@@ -938,7 +968,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
     // *.acme.test is one site on this machine: two origins of it for the sign-in session runs; *.apple.test for Apple's sign-in frame.
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1"],
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1"],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -2612,6 +2642,28 @@ async function frameLogins() {
         await until("the pill says it didn't fill", async () => (await coveredMenu.locator(".pill.failed").count().catch(() => 0)) > 0)
       }
       check((await covered.inputValue("#account_name_text_field")) === "" && (await wants()).length === before, "a frame under a sheet that lets clicks through gets nothing, and the host isn't asked")
+    }
+
+    // Schwab's homepage: a 65 px sign-in bar frame from another host of the
+    // site. The menu opens in the page, below the bar, and fills both boxes.
+    await run.worker.evaluate(() => void (globalThis as unknown as { __seen: string[] }).__seen.splice(0))
+    await page.goto(`http://www.schwab.test:${server.port}/schwab/`)
+    const bar = await until("Schwab's sign-in bar loads", () => page.frames().find((f) => f.url().includes("/ui/host/")) ?? null)
+    if (bar) {
+      await until("the bar's form is found", async () => (await seen()).some((s) => /^db:page@[1-9]\d*:\/ui\/host\/$/.test(s)), 15_000)
+      await bar.click("#loginIdInput")
+      const schwab = await until("the menu opens for the bar's Login ID", menuNow, 15_000)
+      if (schwab) {
+        check(schwab.parentFrame() === page.mainFrame(), "Schwab's 65 px sign-in bar opens the menu in the top page")
+        const m = await (await schwab.frameElement()).boundingBox()
+        const frame = await page.locator("#schwablmslogin").boundingBox()
+        check(!!m && !!frame && m.y >= frame.y + frame.height - 20 && m.height > frame.height, `below the bar, taller than the frame could hold (${JSON.stringify(m)} vs ${JSON.stringify(frame)})`)
+        await shotAround(page, "frame-login-schwab", schwab, "#schwablmslogin")
+        await settled(schwab)
+        await schwab.locator("button.row", { hasText: "admin" }).click()
+        const both = await until("both boxes fill", async () => (await bar.inputValue("#loginIdInput")) === "admin" && (await bar.inputValue("#passwordInput")) === "hunter2")
+        check(!!both, "the pick fills the bar's Login ID and password")
+      }
     }
 
     // A frame on another site, one of the site inside a frame on another
