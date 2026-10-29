@@ -400,6 +400,13 @@ describe("identity and payment forms", () => {
     expect(scanForms()).toEqual([])
   })
 
+  test("a lone email box isn't an address form, unless the site marks it", () => {
+    page(`<form><label for="n">Newsletter</label><input id="n" type="email"></form><form><label for="e">Your email</label><input id="e" type="email"></form>`, "/")
+    expect(scanForms()).toEqual([])
+    page(`<form><input type="email" autocomplete="email"></form>`, "/")
+    expect(formRoles()).toEqual(["email"])
+  })
+
   test("login detection doesn't change on a checkout page", () => {
     page(`<h1>Checkout</h1><form><input type="email" autocomplete="email"><input autocomplete="given-name"><input autocomplete="address-line1"><button>Continue to shipping</button></form>`, "/checkout")
     expect(scanPage().kind).toBeNull()

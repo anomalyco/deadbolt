@@ -5,7 +5,7 @@
 // scanned, each one checked right before it's written.
 
 import type { FormRole, FormsAck, FormsApproved, FormValues } from "../messages"
-import type { FormItemKind } from "../protocol"
+import type { FormKind } from "../protocol"
 import { Approvals } from "./approvals"
 import type { FormControl } from "./detect"
 import { ownBoxes } from "./embed"
@@ -83,7 +83,7 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
 }
 
 /** The section's fields that may be filled now; with `measure`, only if they all show (for a frame). */
-export async function approveForms(state: FormsState, form: number, kind: FormItemKind, section: string | undefined, measure: boolean, ours?: Element | null): Promise<FormsApproved | null> {
+export async function approveForms(state: FormsState, form: number, kind: FormKind, section: string | undefined, measure: boolean, ours?: Element | null): Promise<FormsApproved | null> {
   state.rescan()
   if (state.form() !== form) return null
   const fields = sectionFields(state.fields(), section, kind).filter((f) => fillable(f.el, ours))

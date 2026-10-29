@@ -53,7 +53,7 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
       return autofill.page(sender, message.kind, message.roles, message.form, message.stepped === true, message.idEmpty === true)
     case "db:forms-query":
-      return forms.query(sender, message.kind, message.form, message.section, message.explicit === true, message.box)
+      return forms.query(sender, message.kind, message.form, message.section, message.explicit === true, message.box, message.roles)
     case "db:forms-page":
       return forms.page(sender, message.kinds, message.form)
     case "db:settled":

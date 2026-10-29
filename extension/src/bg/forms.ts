@@ -11,7 +11,7 @@
 // an https page. Every other frame gets nothing.
 
 import { FORM_ROLES, fieldsFor, VERIFIED_FIELDS, type Box, type FormRole, type FormsAck, type FormsApproved, type MenuLoadReply, type PickReply, type QueryReply } from "../messages"
-import type { FormItemKind, FormsReply } from "../protocol"
+import type { FormCard, FormIdentity, FormKind, FormsReply } from "../protocol"
 import { paymentProvider, securePage } from "../payments"
 import { boxesInTop, isBoxes, menuFrameOf, newToken, sendToFrame, type FrameTarget } from "./frames"
 import { fillError, resizeMessage } from "./autofill"
@@ -29,15 +29,17 @@ interface FormsToken {
   owner: FrameTarget
   /** The frame the field is in (the owner, or a frame below it). */
   source: FrameTarget
-  kind: FormItemKind
+  kind: FormKind
   form: number
   section: string
+  /** The host fields the section's fields need: an item with none of them isn't listed. */
+  needs: string[]
   createdAt: number
   menuDocumentId?: string
 }
 
 interface FormsReport extends FrameTarget {
-  kinds: FormItemKind[]
+  kinds: FormKind[]
   form: number
 }
 
@@ -53,7 +55,7 @@ interface Placed extends FrameTarget {
  * provider's frame on an https page. Origins come from the browser's record
  * of the sender; sandboxed and opaque frames get nothing, as do incognito tabs.
  */
-export async function formsTargetFor(sender: chrome.runtime.MessageSender, kind: FormItemKind): Promise<Placed | null> {
+export async function formsTargetFor(sender: chrome.runtime.MessageSender, kind: FormKind): Promise<Placed | null> {
   const tabId = sender.tab?.id
   if (tabId === undefined || sender.tab?.incognito || sender.id !== chrome.runtime.id || !sender.documentId) return null
   const url = senderOrigin(sender)
@@ -144,7 +146,7 @@ export class Forms {
    * every frame and checked on the way: see boxesInTop), and the frame gets
    * no token.
    */
-  async query(sender: chrome.runtime.MessageSender, kind: unknown, form: unknown, section: unknown, explicit: boolean, box: unknown): Promise<QueryReply> {
+  async query(sender: chrome.runtime.MessageSender, kind: unknown, form: unknown, section: unknown, explicit: boolean, box: unknown, roles?: unknown): Promise<QueryReply> {
     if (kind !== "identity" && kind !== "card") return { rows: 0 }
     if (!Number.isSafeInteger(form) || typeof section !== "string" || section.length > 200) return { rows: 0 }
     const source = await formsTargetFor(sender, kind)
@@ -160,20 +162,22 @@ export class Forms {
       at = shown[0]
     }
     await this.host.connect()
+    if (!this.host.capabilities.includes("forms")) return { rows: 0 }
     const state = this.host.status.state
     const site = siteOf(new URL(owner.origin).hostname) ?? owner.origin
+    const needs: string[] = fieldsFor(cleanRoles(roles))
     let rows = 0
     if (state === "locked") {
       if (explicit || !this.lockedShown.has(site)) rows = 1
       this.lockedShown.add(site)
-    } else if (state === "ready" && this.host.capabilities.includes("forms")) {
+    } else if (state === "ready") {
       const reply = await this.list(source.origin).catch(() => null)
-      rows = reply ? (kind === "card" ? reply.cards.length : reply.identities.length) : 0
+      rows = reply ? usable(reply, kind, needs).length : 0
     }
     if (!rows) return { rows: 0 }
     for (const [t, v] of this.tokens) if (Date.now() - v.createdAt > TOKEN_TTL_MS) this.tokens.delete(t)
     const token = newToken()
-    this.tokens.set(token, { owner, source, kind, form: form as number, section, createdAt: Date.now() })
+    this.tokens.set(token, { owner, source, kind, form: form as number, section, needs, createdAt: Date.now() })
     if (!at) return { token, rows }
     const opened = await sendToFrame<boolean>(owner, { type: "db:forms-open", token, rows, box: at })
     if (!opened) this.tokens.delete(token)
@@ -198,7 +202,16 @@ export class Forms {
       const reply = await this.list(t.source.origin)
       const site = siteOf(new URL(t.owner.origin).hostname) ?? new URL(t.owner.origin).hostname
       const into = t.kind === "card" ? this.targets(t).find((x) => x.target.provider)?.target.provider : undefined
-      return { kind: "forms", form: t.kind, site, identities: t.kind === "identity" ? reply.identities : [], cards: t.kind === "card" ? reply.cards : [], verify: t.kind === "card", ...(into ? { into } : {}) }
+      const items = usable(reply, t.kind, t.needs)
+      return {
+        kind: "forms",
+        form: t.kind,
+        site,
+        identities: t.kind === "identity" ? (items as FormIdentity[]) : [],
+        cards: t.kind === "card" ? (items as FormCard[]) : [],
+        verify: t.kind === "card" && reply.canVerify,
+        ...(into ? { into } : {}),
+      }
     } catch {
       return { kind: "status", status: this.host.status }
     }
@@ -216,19 +229,21 @@ export class Forms {
     const t = await this.token(token, sender)
     if (!t) return { ok: false, message: "This menu has expired." }
     const reply = await this.list(t.source.origin).catch(() => null)
-    const item = t.kind === "card" ? reply?.cards.find((c) => c.ref === ref) : reply?.identities.find((i) => i.ref === ref)
+    const item = reply ? usable(reply, t.kind, t.needs).find((i) => i.ref === ref) : undefined
     if (!item) return { ok: false, message: "That isn't here anymore." }
     this.tokens.delete(token)
     const targets = this.targets(t)
-    // The surface folds into its pill before any frame is measured, so it covers none of their fields.
-    if (targets.some((x) => x.target.frameId !== 0)) await sendToFrame(t.owner, { type: "db:forms-settle", token })
-    const approved: Array<{ target: Placed; form: number; approved: FormsApproved }> = []
-    for (const x of targets) {
-      const framed = x.target.frameId !== 0
-      const a = cleanApproved(await sendToFrame(x.target, { type: "db:forms-approve", form: x.form, kind: t.kind, ...(x.section !== undefined ? { section: x.section } : {}), measure: framed }))
-      if (!a) continue
-      if (framed && !(a.boxes && (await boxesInTop(x.target, a.boxes)))) continue
-      approved.push({ target: x.target, form: x.form, approved: a })
+    // Frames below are measured with the pill put away (see db:forms-hold).
+    const framed = targets.some((x) => x.target.frameId !== 0)
+    const hold = async (on: boolean) => {
+      if (framed) await sendToFrame(t.owner, { type: "db:forms-hold", token, hold: on })
+    }
+    await hold(true)
+    let approved: Array<{ target: Placed; form: number; approved: FormsApproved }>
+    try {
+      approved = await this.approveAll(t, targets)
+    } finally {
+      await hold(false)
     }
     // The field the user picked from has to be among them.
     if (!approved.some((a) => a.target.frameId === t.source.frameId)) return { ok: false, message: t.source.frameId === 0 ? "The page changed. Try again." : NOT_SHOWN }
@@ -239,20 +254,39 @@ export class Forms {
     try {
       ;({ values } = await this.host.send({ type: "fill-form", origin: t.source.origin, ref, fields }, verify ? { timeout: VERIFY_TIMEOUT_MS } : {}))
     } catch (err) {
-      return { ok: false, message: formsError(err) }
+      return { ok: false, message: formsError(err, verify) }
     }
+    // Frames below are checked again once the values are in hand.
+    await hold(true)
+    let shown: typeof approved
+    try {
+      shown = []
+      for (const a of approved) if (a.target.frameId === 0 || (await stillShown(a.target, a.approved))) shown.push(a)
+    } finally {
+      await hold(false)
+    }
+    if (!shown.some((a) => a.target.frameId === t.source.frameId)) return { ok: false, message: NOT_SHOWN }
     let filled = 0
-    for (const a of approved) {
-      if (a.target.frameId !== 0 && !(await stillShown(a.target, a.approved))) {
-        if (a.target.frameId === t.source.frameId) return { ok: false, message: NOT_SHOWN }
-        continue
-      }
+    for (const a of shown) {
       const mine = fieldsFor(a.approved.roles)
-      const own = Object.fromEntries(Object.entries(values).filter(([k]) => mine.includes(k)))
+      const own = Object.fromEntries(Object.entries(values).filter(([k]) => (mine as string[]).includes(k)))
       const ack = await sendToFrame<FormsAck>(a.target, { type: "db:forms-fill", values: own, form: a.form, approval: a.approved.approval })
       filled += cleanRoles(ack?.filled).length
     }
     return filled ? { ok: true } : { ok: false, message: "The page changed. Try again." }
+  }
+
+  /** Which fields each target may fill now; a frame below only if every one shows through every frame above. */
+  private async approveAll(t: FormsToken, targets: Array<{ target: Placed; form: number; section?: string }>) {
+    const approved: Array<{ target: Placed; form: number; approved: FormsApproved }> = []
+    for (const x of targets) {
+      const framed = x.target.frameId !== 0
+      const a = cleanApproved(await sendToFrame(x.target, { type: "db:forms-approve", form: x.form, kind: t.kind, ...(x.section !== undefined ? { section: x.section } : {}), measure: framed }))
+      if (!a) continue
+      if (framed && !(a.boxes && (await boxesInTop(x.target, a.boxes)))) continue
+      approved.push({ target: x.target, form: x.form, approved: a })
+    }
+    return approved
   }
 
   async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender, width?: unknown, mode?: unknown) {
@@ -288,9 +322,21 @@ async function stillShown(target: FrameTarget, approved: FormsApproved): Promise
   return isBoxes(boxes) && !!(await boxesInTop(target, boxes))
 }
 
-/** Touch ID turned down, or the card isn't there: say so plainly. */
-export function formsError(err: unknown): string {
-  if (err instanceof HostError && err.code === "cancelled") return "Touch ID was cancelled. Nothing was filled."
+/**
+ * The identities or cards of `kind` that have at least one of the fields
+ * the section needs (all of them when it's not known).
+ */
+export function usable(reply: FormsReply, kind: FormKind, needs: string[]): Array<FormIdentity | FormCard> {
+  const items: Array<FormIdentity | FormCard> = kind === "card" ? reply.cards : reply.identities
+  return needs.length ? items.filter((i) => (i.fields as string[]).some((f) => needs.includes(f))) : items
+}
+
+/**
+ * Touch ID turned down (the agent answers a card fill whose prompt didn't
+ * go through with `failed`), or the item isn't there: say so plainly.
+ */
+export function formsError(err: unknown, verify = false): string {
+  if (err instanceof HostError && (err.code === "cancelled" || (verify && err.code === "failed"))) return "Touch ID didn't confirm it's you. Nothing was filled."
   if (err instanceof HostError && err.code === "not_found") return "That isn't in Deadbolt anymore."
   return fillError(err)
 }

@@ -10,14 +10,14 @@
 // months, years). Text is matched in memory only; nothing here leaves the page.
 
 import { CARD_ROLES, FORM_ROLES, formKindOf, type FormRole } from "../messages"
-import type { FormItemKind } from "../protocol"
+import type { FormKind } from "../protocol"
 import { ignored, isVisible, labelText, type FormControl } from "./detect"
 import { deepQueryAll, openRoots } from "./shadow"
 
 export interface FormField {
   el: FormControl
   role: FormRole
-  kind: FormItemKind
+  kind: FormKind
   /** The section the field belongs to (see sectionsOf): a pick fills every field of its section. */
   section: string
   /** On each box of a card number split into several boxes: how many boxes. */
@@ -66,7 +66,7 @@ const w = (r: RegExp) =>
   new RegExp(r.source.replace(/^\\b\(/, "(?<![\\p{Script=Latin}\\p{Script=Cyrillic}\\p{N}])(?:").replace(/\)\\b$/, ")(?![\\p{Script=Latin}\\p{Script=Cyrillic}\\p{N}])"), "u")
 
 /** Never a card or an address: coupons, gift cards, searches and the like. */
-const NOT_A_FORM_FIELD = w(/\b(gift ?card|coupon|promo|voucher|discount|search|captcha|loyalty|referral|quantity|qty|comment|message|subject)\b/)
+const NOT_A_FORM_FIELD = w(/\b(gift ?card|coupon|promo|voucher|discount|search|captcha|loyalty|referral|quantity|qty|comment|message|subject|newsletter|subscribe)\b/)
 const CARD_CONTEXT = w(/\b(card|credit|debit|cc|kreditkarte|tarjeta|carte|carta|cartao|kaart|カード|卡)\b/)
 
 /** In order: the first that matches wins, so narrower roles come before the ones they'd be mistaken for. */
@@ -233,7 +233,13 @@ export function scanForms(roots = openRoots()): FormField[] {
     const card = cardForms.has(formOf(c.el))
     c.role = roleForDatePart(null, c.el, c.display + c.code, card) ?? (c.el instanceof HTMLSelectElement ? roleFromOptions(c.el, card) : null)
   }
-  return sectionsOf(found.filter((c): c is Candidate & { role: FormRole } => c.role !== null))
+  const fields = sectionsOf(found.filter((c): c is Candidate & { role: FormRole } => c.role !== null))
+  // One lone box guessed from its text (a newsletter's email, a phone
+  // number on its own) isn't an address form; one the site marked is.
+  const tokened = new Set(found.filter((c) => autocompleteRole(c.el) !== null).map((c) => c.el))
+  const size = new Map<string, number>()
+  for (const f of fields) size.set(f.section, (size.get(f.section) ?? 0) + 1)
+  return fields.filter((f) => f.kind === "card" || size.get(f.section)! > 1 || tokened.has(f.el))
 }
 
 const formOf = (el: Element): HTMLFormElement | null => (el as FormControl).form ?? el.closest("form")
@@ -310,7 +316,7 @@ function sectionsOf(found: Array<Candidate & { role: FormRole; split?: number }>
 }
 
 /** The fields of one section; for a card, every card field of the scan (a card is one per page in practice). */
-export function sectionFields(fields: FormField[], section: string | undefined, kind: FormItemKind): FormField[] {
+export function sectionFields(fields: FormField[], section: string | undefined, kind: FormKind): FormField[] {
   return fields.filter((f) => f.kind === kind && (kind === "card" || section === undefined || f.section === section))
 }
 

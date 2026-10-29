@@ -103,6 +103,41 @@ describe("parseHostMessage", () => {
   })
 })
 
+describe("forms", () => {
+  const ref = `${"a".repeat(64)}:${"b".repeat(32)}`
+  const home = `${"a".repeat(64)}:${"c".repeat(32)}`
+  test("forms keeps only well-formed identities and cards, never values", () => {
+    const m = parseHostMessage({
+      id: 1,
+      type: "forms",
+      canVerify: true,
+      identities: [
+        { ref: home, vault: "personal", title: "Home", summary: "Kit Langton · 123 Main St, Brooklyn", fields: ["given-name", "city", "passport"] },
+        { ref: "nope", title: "Bad" },
+      ],
+      cards: [
+        { ref, vault: "personal", title: "Visa •••• 4242", brand: "Visa", last4: "4242", expiry: "2028-08", billing: home, number: "4242424242424242", fields: ["number", "pin"] },
+        { ref, title: "No last four" },
+      ],
+    })
+    expect(m).toEqual({
+      kind: "reply",
+      id: 1,
+      reply: {
+        type: "forms",
+        canVerify: true,
+        identities: [{ ref: home, vault: "personal", title: "Home", summary: "Kit Langton · 123 Main St, Brooklyn", fields: ["given-name", "city"] }],
+        cards: [{ ref, vault: "personal", title: "Visa •••• 4242", brand: "Visa", last4: "4242", expiry: "2028-08", cardholder: undefined, billing: home, fields: ["number"] }],
+      },
+    })
+  })
+  test("fill-form keeps only form fields", () => {
+    const m = parseHostMessage({ id: 2, type: "fill-form", verified: true, values: { number: "4242424242424242", "given-name": "Kit", pin: "9876" } })
+    expect(m).toEqual({ kind: "reply", id: 2, reply: { type: "fill-form", verified: true, values: { number: "4242424242424242", "given-name": "Kit" } } })
+    expect(parseHostMessage({ id: 3, type: "fill-form", values: [] })).toBeNull()
+  })
+})
+
 test("isRef", () => {
   expect(isRef(REF)).toBe(true)
   expect(isRef(REF.toUpperCase())).toBe(false)

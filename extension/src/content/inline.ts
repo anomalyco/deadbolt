@@ -34,7 +34,7 @@ import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
 import { findAccountTile, findProviderButton, type Field, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillForm, takeApproved, type FormsState } from "./formfill"
-import type { FormField } from "./forms"
+import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
 import { provider } from "../signin"
 import { fillable, fillFields, ownValue, visibleBox } from "./fill"
@@ -99,6 +99,8 @@ let menuHeight = 0
 let raises = 0
 /** Set while Deadbolt itself hides and shows the host. */
 let raising = false
+/** The surface is out of the top layer for a moment, while frames below are measured (see hold). */
+let held = false
 /** Which mode the surface is in, and the size the frame asked for in it. */
 let mode: SurfaceMode = "accounts"
 let wanted = { width: 0, height: 0 }
@@ -336,7 +338,7 @@ function position() {
   }
   // While it fades out it lets clicks through (and anything under it would
   // read as a cover): only a surface still in use goes back on top.
-  if (!closing && covered(host)) raise()
+  if (!closing && !held && covered(host)) raise()
   if (host) raf = requestAnimationFrame(position)
 }
 
@@ -477,6 +479,27 @@ function leave(travel = false) {
   setTimeout(done, 900)
 }
 
+/**
+ * Takes the pill out of the top layer (`on`), or puts it back. While
+ * anything shows in the top layer, Chromium's visibility readings say no
+ * field anywhere is fully visible, so the checks of a frame's fields (see
+ * Forms.menuPick) run with it put away for a moment. Only a pill.
+ */
+function hold(on: boolean): boolean {
+  if (!host || mode !== "pill" || closing) return false
+  held = on
+  raising = true
+  try {
+    if (on) host.hidePopover()
+  } catch {
+    // Not shown: nothing to put away.
+  } finally {
+    raising = false
+  }
+  if (!on) show(host)
+  return true
+}
+
 /** The element the open menu hangs from, if one is open. */
 export const menuHost = (): HTMLElement | null => host
 
@@ -489,6 +512,7 @@ export function closeMenu(refocus = false, dismissed = false) {
   const el = host
   host = frame = anchor = null
   anchorBox = null
+  held = false
   el?.remove()
   token = null
   mode = "accounts"
@@ -611,7 +635,8 @@ async function maybeOpenForms(el: FormControl, how: Asked) {
   querying = (async () => {
     const box = isTop ? undefined : fillable(el) ? visibleBox(el) : null
     if (box === null) return
-    const reply = await send<QueryReply>({ type: "db:forms-query", kind: f.kind, form: state.formsForm(), section: f.section, explicit, ...(box ? { box } : {}) })
+    const roles = [...new Set(sectionFields(state.formFields(), f.section, f.kind).map((x) => x.role))]
+    const reply = await send<QueryReply>({ type: "db:forms-query", kind: f.kind, form: state.formsForm(), section: f.section, roles, explicit, ...(box ? { box } : {}) })
     if (!reply?.rows) emptyUntil.set(el, Date.now() + 15_000)
     else if (isTop && reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
   })().finally(() => (querying = null))
@@ -938,9 +963,10 @@ export function initMenu(page: PageState) {
         return true
       case "db:forms-open":
         return void respond(openForFrame(String(message.token), Number(message.rows), message.box))
-      case "db:forms-settle":
-        if (message.token !== token) return void respond(true)
-        pillSettled(900).then(() => respond(true))
+      case "db:forms-hold":
+        if (message.token !== token) return void respond(false)
+        if (!message.hold) return void respond(hold(false))
+        pillSettled(900).then(() => respond(hold(true)))
         return true
       case "db:generated":
         keptGenerated(String(message.generated))
