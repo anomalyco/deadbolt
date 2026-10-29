@@ -83,12 +83,14 @@ pub mod forms;
 mod id;
 pub mod item;
 mod membership;
+pub mod passkeys;
 pub mod password;
 pub mod password_rules;
 pub mod site;
 pub mod site_password;
 pub mod totp;
 mod vault;
+pub mod webauthn;
 
 pub use data::{Item, Version, VersionStatus};
 pub use entry::{Change, DataOp, Entry, Log, LogId, MembershipOp, Payload, Source, valid_name};

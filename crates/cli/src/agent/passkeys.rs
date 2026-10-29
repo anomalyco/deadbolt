@@ -7,22 +7,24 @@
 use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use deadbolt_core::{DataOp, Field, FieldType, Item, ItemId, VaultId};
+use deadbolt_core::{Item, ItemId, VaultId, passkeys as shared};
+#[cfg(test)]
 use zeroize::Zeroizing;
 
-use super::items::create;
 use super::session::{self, Loaded, hex, unhex};
 use super::{Agent, Conversation, ErrorCode, biometric, fail};
 use crate::config::Config;
-use crate::protocol::{Command, FieldInput, LoginRef, Reply, SitePasskey, Verify};
-use crate::webauthn::{self, Ceremony};
+use crate::protocol::{Command, LoginRef, Reply, SitePasskey, Verify};
+use crate::webauthn;
+pub use shared::{NewPasskey, private, user_text};
 
-/// The longest user name kept, in characters.
-const MAX_USER_NAME: usize = 256;
-
-/// Whether `name` is a field no client may see: a passkey's private key.
-pub fn private(item: &Item, name: &str) -> bool {
-    item.kind == "passkey" && name == "private-key"
+fn shared_error(error: shared::Error) -> anyhow::Error {
+    match error {
+        shared::Error::DomainMismatch => fail(ErrorCode::DomainMismatch, error.to_string()),
+        shared::Error::Exists => fail(ErrorCode::Exists, error.to_string()),
+        shared::Error::NotFound => fail(ErrorCode::NotFound, error.to_string()),
+        _ => error.into(),
+    }
 }
 
 /// The relying party id a page at `origin` asks for, checked.
@@ -64,7 +66,7 @@ pub(super) fn passkeys<'a>(
         vault
             .items()
             .into_iter()
-            .filter(|item| item.kind == "passkey" && value(item, "rp-id") == Some(rp))
+            .filter(|item| shared::matches(item, rp))
             .map(move |item| (*id, item))
     })
 }
@@ -86,30 +88,10 @@ pub fn list(s: &Loaded, origin: &str, rp: Option<&str>) -> Result<(String, Vec<S
     Ok((rp, found))
 }
 
-/// A registration the agent checked before asking the user anything.
-pub struct NewPasskey {
-    pub origin: String,
-    pub rp_id: String,
-    pub challenge: String,
-    pub user_id: String,
-    pub user_name: String,
-    /// The WebAuthn display name; empty when the site gave none.
-    pub display_name: String,
-    /// The site's credential ids it doesn't want a second passkey beside.
-    pub exclude: Vec<String>,
-}
-
 /// Refuses a registration when the site already has one of `exclude` here.
 fn check_excluded(s: &Loaded, rp: &str, exclude: &[String]) -> Result<()> {
-    if passkeys(s, rp).any(|(_, item)| {
-        value(&item, "credential-id").is_some_and(|id| exclude.iter().any(|e| e == id))
-    }) {
-        return Err(fail(
-            ErrorCode::Exists,
-            "this site already has a passkey here",
-        ));
-    }
-    Ok(())
+    let items: Vec<_> = passkeys(s, rp).map(|(_, item)| item).collect();
+    shared::check_excluded(&items, rp, exclude).map_err(shared_error)
 }
 
 /// Checks a registration before the user is asked or anything is stored:
@@ -125,29 +107,10 @@ pub fn check_create(
     exclude: &[String],
 ) -> Result<NewPasskey> {
     let rp = rp_id(origin, rp)?;
-    webauthn::challenge(challenge)?;
-    webauthn::user_handle(user_id)?;
-    check_excluded(s, &rp, exclude)?;
-    Ok(NewPasskey {
-        origin: origin.into(),
-        rp_id: rp,
-        challenge: challenge.into(),
-        user_id: user_id.into(),
-        user_name: user_text(user_name),
-        display_name: String::new(),
-        exclude: exclude.to_vec(),
-    })
-}
-
-/// A user name or display name a page gave, as kept: no control
-/// characters, at most [`MAX_USER_NAME`] characters, trimmed.
-pub fn user_text(text: &str) -> String {
-    let text: String = text
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_USER_NAME)
-        .collect();
-    text.trim().into()
+    let new = shared::check_create(origin, Some(&rp), challenge, user_id, user_name, exclude)
+        .map_err(shared_error)?;
+    check_excluded(s, &new.rp_id, exclude)?;
+    Ok(new)
 }
 
 pub struct Created {
@@ -171,70 +134,29 @@ pub fn create_passkey(
     now: i64,
 ) -> Result<Created> {
     check_excluded(s, &new.rp_id, &new.exclude)?;
-    let key = webauthn::generate()?;
-    let made = webauthn::attest(&new.rp_id, &key.credential_id, &key.private_key, verified)?;
-    let client = webauthn::client_data(Ceremony::Create, &new.challenge, &new.origin)?;
-    let credential_id = webauthn::b64(&key.credential_id);
-    let private_key = Zeroizing::new(webauthn::b64(&key.private_key));
     let created = crate::import::onepassword::date(now);
-
-    let mut fields = vec![
-        ("rp-id", new.rp_id.as_str()),
-        ("credential-id", credential_id.as_str()),
-        ("user-handle", new.user_id.as_str()),
-        ("private-key", private_key.as_str()),
-        ("created", created.as_str()),
-    ];
-    if !new.user_name.is_empty() {
-        fields.push(("username", new.user_name.as_str()));
-    }
-    if !new.display_name.is_empty() {
-        fields.push(("display-name", new.display_name.as_str()));
-    }
+    let made = shared::register(new, verified, &created).map_err(shared_error)?;
 
     let same_user = passkeys(s, &new.rp_id)
         .find(|(_, item)| value(item, "user-handle") == Some(new.user_id.as_str()));
     let passkey = if let Some((vault, item)) = same_user {
-        let mut ops: Vec<DataOp> = fields
-            .iter()
-            .map(|(name, value)| {
-                let kind = deadbolt_core::schema("passkey")
-                    .and_then(|s| s.field(name))
-                    .map_or(FieldType::Text, |f| f.kind.clone());
-                DataOp::set(item.id, *name, Field::new(kind, *value))
-            })
-            .collect();
-        if new.user_name.is_empty() && item.fields.contains_key("username") {
-            ops.push(DataOp::remove(item.id, "username"));
-        }
-        if new.display_name.is_empty() && item.fields.contains_key("display-name") {
-            ops.push(DataOp::remove(item.id, "display-name"));
-        }
+        let ops = shared::replace(&item, &made.fields);
         s.update(vault, |v, secret| Ok(v.write(secret, ops)?))?;
         passkey_ref(&vault, &item.id)
     } else {
         let vault = s.resolve(None)?;
-        let inputs = fields
-            .iter()
-            .map(|(name, value)| FieldInput {
-                name: (*name).into(),
-                kind: None,
-                value: (*value).into(),
-            })
-            .collect();
-        let info = create(s, None, "passkey", None, inputs)?;
-        LoginRef {
-            vault: hex(vault.as_bytes()),
-            item: info.id,
-        }
+        let (id, _) = s.update(vault, |v, secret| {
+            Ok(v.create_item(secret, "passkey", None, made.fields)?)
+        })?;
+        passkey_ref(&vault, &id)
     };
     Ok(Created {
         passkey,
-        credential_id,
-        client_data_json: webauthn::b64(&client),
-        attestation_object: webauthn::b64(&made.attestation_object),
-        authenticator_data: webauthn::b64(&made.authenticator_data),
-        public_key: webauthn::b64(&made.public_key),
+        credential_id: made.credential_id,
+        client_data_json: made.client_data_json,
+        attestation_object: made.attestation_object,
+        authenticator_data: made.authenticator_data,
+        public_key: made.public_key,
     })
 }
 
@@ -250,22 +172,17 @@ pub fn find(s: &Loaded, passkey: &LoginRef, rp: &str) -> Result<(VaultId, Item)>
         .and_then(|v| v.item(&id))
         .filter(|item| !item.deleted && item.kind == "passkey")
         .ok_or_else(not_found)?;
-    if value(&item, "rp-id") != Some(rp) {
-        return Err(fail(
+    shared::validate(&item, rp).map_err(|error| match error {
+        shared::Error::DomainMismatch => fail(
             ErrorCode::DomainMismatch,
             format!("this passkey isn't for {rp}"),
-        ));
-    }
+        ),
+        other => shared_error(other),
+    })?;
     Ok((vault, item))
 }
 
-pub struct Assertion {
-    pub credential_id: String,
-    pub client_data_json: String,
-    pub authenticator_data: String,
-    pub signature: String,
-    pub user_handle: String,
-}
+pub use shared::Assertion;
 
 /// Signs `challenge` for the page at `origin` with the passkey `passkey`
 /// for the relying party `rp` (checked by [`rp_id`]).
@@ -278,20 +195,7 @@ pub fn sign(
     verified: bool,
 ) -> Result<Assertion> {
     let (_, item) = find(s, passkey, rp)?;
-    let unreadable = || anyhow!("this passkey is incomplete");
-    let private_key = Zeroizing::new(
-        webauthn::unb64(value(&item, "private-key").ok_or_else(unreadable)?)
-            .map_err(|_| unreadable())?,
-    );
-    let client = webauthn::client_data(Ceremony::Get, challenge, origin)?;
-    let (data, signature) = webauthn::assert(rp, &private_key, &client, verified)?;
-    Ok(Assertion {
-        credential_id: value(&item, "credential-id").ok_or_else(unreadable)?.into(),
-        client_data_json: webauthn::b64(&client),
-        authenticator_data: webauthn::b64(&data),
-        signature: webauthn::b64(&signature),
-        user_handle: value(&item, "user-handle").ok_or_else(unreadable)?.into(),
-    })
+    shared::sign(&item, origin, rp, challenge, verified).map_err(shared_error)
 }
 
 impl Agent {

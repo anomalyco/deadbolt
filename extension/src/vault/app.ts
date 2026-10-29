@@ -2,15 +2,17 @@
 // (the same views in a wider frame). It sets the vault up (pairing with a
 // device that has it, or a new one), unlocks it, and shows it: search across
 // every login with this site's first, a login's details with its current
-// one-time code, adding and editing logins, and the settings (devices, the
-// lock preset, the vault's name). Passphrases and passwords go to the
+// one-time code, adding and editing logins, the settings (devices, passkeys,
+// the lock preset, the vault's name), and a page's passkey call in the popup,
+// as the native popup asks it. Passphrases and passwords go to the
 // background in one message and are never kept here or in storage.
 
-import type { DeviceCommand, DeviceReply, LockPreset, PopupReply, Reauth, ReauthChanged, Status, StatusChanged, VaultDevice } from "../messages"
+import type { DeviceCommand, DevicePasskey, DeviceReply, LockPreset, PasskeyChoice, PasskeyPrompt, PopupReply, Reauth, ReauthChanged, Status, StatusChanged, VaultDevice } from "../messages"
 import { CLIPBOARD_PERMISSIONS, record } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
+import { passkeyCard } from "../ui/passkey"
 import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from "./kit"
 import { detailView, editView, listView } from "./logins"
 import { settingsView } from "./settings"
@@ -31,13 +33,17 @@ export interface View {
   leave?: () => void
 }
 
-/** This tab's site in the popup: its logins, an offer to save, and the tab to fill. */
+/** This tab's site in the popup: its logins, an offer to save, a passkey call waiting, and the tab to fill. */
 export interface Site {
   tabId: number
   host: string
   accounts: Account[]
   offer?: PopupReply["offer"]
+  passkey?: PasskeyPrompt
 }
+
+/** How long the popup stays open after a passkey choice for the passphrase prompt it leads to. */
+const PASSKEY_REAUTH_MS = 10_000
 
 export interface Sync {
   /** Unix seconds of the latest sync with any other device. */
@@ -52,6 +58,8 @@ export class App {
   status: Status = { state: "connecting" }
   logins: Account[] | null = null
   devices: VaultDevice[] | null = null
+  /** The vault's passkeys (never their keys), for settings. */
+  passkeys: DevicePasskey[] | null = null
   vaultName = ""
   preset: LockPreset = "comfortable"
   site: Site | null = null
@@ -127,6 +135,8 @@ export class App {
         return message(icon("plug"), "Deadbolt isn't running", "Reload the extension and try again.")
     }
     if (this.reauth) return reauthView(this, this.reauth)
+    // A page's passkey call: when one is waiting, the popup shows only this, as the native one does.
+    if (this.surface === "popup" && this.site?.passkey) return this.passkeyView(this.site.tabId, this.site.passkey)
     switch (this.route.name) {
       case "list":
         return listView(this)
@@ -244,6 +254,28 @@ export class App {
     this.show(-1)
   }
 
+  private passkeyView(tabId: number, prompt: PasskeyPrompt): View {
+    const card = passkeyCard(prompt, tabId, { chosen: (choice) => void this.passkeyChosen(prompt, choice), ended: () => void this.refresh() })
+    return { el: h("section", { class: "view" }, card), focus: () => card.querySelector<HTMLElement>(".btn.primary")?.focus() }
+  }
+
+  /**
+   * The background took a passkey choice. Under Strict a sign-in or save asks
+   * for the passphrase next (`prompt.passphrase`): the popup stays open until
+   * that prompt comes, and shows it. Otherwise the page takes it from here.
+   */
+  private async passkeyChosen(prompt: PasskeyPrompt, choice: PasskeyChoice) {
+    if (this.site?.passkey?.id === prompt.id) this.site.passkey = undefined
+    if (!prompt.passphrase || (choice.action !== "use" && choice.action !== "save")) return window.close()
+    const until = Date.now() + PASSKEY_REAUTH_MS
+    await this.loadReauth()
+    while (!this.reauth && this.status.state === "ready" && Date.now() < until) {
+      await new Promise((done) => setTimeout(done, 250))
+      await this.loadReauth()
+    }
+    if (!this.reauth) window.close()
+  }
+
   /** The vault just opened (unlock, create, join): show it, unless a status push already did. */
   opened() {
     if (this.shell === this.status.state) return
@@ -265,6 +297,7 @@ export class App {
     if (this.status.state !== "ready") {
       this.logins = null
       this.devices = null
+      this.passkeys = null
       this.site = null
       this.reauth = null
     }
@@ -277,7 +310,13 @@ export class App {
   /** Reads the vault's logins, devices and settings again, and this tab's site, then lets the view follow. */
   async refresh() {
     if (this.status.state !== "ready") return
-    const [l, d, s, site] = await Promise.all([this.run({ type: "device-logins" }), this.run({ type: "device-devices" }), this.run({ type: "device-settings" }), this.loadSite()])
+    const [l, d, s, k, site] = await Promise.all([
+      this.run({ type: "device-logins" }),
+      this.run({ type: "device-devices" }),
+      this.run({ type: "device-settings" }),
+      this.run({ type: "device-passkeys" }),
+      this.loadSite(),
+    ])
     if (this.status.state !== "ready") return this.render()
     if (l.ok && Array.isArray(l.reply.accounts)) this.logins = l.reply.accounts.map(account).filter((a): a is Account => a !== null).sort((a, b) => a.title.localeCompare(b.title))
     if (d.ok && Array.isArray(d.reply.devices)) {
@@ -285,7 +324,12 @@ export class App {
       if (typeof d.reply.vault === "string") this.vaultName = d.reply.vault
     }
     if (s.ok && typeof s.reply.preset === "string") this.preset = s.reply.preset as LockPreset
+    if (k.ok && Array.isArray(k.reply.passkeys))
+      this.passkeys = k.reply.passkeys.map(devicePasskey).filter((x): x is DevicePasskey => x !== null).sort((a, b) => a.rpId.localeCompare(b.rpId) || (a.username ?? "").localeCompare(b.username ?? ""))
+    const prompt = this.site?.passkey?.id
     this.site = site
+    // A passkey call came or went: it replaces the whole view.
+    if (site?.passkey?.id !== prompt && !this.reauth) return this.show(0)
     this.view?.update?.()
     this.paintChrome()
   }
@@ -302,7 +346,7 @@ export class App {
     if (tab?.id === undefined) return null
     const reply = (await chrome.runtime.sendMessage({ type: "db:popup-load", tabId: tab.id }).catch(() => null)) as PopupReply | null
     if (!reply || reply.unfillable || !(reply.site || reply.host)) return null
-    return { tabId: tab.id, host: reply.site || reply.host || "", accounts: reply.accounts, offer: reply.offer }
+    return { tabId: tab.id, host: reply.site || reply.host || "", accounts: reply.accounts, offer: reply.offer, passkey: reply.passkey }
   }
 
   /** Follows the background's status pushes, and starts. */
@@ -343,9 +387,25 @@ export class App {
   }
 }
 
+const REAUTH_KINDS: ReadonlyArray<Reauth["kind"]> = ["card", "passkey-get", "passkey-create"]
+
 function reauthOf(v: unknown): Reauth | null {
   const r = v as Partial<Reauth> | null
-  return r && typeof r.id === "string" && typeof r.title === "string" && typeof r.site === "string" ? { id: r.id, title: r.title, site: r.site } : null
+  if (!r || typeof r.id !== "string" || typeof r.title !== "string" || typeof r.site !== "string") return null
+  return { id: r.id, title: r.title, site: r.site, ...(REAUTH_KINDS.includes(r.kind) ? { kind: r.kind } : {}) }
+}
+
+function devicePasskey(v: unknown): DevicePasskey | null {
+  const k = v as Partial<DevicePasskey> | null
+  if (!k || typeof k.ref !== "string" || typeof k.vault !== "string" || typeof k.rpId !== "string" || typeof k.credentialId !== "string") return null
+  return {
+    ref: k.ref,
+    vault: k.vault,
+    rpId: k.rpId,
+    credentialId: k.credentialId,
+    ...(typeof k.username === "string" && k.username ? { username: k.username } : {}),
+    ...(typeof k.created === "string" && k.created ? { created: k.created } : {}),
+  }
 }
 
 function vaultDevice(v: unknown): VaultDevice | null {

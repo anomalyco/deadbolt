@@ -1078,6 +1078,7 @@ dependencies = [
  "ed25519-dalek",
  "getrandom 0.4.3",
  "hmac",
+ "p256",
  "proptest",
  "psl",
  "serde",

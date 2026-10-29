@@ -3,8 +3,9 @@
 The extension is its own Deadbolt device: a fresh Ed25519 `DeviceSecret`, a
 membership entry and an encrypted vault replica. A CLI on the same computer is
 another peer, not a required helper. The standalone build supports daily login
-autofill, save/update offers, password generation and identity/card filling.
-Passkeys and the other limitations below still use the browser's own fallback;
+autofill, save/update offers, password generation, identity/card filling and
+ES256 passkey registration and sign-in. Unsupported WebAuthn ceremonies and the
+other limitations below still use the browser's own fallback;
 there is no silent fallback to a native host.
 
 ## Architecture
@@ -29,6 +30,44 @@ The device supports a single vault, login create/update/list/fill, save/update
 offers after sign-in, generated passwords, identity/card fills, passphrase
 lock/unlock, joining an existing vault or inviting a CLI device, and bidirectional
 sync. Unsupported operations fail rather than silently delegating to a native host.
+
+### Passkeys
+
+The native agent and standalone worker call `deadbolt-core::passkeys` and
+`deadbolt-core::webauthn`: shared RP/origin validation, exclusion checks,
+registration fields and replacement planning, ES256 signing, canonical CBOR,
+client data and authenticator flags. A synced passkey has the same item schema
+and PKCS#8 key on either device. Sign counters remain zero (as native requires
+for multi-device passkeys); backup eligible/backed-up flags remain set.
+
+The existing page bridge, same-origin ancestor and Permissions Policy checks,
+toolbar confirmation/account chooser and conditional inline-menu visibility
+checks apply unchanged. A page cannot supply its own trusted origin or consent.
+Standalone advertises `passkeys`; registration commits the encrypted item before
+returning attestation and wakes sync. Registering the same account replaces its
+credential in place; exclusions are checked again immediately before the write.
+Assertions re-read the selected account after consent. Settings lists only site,
+account and creation date and can delete a passkey; the signed tombstone syncs
+to CLI/app peers. No management or ceremony response contains the private key.
+
+Strict asks for the local passphrase on every preferred-verification ceremony,
+where native with Touch ID would prompt. `discouraged` skips reauthentication as
+native does. Comfortable/Relaxed use the native Touch-ID-off rule: the explicit
+popup/menu pick supplies user presence. A passphrase is **not** represented as
+Touch ID: `canVerify` and the UV flag stay false. Required-UV ceremonies fall
+back to the browser, and the Rust adapter independently refuses them.
+
+The existing passphrase prompt/backoff is shared with card fills. Cancellation,
+navigation, replacement and lock end the waiting request. A slow passphrase
+check produces only a short-lived one-shot authorization bound to that exact
+ceremony, not a registration or signature; the background spends it only while
+the request is still live. As native, cancellation after the final write was
+sent can leave a saved passkey whose reply the page never received; it can be
+deleted in Settings. One Strict prompt waits at a time across tabs; a newer
+prompt cancels the older one, as for standalone card fills. Worker loss
+discards authorizations. Standalone also
+uses the host's ceremony token bucket (10 then one/second) and four-in-flight
+limit. Listing passkeys does not keep the vault unlocked.
 
 ### Shared autofill rules
 
@@ -332,6 +371,19 @@ and generated passwords on signup and password-change forms. Submit flows use
 trusted localhost: HTTP `.test` pages lack Web Crypto, so the shared content
 script cannot track typed password values there.
 
+Every run also uses a localhost WebAuthn page and the real popup/menu to
+register, sign in modally and conditionally, and choose an account. An
+independent WebAuthn server verifier checks ES256 signatures, origin, RP,
+AAGUID, backup flags, zero counters and UV=false. A virtual browser authenticator
+checks required-UV fallback. Strict checks wrong/right passphrases for both
+registration and assertion and skips reauth for discouraged UV. Settings
+deletion exercises Cancel and Delete and removes that account from subsequent
+choosers; locking and restarting preserve the remaining passkeys and tombstones.
+The online runs additionally sign with a browser-created passkey through the
+CLI's real browser host, register a CLI passkey and sign with it in the browser,
+and verify that deletion reaches the CLI. These use the same signed log and
+passkey schema as app devices; no separate passkey sync protocol is introduced.
+
 The full run adds a real CLI over n0's public relays, so it stays out of CI. It
 pairs a CLI started with `deadbolt join`, checks the browser's login reached it and
 both devices are listed, and never asks the extension to sync: a browser write
@@ -379,25 +431,17 @@ The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
    browser-lifetime guarantees and biometric card reauthentication.
 4. Add WebAuthn PRF/passkey unlock with capability detection; review key wrapping,
    extension origin binding and memory/permission boundaries.
-5. Finish OTP/identity/card editing, passkeys and learning; harden
+5. Finish OTP/identity/card editing and learning; harden
    packaging/update/CSP permissions, measure wasm size/unlock across devices, and
    decide native-path retirement.
 
 ## Remaining limitations
 
 - One vault per browser device; no native-host discovery or automatic migration.
-- No passkey registration/assertion capability and no biometric/PRF unlock.
-  WebAuthn falls back to the browser. A headless check with an unlocked standalone
-  vault verified browser-owned ES256 resident-key registration and assertion with
-  required user verification, no advertised passkey capability and no native
-  messaging. Standalone passkey storage is a separate extraction across
-  `cli/src/webauthn.rs` (ES256/CBOR/client data), `agent/passkeys.rs` (RP and
-  exclusion checks, listing, signing and mutation planning) and the browser host's
-  ceremony adapter. Move the pure crypto and validation into core, then add
-  wasm storage/consent/cancellation adapters, registration and assertion e2e,
-  and durable-save/exclusion-race checks. Initially report `canVerify=false` and
-  UV=false, handing required-UV ceremonies to the browser; passphrase card
-  reauthentication must not silently claim native Touch ID verification.
+- No biometric/PRF unlock or passkey UV provider. Required-UV WebAuthn ceremonies
+  use the browser, not a false claim that the local passphrase performed Touch ID.
+  As native, passkeys are ES256 with `none` attestation only, with no editing,
+  import/export, PRF or largeBlob support.
 - No standalone Activity log or learning log. Neither capability is advertised.
 - The vault UI edits logins only: other item kinds and OTP secrets must be created
   on a peer and synced. No automatic save/update offers for identities or cards.

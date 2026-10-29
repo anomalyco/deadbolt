@@ -5,6 +5,7 @@ mod forms;
 mod generate;
 mod join;
 mod opfs;
+mod passkeys;
 mod wire;
 
 use crate::policy::{self, Preset};
@@ -126,6 +127,8 @@ enum Error {
     Json(#[from] serde_json::Error),
     #[error(transparent)]
     Generation(#[from] deadbolt_core::site_password::Error),
+    #[error(transparent)]
+    Passkey(#[from] deadbolt_core::passkeys::Error),
 }
 
 struct Loaded {
@@ -856,7 +859,7 @@ async fn dispatch(mut body: Value) -> Result<Value> {
                 "not-set-up"
             };
             Ok(
-                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms"]}),
+                json!({"type":"hello", "protocol":3, "version":env!("CARGO_PKG_VERSION"), "status":status, "capabilities":["list", "fill", "check", "save", "generate", "forms", "passkeys"]}),
             )
         }
         "device-create" => {
@@ -902,6 +905,8 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "device-join-finish" => join::finish(&mut body).await,
         "device-sync" => sync_now(&body).await,
         "device-logins" => all_logins(),
+        "device-passkeys" => passkeys::all(),
+        "device-delete" => passkeys::delete(&body),
         "device-item" => login_detail(&body),
         "device-secret" => login_secret(&mut body),
         "device-save" => edit_login(&body),
@@ -931,6 +936,11 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "generate-drop" => generate::drop_candidate(&body),
         "forms" => forms::list(&body),
         "fill-form" => forms::fill(&mut body),
+        "passkey-list" => passkeys::list(&body),
+        "passkey-create" => passkeys::create(&mut body),
+        "passkey-get" => passkeys::get(&mut body),
+        "passkey-authorize" => passkeys::authorize(&mut body),
+        "passkey-finish" => passkeys::finish(&body),
         "list" => list_logins(&body),
         "fill" => fill_login(&body),
         "check" => check_login(&body),
@@ -958,7 +968,7 @@ fn plain(error: &Error) -> String {
         | Error::DomainMismatch
         | Error::NotFound
         | Error::Protocol(_) => error.to_string(),
-        Error::Generation(_) => error.to_string(),
+        Error::Generation(_) | Error::Passkey(_) => error.to_string(),
         Error::Store(deadbolt_store::Error::WrongPassphrase) => Error::WrongPassphrase.to_string(),
         Error::Store(_) | Error::Decode(_) | Error::Json(_) => STORAGE.into(),
         Error::Core(_) | Error::Application(_) => {
@@ -1016,6 +1026,12 @@ pub async fn request(body: JsValue) -> std::result::Result<JsValue, JsValue> {
         Ok(reply) => reply,
         Err(error) => {
             let code = match error {
+                Error::Passkey(ref error) => match error {
+                    deadbolt_core::passkeys::Error::DomainMismatch => "domain_mismatch",
+                    deadbolt_core::passkeys::Error::Exists => "exists",
+                    deadbolt_core::passkeys::Error::NotFound => "not_found",
+                    _ => "failed",
+                },
                 Error::Generation(ref error) => match error {
                     deadbolt_core::site_password::Error::Expired => "not_found",
                     deadbolt_core::site_password::Error::Refused(

@@ -12,8 +12,8 @@
 
 import { DEFAULT_PRESET, isPreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { DeviceCommand, DeviceReply, LockPreset, Reauth, ReauthChanged, Status } from "../messages"
-import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type FillFormReply, type ReplyFor, type RequestBody } from "../protocol"
-import { cancelled, HostError, type Listener, type ReauthAsk, type SendOptions, type VaultBackend } from "./backend"
+import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
+import { cancelled, HostError, type Listener, type ReauthAsk, type ReauthBody, type ReauthReply, type SendOptions, type VaultBackend } from "./backend"
 import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, isCopied, type Copied } from "./clipboard"
 import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultClipboard, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
 
@@ -35,7 +35,7 @@ const SLOW_MS: Partial<Record<string, number>> = {
 }
 /** How long a fill waits for its passphrase before it's dropped. */
 const REAUTH_MS = 2 * 60_000
-const EXPIRED = "This fill isn't waiting anymore. Pick the card in the page again."
+const EXPIRED = "This request isn't waiting anymore. Try again on the page."
 
 /** The chosen preset (src/device-rules.ts), in chrome.storage.local: a setting, nothing secret. */
 const PRESET_KEY = "deadbolt.lockPreset"
@@ -59,11 +59,11 @@ export const backoff = (fails: number) => (fails < FREE_TRIES ? 0 : Math.min(MAX
 /**
  * What this device does today, as the vault's hello names it. Anything else
  * is refused here, before the vault sees it, and no capability is claimed
- * for it: passkeys and the learning log are follow-ups.
+ * for it. The learning log is a follow-up.
  */
-const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form"])
+const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel"])
 /** Requests that count as use for the idle lock. Listing a page's logins or forms doesn't (docs/autofill.md). */
-const USES = new Set<string>(["fill", "save", "fill-form", "generate"])
+const USES = new Set<string>(["fill", "save", "fill-form", "generate", "passkey-create", "passkey-get"])
 
 /**
  * As the native host (crates/cli/src/browser/host.rs): checks are a password
@@ -72,12 +72,14 @@ const USES = new Set<string>(["fill", "save", "fill-form", "generate"])
  */
 const CHECKS_RATE = { capacity: 20, everyMs: 1000 }
 const FILLS_RATE = { capacity: 60, everyMs: 250 }
-const RATED: Partial<Record<string, "checks" | "fills">> = {
+const RATED: Partial<Record<string, "checks" | "fills" | "passkeys">> = {
   check: "checks",
   "generate-check": "checks",
   fill: "fills",
   generate: "fills",
   "fill-form": "fills",
+  "passkey-create": "passkeys",
+  "passkey-get": "passkeys",
 }
 
 /** A token bucket: `capacity` at once, refilled one per `everyMs`. The host's Bucket, on Date.now(). */
@@ -115,6 +117,7 @@ const PAGE_READS = new Set<string>([
   "device-status",
   "device-lock",
   "device-logins",
+  "device-passkeys",
   "device-devices",
   // A login's details, which an open detail asks again for every new one-time code.
   "device-item",
@@ -146,7 +149,9 @@ const unsupported = () => new HostError("failed", "The browser-only Deadbolt can
 interface Pending {
   prompt: Reauth
   tabId: number
-  body: Extract<RequestBody, { type: "fill-form" }>
+  body: ReauthBody
+  /** Two open vault surfaces may answer; a passkey authorization is spent once. */
+  confirming?: Promise<DeviceReply>
   /** The device.html tab opened to ask, closed again once it's answered. */
   opened?: number
   /**
@@ -155,7 +160,7 @@ interface Pending {
    * once none is and the fill still waits (a wrong one), it gets REAUTH_MS again.
    */
   checking(on: boolean): void
-  settle(result: { reply: FillFormReply } | { error: HostError }): void
+  settle(result: { reply: ReauthReply } | { error: HostError }): void
 }
 
 export class StandaloneBackend implements VaultBackend {
@@ -178,7 +183,8 @@ export class StandaloneBackend implements VaultBackend {
    * a newer fill never counts on one of them to show its prompt.
    */
   private closing = new Set<number>()
-  private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE) }
+  private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE), passkeys: new Bucket({ capacity: 10, everyMs: 1000 }) }
+  private ceremonies = 0
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -257,7 +263,7 @@ export class StandaloneBackend implements VaultBackend {
       const reply = await this.request({ type: "hello" }, TIMEOUT_MS)
       if (reply.type !== "hello") throw new HostError("failed", UNREADABLE)
       // Only what this build sends on: a capability it would refuse is never offered.
-      this.capabilities = reply.capabilities.filter((c) => SUPPORTED.has(c))
+      this.capabilities = reply.capabilities.filter((c) => c === "passkeys" || SUPPORTED.has(c))
       if (reply.protocol !== PROTOCOL) {
         this.setStatus({ state: "unavailable", detail: "This extension and its vault are different versions. Reload the extension." }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
@@ -270,13 +276,24 @@ export class StandaloneBackend implements VaultBackend {
 
   async send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, { timeout = TIMEOUT_MS, signal }: SendOptions = {}): Promise<ReplyFor[T]> {
     if (signal?.aborted) throw cancelled()
-    // `onId` names a request for passkey-cancel; passkeys aren't supported here.
+    // Standalone cancels through the ceremony's AbortSignal, including its
+    // passphrase prompt. There is no native prompt/request id to cancel.
+    if (body.type === "passkey-cancel") return { type: "passkey-cancelled", found: false } as ReplyFor[T]
     if (!SUPPORTED.has(body.type)) throw unsupported()
     // Refused before the vault sees it, and before it counts as use.
     const rated = RATED[body.type]
     if (rated && !this.buckets[rated].take()) throw slowDown()
+    const ceremony = body.type === "passkey-create" || body.type === "passkey-get"
+    if (ceremony && this.ceremonies >= 4) throw slowDown()
     if (USES.has(body.type)) this.used()
-    const reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
+    if (ceremony) this.ceremonies++
+    let reply
+    try {
+      reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
+    } finally {
+      if (ceremony) this.ceremonies--
+    }
+    if (signal?.aborted) throw cancelled()
     if (reply.type === "error") {
       if (reply.code === "locked" && this.status.state === "ready") void this.hello("locked")
       throw new HostError(reply.code, reply.message)
@@ -407,11 +424,12 @@ export class StandaloneBackend implements VaultBackend {
    * popup opens over the tab if Chrome lets it; otherwise device.html opens
    * in a new tab. A page already open hears of it.
    */
-  reauth(body: Extract<RequestBody, { type: "fill-form" }>, ask: ReauthAsk, signal: AbortSignal): Promise<FillFormReply> {
+  reauth<T extends ReauthBody["type"]>(body: Extract<ReauthBody, { type: T }>, ask: ReauthAsk, signal: AbortSignal): Promise<ReplyFor[T]> {
+    const request: ReauthBody = body
     if (signal.aborted) return Promise.reject(cancelled())
     if (this.status.state !== "ready") return Promise.reject(new HostError("locked", "Deadbolt is locked. Nothing was filled."))
     this.endReauth(cancelled())
-    return new Promise<FillFormReply>((resolve, reject) => {
+    return new Promise<ReplyFor[T]>((resolve, reject) => {
       let done = false
       let timer: ReturnType<typeof setTimeout> | undefined
       /** Passphrases being checked for it now (the popup and device.html may both answer). */
@@ -422,9 +440,9 @@ export class StandaloneBackend implements VaultBackend {
       }
       const abort = () => p.settle({ error: cancelled() })
       const p: Pending = {
-        prompt: { id: newId(), title: ask.title, site: ask.site },
+        prompt: { id: newId(), title: ask.title, site: ask.site, kind: request.type === "fill-form" ? "card" : request.type },
         tabId: ask.tabId,
-        body: { type: "fill-form", origin: body.origin, ref: body.ref, fields: [...body.fields] },
+        body: structuredClone(body),
         checking: (on) => {
           if (done) return
           checks = Math.max(0, checks + (on ? 1 : -1))
@@ -443,7 +461,7 @@ export class StandaloneBackend implements VaultBackend {
             reauthChanged()
           }
           // A fill goes on once its page is in front again, where its fields are checked once more.
-          if ("reply" in result) void left.catch(() => {}).then(() => resolve(result.reply))
+          if ("reply" in result) void left.catch(() => {}).then(() => resolve(result.reply as ReplyFor[T]))
           else reject(result.error)
         },
       }
@@ -530,14 +548,29 @@ export class StandaloneBackend implements VaultBackend {
    * to the vault in this one request and is kept nowhere.
    */
   private async confirm(id: string, passphrase: string, started: number): Promise<DeviceReply> {
-    const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
     const p = this.pending
-    if (!p || p.prompt.id !== id) return fail(EXPIRED, "expired")
+    if (!p || p.prompt.id !== id) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
+    if (p.body.type === "fill-form") return this.confirmOnce(p, passphrase, started)
+    if (p.confirming) return p.confirming
+    p.confirming = this.confirmOnce(p, passphrase, started).finally(() => { p.confirming = undefined })
+    return p.confirming
+  }
+
+  private async confirmOnce(p: Pending, passphrase: string, started: number): Promise<DeviceReply> {
+    const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
     let raw: Record<string, unknown>
     // The KDF may outlast the time left to answer: the fill waits on it, not the clock.
     p.checking(true)
     try {
-      raw = await this.raw({ ...p.body, passphrase }, SLOW_MS["device-reauth-confirm"]!)
+      const passkey = p.body.type !== "fill-form"
+      raw = await this.raw(passkey ? { type: "passkey-authorize", ceremony: p.body, passphrase } : { ...p.body, passphrase }, SLOW_MS["device-reauth-confirm"]!)
+      // Checking the passphrase does not register/sign. Only a still-live
+      // ceremony may spend its one-shot, command-bound authorization.
+      if (passkey && raw.type === "passkey-authorized") {
+        await this.tried("right")
+        if (this.pending !== p) return fail(EXPIRED, "expired")
+        raw = await this.raw({ type: "passkey-finish", token: raw.token }, TIMEOUT_MS)
+      }
     } catch (err) {
       p.checking(false)
       const error = err instanceof HostError ? err : new HostError("failed", UNREADABLE)
@@ -552,14 +585,14 @@ export class StandaloneBackend implements VaultBackend {
     if (this.pending !== p) return fail(EXPIRED, "expired")
     const reply = parseReply(raw)
     if (reply?.type === "error" && reply.code === "wrong_passphrase") return fail(reply.message || "That passphrase isn't right.", "wrong_passphrase")
-    if (reply?.type !== "fill-form") {
-      const error = reply?.type === "error" ? new HostError(reply.code, reply.message || "Deadbolt couldn't fill that.") : new HostError("failed", UNREADABLE)
+    if (reply?.type !== REPLY_TYPE[p.body.type]) {
+      const error = reply?.type === "error" ? new HostError(reply.code, reply.message || "Deadbolt couldn't complete that request.") : new HostError("failed", UNREADABLE)
       p.settle({ error })
       // A fresh worker answers locked: the page should show Unlock, not a vault that's gone.
       if (error.code === "locked" && this.status.state === "ready") await this.hello("locked")
       return fail(error.message, reply?.type === "error" ? reply.code : undefined)
     }
-    p.settle({ reply })
+    p.settle({ reply: reply as ReauthReply })
     return { ok: true, reply: { type: "device-reauth-confirm", ok: true }, ms: Date.now() - started, status: this.status }
   }
 
@@ -723,13 +756,15 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
     case "device-status":
     case "device-lock":
     case "device-logins":
+    case "device-passkeys":
     case "device-devices":
     case "device-settings":
       return { type: c.type }
     case "device-sync":
       return c.wait === true ? { type: "device-sync", wait: true } : { type: "device-sync" }
     case "device-item":
-      return text(c.ref, 200) && c.ref ? { type: "device-item", ref: c.ref } : null
+    case "device-delete":
+      return text(c.ref, 200) && c.ref ? { type: c.type, ref: c.ref } : null
     case "device-secret":
       if (!text(c.ref, 200) || !c.ref) return null
       if (c.passphrase === undefined) return { type: "device-secret", ref: c.ref }

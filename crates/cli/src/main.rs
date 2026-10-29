@@ -16,7 +16,7 @@ mod secrets;
 mod send;
 use deadbolt_core::site;
 mod update;
-mod webauthn;
+use deadbolt_core::webauthn;
 
 use std::io::IsTerminal;
 use std::path::PathBuf;

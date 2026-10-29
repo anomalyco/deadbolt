@@ -1,9 +1,9 @@
-// Settings: the vault's devices (pair another, remove one), the lock preset
-// and the vault's name.
+// Settings: the vault's devices (pair another, remove one), its passkeys
+// (delete one), the lock preset and the vault's name.
 
 import { describePreset, PRESETS, VAULT_NAME } from "../device-rules"
-import type { LockPreset, VaultDevice } from "../messages"
-import { h } from "../ui/dom"
+import type { DevicePasskey, LockPreset, VaultDevice } from "../messages"
+import { h, icon } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
@@ -47,6 +47,46 @@ function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
       )
       no.focus()
     }
+  }
+  return row
+}
+
+/** A passkey: its account and site, and Delete (asked first). Its key never leaves the vault. */
+function passkeyRow(app: App, k: DevicePasskey, repaint: () => void): HTMLElement {
+  const name = k.username || "Passkey"
+  const created = k.created ? new Date(k.created) : null
+  const when = created && !Number.isNaN(created.getTime()) ? `Added ${created.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}` : ""
+  const row = h(
+    "div",
+    { class: "vrow device" },
+    h("span", { class: "tile" }, icon("passkey")),
+    h("span", { class: "text" }, h("span", { class: "title" }, name), h("span", { class: "sub" }, [k.rpId, when].filter(Boolean).join(" · "))),
+    h("span", { class: "vrow-actions" }, iconButton(glyph("trash"), `Delete passkey ${name} for ${k.rpId}`, () => askDelete())),
+  )
+  const askDelete = () => {
+    const no = button("btn", "Cancel", () => repaint())
+    const label = h("span", { class: "roll-label" }, "Delete")
+    label.dataset.text = "Delete"
+    const yes = button("btn danger", label, async (b) => {
+      b.disabled = true
+      rollLabel(label, "Deleting…")
+      const r = await app.run({ type: "device-delete", ref: k.ref })
+      if (!r.ok) {
+        b.disabled = false
+        rollLabel(label, "Delete")
+        app.announce(r.message)
+        row.querySelector(".confirm-text")!.textContent = r.message
+        return
+      }
+      await app.refresh()
+      app.announce(`Deleted the passkey for ${k.rpId}.`)
+    })
+    row.classList.add("confirming")
+    row.replaceChildren(
+      h("span", { class: "text" }, h("span", { class: "title" }, `Delete passkey for ${k.rpId}?`), h("span", { class: "sub confirm-text" }, `You can't sign in to ${k.rpId} as ${name} with it again, on any device.`)),
+      h("span", { class: "vrow-actions shown" }, no, yes),
+    )
+    no.focus()
   }
   return row
 }
@@ -159,7 +199,15 @@ export function settingsView(app: App): View {
     app.announce(clearing.checked ? "Copied passwords clear after 30 seconds." : "Copied passwords stay until you copy something else.")
   })
 
+  // Passkeys, once the vault has listed them.
+  const passkeys = h("div", { class: "rows" })
+  const passkeysGroup = h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Passkeys")), passkeys)
+
   const paint = () => {
+    passkeysGroup.hidden = app.passkeys === null
+    passkeys.replaceChildren(
+      ...(app.passkeys?.length ? app.passkeys.map((k) => passkeyRow(app, k, paint)) : [h("p", { class: "hint" }, "No passkeys yet. A site that offers one asks to save it in Deadbolt.")]),
+    )
     // This browser first, then the others by name.
     const sorted = [...(app.devices ?? [])].sort((a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name))
     devices.replaceChildren(...sorted.map((d) => deviceRow(app, d, paint)))
@@ -173,6 +221,7 @@ export function settingsView(app: App): View {
   el.append(
     toolbar("Settings", () => app.go({ name: "list" }, -1)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Devices")), devices, pairArea),
+    passkeysGroup,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Lock")), presets, h("p", { class: "hint" }, "Every preset locks when the browser quits.")),
     h(
       "section",

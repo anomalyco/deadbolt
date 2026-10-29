@@ -66,6 +66,17 @@ beforeEach(() => {
 afterEach(() => setSystemTime())
 
 describe("device page commands", () => {
+  test("keeps the passkeys capability when the worker advertises its ceremonies", async () => {
+    const base = fake.runtimeAnswer
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "hello") return { reply: { type: "hello", protocol: 3, version: "test", status: "ready", capabilities: ["list", "passkeys", "learn"] } }
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(backend.capabilities).toEqual(["list", "passkeys"])
+  })
   test("only this extension's own device.html and popup may send them", () => {
     expect(fromVaultPage({ id: ID, url: DEVICE_URL })).toBe(true)
     expect(fromVaultPage({ id: ID, url: `${DEVICE_URL}?from=popup#unlock`, tab: { id: 3 } as chrome.tabs.Tab, frameId: 0 })).toBe(true)
@@ -109,6 +120,7 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-sync", wait: "yes" })).toEqual({ type: "device-sync" })
     expect(deviceCommand({ type: "device-item", ref: "v:i", origin: "x" })).toEqual({ type: "device-item", ref: "v:i" })
     expect(deviceCommand({ type: "device-item" })).toBeNull()
+    expect(deviceCommand({ type: "device-delete", ref: "v:i", passphrase: "ignored" })).toEqual({ type: "device-delete", ref: "v:i" })
     expect(deviceCommand({ type: "device-secret", ref: "v:i" })).toEqual({ type: "device-secret", ref: "v:i" })
     expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "" })).toBeNull()
     expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "p" })).toEqual({ type: "device-secret", ref: "v:i", passphrase: "p" })
@@ -449,6 +461,52 @@ describe("a fill waiting on the passphrase", () => {
     const r = await backend.device({ type: "device-reauth" })
     return r.ok ? (r.reply.reauth as { id: string; title: string; site: string } | null) : null
   }
+
+  test("a passkey cancelled during its slow passphrase check never spends its authorization", async () => {
+    const base = fake.runtimeAnswer!
+    let release!: (value: unknown) => void
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-authorize") return new Promise((resolve) => (release = resolve))
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const body = { type: "passkey-create" as const, origin: "https://shop.test", challenge: "AQ".repeat(16), user: { id: "AQ", name: "Alice" }, exclude: [], userVerification: "preferred" as const }
+    const controller = new AbortController()
+    const ceremony = backend.reauth(body, ask, controller.signal)
+    const ended = ceremony.catch((error: unknown) => error)
+    const id = (await waiting(backend))!.id
+    const confirm = backend.device({ type: "device-reauth-confirm", id, passphrase: "slow" })
+    await settle()
+    controller.abort()
+    expect(await ended).toMatchObject({ code: "cancelled" })
+    release({ reply: { type: "passkey-authorized", token: "one-use" } })
+    expect(await confirm).toMatchObject({ ok: false, code: "expired" })
+    expect(requests().filter((r) => r.type === "passkey-finish")).toHaveLength(0)
+    expect(requests().find((r) => r.type === "passkey-authorize")).toMatchObject({ ceremony: body })
+  })
+
+  test("a live passkey spends its authorization once and returns no UV", async () => {
+    const base = fake.runtimeAnswer!
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-authorize") return { reply: { type: "passkey-authorized", token: "one-use" } }
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-finish") return { reply: { type: "passkey-assertion", credentialId: "AQ", clientDataJSON: "AQ", authenticatorData: "AQ", signature: "AQ", userHandle: "AQ", verified: false } }
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const body = { type: "passkey-get" as const, origin: "https://shop.test", ref: `${"a".repeat(64)}:${"1".repeat(32)}`, challenge: "AQ".repeat(16), userVerification: "preferred" as const }
+    const ceremony = backend.reauth(body, ask, new AbortController().signal)
+    const id = (await waiting(backend))!.id
+    const answers = await Promise.all([backend.device({ type: "device-reauth-confirm", id, passphrase: "right" }), backend.device({ type: "device-reauth-confirm", id, passphrase: "right" })])
+    expect(answers.every((answer) => answer.ok)).toBe(true)
+    expect(await ceremony).toMatchObject({ type: "passkey-assertion", verified: false })
+    expect(await backend.device({ type: "device-reauth-confirm", id, passphrase: "right" })).toMatchObject({ ok: false, code: "expired" })
+    expect(requests().filter((r) => r.type === "passkey-finish")).toEqual([{ type: "passkey-finish", token: "one-use" }])
+    expect(requests().filter((r) => r.type === "passkey-authorize")).toHaveLength(1)
+  })
 
   test("is asked in the popup, runs once with the passphrase, and keeps none of it", async () => {
     const backend = new StandaloneBackend()
