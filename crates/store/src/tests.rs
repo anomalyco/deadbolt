@@ -416,6 +416,56 @@ fn tampered_kdf_params() {
     ));
 }
 
+/// Headers within the practical budget decode; beyond it, in memory or in
+/// memory times passes, they are rejected as corrupt before any allocation.
+#[test]
+fn kdf_params_have_a_practical_budget() {
+    let header = |m: u32, t: u32, p: u32| {
+        let mut bytes = KdfHeader::generate(FAST).unwrap().encode();
+        bytes[1..5].copy_from_slice(&m.to_le_bytes());
+        bytes[5..9].copy_from_slice(&t.to_le_bytes());
+        bytes[9..13].copy_from_slice(&p.to_le_bytes());
+        KdfHeader::decode(&bytes)
+    };
+    let gib = 1024 * 1024;
+    let default = KdfParams::DEFAULT;
+    for (m, t, p) in [
+        (default.m_cost_kib, default.t_cost, default.p_cost),
+        (gib, 4, 1),
+        (256 * 1024, 16, 4),
+        (64 * 1024, 64, 64),
+    ] {
+        assert!(header(m, t, p).is_ok(), "{m} KiB x {t} x {p}");
+    }
+    for (m, t, p) in [
+        (gib + 1, 1, 1),
+        (gib, 5, 1),
+        (512 * 1024, 9, 1),
+        (64 * 1024, 65, 1),
+        (64 * 1024, 3, 65),
+        (u32::MAX, u32::MAX, u32::MAX),
+    ] {
+        assert!(
+            matches!(header(m, t, p), Err(Error::Corrupt(_))),
+            "{m} KiB x {t} x {p}"
+        );
+    }
+    let tmp = TempDir::new().unwrap();
+    assert!(matches!(
+        crate::init_with_params(
+            tmp.path(),
+            PASS,
+            SECRET,
+            KdfParams {
+                m_cost_kib: gib,
+                t_cost: 5,
+                p_cost: 1
+            },
+        ),
+        Err(Error::InvalidKdfParams(_))
+    ));
+}
+
 #[test]
 fn tampered_meta() {
     let tmp = TempDir::new().unwrap();

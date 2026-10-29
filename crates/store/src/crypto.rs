@@ -49,9 +49,13 @@ pub(crate) fn seal(cipher: &XChaCha20Poly1305, aad: &[u8], parts: &[&[u8]]) -> R
     for part in parts {
         out.extend_from_slice(part);
     }
-    let tag = cipher
-        .encrypt_inout_detached(&nonce.into(), aad, out[NONCE_LEN..].as_mut().into())
-        .map_err(|_| Error::corrupt("message too long to encrypt"))?;
+    let Ok(tag) =
+        cipher.encrypt_inout_detached(&nonce.into(), aad, out[NONCE_LEN..].as_mut().into())
+    else {
+        // Still plaintext.
+        zeroize::Zeroize::zeroize(&mut out);
+        return Err(Error::corrupt("message too long to encrypt"));
+    };
     out.extend_from_slice(&tag);
     Ok(out)
 }
