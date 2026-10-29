@@ -39,6 +39,7 @@
 //! status request reads the same to every agent.
 
 mod caller;
+mod reference;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -50,8 +51,9 @@ pub use caller::{
     ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Claim,
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
+pub use reference::{Reference, SCHEME};
 
-pub const PROTOCOL_VERSION: u32 = 16;
+pub const PROTOCOL_VERSION: u32 = 17;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -428,7 +430,7 @@ pub enum Command {
     },
     /// Every grant, expired ones too; replies `agent-grants`.
     AgentGrantList,
-    /// Removes a grant; replies `done`.
+    /// Removes a grant, a sign-in or a secret grant; replies `done`.
     AgentGrantRemove {
         id: String,
     },
@@ -471,6 +473,35 @@ pub enum Command {
         allow_credentials: Vec<String>,
         user_verification: Verify,
     },
+    /// Secrets for commands (`docs/agent-control.md`, "Use, don't read"):
+    /// the values `refs` name (`deadbolt://[vault/]item/field`, see
+    /// [`Reference`]), for `purpose`. Each item is a title or short id that
+    /// must match exactly one item; a one-time password field gives its
+    /// current code. A caller Deadbolt takes for an AI needs a live
+    /// `secret-grant-set` grant covering every item, field and purpose for
+    /// `run` and `inject` (else `not-granted`), and Touch ID each time for
+    /// `read` (else `forbidden`). Replies `secrets`, in reference order.
+    Resolve {
+        refs: Vec<String>,
+        purpose: Purpose,
+    },
+    /// Lets AI callers resolve `fields` (every field when empty) of the
+    /// items `items` (titles or short ids in `vault`) for `purposes` (run,
+    /// inject; never read) without asking, until `expires_at` (Unix seconds;
+    /// `None` never). Setting the same item again replaces its grant. Needs
+    /// the user as `AgentClientAdd` does, and refuses AIs the same way.
+    /// Replies `secret-grants` with the grants made.
+    SecretGrantSet {
+        vault: Option<String>,
+        items: Vec<String>,
+        fields: Vec<String>,
+        purposes: Vec<Purpose>,
+        expires_at: Option<u64>,
+        passphrase: Option<Zeroizing<String>>,
+    },
+    /// Every secret grant, expired ones too; replies `secret-grants`.
+    /// `agent-grant-remove` removes them.
+    SecretGrantList,
 }
 
 impl Command {
@@ -479,12 +510,63 @@ impl Command {
     pub fn carries_passphrase(&self) -> bool {
         match self {
             Self::Setup { .. } | Self::Unlock { .. } => true,
-            Self::AgentClientAdd { passphrase, .. } | Self::AgentGrantSet { passphrase, .. } => {
-                passphrase.is_some()
-            }
+            Self::AgentClientAdd { passphrase, .. }
+            | Self::AgentGrantSet { passphrase, .. }
+            | Self::SecretGrantSet { passphrase, .. } => passphrase.is_some(),
             _ => false,
         }
     }
+}
+
+/// What resolved secrets are for: a command's environment (`deadbolt
+/// run`), a file (`deadbolt inject`) or printing (`deadbolt read`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Purpose {
+    Run,
+    Inject,
+    Read,
+}
+
+impl Purpose {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Run => "run",
+            Self::Inject => "inject",
+            Self::Read => "read",
+        }
+    }
+}
+
+/// One resolved reference: which item and field it found, and the value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedSecret {
+    /// The vault's name.
+    pub vault: String,
+    /// The item's id.
+    pub item: String,
+    pub title: String,
+    pub field: String,
+    pub value: Secret,
+}
+
+/// A standing grant letting AI callers resolve one item's fields.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SecretGrantInfo {
+    pub id: String,
+    /// The vault's name, when the grant was made.
+    pub vault: String,
+    /// The item's id.
+    pub item: String,
+    /// The item's title, when the grant was made.
+    pub title: String,
+    /// Every field when empty.
+    pub fields: Vec<String>,
+    pub purposes: Vec<Purpose>,
+    /// Unix seconds.
+    pub created: u64,
+    pub expires_at: Option<u64>,
+    pub expired: bool,
 }
 
 /// A paired agent client's credentials, on every request it makes: its id
@@ -1096,6 +1178,13 @@ pub enum Reply {
     },
     AgentGrants {
         grants: Vec<AgentGrantInfo>,
+    },
+    /// What `resolve` found, in reference order.
+    Secrets {
+        secrets: Vec<ResolvedSecret>,
+    },
+    SecretGrants {
+        grants: Vec<SecretGrantInfo>,
     },
     AgentLogins {
         /// The page's site: its registrable domain.

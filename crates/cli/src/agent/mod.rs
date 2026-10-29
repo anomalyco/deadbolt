@@ -13,6 +13,7 @@ mod items;
 mod mirror;
 mod pairing;
 mod passkeys;
+mod secrets;
 mod send;
 mod session;
 #[cfg(test)]
@@ -1748,8 +1749,11 @@ impl Agent {
             command @ (Command::PasskeyList { .. }
             | Command::PasskeyCreate { .. }
             | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,
-            Command::AgentClientAdd { .. } | Command::AgentGrantSet { .. } => {
-                bail!("pairing and grants are answered with the caller")
+            Command::AgentClientAdd { .. }
+            | Command::AgentGrantSet { .. }
+            | Command::SecretGrantSet { .. }
+            | Command::Resolve { .. } => {
+                bail!("pairing, grants and references are answered with the caller")
             }
             Command::AgentClientList => Ok(Reply::AgentClients {
                 clients: self.with(|s| grants::list_clients(s))?,
@@ -1763,9 +1767,18 @@ impl Agent {
                 grants: self.with(|s| grants::list_grants(s, session::now()))?,
             }),
             Command::AgentGrantRemove { id } => {
-                self.with(|s| grants::remove_grant(s, &id))?;
+                // Either kind of grant: a sign-in grant, else a secret grant.
+                self.with(|s| match grants::remove_grant(s, &id) {
+                    Err(error) if crate::client::code(&error) == Some(ErrorCode::NotFound) => {
+                        secrets::remove_grant(s, &id)
+                    }
+                    removed => removed.map(drop),
+                })?;
                 Ok(Reply::Done)
             }
+            Command::SecretGrantList => Ok(Reply::SecretGrants {
+                grants: self.with(|s| secrets::list_grants(s, session::now()))?,
+            }),
             command @ (Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }) => self.agent_client(command),

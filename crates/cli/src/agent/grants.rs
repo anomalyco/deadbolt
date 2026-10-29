@@ -136,7 +136,7 @@ fn grants(s: &Loaded) -> Result<Vec<Grant>> {
     Ok(get_json(&s.store, META_GRANTS)?.unwrap_or_default())
 }
 
-fn random_hex<const N: usize>() -> Result<String> {
+pub(super) fn random_hex<const N: usize>() -> Result<String> {
     let mut bytes = [0u8; N];
     getrandom::fill(&mut bytes).map_err(|e| anyhow!("OS random number generator failed: {e}"))?;
     Ok(hex(&bytes))
@@ -160,7 +160,11 @@ fn canonical_origin(origin: &str) -> Option<String> {
 
 /// The one id `query` names: the whole id, or a unique prefix of at
 /// least 4 characters.
-fn pick<'a>(ids: impl Iterator<Item = &'a str>, query: &str, what: &str) -> Result<String> {
+pub(super) fn pick<'a>(
+    ids: impl Iterator<Item = &'a str>,
+    query: &str,
+    what: &str,
+) -> Result<String> {
     let query = query.trim().to_ascii_lowercase();
     let found: Vec<&str> = ids
         .filter(|id| *id == query || (query.len() >= 4 && id.starts_with(&query)))
@@ -721,7 +725,7 @@ impl Agent {
         if caller.class == CallerClass::BrowserHost || super::caller::is_ai(caller) {
             return Err(fail(
                 ErrorCode::Forbidden,
-                "an AI can't pair agent clients or allow agent sign-ins: run this yourself, in a terminal",
+                "an AI can't pair agent clients or grant access to secrets: run this yourself, in a terminal",
             ));
         }
         // Locked fails before anyone is asked anything. The prompt says
@@ -750,6 +754,25 @@ impl Agent {
                     format!(
                         "let agent client {} use logins for {site} without asking",
                         quoted(&name)
+                    ),
+                )
+            }
+            Command::SecretGrantSet {
+                vault,
+                items,
+                passphrase,
+                ..
+            } => {
+                let vault = self.with(|s| {
+                    let id = s.resolve(vault.as_deref())?;
+                    Ok(s.vault(&id).name().to_string())
+                })?;
+                let items: Vec<String> = items.iter().map(|i| quoted(i)).collect();
+                (
+                    passphrase.clone(),
+                    format!(
+                        "let AI agents use {} (vault {vault}) in commands without asking",
+                        items.join(", ")
                     ),
                 )
             }
@@ -786,6 +809,29 @@ impl Agent {
                     )
                 })?;
                 Ok(Reply::AgentGrant { grant })
+            }
+            Command::SecretGrantSet {
+                vault,
+                items,
+                fields,
+                purposes,
+                expires_at,
+                ..
+            } => {
+                let grants = self.with(|s| {
+                    super::secrets::set_grants(
+                        s,
+                        super::secrets::NewGrants {
+                            vault: vault.as_deref(),
+                            items: &items,
+                            fields: &fields,
+                            purposes: &purposes,
+                            expires_at,
+                        },
+                        now,
+                    )
+                })?;
+                Ok(Reply::SecretGrants { grants })
             }
             _ => bail!("not an agent pairing or grant"),
         }
