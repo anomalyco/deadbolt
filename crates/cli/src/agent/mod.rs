@@ -7,6 +7,7 @@ pub mod biometric;
 mod caller;
 mod generate;
 mod grants;
+mod guesses;
 mod items;
 mod mirror;
 mod pairing;
@@ -130,10 +131,8 @@ pub struct Agent {
     activity: Mutex<activity::Ledger>,
     /// Each paired agent client's rate limit, by client id.
     agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
-    /// Wrong passphrases given as proof for pairing and grants.
-    proof_backoff: Mutex<grants::Backoff>,
-    /// Held by the one passphrase check running: they run one at a time.
-    proof_check: tokio::sync::Mutex<()>,
+    /// Every passphrase check: one at a time, wrong ones backed off.
+    guesses: guesses::Guesses,
     /// Deadbolt Send's endpoint, started by the first send.
     send_server: tokio::sync::Mutex<Option<deadbolt_send::Server>>,
     /// Set as the agent stops, ending sends and anyone waiting on one.
@@ -173,8 +172,7 @@ impl Agent {
             callers: caller::Callers::new(),
             activity: Mutex::default(),
             agent_rates: Mutex::default(),
-            proof_backoff: Mutex::default(),
-            proof_check: tokio::sync::Mutex::new(()),
+            guesses: guesses::Guesses::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
         })
@@ -921,6 +919,45 @@ mod tests {
         );
     }
 
+    /// Unlocking (locked or not) and the proof for pairing share one backoff:
+    /// past five wrong passphrases even the right one waits, `rate-limited`.
+    #[tokio::test]
+    async fn every_passphrase_check_shares_one_backoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let fast = deadbolt_store::KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        };
+        let agent = Agent::new(test_paths(dir.path()), true, fast);
+        let pass = |text: &str| Zeroizing::new(text.to_string());
+        agent.setup(pass("test"), "laptop".into()).await.unwrap();
+        agent.lock().await;
+        for _ in 1..guesses::FREE_FAILURES {
+            let error = agent.unlock(pass("wrong"), None).await.unwrap_err();
+            assert!(wrong_passphrase(&error), "{error:#}");
+        }
+        // A right one resets the count.
+        agent.unlock(pass("test"), Some(60)).await.unwrap();
+        // Wrong ones while unlocked (asking for a longer timeout) count
+        // too, and so do locked ones.
+        for _ in 0..3 {
+            let error = agent.unlock(pass("wrong"), Some(0)).await.unwrap_err();
+            assert!(wrong_passphrase(&error), "{error:#}");
+        }
+        agent.lock().await;
+        for _ in 0..2 {
+            assert!(agent.unlock(pass("wrong"), None).await.is_err());
+        }
+        let error = agent.unlock(pass("test"), None).await.unwrap_err();
+        assert_eq!(crate::client::code(&error), Some(ErrorCode::RateLimited));
+        assert_eq!(
+            error.to_string(),
+            "Too many wrong passphrases. Try again in 30 s."
+        );
+        assert!(!agent.status().unlocked);
+    }
+
     /// Unlocking while unlocked may shorten the idle timeout as it is; a
     /// longer one, or never, takes the right passphrase or a Touch ID prompt.
     /// And a passphrase that doesn't open the store never cancels a prompt.
@@ -1011,6 +1048,16 @@ mod tests {
 struct Idle {
     timeout: Option<Duration>,
     deadline: Option<Instant>,
+}
+
+/// Whether `error` says the passphrase was wrong.
+fn wrong_passphrase(error: &anyhow::Error) -> bool {
+    error.chain().any(|e| {
+        matches!(
+            e.downcast_ref::<deadbolt_store::Error>(),
+            Some(deadbolt_store::Error::WrongPassphrase)
+        )
+    })
 }
 
 fn fail(code: ErrorCode, message: impl Into<String>) -> anyhow::Error {
@@ -2048,8 +2095,10 @@ impl Agent {
                 return Ok(());
             }
             let check = check?;
+            let turn = self.guesses.turn()?;
             let right =
                 tokio::task::spawn_blocking(move || check.matches(passphrase.as_bytes())).await?;
+            turn.settle(right);
             if !right {
                 return Err(deadbolt_store::Error::WrongPassphrase.into());
             }
@@ -2067,7 +2116,8 @@ impl Agent {
             .unwrap_or(false);
         let enroll_touch_id = want_touch_id && self.refresh_touch_id_available().await;
         let now = session::now();
-        let (loaded, slot_meta) = tokio::task::spawn_blocking(move || {
+        let turn = self.guesses.turn()?;
+        let opened = tokio::task::spawn_blocking(move || {
             let loaded = Loaded::open(&dir, passphrase.as_bytes())?;
             if enroll_touch_id && let Err(error) = biometric::enroll(&loaded.store, now) {
                 warn!("Touch ID enrollment on unlock failed: {error:#}");
@@ -2076,7 +2126,14 @@ impl Agent {
                 biometric::token_meta(loaded.store.biometric_token().ok().flatten().as_deref());
             Ok::<_, anyhow::Error>((loaded, meta))
         })
-        .await??;
+        .await?;
+        match &opened {
+            Ok(_) => turn.settle(true),
+            Err(error) if wrong_passphrase(error) => turn.settle(false),
+            // Neither right nor wrong (a damaged store, a store in use).
+            Err(_) => drop(turn),
+        }
+        let (loaded, slot_meta) = opened?;
         self.cancel_biometric_prompt();
         if slot_meta.is_some() {
             self.biometric_was_enrolled.store(true, Ordering::SeqCst);

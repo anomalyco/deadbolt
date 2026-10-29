@@ -482,8 +482,11 @@ github.com without asking".
   passphrase, as for `unlock`. The agent checks it on a copy of the wrapped
   key set, off the session's lock, so fills and the app carry on during the
   KDF; one check runs at a time, and after 5 wrong ones every check waits 30
-  seconds, doubling up to 10 minutes, until a right one (`rate-limited`), so
-  pairing is no passphrase-guessing oracle.
+  seconds, doubling up to 10 minutes, until a right one (`rate-limited`).
+  The backoff is one for every passphrase the agent checks: `unlock`
+  (locked, or unlocked asking for a longer idle timeout) and this proof
+  share it, so none of them is a faster way to guess the passphrase. The
+  app's unlock screen says "Too many wrong passphrases. Try again in N s.".
 
 And the caller must not look like an AI: an AI host among its parents
 (OpenCode, Claude Code, Codex, Cursor, Gemini CLI, Aider) or a claimed

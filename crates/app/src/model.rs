@@ -1370,6 +1370,10 @@ pub fn forget(item: &mut ItemInfo) {
 }
 
 fn unlock_message(failure: &Failure) -> String {
+    // "Too many wrong passphrases. Try again in 30 s.", as the agent says.
+    if failure.code == Some(deadbolt_client::protocol::ErrorCode::RateLimited) {
+        return failure.message.clone();
+    }
     if failure.message.contains("passphrase") || failure.message.contains("decrypt") {
         "That passphrase didn't unlock this device.".into()
     } else {
@@ -1447,7 +1451,28 @@ mod tests {
     use deadbolt_client::protocol::Change;
     use rune::{Env, Runtime};
 
-    use super::{App, Screen, take_secret};
+    #[test]
+    fn a_backed_off_unlock_says_when_to_try_again() {
+        use deadbolt_client::protocol::ErrorCode;
+        let backed_off = Failure {
+            code: Some(ErrorCode::RateLimited),
+            message: "Too many wrong passphrases. Try again in 30 s.".into(),
+        };
+        assert_eq!(
+            unlock_message(&backed_off),
+            "Too many wrong passphrases. Try again in 30 s."
+        );
+        let wrong = Failure {
+            code: Some(ErrorCode::Failed),
+            message: "wrong passphrase".into(),
+        };
+        assert_eq!(
+            unlock_message(&wrong),
+            "That passphrase didn't unlock this device."
+        );
+    }
+
+    use super::{App, Failure, Screen, take_secret, unlock_message};
     use crate::agent::{Done, Values};
 
     #[test]

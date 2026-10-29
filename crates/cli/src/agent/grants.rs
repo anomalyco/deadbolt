@@ -701,44 +701,6 @@ pub fn passkey(
 /// What one client may ask: a burst of 30, then one a second.
 const RATE: (u32, Duration) = (30, Duration::from_secs(1));
 
-/// Wrong passphrases allowed as proof before the agent stops checking them.
-const FREE_FAILURES: u32 = 5;
-const FIRST_WAIT: Duration = Duration::from_secs(30);
-const LONGEST_WAIT: Duration = Duration::from_secs(10 * 60);
-
-/// Backs off wrong passphrases given as proof, for every caller at once: a
-/// local process can't use pairing or grants to guess the passphrase.
-/// After [`FREE_FAILURES`], each wrong one waits [`FIRST_WAIT`], doubling
-/// up to [`LONGEST_WAIT`]; a right one resets it.
-#[derive(Default)]
-pub struct Backoff {
-    failures: u32,
-    until: Option<std::time::Instant>,
-}
-
-impl Backoff {
-    /// How long until a passphrase may be checked again, if it must wait.
-    fn wait(&self, now: std::time::Instant) -> Option<Duration> {
-        self.until
-            .and_then(|until| until.checked_duration_since(now))
-            .filter(|d| !d.is_zero())
-    }
-
-    fn failed(&mut self, now: std::time::Instant) {
-        self.failures += 1;
-        if let Some(over) = self.failures.checked_sub(FREE_FAILURES) {
-            let wait = FIRST_WAIT
-                .saturating_mul(1u32 << over.min(10))
-                .min(LONGEST_WAIT);
-            self.until = Some(now + wait);
-        }
-    }
-
-    fn succeeded(&mut self) {
-        *self = Backoff::default();
-    }
-}
-
 /// A client's name for a Touch ID prompt: quoted, so quotes in it go.
 fn quoted(name: &str) -> String {
     format!(
@@ -839,38 +801,17 @@ impl Agent {
     ) -> Result<()> {
         match passphrase {
             Some(passphrase) => {
-                let Ok(_checking) = self.proof_check.try_lock() else {
-                    return Err(fail(
-                        ErrorCode::RateLimited,
-                        "another passphrase is being checked: try again in a moment",
-                    ));
-                };
-                let waiting = self
-                    .proof_backoff
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .wait(std::time::Instant::now());
-                if let Some(wait) = waiting {
-                    return Err(fail(
-                        ErrorCode::RateLimited,
-                        format!(
-                            "too many wrong passphrases: try again in {}s",
-                            wait.as_secs().max(1)
-                        ),
-                    ));
-                }
+                let turn = self.guesses.turn()?;
                 // The KDF is slow: run it on a copy, never under the
                 // session's lock, so fills and the app carry on.
                 let check = self.with(|s| Ok(s.store.passphrase_check()?))?;
                 let right =
                     tokio::task::spawn_blocking(move || check.matches(passphrase.as_bytes()))
                         .await?;
-                let mut backoff = self.proof_backoff.lock().unwrap_or_else(|e| e.into_inner());
+                turn.settle(right);
                 if !right {
-                    backoff.failed(std::time::Instant::now());
                     return Err(fail(ErrorCode::Failed, "wrong passphrase"));
                 }
-                backoff.succeeded();
                 Ok(())
             }
             None if self.can_verify() => {
@@ -1828,34 +1769,18 @@ mod tests {
             let (conv, _closed) = conversation();
             let me = kit();
             let try_with = |passphrase| f.agent.agents_admin(&me, add(Some(passphrase)), &conv);
-            for _ in 0..FREE_FAILURES - 1 {
+            for _ in 0..super::super::super::guesses::FREE_FAILURES - 1 {
                 assert!(try_with("wrong").await.is_err());
             }
             // A right one resets the count.
             try_with("test").await.unwrap();
-            for _ in 0..FREE_FAILURES {
+            for _ in 0..super::super::super::guesses::FREE_FAILURES {
                 let error = try_with("wrong").await.unwrap_err();
                 assert_eq!(error.to_string(), "wrong passphrase");
             }
             // Now even the right one waits.
             let error = try_with("test").await.unwrap_err();
             assert_eq!(code(&error), Some(ErrorCode::RateLimited), "{error}");
-
-            let start = std::time::Instant::now();
-            let mut backoff = Backoff::default();
-            for _ in 0..FREE_FAILURES {
-                backoff.failed(start);
-            }
-            assert_eq!(backoff.wait(start), Some(FIRST_WAIT));
-            backoff.failed(start);
-            assert_eq!(backoff.wait(start), Some(FIRST_WAIT * 2));
-            for _ in 0..20 {
-                backoff.failed(start);
-            }
-            assert_eq!(backoff.wait(start), Some(LONGEST_WAIT));
-            assert_eq!(backoff.wait(start + LONGEST_WAIT), None);
-            backoff.succeeded();
-            assert_eq!(backoff.wait(start), None);
         }
 
         #[tokio::test]
