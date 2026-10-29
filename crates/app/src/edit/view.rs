@@ -180,6 +180,8 @@ fn placeholder(input: &Input) -> &'static str {
         "otp" => "otpauth:// link or secret",
         "email" => "name@example.com",
         "birthday" => "YYYY-MM-DD",
+        "phone" => "+1 555 010 0100",
+        "country" => "US, GB, DE…",
         "public-key" => "ssh-ed25519 AAAA…",
         "fingerprint" => "SHA256:…",
         _ if input.required => "Required",

@@ -169,7 +169,13 @@ not running without sending hello, which would start the agent again.
   changes until a fresh reading taken 400 ms after the press confirms it. A
   frame hears about changes the page makes to it only after a short delay,
   so a reading right at the press can predate them. Every change starts the
-  500 ms again. If it's covered, faded, clipped, shown only at the press or
+  500 ms again, with one exception: when the browser resizes the viewport
+  (an infobar such as "started debugging this browser" comes or goes, or
+  the window is resized) and the page reflows, a move of the menu in the
+  next frame that keeps its size and shifts it no further than the viewport
+  changed doesn't count. That needs a trusted `resize` event in a normal
+  tabbed window: a page can't resize a tab's viewport (only a popup's, so
+  popups get no exception), and any other move still counts. If it's covered, faded, clipped, shown only at the press or
   can't be measured, it fills nothing and says so. A page that covers the
   menu briefly between two readings can go unseen (see the threat model).
   The browser pauses these readings while anything animates inside the
@@ -768,15 +774,52 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   that port. (Foyer, which this ports, offered a port whenever asked and took
   whichever acked first, so a page could take it over.)
 
-## Addresses, contact details and cards
+## Forms: addresses, contact details and cards
 
-Deadbolt fills names, email, phone, postal addresses, birthdays and payment
-cards as well as logins, with the same surface and the same safety rules.
-What an identity and a card hold, and the `forms` and `fill-form` host
-messages, are in the data part of this section; the extension's part
-follows.
+Besides logins, Deadbolt fills what people type into forms all the time:
+name, email, phone, postal address, company, birthday, and payment cards.
+Below: the data and the protocol, then the extension's side (detecting the
+fields, the menu, which frames get what), then the safety rules.
 
-### Detection (extension)
+### The data
+
+An `identity` item holds a person's details in the parts forms ask for,
+named after the HTML `autocomplete` tokens so a field maps without guessing:
+`honorific`, `given-name`, `additional-name`, `family-name`, `nickname`,
+`organization`, `job-title`, `email`, `phone`, `address-line1` to
+`address-line3`, `city` (`address-level2`), `region` (`address-level1`, a
+state or province), `postal-code`, `country` and `birthday`, besides its ID
+numbers (`national-id`, `passport`, `license`) and `notes`, which never fill
+a form. A phone that reads as international is kept in E.164 form
+(`+17185550100`), else as typed; a country is its ISO 3166-1 alpha-2 code in
+upper case (`US`); a birthday is a date. People keep several (Home, Work),
+named by the item's title. The content script turns parts into what a page
+wants: a full name, the street as one field or lines, a national phone
+number, a country's name or a `<select>`'s option, birthday parts.
+
+A `card` holds `number`, `cvv` (the security code), `expiry` (a month,
+`YYYY-MM`), `cardholder`, `brand` and `pin`, and may name its billing address
+with `billing`, the item id of an identity. A PIN never fills a form.
+
+Identities made before names and addresses had parts keep their one-line
+`name` and multi-line `address` as extra fields: shown, searched and used for
+the label as before, but not offered to forms. Importing again, or a sync
+from 1Password, writes the parts: 1Password's `.1pux` and `op` identities
+(first name, initial, last name, company, job title, the structured address,
+the default phone, else the mobile, home or business one, and email) and
+Bitwarden's.
+
+### The protocol
+
+The host's `forms` lists the identities and cards of every vault without
+values: an identity's title, a summary ("Kit Langton · 123 Main St,
+Brooklyn") and which form fields it has; a card's title, brand, last four
+digits, expiry, cardholder and billing identity. `fill-form` returns only the
+fields asked for, of one item. Both go to the agent as `form-items` and
+`form-fill` (agent protocol 16; host protocol 3, capability `forms`). See
+Host messages.
+
+### Detection
 
 `extension/src/content/forms.ts` gives each visible input, select and
 textarea a role named by its HTML autocomplete token (`given-name`,
@@ -810,7 +853,7 @@ form claims (the email box of a sign-in) stays the login's. The same
 opt-out marks apply (`data-1p-ignore`, `data-lpignore="true"`,
 `data-deadbolt-ignore`, …).
 
-### The surface (extension)
+### The menu
 
 A click into an identity or card field (or ↓ in it) opens Deadbolt's
 surface under it, on the logins' rules: only right after the user's own
@@ -856,7 +899,7 @@ extension waits up to 90 seconds for that answer with the pill on
 "Filling…". Turned down, nothing is written, not even the cardholder's
 name, and the pill says so.
 
-### Frames and payment providers (extension)
+### Frames and payment providers
 
 Identities go only to the top page and to frames on the top page's site,
 as logins do. Cards go there too, and into a payment provider's own
@@ -914,8 +957,40 @@ for `.com` over http, and an http top page on `localhost` or a `.test` host,
 so the e2e run can serve a Stripe-like frame on `js.stripe.test`. Every
 other build defines that branch away.
 
-Not in this round: offering to save a new address or card after a checkout,
-and filling forms for agents (Browse grants stay logins only).
+### Security
+
+- **Origins:** forms aren't bound to a site: any page autofill takes may list
+  identities and cards, but only that: https, http only on a local host,
+  never a sandboxed or opaque frame (`null`). The extension offers them only
+  where the user is on a form, never in incognito windows, and decides which
+  frames get card fields (a short allowlist of payment providers'
+  cross-origin frames).
+- **Listing gives no values:** never a card's number or code, and no
+  identity value beyond the summary.
+- **Fills give only what was asked,** and only form fields: an identity's ID
+  numbers and notes and a card's PIN and notes are refused (`bad_request`).
+- **A card's number or security code verifies the user each time:** with
+  Touch ID on and enrolled, the agent raises it for "fill Visa •••• 4242 on
+  shop.com" and fills nothing if it is cancelled or fails. Without Touch ID,
+  the user's explicit pick in the extension's menu is the verification (the
+  same rule as a login's password), so `canVerify` tells the menu which it
+  will be. The expiry, cardholder and brand need no prompt, nor does an
+  identity.
+- **Activity** records every card fill from the browser (which card, which
+  page, which fields), never an identity's: addresses fill on every checkout,
+  and they're not secrets. Listing is never an entry. A fill asked by
+  anything else than the browser host is recorded, whatever the item.
+- **Waiting on Touch ID** holds the host's other requests behind it (they're
+  answered in order), which is fine while the user is at the prompt.
+- **Idle lock:** listing, which comes with every form, doesn't count as use;
+  a fill does.
+
+### What's next
+
+- Saving a new address or card typed into a checkout, and updating one.
+- Agent grants for forms: Browse and other agent clients fill logins only.
+- A billing address picker in the app (the field is an item id today).
+- Filling forms from the toolbar popup: only the in-page menu fills them.
 
 ## Threat model
 
@@ -1101,8 +1176,8 @@ The host exits when the port closes.
 
 ```json
 { "id": "1", "type": "hello" }
-{ "id": "1", "type": "hello", "protocol": 2, "version": "0.1.0+abc123",
-  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn"] }
+{ "id": "1", "type": "hello", "protocol": 3, "version": "0.1.0+abc123",
+  "status": "ready", "capabilities": ["list", "fill", "check", "save", "generate", "passkeys", "learn", "forms"] }
 ```
 
 `status` is one of:
@@ -1229,6 +1304,49 @@ agent forget it.
   no spaces, at most 2048 bytes (`bad_request`), and on the page's site
   (`domain_mismatch`). `title` is 1 to 128 characters.
 
+### forms: identities and cards for a form
+
+```json
+{ "id": "9", "type": "forms", "origin": "https://shop.com", "kinds": ["identity", "card"] }
+{ "id": "9", "type": "forms", "canVerify": true,
+  "identities": [
+    { "ref": "<64 hex>:<32 hex>", "vault": "personal", "title": "Home",
+      "summary": "Kit Langton · 123 Main St, Brooklyn",
+      "fields": ["given-name", "family-name", "email", "phone", "address-line1", "city", "region", "postal-code", "country"] } ],
+  "cards": [
+    { "ref": "<64 hex>:<32 hex>", "vault": "personal", "title": "Visa •••• 4242",
+      "brand": "Visa", "last4": "4242", "expiry": "2028-08", "cardholder": "Kit Langton",
+      "billing": "<64 hex>:<32 hex>", "fields": ["cardholder", "number", "expiry", "cvv", "brand"] } ] }
+```
+
+`kinds` names `identity` and/or `card`. Every vault's items of those kinds,
+by title, with no values (see Forms). `fields` are the form fields the item
+has a value for; `summary` may be empty; `brand`, `expiry` (`YYYY-MM`),
+`cardholder` and `billing` (the ref of its billing identity, if that is in a
+vault here) are left out when the card has none. `canVerify` says whether a
+card's number or code would raise Touch ID now. A page autofill doesn't take
+gets `bad_request`.
+
+### fill-form: some fields of one identity or card
+
+```json
+{ "id": "10", "type": "fill-form", "origin": "https://shop.com", "ref": "…",
+  "fields": ["cardholder", "number", "expiry", "cvv"] }
+{ "id": "10", "type": "fill-form", "verified": true,
+  "values": { "cardholder": "Kit Langton", "number": "4242424242424242", "expiry": "2028-08", "cvv": "737" } }
+```
+
+`fields` names an identity's form fields (`honorific`, `given-name`,
+`additional-name`, `family-name`, `nickname`, `organization`, `job-title`,
+`email`, `phone`, `address-line1`, `address-line2`, `address-line3`, `city`,
+`region`, `postal-code`, `country`, `birthday`) or a card's (`cardholder`,
+`number`, `expiry`, `cvv`, `brand`); any other, or one the item's kind
+doesn't have, is `bad_request`. `values` has only those the item has. Asking
+for a card's `number` or `cvv` raises Touch ID when it's on; `verified` says
+whether it did. A cancelled or failed prompt is `failed`. Rate-limited with
+`fill`. An unknown `ref`, or one that isn't an identity or card, gets
+`not_found`.
+
 ### passkey-list: the passkeys for a page
 
 ```json
@@ -1330,7 +1448,7 @@ Pushes carry no id and no values. Refetch what's on screen.
 `code` is one of:
 
 - `locked`: the store is locked, not set up, or no agent runs.
-- `not_found`: no such login.
+- `not_found`: no such login, identity or card.
 - `domain_mismatch`: the login or URL isn't on the page's site.
 - `bad_request`: a malformed message, a page that gets no logins, or a value
   out of range.
@@ -1353,7 +1471,7 @@ Pushes carry no id and no values. Refetch what's on screen.
 - **Firefox and Safari:** Firefox passes different host arguments and uses a
   different manifest. Safari needs an app extension.
 - **Touch ID on fill:** an unlocked vault fills without asking again.
-  Passkeys ask (see Passkeys).
+  Passkeys and a card's number or code ask (see Passkeys, Forms).
 - **Unlocking from the browser:** the extension can say Deadbolt is locked but
   can't unlock it. Use the app or `deadbolt unlock`.
 - **Choosing the vault for a new login:** new logins go to the default vault.

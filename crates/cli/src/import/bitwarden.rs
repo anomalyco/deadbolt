@@ -8,8 +8,8 @@ use serde_json::Value;
 use super::{
     ATTACHMENT, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, BANK_ACCOUNT, Builder, COLLECTION,
     DRIVERS_LICENSE, FAVORITE, FOLDER, Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSKEYS,
-    PASSPORT, PASSWORD_HISTORY, Summary, UNKNOWN_TYPE, address, array, field_name, item_name, join,
-    month, number, text,
+    PASSPORT, PASSWORD_HISTORY, Summary, UNKNOWN_TYPE, array, field_name, item_name, month, number,
+    text,
 };
 use crate::protocol::ImportSource;
 
@@ -115,33 +115,23 @@ fn identity(item: &Value, summary: &mut Summary) -> Option<Imported> {
     let id = item.get("identity").unwrap_or(&Value::Null);
     let get = |key: &str| text(id, key);
     let mut b = Builder::new("identity");
-    b.known(
-        "name",
-        join([get("firstName"), get("middleName"), get("lastName")], " "),
-    );
+    b.known("honorific", get("title"));
+    b.known("given-name", get("firstName"));
+    b.known("additional-name", get("middleName"));
+    b.known("family-name", get("lastName"));
+    b.known("organization", get("company"));
     b.known_or_extra("email", get("email"), BAD_EMAIL, summary);
-    b.known("phone", get("phone"));
-    b.known(
-        "address",
-        address(
-            [get("address1"), get("address2"), get("address3")],
-            get("city"),
-            get("state"),
-            get("postalCode"),
-            get("country"),
-        ),
+    b.phone(get("phone"));
+    b.postal_address(
+        [get("address1"), get("address2"), get("address3")],
+        [get("city"), get("state"), get("postalCode"), get("country")],
+        summary,
     );
     b.known("national-id", get("ssn"));
     b.known("passport", get("passportNumber"));
     b.known("license", get("licenseNumber"));
-    for (key, name) in [
-        ("title", "title"),
-        ("company", "company"),
-        ("username", "username"),
-    ] {
-        if let Some(value) = get(key) {
-            b.extra(name, FieldType::Text, value);
-        }
+    if let Some(value) = get("username") {
+        b.extra("username", FieldType::Text, value);
     }
     b.known("notes", text(item, "notes"));
     b.custom_fields(item, summary);
@@ -415,19 +405,21 @@ mod tests {
         assert_eq!(
             fields(&items[6]),
             [
-                (
-                    "address",
-                    "note",
-                    "1 Main St\nApt 2\nSpringfield, IL 12345\nUS"
-                ),
-                ("company", "text", "Anomaly"),
+                ("address-line1", "text", "1 Main St"),
+                ("address-line2", "text", "Apt 2"),
+                ("city", "text", "Springfield"),
+                ("country", "text", "US"),
                 ("email", "email", "dax@example.com"),
-                ("name", "text", "Dax Raad"),
+                ("family-name", "text", "Raad"),
+                ("given-name", "text", "Dax"),
+                ("honorific", "text", "Mr"),
                 ("national-id", "secret", "000-00-0000"),
                 ("notes", "note", "primary"),
+                ("organization", "text", "Anomaly"),
                 ("passport", "secret", "X1234567"),
-                ("phone", "text", "+1 555 0100"),
-                ("title", "text", "Mr"),
+                ("phone", "text", "+15550100"),
+                ("postal-code", "text", "12345"),
+                ("region", "text", "IL"),
                 ("username", "text", "dax"),
             ]
         );
@@ -570,8 +562,8 @@ mod tests {
             fields(&items[3]),
             [
                 ("email-2", "text", "not an email"),
+                ("given-name", "text", "Dax"),
                 ("license", "secret", "bw-dl"),
-                ("name", "text", "Dax"),
                 ("passport", "secret", "bw-pp"),
                 ("phone-2", "secret", "bw-phone"),
             ]

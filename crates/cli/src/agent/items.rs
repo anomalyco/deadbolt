@@ -3,8 +3,8 @@
 //! Lookup is search. Every query word must match (case-insensitively) part
 //! of the item's name, URL host, a login's username, a card's cardholder,
 //! brand field or last four digits, an SSH key's comment, an identity's
-//! name or email, or a passkey's relying party or username; a word of 4+
-//! hex digits also matches an id prefix. Secret values (a secure note's body
+//! name parts, organization, email or phone, or a passkey's relying party
+//! or username; a word of 4+ hex digits also matches an id prefix. Secret values (a secure note's body
 //! among them) and the derived label are never searched.
 //!
 //! A passkey's private key never leaves the agent: items come back without
@@ -70,14 +70,30 @@ pub fn label(item: &Item) -> String {
             last_four(item).unwrap_or_default()
         ),
         "ssh" => value(item, "comment").unwrap_or("SSH key").into(),
-        "identity" => value(item, "name")
-            .or_else(|| value(item, "email"))
-            .unwrap_or("identity")
-            .into(),
+        "identity" => person(item)
+            .or_else(|| value(item, "email").map(str::to_string))
+            .unwrap_or_else(|| "identity".into()),
         "passkey" => value(item, "rp-id").unwrap_or("passkey").into(),
         // A secure note's body is secret: never a label.
         kind => kind.into(),
     }
+}
+
+/// An identity's name: given and family name, else its nickname, else the
+/// one-line `name` an identity made before names had parts may still have.
+pub fn person(item: &Item) -> Option<String> {
+    let parts: Vec<&str> = ["given-name", "family-name"]
+        .iter()
+        .filter_map(|f| value(item, f))
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .collect();
+    if !parts.is_empty() {
+        return Some(parts.join(" "));
+    }
+    value(item, "nickname")
+        .or_else(|| value(item, "name"))
+        .map(str::to_string)
 }
 
 /// A login's username (else how it signs in: "Sign in with Google"), a
@@ -112,7 +128,15 @@ fn searchable(item: &Item) -> Vec<String> {
         "login" => &["username"],
         "card" => &["cardholder", "brand"],
         "ssh" => &["comment", "fingerprint"],
-        "identity" => &["name", "email", "phone"],
+        "identity" => &[
+            "given-name",
+            "family-name",
+            "nickname",
+            "organization",
+            "email",
+            "phone",
+            "name",
+        ],
         "passkey" => &["rp-id", "username"],
         _ => &[],
     };
@@ -241,13 +265,22 @@ impl Listing {
 }
 
 /// Normalizes common input forms: card numbers without spaces or dashes,
-/// `MM/YY` and `MM/YYYY` months, URLs without a scheme (https).
+/// `MM/YY` and `MM/YYYY` months, URLs without a scheme (https), an
+/// identity's international phone number in E.164 form and its country
+/// code in upper case.
 fn normalize(kind: &str, name: &str, field: &FieldType, value: String) -> String {
-    if kind == "card" && name == "number" {
-        return value
-            .chars()
-            .filter(|c| !c.is_whitespace() && *c != '-')
-            .collect();
+    match (kind, name) {
+        ("card", "number") => {
+            return value
+                .chars()
+                .filter(|c| !c.is_whitespace() && *c != '-')
+                .collect();
+        }
+        ("identity", "phone") => return deadbolt_core::item::phone(&value).unwrap_or(value),
+        ("identity", "country") => {
+            return deadbolt_core::item::country(&value).map_or(value, str::to_string);
+        }
+        _ => {}
     }
     match field {
         FieldType::Month => {
@@ -1245,10 +1278,24 @@ mod tests {
         let me = item(
             "identity",
             Some("Me"),
-            &[("name", "Dax Raad"), ("email", "dax@example.com")],
+            &[
+                ("given-name", "Dax"),
+                ("family-name", "Raad"),
+                ("email", "dax@example.com"),
+            ],
         );
         assert_eq!(detail(&me).as_deref(), Some("dax@example.com"));
         assert!(matches(&me, &q(&["raad", "example"])));
+        let unnamed = item(
+            "identity",
+            None,
+            &[("given-name", "Dax"), ("family-name", "Raad")],
+        );
+        assert_eq!(label(&unnamed), "Dax Raad");
+        // One made before names had parts still reads by its old name.
+        let legacy = item("identity", None, &[("name", "Kit Langton")]);
+        assert_eq!(label(&legacy), "Kit Langton");
+        assert!(matches(&legacy, &q(&["langton"])));
         let phone = item("identity", None, &[("phone", "+1 555 0100")]);
         assert!(matches(&phone, &q(&["0100"])));
         // The type word and the label's filler match no item, branded or not.
@@ -1291,5 +1338,15 @@ mod tests {
         );
         assert_eq!(n("login", "url", FieldType::Url, "ftp://x"), "ftp://x");
         assert_eq!(n("login", "url", FieldType::Url, ""), "");
+        assert_eq!(
+            n("identity", "phone", FieldType::Text, "+1 (555) 010-0100"),
+            "+15550100100"
+        );
+        assert_eq!(
+            n("identity", "phone", FieldType::Text, "(555) 010-0100"),
+            "(555) 010-0100"
+        );
+        assert_eq!(n("identity", "country", FieldType::Text, "gb"), "GB");
+        assert_eq!(n("identity", "country", FieldType::Text, "Wales"), "Wales");
     }
 }

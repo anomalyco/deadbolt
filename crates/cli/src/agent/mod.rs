@@ -5,6 +5,7 @@ mod activity;
 mod autofill;
 pub mod biometric;
 mod caller;
+mod forms;
 mod generate;
 mod grants;
 mod guesses;
@@ -1404,6 +1405,7 @@ impl Agent {
                 Command::ItemCode { .. }
                     | Command::SiteLogins { .. }
                     | Command::SiteCheck { .. }
+                    | Command::FormItems { .. }
                     | Command::PasskeyList { .. }
                     | Command::SiteGenerateCheck { .. }
                     | Command::SiteGenerateDrop { .. }
@@ -1737,6 +1739,12 @@ impl Agent {
                 self.sync_now.notify_one();
                 Ok(Reply::SiteSaved { login, created })
             }
+            Command::FormItems { origin, kinds } => self.form_items(&origin, &kinds),
+            Command::FormFill {
+                origin,
+                item,
+                fields,
+            } => self.form_fill(&origin, &item, &fields, conv).await,
             command @ (Command::PasskeyList { .. }
             | Command::PasskeyCreate { .. }
             | Command::PasskeyGet { .. }) => self.passkey(command, conv).await,

@@ -1341,16 +1341,14 @@ pub(super) mod tests {
         let count = items(&s).len();
         let mut op = op_items();
         let report = sync(&mut s, &op);
-        // `op` gives the card's and the identity's addresses as one line,
-        // so those two are not plainly the same as the imported ones: they
-        // are added, and the imports left as they were.
-        assert_eq!(report.count(MirrorAction::Adopt), 9, "{report:?}");
+        // `op` gives the card's contact address as one line, so that card
+        // is not plainly the same as the imported one: it is added, and the
+        // import left as it was. An identity's address splits into the
+        // same parts either way.
+        assert_eq!(report.count(MirrorAction::Adopt), 10, "{report:?}");
         assert_eq!(
-            actions(&report)[..2],
-            [
-                (MirrorAction::Add, "Me", Some(BESIDE)),
-                (MirrorAction::Add, "Visa", Some(BESIDE)),
-            ]
+            actions(&report)[..1],
+            [(MirrorAction::Add, "Visa", Some(BESIDE))]
         );
         assert!(
             report
@@ -1358,10 +1356,11 @@ pub(super) mod tests {
                 .iter()
                 .all(|i| i.action != MirrorAction::Adopt || i.reason.is_none())
         );
-        assert_eq!(items(&s).len(), count + 2);
-        let me = named(&s, "Me");
-        assert_eq!(me.len(), 2);
-        let mine = me.iter().find(|i| i.source.is_none()).unwrap();
+        assert_eq!(items(&s).len(), count + 1);
+        assert_eq!(named(&s, "Me").len(), 1);
+        let visa = named(&s, "Visa");
+        assert_eq!(visa.len(), 2);
+        let mine = visa.iter().find(|i| i.source.is_none()).unwrap();
         assert!(mine.fields["address"].value.contains('\n'));
         assert!(named(&s, "Mine")[0].source.is_none());
         let report = sync(&mut s, &op);
@@ -1602,25 +1601,18 @@ pub(super) mod tests {
         assert_eq!(report.count(MirrorAction::Adopt), 11, "{report:?}");
         assert_eq!(report.count(MirrorAction::Add), 0);
         // It names the user, `op` the account: the same item all the same,
-        // so even the two whose addresses `op` gives differently.
+        // so even the one whose address `op` gives differently.
         let changed: Vec<_> = actions(&report)
             .into_iter()
             .filter(|(_, _, reason)| reason.is_some_and(|r| r.starts_with("takes over")))
             .collect();
         assert_eq!(
             changed,
-            [
-                (
-                    MirrorAction::Adopt,
-                    "Me",
-                    Some("takes over, changes: address")
-                ),
-                (
-                    MirrorAction::Adopt,
-                    "Visa",
-                    Some("takes over, changes: address")
-                ),
-            ]
+            [(
+                MirrorAction::Adopt,
+                "Visa",
+                Some("takes over, changes: address")
+            )]
         );
         assert_eq!(items(&s).len(), count);
         let github = &named(&s, "GitHub")[0];
@@ -1709,7 +1701,7 @@ pub(super) mod tests {
         twin["fields"][1]["value"] = json!("op-github-pw-2");
         op.push(twin);
         let report = sync(&mut s, &op);
-        assert_eq!(report.count(MirrorAction::Adopt), 9, "{report:?}");
+        assert_eq!(report.count(MirrorAction::Adopt), 10, "{report:?}");
         assert!(actions(&report).contains(&(MirrorAction::Adopt, "GitHub", None)));
         assert!(actions(&report).contains(&(MirrorAction::Add, "GitHub", None)));
         let github = named(&s, "GitHub");

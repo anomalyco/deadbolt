@@ -51,7 +51,7 @@ pub use caller::{
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
 
-pub const PROTOCOL_VERSION: u32 = 15;
+pub const PROTOCOL_VERSION: u32 = 16;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -321,6 +321,28 @@ pub enum Command {
         passkey: LoginRef,
         challenge: String,
         verify: Verify,
+    },
+    /// Forms: the identities and cards (`kinds`), in every vault, a form
+    /// on the page at `origin` can be filled from, without values: an
+    /// identity's summary, a card's brand, last four digits, expiry and
+    /// cardholder, and which form fields each has. Not bound to a site: any
+    /// page autofill takes (https; http only on a local host), never a
+    /// sandboxed or opaque frame (`null`). Doesn't count as use for the idle
+    /// lock. Replies `form-items`.
+    FormItems {
+        origin: String,
+        kinds: Vec<FormKind>,
+    },
+    /// Forms: the values of `fields` (see [`IDENTITY_FORM_FIELDS`] and
+    /// [`CARD_FORM_FIELDS`]) that the identity or card `item` has, for the
+    /// page at `origin` (the same origin rules as `form-items`). A card's
+    /// number or security code (`cvv`) verifies the user each time: Touch ID
+    /// when it is on and enrolled, else the pick in the browser counts.
+    /// Replies `form-fill`.
+    FormFill {
+        origin: String,
+        item: LoginRef,
+        fields: Vec<String>,
     },
     /// Deadbolt Send: serves `sealed`, a bundle the client sealed with a
     /// content key the agent never sees, to receivers that prove `secret`
@@ -713,6 +735,80 @@ pub fn sign_in_name(provider: &str) -> &str {
         .map_or(provider, |(_, name, _)| name)
 }
 
+/// The kinds of item forms fill from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum FormKind {
+    Identity,
+    Card,
+}
+
+impl FormKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Card => "card",
+        }
+    }
+}
+
+/// An identity's fields a form may ask for: never its ID numbers or notes.
+pub const IDENTITY_FORM_FIELDS: [&str; 17] = [
+    "honorific",
+    "given-name",
+    "additional-name",
+    "family-name",
+    "nickname",
+    "organization",
+    "job-title",
+    "email",
+    "phone",
+    "address-line1",
+    "address-line2",
+    "address-line3",
+    "city",
+    "region",
+    "postal-code",
+    "country",
+    "birthday",
+];
+
+/// A card's fields a form may ask for: never its PIN or notes. `number`
+/// and `cvv` verify the user ([`CARD_VERIFIED_FIELDS`]).
+pub const CARD_FORM_FIELDS: [&str; 5] = ["cardholder", "number", "expiry", "cvv", "brand"];
+
+/// A card's fields whose fill verifies the user.
+pub const CARD_VERIFIED_FIELDS: [&str; 2] = ["number", "cvv"];
+
+/// An identity a form can be filled from, without values.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormIdentity {
+    pub item: LoginRef,
+    /// The name of its vault.
+    pub vault: String,
+    pub title: String,
+    /// Who and where: "Kit Langton · 123 Main St, Brooklyn". May be empty.
+    pub summary: String,
+    /// The form fields it has a value for.
+    pub fields: Vec<String>,
+}
+
+/// A card a form can be filled from, without its number or code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormCard {
+    pub item: LoginRef,
+    pub vault: String,
+    pub title: String,
+    pub brand: Option<String>,
+    pub last4: String,
+    /// `YYYY-MM`.
+    pub expiry: Option<String>,
+    pub cardholder: Option<String>,
+    /// Its billing address's identity, if that is in one of the vaults here.
+    pub billing: Option<LoginRef>,
+    pub fields: Vec<String>,
+}
+
 /// What a fill asked for and the login has.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteValues {
@@ -927,6 +1023,22 @@ pub enum Reply {
     SiteSaved {
         login: LoginRef,
         created: bool,
+    },
+    FormItems {
+        identities: Vec<FormIdentity>,
+        cards: Vec<FormCard>,
+        /// Whether a card fill now would verify the user (Touch ID is on).
+        can_verify: bool,
+    },
+    FormFill {
+        /// `identity` or `card`.
+        kind: String,
+        /// The item's label.
+        title: String,
+        /// The fields asked for that it has, by name.
+        values: BTreeMap<String, Secret>,
+        /// Whether Touch ID verified the user for this fill.
+        verified: bool,
     },
     Passkeys {
         rp_id: String,
