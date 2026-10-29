@@ -18,32 +18,36 @@
 //! membership with reachable peers on startup before serving data, and ordering
 //! membership entries before the data that depends on them.
 
+mod code;
 mod error;
 mod frame;
 mod node;
 mod pair;
 mod qr;
+mod rendezvous;
 mod sync;
 
+pub use code::{CODE_WORDS, PairingCode};
 pub use error::{Error, HandlerError, Result};
 #[cfg(feature = "sim")]
 pub use node::Gate as MembershipGate;
 pub use node::{DEFAULT_MAX_FRAME_LEN, Node, NodeConfig, PeerAddr, Relays};
 pub use pair::{
-    ConfirmationCode, DEFAULT_PAIRING_TTL, Inviter, Joiner, PairingContext, PairingListener,
-    PairingOptions, PairingOutcome, PairingTicket,
+    DEFAULT_FIND_TIMEOUT, DEFAULT_PAIRING_TTL, Inviter, Joiner, PairingContext, PairingListener,
+    PairingOptions, PairingOutcome,
 };
 #[cfg(feature = "sim")]
 pub use pair::{PairingStream, ProvenPairing};
 pub use qr::{QrStyle, render_qr};
+pub use rendezvous::Rendezvous;
 #[cfg(feature = "sim")]
 pub use sync::run_sync_session;
 pub use sync::{INBOUND_SYNC_TIMEOUT, SyncConnection, SyncHandler, SyncOutcome};
 
 /// ALPN of the sync protocol. Membership-gated.
 pub const SYNC_ALPN: &[u8] = b"deadbolt/sync/1";
-/// ALPN of the pairing protocol. Only accepted while a pairing ticket is outstanding.
-pub const PAIR_ALPN: &[u8] = b"deadbolt/pair/1";
+/// ALPN of the pairing protocol. Only accepted while a pairing code is outstanding.
+pub const PAIR_ALPN: &[u8] = b"deadbolt/pair/2";
 
 /// A device's Ed25519 public key, which is also its iroh endpoint id.
 pub type PeerId = [u8; 32];
