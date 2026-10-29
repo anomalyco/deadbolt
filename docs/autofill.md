@@ -800,8 +800,8 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   rules for delegating WebAuthn to cross-origin frames. So does a frame whose
   Permissions Policy doesn't allow `publickey-credentials-get` (or `-create`),
   which the content script reads from `document.permissionsPolicy` in its
-  isolated world, and an autofill request in any frame. Incognito tabs go to
-  the browser.
+  isolated world. The one exception is an autofill request in a login frame
+  (see below). Incognito tabs go to the browser.
 - **Credential lists** go whole or not at all. `allowCredentials`,
   `excludeCredentials` and `pubKeyCredParams` reach the extension entry by
   entry; past 64 entries, or with any entry that isn't a `public-key`
@@ -820,17 +820,36 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
 - **Sign-in** (`get`) without `mediation` asks "Sign in to <rp id> with a
   passkey?" in the popup, with the site's passkeys (those in
   `allowCredentials`, or all for the relying party), Sign in, Use another
-  device and Cancel. With `mediation: "conditional"` they
-  join the inline menu's rows on the top page's username and password fields,
-  under the menu's visibility and keyboard rules, and wait there until the
-  user picks one, the page aborts or the document goes away. One request per
-  document waits there; a newer one replaces it.
+  device and Cancel.
+- **Autofill sign-in** (`mediation: "conditional"`) is Deadbolt's wherever
+  its inline menu opens on the page's login fields: the top page, or a frame
+  whose every frame up to the top page is its site (`sameSiteTop`, see
+  Frames above), such as Apple's sign-in frame in App Store Connect. The
+  browser draws its own autofill dropdown (passkeys from Apple Passwords,
+  Google Password Manager or a phone) in browser UI, over anything a page or
+  extension shows, so there Deadbolt holds the request whenever it has
+  logins or passkeys for the site, and the browser never sees it. Its
+  passkeys join the inline menu's rows on the username and password fields,
+  under the menu's visibility and keyboard rules: picking one signs in;
+  picking a login fills it and leaves the request waiting, as the browser's
+  own does. It waits until a passkey is picked, the page aborts or the
+  document goes away. One request per document waits; a newer one replaces
+  it. In a frame on another origin of the site, the agent's client data
+  (never `crossOrigin`) wouldn't be true, so there the request is held for
+  the logins alone. With neither logins nor usable passkeys for the site,
+  the request goes to the browser, so its dropdown still shows other
+  providers' passkeys on sites Deadbolt doesn't know. Where Deadbolt holds
+  it, other providers' passkeys are a modal sign-in away: the site's own
+  "Sign in with a passkey" button makes a call without `mediation`, which
+  goes to the browser's sheet whenever Deadbolt has no passkey for it (or
+  through Use another device when it does).
 - **Back to the browser:** Deadbolt hands the call to the browser's own
   WebAuthn, unchanged, when the site wants another algorithm or a
   `cross-platform` authenticator, asks `silent`, has no passkey Deadbolt
-  holds, needs `required` verification Deadbolt can't give, Deadbolt isn't
-  ready (locked, not running, or a host without `passkeys`), or the user
-  chooses Use another device.
+  holds (for an autofill request: no passkey and no login), needs `required`
+  verification Deadbolt can't give, Deadbolt isn't ready (locked, not
+  running, or a host without `passkeys`, which still holds an autofill
+  request for its logins), or the user chooses Use another device.
 - **Ending:** the page's `AbortSignal`, the timeout (clamped to 1 to 10
   minutes, 5 by default), closing the tab, and a navigation of the frame, or
   of the top page for every frame in the tab, end the request: the signal
@@ -843,8 +862,9 @@ page ── passkey-hook (MAIN world) ══ one acked MessagePort ══ conten
   the agent gets `passkey-cancel`, which closes the Touch ID prompt.
 - **Limits:** a tab holds 8 requests at once, counted as each arrives; more
   get `NotAllowedError` before anything is asked. A document lists the
-  site's passkeys 4 times at once, then once a second, and requests for the
-  same relying party id while one lists share it. The host allows 20 lists
+  site's passkeys (or, for an autofill request, its logins) 4 times at once,
+  then once a second, and requests for the same relying party id while one
+  lists share it. The host allows 20 lists
   a quarter-second, 10 ceremonies a second and 4 at once, and answers
   `rate_limited` past them, which the page sees as `NotAllowedError`.
 - **The page↔extension channel:** the content script offers the hook one

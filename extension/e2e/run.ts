@@ -532,13 +532,14 @@ const APPLE_WIDGET = `<!doctype html><html><head><meta charset="utf-8"><title>Si
  * `frame` (or through a frame on `via`), maybe under a sheet that lets clicks
  * through, maybe with `sandbox` flags on its iframe, maybe (`tall`) taller
  * than the viewport. `csp`: the frame on `via` is sandboxed by its
- * Content-Security-Policy header instead, without allow-same-origin.
+ * Content-Security-Policy header instead, without allow-same-origin. The
+ * frame may call WebAuthn, as Apple's does for its passkey autofill.
  */
 const appleLogin = (port: string, frame: string, via?: string, cover = false, sandbox?: string, tall = false, csp = false) => {
   const widget = `http://${frame}:${port}/appleauth/auth/signin?widgetKey=e2e&language=en_US`
   const src = via ? `http://${via}:${port}/apple/shell?inner=${encodeURIComponent(widget)}${csp ? "&csp" : ""}` : widget
   const flags = sandbox === undefined ? "" : ` sandbox="${sandbox.replace(/[^a-z -]/g, "")}"`
-  return `<h1>App Store Connect</h1><iframe id="aid-auth-widget-iFrame" name="aid-auth-widget"${flags} src="${src}" style="width:100%;height:${tall ? 1400 : 330}px;border:0"></iframe>
+  return `<h1>App Store Connect</h1><iframe id="aid-auth-widget-iFrame" name="aid-auth-widget" allow="publickey-credentials-get"${flags} src="${src}" style="width:100%;height:${tall ? 1400 : 330}px;border:0"></iframe>
     ${cover ? `<section style="position:fixed;inset:0;z-index:9;pointer-events:none;background:rgb(244 244 245 / 97%)"></section>` : ""}
     <script>addEventListener("message", (e) => { if (e.data?.type === "signed-in") location.assign("/apple/apps?u=" + encodeURIComponent(e.data.account)) })</script>`
 }
@@ -947,6 +948,8 @@ interface LaunchOptions {
   google?: boolean
   /** "deny": the fake host turns down Touch ID for a card's number. */
   touchId?: string
+  /** http origins the browser treats as secure contexts, which WebAuthn needs. */
+  secure?: string[]
 }
 
 async function launch(options: LaunchOptions = {}): Promise<Run> {
@@ -972,7 +975,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
     // *.acme.test is one site on this machine: two origins of it for the sign-in session runs; *.apple.test for Apple's sign-in frame.
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1"],
+    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1", ...(options.secure ? [`--unsafely-treat-insecure-origin-as-secure=${options.secure.join(",")}`] : [])],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -3057,6 +3060,120 @@ const passkeyFrame = (page: Page, what: string, match: (f: Frame) => boolean) =>
     return f && (await f.evaluate(() => typeof (window as any).start === "function").catch(() => false)) ? f : null
   })
 
+/**
+ * Every navigator.credentials.get that reaches the browser's own WebAuthn,
+ * by mediation, in `__nativeGets`. An init script runs before the
+ * extension's document_start scripts, so Deadbolt's hook (passkey-hook.ts)
+ * wraps this spy and hands it only what it falls back on; `__spyUnder`
+ * says the hook wasn't there first.
+ */
+const NATIVE_GETS = () => {
+  const proto = CredentialsContainer.prototype as any
+  const w = window as any
+  w.__nativeGets = []
+  w.__spyUnder = !proto[Symbol.for("deadbolt.passkeys")]
+  const get = proto.get
+  proto.get = function (this: CredentialsContainer, options?: any) {
+    w.__nativeGets.push(options?.mediation ?? "optional")
+    return get.call(this, options)
+  }
+}
+
+/**
+ * What the page's passkey autofill does, as Apple's sign-in frame: marks
+ * the account field `webauthn` and starts a conditional get, whose state
+ * stays in `__conditional`.
+ */
+const CONDITIONAL_GET = (selector: string) => {
+  const w = window as any
+  document.querySelector(selector)!.setAttribute("autocomplete", "username webauthn")
+  w.__conditional = "pending"
+  navigator.credentials.get({ mediation: "conditional", publicKey: { challenge: crypto.getRandomValues(new Uint8Array(32)) } } as CredentialRequestOptions).then(
+    () => (w.__conditional = "answered"),
+    (e) => (w.__conditional = e.name),
+  )
+}
+const nativeGets = (target: Page | Frame) => target.evaluate(() => ({ under: (window as any).__spyUnder as boolean, gets: (window as any).__nativeGets as string[], secure: window.isSecureContext }))
+const conditionalState = (target: Page | Frame) => target.evaluate(() => (window as any).__conditional as string)
+
+/**
+ * A passkey autofill sign-in (mediation "conditional") where Deadbolt's
+ * inline menu opens: the top page, and Apple's sign-in frame in App Store
+ * Connect (idmsa inside appstoreconnect, one site). The browser draws its
+ * own passkey dropdown in browser UI, over Deadbolt's menu, so Deadbolt
+ * holds the call: its menu shows, the browser's get is never called, and
+ * picking a login fills it and leaves the call waiting. A cross-site
+ * frame's call still goes to the browser.
+ */
+async function conditionalHeld() {
+  const port = server.port
+  const apple = `http://appstoreconnect.apple.test:${port}`
+  const run = await launch({ secure: [apple, `http://idmsa.apple.test:${port}`, `http://idmsa.evilpay.test:${port}`] })
+  await run.context.addInitScript(NATIVE_GETS)
+  const page = await run.context.newPage()
+  const menuNow = async () => {
+    const f = extensionFrame(page, "menu.html")
+    return f && (await f.locator("button.row").count()) > 0 ? f : null
+  }
+  try {
+    // The top page.
+    await page.goto(`${site}/passkey`)
+    await formFound(page)
+    await page.evaluate(CONDITIONAL_GET, "#email")
+    const top = await menuOn(page, "#email")
+    const spied = await nativeGets(page)
+    check(spied.under && spied.secure, `the spy sits under Deadbolt's hook, in a secure context (${JSON.stringify(spied)})`)
+    check(!!top, "a top page's conditional get leaves Deadbolt's menu to open on its webauthn field")
+    check(spied.gets.length === 0, `and the browser's get is never called (${spied.gets})`)
+    if (top) {
+      await top.locator("button.row", { hasText: "kit@acme.test" }).click()
+      check(!!(await until("the top page's field fills", async () => (await page.inputValue("#email")) === "kit@acme.test")), "picking a login fills it")
+      await Bun.sleep(300)
+      check((await conditionalState(page)) === "pending", `and leaves the conditional get waiting (${await conditionalState(page)})`)
+    }
+
+    // Apple's sign-in frame.
+    await page.goto(`${apple}/apple/login`)
+    const widget = await until("the sign-in frame loads", () => page.frames().find((f) => f.url().includes("/appleauth/auth/signin")) ?? null)
+    if (widget) {
+      const reports = async () => (await run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)).filter((s) => /^db:page@[1-9]\d*:\/appleauth\/auth\/signin$/.test(s)).length
+      await until("the frame's form is found", async () => (await reports()) > 0, 15_000)
+      const before = await reports()
+      await widget.evaluate(CONDITIONAL_GET, "#account_name_text_field")
+      // The new autocomplete changes the frame's form: let it report again before the click.
+      await until("the frame reports its webauthn field", async () => (await reports()) > before, 5000)
+      await widget.click("#account_name_text_field")
+      const menu = await until("the menu opens for the frame's field", menuNow, 15_000)
+      const framed = await nativeGets(widget)
+      check(framed.under && framed.secure, `the frame's spy sits under the hook, in a secure context (${JSON.stringify(framed)})`)
+      check(!!menu && menu.parentFrame() === page.mainFrame(), "Apple's frame's conditional get leaves Deadbolt's menu to open in the top page")
+      check(framed.gets.length === 0, `and the browser's get is never called (${framed.gets})`)
+      check(((await menu?.locator(".row .sub").allTextContents()) ?? []).every((s) => !s.startsWith("Passkey")), "with logins only: the agent's client data couldn't say cross-origin")
+      if (menu) {
+        await settled(menu)
+        await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+        check(!!(await until("the frame's field fills", async () => (await widget.inputValue("#account_name_text_field")) === "kit@acme.test")), "picking a login fills the frame")
+        check((await conditionalState(widget)) === "pending", `and leaves its conditional get waiting (${await conditionalState(widget)})`)
+      } else await diagnose(run, page, "conditionalHeld")
+    }
+
+    // A cross-site frame: the browser's own.
+    await page.goto(`${apple}/apple/login?frame=idmsa.evilpay.test`)
+    const evil = await until("the cross-site frame loads", () => page.frames().find((f) => f.url().startsWith(`http://idmsa.evilpay.test:${port}/`)) ?? null)
+    if (evil) {
+      await until("its field shows", () => evil.evaluate(() => !!document.querySelector("#account_name_text_field")).catch(() => false))
+      await evil.evaluate(CONDITIONAL_GET, "#account_name_text_field")
+      const went = await until("the cross-site frame's get reaches the browser", async () => ((await nativeGets(evil)).gets.includes("conditional") ? true : null), 5000)
+      check(!!went, "a cross-site frame's conditional get goes to the browser")
+    }
+  } catch (err) {
+    check(false, `conditionalHeld threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "conditionalHeld")
+  } finally {
+    await close(run)
+  }
+}
+
 /** A throwaway Deadbolt store and the environment that points the binary at it. */
 async function deadboltStore() {
   // Short: the agent's socket path must fit in a sockaddr (104 bytes on macOS).
@@ -3742,6 +3859,7 @@ const once: Record<string, () => Promise<void>> = {
   corner,
   signInSessions,
   frameLogins,
+  conditionalHeld,
   rateLimited,
   securityPage,
   keyboardEntry,
@@ -3765,7 +3883,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // rough run times in seconds (per scheme; unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12,
