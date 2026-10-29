@@ -933,7 +933,9 @@ pub async fn serve(paths: Paths) -> Result<()> {
         .mode(0o700)
         .create(runtime)
         .with_context(|| format!("creating {}", runtime.display()))?;
-    fs::set_permissions(runtime, fs::Permissions::from_mode(0o700))?;
+    // Only this user can reach the socket, from the moment it's bound.
+    deadbolt_client::paths::secure_dir(runtime)
+        .with_context(|| format!("checking {}", runtime.display()))?;
     let lock = File::options()
         .create(true)
         .truncate(false)
@@ -1137,6 +1139,17 @@ impl Conversation {
 impl Agent {
     async fn handle(self: Arc<Self>, stream: UnixStream, max_line: usize) -> Result<()> {
         let peer = deadbolt_client::peer::Peer::of(&stream);
+        // The socket's directory keeps other users out; this holds even if
+        // it didn't.
+        match &peer {
+            Ok(peer) if peer.uid == rustix::process::getuid().as_raw() => {}
+            Ok(peer) => bail!(
+                "refused pid {} of uid {}: not this user",
+                peer.pid,
+                peer.uid
+            ),
+            Err(error) => bail!("refused a connection: reading its credentials: {error}"),
+        }
         let (read, write) = stream.into_split();
         let mut read = BufReader::new(read);
         let request =
