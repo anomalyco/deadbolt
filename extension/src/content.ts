@@ -5,9 +5,11 @@
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
 import { isVisible, scanPage, type Field } from "./content/detect"
+import { SIGNIN_SETTING } from "./auth-state"
+import { authReport, SIGN_OUT, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
 import { scanForms, type FormField } from "./content/forms"
-import { ownValue, rendered, trackUserInput } from "./content/fill"
+import { fillable, ownValue, rendered, trackUserInput } from "./content/fill"
 import { generatedId } from "./content/generate"
 import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped } from "./content/inline"
 import { initLearn, learnScanned } from "./content/learn"
@@ -17,6 +19,13 @@ import { deepActiveElement, openRoots } from "./content/shadow"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 
 const isTop = window === window.top
+let offerSignIn = false
+if (isTop) {
+  void chrome.storage.local.get(SIGNIN_SETTING).then((s) => { offerSignIn = s[SIGNIN_SETTING] === true; if (offerSignIn) scheduleScan() })
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area === "local" && SIGNIN_SETTING in changes) { offerSignIn = changes[SIGNIN_SETTING].newValue === true; scheduleScan() }
+  })
+}
 const SCAN_INTERVAL_MS = 750
 const QUIET_AFTER_MS = 2500
 /** A submitted form still showing this long after means the sign-in failed. */
@@ -88,6 +97,7 @@ function scan() {
   void report(false)
   reportForms()
   learnScanned()
+  if (offerSignIn && isTop) void send({ type: "db:signin-check" })
 
   // Autofocused login fields get the menu once the form is recognised.
   const active = deepActiveElement()
@@ -148,6 +158,40 @@ async function report(always: boolean) {
 }
 
 chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
+  if (message?.type === "db:auth-probe") {
+    if (!isTop || !offerSignIn) return void respond(null)
+    return void respond(authReport(state, message.usernames))
+  }
+  if (message?.type === "db:signin-go") {
+    const action = isTop && offerSignIn ? takeSignInAction(message.action, state) : null
+    respond(!!action)
+    // Answer before a navigation unloads the asking document.
+    if (action) setTimeout(() => "element" in action ? action.element.click() : void report(true), 0)
+    return
+  }
+  if (message?.type === "db:signin-submit") {
+    refresh()
+    const button = submitControl
+    const form = button instanceof HTMLButtonElement || button instanceof HTMLInputElement ? button.form : fields[0]?.el.form
+    const label = button?.textContent?.trim() || (button instanceof HTMLInputElement ? button.value : "")
+    const destination = button?.getAttribute("formaction") ?? form?.getAttribute("action") ?? location.href
+    const target = button?.getAttribute("formtarget") ?? form?.getAttribute("target") ?? ""
+    const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
+      (kind === "login" || kind === "mfa") && button instanceof HTMLElement && isVisible(button) &&
+      !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
+      !fields.some((f) => f.role === "captcha") && fields.every((f) => !!f.el.value && fillable(f.el)) &&
+      new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
+    respond(!!safe)
+    if (safe) {
+      // The guarded extension pick explicitly authorized this submit. Other
+      // script-generated submit events still cannot advance a session.
+      gesture()
+      captured()
+      stepSubmitted()
+      button.click()
+    }
+    return
+  }
   if (message?.type === "db:probe") {
     if (!isTop) return void respond(null)
     try {
@@ -310,6 +354,9 @@ const SUBMITS = 'button:not([type]), button[type="submit"], input[type="submit"]
 function onClick(event: MouseEvent) {
   if (!event.isTrusted) return
   let node = realTarget(event) as Element | null
+  const control = node?.closest("a, button, [role=button], [role=menuitem]")
+  if (offerSignIn && isTop && control && SIGN_OUT.test((control.getAttribute("aria-label") || control.textContent || "").trim()))
+    void send({ type: "db:signin-signout" })
   for (let depth = 0; node instanceof Element && depth < 6; depth++, node = node.parentElement) {
     if (submitControl && node === submitControl) {
       gesture()
@@ -330,6 +377,7 @@ function onSubmit(event: Event) {
 }
 
 function onKeydown(event: KeyboardEvent) {
+  if (event.isTrusted && event.key === "Escape" && isTop && offerSignIn) void send({ type: "db:signin-stop" })
   if (!event.isTrusted || event.key !== "Enter") return
   const target = realTarget(event)
   if (!fields.some((f) => f.el === target)) return

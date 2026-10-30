@@ -503,3 +503,10 @@ body[data-offer="dot"] .offer {
     transform: none;
   }
 }
+/* The proactive offer uses the existing surface, pinned to the corner by
+   inline.ts. Compact until there is more than one account to choose from. */
+.universal { border-radius: 18px; padding-right: 26px; }
+.universal:not(.expanded) .row { height: 36px; min-height: 36px; }
+.universal:not(.expanded) .sub { display: none; }
+.universal .signin-dismiss { position: absolute; right: 4px; top: 4px; width: 28px; height: 28px; border: 0; border-radius: 50%; background: transparent; color: inherit; font-size: 20px; cursor: pointer; }
+.universal .signin-dismiss:hover { background: light-dark(#00000012, #ffffff18); }
