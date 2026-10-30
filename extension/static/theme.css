@@ -1,6 +1,6 @@
 /* Deadbolt's extension pages, drawn like the Deadbolt app (crates/app), which
    is built on Rune with rune-theme-opencode. Every value below is copied by
-   hand from the Rune pin in crates/app/Cargo.toml (rev 47c9523, 2026-10-27):
+   hand from the Rune pin in crates/app/Cargo.toml (rev 29b1361, 2026-10-30):
 
    - colours and shadows: themes/opencode/assets/theme.json (the `v2-*`
      tokens, as themes/opencode/src/lib.rs maps them onto rune-kit's Palette

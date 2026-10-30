@@ -210,7 +210,8 @@ not running without sending hello, which would start the agent again.
 - **Menu visibility.** The menu samples its own visibility rather than
   watching it continuously: an `IntersectionObserver` with `trackVisibility`
   gives a reading at most every 100 ms, saying whether the menu is fully on
-  screen, unscaled, opaque and uncovered. A pick, by mouse or keyboard,
+  screen, opaque and uncovered. It ignores CSS `zoom` and also permits
+  proportional transform upscaling; it is not a scale check. A pick, by mouse or keyboard,
   counts only if every reading for at least 500 ms before the key or button
   went down said so and the menu hadn't moved or changed size, and nothing
   changes until a fresh reading taken 400 ms after the press confirms it. A
@@ -237,8 +238,32 @@ not running without sending hello, which would start the agent again.
   every frame, as it writes its place, it sets its own `zoom` to the inverse
   of its parent's `currentCSSZoom` (1 when that can't be read or its
   inverse isn't finite), so it renders at zoom 1, under the field, at its
-  own size. A page that changes the zoom after that write, within the same
-  frame, is covered separately (see issue #145).
+  own size. Late changes are checked separately below.
+- **Rendered menu scale.** A `ResizeObserver` watches the host's device-pixel
+  box after the page's later rAF callbacks. It checks that cumulative
+  `currentCSSZoom` is 1 (within 0.1%) and the rect matches the intended
+  placement and size (within 2 CSS px). This requires Chrome 128 or newer.
+  The verdict stays until another rendered size is observed; restoring zoom
+  in a task cannot turn a bad painted size into an approval.
+- **The menu's own scale reference.** The private channel carries the verdict,
+  intended viewport size and the parent's `devicePixelRatio`. At the press
+  and after the fresh visibility check, the menu requires matching CSS
+  viewport dimensions and a measured physical width within 2 device pixels
+  of intended width × DPR. This absolute reference refuses a steady scaled
+  paint even if the child never observes alternating sizes. A disagreement
+  uses the same "This menu is covered" refusal; changed geometry restarts
+  the dwell. Separate CSS and device-pixel observers also watch the frame's
+  physical/CSS ratio, since compensating zoom with size can keep physical
+  pixels unchanged. A ratio change restarts the dwell even if IO v2 says
+  visible.
+- **Chromium timing.** A deeper page ResizeObserver can change the host after
+  its observer ran; Chromium defers that shallower observation. The child's
+  ratio-change defense relies on Chromium syncing the frame at both our
+  forced layout and the scaled paint. The absolute physical-width reference
+  above does not require that alternation. These checks are tested in
+  headless Chromium, not a claim about other engines. Host size observers
+  do not see position-only or transform restyles; those remain a separate
+  [follow-up (#148)](https://github.com/anomalyco/deadbolt/issues/148).
 - **A press takes no focus.** A pointer press in the menu leaves focus where
   it was, in the page's field (the menu cancels the press's default
   action). The page never sees its field blur at the moment of the press,

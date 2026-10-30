@@ -61,6 +61,54 @@ let universalExpanded = false
 let pressedAt = -Infinity
 const dwell = new Dwell(500)
 watchVisibility(dwell)
+/** The intended viewport and the parent's post-layout scale verdict, over its private channel. */
+let geometry: { width: number; height: number; dpr: number; visible: boolean } | null = null
+let pressedScale = false
+
+// A page's ResizeObserver on a deeper element can change the host after
+// its observer ran; the browser defers the shallower observation. Our own
+// document is outside that loop. Its physical/CSS ratio changes as Chromium
+// syncs the restored layout and the scaled paint, even when IO v2 stays true.
+let paintedScale = 0
+let paintedPixels = 0
+let scaleChangedAt = -Infinity
+const readScale: ResizeObserverCallback = (entries) => {
+  // Each observer watches only documentElement, so its batch has at most this one entry.
+  const e = entries[0]
+  const css = e?.contentBoxSize[0]?.inlineSize
+  const pixels = e?.devicePixelContentBoxSize[0]?.inlineSize
+  if (!css || !pixels) return
+  paintedPixels = pixels
+  const scale = pixels / css
+  // One physical pixel of rounding isn't a change in rendered scale.
+  if (paintedScale && Math.abs(scale - paintedScale) > 1 / css) {
+    scaleChangedAt = performance.now()
+    dwell.moved(scaleChangedAt)
+  }
+  paintedScale = scale
+}
+// Separate observers: observing the same target twice on one replaces the
+// first box. Compensating zoom with width/height can keep device pixels
+// unchanged, but then its CSS size changes instead.
+for (const box of ["content-box", "device-pixel-content-box"] as const)
+  new ResizeObserver(readScale).observe(document.documentElement, { box })
+
+function scaleMatches(): boolean {
+  // innerWidth/Height round to integral CSS px. Never replace the parent's
+  // painted verdict with click-time layout, which a page can have restored.
+  // The absolute physical width also refuses a steady scaled paint: it
+  // doesn't depend on the child seeing the restored/scaled alternation.
+  // Two device pixels allow for the measured physical box snapping to pixels.
+  // Keep a scale change a "covered" refusal, not an invitation to pick again.
+  return !!geometry?.visible && paintedScale > 0 && performance.now() - scaleChangedAt >= dwell.ms &&
+    Math.abs(innerWidth - geometry.width) <= 2 && Math.abs(innerHeight - geometry.height) <= 2 &&
+    Math.abs(paintedPixels - geometry.width * geometry.dpr) <= 2
+}
+
+async function confirmScale(at: number): Promise<boolean> {
+  return pressedScale && scaleMatches() && (await confirmPick(dwell, at)) && scaleMatches()
+}
+
 /** Whether the keyboard may pick: see Entry. */
 const entry = new Entry()
 const COVERED = "This menu is covered. Nothing was filled."
@@ -247,10 +295,10 @@ function unlockRow(): HTMLElement {
 /** The unlock row, pressed: it waits for the menu to have been visible and still, as a pick does. */
 async function unlock() {
   if (busy) return
-  if (!dwell.settled(pressedAt)) return say(dwell.visible ? "Click again in a moment." : "This menu is covered.")
+  if (!pressedScale || !dwell.settled(pressedAt)) return say(pressedScale && dwell.visible ? "Click again in a moment." : "This menu is covered.")
   busy = true
   try {
-    if (!(await confirmPick(dwell, pressedAt))) return say("This menu is covered.")
+    if (!(await confirmScale(pressedAt))) return say("This menu is covered.")
     await send<boolean>({ type: "db:menu-unlock", token })
   } finally {
     busy = false
@@ -460,12 +508,12 @@ async function pick(i: number) {
   if (universal && accounts.length > 1 && !universalExpanded) return expandUniversal()
   const a = accounts[i]
   if (!a || busy || mode !== "accounts" || !matches(a, query)) return
-  if (!dwell.settled(pressedAt)) {
+  if (!pressedScale || !dwell.settled(pressedAt)) {
     relax()
-    return say(dwell.visible ? "Pick again in a moment." : COVERED)
+    return say(pressedScale && dwell.visible ? "Pick again in a moment." : COVERED)
   }
   busy = true
-  if (!(await confirmPick(dwell, pressedAt))) {
+  if (!(await confirmScale(pressedAt))) {
     busy = false
     relax()
     return say(COVERED)
@@ -685,11 +733,12 @@ addEventListener("pointerdown", (e) => {
   const press = entry.pressed()
   if ((e as PointerEvent).button !== 0) return
   pressedAt = e.timeStamp
+  pressedScale = scaleMatches()
   // The keyboard may pick after a press only if the press itself would have,
   // and only with focus still in the menu: a press takes none (see below), so
   // one that ended in no pick (dragged off its row, on the caption) leaves
   // nothing for a later Tab in to pick with.
-  if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && document.hasFocus() && entry.confirmed(press))
+  if (pressedScale && dwell.settled(e.timeStamp)) void confirmScale(e.timeStamp).then((ok) => ok && document.hasFocus() && entry.confirmed(press))
 }, true)
 // A press leaves focus where it was, in the page's field. Taking it would
 // tell the page the moment of the press (its field blurs), and many fields
@@ -711,7 +760,10 @@ addEventListener("focus", (e) => {
 addEventListener("blur", (e) => void (e.target === window && entry.blurred()))
 
 document.addEventListener("keydown", (e) => {
-  if (e.isTrusted) pressedAt = e.timeStamp
+  if (e.isTrusted) {
+    pressedAt = e.timeStamp
+    pressedScale = scaleMatches()
+  }
   if (e.key === "Escape") return void send({ type: "db:menu-dismiss", token })
   if (mode === "save") return
   // Tab leaves the list as Escape does: focus goes back to the field, never on into the end of the page.
@@ -806,8 +858,8 @@ function showUniversal() {
   surface.querySelector(".signin-dismiss")?.remove()
   const dismiss = h("button", { class: "signin-dismiss", type: "button", title: "Not now for this site (30 minutes)", "aria-label": "Not now for this site" }, "×")
   dismiss.addEventListener("click", async (e) => {
-    if (!e.isTrusted || (e.detail === 0 && !entry.entered) || busy || !dwell.settled(pressedAt)) return
-    if (await confirmPick(dwell, pressedAt)) await send({ type: "db:menu-dismiss", token })
+    if (!e.isTrusted || (e.detail === 0 && !entry.entered) || busy || !pressedScale || !dwell.settled(pressedAt)) return
+    if (await confirmScale(pressedAt)) await send({ type: "db:menu-dismiss", token })
   })
   surface.append(dismiss)
 }
@@ -1058,14 +1110,14 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     if (!e.isTrusted || busy || offerState === "dot") return
     // Enter or Space count only once the user came into the surface themselves (see Entry): say where else to answer.
     if (e.detail === 0 && !entry.entered) return say("Click to answer here, or answer in Deadbolt's toolbar button.")
-    if (!dwell.settled(pressedAt)) {
+    if (!pressedScale || !dwell.settled(pressedAt)) {
       relax()
       shape("open")
-      return say(dwell.visible ? "Press again in a moment." : "This offer is covered. Nothing was saved.")
+      return say(pressedScale && dwell.visible ? "Press again in a moment." : "This offer is covered. Nothing was saved.")
     }
     busy = true
     if (e.currentTarget instanceof HTMLElement) press(e.currentTarget)
-    if (!(await confirmPick(dwell, pressedAt))) {
+    if (!(await confirmScale(pressedAt))) {
       busy = false
       relax()
       shape("open")
@@ -1142,9 +1194,12 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
   if (channel) {
     port = channel
     channel.onmessage = (e: MessageEvent<{ type?: unknown }>) => {
-      const data = e.data as { type?: unknown; query?: unknown; near?: unknown }
+      const data = e.data as { type?: unknown; query?: unknown; near?: unknown; geometry?: typeof geometry }
       if (data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
-      else if (data?.type === "db:fold") onFold(e.data as Parameters<typeof onFold>[0])
+      else if (data?.type === "db:menu-geometry" && data.geometry) {
+        geometry = data.geometry
+        dwell.moved(performance.now())
+      } else if (data?.type === "db:fold") onFold(e.data as Parameters<typeof onFold>[0])
       else if (data?.type === "db:filter" && typeof data.query === "string") narrow(data.query)
       // The pointer near the offer pauses its bar, as being on it does.
       else if (data?.type === "db:near") document.body.classList.toggle("near", data.near === true)
