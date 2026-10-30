@@ -5,7 +5,7 @@
 // Ryan Vogel), and so is the start of the sign-in session (its email-first
 // continuation), which here follows a login through every step of a sign-in.
 
-import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type SignInReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, phoneLike, type ToContent, type SignInReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { boxesInTop, cleanApproved, cleanBox, LOGIN_FRAME_PLACE, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type VaultBackend } from "./backend"
@@ -131,11 +131,14 @@ export function wantFor(roles: FieldRole[], account: Pick<Account, "hasPassword"
 
 /**
  * What the menu offers under a field: on a code field, only logins with a
- * one-time password; on a password field, logins with a password or a
+ * one-time password; on a phone field, only logins whose username is a
+ * phone number; on a password field, logins with a password or a
  * "Sign in with …" (which shows as that, never as a fill).
  */
 export function menuAccounts(accounts: Account[], focused: FieldRole): Account[] {
   if (focused === "otp") return accounts.filter((a) => a.hasTotp)
+  // A phone box takes only a phone number: a login saved under an email or a name can't go in it.
+  if (focused === "phone") return accounts.filter((a) => phoneLike(a.username))
   if (focused === "password") return accounts.filter((a) => a.hasPassword || a.signIn)
   return accounts
 }
@@ -163,6 +166,24 @@ export function stepRoles(roles: FieldRole[], account: Pick<Account, "hasPasswor
   if (roles.includes("password") && account.hasPassword) return ["password", ...(idEmpty ? roles.filter((r) => IDENTIFIER_ROLES.includes(r)) : [])]
   if (roles.includes("otp") && account.hasTotp) return ["otp"]
   return []
+}
+
+/**
+ * What a sign-in session's step may fill in a form the content script
+ * reported, or "end" when the form says the sign-in turned into something
+ * else. Only a sign-in step: on a login form, its current password (never
+ * when the form also has a new-password box, or a password box asks for a
+ * new password by autocomplete, which may be a sign-up the detector took for
+ * a login) and the username beside it; on a code step, the code. A sign-up
+ * or change-password form ends the session: its password box wants a new
+ * password, never the saved one. Anything else, a login form it can't be
+ * sure of included, fills nothing; an explicit pick still can.
+ */
+export function sessionStep(kind: SurfaceKind | null, roles: FieldRole[], asksNew: boolean): FieldRole[] | "end" {
+  if (kind === "signup" || kind === "change-password") return "end"
+  if (kind === "mfa") return ["otp"]
+  if (kind !== "login" || roles.includes("new-password") || asksNew) return []
+  return [...IDENTIFIER_ROLES, "password", "otp"]
 }
 
 /** The pill's word for a step: what it filled that matters most. */
@@ -806,7 +827,7 @@ export class Autofill {
    * A content script found a login form: remember it, and fill the tab's
    * sign-in session's next step into it (see Session).
    */
-  async page(sender: chrome.runtime.MessageSender, kind: SurfaceKind | null, roles: unknown, form: unknown, stepped = false, idEmpty = false) {
+  async page(sender: chrome.runtime.MessageSender, kind: SurfaceKind | null, roles: unknown, form: unknown, stepped = false, idEmpty = false, asksNew = false) {
     // Taken before any await: a cancel from here on wins, even one queued behind this.
     const generation = sender.tab?.id === undefined ? 0 : this.generation(sender.tab.id)
     const target = await targetFor(sender)
@@ -839,6 +860,12 @@ export class Autofill {
       const first = s.automatic && s.filled.length === 0
       if (first && kind !== "login") return this.endSession(target.tabId)
       if (!first && (target.documentId === s.documentId ? !stepped : !sub || sub.documentId !== s.documentId || sub.at < s.filledAt)) return
+      // A session fills sign-in steps only (see sessionStep). An address the
+      // site doesn't know often gets "Create your account" instead of a
+      // password box: a sign-up or change-password form ends the session,
+      // and anything else it can't be sure of is left to a pick.
+      const allowed = sessionStep(kind, clean, asksNew)
+      if (allowed === "end") return this.endSession(target.tabId)
       const identifierOnly = clean.some((r) => IDENTIFIER_ROLES.includes(r)) && !clean.includes("password") && !clean.includes("otp")
       // "Not you? Use a different account": the username box came back
       // empty. The session ends; whoever signs in now picks again.
@@ -853,7 +880,7 @@ export class Autofill {
       // or one whose host a saved URL of the login names exactly.
       if (target.origin !== s.origin && !account.urls.some((u) => sameHost(u, target.origin))) return
       if (s.automatic && !account.urls.some((u) => exactSignInOrigin(u, target.origin))) return this.endSession(target.tabId)
-      const step = (first ? clean : stepRoles(clean, account, idEmpty)).filter((r) => !s.filled.includes(r) || (IDENTIFIER_ROLES.includes(r) && (!s.automatic || !s.filled.includes("password"))))
+      const step = (first ? clean : stepRoles(clean, account, idEmpty)).filter((r) => allowed.includes(r)).filter((r) => !s.filled.includes(r) || (IDENTIFIER_ROLES.includes(r) && (!s.automatic || !s.filled.includes("password"))))
       if (!step.length) return
       const shown = framed ? await this.measured(target.tabId, () => shownInPage(target, form as number, true), null) : undefined
       // A frame's step fills only fields that show through every frame above. One

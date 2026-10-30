@@ -172,6 +172,16 @@ describe("fillFields", () => {
     expect([n1.value, n2.value]).toEqual(["", ""])
   })
 
+  test("a value the field can't take isn't written: past its maxlength, or not a phone number in a phone box", async () => {
+    document.body.innerHTML = `<form><input id="u" type="tel"><input id="p" type="password" maxlength="6"></form>`
+    const [u, p] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
+    const fields = [field(u, "phone"), field(p, "password")]
+    expect((await fillFields(fields, { username: "kit@acme.test", password: "correct horse" }, () => true)).filled).toEqual([])
+    expect([u.value, p.value]).toEqual(["", ""])
+    expect((await fillFields(fields, { username: "+1 (415) 555-0123", password: "482916" }, () => true)).filled).toEqual(["phone", "password"])
+    expect([u.value, p.value]).toEqual(["+1 (415) 555-0123", "482916"])
+  })
+
   test("a field moved to another form since the scan isn't written", async () => {
     document.body.innerHTML = `<form id="a"><input id="u"><input id="p" type="password"></form><form id="b" action="https://evil.test/"></form>`
     const u = document.getElementById("u") as HTMLInputElement
@@ -323,6 +333,26 @@ describe("form values", () => {
     expect(filled).toEqual(["name", "postal-code", "country"])
     expect((document.getElementById("n") as HTMLInputElement).value).toBe("Kit J Langton")
     expect((document.getElementById("c") as HTMLSelectElement).value).toBe("US")
+  })
+
+  test("a birth date box whose placeholder shows a whole date takes the whole date", async () => {
+    document.body.innerHTML = `<form><label for="g">First name</label><input id="g"><label for="d">Date of birth</label><input id="d" placeholder="MM/DD/YYYY" maxlength="10"></form>`
+    const fields = scanForms()
+    expect(fields.map((f) => f.role)).toEqual(["given-name", "bday"])
+    await fillForm(fields, kit, () => true)
+    expect((document.getElementById("d") as HTMLInputElement).value).toBe("07/04/1990")
+  })
+
+  test("a select the page loads once an earlier field is chosen fills after it", async () => {
+    document.body.innerHTML = `<form><select id="c" autocomplete="country"><option value="">-</option><option value="US">United States</option></select><select id="s" autocomplete="address-level1" disabled><option value="">Choose a country first</option></select></form>`
+    const [country, state] = ["c", "s"].map((id) => document.getElementById(id) as HTMLSelectElement)
+    country.addEventListener("change", () => setTimeout(() => {
+      state.innerHTML = `<option value="">State</option><option value="CA">California</option><option value="NY">New York</option>`
+      state.disabled = false
+    }, 200))
+    const { filled } = await fillForm(scanForms(), kit, (el) => !el.disabled)
+    expect(filled).toEqual(["country", "address-level1"])
+    expect(state.value).toBe("NY")
   })
 
   test("split card boxes fill only as a whole", async () => {

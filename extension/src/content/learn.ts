@@ -15,7 +15,7 @@
 import type { LearnSession, LearnStep, LearnInput, LearnTrigger, SubmitBy, Typed } from "../learn"
 import { clip, frameOf, lengthBand, MAX_FRAMES, MAX_INPUTS, scrub, sha256, shapeOf, truthOf, usernameDigest } from "../learn"
 import type { ToBackground, ToContent } from "../messages"
-import { controlText, isVisible, scanPage } from "./detect"
+import { controlText, isVisible, masked, scanPage } from "./detect"
 import { deepQueryAll, openRoots } from "./shadow"
 
 const SKIP = new Set(["hidden", "submit", "button", "image", "reset", "checkbox", "radio", "file", "range", "color"])
@@ -87,7 +87,7 @@ const eligible = (el: HTMLInputElement) => !SKIP.has((el.getAttribute("type") ||
 
 function inputsNow(): HTMLInputElement[] {
   const all = deepQueryAll<HTMLInputElement>("input", openRoots()).slice(0, 300).filter(eligible)
-  if (session) for (const el of all) if (el.type === "password") secrets.add(el)
+  if (session) for (const el of all) if (masked(el)) secrets.add(el)
   return all
 }
 
@@ -104,7 +104,7 @@ function onInput(event: Event) {
   const el = event.composedPath()[0]
   if (!(el instanceof HTMLInputElement) || !eligible(el)) return
   const salt = session.salt
-  if (el.type === "password") secrets.add(el)
+  if (masked(el)) secrets.add(el)
   const secret = secrets.has(el)
   const order = keyed.get(el)?.order ?? ++typedCount
   const value = el.value

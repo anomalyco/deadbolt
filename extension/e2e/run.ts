@@ -8,7 +8,8 @@
 //   bun run e2e [--standalone] [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
 //
 // `--video <dir>` records the `film` run (the menu, a fill, a sign-in and
-// the save offer in the page) to <dir>/deadbolt-surface.webm.
+// the save offer in the page) to <dir>/deadbolt-surface.webm, and
+// `signUpStep` to <dir>/session-signup.webm.
 //
 // `--dist <dir>` uses an e2e build already made there (scripts/build.ts
 // --e2e <dir>) instead of building, so parallel shards share one build.
@@ -141,6 +142,20 @@ const HIDDEN: Record<string, string> = {
   "shadow-host": hiddenForm(`<div id="h" style="opacity:0"></div>`, `<script>document.getElementById("h").attachShadow({ mode: "open" }).innerHTML = '${passwordField}'</script>`),
   "closed-slot": hiddenForm(`<div id="h">${passwordField}</div>`, `<script>document.getElementById("h").attachShadow({ mode: "closed" }).innerHTML = '<div style="opacity:0.02"><slot></slot></div>'</script>`),
   clipped: hiddenForm(`<div style="clip-path:inset(50%)">${passwordField}</div>`),
+  // Not hidden: a clip-path that only leaves room for a focus ring (Stripe's sign-in).
+  "ring-room": hiddenForm(`<div style="clip-path:inset(-8px round 6px)">${passwordField}</div>`),
+  // Not hidden: a field positioned past a 0 px tall scrolling box, which doesn't hold it (Intercom's sign-in).
+  "escaped-row": hiddenForm(`<div style="position:relative;height:40px"><div style="height:0;overflow:auto">${passwordField.replace("<input", '<input style="position:absolute;top:0;left:0;width:300px;height:38px"')}</div></div>`),
+  // Each of the next three shows an 18 px band across the middle of the 38 px
+  // field: its centre shows, so the hit test alone passes, but under half of it does.
+  // Hidden: an inset(0) clip-path on a wrapper the field overflows.
+  "inset-sliver": hiddenForm(`<div style="clip-path:inset(0);height:18px">${passwordField.replace("<input", '<input style="margin-top:-10px"')}</div>`),
+  // Hidden: a scrolling box that holds the field by an individual translate (Tailwind v4 writes them).
+  "held-by-translate": hiddenForm(`<div style="position:relative;height:40px"><div style="translate:0 0;height:18px;overflow:hidden">${passwordField.replace("<input", '<input style="position:absolute;top:-10px;left:0;width:300px;height:38px"')}</div></div>`),
+  // Hidden: paint containment clips like overflow.
+  "contain-paint-sliver": hiddenForm(`<div style="contain:paint;height:18px">${passwordField.replace("<input", '<input style="margin-top:-10px"')}</div>`),
+  // Hidden: the same, but the 0 px box holds it.
+  "zero-height-held": hiddenForm(`<div style="position:relative;height:40px"><div style="position:relative;height:0;overflow:auto">${passwordField.replace("<input", '<input style="position:absolute;top:0;left:0;width:300px;height:38px"')}</div></div>`),
   "zero-height": hiddenForm(`<div style="height:0;overflow:hidden">${passwordField}</div>`),
   offscreen: hiddenForm(`<div style="position:absolute;left:-2000px;width:300px">${passwordField}</div>`),
   // Visible until Deadbolt focuses it to write.
@@ -156,13 +171,14 @@ const OVERLAY: Record<string, string> = {
   // A near-opaque sheet over everything in the top layer, letting clicks
   // through to the menu, in a shadow root: Deadbolt can't see it go up.
   cover: topCover("shadow", false),
-  // Fade it out the moment the click starts (focus moves into the menu), so a
-  // visibility reading taken before the click is stale.
-  "on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0", "window.pressed")}`,
+  // Fade it out the moment the click lands, so a visibility reading taken
+  // before the click is stale. A press in the menu doesn't take focus, so the
+  // page has nothing to time it by: the test calls pressed() right after.
+  "on-press": `<script>window.press = () => (window.pressed = true)</script>${restyle("opacity", "0", "window.pressed")}`,
   // The reverse: keep it all but see-through over a decoy (still taking
   // clicks, which a fully transparent frame doesn't) and show it the moment
   // the press lands, so a reading taken after the click finds it visible.
-  "reveal-on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0.02", "!window.pressed")}`,
+  "reveal-on-press": `<script>window.press = () => (window.pressed = true)</script>${restyle("opacity", "0.02", "!window.pressed")}`,
   // Shown a moment before the press instead (as the pointer nears it), so
   // nothing changes after the press: the test calls reveal() 250 ms before.
   "reveal-before-press": `<script>window.reveal = () => (window.revealed = true)</script>${restyle("opacity", "0.02", "!window.revealed")}`,
@@ -206,8 +222,10 @@ const FRAMED: Record<string, string> = {
 }
 
 // Covers everything (letting clicks through) for `ms`, starting `after` ms
-// past the press into the menu (the page's blur), or right away with cover().
-// The cover is a popover in a shadow root, over the menu in the top layer.
+// past the press into the menu, or right away with cover(). A press in the
+// menu takes no focus, so the page never sees it: the test calls pressing()
+// just before it presses. The cover is a popover in a shadow root, over the
+// menu in the top layer.
 const SWEEP = `<script>
   const cover = (ms) => {
     const h = document.createElement("span")
@@ -221,8 +239,10 @@ const SWEEP = `<script>
     setTimeout(() => h.remove(), ms)
   }
   window.cover = cover
-  window.coverAfterPress = (after, ms) => addEventListener("blur", () => (after ? setTimeout(() => cover(ms), after) : cover(ms)), { once: true })
-  addEventListener("blur", () => (window.__press = performance.now()))
+  window.pressing = (after, ms) => {
+    window.__press = performance.now()
+    if (after !== undefined) after ? setTimeout(() => cover(ms), after) : cover(ms)
+  }
 </script>`
 
 const PASSKEY_PAGE = `<h1>Sign in to Acme</h1>
@@ -350,8 +370,13 @@ const DETECT: Record<string, Detect> = {
     expect: { quiet: true, signingIn: false, not: ["otp"] },
   },
   "split-code": {
-    body: `<h1>Check your email</h1><p>We sent a code to k***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
+    body: `<h1>Two-step verification</h1><p>Enter the code from your authenticator app.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
     expect: { kind: "mfa", has: ["otp"] },
+  },
+  // A code the site emailed is the user's to type: a code step, with nothing in it to fill.
+  "sent-split-code": {
+    body: `<h1>Check your email</h1><p>We sent a code to k***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
+    expect: { kind: "mfa", not: ["otp"] },
   },
   // Sign-in buttons on a page with no form: it's still a sign-in page.
   "provider-github": { body: provider("Continue with GitHub"), expect: { quiet: true, signingIn: true } },
@@ -782,6 +807,9 @@ const server = Bun.serve({
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
         return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
+      // An outlined field, as Google's sign-in has: its border thins on blur and it grows a pixel each way, so a press that took its focus would shift the menu.
+      case "/outlined":
+        return html("Sign in to Acme", `<style>#email{border-width:1px;margin:0 0 1px}#email:focus{border:2px solid #18181b;width:calc(100% - 2px);height:36px;margin:1px 1px 2px}</style>${loginForm("/home")}`)
       case "/login": {
         const form = loginForm(url.searchParams.get("next") === "home" ? "/home" : "/mfa")
         // A password the page enables only once the email box is focused.
@@ -823,6 +851,37 @@ const server = Bun.serve({
           `<h1>Sign in to Acme</h1><form method="post" action="/signin/password">
             <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
             <button type="submit">Continue</button></form>`,
+        )
+      // Log in or sign up by address, as Dropbox does: Continue goes to `to`.
+      // An address the site doesn't know gets a sign-up form ("signup": one
+      // password box marked new-password beside name boxes, which the detector
+      // takes for a login; "signup-plain": a new password and its confirmation),
+      // a known one its password step ("password").
+      case "/susi":
+        return html(
+          "Log in or sign up to Acme",
+          `<h1>Log in or sign up</h1><form method="post" action="/susi/${(url.searchParams.get("to") ?? "password").replace(/[^a-z-]/g, "")}">
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+            <button type="submit">Continue</button></form>`,
+        )
+      case "/susi/signup":
+        return html(
+          "Log in or sign up to Acme",
+          `<h1>Sign up for Acme</h1><form method="post" action="/home" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" value="kit@acme.test">
+            <label for="fname">First name</label><input id="fname" name="fname" autocomplete="given-name">
+            <label for="lname">Last name</label><input id="lname" name="lname" autocomplete="family-name">
+            <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password">
+            <button type="submit">Agree and sign up</button></form>`,
+        )
+      case "/susi/signup-plain":
+        return html("Create your Acme account", signupForm("/home"))
+      case "/susi/password":
+        return html(
+          "Enter your password",
+          `<h1>Enter your password</h1><form method="post" action="/home">
+            <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+            <button type="submit">Sign in</button></form>`,
         )
       case "/signin/password":
         return html(
@@ -966,6 +1025,8 @@ interface LaunchOptions {
   scheme?: "light" | "dark"
   rateLimit?: string
   fillDelay?: number
+  /** Seconds the vault holds each list of logins (a slow menu load). */
+  listDelay?: number
   /** Playwright turns the back/forward cache off; keep it on. */
   bfcache?: boolean
   /** Runs the deadbolt binary as the host, with this environment. */
@@ -1019,6 +1080,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_LOG: log,
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
+      DEADBOLT_FAKE_LIST_DELAY: String(options.listDelay ?? 0),
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
       DEADBOLT_FAKE_TOUCHID: options.touchId ?? "",
@@ -1099,7 +1161,7 @@ const SEED_PASSPHRASE = "e2e standalone synthetic passphrase"
  */
 async function seedVault(run: Run, options: LaunchOptions) {
   await run.worker.evaluate(
-    ({ type, delay, limited }) => {
+    ({ type, delay, listDelay, limited }) => {
       const log: unknown[] = []
       ;(globalThis as unknown as { __vaultLog: unknown[] }).__vaultLog = log
       const send = chrome.runtime.sendMessage.bind(chrome.runtime) as (...args: unknown[]) => Promise<unknown>
@@ -1110,10 +1172,11 @@ async function seedVault(run: Run, options: LaunchOptions) {
         log.push(JSON.parse(JSON.stringify(m.body)))
         if (limited.includes(kind)) return Promise.resolve({ reply: { type: "error", code: "rate_limited", message: "too many requests; try again in a moment" } })
         if (delay && (kind === "fill" || kind === "fill-form")) return new Promise((r) => setTimeout(r, delay * 1000)).then(() => send(...args))
+        if (listDelay && kind === "list") return new Promise((r) => setTimeout(r, listDelay * 1000)).then(() => send(...args))
         return send(...args)
       }
     },
-    { type: VAULT_REQUEST, delay: options.fillDelay ?? 0, limited: (options.rateLimit ?? "").split(",").filter(Boolean) },
+    { type: VAULT_REQUEST, delay: options.fillDelay ?? 0, listDelay: options.listDelay ?? 0, limited: (options.rateLimit ?? "").split(",").filter(Boolean) },
   )
   if (options.host === false) return
   const page = await run.context.newPage()
@@ -1431,7 +1494,7 @@ async function savePrompt(scheme: Scheme) {
       await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
       const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
       check(save?.origin === site && save.entry?.username === "new@acme.test", "save carries the submitted login")
-      check(save?.entry?.title === "Sign in to Acme" && save.entry?.url === `${site}/outcome/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
+      check(save?.entry?.title === "Acme" && save.entry?.url === `${site}/outcome/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
       check(!!(await until("popup confirms", async () => ((await p.locator(".done").textContent().catch(() => "")) ?? "").includes("Saved"))), "the popup confirms the save")
       check(!!(await until("badge clears", async () => (await badge(run)) === "")), "and the badge clears")
       check(!!(await until("the surface closes", () => !extensionFrame(page, "menu.html"))), "and answering in the popup closes the offer in the page")
@@ -2034,7 +2097,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible") check(password === "correct horse", "a visible password field fills")
+      if (name === "visible" || name === "ring-room" || name === "escaped-row") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 
@@ -2312,7 +2375,6 @@ async function occlusionSweep() {
           await diagnose(run, page, "sweep")
           break
         }
-        // Focus back in the page, so the press moves it into the menu and the page sees blur.
         await page.focus("#email")
         await page.evaluate(() => {
           const w = window as unknown as { __shown?: number; __press?: number }
@@ -2322,7 +2384,8 @@ async function occlusionSweep() {
         if (offset < 0) {
           await page.evaluate((ms) => (window as unknown as { cover: (ms: number) => void }).cover(ms), ms)
           await Bun.sleep(-offset)
-        } else await page.evaluate(([after, ms]) => (window as unknown as { coverAfterPress: (a: number, ms: number) => void }).coverAfterPress(after, ms), [offset, ms])
+        }
+        await page.evaluate(([after, ms]) => (window as unknown as { pressing: (a?: number, ms?: number) => void }).pressing(after, ms), offset < 0 ? [] : [offset, ms])
         await page.mouse.click(at.x, at.y)
         await Bun.sleep(1500)
         const real = await page.evaluate(() => {
@@ -2358,20 +2421,29 @@ async function coveredMenu() {
         continue
       }
       const before = await fillCount(run)
+      const blurs = (await probe(page)).blurs
+      // The user's ↓ first, so focus is in the menu: a refused press must leave it unable to pick.
+      if (name !== "none") {
+        await page.keyboard.press("ArrowDown")
+        await Bun.sleep(200)
+      }
       if (name === "reveal-before-press") {
         await page.evaluate(() => (window as unknown as { reveal: () => void }).reveal())
         await Bun.sleep(250)
       }
       await menu.locator("button.row").first().click({ force: true })
+      if (name.endsWith("on-press")) await page.evaluate(() => (window as unknown as { press: () => void }).press())
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "none") check(password === "correct horse", `an uncovered menu fills (${password ? "" : await footText(menu)})`)
-      else {
+      if (name === "none") {
+        check(password === "correct horse", `an uncovered menu fills (${password ? "" : await footText(menu)})`)
+        check((await probe(page)).blurs === blurs, "the press in the menu took no focus from the page, which sees no blur")
+      } else {
         check(password === "" && (await fillCount(run)) === before, `a menu made ${name} fills nothing and asks the host for nothing`)
         const foot = await footText(menu)
         check(foot.includes("covered") || (name.startsWith("reveal") && foot.includes("in a moment")), `and says it's covered (${foot})`)
-        // The refused press put focus in the menu, which by now has been in
-        // plain view for a while: the user's next Enter there must not pick.
+        // Focus is in the menu, which by now has been in plain view for a
+        // while: after the refused press, the user's next Enter there must not pick.
         const focused = await menu.evaluate(() => document.hasFocus())
         await page.keyboard.press("Enter")
         await Bun.sleep(1500)
@@ -2380,6 +2452,37 @@ async function coveredMenu() {
           `and a later Enter in the menu ${focused ? "" : "(not focused!) "}fills nothing either (${await footText(menu)})`,
         )
       }
+    }
+    // A press that passed its checks but ended in no pick (a right click,
+    // a press dragged off its row) leaves no focus in the menu: a later Tab
+    // into it doesn't let ⏎ pick.
+    for (const how of ["right-click", "drag-out"]) {
+      await page.goto(`${site}/login?next=home`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `press then Tab: ${how}`)
+        continue
+      }
+      // Everything after the field leaves the tab order, so Tab goes to the menu.
+      await page.evaluate(() => document.querySelectorAll("input:not(#email), button").forEach((el) => el.setAttribute("tabindex", "-1")))
+      const before = await fillCount(run)
+      const row = menu.locator("button.row").first()
+      if (how === "right-click") await row.click({ button: "right" })
+      else {
+        const b = (await (await menu.frameElement()).boundingBox())!
+        await page.mouse.move(b.x + b.width / 2, b.y + 20)
+        await page.mouse.down()
+        await page.mouse.move(b.x + b.width / 2, b.y - 150, { steps: 4 })
+        await page.mouse.up()
+      }
+      // Past the press's 400 ms check.
+      await Bun.sleep(900)
+      await page.focus("#email")
+      await page.keyboard.press("Tab")
+      const inMenu = await menu.evaluate(() => document.hasFocus()).catch(() => false)
+      await page.keyboard.press("Enter")
+      await Bun.sleep(1500)
+      check(inMenu && (await page.inputValue("#password")) === "" && (await fillCount(run)) === before, `after a ${how} in the menu, Tab then ⏎ fills nothing (${inMenu ? "" : "Tab didn't reach the menu; "}${await footText(menu)})`)
     }
     for (const name of Object.keys(BEATEN)) {
       await page.goto(`${site}/beaten/${name}`)
@@ -2452,9 +2555,62 @@ async function viewportResize() {
     await menu.locator("button.row").first().click()
     await Bun.sleep(1200)
     check((await page.inputValue("#password")) === "" && (await fillCount(run)) === 1, `a page moving the menu further than a resize did fills nothing (${await footText(menu)})`)
+
+    // A few pixels is still a move: 5 px, 200 ms before the press.
+    await page.goto(`${site}/centred`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "viewport resize: small move"))
+    await page.evaluate(() => (document.querySelector("main")!.style.transform = "translateY(-5px)"))
+    await Bun.sleep(200)
+    await menu.locator("button.row").first().click()
+    await Bun.sleep(1200)
+    check((await page.inputValue("#password")) === "" && (await fillCount(run)) === 1, `a menu the page moved 5 px before the press fills nothing (${await footText(menu)})`)
+
+    // The field itself shifting a pixel as the press takes its focus (an outlined field's border thinning) isn't a move.
+    await page.goto(`${site}/outlined`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "viewport resize: outlined field"))
+    await menu.locator("button.row").first().click()
+    const outlined = await until("a pick on an outlined field fills", async () => (await page.inputValue("#password")) === "correct horse", 4000)
+    check(!!outlined, `a pick that shifts an outlined field by a pixel fills (${outlined ? "" : await footText(menu)})`)
   } catch (err) {
     check(false, `viewport resize threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "viewport resize")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * The menu grows in only once its frame has its rows (see openMenu): never a
+ * blank box (its shadow, a ghost) with the rows popping in half faded.
+ */
+async function menuReveal() {
+  // A slow list: the frame is up a while before it has rows to show.
+  const run = await launch({ listDelay: 0.3 })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/outcome/login`)
+    await formFound(page)
+    const loaded = page.waitForEvent("framenavigated", (f) => f.url().includes("/menu.html"))
+    await page.click("#email")
+    const menu = await loaded
+    const seen: string[] = []
+    const end = Date.now() + 1500
+    while (Date.now() < end) {
+      const [opacity, rows] = await Promise.all([
+        menu.frameElement().then((el) => el.evaluate((e) => Number(getComputedStyle(e as Element).opacity))).catch(() => -1),
+        menu.locator("button.row").count().catch(() => -1),
+      ])
+      if (opacity >= 0 && rows >= 0) seen.push(`${rows ? "rows" : "blank"}@${opacity.toFixed(2)}`)
+      if (rows && opacity === 1) break
+    }
+    const ghost = seen.filter((s) => s.startsWith("blank") && !s.endsWith("@0.00"))
+    check(ghost.length === 0 && seen.some((s) => s.startsWith("rows")), `the menu shows nothing until it has its rows (${seen.filter((s, i) => s !== seen[i - 1]).join(" ")})`)
+    check(!!(await until("the revealed menu takes a pick", async () => (await menu.locator("button.row").count()) > 0)), "and then lists its logins")
+  } catch (err) {
+    check(false, `menu reveal threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "menu reveal")
   } finally {
     await close(run)
   }
@@ -2561,6 +2717,55 @@ async function topLayer() {
  * narrows the password step's menu to its login; one no login has (a failed
  * sign-in that came back with it) brings no menu at all.
  */
+/**
+ * A sign-in session fills sign-in steps only. Continue with an address the
+ * site doesn't know and it may answer with a sign-up form: the saved password
+ * never goes into its new-password box, whether the detector calls it a
+ * sign-up or (one box marked new-password beside name boxes, as Dropbox's)
+ * a login. A known address's password step still fills.
+ */
+async function signUpStep() {
+  const run = await launch(video ? { record: video, scale: 1 } : {})
+  const page = await run.context.newPage()
+  try {
+    for (const to of ["signup", "signup-plain", "password"]) {
+      await page.goto(`${site}/susi?to=${to}`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `susi ${to}`)
+        continue
+      }
+      await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+      await until("the address fills", async () => (await page.inputValue("#email")) === "kit@acme.test")
+      await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+      const before = await fillCount(run)
+      await page.click("button[type=submit]")
+      await page.waitForURL(`**/susi/${to}`)
+      if (to === "password") {
+        const filled = await until("the password step fills", async () => (await page.inputValue("#password")) === "correct horse")
+        check(!!filled, "a known address's password step still fills from the session")
+        await shot(page, "session-password-step")
+      } else {
+        await formFound(page)
+        await Bun.sleep(2500)
+        const box = to === "signup" ? "#password" : "#new"
+        const value = await page.inputValue(box)
+        check(value === "" && (await fillCount(run)) === before, `the sign-up an unknown address gets (${to}) takes no saved password (${JSON.stringify(value)}, ${(await fillCount(run)) - before} fills)`)
+        await shot(page, `session-${to}`)
+      }
+    }
+  } catch (err) {
+    check(false, `sign-up step threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "sign-up step")
+  } finally {
+    const recording = video ? await page.video()?.path().catch(() => null) : null
+    const blank = video ? await Promise.all(run.context.pages().filter((p) => p !== page).map((p) => p.video()?.path().catch(() => null))) : []
+    await close(run)
+    if (recording) await rename(recording, join(video!, "session-signup.webm")).catch(() => {})
+    for (const path of blank) if (path) await rm(path, { force: true })
+  }
+}
+
 async function signInSessions() {
   const run = await launch()
   const page = await run.context.newPage()
@@ -3272,8 +3477,8 @@ async function conditionalHeld() {
       await until("the frame's form is found", async () => (await reports()) > 0, 15_000)
       const before = await reports()
       await widget.evaluate(CONDITIONAL_GET, "#account_name_text_field")
-      // The new autocomplete changes the frame's form: let it report again before the click.
-      await until("the frame reports its webauthn field", async () => (await reports()) > before, 5000)
+      // If the new autocomplete changes the frame's form (its field's role), let it report again before the click.
+      for (let i = 0; i < 30 && (await reports()) <= before; i++) await Bun.sleep(100)
       await widget.click("#account_name_text_field")
       const menu = await until("the menu opens for the frame's field", menuNow, 15_000)
       const framed = await nativeGets(widget)
@@ -4296,6 +4501,7 @@ const once: Record<string, () => Promise<void>> = {
   googleAccount,
   corner,
   signInSessions,
+  signUpStep,
   frameLogins,
   conditionalHeld,
   rateLimited,
@@ -4304,6 +4510,7 @@ const once: Record<string, () => Promise<void>> = {
   coveredMenu,
   topLayer,
   viewportResize,
+  menuReveal,
   occlusionSweep,
   midFill,
   coveredPill,
@@ -4324,10 +4531,11 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // rough run times in seconds (per scheme; unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  detection: 108, occlusionSweep: 55, signInSessions: 52, signUpStep: 14, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
+  menuReveal: 4,
   ...gauntletRun.cost,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
