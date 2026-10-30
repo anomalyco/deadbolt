@@ -127,7 +127,8 @@ export class Entry {
 
   /** This frame got focus at `now`. */
   focused(now: number) {
-    if (now - this.offeredAt <= this.windowMs) this.granted = true
+    // Focus that wasn't offered brings nothing with it, not even an earlier confirmed press.
+    this.granted = now - this.offeredAt <= this.windowMs
   }
 
   /** A trusted pointer press inside the menu, to be checked: what `confirmed` takes. */

@@ -163,7 +163,9 @@ not running without sending hello, which would start the agent again.
   frame of the page's own site gets the menu too, opened in the top page
   under the field; any other frame's fields get none (see Frames). It's an
   extension page in an iframe inside a closed shadow root, so the page can't
-  read it or click it for you.
+  read it or click it for you. It opens on the form as it is right then (a
+  fresh scan, not the last periodic one), so a password box the page has
+  just shown is part of the pick rather than a change that voids it.
 - **Menu in the top layer.** The host element of Deadbolt's surface (the
   menu, the pill it folds into and the save offer, see One surface) gets a
   fresh random custom-element name and inline `!important` styles, so page
@@ -228,10 +230,22 @@ not running without sending hello, which would start the agent again.
   avatar's ring is still, the save offer's bar is stepped frame by frame,
   never animated), and after narrowing's row animations the half second
   starts again, as after a move.
+- **A press takes no focus.** A pointer press in the menu leaves focus where
+  it was, in the page's field (the menu cancels the press's default
+  action). The page never sees its field blur at the moment of the press,
+  so it has nothing to time a cover or a fade by, and a field that redraws
+  on blur (a floating label dropping back, an outlined border thinning: the
+  real-site sweep found this on Google, Microsoft, Reddit, Chase and others)
+  can't move the menu under the press and cancel the pick. So a habit of
+  clicking a row and then pressing ⏎ sends that ⏎ to the page's field while
+  the pill says "Filling…" (it can submit the form there). A press that
+  passed its checks but picked nothing (a right click, a press dragged off
+  its row) leaves no ⏎ allowed: focus that comes in later without the
+  user's ↓, by Tab for one, starts with none.
 - **Keyboard picks.** ⏎ picks only after the user's own ↓ in the field
-  moved focus into the menu, or a real press inside the menu put it there
-  and passed the same visibility checks as a pick. A press the menu refused
-  lets no later ⏎ pick either. Focus that got into the menu any other way, such as by Tab from a field
+  moved focus into the menu, or, with focus already there, a real press
+  inside the menu passed the same visibility checks as a pick. A press the
+  menu refused lets no later ⏎ pick either. Focus that got into the menu any other way, such as by Tab from a field
   the page made last in the tab order or by a script, doesn't count, and
   leaving the menu ends it even if focus comes back. Such a menu says "Press
   ↓ in the field to choose." The locked menu's Unlock Deadbolt row takes ⏎
@@ -269,11 +283,24 @@ not running without sending hello, which would start the agent again.
   sign-in was cancelled (Esc, or a
   navigation the page didn't make) while the host was answering, the values
   are dropped instead of delivered.
+  A value the field can't take isn't written: longer than its
+  `maxlength` (a person couldn't type or paste it there either), or a
+  username that isn't a phone number into a phone box; a phone box's menu
+  lists only logins whose username is one.
   Each field is checked again right before its value is written, and before
   each digit of a split code: it must still be in the form and under the
   parent it was found in, enabled, editable, and visible through every
   ancestor up to the top of the page, across shadow roots (display,
-  visibility, opacity, clip, size, on screen, not covered). Split one-time
+  visibility, opacity, clip, size, on screen, not covered). Clips follow
+  CSS: a clip-path counts unless it is an inset() whose rectangle, resolved
+  against the clipping box, contains the whole field (any rounded corners
+  no larger than the room left), with no transform on the way (design
+  systems leave a focus ring room that way; Stripe's sign-in); paint
+  containment clips like overflow; and a scrolling or clipping box clips
+  only what it holds (an absolutely positioned field escapes a box between
+  it and its containing block, Intercom's sign-in; a fixed one every box up
+  to a transformed or contained one). The centre of what shows is
+  hit-tested too, and only the centre. Split one-time
   code boxes fill only as one whole group within one form.
 - **Sign-in sessions.** Many sign-ins take more than one step: the
   username on its own, then the password, sometimes a code. Picking a login
@@ -284,9 +311,21 @@ not running without sending hello, which would start the agent again.
   - a password field gets the password (and the username, if its box is
     there beside the password and empty);
   - a one-time-code field, split boxes included, gets the current code, if
-    the login has one;
+    the login has one, and only an authenticator's code: a box for a code
+    the site sent (its label or the page says text message, SMS, email,
+    "we sent", Resend), or for a backup or recovery code, is the user's to
+    fill. The field's own label decides first, then the page, where an
+    authenticator app named anywhere wins. Such a box gets no menu and no
+    fill, and its page still counts as a code step of the sign-in;
   - a username box on its own, empty, is "Not you? Use a different
     account": the session ends.
+  Only a sign-in step fills: a password goes only into a login form's
+  current-password box. An address the site doesn't know often gets a
+  sign-up form instead (Dropbox's "Sign up for Dropbox", found by the
+  real-site sweep), so a sign-up or change-password form ends the session,
+  and a login form with a new-password box, or whose password box asks for
+  a new password by autocomplete (a sign-up the detector may take for a
+  login), fills nothing. An explicit pick still can.
   The bounds: each step fills once, and only after the user's own submit of
   the step before: their trusted click on its submit control or Enter in
   one of its fields. A submit event without one just before it (a page's
@@ -316,6 +355,10 @@ not running without sending hello, which would start the agent again.
   fills still on their way. The session is kept in the extension's session
   storage, so a service worker restart doesn't drop a step; it holds the
   login's ref, the site, what it filled and when, never a value.
+- **Security questions.** A field whose label is a question that names no
+  login field ("What was your first pet's name?"), or that says answer,
+  security question or memorable word, is never a login field, even masked:
+  no menu, and no session fills it.
 - **Signing in by hand.** On a password or code field, the username the
   sign-in is for narrows the menu: the form's own username box, if the user
   typed what's in it (or Deadbolt filled it), or else the one the user
@@ -326,6 +369,10 @@ not running without sending hello, which would start the agent again.
   hand, and the field opens no menu, unless they press ↓ or click it again.
   So a failed sign-in that comes back with an unknown username doesn't
   offer the whole list on its password field.
+- **Passwords masked with CSS.** A text box the page masks with
+  `-webkit-text-security` (to keep the browser's own password handling
+  away) is a password box like any other: it gets the password, and the
+  learning log keeps no shape of what's typed in it.
 - **A provider's own password step.** Google's password page already names
   the account it's for (it remembered it, so the user typed nothing): a chip
   carrying `data-profile-identifier`, and a hidden `identifier` box in the
@@ -515,7 +562,9 @@ not running without sending hello, which would start the agent again.
   the offer the popup showed; if another took its place, the popup shows that
   one instead. A check that finishes after the tab left the site, closed, or
   Deadbolt locked offers nothing. Offers expire after five minutes. A new login is named after
-  the title of the page the password was submitted on and saved with that page's URL, without its query or
+  the title of the page the password was submitted on, the part of it that names the site
+  ("GitHub" of "Sign in to GitHub · GitHub", "Acme" of "Create your account · Acme") without
+  the page's action ("Sign in to", "Create your account"), else the site; it's saved with that page's URL, without its query or
   fragment. A `rate_limited` check offers nothing; a `rate_limited` fill says
   to try again in a moment.
 - **Sign-in outcomes.** The content script answers with yes-or-no facts
@@ -1133,7 +1182,9 @@ textarea a role named by its HTML autocomplete token (`given-name`,
    select's options (twelve months, 28–31 days, years in the past or the
    future, a country list, a US, Canadian or Australian region list); and a
    card number split over short boxes (`maxlength` up to 6), where the
-   first box says what it is and the next ones say nothing.
+   first box says what it is and the next ones say nothing. A birth date
+   box whose text shows a whole date's format (`MM/DD/YYYY`, `DD.MM.YYYY`,
+   `YYYY-MM-DD`) takes the whole date in that format, not just its day.
 
 Fields are grouped into sections, which is what one pick fills: per form
 (or the page, for fields outside one), then by the autocomplete section
@@ -1146,6 +1197,14 @@ Login detection (`detect.ts`) is unchanged and runs first: a field a login
 form claims (the email box of a sign-in) stays the login's. The same
 opt-out marks apply (`data-1p-ignore`, `data-lpignore="true"`,
 `data-deadbolt-ignore`, …).
+
+A select the page fills in only once an earlier field is chosen (a state
+list that loads, or is disabled, until its country is picked) is approved
+with the rest of the section when it's on screen, disabled or not, and
+written last: only if the same fill wrote something before it, once it has
+an option for the value, within two and a half seconds, and after the full
+field check again (enabled, on screen, uncovered). Nothing else the page
+enables later is filled.
 
 ### The menu
 

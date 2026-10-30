@@ -681,17 +681,29 @@ function settle(label: HTMLElement, text: string, ok: boolean) {
 
 addEventListener("pointerdown", (e) => {
   if (!e.isTrusted) return
-  pressedAt = e.timeStamp
-  // The keyboard may pick after a press only if the press itself would have.
+  // Any press ends what the keyboard was allowed; only the main button's can earn it back.
   const press = entry.pressed()
-  if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && entry.confirmed(press))
+  if ((e as PointerEvent).button !== 0) return
+  pressedAt = e.timeStamp
+  // The keyboard may pick after a press only if the press itself would have,
+  // and only with focus still in the menu: a press takes none (see below), so
+  // one that ended in no pick (dragged off its row, on the caption) leaves
+  // nothing for a later Tab in to pick with.
+  if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && document.hasFocus() && entry.confirmed(press))
 }, true)
+// A press leaves focus where it was, in the page's field. Taking it would
+// tell the page the moment of the press (its field blurs), and many fields
+// redraw on blur (a floating label drops back, an outlined border thins, the
+// box changes width): the field moves at the very press, the menu with it,
+// and the move cancels the pick (see Dwell). Tab and the user's ↓ in the
+// field still bring focus in.
+addEventListener("mousedown", (e) => void (e.isTrusted && e.preventDefault()), true)
 addEventListener("focus", (e) => {
   if (e.target !== window) return
   if (e.isTrusted) entry.focused(performance.now())
   // Focus that came in with the keyboard (↓ in the field, or Tab) goes to the
-  // list, so a screen reader reads it and its active row; a click keeps the
-  // focus it gives the row it lands on.
+  // list, so a screen reader reads it and its active row. A click brings no
+  // focus in (see the mousedown handler above).
   setTimeout(() => {
     if (document.hasFocus() && document.activeElement === document.body && rowsEl.getAttribute("role") === "listbox" && mode === "accounts") rowsEl.focus({ preventScroll: true })
   }, 0)

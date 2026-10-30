@@ -4,7 +4,8 @@
 The browser passes its environment through: DEADBOLT_FAKE_STATUS picks the
 hello status, DEADBOLT_FAKE_LOG gets one JSON line per request, and
 DEADBOLT_FAKE_RATE_LIMIT=fill,generate-keep answers those with rate_limited,
-DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds, and
+DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds
+(DEADBOLT_FAKE_LIST_DELAY each list reply), and
 DEADBOLT_FAKE_SIGNIN adds "Sign in with Google" logins, and
 DEADBOLT_FAKE_GOOGLE lists three Google logins instead of its own. Saves
 are checked against the spec's title and URL rules. Generated passwords are held per
@@ -26,6 +27,7 @@ LOG = os.environ.get("DEADBOLT_FAKE_LOG")
 RATE_LIMIT = os.environ.get("DEADBOLT_FAKE_RATE_LIMIT", "")
 TOUCHID = os.environ.get("DEADBOLT_FAKE_TOUCHID", "")
 FILL_DELAY = float(os.environ.get("DEADBOLT_FAKE_FILL_DELAY") or 0)
+LIST_DELAY = float(os.environ.get("DEADBOLT_FAKE_LIST_DELAY") or 0)
 REF1 = "a" * 64 + ":" + "1" * 32
 REF2 = "a" * 64 + ":" + "2" * 32
 ACCOUNTS = [
@@ -158,6 +160,7 @@ while True:
     elif STATUS != "ready":
         write({"id": rid, "type": "error", "code": "locked", "message": "Deadbolt is locked."})
     elif kind == "list":
+        time.sleep(LIST_DELAY)
         write({"id": rid, "type": "list", "site": site(req["origin"]), "accounts": ACCOUNTS})
     elif kind in RATE_LIMIT.split(","):
         write({"id": rid, "type": "error", "code": "rate_limited", "message": "Too many requests."})
