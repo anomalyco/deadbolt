@@ -712,7 +712,12 @@ export class StandaloneBackend implements VaultBackend {
   private async offscreen(): Promise<void> {
     const url = chrome.runtime.getURL(OFFSCREEN_PAGE)
     const open = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"], documentUrls: [url] })
-    if (open.length) return
+    if (open.length) {
+      // Chrome exposes the context before its script is ready to receive.
+      // A concurrent request must still wait for the initial page load.
+      await this.creating
+      return
+    }
     this.creating ??= chrome.offscreen
       .createDocument({
         url: OFFSCREEN_PAGE,

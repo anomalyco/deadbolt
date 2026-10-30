@@ -71,6 +71,29 @@ beforeEach(() => {
 afterEach(() => setSystemTime())
 
 describe("the vault's worker lost", () => {
+  test("a visible offscreen context still waits for its initial load", async () => {
+    fake.offscreenOpen = false
+    let release!: () => void
+    let opening!: () => void
+    const reached = new Promise<void>(resolve => opening = resolve)
+    chrome.offscreen.createDocument = async () => {
+      fake.offscreenOpen = true
+      opening()
+      await new Promise<void>(resolve => release = resolve)
+    }
+    const backend = new StandaloneBackend()
+    const connect = backend.connect()
+    await reached
+    const create = backend.device({ type: "device-create", passphrase: "right", name: "personal" })
+    await settle()
+    const beforeLoad = requests().length
+    release()
+    await connect
+    expect((await create).ok).toBe(true)
+    expect(beforeLoad).toBe(0)
+    expect(requests().some(body => body.type === "device-create")).toBe(true)
+  })
+
   test("every preset locks once its worker or offscreen document is gone", async () => {
     for (const preset of ["comfortable", "relaxed", "strict"] as const) {
       const first = new StandaloneBackend()
