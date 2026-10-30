@@ -9,6 +9,7 @@ mod forms;
 mod generate;
 mod grants;
 mod guesses;
+mod health;
 mod items;
 mod macos_autofill;
 mod mirror;
@@ -327,7 +328,11 @@ mod tests {
                 let mut request = serde_json::to_vec(&Request {
                     v: PROTOCOL_VERSION,
                     claimed: None,
-                    command: Command::Generate { length, symbols },
+                    command: Command::Generate {
+                        length,
+                        symbols,
+                        url: None,
+                    },
                 })
                 .unwrap();
                 request.push(b'\n');
@@ -1824,8 +1829,16 @@ impl Agent {
             Command::SendShow { id } => self.send_show(&id).await,
             Command::SendRevoke { id } => self.send_revoke(&id).await,
             Command::SendWait { id } => self.send_wait(&id, conv).await,
-            Command::Generate { length, symbols } => Ok(Reply::Password {
-                password: deadbolt_core::password::generate(length, symbols)?,
+            Command::Generate {
+                length,
+                symbols,
+                url,
+            } => Ok(Reply::Password {
+                password: deadbolt_core::site_password::generate_for_url(
+                    url.as_deref(),
+                    length,
+                    symbols,
+                )?,
             }),
             Command::SiteLogins { origin } => {
                 let (site, logins) = self.with(|s| autofill::list(s, &origin))?;
@@ -1919,8 +1932,11 @@ impl Agent {
             Command::AgentClientAdd { .. }
             | Command::AgentGrantSet { .. }
             | Command::SecretGrantSet { .. }
-            | Command::Resolve { .. } => {
-                bail!("pairing, grants and references are answered with the caller")
+            | Command::Resolve { .. }
+            | Command::Health { .. }
+            | Command::HealthIgnore { .. }
+            | Command::BreachChecksSet { .. } => {
+                bail!("pairing, grants, references and health are answered with the caller")
             }
             Command::AgentClientList => Ok(Reply::AgentClients {
                 clients: self.with(|s| grants::list_clients(s))?,
@@ -2082,7 +2098,9 @@ impl Agent {
         if closed > 0 {
             info!(closed, "closed sync connections to removed devices");
         }
-        if !session.vaults.is_empty() && !session.vaults.values().any(|v| v.is_member(&session.id))
+        if session.unavailable.is_empty()
+            && !session.vaults.is_empty()
+            && !session.vaults.values().any(|v| v.is_member(&session.id))
         {
             drop(session.store.clear_biometric());
             self.biometric_was_enrolled.store(false, Ordering::SeqCst);
@@ -2836,6 +2854,9 @@ impl Agent {
         self.set_timeout(timeout_secs)?;
         self.with(|s| {
             s.sync_task = Some(AbortOnDrop(tokio::spawn(sync::run(self.clone()))));
+            s.health_task = Some(AbortOnDrop(tokio::spawn(health::run_background(
+                self.clone(),
+            ))));
             Ok(())
         })?;
         info!(device = %id, "unlocked");
@@ -2864,6 +2885,7 @@ impl Agent {
         *self.idle.lock().unwrap_or_else(|e| e.into_inner()) = Idle::default();
         if let Some(mut session) = session {
             self.watchers.locked();
+            session.health_task.take();
             session.sync_task.take();
             session.node.shutdown().await;
             drop(session);

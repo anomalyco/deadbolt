@@ -80,6 +80,8 @@ mod encoding;
 mod entry;
 mod error;
 pub mod forms;
+#[cfg(feature = "health")]
+pub mod health;
 mod id;
 pub mod item;
 pub mod listing;
@@ -99,7 +101,7 @@ pub use entry::{Change, DataOp, Entry, Log, LogId, MembershipOp, Payload, Source
 pub use error::{DecodeError, Error};
 pub use id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 pub use item::{Field, FieldType, ItemError, Schema, SchemaField, schema, schemas};
-pub use vault::{CREATE_BATCH_BYTES, Heads, MAX_ENTRY_LEN, Vault};
+pub use vault::{CREATE_BATCH_BYTES, Heads, MAX_ENTRY_LEN, MAX_MEMBERSHIP_ENTRIES, Vault};
 
 #[cfg(test)]
 mod tests;
@@ -109,3 +111,6 @@ mod membership_tests;
 
 #[cfg(test)]
 mod tag_tests;
+
+#[cfg(all(test, feature = "health"))]
+mod health_tests;

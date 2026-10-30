@@ -257,7 +257,7 @@ export function settingsView(app: App): View {
   const pairArea = h("div", { class: "pair-area" })
   const pairStart = button("btn", [glyph("plus"), "Pair another device"], () => openPair())
   const openPair = () => {
-    const code = h("input", { class: "input mono-input", placeholder: "word-word-word-word", "aria-label": "Pairing code", spellcheck: "false", autocomplete: "off" })
+    const code = h("input", { class: "input mono-input", placeholder: "word-word-word-word-word", "aria-label": "Pairing code", spellcheck: "false", autocomplete: "off" })
     const error = h("p", { class: "error", role: "alert" })
     error.hidden = true
     const label = h("span", { class: "roll-label" }, "Pair")

@@ -202,7 +202,7 @@ addresses so id-based relay lookup remains available. The PAKE, TLS-exporter
 binding, one-guess/single-use code, signatures and connection membership hooks are
 unchanged.
 
-The proof invites a CLI started with `deadbolt join`, accepting its four-word code
+The proof invites a CLI started with `deadbolt join`, accepting its five-word code
 in the extension's device page. Rust checks the new device's vault/inviter-bound
 consent, commits its signed Add before sending the welcome, and sends the existing
 CLI application's versioned envelopes and signed entries. Sync uses the same
@@ -450,6 +450,11 @@ Wrong passphrases back off. After three in a row, for unlocking or for Strict's
 check before a password, the service worker refuses the next try for 1 s, then 2,
 4, … up to 60 s, without reaching the vault; a right passphrase starts over. The
 count lives in `chrome.storage.session`, so a restarted service worker keeps it.
+Every passphrase check (unlocking, Strict's, a waiting fill's, Touch ID's) takes
+its turn in one queue in the service worker: each waits for the one before it to
+finish and be counted, then checks the backoff again, so checks sent together
+can't all start before the first wrong answer sets it. At most four run or wait
+at once; more are refused.
 This slows guessing through Deadbolt's own pages: someone at an unattended browser,
 or a script driving the popup. It does nothing against an attacker who has copied
 the encrypted OPFS file, who meets only the passphrase KDF.

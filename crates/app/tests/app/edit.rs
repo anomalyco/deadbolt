@@ -368,6 +368,7 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
             Job::Generate {
                 length: 24,
                 symbols: true,
+                url: None,
                 seq,
             },
         ] => *seq,
@@ -396,6 +397,7 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
                 length,
                 symbols,
                 seq,
+                ..
             } => Some((length, symbols, seq)),
             _ => None,
         })

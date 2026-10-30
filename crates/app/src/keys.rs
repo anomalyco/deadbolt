@@ -26,6 +26,7 @@ pub const SHORTCUTS: &[(&[&str], &str)] = &[
     (&["⌘", "D"], "Favorite"),
     (&["⌘", "⌫"], "Delete"),
     (&["⇧", "⌘", "⌫"], "Recently deleted"),
+    (&["⇧", "⌘", "H"], "Security"),
     (&["⌘", ","], "Settings"),
     (&["⌘", "L"], "Lock"),
     (&["⇧", "⌘", "Space"], "Quick panel"),
@@ -144,6 +145,11 @@ impl App {
             self.toggle_trash();
             return Some(true);
         }
+        if crate::health::is_shortcut(ev) && !self.hotkey.recorder.is_recording() {
+            tx.instant();
+            self.toggle_security();
+            return Some(true);
+        }
         if self.settings_open || self.trash.open {
             return None;
         }
@@ -163,6 +169,9 @@ impl App {
         if is_question(ev) && (!self.typing() || self.search.text.is_empty()) {
             self.nav.sheet = true;
             return Some(true);
+        }
+        if self.security_open() {
+            return None;
         }
         if let Key::Command(c @ '1'..='9') = ev.key
             && ev.mods.cmd
@@ -367,6 +376,7 @@ impl App {
             return;
         }
         self.cancel_delete();
+        self.close_security();
         self.import.hover = false;
         self.trash.forget();
         self.settings_open = true;
@@ -409,7 +419,7 @@ impl App {
             return None;
         }
         let installing = self.installing();
-        if !self.settings_open && !installing && !self.trash.open {
+        if !self.settings_open && !installing && !self.trash.open && !self.security_open() {
             return None;
         }
         // Import Passwords… leaves either for the import view, as the menu
@@ -426,6 +436,9 @@ impl App {
         }
         if self.trash.open {
             return Some(self.trash_key(ev, tx));
+        }
+        if self.security_open() {
+            return Some(self.security_key(ev, tx));
         }
         match ev.key {
             Key::Escape => {
@@ -480,6 +493,10 @@ fn is_question(ev: &KeyEvent) -> bool {
 
 pub(crate) fn is_letter(ev: &KeyEvent, letter: &str) -> bool {
     matches!(&ev.key, Key::Text(t) if t == letter) && plain(ev)
+}
+
+pub(crate) fn safe_web_url(value: &str) -> Option<String> {
+    web_address(value.trim(), true)
 }
 
 /// `value` as an address the browser may open, `https://` added when it has

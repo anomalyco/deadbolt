@@ -186,7 +186,7 @@ impl App {
         }
     }
 
-    pub fn tag_key(&mut self, ev: &KeyEvent, _tx: &mut Tx) -> bool {
+    pub fn tag_key(&mut self, ev: &KeyEvent, tx: &mut Tx) -> bool {
         let plain = ev.mods == rune::Mods::default();
         let has_text = self
             .edit
@@ -237,7 +237,7 @@ impl App {
                 return true;
             }
         }
-        self.form_key(ev, Field::Line)
+        self.form_key(ev, Field::Line, tx)
     }
 }
 

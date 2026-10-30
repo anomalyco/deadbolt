@@ -55,7 +55,14 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
         summary.drop_some(PASSKEYS, 1);
     }
     b.custom_fields(item, summary);
-    b.finish("login", item_name(text(item, "name")), summary)
+    let mut mapped = b.finish("login", item_name(text(item, "name")), summary)?;
+    if mapped.fields.contains_key("password") {
+        mapped.password_changed = text(login, "passwordRevisionDate")
+            .or_else(|| text(item, "revisionDate"))
+            .and_then(|ts| ts.get(..10).map(str::to_owned))
+            .filter(|d| deadbolt_core::item::valid_date(d));
+    }
+    Some(mapped)
 }
 
 fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {

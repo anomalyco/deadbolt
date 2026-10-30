@@ -284,7 +284,7 @@ fn start_join(new: &Device, device_name: &str) -> (Child, mpsc::Receiver<String>
         .strip_prefix("Code: ")
         .expect("a code line")
         .to_string();
-    assert_eq!(code.split('-').count(), 4, "{code}");
+    assert_eq!(code.split('-').count(), 5, "{code}");
     (child, rx, code)
 }
 
@@ -490,12 +490,14 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
     // Joining another vault on an existing device.
     pair(&a, &b, "beta", Some("personal"));
     assert_eq!(b.run(&["vault", "ls"]).lines().count(), 2);
-    let err = a.fail(&["pair", "violin-garden-tiger-lamp", "--vault", "nope"]);
+    let err = a.fail(&["pair", "violin-garden-tiger-lamp-zoo", "--vault", "nope"]);
     assert!(err.contains("no vault named nope"), "{err}");
     let err = a.fail(&["pair", "DBPAIRAAAA"]);
     assert!(err.contains("invalid pairing code"), "{err}");
-    // Several vaults and no terminal to choose on: name one.
     let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp"]);
+    assert!(err.contains("update both devices"), "{err}");
+    // Several vaults and no terminal to choose on: name one.
+    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp", "zoo"]);
     assert!(err.contains("several vaults (personal, work)"), "{err}");
 }
 
@@ -510,7 +512,7 @@ fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
     c.run(&["init", "--device-name", "gamma"]);
     let (child, _rx, code) = start_join(&b, "beta");
 
-    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp"]);
+    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp-zoo"]);
     wrong.env("DEADBOLT_TEST_PAIR_FIND_SECS", "1");
     let out = c.output(&mut wrong);
     assert!(!out.status.success());
@@ -2349,13 +2351,16 @@ fn watch_prints_changes_as_json_lines() {
             }
         }
     });
-    // Each command here is also an Activity entry; those come in between.
+    // Each command here is also an Activity entry, and item/unlock changes
+    // refresh the background health memo; those come in between.
     let next = || -> serde_json::Value {
         loop {
             let line = rx.recv_timeout(Duration::from_secs(30)).expect("a change");
             let change: serde_json::Value =
                 serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"));
-            if change != serde_json::json!({"change": "activity"}) {
+            if change != serde_json::json!({"change": "activity"})
+                && change != serde_json::json!({"change": "health"})
+            {
                 return change;
             }
         }
@@ -4788,3 +4793,6 @@ fn favorites_and_tags() {
         names == ["Alpha", "Zeta"] && b.run(&["tags"]) == "personal\t1\nprod\t1\nTax 2026\t1\n"
     });
 }
+
+#[path = "cli/health.rs"]
+mod health;

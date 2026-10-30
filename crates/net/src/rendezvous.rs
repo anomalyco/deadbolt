@@ -1,7 +1,7 @@
-//! Rendezvous: how the existing device finds the new one from the code alone.
+//! Rendezvous: how the existing device finds the new one from a code and UTC bucket.
 //!
-//! Both devices derive the same Ed25519 key from the code ([`PairingCode::lookup_secret`],
-//! Argon2id). The new device signs a pkarr record under that key naming its endpoint
+//! Both devices derive the same Ed25519 key from the code and six-hour UTC bucket
+//! ([`PairingCode::lookup_secret`], Argon2id). The new device signs a pkarr record under that key naming its endpoint
 //! id and addresses, and publishes it through n0's pkarr relay (the one iroh's own
 //! address lookup uses); the existing device derives the public key and resolves it.
 //! Nothing published names the code, and only someone holding the code can compute the
@@ -22,6 +22,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     PairingCode, PeerAddr, PeerId,
+    code::lookup_bucket,
     error::{Error, Result},
 };
 
@@ -48,27 +49,31 @@ pub(crate) struct Lookup {
     pub(crate) public: PeerId,
 }
 
+pub(crate) fn current_bucket() -> u64 {
+    lookup_bucket(Timestamp::now().as_micros() / 1_000_000)
+}
+
 impl Lookup {
     /// Blocking (Argon2id).
-    pub(crate) fn derive(code: &PairingCode) -> Result<Self> {
-        let seed: Zeroizing<[u8; 32]> = code.lookup_secret()?;
+    pub(crate) fn derive(code: &PairingCode, bucket: u64) -> Result<Self> {
+        let seed: Zeroizing<[u8; 32]> = code.lookup_secret(bucket)?;
         let secret = SecretKey::from_bytes(&seed);
         let public = *secret.public().as_bytes();
         Ok(Self { secret, public })
     }
 
-    pub(crate) async fn derive_async(code: &PairingCode) -> Result<Self> {
+    pub(crate) async fn derive_async(code: &PairingCode, bucket: u64) -> Result<Self> {
         #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
         {
             let code = code.clone();
-            tokio::task::spawn_blocking(move || Self::derive(&code))
+            tokio::task::spawn_blocking(move || Self::derive(&code, bucket))
                 .await
                 .map_err(|e| Error::InvalidCode(e.to_string()))?
         }
         #[cfg(all(target_family = "wasm", target_os = "unknown"))]
         {
             // No blocking pool in the browser: callers should run pairing in a worker.
-            Self::derive(code)
+            Self::derive(code, bucket)
         }
     }
 }
@@ -190,6 +195,29 @@ impl Client {
         }
     }
 
+    /// Resolve current then adjacent buckets, caching each key only as it is needed.
+    /// Most pairs find the current bucket, avoiding two Argon2id runs (especially
+    /// important on a browser worker, where each derivation blocks its event loop).
+    pub(crate) async fn resolve_code(
+        &self,
+        code: &PairingCode,
+        bucket: u64,
+        lookups: &mut Vec<Lookup>,
+        max_age: Duration,
+    ) -> Result<Option<(PeerId, Record)>> {
+        let buckets = [Some(bucket), bucket.checked_sub(1), bucket.checked_add(1)];
+        for (index, bucket) in buckets.into_iter().flatten().enumerate() {
+            if lookups.len() <= index {
+                lookups.push(Lookup::derive_async(code, bucket).await?);
+            }
+            let lookup = &lookups[index];
+            if let Some(record) = self.resolve(&lookup.public, max_age).await? {
+                return Ok(Some((lookup.public, record)));
+            }
+        }
+        Ok(None)
+    }
+
     /// The record under `key`, if there is one younger than `max_age`.
     pub(crate) async fn resolve(&self, key: &PeerId, max_age: Duration) -> Result<Option<Record>> {
         let public =
@@ -227,7 +255,7 @@ mod tests {
     use super::*;
 
     fn lookup() -> Lookup {
-        Lookup::derive(&"violin-garden-tiger-lamp".parse().unwrap()).unwrap()
+        Lookup::derive(&"violin-garden-tiger-lamp-zoo".parse().unwrap(), 1234).unwrap()
     }
 
     #[test]
@@ -247,11 +275,51 @@ mod tests {
     }
 
     #[test]
-    fn the_rendezvous_key_never_changes() {
-        // Both devices must derive the same key from the same code across builds.
+    fn the_rendezvous_key_for_a_bucket_is_stable() {
+        // Both devices must derive the same key from the same code and bucket across builds.
         assert_eq!(
             crate::fmt_id(&lookup().public),
-            "951d3837dbd6c454c4e021718b0b49b426d4e1717d224f6b23d126aebecdcc76"
+            "07d39317da3a165cb05268c084c73da649d4932f9917667c54986435dc39b120"
+        );
+    }
+
+    #[tokio::test]
+    async fn adjacent_buckets_resolve_across_the_boundary() {
+        use crate::code::LOOKUP_BUCKET_SECONDS;
+        let code = "violin-garden-tiger-lamp-zoo".parse().unwrap();
+        let boundary = LOOKUP_BUCKET_SECONDS * 1234;
+        let before = lookup_bucket(boundary - 1);
+        let after = lookup_bucket(boundary);
+        for (published, resolving) in [(before, after), (after, before), (after, after)] {
+            let dir = tempfile::tempdir().unwrap();
+            let client = Client::Dir(dir.path().to_path_buf());
+            let lookup = Lookup::derive(&code, published).unwrap();
+            let record = Record::Waiting(PeerAddr {
+                id: *SecretKey::from_bytes(&[3; 32]).public().as_bytes(),
+                relay_url: None,
+                direct_addrs: vec![],
+            });
+            client.publish(&lookup, &record).await.unwrap();
+            let mut lookups = Vec::new();
+            assert_eq!(
+                client
+                    .resolve_code(&code, resolving, &mut lookups, Duration::from_secs(60))
+                    .await
+                    .unwrap(),
+                Some((lookup.public, record)),
+            );
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let client = Client::Dir(dir.path().to_path_buf());
+        let stale = Lookup::derive(&code, before - 1).unwrap();
+        client.publish(&stale, &Record::Used).await.unwrap();
+        let mut lookups = Vec::new();
+        assert_eq!(
+            client
+                .resolve_code(&code, after, &mut lookups, Duration::from_secs(60))
+                .await
+                .unwrap(),
+            None
         );
     }
 

@@ -81,7 +81,7 @@ fn head(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
         .width(None)
         .invalid(invalid)
         .on_edit(|s: &mut App| s.name_mut())
-        .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line))
+        .on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Line, tx))
         .on_change(|s: &mut App, _| s.form_changed())
         .on_submit(|s: &mut App, _| s.save());
     let name = quiet(k, name.build(k), &f.name, invalid)
@@ -424,7 +424,8 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                             .invalid(invalid)
                             .on_edit(move |s: &mut App| s.input_mut(i))
                             .on_key(move |s: &mut App, ev, tx| {
-                                s.form_key(ev, Field::SecretLines) || s.copy_secret_input(i, ev, tx)
+                                s.form_key(ev, Field::SecretLines, tx)
+                                    || s.copy_secret_input(i, ev, tx)
                             })
                             .on_change(|s: &mut App, _| s.form_changed())
                             .on_submit(|s: &mut App, _| s.save())
@@ -446,12 +447,12 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         let area = if input.lines {
             // Rune submits a plain ⏎ in a text area; here it breaks the line.
             area.auto_grow(2, 6)
-                .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Lines))
+                .on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Lines, tx))
                 .on_change(|s: &mut App, _| s.form_changed())
                 .on_submit(move |s: &mut App, _| s.break_line(i))
         } else {
             area.auto_grow(1, 4)
-                .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Wrapped))
+                .on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Wrapped, tx))
                 .on_change(move |s: &mut App, _| s.wrapped_changed(i))
         };
         quiet(k, area.build(k), &input.edit, invalid).label(named.clone())
@@ -466,12 +467,12 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         if input.secret() {
             t = t
                 .on_key(move |s: &mut App, ev, tx| {
-                    s.form_key(ev, Field::Line) || s.copy_secret_input(i, ev, tx)
+                    s.form_key(ev, Field::Line, tx) || s.copy_secret_input(i, ev, tx)
                 })
                 .text_style(k.ty.mono)
                 .trailing(secret_actions(k, input, i, generates, f.saving));
         } else {
-            t = t.on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line));
+            t = t.on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Line, tx));
         }
         let built = quiet(k, t.build(k), &input.edit, invalid).label(named.clone());
         if generates {
@@ -493,8 +494,11 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         .gap(6.0)
         .child(control);
     // An edit keeps its password until asked for a new one; then the controls show.
-    if generates && (f.is_new() || f.generated > 0) {
+    if generates && (f.is_new() || f.fixing || f.generated > 0) {
         value = value.child(generator(s, k, f.saving));
+        if f.has_base_password() {
+            value = value.child(fix_actions(s, k, f));
+        }
     }
     if let Some(p) = problem_text {
         value = value.child(problem(k, "problem", p));
@@ -596,6 +600,42 @@ fn generator(s: &App, k: &Kit, saving: bool) -> El {
                 .build(k)
                 .key("symbols"),
         )
+}
+
+fn fix_actions(s: &App, k: &Kit, f: &Form) -> El {
+    let mut bar = row()
+        .key("fix-actions")
+        .w_full()
+        .ml(-8.0)
+        .gap(4.0)
+        .center_y();
+    bar = bar.child(
+        Button::new("Copy current password")
+            .variant(ButtonVariant::GhostMuted)
+            .control_size(ControlSize::Small)
+            .disabled(f.saving)
+            .help("Copy current password")
+            .shortcut("⇧⌘C")
+            .on_press_tx(|s: &mut App, tx| {
+                s.copy_base_password(tx);
+            })
+            .build(k)
+            .key("copy-current"),
+    );
+    if let Some(site_label) = s.fix_site_label(f) {
+        bar = bar.child(
+            Button::new(site_label)
+                .variant(ButtonVariant::GhostMuted)
+                .control_size(ControlSize::Small)
+                .disabled(f.saving)
+                .help("Open change-password page")
+                .shortcut("⌘O")
+                .on_press_tx(|s: &mut App, tx| s.open_fix_site(tx))
+                .build(k)
+                .key("open-fix-site"),
+        );
+    }
+    bar
 }
 
 /// Every segment disabled, which also drops their presses (Rune's

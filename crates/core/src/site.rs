@@ -195,7 +195,7 @@ fn is_dotted_quad(host: &str) -> bool {
 }
 
 /// A lowercase site name that isn't a public suffix itself.
-fn valid_domain(domain: &str) -> bool {
+pub(crate) fn valid_domain(domain: &str) -> bool {
     if domain.is_empty()
         || !domain
             .bytes()

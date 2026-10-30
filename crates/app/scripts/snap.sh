@@ -33,7 +33,7 @@ done
 # The keys, dark and light: ⇥ into a login's fields, the ⌘K action menu, the
 # ? shortcut sheet, and the ⌘, Settings page on its second row.
 for theme in dark light; do
-  for scene in field actions sheet settings-page; do
+  for scene in field actions sheet settings-page security vault-risk fix-password; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done

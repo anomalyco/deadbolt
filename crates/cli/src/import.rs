@@ -36,11 +36,10 @@ pub struct Imported {
     pub tags: BTreeSet<String>,
     /// Where it came from, for an export that says (1Password's).
     pub source: Option<Source>,
-    /// For a login that signs in with another (`sign-in-with`), the
-    /// 1Password item that one is, by vault and item id as in its source id
-    /// ([`onepassword::source_key`]). The agent links it at import, as
-    /// `sign-in-account`, once that item is here.
     pub sign_in_link: Option<(String, String)>,
+    /// UTC date (`YYYY-MM-DD`) the password was last changed in the export, if
+    /// known.
+    pub password_changed: Option<String>,
 }
 
 impl Imported {
@@ -721,6 +720,7 @@ impl Builder {
             tags: BTreeSet::new(),
             source: None,
             sign_in_link: None,
+            password_changed: None,
         })
     }
 }

@@ -680,6 +680,9 @@ fn item(kind: &str, name: Option<&str>, fields: &[(&str, &str)]) -> Item {
         source: None,
         favorite: false,
         tags: BTreeSet::new(),
+        password_entry: None,
+        password_changed: None,
+        ignored: BTreeMap::new(),
         deleted: false,
     }
 }

@@ -294,36 +294,15 @@ impl Onboarding {
     }
 }
 
-/// A rough strength: the bits a brute-force guesser would face for a
-/// password drawn at random from the characters used, discounted for
-/// repetition. It flatters dictionary words, so it only ever asks for more.
+/// Passphrase strength via `zxcvbn` (`deadbolt_client::protocol`), catching
+/// dictionary words, keyboard walks, repeats, and predictable patterns.
 pub fn strength(passphrase: &str) -> Strength {
-    let len = passphrase.chars().count();
-    if len < MIN_PASSPHRASE {
-        return Strength::TooShort;
-    }
-    let has = |f: fn(&char) -> bool| passphrase.chars().any(|c| f(&c));
-    let pool = [
-        (has(char::is_ascii_lowercase), 26.0),
-        (has(char::is_ascii_uppercase), 26.0),
-        (has(char::is_ascii_digit), 10.0),
-        (has(|c| c.is_ascii_punctuation()), 32.0),
-        (has(|c| *c == ' '), 1.0),
-        (has(|c| !c.is_ascii()), 100.0),
-    ]
-    .iter()
-    .filter(|(present, _)| *present)
-    .map(|(_, n)| n)
-    .sum::<f64>();
-    let mut distinct: Vec<char> = passphrase.chars().collect();
-    distinct.sort_unstable();
-    distinct.dedup();
-    let variety = (distinct.len() as f64 * 2.0 / len as f64).min(1.0);
-    let bits = len as f64 * pool.max(2.0).log2() * variety;
-    match bits {
-        b if b < 50.0 => Strength::Weak,
-        b if b < 75.0 => Strength::Fair,
-        _ => Strength::Strong,
+    use deadbolt_client::protocol::PassphraseStrength as P;
+    match deadbolt_client::protocol::passphrase_strength(passphrase) {
+        P::TooShort => Strength::TooShort,
+        P::Weak => Strength::Weak,
+        P::Fair => Strength::Fair,
+        P::Strong => Strength::Strong,
     }
 }
 
