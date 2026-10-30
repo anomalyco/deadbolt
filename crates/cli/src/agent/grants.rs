@@ -722,7 +722,11 @@ impl Agent {
         command: Command,
         conv: &Conversation,
     ) -> Result<Reply> {
-        if caller.class == CallerClass::BrowserHost || super::caller::is_ai(caller) {
+        if matches!(
+            caller.class,
+            CallerClass::BrowserHost | CallerClass::AutoFill
+        ) || super::caller::is_ai(caller)
+        {
             return Err(fail(
                 ErrorCode::Forbidden,
                 "an AI can't pair agent clients or grant access to secrets: run this yourself, in a terminal",

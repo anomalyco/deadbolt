@@ -110,6 +110,12 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         },
         C::SecretGrantSet { .. } => (T::Never, "secret-grant-set"),
         C::SecretGrantList => (T::Look, "secret-grant-list"),
+        C::AutofillStatus => (T::Browser, "autofill-status"),
+        C::AutofillIdentities => (T::Browser, "autofill-identities"),
+        C::AutofillList { .. } => (T::Browser, "autofill-list"),
+        C::AutofillFill { .. } => (T::Browser, "autofill-fill"),
+        C::AutofillPasskeyGet { .. } => (T::Browser, "autofill-passkey-get"),
+        C::AutofillPasskeyCreate { .. } => (T::Browser, "autofill-passkey-create"),
     }
 }
 
@@ -202,6 +208,15 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
                             | Command::SiteGenerateDrop { .. }
                     )
             }
+            CallerClass::AutoFill => {
+                !always
+                    && !matches!(
+                        command,
+                        Command::AutofillStatus
+                            | Command::AutofillIdentities
+                            | Command::AutofillList { .. }
+                    )
+            }
             CallerClass::Caller => !always,
         };
     if !recorded {
@@ -284,6 +299,29 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         Command::PasskeyCreate { origin, .. } => {
             (named(&None, std::slice::from_ref(origin)), Vec::new())
         }
+        Command::AutofillFill {
+            service,
+            login: target,
+            want,
+            ..
+        } => {
+            let where_label = service
+                .as_ref()
+                .map(|s| s.identifier.as_str())
+                .unwrap_or("unassociated app");
+            (
+                login(&target.vault, &target.item, where_label),
+                want.iter().map(fill_name).collect(),
+            )
+        }
+        Command::AutofillPasskeyGet { rp_id, passkey, .. } => (
+            login(&passkey.vault, &passkey.item, rp_id),
+            vec!["passkey".into()],
+        ),
+        Command::AutofillPasskeyCreate { rp_id, .. } => (
+            named(&None, std::slice::from_ref(rp_id)),
+            vec!["passkey".into()],
+        ),
         Command::AgentClientAdd { name, .. } => {
             (named(&None, std::slice::from_ref(name)), Vec::new())
         }
@@ -502,7 +540,8 @@ impl Draft {
                     })
                     .collect();
             }
-            Reply::PasskeyCreated { passkey, .. } => {
+            Reply::PasskeyCreated { passkey, .. }
+            | Reply::AutofillPasskeyCreated { passkey, .. } => {
                 let title = self
                     .items
                     .first()
@@ -568,6 +607,7 @@ impl Agent {
     /// one, to record before the reply goes.
     pub(super) async fn answer(
         self: Arc<Self>,
+        socket: super::macos_autofill::SocketKind,
         peer: std::io::Result<Peer>,
         request: Request,
         conv: &Conversation,
@@ -579,14 +619,22 @@ impl Agent {
             .unwrap_or_else(|_| caller::nobody());
         ledger::bound_caller(&mut caller);
         let draft = draft(&request.command, caller.class);
-        let mut result = match request.command {
-            command @ Command::ActivityReport { .. } => self.report(&caller, command),
-            command @ (Command::AgentClientAdd { .. }
-            | Command::AgentGrantSet { .. }
-            | Command::SecretGrantSet { .. }) => self.agents_admin(&caller, command, conv).await,
-            Command::Resolve { refs, purpose } => self.resolve(&caller, &refs, purpose, conv).await,
-            command => self.clone().dispatch(command, conv).await,
-        };
+        let mut result =
+            match super::macos_autofill::check_access(socket, &caller, &request.command) {
+                Err(error) => Err(error),
+                Ok(()) => match request.command {
+                    command @ Command::ActivityReport { .. } => self.report(&caller, command),
+                    command @ (Command::AgentClientAdd { .. }
+                    | Command::AgentGrantSet { .. }
+                    | Command::SecretGrantSet { .. }) => {
+                        self.agents_admin(&caller, command, conv).await
+                    }
+                    Command::Resolve { refs, purpose } => {
+                        self.resolve(&caller, &refs, purpose, conv).await
+                    }
+                    command => self.clone().dispatch(command, conv).await,
+                },
+            };
         if let Ok(Reply::Status(status)) = &mut result {
             status.caller = caller.clone();
         }

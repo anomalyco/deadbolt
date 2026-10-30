@@ -9,7 +9,7 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use deadbolt_client::peer::{AGENT_ID, APP_ID, CodeSignature, Peer, Process};
+use deadbolt_client::peer::{AGENT_ID, APP_ID, AUTOFILL_ID, CodeSignature, Peer, Process};
 use tracing::warn;
 
 use crate::protocol::{CallerClass, CallerInfo, Check, Claim, Signature};
@@ -29,12 +29,15 @@ const HOSTS: [(&str, &str); 7] = [
 ];
 const SHELLS: [&str; 7] = ["zsh", "bash", "fish", "sh", "dash", "nu", "tcsh"];
 
-/// The agent's own binary and its bundle's app, which peers are compared to.
+/// The agent's own binary and its bundle's app and AutoFill extension, which
+/// peers are compared to.
 pub struct Callers {
     #[cfg(target_os = "macos")]
     exe: Option<PathBuf>,
     #[cfg(target_os = "macos")]
     app: Option<PathBuf>,
+    #[cfg(target_os = "macos")]
+    autofill: Option<PathBuf>,
     /// Their signatures, read with the first peer.
     #[cfg(target_os = "macos")]
     own: Mutex<Option<Own>>,
@@ -46,6 +49,7 @@ pub struct Callers {
 struct Own {
     exe: Option<CodeSignature>,
     app: Option<CodeSignature>,
+    autofill: Option<CodeSignature>,
 }
 
 /// One of Deadbolt's own binaries: where it is (canonical) and its
@@ -66,12 +70,14 @@ pub struct Known<'a> {
     allow(dead_code, reason = "only macOS can verify a peer's code")
 )]
 pub enum Evidence<'a> {
-    /// The running code's signature, the agent's own binary and the app's,
-    /// and the Apple team that signed this build (`None` when ad-hoc).
+    /// The running code's signature, the agent's own binary, the app's and
+    /// the macOS AutoFill extension's, and the Apple team that signed this
+    /// build (`None` when ad-hoc).
     Signature {
         code: &'a CodeSignature,
         exe: Option<Known<'a>>,
         app: Option<Known<'a>>,
+        autofill: Option<Known<'a>>,
         team: Option<&'a str>,
     },
     /// Nothing verified: on Linux, `/proc` names a peer's executable, but a
@@ -87,11 +93,21 @@ impl Callers {
             #[cfg(target_os = "macos")]
             app: exe.as_deref().and_then(app_beside),
             #[cfg(target_os = "macos")]
+            autofill: exe.as_deref().and_then(autofill_beside),
+            #[cfg(target_os = "macos")]
             exe,
             #[cfg(target_os = "macos")]
             own: Mutex::default(),
             cache: Mutex::default(),
         }
+    }
+
+    #[cfg(test)]
+    pub fn cache_for_test(&self, peer: Peer, info: CallerInfo) {
+        self.cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(peer, info);
     }
 
     /// How the agent sees `peer`, claiming `claimed`. Blocking: on macOS it
@@ -138,7 +154,13 @@ impl Callers {
         let own = self.own.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let files: Vec<PathBuf> = match own {
             Some(_) => Vec::new(),
-            None => self.exe.iter().chain(&self.app).cloned().collect(),
+            None => self
+                .exe
+                .iter()
+                .chain(&self.app)
+                .chain(&self.autofill)
+                .cloned()
+                .collect(),
         };
         let found = match deadbolt_client::peer::identify(&helper, peer.token, &files) {
             Ok(Some(found)) => found,
@@ -153,6 +175,7 @@ impl Callers {
             let own = Own {
                 exe: self.exe.as_ref().and_then(|_| files.next().flatten()),
                 app: self.app.as_ref().and_then(|_| files.next().flatten()),
+                autofill: self.autofill.as_ref().and_then(|_| files.next().flatten()),
             };
             *self.own.lock().unwrap_or_else(|e| e.into_inner()) = Some(own.clone());
             own
@@ -172,6 +195,7 @@ impl Callers {
                 code,
                 exe: known(&self.exe, &own.exe),
                 app: known(&self.app, &own.app),
+                autofill: known(&self.autofill, &own.autofill),
                 team: deadbolt_client::peer::team(),
             },
             None => Evidence::None,
@@ -210,6 +234,20 @@ fn app_beside(exe: &Path) -> Option<PathBuf> {
     Some(app.canonicalize().unwrap_or(app))
 }
 
+/// The AutoFill extension of the agent's own bundle,
+/// `Deadbolt.app/Contents/PlugIns/DeadboltAutoFill.appex/Contents/MacOS/DeadboltAutoFill`
+/// for its `Contents/Helpers/deadbolt`, symlinks resolved.
+#[cfg(any(test, target_os = "macos"))]
+fn autofill_beside(exe: &Path) -> Option<PathBuf> {
+    let dir = exe.parent()?;
+    let contents = dir.parent()?;
+    if dir.file_name()? != "Helpers" || contents.file_name()? != "Contents" {
+        return None;
+    }
+    let ext = contents.join("PlugIns/DeadboltAutoFill.appex/Contents/MacOS/DeadboltAutoFill");
+    Some(ext.canonicalize().unwrap_or(ext))
+}
+
 /// Whether `args` run `deadbolt browser-host`, as a browser does.
 fn browser_host_args(args: &[String]) -> bool {
     match args {
@@ -230,6 +268,7 @@ pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
             code,
             exe,
             app,
+            autofill,
             team,
         } => {
             let is = |known: &Option<Known>, id: &str| match team {
@@ -240,6 +279,8 @@ pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
             };
             let class = if is(app, APP_ID) {
                 CallerClass::App
+            } else if is(autofill, AUTOFILL_ID) {
+                CallerClass::AutoFill
             } else if is(exe, AGENT_ID) && browser_host_args(args) {
                 CallerClass::BrowserHost
             } else {
@@ -345,6 +386,7 @@ fn label(class: CallerClass, program: Option<&str>, process: &Process) -> String
     });
     match class {
         CallerClass::App => return "Deadbolt".into(),
+        CallerClass::AutoFill => return "macOS AutoFill".into(),
         CallerClass::BrowserHost => {
             return match host {
                 Some(browser) => format!("browser host ({browser})"),
@@ -473,13 +515,16 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
         let app_path = root.join("MacOS/Deadbolt");
+        let autofill_path =
+            root.join("PlugIns/DeadboltAutoFill.appex/Contents/MacOS/DeadboltAutoFill");
         let exe_path = root.join("Helpers/deadbolt");
         let elsewhere = root.join("Copy");
-        for path in [&app_path, &exe_path, &elsewhere] {
+        for path in [&app_path, &autofill_path, &exe_path, &elsewhere] {
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(path, b"").unwrap();
         }
         let app_file = at(&app_path, "a1", None, APP_ID);
+        let autofill_file = at(&autofill_path, "af1", None, AUTOFILL_ID);
         let exe_file = at(&exe_path, "e1", None, AGENT_ID);
         let class_of = |code: CodeSignature, args: &[String]| {
             let evidence = Evidence::Signature {
@@ -492,6 +537,10 @@ mod tests {
                     path: &app_path,
                     file: Some(&app_file),
                 }),
+                autofill: Some(Known {
+                    path: &autofill_path,
+                    file: Some(&autofill_file),
+                }),
                 team: None,
             };
             classify(&evidence, args).0
@@ -500,6 +549,14 @@ mod tests {
         assert_eq!(
             class_of(at(&app_path, "a1", None, "x"), &[]),
             CallerClass::App
+        );
+        assert_eq!(
+            class_of(at(&autofill_path, "af1", None, "x"), &[]),
+            CallerClass::AutoFill
+        );
+        assert_eq!(
+            class_of(at(&elsewhere, "af1", None, AUTOFILL_ID), &[]),
+            CallerClass::Caller
         );
         // A relocated copy of the app, byte for byte, is a caller.
         assert_eq!(
@@ -552,6 +609,7 @@ mod tests {
                 code: &code,
                 exe: None,
                 app: None,
+                autofill: None,
                 team,
             };
             classify(&evidence, args).0
@@ -559,6 +617,14 @@ mod tests {
         assert_eq!(
             class_of(at(path, "a1", team, APP_ID), &[]),
             CallerClass::App
+        );
+        assert_eq!(
+            class_of(at(path, "af1", team, AUTOFILL_ID), &[]),
+            CallerClass::AutoFill
+        );
+        assert_eq!(
+            class_of(at(path, "af1", None, AUTOFILL_ID), &[]),
+            CallerClass::Caller
         );
         assert_eq!(
             class_of(at(path, "a1", None, APP_ID), &[]),
@@ -644,6 +710,7 @@ mod tests {
             "browser host (Brave Browser)"
         );
         assert_eq!(label(CallerClass::App, &brave), "Deadbolt");
+        assert_eq!(label(CallerClass::AutoFill, &brave), "macOS AutoFill");
     }
 
     #[test]
@@ -652,6 +719,13 @@ mod tests {
             app_beside(Path::new("/A/Deadbolt.app/Contents/Helpers/deadbolt")),
             Some(PathBuf::from("/A/Deadbolt.app/Contents/MacOS/Deadbolt"))
         );
+        assert_eq!(
+            autofill_beside(Path::new("/A/Deadbolt.app/Contents/Helpers/deadbolt")),
+            Some(PathBuf::from(
+                "/A/Deadbolt.app/Contents/PlugIns/DeadboltAutoFill.appex/Contents/MacOS/DeadboltAutoFill"
+            ))
+        );
+        assert_eq!(autofill_beside(Path::new("/w/target/debug/deadbolt")), None);
         // Only a development build takes the app beside it.
         assert_eq!(
             app_beside(Path::new("/w/target/debug/deadbolt")),

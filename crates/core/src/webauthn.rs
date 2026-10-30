@@ -78,6 +78,20 @@ pub fn user_handle(text: &str) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+/// A 32-byte SHA-256 `clientDataHash` (macOS `ASPasskeyCredentialRequest`),
+/// encoded as unpadded base64url.
+pub fn client_data_hash(text: &str) -> Result<[u8; 32]> {
+    if text.len() > 64 || text.contains('=') {
+        return Err(Error::Invalid(
+            "a client data hash is 32 bytes of base64url",
+        ));
+    }
+    let bytes = unb64(text)?;
+    bytes
+        .try_into()
+        .map_err(|_| Error::Invalid("a client data hash is 32 bytes of base64url"))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Ceremony {
     Create,
@@ -197,6 +211,23 @@ pub fn attest(
     })
 }
 
+/// An assertion over a pre-computed 32-byte `client_data_hash` (such as
+/// macOS `ASPasskeyCredentialRequest.clientDataHash`, where the OS built
+/// `clientDataJSON` itself).
+pub fn assert_hash(
+    rp_id: &str,
+    private_key: &[u8],
+    client_data_hash: &[u8; 32],
+    verified: bool,
+) -> Result<(Vec<u8>, Vec<u8>)> {
+    let key = signing_key(private_key)?;
+    let data = auth_data(rp_id, flags(verified, false));
+    let mut signed = data.clone();
+    signed.extend_from_slice(client_data_hash);
+    let signature: DerSignature = key.sign(&signed);
+    Ok((data, signature.as_bytes().to_vec()))
+}
+
 /// An assertion: authenticator data and the DER ECDSA signature over it
 /// and the SHA-256 of `client_data`.
 pub fn assert(
@@ -205,12 +236,8 @@ pub fn assert(
     client_data: &[u8],
     verified: bool,
 ) -> Result<(Vec<u8>, Vec<u8>)> {
-    let key = signing_key(private_key)?;
-    let data = auth_data(rp_id, flags(verified, false));
-    let mut signed = data.clone();
-    signed.extend_from_slice(&Sha256::digest(client_data));
-    let signature: DerSignature = key.sign(&signed);
-    Ok((data, signature.as_bytes().to_vec()))
+    let hash: [u8; 32] = Sha256::digest(client_data).into();
+    assert_hash(rp_id, private_key, &hash, verified)
 }
 
 /// The rpIdHash, flags and a sign counter of zero: a passkey in a synced
@@ -439,5 +466,17 @@ mod tests {
         assert!(user_handle("").is_err());
         assert!(user_handle(&b64(&[0; 65])).is_err());
         assert_eq!(user_handle(&b64(&[9; 64])).unwrap().len(), 64);
+
+        let digest = [0x42; 32];
+        assert_eq!(client_data_hash(&b64(&digest)).unwrap(), digest);
+        for bad in [
+            "",
+            "AQI",
+            &format!("{}==", b64(&digest)),
+            &b64(&[0; 31]),
+            &b64(&[0; 33]),
+        ] {
+            assert!(client_data_hash(bad).is_err(), "{bad:?}");
+        }
     }
 }

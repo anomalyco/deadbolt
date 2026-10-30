@@ -670,6 +670,10 @@ pub(super) mod tests {
             token.extend_from_slice(b"payload");
             loaded.store.set_biometric(&key, &token).unwrap();
             let agent = Agent::new(test_paths(dir.path()), true, fast);
+            *agent.biometric_slot.lock().unwrap() = biometric::token_meta(Some(&token));
+            agent
+                .biometric_was_enrolled
+                .store(true, std::sync::atomic::Ordering::SeqCst);
             *agent.touch_id_available_override.lock().unwrap() = Some(true);
             crate::config::set_touch_id(&agent.paths.config, true).unwrap();
             let node = Node::spawn(

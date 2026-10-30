@@ -386,10 +386,13 @@ impl Agent {
             .iter()
             .map(|r| Reference::parse(r).map_err(|e| anyhow!(e)))
             .collect::<Result<Vec<Reference>>>()?;
-        if caller.class == CallerClass::BrowserHost {
+        if matches!(
+            caller.class,
+            CallerClass::BrowserHost | CallerClass::AutoFill
+        ) {
             return Err(fail(
                 ErrorCode::Forbidden,
-                "the browser host doesn't resolve references",
+                "this caller doesn't resolve references",
             ));
         }
         let ai = caller::is_ai(caller);

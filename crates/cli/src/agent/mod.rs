@@ -10,6 +10,7 @@ mod generate;
 mod grants;
 mod guesses;
 mod items;
+mod macos_autofill;
 mod mirror;
 mod pairing;
 mod passkeys;
@@ -137,6 +138,9 @@ pub struct Agent {
     agent_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
     /// AI callers' `resolve` rate limits, by anchor, and one for them all.
     resolve_rates: Mutex<HashMap<String, crate::browser::host::Bucket>>,
+    /// macOS AutoFill extension rate limits for fills and passkey ceremonies.
+    autofill_fill_rate: Mutex<Option<crate::browser::host::Bucket>>,
+    autofill_passkey_rate: Mutex<Option<crate::browser::host::Bucket>>,
     /// Every passphrase check: one at a time, wrong ones backed off.
     guesses: guesses::Guesses,
     /// Deadbolt Send's endpoint, started by the first send.
@@ -180,6 +184,8 @@ impl Agent {
             activity: Mutex::default(),
             agent_rates: Mutex::default(),
             resolve_rates: Mutex::default(),
+            autofill_fill_rate: Mutex::default(),
+            autofill_passkey_rate: Mutex::default(),
             guesses: guesses::Guesses::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
@@ -1146,7 +1152,14 @@ pub async fn serve(paths: Paths) -> Result<()> {
         .await,
     );
     let agent = Agent::new(paths, local_net, env.kdf);
-    info!(pid = std::process::id(), version = %version(), local_net, "agent started");
+    let mut autofill = macos_autofill::bind_default().await;
+    info!(
+        pid = std::process::id(),
+        version = %version(),
+        local_net,
+        autofill_socket = autofill.as_ref().map(|(_, p)| p.display().to_string()),
+        "agent started"
+    );
     let (system, events) = mpsc::channel(8);
     let _sources = system::spawn(system);
     let _follow = AbortOnDrop(tokio::spawn(agent.clone().follow_system(events)));
@@ -1162,6 +1175,24 @@ pub async fn serve(paths: Paths) -> Result<()> {
                 let agent = agent.clone();
                 connections.spawn(async move { agent.handle(stream, MAX_LINE).await });
             }
+            accepted = async {
+                match autofill.as_ref() {
+                    Some((autofill_listener, _)) => autofill_listener.accept().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let (stream, _) = accepted.context("accepting macOS AutoFill connection")?;
+                let agent = agent.clone();
+                connections.spawn(async move {
+                    agent
+                        .handle_on(
+                            stream,
+                            crate::protocol::MAX_AUTOFILL_LINE,
+                            macos_autofill::SocketKind::AutoFill,
+                        )
+                        .await
+                });
+            }
             Some(result) = connections.join_next(), if !connections.is_empty() => report_connection(result),
             _ = agent.shutdown.notified() => break,
             _ = terminate.recv() => break,
@@ -1171,6 +1202,10 @@ pub async fn serve(paths: Paths) -> Result<()> {
     }
     info!("agent stopping");
     drop(listener);
+    let autofill_socket = autofill.take().map(|(autofill_listener, path)| {
+        drop(autofill_listener);
+        path
+    });
     agent.cancel_biometric_prompt();
     agent.interrupt_op();
     agent.watchers.stopping();
@@ -1178,6 +1213,9 @@ pub async fn serve(paths: Paths) -> Result<()> {
     drain_connections(&mut connections).await;
     agent.lock().await;
     remove_socket(&socket)?;
+    if let Some(autofill_socket) = autofill_socket {
+        drop(remove_socket(&autofill_socket));
+    }
     drop(lock);
     Ok(())
 }
@@ -1319,6 +1357,16 @@ impl Conversation {
 
 impl Agent {
     async fn handle(self: Arc<Self>, stream: UnixStream, max_line: usize) -> Result<()> {
+        self.handle_on(stream, max_line, macos_autofill::SocketKind::Control)
+            .await
+    }
+
+    async fn handle_on(
+        self: Arc<Self>,
+        stream: UnixStream,
+        max_line: usize,
+        socket: macos_autofill::SocketKind,
+    ) -> Result<()> {
         // The socket's directory keeps other users out; this holds even if
         // it didn't. (macOS keeps a peer's uid, but not its audit token, once
         // it hangs up.)
@@ -1362,11 +1410,11 @@ impl Agent {
                 v,
                 command: Command::Watch { app },
                 ..
-            }) if v == protocol() => {
+            }) if v == protocol() && socket == macos_autofill::SocketKind::Control => {
                 return self.watch(&conversation, app).await;
             }
             Ok(request) => {
-                stop = matches!(request.command, Command::Stop);
+                let asked_stop = matches!(request.command, Command::Stop);
                 let always = matches!(request.command, Command::Status | Command::Stop);
                 if request.v != protocol() && !always {
                     Err(fail(
@@ -1378,12 +1426,16 @@ impl Agent {
                         ),
                     ))
                 } else {
-                    let (result, entry) = self.clone().answer(peer, request, &conversation).await;
+                    let (result, entry) = self
+                        .clone()
+                        .answer(socket, peer, request, &conversation)
+                        .await;
                     // Recorded before the reply goes: a client that never
                     // reads it, or the agent stopping, can't lose the entry.
                     if let Some(entry) = entry {
                         self.record(entry);
                     }
+                    stop = asked_stop && result.is_ok();
                     result
                 }
             }
@@ -1450,6 +1502,10 @@ impl Agent {
                     | Command::AgentLogins { .. }
                     | Command::AgentFill { .. }
                     | Command::AgentPasskeyGet { .. }
+                    // macOS AutoFill lookups run in the background without use.
+                    | Command::AutofillStatus
+                    | Command::AutofillIdentities
+                    | Command::AutofillList { .. }
             );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
         // and a lock stops it before it writes anything. Nor does waiting
@@ -1882,6 +1938,12 @@ impl Agent {
             command @ (Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }) => self.agent_client(command),
+            command @ (Command::AutofillStatus
+            | Command::AutofillIdentities
+            | Command::AutofillList { .. }
+            | Command::AutofillFill { .. }
+            | Command::AutofillPasskeyGet { .. }
+            | Command::AutofillPasskeyCreate { .. }) => self.macos_autofill(command, conv).await,
         }
     }
 
@@ -2304,13 +2366,27 @@ impl Agent {
     /// to a shorter one at once, to a longer one (or never) only after a
     /// Touch ID prompt succeeds.
     async fn unlock_biometric(self: &Arc<Self>, timeout_secs: Option<u64>) -> Result<()> {
+        self.unlock_biometric_with_reason(timeout_secs, "unlock your Deadbolt vaults")
+            .await
+            .map(drop)
+    }
+
+    /// Like [`Agent::unlock_biometric`], with a custom `reason` on the Touch ID
+    /// sheet. Returns `Ok(true)` only when this call's own Touch ID prompt
+    /// unsealed the biometric key (as opposed to returning early while already
+    /// unlocked or coalescing onto another caller's prompt).
+    async fn unlock_biometric_with_reason(
+        self: &Arc<Self>,
+        timeout_secs: Option<u64>,
+        reason: &str,
+    ) -> Result<bool> {
         let unlocked = self
             .session
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some();
         if unlocked && self.tighten_timeout(timeout_secs)? {
-            return Ok(());
+            return Ok(false);
         }
         if !unlocked && !deadbolt_store::is_initialized(&self.paths.data) {
             return Err(fail(
@@ -2359,9 +2435,10 @@ impl Agent {
                     .and_then(|v| v.clone())
                     .unwrap_or_else(|| Err(biometric::UnlockError::Cancelled.to_string()));
                 // The finger was for the prompt's own request: this one may
-                // only shorten the timeout that request set.
+                // only shorten the timeout that request set, and never claims
+                // `unsealed_here = true` for passkey UV.
                 return match outcome {
-                    Ok(()) => self.tighten_timeout(timeout_secs).map(drop),
+                    Ok(()) => self.tighten_timeout(timeout_secs).map(|_| false),
                     Err(msg) => bail!("{msg}"),
                 };
             }
@@ -2405,12 +2482,12 @@ impl Agent {
         };
 
         let res = self
-            .run_biometric_leader(timeout_secs, cancel.clone())
+            .run_biometric_leader(timeout_secs, reason, cancel.clone())
             .await;
         cleanup.clear_flight();
         if let Some(tx) = cleanup.done_tx.take() {
             let broadcast = match &res {
-                Ok(()) => Ok(()),
+                Ok(_) => Ok(()),
                 Err(err) => Err(format!("{err:#}")),
             };
             tx.send_replace(Some(broadcast));
@@ -2421,8 +2498,9 @@ impl Agent {
     async fn run_biometric_leader(
         self: &Arc<Self>,
         timeout_secs: Option<u64>,
+        reason: &str,
         cancel: Arc<biometric::CancelHandle>,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let now = session::now();
         let token = {
             let _transition = self.transition.lock().await;
@@ -2435,7 +2513,7 @@ impl Agent {
             if let Some(token) = open {
                 // Unlocked: the prompt only verifies a longer timeout.
                 if self.tighten_timeout(timeout_secs)? {
-                    return Ok(());
+                    return Ok(false);
                 }
                 let Some(token) = token? else {
                     bail!("{}", biometric::UnlockError::NotEnrolled);
@@ -2499,6 +2577,7 @@ impl Agent {
         // Run the interactive Touch ID unseal WITHOUT holding `self.transition`
         // or keeping `store.redb` open, so a concurrent passphrase Unlock or
         // Lock can cancel the prompt immediately and never hits `Error::InUse`.
+        let prompt_reason = reason.to_string();
         let unsealed = {
             #[cfg(test)]
             let hook = self
@@ -2517,7 +2596,7 @@ impl Agent {
                     biometric::unseal_token(
                         &token_for_unseal,
                         now,
-                        "unlock your Deadbolt vaults",
+                        &prompt_reason,
                         &cancel_for_unseal,
                         biometric::PROMPT_TIMEOUT,
                     )
@@ -2532,7 +2611,7 @@ impl Agent {
                     biometric::unseal_token(
                         &token_for_unseal,
                         now,
-                        "unlock your Deadbolt vaults",
+                        &prompt_reason,
                         &cancel_for_unseal,
                         biometric::PROMPT_TIMEOUT,
                     )
@@ -2593,7 +2672,8 @@ impl Agent {
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
         {
-            return self.set_timeout(timeout_secs);
+            self.set_timeout(timeout_secs)?;
+            return Ok(true);
         }
         if cancel.is_cancelled() {
             bail!("{}", biometric::UnlockError::Cancelled);
@@ -2645,7 +2725,8 @@ impl Agent {
             .biometric_slot
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = meta;
-        self.start(loaded, timeout_secs).await
+        self.start(loaded, timeout_secs).await?;
+        Ok(true)
     }
 
     async fn set_touch_id(&self, enabled: bool) -> Result<()> {
