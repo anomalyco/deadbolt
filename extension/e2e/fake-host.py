@@ -57,6 +57,9 @@ if os.environ.get("DEADBOLT_FAKE_USERNAME"):
     ACCOUNTS[0]["username"] = VALUES[REF1]["username"] = os.environ["DEADBOLT_FAKE_USERNAME"]
 if os.environ.get("DEADBOLT_FAKE_PASSWORD"):
     VALUES[REF1]["password"] = os.environ["DEADBOLT_FAKE_PASSWORD"]
+# Universal sign-in needs the fixture's exact origin, including its port.
+if os.environ.get("DEADBOLT_FAKE_ORIGIN"):
+    ACCOUNTS[0]["urls"] = [os.environ["DEADBOLT_FAKE_ORIGIN"]]
 # DEADBOLT_FAKE_SIGNIN=1 adds a "Sign in with Google" login for the site, and
 # the Google account's own login it signs in with.
 if os.environ.get("DEADBOLT_FAKE_SIGNIN"):

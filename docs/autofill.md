@@ -256,14 +256,32 @@ not running without sending hello, which would start the agent again.
   physical/CSS ratio, since compensating zoom with size can keep physical
   pixels unchanged. A ratio change restarts the dwell even if IO v2 says
   visible.
+- **Late placement changes.** Before restoring the host's CSS, the content
+  script checks its rect against the last intended placement. A mutation
+  observer also watches the host and its ancestors: external host style/class
+  writes (including a write immediately restored in the same task), reparenting,
+  and ancestor writes that change placement or inherited zoom invalidate a
+  geometry generation and restart the half-second wait. Unrelated ancestor
+  class changes don't interrupt a pick. Only the single synchronous mutation
+  from our own style write is excluded; pending page mutations are processed
+  first. Repeated late rAF
+  or ResizeObserver restyles therefore never earn a settled pick, even when
+  they change only position or apply a proportional transform scale-up.
+  The private channel carries the generation and the latched verdict. After
+  confirmation, the frame asks the content script to check that generation
+  and the current, **unrestored** rect again. A missing answer fails closed.
+  This applies to pointer and keyboard picks, including passkey rows, save
+  offers and universal sign-in. It doesn't infer the viewport origin from
+  `window.screenX/Y` (those describe the browser window, not its content
+  viewport), or mix CSS pixels with device pixels at browser zoom.
 - **Chromium timing.** A deeper page ResizeObserver can change the host after
   its observer ran; Chromium defers that shallower observation. The child's
   ratio-change defense relies on Chromium syncing the frame at both our
   forced layout and the scaled paint. The absolute physical-width reference
   above does not require that alternation. These checks are tested in
-  headless Chromium, not a claim about other engines. Host size observers
-  do not see position-only or transform restyles; those remain a separate
-  [follow-up (#148)](https://github.com/anomalyco/deadbolt/issues/148).
+  headless Chromium, not a claim about other engines. Size observers alone
+  do not see position-only or transform restyles; mutation generations and
+  the unrestored placement check above cover those changes independently.
 - **A press takes no focus.** A pointer press in the menu leaves focus where
   it was, in the page's field (the menu cancels the press's default
   action). The page never sees its field blur at the moment of the press,

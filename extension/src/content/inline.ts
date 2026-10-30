@@ -183,6 +183,10 @@ let lastRect = ""
 let lastGeometry = ""
 let scaleVisible = false
 let scaleObserver: ResizeObserver | null = null
+let placementObserver: MutationObserver | null = null
+let placementVersion = 0
+let placementChangedAt = -Infinity
+let placementAncestors: Node[] = []
 /** Where a frame's field is in this page now (see anchorBox). */
 function boxNow(): DOMRect | null {
   if (!anchorBox) return null
@@ -391,11 +395,54 @@ function retarget(duration: number) {
   lastTarget = to
 }
 
+/** Never let a restoring write erase evidence of a late page restyle. */
+function placementChanged() {
+  placementVersion++
+  placementChangedAt = performance.now()
+  tellMoved()
+  tellGeometry()
+}
+
+function placed(): boolean {
+  if (!host || !written) return false
+  const r = host.getBoundingClientRect()
+  return (["left", "top", "width", "height"] as const).every((k) => Math.abs(r[k] - written![k]) <= 2)
+}
+
+function placementChanges(records: MutationRecord[]) {
+  if (!host || !records.length) return
+  const changed = records.some((r) => r.target === host || [...r.addedNodes, ...r.removedNodes].some((n) => within(host, n)))
+  // Ancestor transforms don't move a top-layer box, but inherited zoom can.
+  // Read it in the mutation microtask, before a later task can restore it;
+  // unrelated theme/scroll-lock classes mustn't keep a dialog menu unsettled.
+  const zoom = (host as HTMLElement & { currentCSSZoom?: number }).currentCSSZoom
+  if (changed || (!held && (!placed() || typeof zoom !== "number" || Math.abs(zoom - 1) >= 0.001))) placementChanged()
+}
+
+/** Watch only the rendered ancestry, not unrelated style churn in the page. */
+function watchPlacement() {
+  if (!host || !placementObserver) return
+  const ancestors: Node[] = []
+  for (let n: Node | null = host; n; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) ancestors.push(n)
+  if (ancestors.length === placementAncestors.length && ancestors.every((n, i) => n === placementAncestors[i])) return
+  placementChanges(placementObserver.takeRecords())
+  placementObserver.disconnect()
+  placementAncestors = ancestors
+  for (const n of ancestors) placementObserver.observe(n, { attributes: true, attributeFilter: ["style", "class"], childList: true })
+}
+
+function placementSafe(): boolean {
+  return performance.now() - placementChangedAt >= 500
+}
+
 function position() {
   if (!host) return
   // A pill's field re-rendered by the page as it filled: the pill moves to the box now in its place.
   if (anchor instanceof HTMLInputElement && !anchor.isConnected && mode === "pill" && anchorOwner) anchor = successor({ el: anchor, owner: anchorOwner }) ?? anchor
-  if ((anchor && !anchor.isConnected) || !host.isConnected) return closeMenu()
+  if ((anchor && !anchor.isConnected) || !host.isConnected || (!held && !host.matches(":popover-open"))) return closeMenu()
+  placementChanges(placementObserver?.takeRecords() ?? [])
+  watchPlacement()
+  if (written && !held && !placed()) placementChanged()
   const to = targetRect()
   if (!to) return closeMenu()
   lastTarget = to
@@ -420,6 +467,17 @@ function position() {
     "z-index": "2147483647",
     ...(closing ? { "pointer-events": "none" } : {}),
   })
+  // Only this synchronous style assignment is ours. Do not discard additional
+  // records: a page may upgrade the random host to a custom element and run
+  // an attributeChangedCallback synchronously inside the assignment.
+  const own = placementObserver?.takeRecords() ?? []
+  if (own.length !== 1 || own[0].target !== host || own[0].attributeName !== "style") placementChanges(own)
+  // Publish recovery once, not every sub-pixel step of a size spring. The
+  // resize observer publishes actual size changes as before.
+  if (placementChangedAt !== -Infinity && placementSafe()) {
+    placementChangedAt = -Infinity
+    tellGeometry()
+  }
   // The menu only takes a pick once it has sat still for a moment (see
   // Dwell). From inside its frame it can't tell it was moved, so say so: the
   // page can restyle the host, and the field it follows can move.
@@ -443,7 +501,7 @@ function tellGeometry() {
   if (!port || !written) return
   // Keep fractional width: rounding it before multiplying by DPR would
   // inflate the physical-pixel tolerance on high-density displays.
-  const geometry = { width: written.width, height: Math.round(written.height), dpr: devicePixelRatio, visible: scaleVisible }
+  const geometry = { width: written.width, height: Math.round(written.height), dpr: devicePixelRatio, visible: scaleVisible && placementSafe(), version: placementVersion }
   const key = JSON.stringify(geometry)
   if (key === lastGeometry) return
   lastGeometry = key
@@ -526,6 +584,8 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   root.append(frame)
   ;((el && modalAround(el)) ?? document.documentElement).append(box)
   show(box)
+  placementObserver = new MutationObserver(placementChanges)
+  watchPlacement()
   position()
   // ResizeObserver runs after all rAF callbacks, including a page's later
   // restyle. Observe physical pixels so zoom alone triggers it. Keep this
@@ -700,6 +760,11 @@ export const menuHost = (): HTMLElement | null => host
 
 export function closeMenu(refocus = false, dismissed = false) {
   cancelAnimationFrame(raf)
+  placementObserver?.disconnect()
+  placementObserver = null
+  placementAncestors = []
+  placementVersion = 0
+  placementChangedAt = -Infinity
   scaleObserver?.disconnect()
   scaleObserver = null
   scaleVisible = false
@@ -1139,7 +1204,14 @@ function roundTo(radius: number) {
 let typedSinceOpen = false
 
 /** The frame, over the private channel: its pill or offer is done, or how many rows match what was typed. */
-function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown }>) {
+function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown; version?: unknown; check?: unknown }>) {
+  if (e.data?.type === "db:menu-check") {
+    placementChanges(placementObserver?.takeRecords() ?? [])
+    // Do not call position(): check the page's layout, not a restored one.
+    const ok = e.data.version === placementVersion && placementSafe() && scaleVisible && placed()
+    port?.postMessage({ type: "db:menu-checked", check: e.data.check, ok })
+    return
+  }
   if (e.data?.type === "db:surface-done") return leave(e.data.travel === true)
   // The offer changing shape (pill, card, dot): its corners follow its frame's size.
   if (e.data?.type === "db:radius" && mode === "save" && frame && typeof e.data.radius === "number") return roundTo(Math.min(Math.max(e.data.radius, 0), 20))
