@@ -1427,7 +1427,7 @@ async function savePrompt(scheme: Scheme) {
       await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
       const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
       check(save?.origin === site && save.entry?.username === "new@acme.test", "save carries the submitted login")
-      check(save?.entry?.title === "Sign in to Acme" && save.entry?.url === `${site}/outcome/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
+      check(save?.entry?.title === "Acme" && save.entry?.url === `${site}/outcome/login`, `save names it after the page (${save?.entry?.title}, ${save?.entry?.url})`)
       check(!!(await until("popup confirms", async () => ((await p.locator(".done").textContent().catch(() => "")) ?? "").includes("Saved"))), "the popup confirms the save")
       check(!!(await until("badge clears", async () => (await badge(run)) === "")), "and the badge clears")
       check(!!(await until("the surface closes", () => !extensionFrame(page, "menu.html"))), "and answering in the popup closes the offer in the page")
