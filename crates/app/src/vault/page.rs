@@ -498,7 +498,12 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
 }
 
 fn agent_notice(s: &App, k: &Kit) -> Option<El> {
-    let n = s.notice.as_ref().filter(|_| s.selected_item().is_some())?;
+    // With no list (it failed to load) there's nothing else on the page to
+    // say why, so the notice shows then too.
+    let n = s
+        .notice
+        .as_ref()
+        .filter(|_| s.selected_item().is_some() || !s.loaded)?;
     Some(
         text(n.clone())
             .key("agent-notice")

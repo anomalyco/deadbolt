@@ -1540,6 +1540,9 @@ pub struct VaultInfo {
     pub members: usize,
     /// Whether this device is still a member.
     pub member: bool,
+    /// Present when the history could not be loaded. Membership is unknown,
+    /// `members` is zero, and the encrypted entries remain on disk.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

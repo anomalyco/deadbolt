@@ -153,6 +153,7 @@ pub(super) fn vault_info(name: &str) -> VaultInfo {
         default: true,
         members: 1,
         member: true,
+        error: None,
     }
 }
 
@@ -196,6 +197,7 @@ pub(super) fn status(unlocked: bool) -> Status {
             default: true,
             members: 2,
             member: true,
+            error: None,
         }],
         peers_online: 1,
         peers: 1,

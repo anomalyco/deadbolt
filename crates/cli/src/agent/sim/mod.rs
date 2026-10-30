@@ -8,7 +8,8 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, Hash, Log, MembershipOp, Payload, Vault, VaultId,
+    DeviceId, DeviceSecret, Entry, Hash, Log, LogId, MAX_MEMBERSHIP_ENTRIES, MembershipOp, Payload,
+    Vault, VaultId,
 };
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingCode, PairingContext,
@@ -68,6 +69,7 @@ impl Device {
             id: DeviceId::from_bytes(id),
             meta: Meta::default(),
             vaults: Default::default(),
+            unavailable: Default::default(),
             changes: Default::default(),
         })));
         let member_state = state.clone();
@@ -118,6 +120,12 @@ struct Handler {
     state: Arc<Mutex<Option<Loaded>>>,
     ready: Arc<AtomicBool>,
     unreported: Arc<Mutex<Vec<String>>>,
+}
+
+fn membership_writes(vault: &Vault, author: DeviceId) -> u64 {
+    vault.entries().into_iter().filter(|entry| entry.author() == author
+        && matches!(entry.payload(), Payload::Membership(op) if !matches!(op, MembershipOp::Remove { .. })))
+        .count() as u64
 }
 
 /// Accepted (data, membership) entries per vault.
@@ -271,6 +279,8 @@ enum Action {
     Startup(usize),
     WriteFailure(usize),
     RevokeDuringSync(usize, u64, usize),
+    /// Raw signed membership entries, including a suffix beyond the author cap.
+    MembershipFlood(usize, usize),
 }
 
 struct World {
@@ -329,6 +339,16 @@ impl World {
             return Ok(());
         }
         if self.devices[to].with(|s| Ok(s.vaults.contains_key(&self.vault)))? {
+            return Ok(());
+        }
+        // A full non-removal budget cannot admit another device. Re-sending
+        // an already committed admission still works without consuming a slot.
+        if self.devices[0].with(|s| {
+            Ok(!s
+                .vault(&self.vault)
+                .is_member(&DeviceId::from_bytes(self.devices[to].id))
+                && membership_writes(s.vault(&self.vault), s.id) >= MAX_MEMBERSHIP_ENTRIES)
+        })? {
             return Ok(());
         }
         // Removed keys cannot be re-added, including a failed welcome delivery.
@@ -499,6 +519,121 @@ impl World {
         })
     }
 
+    fn membership_flood(&mut self, author: usize, receiver: usize) -> Result<()> {
+        if author == receiver || !self.can_write(author) || !self.can_write(receiver) {
+            return Ok(());
+        }
+        // A simulated author keeps its accepted prefix, just as local writes
+        // do. Otherwise later random actions could accidentally sign a fork.
+        if self.sync(
+            author,
+            receiver,
+            (author * DEVICES + receiver) as u64,
+            None,
+            None,
+        )? != sync::Attempt::Complete
+            || !self.can_write(author)
+            || !self.can_write(receiver)
+        {
+            return Ok(());
+        }
+        let author_id = DeviceId::from_bytes(self.devices[author].id);
+        let log = LogId {
+            author: author_id,
+            log: Log::Membership,
+        };
+        let (vault, consent) = self.devices[receiver].with(|s| {
+            Ok((
+                s.vault(&self.vault).clone(),
+                s.secret.join_consent(&self.vault, &author_id),
+            ))
+        })?;
+        if !vault.is_member(&author_id) {
+            return Ok(());
+        }
+        // Reusing an admission consent is valid: the cap must bound even these
+        // redundant Adds, not just membership operations that change the set.
+        // Start at the receiver's frontier, so a repeated flood probes the
+        // exhausted budget rather than accidentally replaying an earlier batch.
+        let start = vault.heads().get(&log).map_or(0, |seq| seq + 1);
+        let end = start + MAX_MEMBERSHIP_ENTRIES - membership_writes(&vault, author_id);
+        let entries = self.devices[author].with(|s| {
+            let mut deps: Vec<_> = vault
+                .entries()
+                .into_iter()
+                .filter(|e| e.log() == Log::Membership)
+                .map(Entry::hash)
+                .collect();
+            let mut entries = Vec::new();
+            for seq in start..end + MAX_MEMBERSHIP_ENTRIES {
+                let entry = Entry::sign(
+                    &s.secret,
+                    self.vault,
+                    seq,
+                    deps,
+                    Payload::Membership(MembershipOp::Add {
+                        device: DeviceId::from_bytes(self.devices[receiver].id),
+                        consent,
+                    }),
+                );
+                deps = vec![entry.hash()];
+                entries.push(entry);
+            }
+            Ok(entries)
+        })?;
+        let mut slowest = std::time::Duration::ZERO;
+        for batch in entries.chunks(64) {
+            let blobs: Vec<_> = batch.iter().map(Entry::encode).collect();
+            for blob in &blobs {
+                self.digest.update(blob);
+            }
+            let accepted = self.devices[receiver].with(|s| {
+                let start = std::time::Instant::now();
+                let added = sync::receive(s, &author_id, blobs.clone(), true)?;
+                let elapsed = start.elapsed();
+                slowest = slowest.max(elapsed);
+                // A generous regression watchdog, not a simulated deadline:
+                // wall time never affects entry generation or delivery order.
+                ensure!(
+                    elapsed < std::time::Duration::from_secs(5),
+                    "membership flood batch took {elapsed:?}"
+                );
+                let expected = batch.iter().filter(|entry| entry.seq() < end).count();
+                ensure!(
+                    added == expected,
+                    "membership flood accepted {added}, expected {expected}"
+                );
+                let last = batch.last().unwrap().seq().min(end - 1);
+                ensure!(
+                    s.vault(&self.vault).heads().get(&log) == Some(last),
+                    "membership cap head mismatch"
+                );
+                ensure!(
+                    membership_writes(s.vault(&self.vault), author_id) <= MAX_MEMBERSHIP_ENTRIES,
+                    "membership cap exceeded"
+                );
+                Ok(added)
+            })?;
+            self.devices[author].with(|s| {
+                let added = sync::receive(
+                    s,
+                    &DeviceId::from_bytes(self.devices[receiver].id),
+                    blobs,
+                    true,
+                )?;
+                ensure!(added == accepted, "author lost its accepted flood prefix");
+                Ok(())
+            })?;
+        }
+        if std::env::var_os("DEADBOLT_SIM_TIMING").is_some() {
+            eprintln!(
+                "membership flood: {} entries, slowest 64-entry batch {slowest:?}",
+                entries.len()
+            );
+        }
+        Ok(())
+    }
+
     fn startup(&mut self, i: usize) -> Result<()> {
         if !self.devices[i].open() || self.devices[i].ready.load(Ordering::SeqCst) {
             return Ok(());
@@ -522,6 +657,7 @@ impl World {
     fn step(&mut self, action: &Action) -> Result<()> {
         match *action {
             Action::Pair(i) => self.pair(i)?,
+            Action::MembershipFlood(a, b) => self.membership_flood(a, b)?,
             Action::Partition(a, b) => {
                 self.blocked.insert((a.min(b), a.max(b)));
             }
@@ -560,7 +696,7 @@ impl World {
                     let result = super::session::update(
                         s.vaults.get_mut(&self.vault).unwrap(),
                         |_| anyhow::bail!("injected disk full"),
-                        |v| Ok(v.rename(key, "failed-write")?),
+                        |v| Ok(v.write(key, vec![])?),
                     );
                     ensure!(result.is_err(), "write fault was not injected");
                     Ok(())
@@ -740,6 +876,16 @@ impl World {
             if d.open() {
                 d.with(|s| {
                     for v in s.vaults.values() {
+                        for (log, _) in v
+                            .heads()
+                            .iter()
+                            .filter(|(log, _)| log.log == Log::Membership)
+                        {
+                            ensure!(
+                                membership_writes(v, log.author) <= MAX_MEMBERSHIP_ENTRIES,
+                                "membership author exceeded entry cap"
+                            );
+                        }
                         for e in v.entries() {
                             all.insert(e.hash(), e.clone());
                         }
@@ -895,6 +1041,10 @@ fn actions(seed: u64) -> Vec<Action> {
         let i = (rng.next() % DEVICES as u64) as usize;
         let j = (rng.next() % DEVICES as u64) as usize;
         let value = rng.next();
+        if rng.next().is_multiple_of(64) {
+            actions.push(Action::MembershipFlood(i, j));
+            continue;
+        }
         actions.push(match rng.next() % 19 {
             0 => Action::Add(i, value),
             1 => Action::Edit(i, value),
@@ -964,6 +1114,23 @@ fn shrink(mut actions: Vec<Action>, mut fails: impl FnMut(&[Action]) -> bool) ->
         width /= 2;
     }
     actions
+}
+
+#[test]
+fn membership_flood_is_bounded_durable_and_replayable() {
+    for (author, receiver) in [(0, 1), (1, 0)] {
+        let actions = [
+            Action::Pair(1),
+            Action::MembershipFlood(author, receiver),
+            Action::Crash(receiver),
+            Action::MembershipFlood(author, receiver),
+            Action::Startup(receiver),
+            Action::Add(receiver, 42),
+            Action::Remove(1),
+            Action::Add(0, 43),
+        ];
+        assert_eq!(replay(&actions).unwrap(), replay(&actions).unwrap());
+    }
 }
 
 #[test]

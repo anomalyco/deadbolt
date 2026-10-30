@@ -196,7 +196,7 @@ impl Joiner for NewDevice<'_> {
         let inviter = DeviceId::from_bytes(ctx.remote);
         let join = match &self.home {
             Home::Store(agent) => agent.with(|s| {
-                if s.vaults.contains_key(&vault) {
+                if s.contains_vault(&vault) {
                     bail!("this device already holds vault {}", offer.vault_name);
                 }
                 join_blob(
