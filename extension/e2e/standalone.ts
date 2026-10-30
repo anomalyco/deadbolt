@@ -38,7 +38,7 @@
 // synthetic accounts on the demo backend. Toolbar popup stills accompany --video.
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
-import { copyFile, mkdir, mkdtemp, rm, readdir, writeFile } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, rm, readdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { DeviceCommand, DevicePasskey, DeviceReply, VaultDevice } from "../src/messages"
@@ -56,6 +56,7 @@ const limit = Number(arg("--latency-ms") ?? (process.env.CI ? 1500 : 1000))
 if (!(limit > 0)) throw new Error("--latency-ms wants a positive number")
 const root = await mkdtemp(join(tmpdir(), "db-ext-device-"))
 const dist = arg("--dist") ? resolve(arg("--dist")!) : join(root, "extension")
+let cliMarker: Buffer | null | undefined
 const profile = join(root, "profile")
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 /** The background's sync alarm (bg/standalone.ts). */
@@ -1201,8 +1202,9 @@ async function joinExistingVault(device: Page, worker: Worker) {
   // Not logins: the forms flows fill them, and the counts leave them out.
   await cli(...IDENTITY)
   await cli(...CARD)
+  const pairChoice = device.getByRole("button", { name: /^Pair with (?:an existing device|Deadbolt on this (?:Mac|computer))$/ })
   const begin = async () => {
-    await device.getByRole("button", { name: "Pair with an existing device", exact: true }).click()
+    await pairChoice.click()
     return until("extension publishes its join code", async () => {
       const r = (await request(device, { type: "device-join-status" })).reply
       return r.phase === "waiting" && typeof r.code === "string" ? r.code : null
@@ -1210,7 +1212,7 @@ async function joinExistingVault(device: Page, worker: Worker) {
   }
   const abandoned = await begin()
   await device.getByRole("button", { name: "Cancel", exact: true }).click()
-  await device.getByRole("button", { name: "Pair with an existing device", exact: true }).waitFor()
+  await pairChoice.waitFor()
   check((await request(device, { type: "device-join-status" })).reply.phase === "idle", "cancel discards the pending join")
   check(await state(device) === "not-set-up", "cancel does not create a browser vault")
 
@@ -1273,7 +1275,13 @@ try {
   }
   // The smoke's copy is one the CLI keeps (`deadbolt update` leaves this
   // marker), so first run offers Deadbolt on this computer by name.
-  if (smoke) await writeFile(join(dist, ".deadbolt-extension"), "manifest.json\n")
+  if (smoke) {
+    cliMarker = await readFile(join(dist, ".deadbolt-extension")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null
+      throw error
+    })
+    await writeFile(join(dist, ".deadbolt-extension"), "manifest.json\n")
+  }
   const { worker, device } = await launch()
   check((await readdir(join(profile, "NativeMessagingHosts")).catch(() => [])).filter((name) => name.endsWith(".json")).length === 0, "profile has no native host manifest")
   if (smoke) {
@@ -1405,6 +1413,12 @@ try {
   if (suspended) process.kill(suspended, "SIGCONT")
   joining?.kill()
   await context?.close()
+  // An explicitly supplied build may be reused by full/join runs. Restore its
+  // install provenance instead of leaking this smoke-only fixture into them.
+  if (cliMarker !== undefined) {
+    if (cliMarker === null) await rm(join(dist, ".deadbolt-extension"), { force: true })
+    else await writeFile(join(dist, ".deadbolt-extension"), cliMarker)
+  }
   if (!smoke) await cli("agent", "stop").catch(() => {})
   server.stop(true)
   if (video && recordings.length) {
