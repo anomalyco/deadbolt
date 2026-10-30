@@ -8,7 +8,7 @@ import type { ItemDetail, ItemField, ItemInput, ItemKind, ItemSummary } from "..
 import { avatar, h, icon } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
-import { button, copied, glyph, iconButton, refuse, slidingHighlight, toolbar } from "./kit"
+import { button, copied, glyph, iconButton, keepFocus, refuse, slidingHighlight, toolbar } from "./kit"
 
 /** Names the agent and the app give fields, where its own name doesn't read well. */
 const LABELS: Record<string, string> = {
@@ -252,7 +252,7 @@ export function itemDetailView(app: App, ref: string): View {
           "div",
           { class: "line" },
           h("span", { class: "line-label" }, "One-time code"),
-          h("span", { class: "value" }, h("span", { class: "totp" }, h("span", { class: "mono code-value" }, t.code), secs)),
+          h("span", { class: "value" }, h("span", { class: "totp" }, h("span", { class: "mono code-value" }, t.code), secs, h("span", { class: "sr-only" }, " seconds left"))),
           h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy one-time code", async (b) => {
             await app.offerClearing()
             if (await copied(b, t.code)) say(await app.copiedSecret(t.code))
@@ -267,11 +267,13 @@ export function itemDetailView(app: App, ref: string): View {
     }
     const actions: Node[] = []
     if (d.editable) actions.push(button("btn", "Edit", () => app.go({ name: "edit", ref, kind: d.kind })))
-    el.replaceChildren(
-      toolbar("", () => app.go({ name: "list" }, -1), ...actions),
-      h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")))),
-      lines.length ? h("div", { class: "box" }, ...lines) : h("p", { class: "muted" }, "Nothing saved in it yet."),
-      h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
+    keepFocus(el, () =>
+      el.replaceChildren(
+        toolbar("", () => app.go({ name: "list" }, -1), ...actions),
+        h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")))),
+        lines.length ? h("div", { class: "box" }, ...lines) : h("p", { class: "muted" }, "Nothing saved in it yet."),
+        h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
+      ),
     )
   }
 
