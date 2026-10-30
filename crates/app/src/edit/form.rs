@@ -1,7 +1,9 @@
 //! Pure form state, item field schema, change diffing and agent refusal parsing.
 
 use deadbolt_client::protocol::{FieldInfo, FieldInput, ItemInfo};
+use deadbolt_core::tag::fold_tag;
 use rune::TextEdit;
+use zeroize::Zeroize;
 
 use crate::model::{is_secret, title_case};
 use crate::onboarding::sentence;
@@ -188,6 +190,10 @@ pub struct Form {
     pub id: Option<String>,
     pub kind: String,
     pub name: TextEdit,
+    pub favorite: bool,
+    pub tags: Vec<String>,
+    pub tag_input: TextEdit,
+    pub tag_active: Option<usize>,
     pub fields: Vec<Input>,
     /// The item as it was when the form opened, to save only what changed
     /// and to tell when another device changes it meanwhile.
@@ -231,10 +237,15 @@ impl Drop for Input {
 }
 
 impl Drop for Form {
-    /// The name goes with the fields.
+    /// The name and tags go with the fields.
     fn drop(&mut self) {
         self.name.set_secure(true);
         self.name.clear();
+        self.tag_input.set_secure(true);
+        self.tag_input.clear();
+        for tag in &mut self.tags {
+            tag.zeroize();
+        }
     }
 }
 
@@ -367,6 +378,8 @@ impl Snapshot {
 
     pub(super) fn same(&self, item: &ItemInfo) -> bool {
         self.0.label == item.label
+            && self.0.favorite == item.favorite
+            && self.0.tags == item.tags
             && self.0.fields.len() == item.fields.len()
             && self
                 .0
@@ -383,11 +396,19 @@ pub(super) struct Changes {
     pub(super) name: Option<String>,
     pub(super) set: Vec<FieldInput>,
     pub(super) unset: Vec<String>,
+    pub(super) favorite: Option<bool>,
+    pub(super) add_tags: Vec<String>,
+    pub(super) remove_tags: Vec<String>,
 }
 
 impl Changes {
     pub(super) fn is_empty(&self) -> bool {
-        self.name.is_none() && self.set.is_empty() && self.unset.is_empty()
+        self.name.is_none()
+            && self.set.is_empty()
+            && self.unset.is_empty()
+            && self.favorite.is_none()
+            && self.add_tags.is_empty()
+            && self.remove_tags.is_empty()
     }
 }
 
@@ -421,6 +442,10 @@ impl Form {
             id: item.map(|i| i.id.clone()),
             kind: kind.into(),
             name,
+            favorite: item.is_some_and(|i| i.favorite),
+            tags: item.map(|i| i.tags.clone()).unwrap_or_default(),
+            tag_input: TextEdit::new(""),
+            tag_active: None,
             fields,
             base: item.map(|i| Snapshot(i.clone())),
             conflict: None,
@@ -488,6 +513,39 @@ impl Form {
             None if !name.is_empty() => changes.name = Some(name.to_owned()),
             _ => {}
         }
+        let mut effective_tags = self.tags.clone();
+        if !self
+            .tag_input
+            .text
+            .trim()
+            .trim_start_matches('#')
+            .is_empty()
+        {
+            super::tags::push_clean_tag(&mut effective_tags, &self.tag_input.text)?;
+        }
+        match self.saves_over() {
+            Some(base) => {
+                if self.favorite != base.0.favorite {
+                    changes.favorite = Some(self.favorite);
+                }
+                for tag in &effective_tags {
+                    if !base.0.tags.contains(tag) {
+                        changes.add_tags.push(tag.clone());
+                    }
+                }
+                for old in &base.0.tags {
+                    if !effective_tags.iter().any(|t| fold_tag(t) == fold_tag(old)) {
+                        changes.remove_tags.push(old.clone());
+                    }
+                }
+            }
+            None => {
+                if self.favorite {
+                    changes.favorite = Some(true);
+                }
+                changes.add_tags = effective_tags;
+            }
+        }
         Ok(changes)
     }
 
@@ -504,6 +562,9 @@ impl Form {
             self.changes().map_or(true, |c| !c.is_empty())
         } else {
             !self.name.text.trim().is_empty()
+                || self.favorite
+                || !self.tags.is_empty()
+                || !self.tag_input.text.trim().is_empty()
                 || self.fields.iter().any(|f| f.keeps() || f.value().is_some())
         }
     }
@@ -554,6 +615,12 @@ pub(super) fn problem(message: &str) -> Problem {
             message: "A name is up to 128 characters, on one line.".into(),
         };
     }
+    if message.contains("invalid tag") || message.contains("too many tags") {
+        return Problem {
+            field: Some("tags".into()),
+            message: sentence(message),
+        };
+    }
     Problem {
         field: None,
         message: sentence(message),
@@ -580,6 +647,8 @@ mod tests {
                 })
                 .collect(),
             source: None,
+            favorite: false,
+            tags: Vec::new(),
             deleted_at: None,
         }
     }

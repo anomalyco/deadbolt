@@ -92,6 +92,40 @@ pub fn view(s: &App, k: &Kit) -> El {
                     ),
             );
         }
+        if !full.tags.is_empty() {
+            let line = full
+                .tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join("  ");
+            fields = fields.child(
+                row()
+                    .key("field-tags")
+                    .w_full()
+                    .h(32.0)
+                    .gap(8.0)
+                    .center_y()
+                    .child(
+                        text("Tags")
+                            .key("name")
+                            .font(k.ty.text_small)
+                            .color(k.c.text_faint)
+                            .w(NAME_W)
+                            .truncate(),
+                    )
+                    .child(
+                        text(line)
+                            .key("value")
+                            .font(k.ty.text_small)
+                            .color(k.c.text_muted)
+                            .grow(1.0)
+                            .shrink()
+                            .min_w(0.0)
+                            .truncate_fade(),
+                    ),
+            );
+        }
     }
     pane.child(head).child(fields)
 }

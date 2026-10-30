@@ -89,6 +89,7 @@ pub mod password;
 pub mod password_rules;
 pub mod site;
 pub mod site_password;
+pub mod tag;
 pub mod totp;
 mod vault;
 pub mod webauthn;
@@ -105,3 +106,6 @@ mod tests;
 
 #[cfg(test)]
 mod membership_tests;
+
+#[cfg(test)]
+mod tag_tests;

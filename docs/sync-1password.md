@@ -78,12 +78,13 @@ Then, under the agent's lock:
 | deleted or archived | taken over | releases it: keeps it, drops the source |
 | any | your own item | never touches it |
 
-Taking over writes 1Password's values and keeps fields only Deadbolt has
-(a PIN you added, say). The item then records which fields 1Password wrote:
-later syncs keep 1Password's values winning, remove a field once 1Password
-deletes it, and keep fields added here, before or since. (An item with so
-many fields that their names don't fit in its version records none, and
-then no field is ever removed from it.)
+Taking over writes 1Password's values, favorite state and tags, and keeps
+fields and tags only Deadbolt has (a PIN or local tag you added, say). The
+item then records which fields and tags 1Password wrote (`v2:` mirror
+version): later syncs keep 1Password's values winning, remove a field or tag
+once 1Password deletes it, and keep fields and tags added here, before or
+since. (An item with so many fields that their names don't fit in its version
+records none, and then no field is ever removed from it.)
 
 A username and URL count only when exactly one login in the Deadbolt vault
 and exactly one in the 1Password vaults synced have them, counting items
@@ -140,7 +141,7 @@ field only Deadbolt has.
   them.
 - **SSH keys without a private key**, and item types this build doesn't know:
   skipped and listed.
-- **Tags, favorites, password history.** Counted, not kept.
+- **Password history.** Counted, not kept.
 
 ## Approval prompts
 

@@ -21,7 +21,7 @@ use rune_kit::shell::{SplitView, Toolbar};
 use rune_kit::{IconButton, IconButtonVariant, Keybind, Kit, TextInput};
 
 use crate::model::App;
-use crate::view::theme::{SLIDERS, TRASH, kind_icon};
+use crate::view::theme::{SLIDERS, STAR_FILL, TRASH, kind_icon};
 use crate::view::{LIST_EDGE, device_name, instant, scroll_col, tnum, vault_name};
 
 pub(crate) use crate::view::theme::{FACT, glyph_tile, kind_name};
@@ -213,7 +213,14 @@ fn rows_of(s: &App, k: &Kit, visible: &[usize]) -> El {
             let jump = if i < 9 && on { i + 1 } else { 0 };
             rune::memo(
                 format!("item-{}", item.id),
-                (&item.label, &item.detail, &item.kind, on, jump),
+                (
+                    &item.label,
+                    &item.detail,
+                    &item.kind,
+                    item.favorite,
+                    on,
+                    jump,
+                ),
                 || list_row(&k, item, i, on),
             )
         },
@@ -256,19 +263,33 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
 /// the search, and a press selects while the search keeps focus.
 fn list_row(k: &Kit, item: &ItemInfo, i: usize, on: bool) -> El {
     let id = item.id.clone();
+    let label = text(item.label.clone())
+        .key("label")
+        .font(k.ty.ui)
+        .color(if on { k.c.text_strong } else { k.c.text_base })
+        .truncate();
+    let top = if item.favorite {
+        row()
+            .key("title-row")
+            .w_full()
+            .gap(5.0)
+            .center_y()
+            .child(label.shrink().min_w(0.0))
+            .child(icon(&STAR_FILL, 11.0).key("star").color(if on {
+                k.c.icon_base
+            } else {
+                k.c.icon_muted
+            }))
+    } else {
+        label
+    };
     let lines = col()
         .key("lines")
         .gap(1.0)
         .grow(1.0)
         .shrink()
         .min_w(0.0)
-        .child(
-            text(item.label.clone())
-                .key("label")
-                .font(k.ty.ui)
-                .color(if on { k.c.text_strong } else { k.c.text_base })
-                .truncate(),
-        )
+        .child(top)
         .child(
             text(fact(item))
                 .key("subtitle")
