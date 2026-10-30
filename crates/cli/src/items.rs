@@ -118,30 +118,7 @@ pub fn line(item: &ItemInfo) -> String {
     }
 }
 
-/// `month` of a 2- or 4-digit `year` (20YY) as `YYYY-MM`. The month is not
-/// range-checked here; the item rules do that. Shared by the agent's input
-/// normalization and the importer.
-pub fn format_month(month: u8, year: &str) -> Option<String> {
-    let year = year.trim();
-    if !year.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    let year = match year.len() {
-        2 => format!("20{year}"),
-        4 => year.to_string(),
-        _ => return None,
-    };
-    Some(format!("{year}-{month:02}"))
-}
-
-/// A URL without a scheme gets `https://`.
-pub fn with_scheme(url: String) -> String {
-    if url.is_empty() || url.contains("://") {
-        url
-    } else {
-        format!("https://{url}")
-    }
-}
+pub use deadbolt_core::listing::{format_month, with_scheme};
 
 fn parse(arg: &str) -> Result<FieldInput> {
     let (lhs, value) = arg

@@ -19,8 +19,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail};
-use deadbolt_core::forms::last_four;
-use deadbolt_core::item::check_new_value;
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{
     DataOp, Entry, Field, FieldType, Item, ItemError, ItemId, Source, Vault, VaultId, schema,
@@ -31,164 +29,13 @@ use zeroize::{Zeroize, Zeroizing};
 use super::session::{Loaded, hex};
 use crate::import::onepassword::source_key;
 use crate::import::{Imported, MirrorVersion, digest};
-use crate::items::{format_month, line, with_scheme};
-use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo, Tally, sign_in_name};
+use crate::items::line;
+use crate::protocol::{Code, FieldInfo, FieldInput, ImportReport, ItemInfo, Tally};
 
 const MIN_SHORT: usize = 4;
 
-/// The host of a URL as autofill reads it ([`crate::site::url_host`]),
-/// without `www.`, so a label or a search shows the site a login fills on.
-pub fn host(url: &str) -> String {
-    let Some(host) = crate::site::url_host(url) else {
-        return String::new();
-    };
-    let host = host.strip_prefix("www.").unwrap_or(&host);
-    if host.contains(':') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    }
-}
-
-fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
-    item.fields.get(field).map(|f| f.value.as_str())
-}
-
-/// The item's name, else a label derived from its fields.
-pub fn label(item: &Item) -> String {
-    if let Some(name) = &item.name {
-        return name.clone();
-    }
-    match item.kind.as_str() {
-        "login" => deadbolt_core::autofill::login_title(item),
-        "card" | "identity" => deadbolt_core::forms::title(item),
-        "ssh" => value(item, "comment").unwrap_or("SSH key").into(),
-        "passkey" => value(item, "rp-id").unwrap_or("passkey").into(),
-        "api" => value(item, "url")
-            .map(host)
-            .filter(|h| !h.is_empty())
-            .or_else(|| value(item, "host").map(str::to_string))
-            .unwrap_or_else(|| "API credential".into()),
-        "database" => match (value(item, "database"), value(item, "host")) {
-            (Some(db), Some(host)) => format!("{db} on {host}"),
-            (db, host) => db.or(host).unwrap_or("database").into(),
-        },
-        "server" => value(item, "url")
-            .map(host)
-            .filter(|h| !h.is_empty())
-            .unwrap_or_else(|| "server".into()),
-        "wifi" => value(item, "ssid").unwrap_or("Wi-Fi network").into(),
-        "license" => value(item, "product").unwrap_or("software license").into(),
-        "bank" => value(item, "bank").unwrap_or("bank account").into(),
-        "document" => value(item, "file")
-            .map(|f| deadbolt_core::item::file_parts(f).0)
-            .unwrap_or("document")
-            .into(),
-        "passport" | "driver-license" | "id-document" => value(item, "full-name")
-            .map(str::to_string)
-            .unwrap_or_else(|| crate::protocol::noun(&item.kind, 1).into()),
-        "membership" => value(item, "organization").unwrap_or("membership").into(),
-        "crypto" => value(item, "network").unwrap_or("crypto wallet").into(),
-        // A secure note's body is secret: never a label.
-        kind => kind.into(),
-    }
-}
-
-/// A login's username (else how it signs in: "Sign in with Google"), a
-/// card's expiry (`MM/YY`), an SSH key's comment or fingerprint, an
-/// identity's email, a passkey's username, and for the other types the
-/// first plain field that tells one from another (an API credential's
-/// username or type, a database's username, ...). A secure note has none.
-fn detail(item: &Item) -> Option<String> {
-    let first = |fields: &[&str]| {
-        fields
-            .iter()
-            .find_map(|f| value(item, f))
-            .map(str::to_string)
-    };
-    match item.kind.as_str() {
-        "login" => first(&["username"]).or_else(|| {
-            value(item, "sign-in-with").map(|p| format!("Sign in with {}", sign_in_name(p)))
-        }),
-        "card" => value(item, "expiry")
-            .and_then(|e| e.split_once('-'))
-            .map(|(year, month)| format!("{month}/{}", &year[year.len().saturating_sub(2)..])),
-        "ssh" => first(&["comment", "fingerprint"]),
-        "identity" => first(&["email", "phone"]),
-        "passkey" | "server" => first(&["username"]),
-        "api" => first(&["username", "type", "environment"]),
-        "database" => first(&["username", "type"]),
-        "wifi" => first(&["security"]),
-        "license" => first(&["licensed-to", "version"]),
-        "bank" => first(&["account-holder"]),
-        "document" => value(item, "file")
-            .and_then(|f| deadbolt_core::item::file_parts(f).1)
-            .and_then(deadbolt_core::item::file_size)
-            .map(file_size),
-        "passport" | "id-document" => first(&["type", "issuing-country", "country"]),
-        "driver-license" => first(&["state", "country"]),
-        "membership" => first(&["member-name"]),
-        "crypto" => first(&["address"]),
-        _ => None,
-    }
-}
-
-/// A file's size as people read it: "812 bytes", "1.2 MB".
-pub fn file_size(bytes: usize) -> String {
-    match bytes {
-        0..1_000 => format!("{bytes} bytes"),
-        1_000..1_000_000 => format!("{:.1} KB", bytes as f64 / 1e3),
-        _ => format!("{:.1} MB", bytes as f64 / 1e6),
-    }
-}
-
-fn searchable(item: &Item) -> Vec<String> {
-    let mut texts = Vec::new();
-    texts.extend(item.name.clone());
-    texts.extend(value(item, "url").map(host));
-    let fields: &[&str] = match item.kind.as_str() {
-        "login" => &["username"],
-        "card" => &["cardholder", "brand"],
-        "ssh" => &["comment", "fingerprint"],
-        "identity" => &[
-            "given-name",
-            "family-name",
-            "nickname",
-            "organization",
-            "email",
-            "phone",
-            "name",
-        ],
-        "passkey" => &["rp-id", "username"],
-        "api" => &["username", "type", "host", "environment"],
-        "database" => &["type", "host", "database", "username"],
-        "server" => &["username"],
-        "wifi" => &["ssid"],
-        "license" => &["product", "licensed-to", "email"],
-        "bank" => &["bank", "account-holder"],
-        "passport" | "driver-license" | "id-document" => &["full-name", "type"],
-        "membership" => &["organization", "member-name"],
-        "crypto" => &["network", "address"],
-        _ => &[],
-    };
-    texts.extend(
-        fields
-            .iter()
-            .filter_map(|f| value(item, f))
-            .map(str::to_string),
-    );
-    if item.kind == "card" {
-        texts.extend(last_four(item).map(str::to_string));
-    }
-    // Every file's name, on any item.
-    texts.extend(
-        item.fields
-            .values()
-            .filter(|f| f.kind == FieldType::File)
-            .map(|f| deadbolt_core::item::file_parts(&f.value).0.to_string()),
-    );
-    texts.into_iter().map(|t| t.to_lowercase()).collect()
-}
+use deadbolt_core::listing::{detail, input_field, searchable};
+pub use deadbolt_core::listing::{host, label};
 
 fn matches(item: &Item, query: &[String]) -> bool {
     let texts = searchable(item);
@@ -308,40 +155,7 @@ impl Listing {
     }
 }
 
-/// Normalizes common input forms: card numbers without spaces or dashes,
-/// `MM/YY` and `MM/YYYY` months, URLs without a scheme (https), an
-/// identity's or membership's international phone number in E.164 form and
-/// an identity's country code in upper case.
-fn normalize(kind: &str, name: &str, field: &FieldType, value: String) -> String {
-    match (kind, name) {
-        ("card", "number") => {
-            return value
-                .chars()
-                .filter(|c| !c.is_whitespace() && *c != '-')
-                .collect();
-        }
-        ("identity" | "membership", "phone") => {
-            return deadbolt_core::item::phone(&value).unwrap_or(value);
-        }
-        ("identity", "country") => {
-            return deadbolt_core::item::country(&value).map_or(value, str::to_string);
-        }
-        _ => {}
-    }
-    match field {
-        FieldType::Month => {
-            let parsed = value
-                .split_once('/')
-                .and_then(|(month, year)| format_month(month.trim().parse().ok()?, year));
-            parsed.unwrap_or(value)
-        }
-        FieldType::Url => with_scheme(value),
-        _ => value,
-    }
-}
-
-/// Types and normalizes user input. Without an explicit type a field gets
-/// the item type's field type, else its current type, else `text`.
+/// Types and normalizes user input ([`input_field`]).
 fn fields(
     kind: &str,
     existing: Option<&Item>,
@@ -354,17 +168,8 @@ fn fields(
             if !seen.insert(input.name.clone()) {
                 bail!("field {} given twice", input.name);
             }
-            let field = match input.kind.as_deref() {
-                Some(k) => FieldType::parse(k),
-                None => schema(kind)
-                    .and_then(|s| s.field(&input.name))
-                    .map(|f| f.kind.clone())
-                    .or_else(|| existing?.fields.get(&input.name).map(|f| f.kind.clone()))
-                    .unwrap_or(FieldType::Text),
-            };
-            let value = normalize(kind, &input.name, &field, std::mem::take(&mut input.value));
-            let field = Field::new(field, value);
-            check_new_value(&input.name, &field)?;
+            let value = std::mem::take(&mut input.value);
+            let field = input_field(kind, existing, &input.name, input.kind.as_deref(), value)?;
             Ok((std::mem::take(&mut input.name), field))
         })
         .collect()
@@ -797,6 +602,7 @@ pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<I
 #[cfg(test)]
 mod tests {
     use super::*;
+    use deadbolt_core::listing::normalize;
 
     fn loaded(dir: &std::path::Path) -> Loaded {
         let params = deadbolt_store::KdfParams {

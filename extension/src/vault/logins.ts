@@ -1,13 +1,15 @@
-// The vault's logins: the list (search across every login, this site's
-// first), a login's details (reveal and copy, its one-time code counting
-// down), and adding or editing one, with the password generator.
+// The vault's list (search across every item, this site's logins first),
+// a login's details (reveal and copy, its one-time code counting down), and
+// adding or editing one, with the password generator. Other types are in
+// items.ts.
 
-import type { LoginDetail, PickReply } from "../messages"
+import type { ItemDetail, ItemSummary, PickReply } from "../messages"
 import type { Account } from "../protocol"
 import { avatar, h, icon } from "../ui/dom"
 import { offerCard } from "../ui/offer"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
+import { deleteButton, kindAvatar, kindName, secretOf } from "./items"
 import { button, copied, favicon, field, glyph, hostOf, iconButton, para, refuse, slidingHighlight, toolbar } from "./kit"
 
 const url = (a: Account) => a.urls.find(Boolean) ?? ""
@@ -27,9 +29,8 @@ function avatarFor(title: string, link: string): HTMLElement {
 
 /** A password to copy or reveal: Strict asks for the passphrase first, in the login's own view. */
 async function secret(app: App, ref: string, passphrase?: string): Promise<{ password?: string; message?: string; reauth?: boolean }> {
-  const r = await app.run(passphrase ? { type: "device-secret", ref, passphrase } : { type: "device-secret", ref })
-  if (r.ok && typeof r.reply.password === "string") return { password: r.reply.password }
-  return { message: r.ok ? "Deadbolt didn't answer." : r.message, reauth: !r.ok && r.code === "passphrase_needed" }
+  const s = await secretOf(app, ref, "password", passphrase)
+  return { password: s.value, message: s.message, reauth: s.reauth }
 }
 
 /** Copies a password or one-time code; the background clears it in 30 s if Chrome lets it. */
@@ -73,24 +74,56 @@ function row(app: App, a: Account, fill: boolean): HTMLElement {
   return h("div", { class: `vrow${fill ? " here" : ""}` }, main, actions)
 }
 
-const matches = (a: Account, q: string) => [a.title, a.username ?? "", ...a.urls.map(hostOf)].some((s) => s.toLowerCase().includes(q))
+/** Another type's row: its tile, label and detail, and a copy of the field it's for. */
+function itemRow(app: App, item: ItemSummary): HTMLElement {
+  const main = button("vrow-main", [kindAvatar(item), h("span", { class: "text" }, h("span", { class: "title" }, item.title), h("span", { class: "sub" }, item.detail ? `${kindName(app, item.kind)} · ${item.detail}` : kindName(app, item.kind)))], () =>
+    app.go({ name: "item", ref: item.ref, kind: item.kind }),
+  )
+  main.setAttribute("aria-label", `${item.title}, ${kindName(app, item.kind)}`)
+  const actions = h("span", { class: "vrow-actions" })
+  const primary = item.primary
+  if (primary && item.kind !== "document") {
+    const copy = iconButton(icon("copy"), `Copy ${primary.replace(/-/g, " ")}`, async (b) => {
+      await app.offerClearing()
+      const s = await secretOf(app, item.ref, primary)
+      if (s.value !== undefined) {
+        if (await copied(b, s.value)) app.announce(await app.copiedSecret(s.value))
+        return
+      }
+      if (s.reauth) return app.go({ name: "item", ref: item.ref, kind: item.kind })
+      // A plain field (an identity's email) isn't a secret: the details have it.
+      const r = await app.run({ type: "device-item", ref: item.ref })
+      const value = r.ok ? (r.reply as unknown as ItemDetail).fields.find((f) => f.name === primary)?.value : undefined
+      if (value !== undefined) void copied(b, value, (m) => app.announce(m))
+      else app.announce(s.message ?? "Couldn't copy.")
+    })
+    actions.append(copy)
+  }
+  return h("div", { class: "vrow" }, main, actions)
+}
+
+/** Every query word is in the item's title or its search words (never a secret), or a login's username or site. */
+const matches = (a: ItemSummary, q: string) => {
+  const texts = [a.title, a.username ?? "", ...a.urls.map(hostOf), ...a.search].map((s) => s.toLowerCase())
+  return q.split(/\s+/).filter(Boolean).every((w) => texts.some((s) => s.includes(w)))
+}
 
 export function listView(app: App): View {
-  const search = h("input", { class: "input search", type: "search", placeholder: "Search logins", "aria-label": "Search logins", autocomplete: "off", spellcheck: "false", value: app.query })
-  const add = button("btn add", [glyph("plus"), "Add"], () => app.go({ name: "edit" }), { "aria-label": "Add login", title: "Add login" })
+  const search = h("input", { class: "input search", type: "search", placeholder: "Search", "aria-label": "Search the vault", autocomplete: "off", spellcheck: "false", value: app.query })
+  const add = button("btn add", [glyph("plus"), "Add"], () => app.go({ name: "new" }), { "aria-label": "Add an item", title: "Add an item" })
   const body = h("div", { class: "list-body" })
   const el = h("section", { class: "view list-view" }, h("div", { class: "search-row" }, h("span", { class: "search-wrap" }, glyph("search"), search), add), body)
 
-  const section = (label: string, aside: string | null, accounts: Account[], fill: boolean) => {
+  const section = (label: string, aside: string | null, items: ItemSummary[], fill: boolean) => {
     const rows = h("div", { class: "rows" })
     slidingHighlight(rows)
-    rows.append(...accounts.map((a) => row(app, a, fill)))
+    rows.append(...items.map((a) => (a.kind === "login" ? row(app, a as Account, fill) : itemRow(app, a))))
     return h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, label), aside ? h("span", { class: "mono muted" }, aside) : null), rows)
   }
 
   const paint = () => {
     const q = app.query.trim().toLowerCase()
-    const all = app.logins
+    const all = app.items
     const parts: Node[] = []
     if (app.site?.offer && !q) parts.push(offerCard(app.site.offer, app.site.tabId, () => void app.refresh()))
     if (all === null) {
@@ -101,9 +134,9 @@ export function listView(app: App): View {
           "div",
           { class: "empty-state" },
           h("span", { class: "state-icon" }, icon("key")),
-          h("h2", {}, "No logins yet"),
-          para("Sign in on a site and Deadbolt offers to save it, or add one by hand."),
-          button("btn primary", [glyph("plus"), "Add a login"], () => app.go({ name: "edit" })),
+          h("h2", {}, "Nothing saved yet"),
+          para("Sign in on a site and Deadbolt offers to save it, or add a login, note, card or key by hand."),
+          button("btn primary", [glyph("plus"), "Add your first item"], () => app.go({ name: "new" })),
         ),
       )
     } else {
@@ -111,12 +144,12 @@ export function listView(app: App): View {
       const site = all.filter((a) => here.has(a.ref))
       if (q) {
         const found = [...site, ...all.filter((a) => !here.has(a.ref))].filter((a) => matches(a, q))
-        parts.push(found.length ? section("Results", String(found.length), found, false) : h("div", { class: "empty" }, `No logins match “${app.query.trim()}”.`))
+        parts.push(found.length ? section("Results", String(found.length), found, false) : h("div", { class: "empty" }, `Nothing matches “${app.query.trim()}”.`))
       } else {
         if (site.length) parts.push(section("This site", app.site!.host, site, true))
         else if (app.site) parts.push(h("p", { class: "site-none" }, `Nothing saved for `, h("span", { class: "mono" }, app.site.host), ` yet.`))
         const rest = all.filter((a) => !here.has(a.ref))
-        if (rest.length) parts.push(section(site.length ? "All logins" : "Logins", String(all.length), rest, false))
+        if (rest.length) parts.push(section(site.length ? "Everything else" : "All items", String(all.length), rest, false))
       }
     }
     body.replaceChildren(...parts)
@@ -173,7 +206,7 @@ function totpRing(period: number, left: number): SVGElement {
 
 export function detailView(app: App, ref: string, then?: "reveal" | "copy"): View {
   const el = h("section", { class: "view detail" })
-  let detail: LoginDetail | null = null
+  let detail: ItemDetail | null = null
   let revealed: string | null = null
   let hideTimer: ReturnType<typeof setTimeout> | undefined
   let codeTimer: ReturnType<typeof setTimeout> | undefined
@@ -202,7 +235,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       el.replaceChildren(toolbar("Login", () => app.go({ name: "list" }, -1)), h("p", { class: "error" }, r.message))
       return
     }
-    detail = r.reply as unknown as LoginDetail
+    detail = r.reply as unknown as ItemDetail
     paint()
     if (then === "copy" && !reauth) void copyPassword(el.querySelector<HTMLElement>(".copy-password"))
   }
@@ -274,7 +307,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     clearInterval(tick)
     clearTimeout(codeTimer)
     const d = detail
-    const host = hostOf(d.url)
+    const host = hostOf(d.url ?? "")
     const line = (label: string, value: Node, ...actions: Node[]) => h("div", { class: "line" }, h("span", { class: "line-label" }, label), h("span", { class: "value" }, value), h("span", { class: "line-actions" }, ...actions))
     const lines: Node[] = []
     lines.push(line("Username", d.username ? h("span", {}, d.username) : h("span", { class: "faint" }, "None"), iconButton(icon("copy"), "Copy username", (b) => d.username && void copied(b, d.username, say, "Copied the username"))))
@@ -307,18 +340,22 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       // The next code, a moment after this one ends.
       codeTimer = setTimeout(() => void refreshCode(), left * 1000 + 150)
     }
-    if (d.url) lines.push(line("Website", h("span", {}, host), iconButton(glyph("open"), "Open site", () => openSite(d.url))))
+    const website = d.url
+    if (website) lines.push(line("Website", h("span", {}, host), iconButton(glyph("open"), "Open site", () => openSite(website))))
+    const notes = d.fields.find((f) => f.name === "notes")?.value
+    if (notes) lines.push(h("div", { class: "line" }, h("span", { class: "line-label" }, "Notes"), h("span", { class: "value lines" }, notes), h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy notes", (b) => void copied(b, notes, say, "Copied the notes")))))
     el.replaceChildren(
-      toolbar("", () => app.go({ name: "list" }, -1), button("btn", "Edit", () => app.go({ name: "edit", ref }))),
-      h("div", { class: "detail-head" }, avatarFor(d.title, d.url), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"))),
+      toolbar("", () => app.go({ name: "list" }, -1), button("btn", "Edit", () => app.go({ name: "edit", ref, kind: "login" }))),
+      h("div", { class: "detail-head" }, avatarFor(d.title, d.url ?? ""), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"))),
       h("div", { class: "box" }, ...lines),
+      h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
     )
   }
 
   const refreshCode = async () => {
     const r = await app.run({ type: "device-item", ref })
     if (!el.isConnected || !r.ok) return
-    detail = r.reply as unknown as LoginDetail
+    detail = r.reply as unknown as ItemDetail
     paint()
   }
 
@@ -353,6 +390,22 @@ export function editView(app: App, ref?: string): View {
   const dice = iconButton(glyph("dice"), "Generate a password", () => toggleGenerator())
   const pass = field(ref ? "New password" : "Password", { type: "password", autocomplete: "new-password", maxlength: "4096", placeholder: ref ? "Unchanged" : "" }, show, dice)
   pass.input.classList.add("mono-input")
+  // The one-time password's secret never comes back to the form: empty keeps it, Remove takes it off.
+  let hadOtp = !!existing?.hasTotp
+  let dropOtp = false
+  const removeOtp = button("link", "Remove", () => {
+    dropOtp = true
+    otp.input.value = ""
+    otp.input.placeholder = "Removed when you save"
+    removeOtp.hidden = true
+  })
+  const otp = field("One-time password", { type: "password", autocomplete: "off", maxlength: "4096", placeholder: hadOtp ? "Unchanged" : "Secret or otpauth:// link" }, removeOtp)
+  otp.input.classList.add("mono-input")
+  removeOtp.hidden = !hadOtp
+  otp.input.addEventListener("input", () => (dropOtp = false))
+  const notesId = `f-${Math.random().toString(36).slice(2, 9)}`
+  const notes = h("textarea", { class: "input area", id: notesId, rows: "3", maxlength: "65536", spellcheck: "false" })
+  let savedNotes = ""
 
   // The generator: the core's (letters, digits and, if chosen, symbols, at least one of each).
   const length = h("input", { type: "range", min: "12", max: "48", value: "24", "aria-label": "Length" })
@@ -401,6 +454,8 @@ export function editView(app: App, ref?: string): View {
     user.wrap,
     pass.wrap,
     generator,
+    otp.wrap,
+    h("div", { class: "field" }, h("label", { for: notesId }, "Notes"), notes),
     error,
     h("div", { class: "buttons end" }, button("btn", "Cancel", cancel), save),
   )
@@ -419,10 +474,15 @@ export function editView(app: App, ref?: string): View {
     save.disabled = true
     void app.run({ type: "device-item", ref }).then((r) => {
       if (!r.ok) return fail(r.message)
-      const d = r.reply as unknown as LoginDetail
+      const d = r.reply as unknown as ItemDetail
       if (!title.input.value) title.input.value = d.title
-      if (!site.input.value) site.input.value = d.url
-      if (!user.input.value) user.input.value = d.username
+      if (!site.input.value) site.input.value = d.url ?? ""
+      if (!user.input.value) user.input.value = d.username ?? ""
+      savedNotes = d.fields.find((f) => f.name === "notes")?.value ?? ""
+      if (!notes.value) notes.value = savedNotes
+      hadOtp = d.fields.some((f) => f.type === "otp")
+      removeOtp.hidden = !hadOtp || dropOtp
+      if (!dropOtp) otp.input.placeholder = hadOtp ? "Unchanged" : "Secret or otpauth:// link"
       save.disabled = false
     })
   }
@@ -440,7 +500,16 @@ export function editView(app: App, ref?: string): View {
     if (!ref && !pass.input.value) return fail("Enter a password, or generate one.", pass.input)
     save.disabled = true
     rollLabel(label, "Saving…")
-    const entry = { title: title.input.value.trim() || new URL(origin).hostname, url: origin, username: user.input.value.trim(), password: pass.input.value }
+    const typedOtp = otp.input.value.trim()
+    const entry = {
+      title: title.input.value.trim() || new URL(origin).hostname,
+      url: origin,
+      username: user.input.value.trim(),
+      password: pass.input.value,
+      // Only what changed: empty removes, absent keeps.
+      ...(typedOtp ? { otp: typedOtp } : dropOtp ? { otp: "" } : {}),
+      ...(notes.value !== savedNotes ? { notes: notes.value } : {}),
+    }
     const r = await app.run(ref ? { type: "device-save", ref, entry } : { type: "device-save", entry })
     if (!r.ok) {
       save.disabled = false
@@ -448,6 +517,7 @@ export function editView(app: App, ref?: string): View {
       return fail(r.message)
     }
     pass.input.value = ""
+    otp.input.value = ""
     await app.refresh()
     app.announce(ref ? "Saved." : "Login added.")
     app.go({ name: "item", ref: typeof r.reply.ref === "string" ? r.reply.ref : (ref ?? "") }, ref ? -1 : 1)

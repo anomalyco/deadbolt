@@ -6,12 +6,13 @@
 // lock preset, the vault's name). Passphrases and passwords go to the
 // background in one message and are never kept here or in storage.
 
-import type { DeviceCommand, DeviceReply, LockPreset, PopupReply, Reauth, ReauthChanged, Status, StatusChanged, VaultDevice } from "../messages"
+import type { DeviceCommand, DeviceReply, ItemKind, ItemSummary, LockPreset, PopupReply, Reauth, ReauthChanged, Status, StatusChanged, VaultDevice } from "../messages"
 import { CLIPBOARD_PERMISSIONS, record } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
 import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from "./kit"
+import { itemDetailView, itemEditView, kindsView } from "./items"
 import { detailView, editView, listView } from "./logins"
 import { settingsView } from "./settings"
 import { reauthView, Setup, unlockView } from "./setup"
@@ -21,7 +22,8 @@ export type Surface = "popup" | "page"
 /** Set once Strict's first copy asked for the clipboard permissions, so it asks once. */
 const ASKED_KEY = "deadbolt.clipboardAsked"
 
-export type Route = { name: "list" } | { name: "item"; ref: string; then?: "reveal" | "copy" } | { name: "edit"; ref?: string } | { name: "settings" }
+/** `kind`: the item's type, where the view knows it; else it's looked up, a login if it isn't listed yet. */
+export type Route = { name: "list" } | { name: "item"; ref: string; kind?: string; then?: "reveal" | "copy" } | { name: "edit"; ref?: string; kind?: string } | { name: "new" } | { name: "settings" }
 
 /** What a view shows and how it follows the vault: `update` when the data changed under it, `leave` when it goes. */
 export interface View {
@@ -50,7 +52,10 @@ export interface Sync {
 /** Everything a view needs: the vault's data, a way to ask it things, and to move between views. */
 export class App {
   status: Status = { state: "connecting" }
-  logins: Account[] | null = null
+  /** Every item, sorted by title. */
+  items: ItemSummary[] | null = null
+  /** The types New can add, from the core's schemas. */
+  kinds: ItemKind[] | null = null
   devices: VaultDevice[] | null = null
   vaultName = ""
   preset: LockPreset = "comfortable"
@@ -130,10 +135,16 @@ export class App {
     switch (this.route.name) {
       case "list":
         return listView(this)
-      case "item":
-        return detailView(this, this.route.ref, this.route.then)
-      case "edit":
-        return editView(this, this.route.ref)
+      case "item": {
+        const kind = this.kindOf(this.route.ref, this.route.kind)
+        return kind === "login" ? detailView(this, this.route.ref, this.route.then) : itemDetailView(this, this.route.ref)
+      }
+      case "edit": {
+        const kind = this.route.ref ? this.kindOf(this.route.ref, this.route.kind) : (this.route.kind ?? "login")
+        return kind === "login" ? editView(this, this.route.ref) : itemEditView(this, kind, this.route.ref)
+      }
+      case "new":
+        return kindsView(this)
       case "settings":
         return settingsView(this)
     }
@@ -263,7 +274,7 @@ export class App {
   render() {
     if (this.status.state !== "not-set-up") this.setup.reset()
     if (this.status.state !== "ready") {
-      this.logins = null
+      this.items = null
       this.devices = null
       this.site = null
       this.reauth = null
@@ -274,12 +285,29 @@ export class App {
     this.show(0, !first)
   }
 
+  /** The type of item `ref`: as the route says, else as the list has it. */
+  kindOf(ref: string, kind?: string): string {
+    return kind ?? this.items?.find((i) => i.ref === ref)?.kind ?? "login"
+  }
+
+  /** The vault's logins, for the views that only show those. */
+  get logins(): Account[] | null {
+    return this.items ? (this.items.filter((i) => i.kind === "login") as Account[]) : null
+  }
+
   /** Reads the vault's logins, devices and settings again, and this tab's site, then lets the view follow. */
   async refresh() {
     if (this.status.state !== "ready") return
-    const [l, d, s, site] = await Promise.all([this.run({ type: "device-logins" }), this.run({ type: "device-devices" }), this.run({ type: "device-settings" }), this.loadSite()])
+    const [l, d, s, site, k] = await Promise.all([
+      this.run({ type: "device-items" }),
+      this.run({ type: "device-devices" }),
+      this.run({ type: "device-settings" }),
+      this.loadSite(),
+      this.kinds ? null : this.run({ type: "device-kinds" }),
+    ])
     if (this.status.state !== "ready") return this.render()
-    if (l.ok && Array.isArray(l.reply.accounts)) this.logins = l.reply.accounts.map(account).filter((a): a is Account => a !== null).sort((a, b) => a.title.localeCompare(b.title))
+    if (l.ok && Array.isArray(l.reply.items)) this.items = (l.reply.items as unknown[]).map(itemSummary).filter((a): a is ItemSummary => a !== null).sort((a, b) => a.title.localeCompare(b.title))
+    if (k?.ok && Array.isArray(k.reply.kinds)) this.kinds = k.reply.kinds as ItemKind[]
     if (d.ok && Array.isArray(d.reply.devices)) {
       this.devices = d.reply.devices.map(vaultDevice).filter((x): x is VaultDevice => x !== null)
       if (typeof d.reply.vault === "string") this.vaultName = d.reply.vault
@@ -341,6 +369,16 @@ export class App {
       if (this.status.state === "ready") void this.refresh()
     })
   }
+}
+
+/** An item of the list, checked: a login's account fields as protocol.ts checks them, and the rest. */
+function itemSummary(v: unknown): ItemSummary | null {
+  const i = v as Record<string, unknown> | null
+  if (!i || typeof i.kind !== "string" || typeof i.title !== "string" || typeof i.ref !== "string") return null
+  const words = Array.isArray(i.search) ? i.search.filter((w): w is string => typeof w === "string") : []
+  const base = i.kind === "login" ? account(i) : { ref: i.ref, title: i.title, urls: Array.isArray(i.urls) ? i.urls.filter((u): u is string => typeof u === "string") : [] }
+  if (!base) return null
+  return { ...base, kind: i.kind, title: i.title, search: words, ...(typeof i.detail === "string" ? { detail: i.detail } : {}), ...(typeof i.primary === "string" ? { primary: i.primary } : {}) }
 }
 
 function reauthOf(v: unknown): Reauth | null {

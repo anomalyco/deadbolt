@@ -75,10 +75,30 @@ commands may change the worker’s preset; extra `preset` fields on ordinary
 requests cannot weaken it. Comfortable and Relaxed
 follow the native Touch-ID-off rule: the explicit menu pick is sufficient. There
 is no standalone Activity log, so card fills are **not** recorded as Activity.
-Identities and cards can be synced from another device; the standalone editor
-still edits logins only. Its website input now uses the same site policy too:
-public suffixes and single-label intranet hosts cannot be saved by hand. Synced
-OTP fields use core's current-code generator; the editor does not create OTP fields.
+Its website input uses the same site policy too: public suffixes and
+single-label intranet hosts cannot be saved by hand. Synced OTP fields use
+core's current-code generator.
+
+### Every item type in the vault page
+
+The vault page lists every item type the core knows (logins, secure notes,
+cards, identities, API credentials, SSH keys, documents, databases, servers,
+Wi-Fi networks, licenses, bank accounts, passports, IDs, memberships, crypto
+wallets and synced passkeys). Labels, details, search words, the field each
+row copies and input normalization come from `deadbolt-core::listing`, moved
+from the native agent, so both name, find and write an item the same way.
+Search never looks at a secret value. `device-items` lists them, `device-item`
+returns one with plain values only (secrets say they are there; a file says
+its name and size), and `device-secret {ref, field}` returns one secret, or a
+file's whole value for a download, under the same Strict passphrase rule as a
+password. `device-item-save` adds an item of any editable type or edits one:
+fields left out stay, so an edit never needs a secret it didn't show, and the
+core's schema and item rules decide what is valid (its message is shown).
+`device-item-delete` deletes any item. `device-kinds` gives the page the
+core's schemas for its New picker and editor. A passkey's private key never
+leaves the worker, and passkeys can only be deleted here. A login's editor
+also sets or removes its one-time password (a TOTP secret or `otpauth://`
+link, never shown again) and its notes.
 
 ### Storage: redb over OPFS
 
@@ -461,7 +481,7 @@ name "this Mac" grants nothing: it only changes the wording.
    browser-lifetime guarantees and biometric card reauthentication.
 4. Add WebAuthn PRF/passkey unlock with capability detection; review key wrapping,
    extension origin binding and memory/permission boundaries.
-5. Finish OTP/identity/card editing, passkeys and learning; harden
+5. Finish passkeys and learning; harden
    packaging/update/CSP permissions, measure wasm size/unlock across devices, and
    decide native-path retirement.
 
@@ -482,7 +502,8 @@ name "this Mac" grants nothing: it only changes the wording.
   UV=false, handing required-UV ceremonies to the browser; passphrase card
   reauthentication must not silently claim native Touch ID verification.
 - No standalone Activity log or learning log. Neither capability is advertised.
-- The vault UI edits logins only: other item kinds and OTP secrets must be created
-  on a peer and synced. No automatic save/update offers for identities or cards.
+- No automatic save/update offers for identities or cards. Item-to-item links
+  (a card's billing identity, a login's sign-in account) are kept but not
+  edited on the vault page.
 - Worker/offscreen loss locks every preset; no session-key restoration. Chrome
   extension removal or storage clearing destroys this replica.

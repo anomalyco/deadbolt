@@ -1344,6 +1344,27 @@ main.vault.popup {
   transform: translateX(13px);
 }
 
+/* Notes and other values that span lines: kept as written, never cut off. */
+.line .value.lines {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+  font-weight: 450;
+}
+
+.vault textarea.input.area {
+  height: auto;
+  min-height: 72px;
+  padding: 8px 10px;
+  resize: vertical;
+  line-height: 1.45;
+  font: inherit;
+}
+
+.vault .edit .fields {
+  display: contents;
+}
+
 /* Settings' About: the version, a newer build's command, Report an issue. */
 .about-version {
   font-size: 13px;

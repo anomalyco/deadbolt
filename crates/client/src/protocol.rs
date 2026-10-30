@@ -784,57 +784,6 @@ pub struct SignIn {
     pub account: Option<String>,
 }
 
-/// The sign-in providers a login's `sign-in-with` names by id, with their
-/// names and other names for them.
-pub const SIGN_IN_PROVIDERS: [(&str, &str, &[&str]); 12] = [
-    ("google", "Google", &[]),
-    ("apple", "Apple", &[]),
-    ("github", "GitHub", &[]),
-    ("microsoft", "Microsoft", &[]),
-    ("facebook", "Facebook", &["meta"]),
-    ("x", "X", &["twitter"]),
-    ("amazon", "Amazon", &[]),
-    ("discord", "Discord", &[]),
-    ("slack", "Slack", &[]),
-    ("okta", "Okta", &[]),
-    ("linkedin", "LinkedIn", &[]),
-    ("gitlab", "GitLab", &[]),
-];
-
-/// A provider as a `sign-in-with` value: the id of a known one, matched
-/// by id, name or other name in any case and spacing ("Sign in with
-/// Twitter" is `x`); any other as one line of at most 64 characters.
-/// `None` if blank.
-pub fn sign_in_provider(text: &str) -> Option<String> {
-    let line = text
-        .split(|c: char| c.is_whitespace() || c.is_control())
-        .filter(|w| !w.is_empty())
-        .collect::<Vec<_>>()
-        .join(" ");
-    let bare = line
-        .to_lowercase()
-        .strip_prefix("sign in with ")
-        .map_or_else(|| line.to_lowercase(), str::to_string);
-    let bare: String = bare.chars().filter(|c| c.is_alphanumeric()).collect();
-    if let Some((id, ..)) = SIGN_IN_PROVIDERS.iter().find(|(id, name, other)| {
-        *id == bare || name.to_lowercase() == bare || other.contains(&bare.as_str())
-    }) {
-        return Some((*id).to_string());
-    }
-    let line: String = line.chars().take(64).collect();
-    let line = line.trim_end();
-    (!line.is_empty()).then(|| line.to_string())
-}
-
-/// What a provider is called: "Google" for `google`; one this version
-/// doesn't know by its value.
-pub fn sign_in_name(provider: &str) -> &str {
-    SIGN_IN_PROVIDERS
-        .iter()
-        .find(|(id, ..)| *id == provider)
-        .map_or(provider, |(_, name, _)| name)
-}
-
 /// The kinds of item forms fill from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -853,6 +802,9 @@ impl FormKind {
 }
 
 pub use deadbolt_core::forms::{CARD_FORM_FIELDS, CARD_VERIFIED_FIELDS, IDENTITY_FORM_FIELDS};
+pub use deadbolt_core::listing::{
+    KINDS, SIGN_IN_PROVIDERS, noun, primary_field, sign_in_name, sign_in_provider,
+};
 
 /// An identity a form can be filled from, without values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1480,63 +1432,6 @@ impl fmt::Display for ImportSource {
             Self::Csv => "CSV",
         })
     }
-}
-
-/// The item types clients name, in the order they list them: the type, then
-/// what one and several are called.
-pub const KINDS: [(&str, &str, &str); 18] = [
-    ("login", "login", "logins"),
-    ("card", "card", "cards"),
-    ("note", "secure note", "secure notes"),
-    ("ssh", "SSH key", "SSH keys"),
-    ("identity", "identity", "identities"),
-    ("passkey", "passkey", "passkeys"),
-    ("api", "API credential", "API credentials"),
-    ("database", "database", "databases"),
-    ("server", "server", "servers"),
-    ("wifi", "Wi-Fi network", "Wi-Fi networks"),
-    ("license", "software license", "software licenses"),
-    ("bank", "bank account", "bank accounts"),
-    ("document", "document", "documents"),
-    ("passport", "passport", "passports"),
-    ("driver-license", "driver's license", "driver's licenses"),
-    ("membership", "membership", "memberships"),
-    ("crypto", "crypto wallet", "crypto wallets"),
-    ("id-document", "ID document", "ID documents"),
-];
-
-/// What `count` items of type `kind` are called: "secure note", "SSH keys".
-/// A type this version doesn't know is called by its identifier.
-pub fn noun(kind: &str, count: usize) -> &str {
-    KINDS
-        .iter()
-        .find(|(k, ..)| *k == kind)
-        .map_or(kind, |(_, one, many)| if count == 1 { one } else { many })
-}
-
-/// The field an item is for, which clients copy or print by default: a
-/// login's password, a card's number, a secure note's body, an SSH key's
-/// private key, an identity's email, a passkey's username, an API
-/// credential's credential, a database's, server's or Wi-Fi network's
-/// password, a license's key, a bank account's number, a document's file,
-/// an ID's number, a membership's id, a wallet's recovery phrase. `None`
-/// for a type this version doesn't know.
-pub fn primary_field(kind: &str) -> Option<&'static str> {
-    Some(match kind {
-        "login" | "database" | "server" | "wifi" => "password",
-        "card" | "passport" | "driver-license" | "id-document" => "number",
-        "note" => "notes",
-        "ssh" => "private-key",
-        "identity" => "email",
-        "passkey" => "username",
-        "api" => "credential",
-        "license" => "license-key",
-        "bank" => "account-number",
-        "document" => "file",
-        "membership" => "member-id",
-        "crypto" => "recovery-phrase",
-        _ => return None,
-    })
 }
 
 /// A count of something, named in the singular and the plural.
