@@ -179,11 +179,12 @@ export class Setup {
   }
 
   private code(code: string | null): View {
-    const copy = button("btn", [icon("copy"), "Copy"], (b) => code && void copied(b, code, (m) => this.app.announce(m), "Copied the code"))
-    if (!code) copy.disabled = true
+    const copy = button("btn", [icon("copy"), "Copy code"], (b) => code && void copied(b, code, (m) => this.app.announce(m), "Copied the code"))
     // The whole command, for a terminal on the other device (or this one).
     const command = code ? `deadbolt pair ${code}` : ""
-    const copyCommand = button("link", "Copy the command", (b) => command && void copied(b, command, (m) => this.app.announce(m), "Copied the command"))
+    const copyCommand = button("btn", "Copy command", (b) => command && void copied(b, command, (m) => this.app.announce(m), "Copied the command"))
+    // Both wait for the code in place, so nothing moves when it comes.
+    if (!code) copy.disabled = copyCommand.disabled = true
     // Long codes wrap between words, never inside one.
     const words = code ? code.split("-").flatMap((w, i) => (i ? ["-", h("wbr"), w] : [w])) : ["Getting a code…"]
     const shown = h("span", { class: `code${code ? "" : " pending"}`, id: "join-code" })
@@ -194,9 +195,9 @@ export class Setup {
         "section",
         { class: "view" },
         toolbar("Pair with a device", () => void this.cancel()),
-        para("On a device that has your vault, run ", h("code", {}, code ? command : "deadbolt pair"), code ? "" : " with this code", ", or choose Pair in the Deadbolt app."),
-        h("div", { class: "code-box" }, shown, copy),
-        code ? h("p", { class: "small" }, copyCommand) : null,
+        // The same words before and after the code comes: it shows once, below, on its own line.
+        para("On a device that has your vault, run ", h("code", {}, "deadbolt pair"), " with this code, or choose Pair in the Deadbolt app."),
+        h("div", { class: "code-box pair" }, shown, h("div", { class: "code-actions" }, copy, copyCommand)),
         h("div", { class: "waiting" }, h("span", { class: "sync-dot busy", "aria-hidden": "true" }), h("span", {}, code ? "Waiting for the other device…" : "Connecting to Deadbolt's sync service…")),
         h("p", { class: "faint small" }, "The code works once, for five minutes. Keep this open, or come back to it: it waits either way."),
         h("div", { class: "buttons end" }, button("btn", "Cancel", () => void this.cancel())),
@@ -222,7 +223,7 @@ export class Setup {
   private passphrases(): { pass: HTMLInputElement; again: HTMLInputElement; error: HTMLElement; fields: HTMLElement[]; valid(): boolean } {
     const pass = field("Passphrase", { type: "password", autocomplete: "new-password" })
     const again = field("Passphrase again", { type: "password", autocomplete: "new-password" })
-    const error = h("p", { class: "error", role: "alert" })
+    const error = h("p", { class: "error reserve", role: "alert" })
     error.hidden = true
     const valid = () => {
       const problem = !pass.input.value ? "Choose a passphrase." : pass.input.value !== again.input.value ? "The passphrases don't match." : ""
@@ -231,7 +232,12 @@ export class Setup {
       if (problem) refuse(problem.startsWith("Choose") ? pass.input : again.input)
       return !problem
     }
-    for (const f of [pass.input, again.input]) f.addEventListener("input", () => f.classList.remove("invalid"))
+    // Typing again takes the complaint away, as the unlock form does.
+    for (const f of [pass.input, again.input])
+      f.addEventListener("input", () => {
+        f.classList.remove("invalid")
+        error.hidden = true
+      })
     return { pass: pass.input, again: again.input, error, fields: [pass.wrap, again.wrap], valid }
   }
 
@@ -243,7 +249,7 @@ export class Setup {
     const form = h(
       "form",
       { class: "view", novalidate: "" },
-      h("div", { class: "hero small" }, h("span", { class: "done-mark" }, icon("check")), h("h1", {}, vault ? `Joined ${vault}` : "Joined your vault"), para("Choose a passphrase for this browser. It unlocks Deadbolt here only; your other devices keep their own.")),
+      h("div", { class: "hero small" }, h("span", { class: "done-mark" }, icon("check")), h("h1", {}, vault ? `Joined the ${vault} vault` : "Joined your vault"), para("Choose a passphrase for this browser. It unlocks Deadbolt here only; your other devices keep their own.")),
       ...p.fields,
       p.error,
       h("div", { class: "buttons stack" }, submit, button("link", "Cancel", () => void this.cancel())),
@@ -276,6 +282,10 @@ export class Setup {
   private create(): View {
     const name = field("Vault name", { value: "personal", maxlength: "64", pattern: "[a-z][a-z0-9_\\-]{0,63}", "aria-describedby": "name-hint" })
     const p = this.passphrases()
+    name.input.addEventListener("input", () => {
+      name.input.classList.remove("invalid")
+      p.error.hidden = true
+    })
     const label = h("span", { class: "roll-label" }, "Create vault")
     label.dataset.text = "Create vault"
     const submit = h("button", { class: "btn primary wide", type: "submit" }, label)
@@ -322,13 +332,19 @@ export function unlockView(app: App): View {
     clearTimeout(timer)
     const seconds = Math.ceil((until - Date.now()) / 1000)
     submit.disabled = seconds > 0
-    if (seconds <= 0) { error.textContent = "You can try your passphrase again."; return }
+    // Over: no longer an error. The red goes and the line clears; it's said rather than shown.
+    if (seconds <= 0) {
+      error.hidden = true
+      input.classList.remove("invalid")
+      app.announce("You can try your passphrase again.")
+      return
+    }
     error.hidden = false
     error.textContent = `Too many wrong passphrases. Try again in ${seconds} s.`
     timer = setTimeout(() => backoff(until), 250)
   }
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
-  const error = h("p", { class: "error", role: "alert" })
+  const error = h("p", { class: "error reserve", role: "alert" })
   error.hidden = true
   const label = h("span", { class: "roll-label" }, "Unlock")
   label.dataset.text = "Unlock"
@@ -410,7 +426,7 @@ function reauthText(reauth: Reauth): { title: string; why: string; act: string; 
 export function reauthView(app: App, reauth: Reauth): View {
   const text = reauthText(reauth)
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
-  const error = h("p", { class: "error", role: "alert" })
+  const error = h("p", { class: "error reserve", role: "alert" })
   error.hidden = true
   const label = h("span", { class: "roll-label" }, text.act)
   label.dataset.text = text.act

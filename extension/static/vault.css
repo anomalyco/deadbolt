@@ -21,6 +21,19 @@ main.vault.popup {
   display: none !important;
 }
 
+/* A form's error line keeps its place while it's empty, so showing or
+   clearing it never moves the fields and buttons around it. */
+.vault p.error.reserve {
+  min-height: 16px;
+  line-height: 16px;
+  margin: 0;
+}
+
+.vault p.error.reserve[hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+
 /* ---- Header and footer ---- */
 
 .vault .top {
@@ -528,6 +541,31 @@ main.vault.popup {
   user-select: none;
 }
 
+/* Pairing: the code on its own line, centred, with its two copies under it.
+   The line keeps its height while the code is coming. */
+.code-box.pair {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding: 14px 12px;
+}
+
+.code-box.pair .code {
+  min-height: 24px;
+  font-size: 17px;
+  text-align: center;
+}
+
+.code-box.pair .code.pending {
+  line-height: 24px;
+}
+
+.code-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
 .waiting {
   display: flex;
   align-items: center;
@@ -698,6 +736,11 @@ main.vault.popup {
   display: flex;
   flex-direction: column;
   margin: 0 -6px;
+}
+
+/* A list's empty line lines up with the text around it, not with the rows' bleed. */
+.rows > .hint {
+  padding: 0 6px;
 }
 
 /* The one highlight, as in the inline menu: it slides between rows. */
@@ -1058,6 +1101,17 @@ main.vault.popup {
   gap: 14px;
 }
 
+/* Save and Cancel stay in reach at the foot of a long form, over the fields scrolling under them. */
+.edit > .buttons.end {
+  position: sticky;
+  bottom: -16px;
+  z-index: 1;
+  margin: 0 -14px -16px;
+  padding: 10px 14px 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--border-weak);
+}
+
 .generator {
   display: flex;
   flex-direction: column;
@@ -1072,20 +1126,6 @@ main.vault.popup {
 
 .generator[hidden] {
   display: none;
-}
-
-.gen-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.gen-value {
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  overflow-wrap: anywhere;
-  user-select: all;
 }
 
 .gen-length {
@@ -1109,7 +1149,12 @@ main.vault.popup {
 
 .gen-options {
   display: flex;
+  align-items: center;
   gap: 16px;
+}
+
+.gen-options .gen-again {
+  margin-left: auto;
 }
 
 .check {

@@ -480,7 +480,6 @@ export function editView(app: App, ref?: string): View {
   const length = h("input", { type: "range", min: "12", max: "48", value: "24", "aria-label": "Length" })
   const lengthOut = h("output", { class: "mono" }, "24")
   const symbols = h("input", { type: "checkbox", checked: "" })
-  const preview = h("span", { class: "mono gen-value" })
   let asked = 0
   const regenerate = async () => {
     lengthOut.textContent = length.value
@@ -489,7 +488,6 @@ export function editView(app: App, ref?: string): View {
     // Only the latest slider position's password lands.
     if (n !== asked) return
     if (!r.ok || typeof r.reply.password !== "string") return fail(r.ok ? "Deadbolt didn't make a password." : r.message)
-    preview.textContent = r.reply.password
     pass.input.value = r.reply.password
     pass.input.type = "text"
     show.replaceChildren(glyph("eyeOff"))
@@ -497,9 +495,9 @@ export function editView(app: App, ref?: string): View {
   const generator = h(
     "div",
     { class: "generator", hidden: "" },
-    h("div", { class: "gen-head" }, preview, iconButton(glyph("sync"), "Another password", () => void regenerate())),
+    // The password shows once, in the box above; this only shapes it.
     h("label", { class: "gen-length" }, h("span", {}, "Length"), length, lengthOut),
-    h("div", { class: "gen-options" }, h("label", { class: "check" }, symbols, "Symbols")),
+    h("div", { class: "gen-options" }, h("label", { class: "check" }, symbols, "Symbols"), iconButton(glyph("sync"), "Another password", () => void regenerate(), "gen-again")),
   )
   for (const c of [length, symbols]) c.addEventListener("input", () => void regenerate())
   const toggleGenerator = () => {

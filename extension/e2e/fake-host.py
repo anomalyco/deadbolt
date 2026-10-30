@@ -49,6 +49,12 @@ FORM_VALUES = {
     VISA: {"number": "4242424242424242", "cvv": "123", "expiry": "2028-08", "cardholder": "Kit Langton", "brand": "Visa"},
 }
 VALUES = {REF1: {"username": "kit@acme.test", "password": "correct horse", "totp": "492039"}, REF2: {"username": "admin", "password": "hunter2"}}
+# DEADBOLT_FAKE_USERNAME and DEADBOLT_FAKE_PASSWORD replace the first login's
+# values (corpus/sweep.ts, on real sites).
+if os.environ.get("DEADBOLT_FAKE_USERNAME"):
+    ACCOUNTS[0]["username"] = VALUES[REF1]["username"] = os.environ["DEADBOLT_FAKE_USERNAME"]
+if os.environ.get("DEADBOLT_FAKE_PASSWORD"):
+    VALUES[REF1]["password"] = os.environ["DEADBOLT_FAKE_PASSWORD"]
 # DEADBOLT_FAKE_SIGNIN=1 adds a "Sign in with Google" login for the site, and
 # the Google account's own login it signs in with.
 if os.environ.get("DEADBOLT_FAKE_SIGNIN"):
