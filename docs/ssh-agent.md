@@ -1,9 +1,10 @@
 # SSH agent
 
-2026-10-30. Plan; not built yet. An SSH agent and Git commit signer inside
+2026-10-30. Built (`crates/cli/src/agent/ssh.rs`, `crates/cli/src/ssh.rs`,
+`crates/app/src/ssh.rs`). An SSH agent and Git commit signer inside
 Deadbolt's background agent, matching 1Password's SSH agent while keeping
 Deadbolt's Touch ID and caller-verification rules (`docs/agent-control.md`,
-`docs/touch-id.md`). Open decisions are at the end.
+`docs/touch-id.md`).
 
 ## Summary
 
@@ -468,21 +469,20 @@ To make every `ssh` item work without manual repair:
     vault so signing needs only Touch ID, derives `public-key`, `fingerprint`,
     and `comment`, and creates the `ssh` item.
 - **Desktop app (`crates/app`):**
-  - **New Item (`⌘N`) › SSH key:** auto-generates an Ed25519 key via
-    `Command::SshGenerate { kind, comment }` (with an `Ed25519` / `ECDSA P-256`
-    segmented control, Regenerate button, and **Import Key File…** button,
-    mirroring Login's password generator in `edit/view.rs`), displaying the
-    derived `public-key` and `fingerprint` in monospace without holding raw
-    private-key text in a plain field.
-  - **Copy & actions (`vault/page.rs`, `palette.rs`, `listing.rs`):**
-    `primary_field("ssh")` becomes `"public-key"` (`copy_label("ssh")` →
-    `"Copy public key"`), so `⏎` in the main window and Quick Panel copies the
-    public key cleanly without arming the 30-second secret clipboard wipe
-    (Decision 3). `⌘K` adds **Copy Fingerprint** and **Copy Git Signing
-    Config**.
-  - **Withholding `private-key` by default:** `Listing::info` leaves `ssh`
-    `private-key` and `passphrase` empty unless explicitly requested (matching
-    `otp`), and the Edit form shows `"Kept · paste or import to replace"`.
+  - **New / Edit Item › SSH key:** adds an `Ed25519` / `ECDSA P-256` segmented
+    control, **Generate key** button (`Command::SshGenerate { kind, comment }`),
+    and **Import file…** button (`Command::SshInspect`) under `private-key`,
+    filling `public-key`, `fingerprint`, and `comment` while keeping the private
+    key masked.
+  - **Copy & actions (`model.rs`, `listing.rs`):** `primary_field("ssh")`
+    becomes `"public-key"` (`copy_label("ssh")` → `"Copy public key"`), so `⏎`
+    in the main window and Quick Panel copies the public key instead of the
+    private key.
+  - **Withholding `private-key` by default:** `Listing::info_with` leaves `ssh`
+    `private-key` and `passphrase` empty on default `ItemGet` (`ssh_private =
+    false`, including background cache `Peek`s, `deadbolt show`, `deadbolt run`,
+    and `deadbolt inject`). Exporting `private-key` from the CLI (`deadbolt get
+    <item> -f private-key` or `deadbolt show --reveal`) requires Touch ID.
 
 ## Security argument
 
@@ -667,47 +667,29 @@ well under 800 non-test lines, SSH dependencies isolated to `deadbolt-cli` so
      [Allow once] [Allow 15 min]`) with verified caller details, host key, and
      secure passphrase fallback when Touch ID is unavailable.
 
-## Open decisions
+## Decisions
 
-1. **Touch ID per signature (`each`) vs a 15-minute terminal tab grant (`15m`)?**
-   - **Recommended:** Default to **`each`** (one Touch ID tap per SSH login or
-     Git commit), with `ssh_approval = "15m"` in `config.toml` (and `[Allow 15
-     min]` once the approval panel lands) tied to `(tty, session_started)`,
-     while always keeping AI callers (`caller::is_ai`), TTY-less callers, and
-     forwarded connections at `Once`.
-   - *Trade-off:* `each` matches `ssh-add -c` and gives an interactive rebase of
-     N commits N taps unless `15m` is turned on; `15m` matches `agent-control`
-     Decision 1 ("one tap per tab per 15 minutes idle") out of the box.
-2. **Allow SSH agent forwarding (`ssh -A`) by default, or refuse it?**
-   - **Recommended:** **Refuse forwarded `SIGN_REQUEST`s by default**
-     (`ssh_allow_forwarding = false`), with a `config.toml` / per-key `ssh.toml`
-     opt-in that always requires a per-signature Touch ID tap labelled
-     `(forwarded via SHA256:…)`.
-   - *Trade-off:* `ProxyJump` (`ssh -J`) works locally without forwarding; users
-     who run `git` on remote dev VMs over `ssh -A` flip one
-     setting (or allow forwarding for their GitHub key only in `ssh.toml`).
-3. **Flip `ssh` items' `⏎` copy to `public-key`, and keep `private-key` out of `ItemGet` by default?**
-   - **Recommended:** **Yes to both.** Make `primary_field("ssh") =
-     "public-key"` so `⏎` copies the public key, and omit `private-key` and
-     `passphrase` from default `ItemGet` (like `otp`), returning `private-key`
-     only on explicit reveal / `deadbolt get <item> -f private-key` with a
-     Touch ID tap (`Tier::Read`).
-   - *Trade-off:* Breaking change to bare `deadbolt get <ssh-item>` (which
-     currently prints `private-key`), in exchange for never copying a private
-     key by mistake on `⏎` and keeping SSH private keys out of `Deadbolt.app`'s
-     memory during normal browsing.
-4. **Unlock with Touch ID on `ssh.sock` when the vault is locked?**
-   - **Recommended:** **Yes when `touch_id_ready` is true,** and coalesce unlock
-     + sign into **one** tap when `session-bind@openssh.com` already bound the
-     connection to a local server host key (`"unlock Deadbolt and sign in to
-     github.com"` covers one `SIGN_REQUEST` on that socket within 15 s; unbound
-     `ssh-add -l` unlocks only and still asks before signing).
-   - *Trade-off:* One-tap cold `git push` / `ssh` from a locked Mac, vs strictly
-     requiring `Deadbolt` to be unlocked beforehand.
-5. **Install a login LaunchAgent / `systemd --user` service when turning the SSH agent on?**
-   - **Recommended:** **Yes.** Install `~/Library/LaunchAgents/pw.deadbolt.agent.plist`
-     (`RunAtLoad = true`, starting `deadbolt agent` locked) on `deadbolt ssh on`
-     and remove it on `deadbolt ssh off`.
-   - *Trade-off:* Adds one LaunchAgent file outside `$DEADBOLT_HOME` (never in
-     tests), so the first `ssh` or `git pull` after a Mac reboot finds
-     `~/.deadbolt/ssh.sock` listening without opening `Deadbolt.app` first.
+1. **Touch ID per signature (`each`) by default, with optional `15m` per terminal tab:**
+   Default is **`each`** (one Touch ID tap per SSH login or Git commit), with
+   `ssh_approval = "15m"` in `config.toml` tied to `(tty, session_started)`,
+   while always keeping AI callers (`caller::is_ai`), TTY-less callers, and
+   forwarded connections at `Once`.
+2. **SSH agent forwarding (`ssh -A`) refused by default:**
+   `ssh_allow_forwarding = false` by default, with a `config.toml` / per-key
+   `ssh.toml` (`allow-forwarding = true`) opt-in that always requires a
+   per-signature Touch ID tap labelled `(forwarded via SHA256:…)`.
+3. **`⏎` copies `public-key`, and `private-key` is withheld from default `ItemGet`:**
+   `primary_field("ssh") = "public-key"`, and default `ItemGet` omits
+   `private-key` and `passphrase` (like `otp`), returning them to CLI callers
+   only on explicit `ssh_private = true` with a Touch ID tap.
+4. **Single-tap Touch ID unlock + sign on `ssh.sock` when locked:**
+   When `touch_id_ready` is true and `session-bind@openssh.com` already bound
+   the connection to a local server host key, one Touch ID tap unlocks Deadbolt
+   and issues a 15-second single-use ticket for that connection's matching
+   `SIGN_REQUEST`; unbound `ssh-add -l` unlocks only and still prompts before
+   signing.
+5. **Login auto-start unit installed when turning the SSH agent on:**
+   Enabling the SSH agent on the default store writes
+   `~/Library/LaunchAgents/pw.deadbolt.agent.plist` (macOS) or
+   `~/.config/systemd/user/deadbolt-agent.service` (Linux) and removes it when
+   disabled.

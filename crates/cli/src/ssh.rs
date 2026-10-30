@@ -348,6 +348,7 @@ pub async fn run(
                     otp: false,
                     ssh_private: false,
                     files: Vec::new(),
+                    deleted: false,
                 },
                 from_stdin,
             )

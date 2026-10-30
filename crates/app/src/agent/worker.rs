@@ -8,10 +8,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use deadbolt_client::export;
-use deadbolt_client::protocol::{Change, Code, Command, ItemInfo, Reply, Status, code_field};
+use deadbolt_client::protocol::{
+    Change, Code, Command, ItemInfo, Reply, Secret, Status, code_field,
+};
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
 
 use super::{Done, Failure, ImportFailure, Imported, Job, Values, next_jobs};
 
@@ -220,6 +223,10 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             enabled,
             result: status_after(paths, None, Command::TouchIdSet { enabled }, true).await,
         },
+        Job::SshAgentSet(enabled) => Done::SshAgentSet {
+            enabled,
+            result: status_after(paths, None, Command::SshAgentSet { enabled }, true).await,
+        },
         Job::Lock => Done::Locked(
             deadbolt_client::simple(paths, Command::Lock)
                 .await
@@ -244,12 +251,12 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         }
         Job::Get { id, seq, .. } => Done::Item {
             seq,
-            result: values(paths, id).await,
+            result: values(paths, id, true).await,
         },
         Job::Peek { id, epoch, .. } => Done::Peeked {
             id: id.clone(),
             epoch,
-            result: values(paths, id).await,
+            result: values(paths, id, false).await,
         },
         Job::Code { id, seq } => Done::Code {
             seq,
@@ -378,6 +385,55 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             .await;
             Done::Generated { seq, result }
         }
+        Job::SshGenerate { kind, comment, seq } => {
+            let command = Command::SshGenerate { kind, comment };
+            let result = call(paths, command, |r| match r {
+                Reply::SshGenerated {
+                    private_key,
+                    public_key,
+                    fingerprint,
+                    comment,
+                } => Some(crate::ssh::SshGeneratedKey {
+                    private_key: Zeroizing::new(private_key.expose().to_owned()),
+                    public_key,
+                    fingerprint,
+                    comment,
+                }),
+                _ => None,
+            })
+            .await;
+            Done::SshGenerated { seq, result }
+        }
+        Job::SshImportFile { path, comment, seq } => {
+            let result = async {
+                let raw = Zeroizing::new(std::fs::read_to_string(&path).map_err(|e| Failure {
+                    code: None,
+                    message: e.to_string(),
+                })?);
+                let command = Command::SshInspect {
+                    private_key: Secret::new(raw.as_str()),
+                    passphrase: None,
+                    comment,
+                };
+                call(paths, command, |r| match r {
+                    Reply::SshGenerated {
+                        private_key,
+                        public_key,
+                        fingerprint,
+                        comment,
+                    } => Some(crate::ssh::SshGeneratedKey {
+                        private_key: Zeroizing::new(private_key.expose().to_owned()),
+                        public_key,
+                        fingerprint,
+                        comment,
+                    }),
+                    _ => None,
+                })
+                .await
+            }
+            .await;
+            Done::SshGenerated { seq, result }
+        }
     }
 }
 
@@ -429,11 +485,12 @@ pub(crate) async fn call<T>(
 }
 
 /// One item with its values, and its one-time code if it has one.
-async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
+async fn values(paths: &Paths, id: String, ssh_private: bool) -> Result<Values, Failure> {
     let command = Command::ItemGet {
         vault: None,
         query: vec![id.clone()],
         otp: false,
+        ssh_private,
         files: Vec::new(),
         deleted: false,
     };
@@ -451,6 +508,7 @@ async fn save_file(paths: &Paths, id: String, field: &str, path: &Path) -> Resul
         vault: None,
         query: vec![id],
         otp: false,
+        ssh_private: false,
         files: vec![field.to_owned()],
         deleted: false,
     };

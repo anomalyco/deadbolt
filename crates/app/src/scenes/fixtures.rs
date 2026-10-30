@@ -206,6 +206,8 @@ pub(super) fn status(unlocked: bool) -> Status {
         touch_id_enabled: false,
         touch_id_ready: false,
         touch_id_reset: false,
+        ssh_agent: false,
+        ssh_socket: None,
     }
 }
 

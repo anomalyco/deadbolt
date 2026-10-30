@@ -444,6 +444,14 @@ pub(crate) const SCENES: &[Scene] = &[
     }),
     // Settings on a Mac with Touch ID enabled.
     ("settings-touch-id", settings_touch_id),
+    // Settings with the SSH agent enabled and its ~/.ssh/config button ready.
+    ("settings-ssh", |s| {
+        settings_touch_id(s);
+        if let Some(st) = &mut s.status {
+            st.ssh_agent = true;
+            st.ssh_socket = Some("~/.deadbolt/ssh.sock".into());
+        }
+    }),
     // github.com mirrored from 1Password, shown, then opened with ⌘E.
     ("mirrored", mirrored),
     ("edit-mirrored", |s| {

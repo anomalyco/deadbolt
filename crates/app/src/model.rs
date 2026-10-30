@@ -94,6 +94,7 @@ pub struct App {
     /// Recently Deleted, in the item's place (⇧⌘⌫).
     pub trash: crate::trash::Trash,
     pub health: crate::health::Health,
+    pub ssh: crate::ssh::Ssh,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
@@ -158,6 +159,7 @@ impl App {
             agents: crate::agents::Agents::default(),
             trash: crate::trash::Trash::default(),
             health: crate::health::Health::default(),
+            ssh: crate::ssh::Ssh::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
@@ -189,6 +191,7 @@ impl App {
         changed |= self.tick_copy(now, tx);
         self.tick_code(now, tx);
         changed |= self.tick_import(now);
+        changed |= self.poll_ssh(now, tx);
         if let Some(installer) = &mut self.installer {
             installer.stamp_copy(now, tx);
             changed |= installer.poll(now);
@@ -224,6 +227,7 @@ impl App {
             Done::Unlocked(result) => self.on_unlocked(result, tx),
             Done::UnlockedBiometric(result) => self.on_unlocked_biometric(result, tx),
             Done::TouchIdSet { enabled, result } => self.on_touch_id_set(enabled, result, tx),
+            Done::SshAgentSet { enabled, result } => self.on_ssh_agent_set(enabled, result, tx),
             Done::Locked(result) => match result {
                 Ok(()) => {
                     self.on_locked(tx);
@@ -267,6 +271,7 @@ impl App {
             Done::Favorited { seq, result } => self.on_favorited(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
+            Done::SshGenerated { seq, result } => self.on_ssh_generated(seq, result),
             Done::FileSaved(result) => match result {
                 Ok(name) => self.notice = Some(format!("Saved {name}")),
                 Err(failure) if failure.locked() => self.on_locked(tx),
@@ -424,11 +429,14 @@ impl App {
         }
     }
 
-    fn on_status(&mut self, mut status: Status, tx: &mut Tx) {
-        if self.touch_id_busy
-            && let Some(prev) = &self.status
-        {
-            status.touch_id_enabled = prev.touch_id_enabled;
+    pub(crate) fn on_status(&mut self, mut status: Status, tx: &mut Tx) {
+        if let Some(prev) = &self.status {
+            if self.touch_id_busy {
+                status.touch_id_enabled = prev.touch_id_enabled;
+            }
+            if self.ssh.busy {
+                status.ssh_agent = prev.ssh_agent;
+            }
         }
         let ready = status.initialized;
         let screen = if !status.initialized {
@@ -674,7 +682,7 @@ pub fn copy_label(kind: &str) -> &'static str {
     match kind {
         "card" => "Copy number",
         "note" => "Copy note",
-        "ssh" => "Copy private key",
+        "ssh" => "Copy public key",
         "identity" => "Copy email",
         "passkey" => "Copy username",
         "api" => "Copy credential",
