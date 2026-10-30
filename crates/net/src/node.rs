@@ -20,7 +20,7 @@ use n0_future::{
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -35,6 +35,16 @@ use crate::{
 
 /// Default maximum size of one frame (one heads blob or one entry).
 pub const DEFAULT_MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
+/// Default for how many inbound sync connections one peer may hold open at once.
+pub const DEFAULT_MAX_INBOUND_PER_PEER: usize = 2;
+
+/// Default for how many inbound connections, from handshake to the end of their sync
+/// sessions, the node serves at once from everyone together.
+pub const DEFAULT_MAX_INBOUND: usize = 32;
+
+/// How long an inbound connection may take to finish its handshake (and the gate).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Which relay servers the node uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -66,6 +76,12 @@ pub struct NodeConfig {
     pub max_frame_len: usize,
     /// How long a sync session a peer opened may take before its connection is closed.
     pub inbound_sync_timeout: Duration,
+    /// How many inbound sync connections one peer may hold at once; more are closed as
+    /// busy. Connections this node dialed don't count.
+    pub max_inbound_per_peer: usize,
+    /// How many inbound connections (handshaking, or serving sync) the node takes at once
+    /// from everyone; more are refused before their handshake.
+    pub max_inbound: usize,
     /// Where a new device publishes its pairing record.
     pub rendezvous: Rendezvous,
 }
@@ -81,6 +97,8 @@ impl NodeConfig {
             portmapper: true,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
+            max_inbound_per_peer: DEFAULT_MAX_INBOUND_PER_PEER,
+            max_inbound: DEFAULT_MAX_INBOUND,
             rendezvous: Rendezvous::N0,
         }
     }
@@ -98,6 +116,8 @@ impl NodeConfig {
             portmapper: false,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
+            max_inbound_per_peer: DEFAULT_MAX_INBOUND_PER_PEER,
+            max_inbound: DEFAULT_MAX_INBOUND,
             rendezvous: Rendezvous::Dir(std::env::temp_dir().join("deadbolt-rendezvous")),
         }
     }
@@ -113,6 +133,8 @@ impl fmt::Debug for NodeConfig {
             .field("portmapper", &self.portmapper)
             .field("max_frame_len", &self.max_frame_len)
             .field("inbound_sync_timeout", &self.inbound_sync_timeout)
+            .field("max_inbound_per_peer", &self.max_inbound_per_peer)
+            .field("max_inbound", &self.max_inbound)
             .field("rendezvous", &self.rendezvous)
             .finish()
     }
@@ -261,8 +283,12 @@ impl Node {
             endpoint.clone(),
             gate.clone(),
             handler.clone(),
-            config.max_frame_len,
-            config.inbound_sync_timeout,
+            Limits {
+                max_frame_len: config.max_frame_len,
+                session_timeout: config.inbound_sync_timeout,
+                per_peer: config.max_inbound_per_peer,
+                total: config.max_inbound,
+            },
         )));
         Ok(Self {
             inner: Arc::new(Inner {
@@ -344,31 +370,62 @@ impl Node {
     }
 }
 
+struct Limits {
+    max_frame_len: usize,
+    session_timeout: Duration,
+    per_peer: usize,
+    total: usize,
+}
+
 async fn accept_loop(
     endpoint: Endpoint,
     gate: Arc<Gate>,
     handler: Arc<dyn DynSyncHandler>,
-    max_frame_len: usize,
-    session_timeout: Duration,
+    limits: Limits,
 ) {
+    let Limits {
+        max_frame_len,
+        session_timeout,
+        per_peer,
+        total,
+    } = limits;
+    // One permit per inbound connection, held from before its handshake until it has
+    // been served, so neither handshakes nor sessions pile up without bound.
+    let permits = Arc::new(Semaphore::new(total));
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
+                let Ok(permit) = permits.clone().try_acquire_owned() else {
+                    debug!("refusing inbound connection: {total} already open");
+                    incoming.refuse();
+                    continue;
+                };
                 let gate = gate.clone();
                 let handler = handler.clone();
                 tasks.spawn(async move {
+                    let _permit = permit;
                     // The gate hook runs inside this await; a rejected peer never gets here.
-                    let conn = match incoming.await {
-                        Ok(conn) => conn,
-                        Err(err) => {
+                    let conn = match n0_future::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+                        Ok(Ok(conn)) => conn,
+                        Ok(Err(err)) => {
                             debug!("incoming connection failed: {err}");
+                            return;
+                        }
+                        Err(_) => {
+                            debug!("incoming connection timed out in its handshake");
                             return;
                         }
                     };
                     match conn.alpn() {
                         SYNC_ALPN => {
+                            let peer = *conn.remote_id().as_bytes();
+                            let Some(_slot) = gate.claim_inbound(peer, per_peer) else {
+                                debug!(peer = %fmt_id(&peer), "refusing sync connection: too many open");
+                                conn.close(close::BUSY, b"too many connections");
+                                return;
+                            };
                             serve_sync(conn, handler, max_frame_len, session_timeout).await;
                         }
                         PAIR_ALPN => gate.route_pairing(conn),
@@ -377,6 +434,24 @@ async fn accept_loop(
                 });
             }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+        }
+    }
+}
+
+/// One inbound sync connection counted against its peer's limit, released on drop.
+struct InboundSlot {
+    gate: Arc<Gate>,
+    peer: PeerId,
+}
+
+impl Drop for InboundSlot {
+    fn drop(&mut self) {
+        let mut st = self.gate.lock();
+        if let Some(n) = st.inbound.get_mut(&self.peer) {
+            *n -= 1;
+            if *n == 0 {
+                st.inbound.remove(&self.peer);
+            }
         }
     }
 }
@@ -415,6 +490,8 @@ impl PairingSlot {
 #[derive(Default)]
 struct GateState {
     conns: HashMap<PeerId, Vec<Tracked>>,
+    /// Inbound sync connections being served, per peer ([`InboundSlot`]).
+    inbound: HashMap<PeerId, usize>,
     pairing: Option<PairingSlot>,
     next_slot: u64,
     /// The last code was used (or burnt by a wrong guess), and no new one opened since:
@@ -549,6 +626,21 @@ impl Gate {
             .filter(|(_, list)| list.iter().any(|t| t.kind == ConnKind::Sync))
             .map(|(peer, _)| *peer)
             .collect()
+    }
+
+    /// Counts one more inbound sync connection from `peer`, unless it already has `max`.
+    fn claim_inbound(self: &Arc<Self>, peer: PeerId, max: usize) -> Option<InboundSlot> {
+        let mut st = self.lock();
+        let n = st.inbound.get(&peer).copied().unwrap_or(0);
+        if n >= max {
+            return None;
+        }
+        st.inbound.insert(peer, n + 1);
+        drop(st);
+        Some(InboundSlot {
+            gate: self.clone(),
+            peer,
+        })
     }
 
     pub(crate) fn open_pairing(&self, expires_at: Instant, tx: mpsc::Sender<Connection>) -> u64 {

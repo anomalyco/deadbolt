@@ -290,3 +290,87 @@ async fn three_nodes_converge() {
         assert_eq!(x.store.sorted(), ["a", "b", "c"]);
     }
 }
+
+/// Runs one session on a fresh connection, retrying while the responder still
+/// counts a connection that was just closed.
+async fn sync_once_released(from: &TestNode, to: &TestNode) {
+    within(async {
+        loop {
+            if let Ok(conn) = from.node.connect(to.node.addr()).await
+                && conn.sync().await.is_ok()
+            {
+                conn.close();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+/// A member gets at most two inbound sync connections at once: the third is
+/// closed as busy (not as a membership refusal, so the dialer retries), and a
+/// slot frees once one of the first two closes.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_connections_per_peer_are_bounded() {
+    let (a, b) = pair_of_members(&["a1"], &["b1"]).await;
+
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let conn = within(b.node.connect(a.node.addr())).await.unwrap();
+        within(conn.sync()).await.unwrap();
+        held.push(conn);
+    }
+
+    let extra = within(b.node.connect(a.node.addr())).await.unwrap();
+    let result = within(extra.sync()).await;
+    assert!(
+        matches!(&result, Err(Error::Rejected(r)) if r == "too many connections"),
+        "{result:?}"
+    );
+
+    held.pop().unwrap().close();
+    sync_once_released(&b, &a).await;
+    // The connection still held keeps working.
+    within(held[0].sync()).await.unwrap();
+}
+
+/// The node takes at most `max_inbound` inbound connections from everyone together,
+/// refusing the next before its handshake, and frees a slot when one closes.
+/// Connections the node dialed itself count against neither limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_connections_in_total_are_bounded() {
+    let mut config = NodeConfig::local_only(key());
+    config.max_inbound = 3;
+    let b = TestNode::with_config(Store::with(&["b1"]), config).await;
+    let a = TestNode::new(Store::with(&["a1"])).await;
+    let c = TestNode::new(Store::with(&["c1"])).await;
+    for peer in [&a, &c] {
+        peer.members.add(b.id());
+        b.members.add(peer.id());
+    }
+
+    // B's own dials, open while A and C dial in, don't use up B's inbound slots.
+    let mut outbound = Vec::new();
+    for peer in [&a, &a, &c] {
+        let conn = within(b.node.connect(peer.node.addr())).await.unwrap();
+        within(conn.sync()).await.unwrap();
+        outbound.push(conn);
+    }
+
+    let mut held = Vec::new();
+    for peer in [&a, &a, &c] {
+        let conn = within(peer.node.connect(b.node.addr())).await.unwrap();
+        within(conn.sync()).await.unwrap();
+        held.push(conn);
+    }
+
+    let result = within(c.node.connect(b.node.addr())).await;
+    assert!(matches!(&result, Err(Error::Connect(_))), "{result:?}");
+
+    held.remove(0).close();
+    sync_once_released(&c, &b).await;
+    for conn in held.iter().chain(&outbound) {
+        within(conn.sync()).await.unwrap();
+    }
+}
