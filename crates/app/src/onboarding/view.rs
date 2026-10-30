@@ -378,6 +378,7 @@ fn device_field(s: &App, k: &Kit, flow: Flow) -> El {
         .width(None)
         .invalid(problem.is_some())
         .on_edit(|s: &mut App| &mut s.onboarding.device)
+        .on_change(|s: &mut App, _| s.onboarding.device_edited = true)
         .on_key(super::key)
         .on_submit(move |s: &mut App, _| s.advance_onboarding(flow))
         .build(k)
