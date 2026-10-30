@@ -60,17 +60,7 @@ async function wait<T>(_what: string, fn: () => Promise<T | null | undefined | f
  * entry goes.
  */
 export const PENDING: Record<string, string> = {
-  sms: "#137 codes the user brings",
-  "email-code": "#137 codes the user brings",
-  backup: "#137 codes the user brings",
-  "security-questions": "#137 codes the user brings",
-  pin: "#138 values that fit the field",
-  phone: "#138 values that fit the field",
-  passkey: "#139 a fresh scan when the menu opens",
-  "css-masked": "#140 CSS-masked password boxes",
   "shadow-closed": "#141 closed shadow roots",
-  "dob-masked": "#142 masked birth dates and dependent selects",
-  "address-cascade": "#142 masked birth dates and dependent selects",
   rerender: "#143 forms that re-render on each keystroke",
 }
 const menuFrame = (page: Page) => page.frames().find((f) => f.url().includes("/menu.html")) ?? null
