@@ -101,6 +101,7 @@ impl App {
             return;
         };
         form.name.focused = false;
+        form.tag_input.focused = false;
         for input in &mut form.fields {
             input.edit.focused = false;
         }
@@ -135,6 +136,7 @@ impl App {
         self.close_types();
         self.pick_kind(kind);
         if let Some(form) = self.edit.form.as_mut() {
+            form.tag_input.focused = false;
             for input in &mut form.fields {
                 input.edit.focused = false;
             }

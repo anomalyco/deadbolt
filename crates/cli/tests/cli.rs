@@ -1444,6 +1444,80 @@ fn ai_agents_use_secrets_only_with_a_grant() {
     );
 }
 
+/// Until `policy::decide` (#111): an AI sees a value only with Touch ID
+/// each time, as `deadbolt read` does, and never runs the Never tier.
+#[test]
+fn ai_agents_read_values_only_with_touch_id_and_never_administer() {
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            &format!("otp={OTP_SECRET}"),
+        ],
+    );
+    let refused = |out: &Output, says: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(4), "{err}");
+        assert!(err.contains(says), "{err}");
+        assert!(!err.contains(TOKEN) && out.stdout.is_empty(), "{err}");
+    };
+    // No Touch ID here: values are refused, the item named or not.
+    refused(&as_ai(&a, &["get", "GitHub"]), "Touch ID");
+    refused(&as_ai(&a, &["show", "--reveal", "GitHub"]), "Touch ID");
+    refused(&as_ai(&a, &["code", "GitHub"]), "Touch ID");
+    // A claimed caller name alone isn't an AI.
+    let out = a.output(
+        a.cmd(&["get", "GitHub"])
+            .env("DEADBOLT_CALLER", "an AI")
+            .env_remove("OPENCODE_SESSION_ID"),
+    );
+    assert!(out.status.success());
+
+    for (args, says) in [
+        (&["init", "work"][..], "can't create a vault"),
+        (
+            &["vault", "rename", "personal", "mine"],
+            "can't rename a vault",
+        ),
+        (
+            &["vault", "default", "personal"],
+            "can't change the default vault",
+        ),
+        (&["devices", "remove", "gamma"], "can't remove a device"),
+        (&["rm", "GitHub"], "can't delete an item"),
+        (&["touch-id", "off"], "can't turn Touch ID"),
+    ] {
+        refused(&as_ai(&a, args), says);
+    }
+    // Nothing changed, and the user can still do all of it.
+    assert_eq!(a.run(&["vault", "ls"]).lines().count(), 1);
+    assert_eq!(a.run(&["init", "work"]), "created vault work\n");
+    assert!(a.run(&["ls"]).contains("GitHub"));
+    // Listing stays open to AIs: no values.
+    let ls = as_ai(&a, &["ls"]);
+    assert!(ls.status.success());
+    assert!(String::from_utf8_lossy(&ls.stdout).contains("GitHub"));
+
+    let raw = a.run(&["activity", "--json"]);
+    assert!(!raw.contains(TOKEN), "{raw}");
+    let entries = activity(&a);
+    let refused_as = |command: &str| {
+        entries.iter().any(|e| {
+            e["command"] == command
+                && e["outcome"] == "refused"
+                && e["caller"]["claimed"]["opencode_session"] == "ses_test"
+        })
+    };
+    for command in ["item-get", "item-code", "vault-create", "item-remove"] {
+        assert!(refused_as(command), "{command}: {raw}");
+    }
+}
+
 #[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();
@@ -1975,7 +2049,7 @@ fn import() {
     };
 
     let summary = "4 from Bitwarden (logins 2, cards 1, secure notes 1)\n\
-        dropped: 1 favorite, 1 folder, 1 item's password history\n";
+        dropped: 1 item's password history\n";
     let output = a.try_run(&["import", "--dry-run", file.to_str().unwrap()]);
     assert!(output.status.success());
     no_secrets(&output);
@@ -2020,6 +2094,13 @@ fn import() {
             .any(|s| show.contains(s)),
         "{show}"
     );
+    assert!(
+        show.contains("favorite       yes\n") && show.contains("tags           Work\n"),
+        "{show}"
+    );
+    assert_eq!(a.run(&["tags"]), "Work\t1\n");
+    assert!(a.run(&["items", "--favorites"]).contains("\tGitHub\tdax\n"));
+    assert!(a.run(&["ls", "--tag", "work"]).contains("\tGitHub\tdax\n"));
 
     // Importing again changes nothing.
     let output = a.try_run(&["import", file.to_str().unwrap()]);
@@ -4638,4 +4719,72 @@ fn import_1pux_with_files() {
         again.contains("imported 0") && again.contains("skipped 5 duplicates"),
         "{again}"
     );
+}
+
+#[test]
+fn favorites_and_tags() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "Alpha",
+            "username=personal",
+            "password=pw-a",
+            "-t",
+            "personal",
+        ],
+    );
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "Zeta",
+            "username=ops",
+            "password=pw-z",
+            "--favorite",
+            "-t",
+            "Work/AWS",
+            "-t",
+            "Tax 2026",
+        ],
+    );
+
+    // Favorites rank first in `ls` and `items`.
+    let ls = a.run(&["items"]);
+    let labels: Vec<&str> = ls.lines().map(|l| l.split('\t').nth(1).unwrap()).collect();
+    assert_eq!(labels, ["Zeta", "Alpha"]);
+
+    // Hierarchical tag queries and `deadbolt tags` counts.
+    assert_eq!(
+        a.run(&["tags"]),
+        "personal\t1\nTax 2026\t1\nWork\t1\nWork/AWS\t1\n"
+    );
+    assert!(a.run(&["ls", "#work"]).contains("\tZeta\tops\n"));
+    assert!(!a.run(&["ls", "#work"]).contains("Alpha"));
+    assert!(a.run(&["ls", "#tax-2026"]).contains("\tZeta\tops\n"));
+    assert!(a.run(&["ls", "is:favorite"]).contains("\tZeta\tops\n"));
+
+    // Updating favorite and tags in place, and syncing to a paired device.
+    let b = Device::new();
+    pair(&a, &b, "beta", None);
+    a.run(&[
+        "set",
+        "zeta",
+        "--no-favorite",
+        "--tag",
+        "prod",
+        "--untag",
+        "work/aws",
+    ]);
+    a.run(&["set", "alpha", "--favorite"]);
+    eventually("b to converge on favorite and tags", || {
+        b.run(&["sync"]);
+        let items = b.run(&["items"]);
+        let names: Vec<&str> = items.lines().filter_map(|l| l.split('\t').nth(1)).collect();
+        names == ["Alpha", "Zeta"] && b.run(&["tags"]) == "personal\t1\nprod\t1\nTax 2026\t1\n"
+    });
 }

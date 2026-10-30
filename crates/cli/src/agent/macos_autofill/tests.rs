@@ -198,7 +198,10 @@ async fn autofill_extension_is_confined_to_its_narrow_command_set() {
             query: Vec::new(),
             kind: None,
             deleted: false,
+            tags: Vec::new(),
+            favorites: false,
         },
+        Command::TagList { vault: None },
         Command::ItemRemove {
             vault: None,
             query: vec![gh.item.clone()],

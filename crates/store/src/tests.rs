@@ -552,22 +552,22 @@ fn kdf_params_have_a_practical_budget() {
         bytes[9..13].copy_from_slice(&p.to_le_bytes());
         KdfHeader::decode(&bytes)
     };
-    let gib = 1024 * 1024;
+    let mib = 1024;
     let default = KdfParams::DEFAULT;
     for (m, t, p) in [
         (default.m_cost_kib, default.t_cost, default.p_cost),
-        (gib, 4, 1),
-        (256 * 1024, 16, 4),
-        (64 * 1024, 64, 64),
+        (256 * mib, 6, 1),
+        (128 * mib, 12, 4),
+        (64 * mib, 24, 64),
     ] {
         assert!(header(m, t, p).is_ok(), "{m} KiB x {t} x {p}");
     }
     for (m, t, p) in [
-        (gib + 1, 1, 1),
-        (gib, 5, 1),
-        (512 * 1024, 9, 1),
-        (64 * 1024, 65, 1),
-        (64 * 1024, 3, 65),
+        (256 * mib + 1, 1, 1),
+        (256 * mib, 7, 1),
+        (128 * mib, 13, 1),
+        (64 * mib, 25, 1),
+        (64 * mib, 3, 65),
         (u32::MAX, u32::MAX, u32::MAX),
     ] {
         assert!(
@@ -582,8 +582,8 @@ fn kdf_params_have_a_practical_budget() {
             PASS,
             SECRET,
             KdfParams {
-                m_cost_kib: gib,
-                t_cost: 5,
+                m_cost_kib: 256 * mib,
+                t_cost: 7,
                 p_cost: 1
             },
         ),

@@ -48,7 +48,11 @@ export const REPROBE_MS = 4000
 export const AUTO_OPEN_EVERY_MS = 10 * 60_000
 /** Not now holds back the same login on the same site this long. */
 export const NOT_NOW_MS = 24 * 60 * 60_000
-/** chrome.storage.local: sites the user said Never for. */
+/**
+ * chrome.storage.local: sites the user said Never for, by name, unlike the
+ * other site memories (salted hashes): Settings › Saving lists them to turn
+ * back on, and a hash can't be shown as a name (docs/autofill.md).
+ */
 export const NEVER_KEY = "neverSave"
 /** chrome.storage.session: SHA-256 of `site\nusername` → until when Not now holds it back. */
 const NOT_NOW_KEY = "notNow"

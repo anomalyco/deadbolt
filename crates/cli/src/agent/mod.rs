@@ -50,7 +50,8 @@ use crate::client::{AgentError, protocol, version};
 use crate::config::Config;
 use crate::paths::Paths;
 use crate::protocol::{
-    Answer, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request, Status,
+    Answer, CallerInfo, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request,
+    Status,
 };
 use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
@@ -577,6 +578,8 @@ mod tests {
                 kind: "login".into(),
                 name: Some("offline-login".into()),
                 fields: fields(),
+                favorite: false,
+                tags: Vec::new(),
             },
             Command::ItemGet {
                 vault: None,
@@ -590,6 +593,8 @@ mod tests {
                 query: vec![],
                 kind: None,
                 deleted: false,
+                tags: Vec::new(),
+                favorites: false,
             },
             Command::ItemSet {
                 vault: None,
@@ -597,6 +602,9 @@ mod tests {
                 fields: fields(),
                 name: None,
                 unset: Vec::new(),
+                favorite: None,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
             },
             Command::ItemUnset {
                 vault: None,
@@ -722,13 +730,17 @@ mod tests {
         let (conv, _client, _closed) = conversation();
         let syncing = {
             let agent = agent.clone();
-            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+            tokio::spawn(async move { agent.dispatch(&caller::nobody(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
 
         // One at a time.
         let (conv, _client, _closed) = conversation();
-        let error = agent.clone().dispatch(sync_op(), &conv).await.unwrap_err();
+        let error = agent
+            .clone()
+            .dispatch(&caller::nobody(), sync_op(), &conv)
+            .await
+            .unwrap_err();
         assert_eq!(
             error.to_string(),
             "already syncing from 1Password: try again when it finishes"
@@ -756,7 +768,7 @@ mod tests {
         let (conv, _client, closed) = conversation();
         let syncing = {
             let agent = agent.clone();
-            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+            tokio::spawn(async move { agent.dispatch(&caller::nobody(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
         closed.send_replace(true);
@@ -1463,10 +1475,16 @@ impl Agent {
         sent
     }
 
-    async fn dispatch(self: Arc<Self>, command: Command, conv: &Conversation) -> Result<Reply> {
+    async fn dispatch(
+        self: Arc<Self>,
+        caller: &CallerInfo,
+        command: Command,
+        conv: &Conversation,
+    ) -> Result<Reply> {
         if matches!(command, Command::Status | Command::Stop) {
             return self.run(command, conv).await;
         }
+        self.ai_gate(caller, &command, conv).await?;
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.
@@ -1668,23 +1686,56 @@ impl Agent {
                 query,
                 kind,
                 deleted,
+                tags,
+                favorites,
             } => Ok(Reply::Items {
-                items: self
-                    .with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref(), deleted))?,
+                items: self.with(|s| {
+                    items::list_filtered(
+                        s,
+                        vault.as_deref(),
+                        &query,
+                        kind.as_deref(),
+                        deleted,
+                        &tags,
+                        favorites,
+                    )
+                })?,
+            }),
+            Command::TagList { vault } => Ok(Reply::Tags {
+                tags: self.with(|s| items::tags(s, vault.as_deref()))?,
             }),
             Command::ItemNew {
                 vault,
                 kind,
                 name,
                 fields,
-            } => self.item_write(|s| items::create(s, vault.as_deref(), &kind, name, fields)),
+                favorite,
+                tags,
+            } => self.item_write(|s| {
+                items::create_with(s, vault.as_deref(), &kind, name, fields, favorite, tags)
+            }),
             Command::ItemSet {
                 vault,
                 query,
                 fields,
                 name,
                 unset,
-            } => self.item_write(|s| items::set(s, vault.as_deref(), &query, fields, name, &unset)),
+                favorite,
+                add_tags,
+                remove_tags,
+            } => self.item_write(|s| {
+                items::set_with(
+                    s,
+                    vault.as_deref(),
+                    &query,
+                    fields,
+                    name,
+                    &unset,
+                    favorite,
+                    &add_tags,
+                    &remove_tags,
+                )
+            }),
             Command::ItemUnset {
                 vault,
                 query,

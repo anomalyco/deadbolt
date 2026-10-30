@@ -60,11 +60,12 @@ pub fn login_title(item: &Item) -> String {
     })
 }
 
-/// Closest site match, then most recently filled, title and username.
+/// Closest site match, then starred, then most recently filled, title and username.
 /// Callers break remaining ties by vault and item reference.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rank {
     closeness: Closeness,
+    favorite: Reverse<bool>,
     used: Reverse<u64>,
     title: String,
     username: Option<String>,
@@ -76,6 +77,7 @@ pub fn rank(origin: &str, item: &Item, used: u64) -> Rank {
             .filter_map(|url| closeness(origin, url))
             .min()
             .unwrap_or(Closeness::Site),
+        favorite: Reverse(item.favorite),
         used: Reverse(used),
         title: login_title(item).to_lowercase(),
         username: value(item, "username").map(str::to_owned),

@@ -5,9 +5,7 @@ use std::collections::BTreeSet;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::{
-    ARCHIVED, BAD_OTP, Builder, COLUMN, FAVORITE, Imported, SUPPORTED, Summary, TAG, item_name,
-};
+use super::{ARCHIVED, BAD_OTP, Builder, COLUMN, Imported, SUPPORTED, Summary, item_name, tags};
 use crate::protocol::ImportSource;
 
 /// Apple Passwords' header (macOS 15+, and Safari's before it).
@@ -101,7 +99,6 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
     }
     let mut summary = Summary::new(source);
     let mut used = vec![false; columns.len()];
-    let mut tags = BTreeSet::new();
     let mut record = ::csv::StringRecord::new();
     let mut out = Vec::new();
     while reader.read_record(&mut record).map_err(|e| error(&e))? {
@@ -144,13 +141,11 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
         }
         let favorite = row.favorite;
         let row_tags = std::mem::take(&mut row.tags);
-        let Some(item) = login(row, &mut summary) else {
+        let Some(mut item) = login(row, &mut summary) else {
             continue;
         };
-        if favorite {
-            summary.drop_some(FAVORITE, 1);
-        }
-        tags.extend(row_tags.into_iter().filter(|t| !t.is_empty()));
+        item.favorite = favorite;
+        item.tags = tags::collect(row_tags);
         summary.add(&item);
         out.push(item);
     }
@@ -160,7 +155,6 @@ pub fn export(text: &str) -> Result<(Vec<Imported>, Summary)> {
         .filter(|(c, used)| **c == Column::Other && **used)
         .count();
     summary.drop_some(COLUMN, unused);
-    summary.drop_some(TAG, tags.len());
     Ok((out, summary))
 }
 
@@ -253,12 +247,16 @@ Old,https://old.example,dax,op-old-pw,,false,true,,
                 ("username", "text", "dax"),
             ]
         );
+        assert!(items[0].favorite);
+        assert_eq!(
+            items[0].tags,
+            ["dev".to_string(), "work".to_string()].into()
+        );
         assert_eq!(
             lines(&report),
             [
                 "imported 1 from 1Password (logins 1, cards 0)",
                 "skipped 1 archived item",
-                "dropped: 1 favorite, 2 tags",
             ]
         );
     }

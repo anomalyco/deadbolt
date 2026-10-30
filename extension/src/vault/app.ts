@@ -19,6 +19,7 @@ import { itemDetailView, itemEditView, kindsView } from "./items"
 import { detailView, editView, listView } from "./logins"
 import { settingsView } from "./settings"
 import { reauthView, Setup, unlockView } from "./setup"
+import { sortItems } from "./tags"
 
 export type Surface = "popup" | "page"
 
@@ -355,7 +356,7 @@ export class App {
       this.run({ type: "device-passkeys" }),
     ])
     if (this.status.state !== "ready") return this.render()
-    if (items.ok && Array.isArray(items.reply.items)) this.items = (items.reply.items as unknown[]).map(itemSummary).filter((a): a is ItemSummary => a !== null).sort((a, b) => a.title.localeCompare(b.title))
+    if (items.ok && Array.isArray(items.reply.items)) this.items = sortItems((items.reply.items as unknown[]).map(itemSummary).filter((a): a is ItemSummary => a !== null))
     if (kinds?.ok && Array.isArray(kinds.reply.kinds)) this.kinds = kinds.reply.kinds as ItemKind[]
     if (d.ok && Array.isArray(d.reply.devices)) {
       this.devices = d.reply.devices.map(vaultDevice).filter((x): x is VaultDevice => x !== null)
@@ -448,9 +449,19 @@ function itemSummary(v: unknown): ItemSummary | null {
   const i = v as Record<string, unknown> | null
   if (!i || typeof i.kind !== "string" || typeof i.title !== "string" || typeof i.ref !== "string") return null
   const words = Array.isArray(i.search) ? i.search.filter((w): w is string => typeof w === "string") : []
+  const tags = Array.isArray(i.tags) ? i.tags.filter((t): t is string => typeof t === "string") : []
   const base = i.kind === "login" ? account(i) : { ref: i.ref, title: i.title, urls: Array.isArray(i.urls) ? i.urls.filter((u): u is string => typeof u === "string") : [] }
   if (!base) return null
-  return { ...base, kind: i.kind, title: i.title, search: words, ...(typeof i.detail === "string" ? { detail: i.detail } : {}), ...(typeof i.primary === "string" ? { primary: i.primary } : {}) }
+  return {
+    ...base,
+    kind: i.kind,
+    title: i.title,
+    search: words,
+    favorite: i.favorite === true,
+    tags,
+    ...(typeof i.detail === "string" ? { detail: i.detail } : {}),
+    ...(typeof i.primary === "string" ? { primary: i.primary } : {}),
+  }
 }
 
 function reauthOf(v: unknown): Reauth | null {

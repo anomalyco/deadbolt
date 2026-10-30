@@ -21,3 +21,4 @@ mod onboarding;
 mod panel;
 mod place;
 mod shortcut;
+mod tags;
