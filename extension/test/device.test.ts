@@ -59,7 +59,8 @@ const sentTypes = () => commands().map((c) => c.type)
 const app = () => document.getElementById("app")!
 const headings = () => [...app().querySelectorAll(".stage h1, .stage h2")].map((h) => h.textContent).filter(Boolean)
 /** A button's name: its label if it has one (icon buttons, the first-run choices), else its text. */
-const nameOf = (b: Element) => b.getAttribute("aria-label") ?? b.textContent
+/** A button's accessible name, near enough: its aria-label, what aria-labelledby points at, or its text. */
+const nameOf = (b: Element) => b.getAttribute("aria-label") ?? (b.hasAttribute("aria-labelledby") ? document.getElementById(b.getAttribute("aria-labelledby")!)?.textContent : null) ?? b.textContent
 const buttons = () => [...app().querySelectorAll(".stage button")].map(nameOf)
 const buttonNamed = (name: string) => [...app().querySelectorAll<HTMLButtonElement>(".stage button")].find((b) => nameOf(b) === name)!
 const input = (label: string) => {

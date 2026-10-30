@@ -21,15 +21,6 @@ main.vault.popup {
   display: none !important;
 }
 
-.sr-only {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
-  white-space: nowrap;
-}
-
 /* ---- Header and footer ---- */
 
 .vault .top {
@@ -51,7 +42,7 @@ main.vault.popup {
 .vault-name {
   font-size: 12px;
   font-weight: var(--weight);
-  color: var(--faint);
+  color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -173,7 +164,7 @@ main.vault.popup {
   margin-top: -6px;
   font-size: 11.5px;
   line-height: 1.4;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .hint.error {
@@ -196,6 +187,10 @@ main.vault.popup {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.toolbar-spacer {
+  flex: 1;
 }
 
 .toolbar .back {
@@ -285,7 +280,7 @@ main.vault.popup {
 }
 
 .vault .input::placeholder {
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .vault .input:focus-visible {
@@ -491,7 +486,7 @@ main.vault.popup {
 }
 
 .chevron {
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .chevron svg {
@@ -529,7 +524,7 @@ main.vault.popup {
   font-family: var(--sans);
   font-size: 13px;
   font-weight: 400;
-  color: var(--faint);
+  color: var(--text-faint);
   user-select: none;
 }
 
@@ -594,7 +589,7 @@ main.vault.popup {
   gap: 6px;
   margin-top: 6px;
   font-size: 11.5px;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .preset-note svg {
@@ -695,7 +690,7 @@ main.vault.popup {
   font-family: var(--sans);
   font-size: 11px;
   letter-spacing: var(--tracking-small);
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .rows {
@@ -771,7 +766,7 @@ main.vault.popup {
   font-size: 11.5px;
   line-height: 14px;
   letter-spacing: 0;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 /* A row's actions stay out of the way until the row is wanted. */
@@ -817,7 +812,7 @@ main.vault.popup {
 
 .site-none {
   font-size: 12px;
-  color: var(--faint);
+  color: var(--text-faint);
   padding: 0 2px;
 }
 
@@ -1012,7 +1007,7 @@ main.vault.popup {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--faint);
+  color: var(--text-faint);
   transition: color 200ms ease-out;
 }
 
@@ -1296,4 +1291,21 @@ main.vault.popup {
 
 .about .buttons {
   display: flex;
+}
+
+/* Reduced motion (theme.css swaps every animation for a fade): what would
+   repeat, a spinner, a breathing dot or a shimmer, would blink forever, so
+   it stays still instead; the one-time code's ring still drains, which only
+   shows time passing. */
+@media (prefers-reduced-motion: reduce) {
+  .icon-button.spinning svg,
+  .sync-dot.busy,
+  .state-icon.pulse,
+  .skeleton-row {
+    animation-name: none !important;
+  }
+
+  .ring .arc {
+    animation-name: drain !important;
+  }
 }

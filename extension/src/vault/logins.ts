@@ -13,7 +13,7 @@ import { siteTile } from "../ui/site-icon"
 import type { App, View } from "./app"
 import { enrollment, verify } from "./biometric"
 import { deleteButton, kindAvatar, kindName, secretOf } from "./items"
-import { button, copied, field, glyph, hostOf, iconButton, para, refuse, slidingHighlight, toolbar } from "./kit"
+import { button, copied, field, glyph, hostOf, iconButton, keepFocus, para, refuse, slidingHighlight, toolbar } from "./kit"
 
 const url = (a: Account) => a.urls.find(Boolean) ?? ""
 
@@ -59,7 +59,7 @@ function row(app: App, a: Account, fill: boolean, tile: HTMLElement, failed: (me
   const main = button("vrow-main", [tile, h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
     app.go({ name: "item", ref: a.ref }),
   )
-  main.setAttribute("aria-label", `${a.title}${a.username ? `, ${a.username}` : ""}`)
+  main.dataset.ref = a.ref
   const say = (m: string) => app.announce(m)
   const user = iconButton(glyph("user"), "Copy username", (b) => a.username && void copied(b, a.username, say, "Copied the username"))
   if (!a.username) user.disabled = true
@@ -96,7 +96,7 @@ function itemRow(app: App, item: ItemSummary): HTMLElement {
   const main = button("vrow-main", [kindAvatar(item), h("span", { class: "text" }, h("span", { class: "title" }, item.title), h("span", { class: "sub" }, item.detail ? `${kindName(app, item.kind)} · ${item.detail}` : kindName(app, item.kind)))], () =>
     app.go({ name: "item", ref: item.ref, kind: item.kind }),
   )
-  main.setAttribute("aria-label", `${item.title}, ${kindName(app, item.kind)}`)
+  main.dataset.ref = item.ref
   const actions = h("span", { class: "vrow-actions" })
   const primary = item.primary
   if (primary && item.kind !== "document") {
@@ -193,7 +193,8 @@ export function listView(app: App): View {
     return h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, label), aside ? h("span", { class: "mono muted" }, aside) : null), rows)
   }
 
-  const paint = () => {
+  // Capture focus before cached rows move into their new sections.
+  const paint = () => keepFocus(body, () => {
     if (previousItems !== app.items || previousSite !== app.site) {
       icons.disconnect()
       cached.clear()
@@ -239,7 +240,7 @@ export function listView(app: App): View {
       if (!app.site.learning) parts.push(learnLine(app.site.tabId, () => void app.refresh()))
     }
     body.replaceChildren(...parts)
-  }
+  })
 
   search.addEventListener("input", () => {
     app.query = search.value
@@ -265,7 +266,13 @@ export function listView(app: App): View {
     }
   })
   paint()
-  return { el, update: paint, focus: () => search.focus(), leave: () => icons.disconnect() }
+  const focus = () => {
+    const ref = app.returnTo
+    app.returnTo = null
+    const back = ref ? [...el.querySelectorAll<HTMLElement>(".vrow-main")].find((r) => r.dataset.ref === ref) : undefined
+    ;(back ?? search).focus()
+  }
+  return { el, update: paint, focus, leave: () => icons.disconnect() }
 }
 
 /** The one-time code's ring: it empties over the code's period, by CSS, so nothing ticks here but the seconds. */
@@ -422,7 +429,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       lines.push(
         line(
           "One-time code",
-          h("span", { class: "totp" }, h("span", { class: "mono code-value" }, code), h("span", { class: `countdown${left <= 5 ? " ending" : ""}` }, totpRing(t.period, left), secs)),
+          h("span", { class: "totp" }, h("span", { class: "mono code-value" }, code), h("span", { class: `countdown${left <= 5 ? " ending" : ""}` }, totpRing(t.period, left), secs, h("span", { class: "sr-only" }, " seconds left"))),
           iconButton(icon("copy"), "Copy one-time code", async (b) => {
             await app.offerClearing()
             await copySecret(app, b, t.code)
@@ -441,11 +448,13 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     if (website) lines.push(line("Website", h("span", {}, host), iconButton(glyph("open"), "Open site", () => openSite(website))))
     const notes = d.fields.find((f) => f.name === "notes")?.value
     if (notes) lines.push(h("div", { class: "line" }, h("span", { class: "line-label" }, "Notes"), h("span", { class: "value lines" }, notes), h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy notes", (b) => void copied(b, notes, say, "Copied the notes")))))
-    el.replaceChildren(
-      toolbar("", () => app.go({ name: "list" }, -1), button("btn", "Edit", () => app.go({ name: "edit", ref, kind: "login" }))),
-      h("div", { class: "detail-head" }, avatarFor(app, d.title, d.url ?? "", "detail"), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"))),
-      h("div", { class: "box" }, ...lines),
-      h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
+    keepFocus(el, () =>
+      el.replaceChildren(
+        toolbar("", () => app.go({ name: "list" }, -1), button("btn", "Edit", () => app.go({ name: "edit", ref, kind: "login" }))),
+        h("div", { class: "detail-head" }, avatarFor(app, d.title, d.url ?? "", "detail"), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"))),
+        h("div", { class: "box" }, ...lines),
+        h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
+      ),
     )
   }
 

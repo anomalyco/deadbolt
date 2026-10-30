@@ -159,7 +159,7 @@ try {
           await search.fill("")
           await search.focus()
           for (let i = 0; i < 35; i++) await popup.keyboard.press("ArrowDown")
-          const focused = await popup.evaluate(() => document.activeElement?.getAttribute("aria-label"))
+          const focused = await popup.evaluate(() => document.activeElement?.querySelector(".title")?.textContent)
           if (!focused?.startsWith("Fixture 0034")) throw new Error(`Arrow navigation lost its row: ${focused}`)
           await popup.locator(".vrow-main").last().scrollIntoViewIfNeeded()
           await popup.locator(".vrow-main").last().click()
@@ -241,7 +241,11 @@ try {
     await menu.locator("button.row").first().click()
     await web.waitForFunction(() => (document.querySelector("#password") as HTMLInputElement).value === "synthetic-only-password")
     record("inline pick to filled fields", performance.now() - pick)
-    await menu.getByText("Filled", { exact: true }).waitFor()
+    // Ignore the live region / screen-reader copy; time the visible pill's
+    // settled label, including its roll animation.
+    const filled = menu.locator('.pill-label[data-text="Filled"]')
+    await filled.waitFor()
+    await filled.evaluate((label) => Promise.all(label.getAnimations({ subtree: true }).map((a) => a.finished.catch(() => {}))))
     record("inline pick to Filled", performance.now() - pick)
     await web.close()
   }
