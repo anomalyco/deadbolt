@@ -43,6 +43,8 @@ pub enum Progress {
     },
     Created(Result<VaultInfo, Failure>),
     Joined(Result<VaultInfo, Failure>),
+    /// What this computer calls itself, to suggest as the device's name.
+    DeviceName(String),
 }
 
 /// This device's name and passphrase, when it isn't set up yet.
@@ -59,6 +61,8 @@ pub struct Worker {
     thread: Option<JoinHandle<()>>,
     /// Progress to deliver at set times, for scenes (no agent).
     script: Vec<(f64, Progress)>,
+    /// The device name lookup has started.
+    naming: bool,
 }
 
 impl Worker {
@@ -77,6 +81,7 @@ impl Worker {
             cancel: None,
             thread: None,
             script: Vec::new(),
+            naming: false,
         }
     }
 
@@ -99,6 +104,23 @@ impl Worker {
         let due = self.script.iter().take_while(|(at, _)| *at <= now).count();
         out.extend(self.script.drain(..due).map(|(_, p)| p));
         (out, self.script.first().map(|(at, _)| *at))
+    }
+
+    /// Looks up what this computer calls itself on a thread (`scutil` can
+    /// take tens of milliseconds) and posts it as `Progress::DeviceName`.
+    /// Once per worker, and not offline: scenes name their devices.
+    pub fn name_device(&mut self) {
+        if self.agent.is_none() || self.naming {
+            return;
+        }
+        self.naming = true;
+        // No thread, no suggestion: the field keeps its placeholder.
+        self.inbox
+            .poster()
+            .spawn("deadbolt-device-name", |post| {
+                post.send(Progress::DeviceName(super::default_device_name()));
+            })
+            .ok();
     }
 
     /// Sets up this device if `device` is given, then creates `vault`.

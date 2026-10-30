@@ -42,6 +42,7 @@ import { fillable, fillFields, ownValue, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { learning } from "./learn"
 import { deepActiveElement } from "./shadow"
+import { SIGNIN_SETTING } from "../auth-state"
 
 export interface PageState {
   targets(): Field[]
@@ -297,7 +298,7 @@ interface Rect {
 
 /** Where the surface goes in its mode, in the viewport. */
 function targetRect(): Rect | null {
-  if (mode === "save") return corner(wanted.width || SAVE_GUESS.width, wanted.height || SAVE_GUESS.height)
+  if (mode === "save" || mode === "signin") return corner(wanted.width || SAVE_GUESS.width, wanted.height || SAVE_GUESS.height)
   // The saved pill stays in the same corner. A pill for a frame's field sits
   // on where the field shows (anchorBox), out of sight while the frame's
   // fields are checked (see hold).
@@ -435,12 +436,14 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   // No token in the URL: the menu asks for it (see onMenuReady).
   frame.src = chrome.runtime.getURL("menu.html")
   frame.setAttribute("allow", "")
+  // A screen reader names the frame by this; it's all the page side says (nothing of the vault).
+  frame.title = "Deadbolt"
   frame.style.cssText = frameStyle(RADIUS)
   root.append(frame)
   ;((el && modalAround(el)) ?? document.documentElement).append(box)
   show(box)
   position()
-  if (as === "save") {
+  if (as === "save" || as === "signin") {
     // From the corner, where the toolbar button is: 24 px of travel and a fade.
     frame.style.borderRadius = `${SAVE_GUESS.height / 2}px`
     frame.animate(
@@ -604,6 +607,15 @@ export function openSaveSurface(t: string) {
     setTimeout(() => token === t && wanted.height === 0 && leave(), SAVE_LOAD_MS),
     setTimeout(() => token === t && leave(), SAVE_CAP_MS),
   ]
+  return true
+}
+
+/** Never replaces a menu, a save, or the person's typing; never focuses. */
+function openSignInSurface(t: string) {
+  const active = deepActiveElement()
+  if (!isTop || document.hidden || host || learning() || (active instanceof HTMLInputElement && active.value)) return false
+  openMenu(null, t, 0, "signin")
+  saveTimers = [setTimeout(() => token === t && leave(), SAVE_CAP_MS)]
   return true
 }
 
@@ -831,6 +843,7 @@ function onPointerDown(event: PointerEvent) {
 
 function onKeyDown(event: KeyboardEvent) {
   if (!event.isTrusted) return
+  if (mode === "signin" && event.key === "Escape") return closeMenu(false, true)
   lastGestureAt = Date.now()
   lastPointer = null
   const target = event.composedPath()[0]
@@ -866,6 +879,7 @@ function onKeyDown(event: KeyboardEvent) {
  * background's db:approve fixed for this fill. Answers with what was written.
  */
 async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Promise<FillAck> {
+  if (message.automatic && (!isTop || document.hidden || (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true)) return { filled: [] }
   // A sign-in session's step (no pick) fills nothing while the tab learns: the user signs in by hand.
   if (message.notice && learning()) return { filled: [] }
   // A pick from the menu folded it into a pill on the field, which stays to
@@ -890,7 +904,7 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
   // (see ownPill). Each write checks again.
   if (mode === "pill") await pillSettled(700)
   if (state.form() !== message.form) return { filled: [] }
-  const { filled, last } = await fillFields(targets, message.values, (el) => fillable(el, ownPill()))
+  const { filled, last } = await fillFields(targets, message.values, (el) => (!message.automatic || !document.hidden) && fillable(el, ownPill()))
   if (filled.includes("new-password") && message.values.newPassword && typeof message.generated === "string")
     rememberGenerated(message.generated, message.values.newPassword)
   if (filled.length) {
@@ -1131,6 +1145,8 @@ export function initMenu(page: PageState) {
         return void respond(true)
       case "db:surface":
         return void respond(openSaveSurface(String(message.token)))
+      case "db:signin-offer":
+        return void respond(openSignInSurface(String(message.token)))
       case "db:point":
         return void respond(pointAtProvider(String(message.provider)))
       case "db:chooser":

@@ -30,6 +30,15 @@ let learningShown = false
 let icons: IconSettings = { menu: false, vault: true }
 /** The settings show in place of the site's logins. */
 let settingsOpen = false
+/** The control to give focus back to once the popup has repainted (its data-focus), as a repaint replaces every element. */
+let refocus: string | null = null
+/** What a screen reader says as it happens ("Copied the username"); outside #app, so a repaint keeps it. */
+const live = h("p", { class: "sr-only", role: "status", "aria-live": "polite" })
+document.body.append(live)
+function announce(text: string) {
+  live.textContent = ""
+  setTimeout(() => (live.textContent = text), 50)
+}
 /** A login's tile: its site's icon, dithered in the first time this popup shows it, or its letter (see ui/site-icon.ts). */
 function tileFor(a: Account, index: number): HTMLElement {
   const url = a.urls.find(Boolean) ?? ""
@@ -42,13 +51,14 @@ function settingsBody(): HTMLElement {
   const done = h("button", { class: "btn", type: "button" }, "Done")
   done.addEventListener("click", () => {
     settingsOpen = false
+    refocus = "settings"
     void render(true)
   })
   return h(
     "section",
     { class: "site settings" },
     h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")),
-    ...appearanceRows(icons, () => {}),
+    ...appearanceRows(icons, announce),
     h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks."),
     h("div", { class: "buttons" }, done),
   )
@@ -63,11 +73,15 @@ const code = (text: string) => h("code", {}, text)
 function commandBlock(command: string): HTMLElement {
   const copy = h("button", { class: "icon-button", type: "button", title: "Copy command", "aria-label": "Copy command" }, icon("copy"))
   copy.addEventListener("click", async () => {
-    await navigator.clipboard.writeText(command).catch(() => {})
+    if (!(await writeClipboard(command))) return announce("Couldn't copy.")
     swapIcon(copy, "check")
+    announce("Copied the command")
   })
   return h("div", { class: "command" }, h("code", {}, command), copy)
 }
+
+/** Writes `text` to the clipboard: whether it could. */
+const writeClipboard = (text: string) => navigator.clipboard.writeText(text).then(() => true, () => false)
 
 function swapIcon(button: HTMLElement, name: "check" | "copy") {
   button.replaceChildren(icon(name))
@@ -196,8 +210,9 @@ function accountRow(a: Account, first: boolean, index = 0): HTMLElement {
   )
   copy.addEventListener("click", async () => {
     if (!a.username) return
-    await navigator.clipboard.writeText(a.username).catch(() => {})
+    if (!(await writeClipboard(a.username))) return announce("Couldn't copy.")
     swapIcon(copy, "check")
+    announce("Copied the username")
   })
   fill.addEventListener("click", async () => {
     if (tabId === undefined) return
@@ -215,6 +230,7 @@ function showError(message: string) {
   if (!el) return
   el.textContent = message
   el.hidden = false
+  announce(message)
 }
 
 /** With an offer showing, its Save is the one primary button. */
@@ -246,9 +262,10 @@ function siteBody(reply: PopupReply): HTMLElement {
 
 /** Opens and closes the popup's settings. */
 function settingsButton(): HTMLElement {
-  const b = h("button", { class: `icon-button${settingsOpen ? " on" : ""}`, type: "button", title: "Settings", "aria-label": "Settings", "aria-pressed": String(settingsOpen) }, glyph("gear"))
+  const b = h("button", { class: `icon-button${settingsOpen ? " on" : ""}`, type: "button", title: "Settings", "aria-label": "Settings", "aria-pressed": String(settingsOpen), "data-focus": "settings" }, glyph("gear"))
   b.addEventListener("click", () => {
     settingsOpen = !settingsOpen
+    refocus = "settings"
     void render(true)
   })
   return b
@@ -309,10 +326,13 @@ function paint(reply: PopupReply | null, changed: boolean) {
           ]),
   )
   root.replaceChildren(
-    h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill(status)),
+    h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("h1", { class: "brand" }, "Deadbolt"), pill(status)),
     body2,
     h("footer", { class: "bottom" }, open ?? h("span"), h("span", { class: "bottom-end" }, status.state === "ready" ? (native ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : lockButton()) : null, native ? settingsButton() : null)),
   )
+  // Keyboard focus stays on the button that repainted the popup, not on the page's body.
+  if (refocus) root.querySelector<HTMLElement>(`[data-focus="${refocus}"]`)?.focus({ preventScroll: true })
+  refocus = null
   // The first paint is at rest. After that, a whole new state is softened:
   // the old one blurs, shrinks and fades out over the new one as it comes in,
   // on the same frame, never waiting for the exit.

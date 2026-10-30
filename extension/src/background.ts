@@ -14,6 +14,7 @@ import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
 import { SiteIcons } from "./bg/site-icons"
+import { UniversalSignIn } from "./bg/universal"
 import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
 import type { DeviceReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
@@ -27,6 +28,7 @@ const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(ta
 const learner = new Learner(host)
 const forms = new Forms(host)
 const siteIcons = new SiteIcons(host)
+const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(tabId) !== undefined)
 /**
  * The device.html tab the inline menu's locked row opened. Memory only, like
  * Autofill's return target: a restarted worker returns nowhere. A later click
@@ -36,6 +38,7 @@ const siteIcons = new SiteIcons(host)
 let unlockTab: number | undefined
 let openingUnlock: Promise<void> | null = null
 saver.signedIn = (tabId, site) => {
+  void universal.signedIn(tabId)
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
   void siteIcons.used(tabId, site)
@@ -68,6 +71,13 @@ host.onChange((status, change) => {
 
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
   switch (message.type) {
+    case "db:signin-check":
+      return universal.check(sender)
+    case "db:signin-signout":
+      return universal.signedOut(sender)
+    case "db:signin-stop":
+      if (sender.tab?.id !== undefined) return autofill.stopAutomatic(sender.tab.id)
+      return
     case "db:query":
       return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount, message.box)
     case "db:page":
@@ -93,27 +103,33 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return learner.step(sender, String(message.session), message.step)
     // The save offer's surface uses the menu's messages with a token of its own (see bg/save.ts).
     case "db:menu-close":
+      if (universal.owns(message.token)) return universal.closed(message.token, sender, message.dismissed === true)
       if (saver.ownsSurface(message.token)) return saver.surfaceClosed(String(message.token), sender)
       if (forms.owns(message.token)) return forms.menuClose(String(message.token), sender)
       return autofill.menuClose(String(message.token), message.dismissed === true, sender)
     case "db:menu-load":
+      if (universal.owns(message.token)) return universal.load(message.token, sender, String(message.parent))
       if (saver.ownsSurface(message.token)) return saver.surfaceLoad(message.token, sender, String(message.parent))
       if (forms.owns(message.token)) return forms.menuLoad(message.token, sender, String(message.parent))
       return autofill.menuLoad(message.token, sender, String(message.parent))
     case "db:menu-pick":
+      if (universal.owns(message.token)) return universal.pick(message.token, String(message.ref), sender)
       if (forms.owns(message.token)) return forms.menuPick(message.token, String(message.ref), sender)
       return autofill.menuPick(message.token, String(message.ref), sender)
     case "db:menu-generate":
       return autofill.menuGenerate(message.token, sender)
     case "db:menu-signin":
+      if (universal.owns(message.token)) return universal.provider(message.token, String(message.ref), sender)
       return autofill.menuSignIn(message.token, String(message.ref), sender)
     case "db:menu-dismiss":
+      if (universal.owns(message.token)) return universal.dismiss(message.token, sender)
       if (saver.ownsSurface(message.token)) return saver.surfaceDismiss(message.token, sender)
       if (forms.owns(message.token)) return forms.menuDismiss(message.token, sender)
       return autofill.menuDismiss(message.token, sender)
     case "db:menu-unlock":
       return menuUnlock(String(message.token), sender)
     case "db:menu-resize":
+      if (universal.owns(message.token)) return universal.resize(message.token, sender, Number(message.height), message.width, message.mode)
       if (saver.ownsSurface(message.token)) return saver.surfaceResize(message.token, sender, Number(message.height), message.width, message.mode)
       if (forms.owns(message.token)) return forms.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
       return autofill.menuResize(message.token, Number(message.height), sender, message.width, message.mode)
@@ -203,6 +219,7 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) =>
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void universal.closeTab(tabId)
   if (tabId === unlockTab) unlockTab = undefined
   autofill.forgetTab(tabId)
   forms.forgetTab(tabId)
@@ -215,6 +232,7 @@ chrome.webNavigation.onCommitted.addListener((d) => {
   void autofill.navigated(d)
   forms.navigated(d)
   if (d.frameId === 0) {
+    void universal.closeTab(d.tabId)
     saver.navigated(d.tabId, d.url, d.transitionType)
     signInWith.navigated(d.tabId, d.url)
   }

@@ -145,8 +145,16 @@ export class Setup {
   }
 
   private choose(): View {
-    const choice = (glyphEl: Element, title: string, sub: string, act: () => void, primary = false) =>
-      button(`choice${primary ? " primary" : ""}`, [h("span", { class: "tile" }, glyphEl), h("span", { class: "choice-text" }, h("span", { class: "choice-title" }, title), h("span", { class: "choice-sub" }, sub)), h("span", { class: "chevron" }, glyph("chevron"))], act, { "aria-label": title, "aria-description": sub })
+    // Named by its title, described by the line under it, both as shown.
+    const choice = (glyphEl: Element, title: string, sub: string, act: () => void, primary = false) => {
+      const id = `choice-${Math.random().toString(36).slice(2, 9)}`
+      return button(
+        `choice${primary ? " primary" : ""}`,
+        [h("span", { class: "tile" }, glyphEl), h("span", { class: "choice-text" }, h("span", { class: "choice-title", id: `${id}-title` }, title), h("span", { class: "choice-sub", id: `${id}-sub` }, sub)), h("span", { class: "chevron" }, glyph("chevron"))],
+        act,
+        { "aria-labelledby": `${id}-title`, "aria-describedby": `${id}-sub` },
+      )
+    }
     const pair = choice(glyph("link"), "Pair with an existing device", "Use the vault you already have on your Mac, phone or another browser", () => void this.start(), true)
     // The Deadbolt CLI installed this copy, so Deadbolt is on this computer:
     // offer it by name. Pairing is the same either way (a code it admits).
@@ -157,8 +165,6 @@ export class Setup {
       const sub = "Use the vault you already have here: this browser shows a code to run deadbolt pair with"
       pair.querySelector(".choice-title")!.textContent = title
       pair.querySelector(".choice-sub")!.textContent = sub
-      pair.setAttribute("aria-label", title)
-      pair.setAttribute("aria-description", sub)
     })
     const create = choice(glyph("plus"), "Create a new vault", "Start fresh, with this browser as its first device", () => this.to({ step: "create" }, 1))
     return {
