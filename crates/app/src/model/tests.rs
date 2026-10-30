@@ -122,6 +122,40 @@ fn replies_from_before_a_lock_are_dropped() {
     }
 }
 
+/// An unlock whose list fails (the default vault is unavailable) leaves
+/// nothing loaded and nothing selected; the failure must still show rather
+/// than a blank, still-loading page.
+#[test]
+fn a_failed_list_after_unlocking_says_why() {
+    let mut rt = vault();
+    let unlocked = rt.state.status.clone();
+    rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
+    rt.update(|s, tx| s.apply(Done::Status(unlocked.clone()), tx));
+    assert_eq!(rt.state.screen, Screen::Vault);
+    let generation = rt.state.generation;
+    let message = "vault Work (abc) is unavailable: bad history; its stored entries are retained";
+    rt.update(|s, tx| {
+        s.apply(
+            Done::Items {
+                generation,
+                result: Err(Failure {
+                    code: None,
+                    message: message.into(),
+                }),
+            },
+            tx,
+        );
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.loaded && rt.state.selected_item().is_none());
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref().is_some_and(|t| t.contains(message))),
+        "shows the list failure"
+    );
+}
+
 /// The panel forgets everything as it hides; a lock and the replies to
 /// what it asked before, landing while it's hidden, bring nothing back.
 #[test]
@@ -442,6 +476,98 @@ fn settings_touch_id_toggle_sends_command_and_reverts_on_failure() {
         "restored from fresh Status on failure"
     );
     assert_eq!(rt.state.touch_id_error.as_deref(), Some("Touch ID failed"));
+}
+
+#[test]
+fn settings_ssh_agent_toggle_and_ssh_key_generator_update_state() {
+    use crate::agent::{Agent, Failure, Job};
+    use crate::ssh::SshGeneratedKey;
+    use deadbolt_client::protocol::SshKeyKind;
+    use zeroize::Zeroizing;
+
+    let mut rt = main("settings-touch-id");
+    let (agent, jobs, _replies) = Agent::scripted();
+    rt.state.agent = agent;
+    assert!(!rt.state.ssh_agent_enabled());
+    let initial_status = rt.state.status.clone().unwrap();
+
+    rt.update(|s, _| s.toggle_ssh_agent());
+    assert!(rt.state.ssh_agent_enabled());
+    assert!(rt.state.ssh.busy);
+    assert!(jobs.try_iter().any(|j| matches!(j, Job::SshAgentSet(true))));
+
+    // Intermediate Status replies preserve the pending switch state.
+    rt.update(|s, tx| s.apply(Done::Status(Some(initial_status.clone())), tx));
+    assert!(rt.state.ssh_agent_enabled());
+
+    // Failure restores the prior switch state and shows the error.
+    rt.update(|s, tx| {
+        s.apply(
+            Done::SshAgentSet {
+                enabled: true,
+                result: Err((
+                    Failure {
+                        code: None,
+                        message: "bind failed".into(),
+                    },
+                    Some(Box::new(initial_status)),
+                )),
+            },
+            tx,
+        );
+    });
+    assert!(!rt.state.ssh_agent_enabled());
+    assert_eq!(rt.state.ssh.error.as_deref(), Some("bind failed"));
+
+    // Generating an SSH key on a new SSH item fills private-key, public-key, and fingerprint.
+    rt.update(|s, _| {
+        s.close_settings();
+        s.new_item();
+        s.choose_type("ssh");
+        s.set_ssh_kind(SshKeyKind::EcdsaP256);
+        s.generate_ssh_key();
+    });
+    let seq = jobs
+        .try_iter()
+        .find_map(|j| match j {
+            Job::SshGenerate {
+                kind: SshKeyKind::EcdsaP256,
+                seq,
+                ..
+            } => Some(seq),
+            _ => None,
+        })
+        .expect("SshGenerate queued");
+    rt.update(|s, tx| {
+        s.apply(
+            Done::SshGenerated {
+                seq,
+                result: Ok(SshGeneratedKey {
+                    private_key: Zeroizing::new("-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----".into()),
+                    public_key: "ecdsa-sha2-nistp256 AAAAE2VjZHNh alice@laptop".into(),
+                    fingerprint: "SHA256:testfp".into(),
+                    comment: Some("alice@laptop".into()),
+                }),
+            },
+            tx,
+        );
+    });
+    let form = rt.state.edit.form.as_ref().unwrap();
+    let val = |name: &str| {
+        form.fields
+            .iter()
+            .find(|f| f.name == name)
+            .unwrap()
+            .edit
+            .text
+            .as_str()
+    };
+    assert_eq!(
+        val("public-key"),
+        "ecdsa-sha2-nistp256 AAAAE2VjZHNh alice@laptop"
+    );
+    assert_eq!(val("fingerprint"), "SHA256:testfp");
+    assert_eq!(val("comment"), "alice@laptop");
 }
 
 #[test]

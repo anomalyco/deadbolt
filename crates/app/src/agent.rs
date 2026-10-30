@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use deadbolt_client::export::ExportError;
 use deadbolt_client::protocol::{
-    ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, ImportReport, ItemInfo,
-    MirrorReport, Status,
+    ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, FindingKind, HealthReport,
+    ImportReport, ItemInfo, MirrorReport, SshKeyKind, Status,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -42,6 +42,7 @@ pub enum Job {
     Unlock(Zeroizing<String>),
     UnlockBiometric,
     TouchIdSet(bool),
+    SshAgentSet(bool),
     Lock,
     /// The list; `generation` tells a reply from before a lock from a current one.
     List {
@@ -127,6 +128,36 @@ pub enum Job {
     Generate {
         length: usize,
         symbols: bool,
+        url: Option<String>,
+        seq: u64,
+    },
+    /// Password health findings and counts (`health::Health`).
+    Health {
+        seq: u64,
+        online: bool,
+    },
+    /// Silences or restores a finding on `id`.
+    HealthIgnore {
+        id: String,
+        kind: FindingKind,
+        ignored: bool,
+        seq: u64,
+    },
+    /// Turns Have I Been Pwned breach checks on or off in `config.toml`.
+    BreachChecksSet {
+        enabled: bool,
+        seq: u64,
+    },
+    /// A new SSH key pair from the agent's generator.
+    SshGenerate {
+        kind: SshKeyKind,
+        comment: Option<String>,
+        seq: u64,
+    },
+    /// Reads an SSH private key file and normalizes it in the agent.
+    SshImportFile {
+        path: PathBuf,
+        comment: Option<String>,
         seq: u64,
     },
     /// The newest Activity entries (`activity::Activity`).
@@ -168,6 +199,10 @@ pub enum Done {
     /// failed so the lock screen sees if the biometric slot was reset.
     UnlockedBiometric(Result<Status, (Failure, Option<Box<Status>>)>),
     TouchIdSet {
+        enabled: bool,
+        result: Result<Status, (Failure, Option<Box<Status>>)>,
+    },
+    SshAgentSet {
         enabled: bool,
         result: Result<Status, (Failure, Option<Box<Status>>)>,
     },
@@ -218,6 +253,10 @@ pub enum Done {
         seq: u64,
         result: Result<Zeroizing<String>, Failure>,
     },
+    SshGenerated {
+        seq: u64,
+        result: Result<crate::ssh::SshGeneratedKey, Failure>,
+    },
     /// A file saved (its name), or why not.
     FileSaved(Result<String, Failure>),
     Activity {
@@ -235,6 +274,15 @@ pub enum Done {
     TrashItem {
         seq: u64,
         result: Result<Values, Failure>,
+    },
+    Health {
+        seq: u64,
+        result: Result<HealthReport, Failure>,
+    },
+    BreachChecksSet {
+        seq: u64,
+        enabled: bool,
+        result: Result<(), Failure>,
     },
     /// A report went, or didn't: nothing waits on it.
     Reported,
@@ -453,6 +501,10 @@ pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
             _ => None,
         })
         .max();
+    let keep_health = newest_at(&|j| match j {
+        Job::Health { seq, online } => Some((*seq, *online)),
+        _ => None,
+    });
     let mut i = 0;
     queue.retain(|item| {
         let at = i;
@@ -462,6 +514,7 @@ pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
             Job::List { .. } => keep_list == Some(at),
             Job::Code { .. } => keep_code == Some(at),
             Job::Peek { batch, .. } => newest_batch.is_none_or(|n| *batch >= n),
+            Job::Health { online: false, .. } => keep_health == Some(at),
             _ => true,
         }
     });
@@ -471,7 +524,7 @@ pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
 fn pick<'a>(jobs: impl Iterator<Item = &'a Job>) -> Option<usize> {
     let rank = |j: &Job| match j {
         Job::Peek { .. } => 1,
-        Job::Get { cached: true, .. } => 2,
+        Job::Get { cached: true, .. } | Job::Health { online: false, .. } => 2,
         _ => 0,
     };
     jobs.enumerate()

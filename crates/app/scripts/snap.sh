@@ -33,7 +33,7 @@ done
 # The keys, dark and light: ⇥ into a login's fields, the ⌘K action menu, the
 # ? shortcut sheet, and the ⌘, Settings page on its second row.
 for theme in dark light; do
-  for scene in field actions sheet settings-page; do
+  for scene in field actions sheet settings-page security vault-risk fix-password; do
     "$bin" --scene "$scene" --theme "$theme" --snap "$out/$scene-$theme.png" "$@"
   done
 done
@@ -49,6 +49,7 @@ for theme in dark light; do
   "$bin" --scene shortcut-conflict --theme "$theme" --snap "$out/shortcut-conflict-$theme.png" "$@"
   "$bin" --scene settings-unavailable --theme "$theme" --snap "$out/settings-unavailable-$theme.png" "$@"
   "$bin" --scene settings-touch-id --theme "$theme" --snap "$out/settings-touch-id-$theme.png" "$@"
+  "$bin" --scene settings-ssh --theme "$theme" --snap "$out/settings-ssh-$theme.png" "$@"
   "$bin" --scene settings-agents --script scripts/settings-agents.json --at 1.5 --theme "$theme" --snap "$out/settings-agents-$theme.png" "$@"
   "$bin" --scene locked-touch-id --theme "$theme" --snap "$out/locked-touch-id-$theme.png" "$@"
   "$bin" --scene locked-touch-id-reset --theme "$theme" --snap "$out/locked-touch-id-reset-$theme.png" "$@"

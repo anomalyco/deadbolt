@@ -95,7 +95,7 @@ fn items_leave_otp_secrets_unless_asked() {
     ];
     create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
     let values = |otp| {
-        let item = get(&s, None, &words("site"), otp, &[], false).unwrap();
+        let item = get(&s, None, &words("site"), otp, false, &[], false).unwrap();
         item.fields
             .into_iter()
             .map(|f| (f.name.clone(), f.value.clone()))
@@ -148,6 +148,7 @@ fn a_get_carries_only_the_files_it_names() {
         None,
         &words("parts"),
         false,
+        false,
         &["part-3".to_string()],
         false,
     )
@@ -168,7 +169,7 @@ fn a_get_carries_only_the_files_it_names() {
         "one file's worth: {}",
         reply.len()
     );
-    let none = get(&s, None, &words("parts"), false, &[], false).unwrap();
+    let none = get(&s, None, &words("parts"), false, false, &[], false).unwrap();
     assert!(none.fields.iter().all(|f| !f.value.contains('\n')));
 }
 
@@ -401,7 +402,7 @@ fn a_set_removes_its_unset_fields_in_the_same_entry() {
     let item = set(&mut s, None, &query, fields, name, &unset).unwrap();
     assert_eq!(s.vault(&vault).entries().len(), before + 1);
     assert_eq!(item.label, "GitHub");
-    let item = get(&s, None, &query, false, &[], false).unwrap();
+    let item = get(&s, None, &query, false, false, &[], false).unwrap();
     let fields: Vec<(&str, &str)> = item
         .fields
         .iter()
@@ -458,7 +459,7 @@ fn a_set_skips_unset_fields_already_gone() {
     );
     assert!(item.is_ok(), "{item:?}");
     assert_eq!(s.vault(&vault).entries().len(), before + 1);
-    let item = get(&s, None, &query, false, &[], false).unwrap();
+    let item = get(&s, None, &query, false, false, &[], false).unwrap();
     let names: Vec<&str> = item.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["password"]);
 
@@ -564,14 +565,14 @@ fn deleted_items_list_apart_and_restore() {
     let mut gone = labels(&s, true);
     gone.sort();
     assert_eq!(gone, [("Alpha".into(), true), ("Beta".into(), true)]);
-    assert!(get(&s, None, &words("alpha"), false, &[], false).is_err());
-    let alpha = get(&s, None, &words("alpha"), false, &[], true).unwrap();
+    assert!(get(&s, None, &words("alpha"), false, false, &[], false).is_err());
+    let alpha = get(&s, None, &words("alpha"), false, false, &[], true).unwrap();
     assert_eq!(alpha.fields[0].value, "Alpha-pw");
     assert!(restore(&mut s, None, &words("gamma")).is_err());
 
     let back = restore(&mut s, None, &words("alpha")).unwrap();
     assert_eq!((back.label.as_str(), back.deleted_at), ("Alpha", None));
-    let alpha = get(&s, None, &words("alpha"), false, &[], false).unwrap();
+    let alpha = get(&s, None, &words("alpha"), false, false, &[], false).unwrap();
     assert_eq!(alpha.fields[0].value, "Alpha-pw");
     assert_eq!(labels(&s, true), [("Beta".into(), true)]);
 }
@@ -680,6 +681,9 @@ fn item(kind: &str, name: Option<&str>, fields: &[(&str, &str)]) -> Item {
         source: None,
         favorite: false,
         tags: BTreeSet::new(),
+        password_entry: None,
+        password_changed: None,
+        ignored: BTreeMap::new(),
         deleted: false,
     }
 }

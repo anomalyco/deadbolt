@@ -231,6 +231,11 @@ fn fill_required(kind: &str, inputs: &mut Vec<FieldInput>) -> Result<()> {
         if inputs.iter().any(|i| i.name == field.name) {
             continue;
         }
+        // `deadbolt new ssh` without `private-key=` generates an Ed25519 key in
+        // the agent, matching `deadbolt new login` without `password=`.
+        if kind == "ssh" && field.name == "private-key" {
+            continue;
+        }
         let file = field.kind == FieldType::File;
         let value = prompt::fill(
             None,
@@ -337,10 +342,12 @@ async fn get(
     mut fetch: impl AsyncFnMut(Command) -> Result<ItemInfo>,
 ) -> Result<(Zeroizing<String>, String)> {
     let otp = field == Some("otp");
+    let ssh_private = matches!(field, Some("private-key" | "passphrase"));
     let command = Command::ItemGet {
         vault: vault.clone(),
         query,
         otp,
+        ssh_private,
         files: Vec::new(),
         deleted: false,
     };
@@ -358,6 +365,9 @@ async fn get(
             .find(|f| f.name == name)
             .map(|f| {
                 let withheld = (f.kind == "otp" && f.value.is_empty())
+                    || (item.kind == "ssh"
+                        && matches!(f.name.as_str(), "private-key" | "passphrase")
+                        && f.value.is_empty())
                     || (f.kind == "file" && !deadbolt_client::file::has_contents(&f.value));
                 (
                     withheld,
@@ -368,11 +378,13 @@ async fn get(
             .ok_or_else(|| anyhow!("{label} has no field {name}"))
     };
     let (withheld, mut value, mut kind) = find(&mut item)?;
-    if withheld && !(otp && kind == "otp") {
+    if withheld && !(otp && kind == "otp") && !ssh_private {
         let command = Command::ItemGet {
             vault,
             query: vec![item.id.clone()],
             otp: kind == "otp",
+            ssh_private: item.kind == "ssh"
+                && matches!(name.as_str(), "private-key" | "passphrase"),
             files: if kind == "file" {
                 vec![name.clone()]
             } else {
@@ -463,9 +475,14 @@ pub async fn run(
             let mut fields = assignments(&fields, Some(&kind))?;
             fill_required(&kind, &mut fields)?;
             if kind == "login" && !fields.iter().any(|f| f.name == "password") {
+                let url = fields
+                    .iter()
+                    .find(|f| f.name == "url")
+                    .map(|f| f.value.clone());
                 let command = Command::Generate {
                     length,
                     symbols: !no_symbols,
+                    url,
                 };
                 let Reply::Password { password } =
                     crate::request(paths, command, from_stdin).await?
@@ -477,6 +494,48 @@ pub async fn run(
                     kind: None,
                     value: password.to_string(),
                 });
+            }
+            if kind == "ssh" && !fields.iter().any(|f| f.name == "private-key") {
+                let comment = fields
+                    .iter()
+                    .find(|f| f.name == "comment")
+                    .map(|f| f.value.clone());
+                let Reply::SshGenerated {
+                    private_key,
+                    public_key,
+                    fingerprint,
+                    ..
+                } = crate::request(
+                    paths,
+                    Command::SshGenerate {
+                        kind: crate::protocol::SshKeyKind::Ed25519,
+                        comment,
+                    },
+                    from_stdin,
+                )
+                .await?
+                else {
+                    bail!("unexpected reply");
+                };
+                fields.push(FieldInput {
+                    name: "private-key".into(),
+                    kind: None,
+                    value: private_key.expose().to_owned(),
+                });
+                if !fields.iter().any(|f| f.name == "public-key") {
+                    fields.push(FieldInput {
+                        name: "public-key".into(),
+                        kind: None,
+                        value: public_key,
+                    });
+                }
+                if !fields.iter().any(|f| f.name == "fingerprint") {
+                    fields.push(FieldInput {
+                        name: "fingerprint".into(),
+                        kind: None,
+                        value: fingerprint,
+                    });
+                }
             }
             let command = Command::ItemNew {
                 vault,
@@ -514,6 +573,7 @@ pub async fn run(
                 vault: vault.clone(),
                 query,
                 otp: reveal,
+                ssh_private: reveal,
                 files: Vec::new(),
                 deleted: false,
             };

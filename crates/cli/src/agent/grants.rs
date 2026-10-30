@@ -727,10 +727,15 @@ impl Agent {
             CallerClass::BrowserHost | CallerClass::AutoFill
         ) || super::caller::is_ai(caller)
         {
-            return Err(fail(
-                ErrorCode::Forbidden,
-                "an AI can't pair agent clients or grant access to secrets: run this yourself, in a terminal",
-            ));
+            let message = if super::caller::is_ai(caller) {
+                format!(
+                    "an AI agent can't pair agent clients or grant access to secrets. {}.",
+                    super::caller::not_from_here(caller)
+                )
+            } else {
+                "the browser host and macOS AutoFill can't pair agent clients or grant access to secrets".into()
+            };
+            return Err(fail(ErrorCode::Forbidden, message));
         }
         // Locked fails before anyone is asked anything. The prompt says
         // plainly what is being allowed, the caller-chosen name quoted.

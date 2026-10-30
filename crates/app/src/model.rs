@@ -93,6 +93,8 @@ pub struct App {
     pub agents: crate::agents::Agents,
     /// Recently Deleted, in the item's place (⇧⌘⌫).
     pub trash: crate::trash::Trash,
+    pub health: crate::health::Health,
+    pub ssh: crate::ssh::Ssh,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
@@ -156,6 +158,8 @@ impl App {
             activity: crate::activity::Activity::default(),
             agents: crate::agents::Agents::default(),
             trash: crate::trash::Trash::default(),
+            health: crate::health::Health::default(),
+            ssh: crate::ssh::Ssh::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
@@ -187,20 +191,22 @@ impl App {
         changed |= self.tick_copy(now, tx);
         self.tick_code(now, tx);
         changed |= self.tick_import(now);
+        changed |= self.poll_ssh(now, tx);
         if let Some(installer) = &mut self.installer {
             installer.stamp_copy(now, tx);
             changed |= installer.poll(now);
         }
-        // The install page, Settings and Recently Deleted belong to the
-        // vault; leaving it closes them.
+        // The install page, Settings, Recently Deleted and Security belong to
+        // the vault; leaving it closes them.
         if self.screen != Screen::Vault
-            && (self.installing() || self.settings_open || self.trash.open)
+            && (self.installing() || self.settings_open || self.trash.open || self.security_open())
         {
             if let Some(installer) = &mut self.installer {
                 installer.open = false;
             }
             self.close_settings();
             self.trash.forget();
+            self.close_security();
             changed = true;
         }
         changed |= self.poll_panel(now, tx);
@@ -221,6 +227,7 @@ impl App {
             Done::Unlocked(result) => self.on_unlocked(result, tx),
             Done::UnlockedBiometric(result) => self.on_unlocked_biometric(result, tx),
             Done::TouchIdSet { enabled, result } => self.on_touch_id_set(enabled, result, tx),
+            Done::SshAgentSet { enabled, result } => self.on_ssh_agent_set(enabled, result, tx),
             Done::Locked(result) => match result {
                 Ok(()) => {
                     self.on_locked(tx);
@@ -264,6 +271,7 @@ impl App {
             Done::Favorited { seq, result } => self.on_favorited(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
+            Done::SshGenerated { seq, result } => self.on_ssh_generated(seq, result),
             Done::FileSaved(result) => match result {
                 Ok(name) => self.notice = Some(format!("Saved {name}")),
                 Err(failure) if failure.locked() => self.on_locked(tx),
@@ -273,6 +281,12 @@ impl App {
             Done::Agents { seq, result } => self.on_agents(seq, result, tx),
             Done::Trash { seq, result } => self.on_trash(seq, result, tx),
             Done::TrashItem { seq, result } => self.on_trash_item(seq, result, tx),
+            Done::Health { seq, result } => self.on_health(seq, result, tx),
+            Done::BreachChecksSet {
+                seq,
+                enabled,
+                result,
+            } => self.on_breach_checks_set(seq, enabled, result, tx),
             Done::Reported => {}
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
@@ -310,6 +324,7 @@ impl App {
                 self.on_activity_changed();
                 self.on_agents_changed();
             }
+            Change::Health => self.request_health(false),
             Change::Items { vault } if self.shows(&vault) => {
                 self.refresh();
                 self.on_trash_changed();
@@ -379,6 +394,9 @@ impl App {
         let before = self.selected.clone();
         self.items = items;
         self.loaded = true;
+        if self.panel.is_none() {
+            self.request_health(false);
+        }
         self.edit_items_landed();
         self.keep_selection_visible();
         if before.is_some() && self.selected != before {
@@ -411,11 +429,14 @@ impl App {
         }
     }
 
-    fn on_status(&mut self, mut status: Status, tx: &mut Tx) {
-        if self.touch_id_busy
-            && let Some(prev) = &self.status
-        {
-            status.touch_id_enabled = prev.touch_id_enabled;
+    pub(crate) fn on_status(&mut self, mut status: Status, tx: &mut Tx) {
+        if let Some(prev) = &self.status {
+            if self.touch_id_busy {
+                status.touch_id_enabled = prev.touch_id_enabled;
+            }
+            if self.ssh.busy {
+                status.ssh_agent = prev.ssh_agent;
+            }
         }
         let ready = status.initialized;
         let screen = if !status.initialized {
@@ -552,6 +573,7 @@ impl App {
         self.activity.forget();
         self.agents.forget();
         self.trash.forget();
+        self.health.forget();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -660,7 +682,7 @@ pub fn copy_label(kind: &str) -> &'static str {
     match kind {
         "card" => "Copy number",
         "note" => "Copy note",
-        "ssh" => "Copy private key",
+        "ssh" => "Copy public key",
         "identity" => "Copy email",
         "passkey" => "Copy username",
         "api" => "Copy credential",

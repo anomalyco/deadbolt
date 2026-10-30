@@ -136,6 +136,12 @@ fn page(s: &App, k: &Kit, item: &ItemInfo, full: Option<&ItemInfo>) -> Vec<El> {
     if let Some(source) = &item.source {
         sub = format!("{sub} · From {source}");
     }
+    if let Some(changed) = s.health.password_changed_for(&item.id) {
+        sub = format!(
+            "{sub} · Changed {}",
+            crate::health::view::human_date(changed)
+        );
+    }
     let tags_source = full.map_or(&item.tags, |f| &f.tags);
     let mut titles = col()
         .key("titles")
@@ -194,6 +200,8 @@ fn page(s: &App, k: &Kit, item: &ItemInfo, full: Option<&ItemInfo>) -> Vec<El> {
     let mut out = vec![head];
     if let Some(delete) = s.edit.delete.as_ref().filter(|d| d.id == item.id) {
         out.push(crate::edit::view::confirm(k, delete).mb(20.0));
+    } else if let Some(callout) = crate::health::view::item_callout(s, k, &item.id) {
+        out.push(callout);
     }
     let mut fields = col().key("fields").w_full().gap(2.0);
     if let Some(full) = full {
@@ -498,7 +506,12 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
 }
 
 fn agent_notice(s: &App, k: &Kit) -> Option<El> {
-    let n = s.notice.as_ref().filter(|_| s.selected_item().is_some())?;
+    // With no list (it failed to load) there's nothing else on the page to
+    // say why, so the notice shows then too.
+    let n = s
+        .notice
+        .as_ref()
+        .filter(|_| s.selected_item().is_some() || !s.loaded)?;
     Some(
         text(n.clone())
             .key("agent-notice")

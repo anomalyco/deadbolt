@@ -35,6 +35,12 @@ pub struct Item {
     pub favorite: bool,
     /// Organizational tags (`work`, `work/aws`).
     pub tags: BTreeSet<String>,
+    /// The entry that wrote the winning `password` (or `passphrase`) field.
+    pub password_entry: Option<Hash>,
+    /// UTC date (`YYYY-MM-DD`) the item's password last changed, if recorded.
+    pub password_changed: Option<String>,
+    /// Ignored health findings (`kind` -> entry hash, or `[0; 32]` item-wide).
+    pub ignored: BTreeMap<String, Hash>,
     /// Tombstone. Fields are kept so the item can be restored.
     pub deleted: bool,
 }
@@ -142,6 +148,8 @@ pub(crate) struct ItemState {
     favorite: Vec<Write<bool>>,
     /// Per case-folded tag: `Some(spelling)` is an add, `None` a remove.
     tags: BTreeMap<String, Vec<Write<Option<String>>>>,
+    password_changed: Vec<Write<Option<String>>>,
+    ignored: BTreeMap<String, Vec<Write<Option<Hash>>>>,
     fields: BTreeMap<String, Vec<Write<Option<Field>>>>,
     /// Deletes, and every other change (which brings the item back).
     alive: Vec<Write<Life>>,
@@ -189,6 +197,22 @@ impl ItemState {
                     .map(|(_, t)| t.clone())
             })
             .collect();
+        let pw_field = if self.kind == "ssh" {
+            "passphrase"
+        } else {
+            "password"
+        };
+        let password_entry = self
+            .fields
+            .get(pw_field)
+            .and_then(|frontier| winner(frontier))
+            .filter(|w| w.value.is_some())
+            .map(|w| w.at.entry);
+        let ignored = self
+            .ignored
+            .iter()
+            .filter_map(|(kind, frontier)| Some((kind.clone(), winner(frontier)?.value?)))
+            .collect();
         Item {
             id,
             kind: self.kind.clone(),
@@ -197,6 +221,9 @@ impl ItemState {
             source: winner(&self.source).and_then(|w| w.value.clone()),
             favorite: winner(&self.favorite).is_some_and(|w| w.value),
             tags,
+            password_entry,
+            password_changed: winner(&self.password_changed).and_then(|w| w.value.clone()),
+            ignored,
             deleted: self.deleted(),
         }
     }
@@ -238,6 +265,8 @@ impl ItemState {
                 let present = frontier.iter().any(|w| w.value.is_some());
                 (live, live && !present)
             }
+            Change::Ignore { kind, .. } => of(&self.ignored[kind], record.at),
+            Change::PasswordChanged(_) => of(&self.password_changed, record.at),
             Change::Delete { .. } => {
                 let live = self.alive.iter().any(|w| w.at == record.at);
                 (live, live && self.deleted())
@@ -284,6 +313,17 @@ impl ItemState {
             Change::TagRemove(t) => {
                 let frontier = self.tags.entry(tag::fold_tag(t)).or_default();
                 write(frontier, node, at, None);
+            }
+            Change::Ignore { kind, at: target } => {
+                write(
+                    self.ignored.entry(kind.clone()).or_default(),
+                    node,
+                    at,
+                    *target,
+                );
+            }
+            Change::PasswordChanged(date) => {
+                write(&mut self.password_changed, node, at, date.clone());
             }
             Change::Delete { .. } | Change::Restore => {}
         }
@@ -439,6 +479,8 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                     source: Vec::new(),
                     favorite: Vec::new(),
                     tags: BTreeMap::new(),
+                    password_changed: Vec::new(),
+                    ignored: BTreeMap::new(),
                     fields: BTreeMap::new(),
                     alive: Vec::new(),
                     history: Vec::new(),

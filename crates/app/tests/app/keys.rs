@@ -166,7 +166,7 @@ fn vault_keys_work_with_nothing_focused() {
 fn enter_copies_what_each_kind_is_for() {
     for (kind, field) in [
         ("note", "notes"),
-        ("ssh", "private-key"),
+        ("ssh", "public-key"),
         ("identity", "email"),
         ("passkey", "username"),
     ] {

@@ -679,6 +679,7 @@ mod tests {
             socket: dir.join("agent.sock"),
             lock: dir.join("agent.lock"),
             log: dir.join("agent.log"),
+            ssh_link: None,
         }
     }
 
@@ -686,7 +687,7 @@ mod tests {
     /// passphrase and so needs an agent check these tests don't install.
     fn join() -> Command {
         Command::Pair {
-            code: "violin-garden-tiger-lamp".into(),
+            code: "violin-garden-tiger-lamp-zoo".into(),
             vault: None,
         }
     }
@@ -753,6 +754,8 @@ mod tests {
             touch_id_enabled: false,
             touch_id_ready: false,
             touch_id_reset: false,
+            ssh_agent: false,
+            ssh_socket: None,
             caller: protocol::CallerInfo::unverified("test"),
         }
     }

@@ -76,6 +76,17 @@ pub fn bind_in(container: &Path) -> Result<(UnixListener, PathBuf)> {
 /// Resolves and binds the default macOS App Group AutoFill socket when this
 /// build is signed with an Apple Team ID and the App Group entitlement.
 pub async fn bind_default() -> Option<(UnixListener, PathBuf)> {
+    if let Some(dir) =
+        crate::config::test_env("DEADBOLT_TEST_AUTOFILL_DIR").filter(|s| !s.is_empty())
+    {
+        return match bind_in(Path::new(&dir)) {
+            Ok(bound) => Some(bound),
+            Err(error) => {
+                tracing::warn!("binding test AutoFill socket in {dir}: {error:#}");
+                None
+            }
+        };
+    }
     let group = deadbolt_client::peer::app_group()?;
     let container =
         match tokio::task::spawn_blocking(move || biometric::group_container(&group)).await {
@@ -204,7 +215,7 @@ fn map_passkey_error(error: shared_passkeys::Error) -> anyhow::Error {
     }
 }
 
-fn is_biometric_cancelled(error: &anyhow::Error) -> bool {
+pub(super) fn is_biometric_cancelled(error: &anyhow::Error) -> bool {
     error.to_string() == biometric::UnlockError::Cancelled.to_string()
         || error.to_string() == "Touch ID was cancelled"
         || error.to_string() == "the request was cancelled"

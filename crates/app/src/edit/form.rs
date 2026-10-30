@@ -210,6 +210,10 @@ pub struct Form {
     pub(super) generating: Option<u64>,
     /// Passwords generated so far, so each one swaps in (`view`).
     pub generated: u64,
+    /// Opened from a password-health `Fix` action.
+    pub fixing: bool,
+    /// Copy the first generated Fix candidate to the concealed clipboard.
+    pub(super) copy_generated_once: bool,
 }
 
 pub struct Input {
@@ -455,6 +459,8 @@ impl Form {
             nudge: false,
             generating: None,
             generated: 0,
+            fixing: false,
+            copy_generated_once: false,
         }
     }
 
@@ -468,11 +474,24 @@ impl Form {
         self.base.as_ref()?.0.source.as_deref()
     }
 
-    /// The field the generator fills: a login's password.
+    /// The field the generator fills: a login's password, or the audited
+    /// password/passphrase field when fixing a security finding.
     pub fn generates(&self) -> Option<usize> {
-        (self.kind == "login")
-            .then(|| self.fields.iter().position(|f| f.name == "password"))
-            .flatten()
+        if self.kind == "login" {
+            self.fields.iter().position(|f| f.name == "password")
+        } else if self.fixing {
+            self.fixable_password_field()
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn generating_seq(&self) -> Option<u64> {
+        self.generating
+    }
+
+    pub(crate) fn set_generating(&mut self, seq: Option<u64>) {
+        self.generating = seq;
     }
 
     /// What saving would send. A new item (or one deleted meanwhile, saved

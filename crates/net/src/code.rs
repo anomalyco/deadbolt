@@ -1,5 +1,5 @@
-//! Pairing codes: four words from the BIP-39 English list (`words.txt`, MIT,
-//! github.com/bitcoin/bips), 11 bits each, so 44 bits drawn from the OS CSPRNG.
+//! Pairing codes: five words from the BIP-39 English list (`words.txt`, MIT,
+//! github.com/bitcoin/bips), 11 bits each, so 55 bits drawn from the OS CSPRNG.
 
 use std::{fmt, str::FromStr, sync::OnceLock};
 
@@ -9,13 +9,18 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::error::{Error, Result};
 
 /// Words in a code.
-pub const CODE_WORDS: usize = 4;
+pub const CODE_WORDS: usize = 5;
 const LIST: &str = include_str!("words.txt");
 const LIST_LEN: usize = 2048;
 
-/// Argon2id salt for the rendezvous key: fixed, so both devices derive the same key
-/// from the code alone, and specific to this use.
-const LOOKUP_SALT: &[u8] = b"deadbolt/pair/2 rendezvous";
+/// Domain separation followed by the six-hour UTC bucket as a big-endian u64.
+/// Tables cannot be reused across buckets; the bucket itself is not a secret.
+const LOOKUP_SALT: &[u8] = b"deadbolt/pair/3 rendezvous";
+pub(crate) const LOOKUP_BUCKET_SECONDS: u64 = 6 * 60 * 60;
+
+pub(crate) fn lookup_bucket(unix_seconds: u64) -> u64 {
+    unix_seconds / LOOKUP_BUCKET_SECONDS
+}
 /// 64 MiB, six passes: a fraction of a second on a laptop, and a memory-hard cost on
 /// every guess at the code.
 const LOOKUP_M_COST_KIB: u32 = 64 * 1024;
@@ -26,7 +31,7 @@ fn words() -> &'static [&'static str] {
     WORDS.get_or_init(|| LIST.lines().map(str::trim).collect())
 }
 
-/// A one-time pairing code, such as `violin-garden-tiger-lamp`. Wiped on drop; `Debug`
+/// A one-time pairing code, such as `violin-garden-tiger-lamp-zoo`. Wiped on drop; `Debug`
 /// leaves it out.
 #[derive(Clone, PartialEq, Eq)]
 pub struct PairingCode(Zeroizing<[u16; CODE_WORDS]>);
@@ -58,11 +63,14 @@ impl PairingCode {
     }
 
     /// The rendezvous key both devices derive from the code: Argon2id over the whole
-    /// code, used as an Ed25519 seed. The new device publishes its address under its
-    /// public half. Blocking; a fraction of a second.
-    pub fn lookup_secret(&self) -> Result<Zeroizing<[u8; 32]>> {
+    /// code with a six-hour UTC `bucket` (Unix seconds / 21600), used as an Ed25519
+    /// seed. The new device publishes its address under its public half. Blocking;
+    /// a fraction of a second.
+    pub fn lookup_secret(&self, bucket: u64) -> Result<Zeroizing<[u8; 32]>> {
         let params = Params::new(LOOKUP_M_COST_KIB, LOOKUP_T_COST, 1, Some(32))
             .map_err(|e| Error::InvalidCode(format!("argon2 parameters: {e}")))?;
+        let mut salt = LOOKUP_SALT.to_vec();
+        salt.extend_from_slice(&bucket.to_be_bytes());
         // Allocated here (rather than by argon2) so the working memory, which
         // holds code-derived state, is wiped when dropped, as the store's KDF does.
         let mut memory = Zeroizing::new(vec![Block::new(); params.block_count()]);
@@ -70,7 +78,7 @@ impl PairingCode {
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into_with_memory(
                 self.text().as_bytes(),
-                LOOKUP_SALT,
+                &salt,
                 seed.as_mut(),
                 memory.as_mut_slice(),
             )
@@ -115,9 +123,15 @@ impl FromStr for PairingCode {
             count += 1;
         }
         lowered.zeroize();
+        // Version 2 used four words; never resolve its fixed-salt records.
+        if count == 4 {
+            return Err(Error::InvalidCode(
+                "four-word codes use an older pairing protocol; update both devices and generate a new five-word code".into(),
+            ));
+        }
         if count != CODE_WORDS {
             return Err(Error::InvalidCode(format!(
-                "a code has {CODE_WORDS} words, like violin-garden-tiger-lamp"
+                "a code has {CODE_WORDS} words, like violin-garden-tiger-lamp-zoo"
             )));
         }
         Ok(Self(indices))
@@ -149,8 +163,8 @@ mod tests {
         let text = code.to_string();
         assert_eq!(text.split('-').count(), CODE_WORDS);
         assert_eq!(text.parse::<PairingCode>().unwrap(), code);
-        let parsed: PairingCode = "  Violin garden-TIGER\t-  lamp\n".parse().unwrap();
-        assert_eq!(parsed.to_string(), "violin-garden-tiger-lamp");
+        let parsed: PairingCode = "  Violin garden-TIGER\t-  lamp zoo\n".parse().unwrap();
+        assert_eq!(parsed.to_string(), "violin-garden-tiger-lamp-zoo");
         assert!(!format!("{parsed:?}").contains("violin"));
     }
 
@@ -159,8 +173,8 @@ mod tests {
         for bad in [
             "",
             "violin-garden-tiger",
-            "violin-garden-tiger-lamp-zoo",
-            "violin-garden-tiger-lamps",
+            "violin-garden-tiger-lamp-zoo-zoo",
+            "violin-garden-tiger-lamp-zoos",
             "DBPAIRABCDEF",
         ] {
             assert!(bad.parse::<PairingCode>().is_err(), "{bad}");
@@ -168,23 +182,39 @@ mod tests {
     }
 
     #[test]
+    fn old_codes_fail_with_upgrade_instructions() {
+        let error = "violin-garden-tiger-lamp"
+            .parse::<PairingCode>()
+            .unwrap_err();
+        assert!(error.to_string().contains("update both devices"));
+    }
+
+    #[test]
+    fn bucket_changes_at_six_hour_boundary() {
+        assert_eq!(lookup_bucket(LOOKUP_BUCKET_SECONDS - 1), 0);
+        assert_eq!(lookup_bucket(LOOKUP_BUCKET_SECONDS), 1);
+        assert_eq!(lookup_bucket(LOOKUP_BUCKET_SECONDS + 1), 1);
+    }
+
+    #[test]
     fn generated_codes_differ() {
         let a = PairingCode::generate().unwrap();
         let b = PairingCode::generate().unwrap();
-        // 2^-44 chance of a false failure.
+        // 2^-55 chance of a false failure.
         assert_ne!(a, b);
     }
 
     #[test]
     fn lookup_is_deterministic_and_depends_on_every_word() {
-        let code: PairingCode = "violin-garden-tiger-lamp".parse().unwrap();
-        let again: PairingCode = "VIOLIN GARDEN TIGER LAMP".parse().unwrap();
-        let other: PairingCode = "violin-garden-tiger-lady".parse().unwrap();
+        let code: PairingCode = "violin-garden-tiger-lamp-zoo".parse().unwrap();
+        let again: PairingCode = "VIOLIN GARDEN TIGER LAMP ZOO".parse().unwrap();
+        let other: PairingCode = "violin-garden-tiger-lamp-zone".parse().unwrap();
         let started = std::time::Instant::now();
-        let key = code.lookup_secret().unwrap();
+        let key = code.lookup_secret(1234).unwrap();
         let elapsed = started.elapsed();
-        assert_eq!(key, again.lookup_secret().unwrap());
-        assert_ne!(key, other.lookup_secret().unwrap());
+        assert_eq!(key, again.lookup_secret(1234).unwrap());
+        assert_ne!(key, other.lookup_secret(1234).unwrap());
+        assert_ne!(key, code.lookup_secret(1235).unwrap());
         // Generous: debug builds optimize argon2 (Cargo.toml), CI machines vary.
         assert!(elapsed < std::time::Duration::from_secs(5), "{elapsed:?}");
     }

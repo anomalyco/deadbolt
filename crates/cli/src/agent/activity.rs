@@ -4,7 +4,7 @@
 //! on this device; those made while locked wait in memory until an unlock.
 //! [`ledger`] keeps all of it in budget.
 
-mod ledger;
+pub(super) mod ledger;
 
 use std::sync::Arc;
 
@@ -116,6 +116,13 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::AutofillFill { .. } => (T::Browser, "autofill-fill"),
         C::AutofillPasskeyGet { .. } => (T::Browser, "autofill-passkey-get"),
         C::AutofillPasskeyCreate { .. } => (T::Browser, "autofill-passkey-create"),
+        C::Health { .. } => (T::Look, "health"),
+        C::HealthIgnore { .. } => (T::Write, "health-ignore"),
+        C::BreachChecksSet { .. } => (T::Never, "breach-checks-set"),
+        C::SshAgentSet { .. } => (T::Never, "ssh-agent-set"),
+        C::SshGenerate { .. } => (T::Always, "ssh-generate"),
+        C::SshInspect { .. } => (T::Always, "ssh-inspect"),
+        C::SshSign { .. } => (T::Use, "ssh-sign"),
     }
 }
 
@@ -188,6 +195,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             | Command::AgentPasskeyGet { .. }
             | Command::Resolve { .. }
             | Command::SecretGrantSet { .. }
+            | Command::SshSign { .. }
     );
     let always = matches!(
         command,
@@ -266,6 +274,9 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             query,
             field,
         } => (named(vault, query), vec![field.clone()]),
+        Command::HealthIgnore {
+            vault, query, kind, ..
+        } => (named(vault, query), vec![kind.as_str().into()]),
         Command::SiteFill {
             origin,
             login: target,
@@ -417,6 +428,7 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             named(&None, std::slice::from_ref(origin)),
             vec!["password".into()],
         ),
+        Command::SshSign { namespace, .. } => (Vec::new(), vec![format!("sshsig:{namespace}")]),
         _ => (Vec::new(), Vec::new()),
     };
     let client = match command {
@@ -632,6 +644,64 @@ impl Agent {
                     Command::Resolve { refs, purpose } => {
                         self.resolve(&caller, &refs, purpose, conv).await
                     }
+                    command @ (Command::Health { .. }
+                    | Command::HealthIgnore { .. }
+                    | Command::BreachChecksSet { .. }) => {
+                        self.health_command(&caller, command).await
+                    }
+                    Command::SshSign {
+                        public_key,
+                        namespace,
+                        data,
+                    } => {
+                        self.ssh_sign_command(
+                            &caller,
+                            &public_key,
+                            &namespace,
+                            &data,
+                            conv.closed.clone(),
+                        )
+                        .await
+                    }
+                    Command::ItemGet {
+                        vault,
+                        query,
+                        otp,
+                        ssh_private,
+                        files,
+                        deleted,
+                    } => {
+                        async {
+                            if ssh_private
+                                && caller.class != CallerClass::App
+                                && !caller::is_ai(&caller)
+                            {
+                                self.verify_ssh_export(
+                                    &caller,
+                                    vault.as_deref(),
+                                    &query,
+                                    deleted,
+                                    conv,
+                                )
+                                .await?;
+                            }
+                            self.clone()
+                                .dispatch(
+                                    &caller,
+                                    Command::ItemGet {
+                                        vault,
+                                        query,
+                                        otp,
+                                        ssh_private,
+                                        files,
+                                        deleted,
+                                    },
+                                    conv,
+                                )
+                                .await
+                        }
+                        .await
+                    }
                     command => self.clone().dispatch(&caller, command, conv).await,
                 },
             };
@@ -754,6 +824,40 @@ impl Agent {
         ));
         Ok(Reply::Done)
     }
+
+    async fn verify_ssh_export(
+        &self,
+        caller: &CallerInfo,
+        vault: Option<&str>,
+        query: &[String],
+        deleted: bool,
+        conv: &Conversation,
+    ) -> Result<()> {
+        let ssh_title = self.with(|s| {
+            let listing = super::items::Listing::pick(s.vault(&s.resolve(vault)?), deleted);
+            let item = listing.find(query)?;
+            Ok((item.kind == "ssh").then(|| deadbolt_core::listing::label(item)))
+        })?;
+        let Some(title) = ssh_title else {
+            return Ok(());
+        };
+        if caller::is_ai(caller) && !self.can_verify() {
+            return Err(fail(
+                ErrorCode::Forbidden,
+                "an AI agent can export an SSH private key only with Touch ID each time",
+            ));
+        }
+        if self.can_verify() {
+            let reason = format!(
+                "export the SSH private key of {title} ({})",
+                super::ssh::wire::clean_label(&caller.label)
+            );
+            let _busy = self.busy();
+            self.verify_user(conv, crate::protocol::Verify::Required, &reason)
+                .await?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -773,8 +877,20 @@ mod tests {
 
     const SECRET: &str = "correct-horse-battery-staple";
 
+    /// Takes the peer on `server` (this test process) as a person's
+    /// terminal would be: the tests may run under an AI host such as
+    /// OpenCode, among the process's parents, which the agent refuses
+    /// what these tests ask.
+    fn as_a_person(agent: &Agent, server: &UnixStream) {
+        let peer = deadbolt_client::peer::Peer::of(server).unwrap();
+        let mut info = agent.callers.identify(Ok(peer), None);
+        info.ancestry.clear();
+        agent.callers.cache_for_test(peer, info);
+    }
+
     async fn ask(agent: &Arc<Agent>, command: Command) -> Message {
         let (server, mut client) = UnixStream::pair().unwrap();
+        as_a_person(agent, &server);
         let mut line = serde_json::to_vec(&Request {
             v: PROTOCOL_VERSION,
             claimed: None,
@@ -794,6 +910,7 @@ mod tests {
             vault: None,
             query: vec!["github".into()],
             otp: false,
+            ssh_private: false,
             files: Vec::new(),
             deleted: false,
         }
@@ -1177,6 +1294,7 @@ mod tests {
         })
         .unwrap();
         line.push(b'\n');
+        as_a_person(&agent, &server);
         let handled = tokio::spawn(agent.clone().handle(server, MAX_LINE));
         client.write_all(&line).await.unwrap();
         let mut reply = String::new();
@@ -1192,6 +1310,7 @@ mod tests {
                 vault: None,
                 query: vec!["big".into()],
                 otp: false,
+                ssh_private: false,
                 files: Vec::new(),
                 deleted: false,
             },
@@ -1200,6 +1319,7 @@ mod tests {
         line.push(b'\n');
         let (mut read, mut write) = client.into_split();
         write.write_all(&line).await.unwrap();
+        as_a_person(&agent, &server);
         let handled = tokio::spawn(agent.clone().handle(server, MAX_LINE));
         // The reply has started, and stalls on a client that reads no more.
         let mut first = [0u8; 1];

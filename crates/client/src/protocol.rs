@@ -39,6 +39,7 @@
 //! status request reads the same to every agent.
 
 mod caller;
+mod health;
 mod reference;
 mod reports;
 #[cfg(test)]
@@ -54,12 +55,16 @@ pub use caller::{
     ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Claim,
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
+pub use health::{
+    Finding, FindingKind, HealthCounts, HealthPeer, HealthReport, ItemHealth, PassphraseStrength,
+    RiskLevel, WeakReason, audited_password_field, passphrase_strength,
+};
 pub use reference::{Reference, SCHEME};
 pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 22;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -176,6 +181,8 @@ pub enum Command {
         query: Vec<String>,
         otp: bool,
         #[serde(default)]
+        ssh_private: bool,
+        #[serde(default)]
         files: Vec<String>,
         #[serde(default)]
         deleted: bool,
@@ -253,10 +260,13 @@ pub enum Command {
         apply: bool,
     },
     /// A new random password of `length` characters (8 to 256): letters and
-    /// digits, and symbols if `symbols`. Needs no unlock; replies `password`.
+    /// digits, and symbols if `symbols`, honoring `url`'s vendored site rules
+    /// when given. Needs no unlock; replies `password`.
     Generate {
         length: usize,
         symbols: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
     },
     /// Mirrors 1Password into `vault` with the 1Password CLI (`op`), which
     /// the agent runs: from every vault of `account` (`op`'s default
@@ -613,6 +623,59 @@ pub enum Command {
         verify: Verify,
         interactive: bool,
     },
+    /// Password health findings and summary counts for `vault` (`None` uses the
+    /// default vault; `Some("*")` includes every unlocked vault), never values
+    /// or hashes. With `online`, runs a Have I Been Pwned range check first.
+    /// Refused to AI callers. Replies `health`.
+    Health {
+        vault: Option<String>,
+        #[serde(default)]
+        online: bool,
+    },
+    /// Ignores (`ignored = true`) or restores (`false`) `kind` on the item
+    /// matching `query` in `vault`, syncing the dismissal across devices.
+    /// Refused to AI callers. Replies `health`.
+    HealthIgnore {
+        vault: Option<String>,
+        query: Vec<String>,
+        kind: FindingKind,
+        ignored: bool,
+    },
+    /// Enables or disables opt-in Have I Been Pwned breach checks in
+    /// `config.toml`. Refused to AI callers. Replies `done`.
+    BreachChecksSet {
+        enabled: bool,
+    },
+    /// Turns the SSH agent listener (`ssh.sock`) on or off in `config.toml`
+    /// and binds or drops the socket immediately. Replies `done`.
+    SshAgentSet {
+        enabled: bool,
+    },
+    /// Generates a new SSH key pair (`ed25519` or `ecdsa-p256`) inside the
+    /// agent without writing to a vault yet; needs no unlock. Replies
+    /// `ssh-generated`.
+    SshGenerate {
+        kind: SshKeyKind,
+        comment: Option<String>,
+    },
+    /// Parses and normalizes an imported SSH private key file (decrypting with
+    /// `passphrase` when encrypted) into unencrypted OpenSSH PEM and derived
+    /// metadata without writing to a vault yet; needs no unlock. Replies
+    /// `ssh-generated`.
+    SshInspect {
+        private_key: Secret,
+        passphrase: Option<Secret>,
+        comment: Option<String>,
+    },
+    /// Signs `data` (standard base64 of raw bytes) in the OpenSSH `SSHSIG`
+    /// format (`ssh-keygen -Y sign`) using the vault's SSH key matching
+    /// `public_key`, approving with Touch ID (and unlocking with the same tap
+    /// when `touch_id_ready` is true). Replies `ssh-signature`.
+    SshSign {
+        public_key: String,
+        namespace: String,
+        data: String,
+    },
 }
 
 impl Command {
@@ -680,6 +743,13 @@ pub struct OneTimeCodeIdentity {
     pub label: String,
     pub record_id: String,
     pub rank: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshKeyKind {
+    Ed25519,
+    EcdsaP256,
 }
 
 /// What resolved secrets are for: a command's environment (`deadbolt
@@ -1098,6 +1168,8 @@ pub enum Change {
     },
     /// New Activity entries were recorded.
     Activity,
+    /// Password health findings or breach-check state changed.
+    Health,
     /// Changes were dropped because the watcher fell behind. Fetch everything.
     Resync,
     /// The agent is stopping, which locks the store. The stream ends.
@@ -1335,6 +1407,9 @@ pub enum Reply {
     SecretGrants {
         grants: Vec<SecretGrantInfo>,
     },
+    Health {
+        report: HealthReport,
+    },
     AgentLogins {
         /// The page's site: its registrable domain.
         site: String,
@@ -1388,6 +1463,17 @@ pub enum Reply {
         user_handle: String,
         verified: bool,
         identities_hash: String,
+    },
+    SshGenerated {
+        private_key: Secret,
+        public_key: String,
+        fingerprint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+    },
+    SshSignature {
+        /// PEM-armored `-----BEGIN SSH SIGNATURE-----` block.
+        signature: String,
     },
 }
 
@@ -1528,6 +1614,12 @@ pub struct Status {
     /// Whether Touch ID is enabled on this store, but its enrolled slot was
     /// reset (expired after 14 days, fingerprint set changed, or passphrase changed).
     pub touch_id_reset: bool,
+    /// Whether the SSH agent (`ssh.sock`) is turned on in config.toml.
+    #[serde(default)]
+    pub ssh_agent: bool,
+    /// Where SSH clients reach this agent's SSH socket when `ssh_agent` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_socket: Option<String>,
     /// How the agent sees the client asking (`deadbolt whoami`).
     pub caller: CallerInfo,
 }
@@ -1540,6 +1632,9 @@ pub struct VaultInfo {
     pub members: usize,
     /// Whether this device is still a member.
     pub member: bool,
+    /// Present when the history could not be loaded. Membership is unknown,
+    /// `members` is zero, and the encrypted entries remain on disk.
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -190,6 +190,7 @@ async fn autofill_extension_is_confined_to_its_narrow_command_set() {
             vault: None,
             query: vec![gh.item.clone()],
             otp: false,
+            ssh_private: false,
             files: Vec::new(),
             deleted: false,
         },
@@ -802,6 +803,54 @@ async fn passkey_hash_ceremonies_verify_signatures_coalesce_locked_touch_id_and_
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     assert_eq!(cancelled.load(Ordering::SeqCst), 1);
+
+    // Hanging up during `UnlockBiometric` (e.g. picker or config sheet dismissed)
+    // also cancels the Touch ID prompt immediately.
+    let started_ub = Arc::new(tokio::sync::Notify::new());
+    let started_ub_hook = started_ub.clone();
+    let cancelled_ub = Arc::new(AtomicUsize::new(0));
+    let seen_cancel_ub = cancelled_ub.clone();
+    *f.agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |cancel| {
+        started_ub_hook.notify_one();
+        for _ in 0..400 {
+            if cancel.is_cancelled() {
+                seen_cancel_ub.fetch_add(1, Ordering::SeqCst);
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        Err(biometric::UnlockError::Cancelled)
+    }));
+    let (server, mut client) = UnixStream::pair().unwrap();
+    mark_peer_as(&f.agent, &server, CallerClass::AutoFill, "macOS AutoFill");
+    let mut raw = serde_json::to_vec(&Request {
+        v: PROTOCOL_VERSION,
+        claimed: None,
+        command: Command::UnlockBiometric { timeout_secs: None },
+    })
+    .unwrap();
+    raw.push(b'\n');
+    client.write_all(&raw).await.unwrap();
+    let agent = f.agent.clone();
+    let task = tokio::spawn(async move {
+        drop(
+            agent
+                .handle_on(server, MAX_AUTOFILL_LINE, SocketKind::AutoFill)
+                .await,
+        );
+    });
+    tokio::time::timeout(Duration::from_secs(5), started_ub.notified())
+        .await
+        .expect("UnlockBiometric Touch ID hook should start");
+    drop(client);
+    task.await.unwrap();
+    for _ in 0..100 {
+        if cancelled_ub.load(Ordering::SeqCst) == 1 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert_eq!(cancelled_ub.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]

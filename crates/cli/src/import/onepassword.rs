@@ -664,16 +664,28 @@ fn ssh(item: &Value, files: Files, summary: &mut Summary) -> Option<Imported> {
         return None;
     };
     let mut b = Builder::new("ssh");
-    b.known("private-key", Some(private));
     // 1Password 8 keeps these in the item's fields; older exports only in
     // the key's metadata.
     let metadata = ssh_metadata(details);
     let mut field = |names: [&str; 2]| entries.take(|e| names.iter().any(|n| e.is(n)));
-    let public = field(["public_key", "public key"]).or_else(|| text(metadata, "publicKey"));
-    let fingerprint =
+    let mut public = field(["public_key", "public key"]).or_else(|| text(metadata, "publicKey"));
+    let mut fingerprint =
         field(["fingerprint", "fingerprint"]).or_else(|| text(metadata, "fingerprint"));
     let passphrase = field(["passphrase", "password"]);
-    let comment = field(["comment", "comment"]);
+    let mut comment = field(["comment", "comment"]);
+    if (public.is_none() || fingerprint.is_none())
+        && let Some((derived_pub, derived_fp, derived_comment)) =
+            crate::agent::ssh::keys::derive_fields(
+                &private,
+                passphrase.as_deref(),
+                comment.as_deref(),
+            )
+    {
+        public = public.or(Some(derived_pub));
+        fingerprint = fingerprint.or(Some(derived_fp));
+        comment = comment.or(derived_comment);
+    }
+    b.known("private-key", Some(private));
     b.known("public-key", public);
     b.known("fingerprint", fingerprint);
     b.known("passphrase", passphrase);
@@ -799,6 +811,20 @@ pub(super) fn item(item: &Value, files: Files, summary: &mut Summary) -> Option<
     mapped.tags = tags::collect(array(overview, "tags").iter().filter_map(scalar));
     if !array(details, "passwordHistory").is_empty() {
         summary.drop_some(PASSWORD_HISTORY, 1);
+    }
+    let mut mapped = mapped;
+    if let Some(pw_field) = deadbolt_core::health::audited_password_field(mapped.kind)
+        && mapped.fields.contains_key(pw_field)
+    {
+        let hist_max = array(details, "passwordHistory")
+            .iter()
+            .filter_map(|h| number(h, "time"))
+            .max();
+        mapped.password_changed = hist_max
+            .or_else(|| number(item, "updatedAt"))
+            .filter(|&secs| secs > 0)
+            .map(date)
+            .filter(|d| deadbolt_core::item::valid_date(d));
     }
     summary.add(&mapped);
     Some(mapped)
