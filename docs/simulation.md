@@ -16,7 +16,7 @@ In Kit's environment, put the command (including `env NAME=value`) after
 ## A seed controls actions and delivery
 
 Two fixed seeds run by default. Each generates 48 actions after pairing three
-devices: item creation, edits, deletion, pairing, removal, lock/unlock, crash and
+devices: item creation, edits, deletion, restoring the latest deleted item, pairing, removal, lock/unlock, crash and
 reopen, startup rounds, sync, partitions, heals, failed writes, and revocation during sync.
 Startup actions use the production barrier against the current membership, and
 handlers read live readiness. Item actions use the production item-command path.
@@ -51,7 +51,8 @@ and compares its wire digest.
   whose items or membership grew, which is what `watch` streams, and none for
   a vault's items or devices that didn't.
 - **Convergence:** after healing and unlocking, current members must agree on
-  heads and items within twelve rounds. Stop early once they agree and their
+  heads, items and deleted items (with their deletion times) within twelve
+  rounds. Stop early once they agree and their
   membership barriers are open. Removed devices need not converge.
 
 Pairing uses the production PAKE, key confirmation and welcome protocol with a

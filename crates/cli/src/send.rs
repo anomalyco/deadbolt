@@ -546,6 +546,7 @@ async fn find_item(
         vault: vault.clone(),
         query: Vec::new(),
         kind: None,
+        deleted: false,
         tags: Vec::new(),
         favorites: false,
     };
@@ -558,6 +559,7 @@ async fn find_item(
         query: vec![id],
         otp: true,
         files: Vec::new(),
+        deleted: false,
     };
     let Reply::Item { item } = crate::request(paths, command, from_stdin).await? else {
         bail!("unexpected reply");
@@ -1153,6 +1155,7 @@ mod tests {
             source: None,
             favorite: false,
             tags: Vec::new(),
+            deleted_at: None,
         }
     }
 
@@ -1360,6 +1363,7 @@ mod tests {
             source: None,
             favorite: false,
             tags: Vec::new(),
+            deleted_at: None,
         };
         let Node::Group(group) = item_node(&item, None).unwrap() else {
             panic!("expected a group");

@@ -261,6 +261,7 @@ fn fixture_item(id: &str, kind: &str, label: &str, detail: Option<&str>) -> Item
         source: None,
         favorite,
         tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+        deleted_at: None,
     }
 }
 
@@ -295,6 +296,75 @@ pub(super) fn vault_243(s: &mut App) {
     s.select(first);
 }
 
+/// The vault with Recently Deleted open on four items, deleted hours to
+/// weeks ago, newest first as the agent lists them.
+pub(super) fn trash(s: &mut App) {
+    vault(s);
+    s.open_trash();
+    let now = crate::activity::now();
+    let items = [
+        (
+            "d41e07",
+            "login",
+            "netflix.com",
+            Some("dax@anoma.ly"),
+            3 * 3600,
+        ),
+        ("6b0a93", "note", "Spare key", None, 30 * 3600),
+        ("2fc581", "card", "Visa •••• 1881", Some("02/26"), 6 * 86400),
+        (
+            "8e3d2a",
+            "database",
+            "staging on db.anoma.ly",
+            Some("app"),
+            23 * 86400,
+        ),
+    ]
+    .map(|(id, kind, label, detail, age)| ItemInfo {
+        deleted_at: Some(now - age),
+        ..fixture_item(id, kind, label, detail)
+    });
+    let seq = s.trash.seq();
+    s.apply(
+        agent::Done::Trash {
+            seq,
+            result: Ok((None, items.to_vec())),
+        },
+        &mut Tx::default(),
+    );
+}
+
+/// Recently Deleted with netflix.com open, read-only.
+pub(super) fn trash_item(s: &mut App) {
+    trash(s);
+    let Some(listed) = s.trash.items.first().cloned() else {
+        return;
+    };
+    s.open_deleted(&listed.id);
+    let field = |name: &str, kind: &str, value: &str| FieldInfo {
+        name: name.into(),
+        kind: kind.into(),
+        value: value.into(),
+    };
+    let item = ItemInfo {
+        fields: vec![
+            field("username", "text", "dax@anoma.ly"),
+            field("password", "secret", "fixture-netflix-password"),
+            field("url", "url", "https://netflix.com/login"),
+            field("notes", "note", "The family plan. Kitchen TV and the iPad."),
+        ],
+        ..listed
+    };
+    let seq = s.trash.item_seq();
+    s.apply(
+        agent::Done::TrashItem {
+            seq,
+            result: Ok(agent::Values::new(item)),
+        },
+        &mut Tx::default(),
+    );
+}
+
 fn many_item(i: usize) -> ItemInfo {
     const SITES: [&str; 9] = [
         "acme",
@@ -317,6 +387,7 @@ fn many_item(i: usize) -> ItemInfo {
         source: None,
         favorite: false,
         tags: Vec::new(),
+        deleted_at: None,
     }
 }
 

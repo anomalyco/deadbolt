@@ -131,13 +131,19 @@ fn apply_in_order(mut entries: Vec<Entry>) -> Vault {
     vault
 }
 
-type Snapshot = (Vec<DeviceId>, Vec<Option<Item>>, Vec<Vec<Version>>);
+type Snapshot = (
+    Vec<DeviceId>,
+    Vec<Option<Item>>,
+    Vec<Vec<Version>>,
+    Vec<Deleted>,
+);
 
 fn snapshot(vault: &Vault, items: &[ItemId]) -> Snapshot {
     (
         vault.members().collect(),
         items.iter().map(|id| vault.item(id)).collect(),
         items.iter().map(|id| vault.history(id)).collect(),
+        vault.deleted(),
     )
 }
 
@@ -751,7 +757,7 @@ fn items_set_delete_and_restore() {
     a.write(vec![DataOp::remove(item, "username")]);
     assert!(!a.vault.item(&item).unwrap().fields.contains_key("username"));
 
-    a.write(vec![DataOp::delete(item)]);
+    a.write(vec![DataOp::delete(item, 100)]);
     assert!(a.vault.item(&item).unwrap().deleted);
     assert!(a.vault.items().is_empty());
 
@@ -1382,7 +1388,7 @@ fn concurrent_edits_are_order_independent() {
         dev.set(items[1], "user", &format!("again{i}"));
     }
     sync_both(&mut a, &mut b);
-    a.write(vec![DataOp::delete(items[0])]);
+    a.write(vec![DataOp::delete(items[0], 100)]);
     c.set(items[1], "notes", "c");
     let vault = assert_order_independent(&all_entries(&[&a, &b, &c]), &items);
     let conflicted = vault
@@ -1399,7 +1405,7 @@ fn concurrent_edit_beats_delete_item() {
     let mut b = a.invite();
     let item = a.login("one");
     sync(&a, &mut b);
-    a.write(vec![DataOp::delete(item)]);
+    a.write(vec![DataOp::delete(item, 100)]);
     b.set(item, "password", "two");
     sync_both(&mut a, &mut b);
     for vault in [&a.vault, &b.vault] {
@@ -1409,9 +1415,159 @@ fn concurrent_edit_beats_delete_item() {
         let delete = vault
             .history(&item)
             .into_iter()
-            .find(|v| v.change == Change::Delete)
+            .find(|v| matches!(v.change, Change::Delete { .. }))
             .unwrap();
         assert_eq!(delete.status, VersionStatus::Conflicted);
+    }
+}
+
+#[test]
+fn restore_brings_a_deleted_item_back_as_it_was() {
+    let mut a = Dev::create();
+    let item = a.login("one");
+    let other = a.login("two");
+    a.write(vec![DataOp::delete(item, 100)]);
+    a.write(vec![DataOp::delete(other, 200)]);
+    // Newest first, each with its time; an untimed delete goes last.
+    let untimed = a.login("three");
+    a.write(vec![DataOp::Edit {
+        item: untimed,
+        change: Change::Delete { at: None },
+    }]);
+    let deleted: Vec<(ItemId, Option<u64>)> = a
+        .vault
+        .deleted()
+        .iter()
+        .map(|d| (d.item.id, d.at))
+        .collect();
+    assert_eq!(
+        deleted,
+        [(other, Some(200)), (item, Some(100)), (untimed, None)]
+    );
+
+    a.write(vec![DataOp::restore(item)]);
+    let got = a.vault.item(&item).unwrap();
+    assert!(!got.deleted);
+    assert_eq!(got.fields["password"], secret("one"));
+    assert_eq!(a.vault.items().len(), 1);
+    assert_eq!(a.vault.deleted().len(), 2);
+    let history = a.vault.history(&item);
+    let last = history.last().unwrap();
+    assert_eq!(
+        (&last.change, last.status),
+        (&Change::Restore, VersionStatus::Current)
+    );
+    // Deleted again, it's deleted at the new time.
+    a.write(vec![DataOp::delete(item, 300)]);
+    assert_eq!(a.vault.deleted()[0].at, Some(300));
+}
+
+/// A delete and a restore that didn't see each other: the restore wins on
+/// every device, in every order, as an edit beats a delete it didn't see. A
+/// delete made after seeing the restore deletes it again.
+#[test]
+fn concurrent_restore_beats_delete_and_converges() {
+    let mut a = Dev::create();
+    let mut b = a.invite();
+    let item = a.login("one");
+    a.write(vec![DataOp::delete(item, 100)]);
+    sync_both(&mut a, &mut b);
+    assert!(b.vault.item(&item).unwrap().deleted);
+
+    a.write(vec![DataOp::restore(item)]);
+    b.write(vec![DataOp::delete(item, 150)]);
+    sync_both(&mut a, &mut b);
+    let vault = assert_order_independent(&all_entries(&[&a, &b]), &[item]);
+    assert!(!vault.item(&item).unwrap().deleted);
+    for dev in [&a, &b] {
+        assert!(!dev.vault.item(&item).unwrap().deleted);
+        assert!(dev.vault.deleted().is_empty());
+    }
+
+    b.write(vec![DataOp::delete(item, 200)]);
+    sync_both(&mut a, &mut b);
+    assert_order_independent(&all_entries(&[&a, &b]), &[item]);
+    for dev in [&a, &b] {
+        assert_eq!(dev.vault.deleted()[0].at, Some(200));
+    }
+
+    // Two deletes that didn't see each other: the later time shows.
+    a.write(vec![DataOp::restore(item)]);
+    sync_both(&mut a, &mut b);
+    a.write(vec![DataOp::delete(item, 400)]);
+    b.write(vec![DataOp::delete(item, 300)]);
+    sync_both(&mut a, &mut b);
+    assert_order_independent(&all_entries(&[&a, &b]), &[item]);
+    for dev in [&a, &b] {
+        assert_eq!(dev.vault.deleted()[0].at, Some(400));
+    }
+}
+
+/// Seeded rounds of deletes, restores and edits on three devices with
+/// partial syncs between them: every order of the entries gives the same
+/// items, history and deleted list, and fully synced devices agree.
+#[test]
+#[expect(
+    clippy::disallowed_methods,
+    reason = "test configuration boundary, as the property tests' case count"
+)]
+fn random_deletes_and_restores_converge() {
+    let cases: u64 = std::env::var("PROPTEST_CASES")
+        .ok()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(16);
+    for case in 0..cases {
+        let mut seed = 0x2545_f491_4f6c_dd1d_u64 ^ case;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut a = Dev::create();
+        let items = [a.login("x"), a.login("y")];
+        let mut b = a.invite();
+        let mut c = a.invite();
+        sync(&a, &mut b);
+        sync(&a, &mut c);
+        let mut devs = [a, b, c];
+        for step in 0..24 {
+            let i = (next() % 3) as usize;
+            let item = items[(next() % 2) as usize];
+            let dev = &mut devs[i];
+            match next() % 4 {
+                0 => {
+                    dev.write(vec![DataOp::delete(item, 1_000 + step)]);
+                }
+                1 => {
+                    dev.write(vec![DataOp::restore(item)]);
+                }
+                2 => {
+                    dev.set(item, "password", &format!("p{case}-{step}"));
+                }
+                _ => {
+                    let j = (next() % 3) as usize;
+                    if i != j {
+                        let (from, to) = if i < j {
+                            let (l, r) = devs.split_at_mut(j);
+                            (&l[i], &mut r[0])
+                        } else {
+                            let (l, r) = devs.split_at_mut(i);
+                            (&r[0], &mut l[j])
+                        };
+                        sync(from, to);
+                    }
+                }
+            }
+        }
+        let [a, b, c] = &mut devs;
+        assert_order_independent(&all_entries(&[a, b, c]), &items);
+        sync_both(a, b);
+        sync_both(b, c);
+        sync_both(a, b);
+        let expected = snapshot(&a.vault, &items);
+        assert_eq!(snapshot(&b.vault, &items), expected, "case {case}");
+        assert_eq!(snapshot(&c.vault, &items), expected, "case {case}");
     }
 }
 

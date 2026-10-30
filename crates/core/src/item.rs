@@ -1169,8 +1169,9 @@ pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError>
             Err(ItemError::InvalidTag(tag.clone()))
         }
         Change::Name(_)
-        | Change::Delete
+        | Change::Delete { .. }
         | Change::Source(_)
+        | Change::Restore
         | Change::Favorite(_)
         | Change::TagAdd(_)
         | Change::TagRemove(_) => Ok(()),

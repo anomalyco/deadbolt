@@ -258,6 +258,8 @@ enum Action {
     Tag(usize, u64),
     Untag(usize),
     Delete(usize),
+    /// Restores the most recently deleted item.
+    Restore(usize),
     Pair(usize),
     Remove(usize),
     Sync(usize, usize, u64, Option<usize>),
@@ -709,6 +711,14 @@ impl World {
                     Ok(())
                 })?;
             }
+            Action::Restore(i) if self.can_write(i) => {
+                self.devices[i].with(|s| {
+                    if let Some(gone) = s.vault(&self.vault).deleted().first() {
+                        super::items::restore(s, None, &[gone.item.id.to_string()])?;
+                    }
+                    Ok(())
+                })?;
+            }
             _ => {}
         }
         self.check()
@@ -852,8 +862,10 @@ impl World {
     fn converged(&self) -> Result<bool> {
         let members = self.devices[0]
             .with(|s| Ok(s.vault(&self.vault).members().collect::<BTreeSet<_>>()))?;
-        let (heads, items) = self.devices[0]
-            .with(|s| Ok((s.vault(&self.vault).heads(), s.vault(&self.vault).items())))?;
+        let (heads, items, deleted) = self.devices[0].with(|s| {
+            let vault = s.vault(&self.vault);
+            Ok((vault.heads(), vault.items(), vault.deleted()))
+        })?;
         for d in &self.devices {
             if !members.contains(&DeviceId::from_bytes(d.id)) {
                 continue;
@@ -866,7 +878,7 @@ impl World {
                     .vaults
                     .get(&self.vault)
                     .ok_or_else(|| anyhow::anyhow!("member missing vault"))?;
-                Ok(vault.heads() == heads && vault.items() == items)
+                Ok(vault.heads() == heads && vault.items() == items && vault.deleted() == deleted)
             })?;
             if !same {
                 return Ok(false);
@@ -883,7 +895,7 @@ fn actions(seed: u64) -> Vec<Action> {
         let i = (rng.next() % DEVICES as u64) as usize;
         let j = (rng.next() % DEVICES as u64) as usize;
         let value = rng.next();
-        actions.push(match rng.next() % 18 {
+        actions.push(match rng.next() % 19 {
             0 => Action::Add(i, value),
             1 => Action::Edit(i, value),
             2 => Action::Delete(i),
@@ -899,9 +911,10 @@ fn actions(seed: u64) -> Vec<Action> {
             12 => Action::WriteFailure(i),
             13 => Action::RevokeDuringSync(i, value, (value % 400) as usize),
             14 => Action::Startup(i),
-            15 => Action::Favorite(i, value & 1 == 0),
-            16 => Action::Tag(i, value),
-            17 => Action::Untag(i),
+            15 => Action::Restore(i),
+            16 => Action::Favorite(i, value & 1 == 0),
+            17 => Action::Tag(i, value),
+            18 => Action::Untag(i),
             _ => Action::Sync(i, j, value, None),
         });
     }
@@ -1093,6 +1106,39 @@ fn startup_reopens_pairing_and_existing_handlers_observe_readiness() {
     assert!(world.can_write(2));
     world.step(&Action::Add(2, 42)).unwrap();
     world.converge().unwrap();
+}
+
+/// Two devices that can't see each other both delete an item, and one
+/// restores it: the restore never saw the other delete, so once healed
+/// every device has the item back.
+#[test]
+fn restore_beats_a_delete_it_never_saw() {
+    let mut world = World::new().unwrap();
+    for action in [
+        Action::Pair(1),
+        Action::Add(0, 1),
+        Action::Sync(0, 1, 10, None),
+        Action::Partition(0, 1),
+        Action::Delete(0),
+        Action::Delete(1),
+        Action::Restore(0),
+    ] {
+        world.step(&action).unwrap();
+    }
+    let deleted = |world: &World, i: usize| {
+        world.devices[i]
+            .with(|s| Ok(s.vault(&world.vault).deleted().len()))
+            .unwrap()
+    };
+    assert_eq!((deleted(&world, 0), deleted(&world, 1)), (0, 1));
+    world.converge().unwrap();
+    for i in 0..2 {
+        assert_eq!(deleted(&world, i), 0);
+        let items = world.devices[i]
+            .with(|s| Ok(s.vault(&world.vault).items().len()))
+            .unwrap();
+        assert_eq!(items, 1);
+    }
 }
 
 #[test]

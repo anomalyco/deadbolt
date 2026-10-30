@@ -102,6 +102,7 @@ impl App {
         let token = tag_token(tag);
         tx.instant();
         self.close_settings();
+        self.close_trash();
         self.nav.field = None;
         self.sidebar.set_open(true);
         if self.search.text.trim().eq_ignore_ascii_case(&token) {

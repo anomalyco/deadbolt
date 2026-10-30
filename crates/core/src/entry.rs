@@ -132,10 +132,16 @@ pub enum Change {
     Remove { field: String },
     /// Sets or clears the item's name.
     Name(Option<String>),
-    /// Marks the item deleted. A later edit restores it.
-    Delete,
+    /// Marks the item deleted, keeping its fields. `at` is when, in seconds
+    /// since the Unix epoch on the deleting device's clock, for showing and
+    /// ordering deleted items; `None` in deletes written before it was kept.
+    /// A later [`Change::Restore`] or edit brings the item back.
+    Delete { at: Option<u64> },
     /// Sets or clears where the item is mirrored from.
     Source(Option<Source>),
+    /// Brings a deleted item back as it was. Like any edit, it beats a
+    /// delete it didn't see and loses to one that saw it.
+    Restore,
     /// Stars or unstars the item.
     Favorite(bool),
     /// Adds a tag (`work`, `work/aws`).
@@ -226,8 +232,13 @@ impl DataOp {
         Self::edit(item, Change::Name(name))
     }
 
-    pub fn delete(item: ItemId) -> Self {
-        Self::edit(item, Change::Delete)
+    /// Deletes `item` at `at` (seconds since the Unix epoch).
+    pub fn delete(item: ItemId, at: u64) -> Self {
+        Self::edit(item, Change::Delete { at: Some(at) })
+    }
+
+    pub fn restore(item: ItemId) -> Self {
+        Self::edit(item, Change::Restore)
     }
 
     fn edit(item: ItemId, change: Change) -> Self {
@@ -527,12 +538,18 @@ fn write_data_op(w: &mut DynWriter<'_>, op: &DataOp) {
                     w.u8(2);
                     write_opt_str(w, name.as_deref());
                 }
-                Change::Delete => w.u8(3),
+                // An untimed delete keeps its old tag, so it encodes (and
+                // hashes) as it did before deletes were timed.
+                Change::Delete { at: None } => w.u8(3),
                 Change::Source(source) => {
                     w.u8(4);
                     write_source(w, source.as_ref());
                 }
-                // Tags 5 and 6 are reserved for timed deletes and restores.
+                Change::Delete { at: Some(at) } => {
+                    w.u8(5);
+                    w.u64(*at);
+                }
+                Change::Restore => w.u8(6),
                 Change::Favorite(favorite) => {
                     w.u8(7);
                     w.u8(u8::from(*favorite));
@@ -652,8 +669,10 @@ fn read_data_op(r: &mut Reader<'_>) -> Result<DataOp, DecodeError> {
                 },
                 1 => Change::Remove { field: r.string()? },
                 2 => Change::Name(read_opt_str(r)?),
-                3 => Change::Delete,
+                3 => Change::Delete { at: None },
                 4 => Change::Source(read_source(r)?),
+                5 => Change::Delete { at: Some(r.u64()?) },
+                6 => Change::Restore,
                 7 => Change::Favorite(match r.u8()? {
                     0 => false,
                     1 => true,
@@ -735,7 +754,9 @@ mod tests {
                 DataOp::remove(item, "notes"),
                 DataOp::name(item, None),
                 DataOp::name(item, Some("n".into())),
-                DataOp::delete(item),
+                DataOp::delete(item, 1_793_145_905),
+                DataOp::edit(item, Change::Delete { at: None }),
+                DataOp::restore(item),
                 DataOp::create_mirror(
                     "note",
                     Some("Mirrored".into()),
@@ -770,6 +791,15 @@ mod tests {
         assert_eq!(decoded, entry);
         assert_eq!(decoded.encode(), bytes);
         decoded.verify().unwrap();
+        // An untimed delete (from before deletes were timed) is still the
+        // edit tag, the item and tag 3, so old entries hash as they did.
+        let item = ItemId::from_bytes([7; 16]);
+        assert_eq!(
+            DataOp::edit(item, Change::Delete { at: None }).encoded_len(),
+            18
+        );
+        assert_eq!(DataOp::delete(item, 1).encoded_len(), 26);
+        assert_eq!(DataOp::restore(item).encoded_len(), 18);
 
         for op in [
             MembershipOp::Create {

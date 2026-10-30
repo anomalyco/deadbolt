@@ -95,14 +95,43 @@ fn short_id(ids: &[String], id: &str) -> String {
 pub(super) struct Listing {
     pub(super) items: Vec<Item>,
     ids: Vec<String>,
+    /// A listing of deleted items, and when each was deleted.
+    deleted: Option<BTreeMap<ItemId, u64>>,
 }
 
 impl Listing {
     pub(super) fn new(vault: &Vault) -> Self {
-        let items = vault.items();
+        Self::of(vault.items(), None)
+    }
+
+    /// The deleted items instead, newest first ([`Vault::deleted`]). Short
+    /// ids are unique among them.
+    pub(super) fn deleted(vault: &Vault) -> Self {
+        let deleted = vault.deleted();
+        let at = deleted
+            .iter()
+            .filter_map(|d| Some((d.item.id, d.at?)))
+            .collect();
+        Self::of(deleted.into_iter().map(|d| d.item).collect(), Some(at))
+    }
+
+    /// The live items, or with `deleted` the deleted ones.
+    pub(super) fn pick(vault: &Vault, deleted: bool) -> Self {
+        if deleted {
+            Self::deleted(vault)
+        } else {
+            Self::new(vault)
+        }
+    }
+
+    fn of(items: Vec<Item>, deleted: Option<BTreeMap<ItemId, u64>>) -> Self {
         let mut ids: Vec<String> = items.iter().map(|i| i.id.to_string()).collect();
         ids.sort();
-        Self { items, ids }
+        Self {
+            items,
+            ids,
+            deleted,
+        }
     }
 
     pub(super) fn has_any_tagged(&self) -> bool {
@@ -156,6 +185,10 @@ impl Listing {
             source: super::mirror::source_app(item.source.as_ref()),
             favorite: item.favorite,
             tags: item.tags.iter().cloned().collect(),
+            deleted_at: self
+                .deleted
+                .as_ref()
+                .and_then(|at| at.get(&item.id).copied()),
         }
     }
 
@@ -169,6 +202,7 @@ impl Listing {
         let query = query.join(" ");
         match found.as_slice() {
             [item] => Ok(item),
+            [] if self.deleted.is_some() => bail!("no deleted item matches {query:?}"),
             [] => bail!("no item matches {query:?}"),
             many => {
                 let mut lines: Vec<String> = many
@@ -236,15 +270,17 @@ fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
 }
 
 /// One item with its values; one-time password secrets only with `otp`,
-/// and the contents only of the file fields `files` names.
+/// and the contents only of the file fields `files` names. With `deleted`,
+/// one of the deleted items instead.
 pub fn get(
     s: &Loaded,
     vault: Option<&str>,
     query: &[String],
     otp: bool,
     files: &[String],
+    deleted: bool,
 ) -> Result<ItemInfo> {
-    let listing = Listing::new(s.vault(&s.resolve(vault)?));
+    let listing = Listing::pick(s.vault(&s.resolve(vault)?), deleted);
     let item = listing.find(query)?;
     let mut info = listing.info(item, true, otp);
     if !files.is_empty() {
@@ -291,19 +327,23 @@ pub fn list(
     vault: Option<&str>,
     query: &[String],
     kind: Option<&str>,
+    deleted: bool,
 ) -> Result<Vec<ItemInfo>> {
-    list_filtered(s, vault, query, kind, &[], false)
+    list_filtered(s, vault, query, kind, deleted, &[], false)
 }
 
+/// Matching items (favorites first, then by label), or with `deleted` the
+/// deleted ones newest first.
 pub fn list_filtered(
     s: &Loaded,
     vault: Option<&str>,
     query: &[String],
     kind: Option<&str>,
+    deleted: bool,
     filter_tags: &[String],
     favorites_only: bool,
 ) -> Result<Vec<ItemInfo>> {
-    let listing = Listing::new(s.vault(&s.resolve(vault)?));
+    let listing = Listing::pick(s.vault(&s.resolve(vault)?), deleted);
     let any_tagged = listing.has_any_tagged();
     let mut items: Vec<ItemInfo> = listing
         .items
@@ -318,13 +358,15 @@ pub fn list_filtered(
         })
         .map(|i| listing.info(i, false, false))
         .collect();
-    items.sort_by(|a, b| {
-        (!a.favorite, a.label.to_lowercase(), &a.id).cmp(&(
-            !b.favorite,
-            b.label.to_lowercase(),
-            &b.id,
-        ))
-    });
+    if !deleted {
+        items.sort_by(|a, b| {
+            (!a.favorite, a.label.to_lowercase(), &a.id).cmp(&(
+                !b.favorite,
+                b.label.to_lowercase(),
+                &b.id,
+            ))
+        });
+    }
     Ok(items)
 }
 
@@ -746,7 +788,11 @@ pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<I
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;
     let info = listing.info(item, false, false);
-    write(s, vault, vec![DataOp::delete(item.id)])?;
+    write(
+        s,
+        vault,
+        vec![DataOp::delete(item.id, crate::config::now())],
+    )?;
     Ok(info)
 }
 
@@ -761,6 +807,13 @@ pub(super) fn remove_id(s: &mut Loaded, vault: VaultId, id: ItemId) -> Result<It
         .filter(|item| !item.deleted)
         .ok_or_else(|| anyhow!("no such item"))?;
     let info = Listing::new(stored).info(&item, false, false);
-    write(s, vault, vec![DataOp::delete(id)])?;
+    write(s, vault, vec![DataOp::delete(id, crate::config::now())])?;
     Ok(info)
+}
+/// Brings back the one deleted item `query` matches, as it was.
+pub fn restore(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+    let vault = s.resolve(vault)?;
+    let id = Listing::deleted(s.vault(&vault)).find(query)?.id;
+    write(s, vault, vec![DataOp::restore(id)])?;
+    Ok(info(s, vault, &id))
 }

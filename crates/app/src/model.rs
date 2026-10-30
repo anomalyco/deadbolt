@@ -91,6 +91,8 @@ pub struct App {
     pub mirror: crate::mirror::Mirror,
     pub activity: crate::activity::Activity,
     pub agents: crate::agents::Agents,
+    /// Recently Deleted, in the item's place (⇧⌘⌫).
+    pub trash: crate::trash::Trash,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
@@ -153,6 +155,7 @@ impl App {
             mirror: crate::mirror::Mirror::default(),
             activity: crate::activity::Activity::default(),
             agents: crate::agents::Agents::default(),
+            trash: crate::trash::Trash::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
@@ -188,12 +191,16 @@ impl App {
             installer.stamp_copy(now, tx);
             changed |= installer.poll(now);
         }
-        // The install page and Settings belong to the vault; leaving it closes them.
-        if self.screen != Screen::Vault && (self.installing() || self.settings_open) {
+        // The install page, Settings and Recently Deleted belong to the
+        // vault; leaving it closes them.
+        if self.screen != Screen::Vault
+            && (self.installing() || self.settings_open || self.trash.open)
+        {
             if let Some(installer) = &mut self.installer {
                 installer.open = false;
             }
             self.close_settings();
+            self.trash.forget();
             changed = true;
         }
         changed |= self.poll_panel(now, tx);
@@ -264,6 +271,8 @@ impl App {
             },
             Done::Activity { seq, result } => self.on_activity(seq, result, tx),
             Done::Agents { seq, result } => self.on_agents(seq, result, tx),
+            Done::Trash { seq, result } => self.on_trash(seq, result, tx),
+            Done::TrashItem { seq, result } => self.on_trash_item(seq, result, tx),
             Done::Reported => {}
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
@@ -301,7 +310,10 @@ impl App {
                 self.on_activity_changed();
                 self.on_agents_changed();
             }
-            Change::Items { vault } if self.shows(&vault) => self.refresh(),
+            Change::Items { vault } if self.shows(&vault) => {
+                self.refresh();
+                self.on_trash_changed();
+            }
             Change::Stopping => self.on_agent_gone(tx),
             // Another launch (`deadbolt app`): only the main window's watch hears it.
             Change::Activate { token } => {
@@ -539,6 +551,7 @@ impl App {
         self.mirror.forget();
         self.activity.forget();
         self.agents.forget();
+        self.trash.forget();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay

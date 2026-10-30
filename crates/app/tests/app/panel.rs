@@ -1224,6 +1224,7 @@ fn many_items() -> Vec<ItemInfo> {
             source: None,
             favorite: false,
             tags: Vec::new(),
+            deleted_at: None,
         })
         .collect()
 }

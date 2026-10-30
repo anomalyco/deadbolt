@@ -139,6 +139,17 @@ pub enum Job {
         seq: u64,
         revoke: Option<crate::agents::Revoke>,
     },
+    /// Recently Deleted: restores `restore` if asked, then lists the
+    /// deleted items (`trash::Trash`).
+    Trash {
+        seq: u64,
+        restore: Option<String>,
+    },
+    /// A deleted item with its values, to show read-only.
+    TrashItem {
+        id: String,
+        seq: u64,
+    },
     /// Tells the agent the app showed or copied a field, for Activity.
     Report {
         action: AppAction,
@@ -217,6 +228,14 @@ pub enum Done {
         seq: u64,
         result: Result<crate::agents::Listing, Failure>,
     },
+    Trash {
+        seq: u64,
+        result: Result<crate::trash::Listing, Failure>,
+    },
+    TrashItem {
+        seq: u64,
+        result: Result<Values, Failure>,
+    },
     /// A report went, or didn't: nothing waits on it.
     Reported,
     /// From the watch stream.
@@ -251,6 +270,7 @@ impl Values {
             source: self.0.source.take(),
             favorite: self.0.favorite,
             tags: std::mem::take(&mut self.0.tags),
+            deleted_at: self.0.deleted_at,
         };
         (item, self.1.take())
     }

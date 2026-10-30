@@ -66,6 +66,8 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::ItemSet { .. } => (T::Write, "item-set"),
         C::ItemUnset { .. } => (T::Write, "item-unset"),
         C::ItemRemove { .. } => (T::Never, "item-remove"),
+        // A restored login fills on its sites again.
+        C::ItemRestore { .. } => (T::Write, "item-restore"),
         C::Import { .. } => (T::Never, "import"),
         C::Generate { .. } => (T::Always, "generate"),
         C::SyncOnePassword { .. } => (T::Never, "sync-one-password"),
@@ -218,7 +220,8 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
         ),
         Command::ItemGet { vault, query, .. }
         | Command::ItemList { vault, query, .. }
-        | Command::ItemRemove { vault, query } => (named(vault, query), Vec::new()),
+        | Command::ItemRemove { vault, query }
+        | Command::ItemRestore { vault, query } => (named(vault, query), Vec::new()),
         Command::ItemCode { vault, query } => (named(vault, query), vec!["otp".into()]),
         Command::ItemSet {
             vault,
@@ -744,6 +747,7 @@ mod tests {
             query: vec!["github".into()],
             otp: false,
             files: Vec::new(),
+            deleted: false,
         }
     }
 
@@ -1141,6 +1145,7 @@ mod tests {
                 query: vec!["big".into()],
                 otp: false,
                 files: Vec::new(),
+                deleted: false,
             },
         })
         .unwrap();
@@ -1206,6 +1211,7 @@ mod tests {
             vault: None,
             query: Vec::new(),
             kind: None,
+            deleted: false,
             tags: Vec::new(),
             favorites: false,
         };

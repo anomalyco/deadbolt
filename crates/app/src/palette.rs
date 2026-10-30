@@ -23,6 +23,7 @@ pub enum Action {
     FilterTag,
     New,
     Import,
+    Trash,
     Settings,
     Lock,
     /// The quick panel's way to the main window.
@@ -43,6 +44,7 @@ impl Action {
             Action::FilterTag => "filter-tag",
             Action::New => "new",
             Action::Import => "import",
+            Action::Trash => "trash",
             Action::Settings => "settings",
             Action::Lock => "lock",
             Action::Window => "window",
@@ -62,6 +64,7 @@ impl Action {
             Action::FilterTag => &[],
             Action::New => &["⌘", "N"],
             Action::Import => &["⇧", "⌘", "I"],
+            Action::Trash => &["⇧", "⌘", "⌫"],
             Action::Settings => &["⌘", ","],
             Action::Lock => &["⌘", "L"],
             Action::Window => &[],
@@ -113,7 +116,13 @@ pub fn actions(s: &App) -> Vec<Action> {
     if s.items.iter().any(|i| !i.tags.is_empty()) {
         list.push(Action::FilterTag);
     }
-    list.extend([Action::New, Action::Import, Action::Settings, Action::Lock]);
+    list.extend([
+        Action::New,
+        Action::Import,
+        Action::Trash,
+        Action::Settings,
+        Action::Lock,
+    ]);
     if item.is_some() {
         list.push(Action::Delete);
     }
@@ -155,6 +164,7 @@ pub fn label(s: &App, a: Action) -> String {
         Action::FilterTag => "Filter by tag…".into(),
         Action::New => "New item".into(),
         Action::Import => "Import passwords…".into(),
+        Action::Trash => "Recently deleted".into(),
         Action::Settings => "Settings".into(),
         Action::Lock => "Lock".into(),
         Action::Window => "Open Deadbolt".into(),
@@ -224,6 +234,7 @@ impl App {
             Action::FilterTag => {}
             Action::New => self.new_item(),
             Action::Import => self.show_import(),
+            Action::Trash => self.open_trash(),
             Action::Settings => self.open_settings(),
             Action::Lock => self.lock(),
             Action::Window => self.open_main(tx),
@@ -232,6 +243,9 @@ impl App {
 }
 
 fn shortcut_action(ev: &KeyEvent) -> Option<Action> {
+    if crate::keys::is_trash_shortcut(ev) {
+        return Some(Action::Trash);
+    }
     match &ev.key {
         Key::Enter if !ev.mods.cmd && !ev.mods.ctrl => match (ev.mods.shift, ev.mods.alt) {
             (true, false) => Some(Action::Username),

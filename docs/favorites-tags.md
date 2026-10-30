@@ -239,9 +239,9 @@ deadbolt tags                       # prints `<tag>\t<count>` for every tag and 
 - `deadbolt ls` keeps its existing `short\tlabel[\tdetail]` columns so shell pipelines that cut by tab do not break, and sorts **favorites first** (`(!favorite, label.to_lowercase(), id)`).
 - Ambiguous item lookups (`Listing::find` in `get`, `show`, `set`, `code`, `rm`) accept `#tag` and `is:favorite` tokens in `QUERY`, so `deadbolt get "#work" github` disambiguates two GitHub logins without needing a hex id prefix.
 
-### Control protocol (`PROTOCOL_VERSION = 20`)
+### Control protocol (`PROTOCOL_VERSION = 21`)
 
-Bump `PROTOCOL_VERSION` from `19` to `20` in `crates/client/src/protocol.rs`. `status` and `stop` stay version-independent, so `ensure_running` stops an older `v19` agent cleanly and starts `v20`.
+Bump `PROTOCOL_VERSION` from `20` to `21` in `crates/client/src/protocol.rs`. `status` and `stop` stay version-independent, so `ensure_running` stops an older `v20` agent cleanly and starts `v21`.
 
 - **`ItemInfo`** (in `protocol/items.rs`):
   - `pub favorite: bool`

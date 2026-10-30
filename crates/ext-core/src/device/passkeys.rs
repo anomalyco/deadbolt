@@ -133,7 +133,10 @@ pub(super) fn delete(body: &mut Value) -> Result<Value> {
     let reply = state().with(|s| {
         let item = find(s, body)?;
         let mut staged = s.vault.clone();
-        staged.write(&s.secret, vec![DataOp::delete(item.id)])?;
+        staged.write(
+            &s.secret,
+            vec![DataOp::delete(item.id, super::unix_time() as u64)],
+        )?;
         s.commit(staged)?;
         Ok(json!({"type": "device-delete", "ok": true}))
     })?;

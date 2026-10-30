@@ -20,8 +20,8 @@ use fixtures::{
     FIXTURE_PRIVATE_KEY, FIXTURE_PUBLIC_KEY, detail_for_selection, empty_vault,
     fixture_pairing_code, form, generated, import_preview, import_report, inviter, join_notice,
     kind_scene, locked, locked_error, locked_touch_id, locked_touch_id_reset, mirrored, new_of,
-    other_shortcut, panel_vault, settings_touch_id, show_preview, status, typed, vault, vault_243,
-    vault_info, vault_with_offered_installer, welcome, working,
+    other_shortcut, panel_vault, settings_touch_id, show_preview, status, trash, trash_item, typed,
+    vault, vault_243, vault_info, vault_with_offered_installer, welcome, working,
 };
 
 pub(crate) type Scene = (&'static str, fn(&mut App));
@@ -180,6 +180,9 @@ pub(crate) const SCENES: &[Scene] = &[
     ("document", |s| kind_scene(s, "document")),
     ("passport", |s| kind_scene(s, "passport")),
     ("passkey", |s| kind_scene(s, "passkey")),
+    // ⇧⌘⌫: Recently Deleted, and one of its items opened.
+    ("trash", trash),
+    ("trash-item", trash_item),
     ("passkey-delete", |s| {
         kind_scene(s, "passkey");
         s.ask_delete();

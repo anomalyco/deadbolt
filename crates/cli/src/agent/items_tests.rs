@@ -95,7 +95,7 @@ fn items_leave_otp_secrets_unless_asked() {
     ];
     create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
     let values = |otp| {
-        let item = get(&s, None, &words("site"), otp, &[]).unwrap();
+        let item = get(&s, None, &words("site"), otp, &[], false).unwrap();
         item.fields
             .into_iter()
             .map(|f| (f.name.clone(), f.value.clone()))
@@ -143,7 +143,15 @@ fn a_get_carries_only_the_files_it_names() {
         "{error}"
     );
 
-    let item = get(&s, None, &words("parts"), false, &["part-3".to_string()]).unwrap();
+    let item = get(
+        &s,
+        None,
+        &words("parts"),
+        false,
+        &["part-3".to_string()],
+        false,
+    )
+    .unwrap();
     for field in &item.fields {
         let (name, contents) = deadbolt_core::item::file_parts(&field.value);
         if field.name == "part-3" {
@@ -160,7 +168,7 @@ fn a_get_carries_only_the_files_it_names() {
         "one file's worth: {}",
         reply.len()
     );
-    let none = get(&s, None, &words("parts"), false, &[]).unwrap();
+    let none = get(&s, None, &words("parts"), false, &[], false).unwrap();
     assert!(none.fields.iter().all(|f| !f.value.contains('\n')));
 }
 
@@ -337,7 +345,7 @@ fn sign_in_methods_are_kept_and_linked_to_their_accounts() {
     let figma = named(&s, "Figma");
     assert_eq!(value(&figma, "sign-in-with").as_deref(), Some("x"));
     assert_eq!(value(&named(&s, "Linear"), "sign-in-account"), None);
-    let listed = list(&s, None, &words("notion"), None).unwrap();
+    let listed = list(&s, None, &words("notion"), None, false).unwrap();
     assert_eq!(listed[0].detail.as_deref(), Some("Sign in with Google"));
     // The link is not content: importing again adds nothing.
     let again = import(&mut s, &export, true);
@@ -393,7 +401,7 @@ fn a_set_removes_its_unset_fields_in_the_same_entry() {
     let item = set(&mut s, None, &query, fields, name, &unset).unwrap();
     assert_eq!(s.vault(&vault).entries().len(), before + 1);
     assert_eq!(item.label, "GitHub");
-    let item = get(&s, None, &query, false, &[]).unwrap();
+    let item = get(&s, None, &query, false, &[], false).unwrap();
     let fields: Vec<(&str, &str)> = item
         .fields
         .iter()
@@ -450,7 +458,7 @@ fn a_set_skips_unset_fields_already_gone() {
     );
     assert!(item.is_ok(), "{item:?}");
     assert_eq!(s.vault(&vault).entries().len(), before + 1);
-    let item = get(&s, None, &query, false, &[]).unwrap();
+    let item = get(&s, None, &query, false, &[], false).unwrap();
     let names: Vec<&str> = item.fields.iter().map(|f| f.name.as_str()).collect();
     assert_eq!(names, ["password"]);
 
@@ -489,17 +497,17 @@ fn favorites_sort_first_and_nested_tags_filter_and_disambiguate() {
     .unwrap();
 
     // Favorites come first in `list`.
-    let all = list(&s, None, &[], None).unwrap();
+    let all = list(&s, None, &[], None, false).unwrap();
     let labels: Vec<&str> = all.iter().map(|i| i.label.as_str()).collect();
     assert_eq!(labels, ["Zeta", "Alpha"]);
     assert!(all[0].favorite && !all[1].favorite);
     assert_eq!(all[0].tags, ["Work/AWS"]);
 
     // Parent tag `work` matches `Work/AWS`, both via `--tag` and `#work`.
-    let by_flag = list_filtered(&s, None, &[], None, &["work".into()], false).unwrap();
+    let by_flag = list_filtered(&s, None, &[], None, false, &["work".into()], false).unwrap();
     assert_eq!(by_flag.len(), 1);
     assert_eq!(by_flag[0].label, "Zeta");
-    let by_hash = list(&s, None, &["#work/aws".into()], None).unwrap();
+    let by_hash = list(&s, None, &["#work/aws".into()], None, false).unwrap();
     assert_eq!(by_hash.len(), 1);
     assert_eq!(by_hash[0].label, "Zeta");
 
@@ -533,6 +541,39 @@ fn favorites_sort_first_and_nested_tags_filter_and_disambiguate() {
     .unwrap();
     assert!(!updated.favorite);
     assert_eq!(updated.tags, ["prod"]);
+}
+
+#[test]
+fn deleted_items_list_apart_and_restore() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut s = loaded(dir.path());
+    for name in ["Alpha", "Beta", "Gamma"] {
+        let fields = vec![input("password", &format!("{name}-pw"))];
+        create(&mut s, None, "login", Some(name.into()), fields).unwrap();
+    }
+    remove(&mut s, None, &words("alpha")).unwrap();
+    remove(&mut s, None, &words("beta")).unwrap();
+    let labels = |s: &Loaded, deleted| {
+        list(s, None, &[], None, deleted)
+            .unwrap()
+            .into_iter()
+            .map(|i| (i.label, i.deleted_at.is_some()))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(labels(&s, false), [("Gamma".into(), false)]);
+    let mut gone = labels(&s, true);
+    gone.sort();
+    assert_eq!(gone, [("Alpha".into(), true), ("Beta".into(), true)]);
+    assert!(get(&s, None, &words("alpha"), false, &[], false).is_err());
+    let alpha = get(&s, None, &words("alpha"), false, &[], true).unwrap();
+    assert_eq!(alpha.fields[0].value, "Alpha-pw");
+    assert!(restore(&mut s, None, &words("gamma")).is_err());
+
+    let back = restore(&mut s, None, &words("alpha")).unwrap();
+    assert_eq!((back.label.as_str(), back.deleted_at), ("Alpha", None));
+    let alpha = get(&s, None, &words("alpha"), false, &[], false).unwrap();
+    assert_eq!(alpha.fields[0].value, "Alpha-pw");
+    assert_eq!(labels(&s, true), [("Beta".into(), true)]);
 }
 
 #[test]

@@ -118,6 +118,7 @@ impl Cache {
                 source: item.source.clone(),
                 favorite: item.favorite,
                 tags: item.tags.clone(),
+                deleted_at: None,
             },
             code: code.map(|c| (c.clone(), now)),
         });
@@ -158,6 +159,7 @@ mod tests {
             source: None,
             favorite: false,
             tags: Vec::new(),
+            deleted_at: None,
         }
     }
 

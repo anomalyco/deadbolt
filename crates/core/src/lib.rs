@@ -94,7 +94,7 @@ pub mod totp;
 mod vault;
 pub mod webauthn;
 
-pub use data::{Item, Version, VersionStatus};
+pub use data::{Deleted, Item, Version, VersionStatus};
 pub use entry::{Change, DataOp, Entry, Log, LogId, MembershipOp, Payload, Source, valid_name};
 pub use error::{DecodeError, Error};
 pub use id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};

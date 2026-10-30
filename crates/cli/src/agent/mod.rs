@@ -579,11 +579,13 @@ mod tests {
                 query: vec!["offline-login".into()],
                 otp: false,
                 files: Vec::new(),
+                deleted: false,
             },
             Command::ItemList {
                 vault: None,
                 query: vec![],
                 kind: None,
+                deleted: false,
                 tags: Vec::new(),
                 favorites: false,
             },
@@ -611,6 +613,10 @@ mod tests {
                 apply: true,
             },
             Command::ItemRemove {
+                vault: None,
+                query: vec!["offline-login".into()],
+            },
+            Command::ItemRestore {
                 vault: None,
                 query: vec!["offline-login".into()],
             },
@@ -1598,8 +1604,10 @@ impl Agent {
                 query,
                 otp,
                 files,
+                deleted,
             } => Ok(Reply::Item {
-                item: self.with(|s| items::get(s, vault.as_deref(), &query, otp, &files))?,
+                item: self
+                    .with(|s| items::get(s, vault.as_deref(), &query, otp, &files, deleted))?,
             }),
             Command::ItemCode { vault, query } => Ok(Reply::Code {
                 code: self.with(|s| {
@@ -1610,6 +1618,7 @@ impl Agent {
                 vault,
                 query,
                 kind,
+                deleted,
                 tags,
                 favorites,
             } => Ok(Reply::Items {
@@ -1619,6 +1628,7 @@ impl Agent {
                         vault.as_deref(),
                         &query,
                         kind.as_deref(),
+                        deleted,
                         &tags,
                         favorites,
                     )
@@ -1682,6 +1692,9 @@ impl Agent {
                     .await?;
                 }
                 self.item_write(|s| items::remove_id(s, vault, id))
+            }
+            Command::ItemRestore { vault, query } => {
+                self.item_write(|s| items::restore(s, vault.as_deref(), &query))
             }
             Command::Import {
                 vault,

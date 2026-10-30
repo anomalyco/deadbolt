@@ -649,6 +649,7 @@ mod tests {
             source: None,
             favorite: false,
             tags: Vec::new(),
+            deleted_at: None,
         }
     }
 
