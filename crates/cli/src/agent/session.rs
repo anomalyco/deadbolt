@@ -503,7 +503,15 @@ impl Loaded {
     pub fn resolve(&self, vault: Option<&str>) -> Result<VaultId> {
         let Some(query) = vault else {
             if let Some(id) = self.meta.default_vault.filter(|id| self.contains_vault(id)) {
-                return self.available(id);
+                // Say how to move on when another vault still works.
+                return self
+                    .available(id)
+                    .map_err(|e| match self.vaults.is_empty() {
+                        true => e,
+                        false => anyhow!(
+                            "{e}; pick another with --vault or `deadbolt vault default <name>`"
+                        ),
+                    });
             }
             return match self.vaults.len() + self.unavailable.len() {
                 0 => bail!(
@@ -787,13 +795,9 @@ mod tests {
         assert!(info.default);
         assert_eq!(info.name, "renamed");
         assert!(info.error.as_ref().unwrap().contains("1000 non-removal"));
-        assert!(
-            loaded
-                .resolve(None)
-                .unwrap_err()
-                .to_string()
-                .contains("unavailable")
-        );
+        let error = loaded.resolve(None).unwrap_err().to_string();
+        assert!(error.contains("unavailable"));
+        assert!(error.contains("`deadbolt vault default <name>`"), "{error}");
         for query in [
             "personal",
             "renamed",

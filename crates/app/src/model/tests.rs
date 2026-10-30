@@ -122,6 +122,40 @@ fn replies_from_before_a_lock_are_dropped() {
     }
 }
 
+/// An unlock whose list fails (the default vault is unavailable) leaves
+/// nothing loaded and nothing selected; the failure must still show rather
+/// than a blank, still-loading page.
+#[test]
+fn a_failed_list_after_unlocking_says_why() {
+    let mut rt = vault();
+    let unlocked = rt.state.status.clone();
+    rt.update(|s, tx| s.apply(Done::Changed(Change::Locked), tx));
+    rt.update(|s, tx| s.apply(Done::Status(unlocked.clone()), tx));
+    assert_eq!(rt.state.screen, Screen::Vault);
+    let generation = rt.state.generation;
+    let message = "vault Work (abc) is unavailable: bad history; its stored entries are retained";
+    rt.update(|s, tx| {
+        s.apply(
+            Done::Items {
+                generation,
+                result: Err(Failure {
+                    code: None,
+                    message: message.into(),
+                }),
+            },
+            tx,
+        );
+    });
+    rt.frame(1.0 / 60.0);
+    assert!(!rt.state.loaded && rt.state.selected_item().is_none());
+    assert!(
+        rt.elements()
+            .iter()
+            .any(|e| e.text.as_deref().is_some_and(|t| t.contains(message))),
+        "shows the list failure"
+    );
+}
+
 /// The panel forgets everything as it hides; a lock and the replies to
 /// what it asked before, landing while it's hidden, bring nothing back.
 #[test]
