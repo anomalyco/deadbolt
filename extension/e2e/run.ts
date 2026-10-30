@@ -45,6 +45,7 @@ import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { VAULT_REQUEST } from "../src/bg/vault-messages"
+import { axe, describe } from "./axe"
 import { gauntlet } from "./gauntlet/site"
 import { gauntletAccounts, gauntletScenarios } from "./gauntlet/scenarios"
 
@@ -973,6 +974,8 @@ interface LaunchOptions {
   record?: string
   /** Device pixels per CSS pixel (2 unless set). */
   scale?: number
+  /** The browser prefers reduced motion. */
+  reducedMotion?: boolean
   /** The fake host adds "Sign in with Google" logins. */
   signIn?: boolean
   /** The fake host lists three Google logins instead of its own. */
@@ -1003,6 +1006,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     channel: "chromium",
     headless: true,
     colorScheme: options.scheme ?? "light",
+    reducedMotion: options.reducedMotion ? "reduce" : "no-preference",
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
     // *.acme.test is one site on this machine: two origins of it for the sign-in session runs; *.apple.test for Apple's sign-in frame.
@@ -1317,7 +1321,7 @@ async function fillAndTotp(scheme: Scheme) {
       check((await page.inputValue("#email")) === "kit@acme.test", "username filled")
       check((await page.inputValue("#password")) === "correct horse", "password filled")
       // The menu folded into a pill on the field, which says Filled and goes by itself.
-      const filled = await until("the pill says Filled", async () => (await menu.locator(".pill.ok .pill-label[aria-label='Filled']").count().catch(() => 0)) > 0)
+      const filled = await until("the pill says Filled", async () => (await menu.locator(".pill.ok .pill-label[data-text='Filled']").count().catch(() => 0)) > 0)
       check(!!filled, "the menu folds into a pill that says Filled")
       await Bun.sleep(350)
       await shotAround(page, `surface-filled-${scheme}`, menu, "#email")
@@ -4065,7 +4069,223 @@ async function learnAndNever() {
   }
 }
 
-const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, generator, signInWith, locked, notInstalled, formsSurface }
+// ---- Accessibility ------------------------------------------------------------------
+
+/**
+ * Every surface in `scheme`, checked with axe-core (WCAG 2.2 A and AA, with
+ * axe's best practices, contrast included): the inline menu as it opens and
+ * once the keyboard is in it, the Filled pill, the save offer small and
+ * open, the toolbar popup and, in the browser-only build, device.html's
+ * views. A surface that axe finds nothing wrong with passes.
+ */
+async function audited(where: string, target: Page | Frame | null, surface = false) {
+  if (!target) return check(false, `axe: ${where} wasn't there to check`)
+  const found = await axe(target, surface).catch((e: Error) => [{ id: "axe-threw", impact: "critical", help: e.message, targets: [""], detail: e.message.split("\n")[0] }])
+  for (const v of found) console.log(`  axe ${where}: ${describe(v)}`)
+  return check(!found.length, `axe finds nothing wrong with ${where}`)
+}
+
+/** Where keyboard focus is in the menu's frame: the element's id and role, and the row its list points at. */
+const menuFocus = (menu: Frame) =>
+  menu.evaluate(() => {
+    const el = document.activeElement
+    const row = el?.getAttribute("aria-activedescendant")
+    return { focused: document.hasFocus(), id: el?.id ?? "", role: el?.getAttribute("role") ?? "", label: el?.getAttribute("aria-label") ?? "", active: row ? (document.getElementById(row)?.textContent ?? "") : "", selected: row ? document.getElementById(row)?.getAttribute("aria-selected") : null }
+  })
+
+/** What the menu's frame has said to a screen reader last. */
+const spoken = (frame: Frame) => frame.evaluate(() => document.getElementById("live")?.textContent ?? "")
+
+/** Whether keyboard focus in the page is on `selector`. */
+const focusedOn = (page: Page, selector: string) => page.evaluate((s) => document.activeElement === document.querySelector(s), selector)
+
+/**
+ * Accessibility, in `scheme` (dark also prefers reduced motion): axe-core
+ * on every surface and state (see audited), the menu by keyboard alone, and
+ * motion that's only fades when reduced motion is asked for.
+ */
+async function a11y(scheme: Scheme) {
+  const reduced = scheme === "dark"
+  const run = await launch({ scheme, reducedMotion: reduced })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login`)
+    const menu = await menuOn(page)
+    await audited(`the menu (${scheme})`, menu, true)
+    // The page sees none of the menu's contents, ARIA included.
+    const html = await page.evaluate(() => document.documentElement.outerHTML)
+    check(!html.includes("kit@acme.test") && !html.includes("Acme admin"), "nothing of the menu's logins is in the page's DOM")
+    if (!menu) return
+    // ↓ from the field: the list has focus, as a listbox pointing at its active row.
+    await page.focus("#email")
+    await page.keyboard.press("ArrowDown")
+    let at = await until("↓ puts focus on the menu's list", async () => {
+      const f = await menuFocus(menu)
+      return f.focused && f.role === "listbox" ? f : null
+    })
+    check(!!at && at.label === "Logins" && at.active.includes("Acme") && at.selected === "true", `the list is a listbox named Logins, its active row the first (${at?.active})`)
+    await audited(`the menu with keyboard focus (${scheme})`, menu, true)
+    await shotAround(page, `a11y-menu-keyboard-${scheme}`, menu, "#email")
+    await page.keyboard.press("ArrowDown")
+    at = await menuFocus(menu)
+    check(at.active.includes("Acme admin"), `↓ makes the next row the active one (${at.active})`)
+    await page.keyboard.press("ArrowUp")
+    at = await menuFocus(menu)
+    check(at.active.includes("kit@acme.test"), `↑ goes back (${at.active})`)
+    // Tab leaves the menu for the field, never into the end of the page; so does Escape.
+    await page.keyboard.press("Tab")
+    check(!!(await until("Tab closes the menu", () => !extensionFrame(page, "menu.html"), 3000)) && (await focusedOn(page, "#email")), "Tab closes the menu and focus is back in the field")
+    for (const key of ["Escape"]) {
+      await page.keyboard.press("ArrowDown")
+      const again = await until("↓ opens the menu again", async () => {
+        const f = extensionFrame(page, "menu.html")
+        return f && (await f.locator("button.row").count()) > 0 ? f : null
+      })
+      if (!again) break
+      await settled(again)
+      await page.keyboard.press("ArrowDown")
+      await until("↓ enters the menu", async () => (await menuFocus(again)).role === "listbox")
+      await page.keyboard.press(key)
+      check(!!(await until(`${key} closes the menu`, () => !extensionFrame(page, "menu.html"), 3000)) && (await focusedOn(page, "#email")), `${key} closes the menu and focus is back in the field`)
+    }
+    // ↓ to open, ↓ to enter, Enter to fill: by keyboard alone, said aloud, focus left in the form.
+    await page.keyboard.press("ArrowDown")
+    const filling = await until("↓ opens the menu", async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && (await f.locator("button.row").count()) > 0 ? f : null
+    })
+    if (filling) {
+      await settled(filling)
+      await page.keyboard.press("ArrowDown")
+      await until("↓ enters the menu", async () => (await menuFocus(filling)).role === "listbox")
+      // Every animation that runs in the frame from here on, by what it animates.
+      await filling.evaluate(() => {
+        const seen = new Set<string>()
+        ;(window as unknown as { __animated: Set<string> }).__animated = seen
+        const sample = () => {
+          for (const a of document.getAnimations()) for (const k of (a.effect as KeyframeEffect | null)?.getKeyframes() ?? []) for (const p of Object.keys(k)) if (!["offset", "easing", "composite", "computedOffset"].includes(p)) seen.add(p)
+          setTimeout(sample, 16)
+        }
+        sample()
+      })
+      await page.keyboard.press("Enter")
+      check(!!(await until("↓ ↓ Enter fills", async () => (await page.inputValue("#password")) === "correct horse")), "the keyboard alone fills: ↓, ↓, Enter")
+      check(!!(await until("the fill is said aloud", async () => (await spoken(filling).catch(() => "")) === "Filled", 3000)), "a screen reader hears Filled")
+      await audited(`the Filled pill (${scheme})`, filling, true)
+      if (reduced) {
+        const animated = await filling.evaluate(() => [...(window as unknown as { __animated: Set<string> }).__animated])
+        // Fades and colour changes only: nothing moves, scales, blurs or resizes.
+        check(animated.every((p) => ["opacity", "color", "backgroundColor", "borderColor"].includes(p)), `with reduced motion the pill only fades (${animated.join(", ") || "nothing animated"})`)
+      }
+      check(await page.evaluate(() => document.activeElement instanceof HTMLInputElement), "focus is left in the form")
+    }
+    const p = await popup(run, site)
+    await audited(`the popup (${scheme})`, p)
+    await p.close()
+    await signIn(run, page, "/outcome/login?to=/auth/complete", "a11y@acme.test", "a11y password")
+    const surface = await saveSurface(page)
+    await Bun.sleep(600)
+    await audited(`the save offer (${scheme})`, surface, true)
+    if (surface) {
+      check(/Save login for localhost\?/.test(await spoken(surface)), "a screen reader hears the offer came")
+      await surface.locator(".offer-row").hover()
+      await until("the offer opens on approach", async () => (await frameBox(surface)).height > 60)
+      await settled(surface)
+      await audited(`the open save offer (${scheme})`, surface, true)
+      // Escape puts it away, as Not now does.
+      await surface.locator(".offer-row .btn.primary").focus()
+      await page.keyboard.press("Escape")
+      check(!!(await until("Escape puts the offer away", () => !extensionFrame(page, "menu.html"), 5000)), "Escape puts the offer away")
+      const withOffer = await popup(run, site)
+      await audited(`the popup with the offer (${scheme})`, withOffer)
+      await withOffer.close()
+    }
+    // An address field's menu: a caption over the identities.
+    await page.goto(`${site}/forms/tokens`)
+    await audited(`the address menu (${scheme})`, await formsMenu(run, page, "#ship-name", "/forms/tokens"), true)
+    if (standalone) {
+      const device = await run.context.newPage()
+      await device.goto(`chrome-extension://${ID}/device.html`)
+      await device.getByRole("searchbox", { name: "Search the vault" }).waitFor()
+      await Bun.sleep(500)
+      await audited(`device.html's list (${scheme})`, device)
+      // The list by keyboard: ↓ from the search to a row, Enter opens it, Back returns focus to that row.
+      await device.keyboard.press("ArrowDown")
+      await device.keyboard.press("ArrowDown")
+      const row = await device.evaluate(() => document.activeElement?.textContent ?? "")
+      await shot(device, `a11y-device-keyboard-${scheme}`)
+      await device.keyboard.press("Enter")
+      await device.getByRole("button", { name: "Edit", exact: true }).waitFor()
+      await Bun.sleep(400)
+      await audited(`a login (${scheme})`, device)
+      check(await device.evaluate(() => document.activeElement?.getAttribute("aria-label") === "Back"), "an opened login puts focus on Back")
+      await device.keyboard.press("Enter")
+      await device.getByRole("searchbox", { name: "Search the vault" }).waitFor()
+      check((await device.evaluate(() => document.activeElement?.textContent ?? "")) === row && row !== "", `back in the list, focus is on the row that was opened (${row})`)
+      await device.locator(".vrow-main", { hasText: "Acme" }).first().click()
+      await device.getByRole("button", { name: "Edit", exact: true }).waitFor()
+      const copy = device.getByRole("button", { name: "Copy one-time code", exact: true })
+      await copy.focus()
+      // A change to the vault repaints the open login, as a new code does.
+      const repainted = device.locator(".code-value").evaluate((el) => new Promise<void>((done) => new MutationObserver(() => done()).observe(el.closest(".view")!, { childList: true })))
+      await device.evaluate(() => chrome.runtime.sendMessage({ type: "db:device", command: { type: "device-item-save", kind: "login", name: "Elsewhere", fields: [{ name: "url", value: "https://elsewhere.test" }, { name: "username", value: "e" }, { name: "password", value: "p" }] } }))
+      await repainted
+      check(await copy.evaluate((b) => b === document.activeElement), "repainting a login keeps focus on Copy one-time code")
+      await device.getByRole("button", { name: "Edit", exact: true }).click()
+      await Bun.sleep(400)
+      await audited(`editing a login (${scheme})`, device)
+      await device.getByRole("button", { name: "Settings", exact: true }).click()
+      await Bun.sleep(600)
+      await audited(`settings (${scheme})`, device)
+      // 400% zoom on a 1280 px window is 320 CSS px: nothing scrolls sideways.
+      await device.setViewportSize({ width: 320, height: 640 })
+      await device.getByRole("button", { name: "Back", exact: true }).click()
+      await Bun.sleep(400)
+      check(await device.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "device.html reflows to 320 px without scrolling sideways")
+      await device.close()
+    }
+  } catch (err) {
+    check(false, `a11y threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "a11y")
+  } finally {
+    await close(run)
+  }
+}
+
+/** The locked and never-set-up states' surfaces, checked with axe as a11y checks the rest. */
+async function a11yStates(scheme: Scheme) {
+  for (const status of ["locked", "not-set-up"] as const) {
+    const run = await launch(status === "locked" ? { status, scheme } : { host: false, scheme })
+    try {
+      const page = await run.context.newPage()
+      await page.goto(`${site}/login`)
+      if (status === "locked") {
+        await page.click("#email")
+        const menu = await until("the locked menu", async () => {
+          const f: Frame | null = extensionFrame(page, "menu.html")
+          return f && (await f.locator(".row").count()) > 0 ? f : null
+        })
+        await Bun.sleep(400)
+        await audited(`the locked menu (${scheme})`, menu, true)
+      }
+      const p = await popup(run, site)
+      await audited(`the ${status} popup (${scheme})`, p)
+      if (standalone) {
+        const device = await run.context.newPage()
+        await device.goto(`chrome-extension://${ID}/device.html`)
+        await device.waitForSelector(".top")
+        await Bun.sleep(800)
+        await audited(`device.html ${status} (${scheme})`, device)
+      }
+    } catch (err) {
+      check(false, `a11y ${status} threw: ${(err as Error).message.split("\n")[0]}`)
+    } finally {
+      await close(run)
+    }
+  }
+}
+
+const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, generator, signInWith, locked, notInstalled, formsSurface, a11y, a11yStates }
 const once: Record<string, () => Promise<void>> = {
   film,
   detection,
@@ -4107,7 +4327,7 @@ const cost: Record<string, number> = {
   detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
-  formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15,
+  formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
   ...gauntletRun.cost,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */

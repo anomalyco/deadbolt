@@ -23,10 +23,13 @@ main {
   height: 22px;
 }
 
+/* The page's one h1. */
 .brand {
   flex: 1;
+  margin: 0;
   font-weight: var(--weight-strong);
   font-size: 15px;
+  line-height: 20px;
 }
 
 .pill {
@@ -53,7 +56,7 @@ main {
 
 .pill.ok {
   background: var(--success-bg);
-  color: var(--success);
+  color: var(--text-success);
 }
 
 .pill.ok::before {
@@ -162,7 +165,7 @@ main {
   font-size: 11px;
   line-height: 12px;
   letter-spacing: var(--tracking-small);
-  color: var(--faint);
+  color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -217,7 +220,7 @@ main {
   font-size: 11.5px;
   line-height: 14px;
   letter-spacing: 0;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .empty {
@@ -239,7 +242,7 @@ main {
   font-size: 11.5px;
   line-height: 16px;
   letter-spacing: 0;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .note svg {
@@ -369,7 +372,7 @@ main {
 .offer .buttons .link {
   margin-right: auto;
   font-size: 11px;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 .saving-off {
@@ -397,7 +400,7 @@ main {
   display: grid;
   place-items: center;
   background: var(--success-bg);
-  color: var(--success);
+  color: var(--text-success);
 }
 
 .done-mark svg {

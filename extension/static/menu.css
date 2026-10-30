@@ -76,6 +76,16 @@ body {
   pointer-events: none;
 }
 
+/* The list has keyboard focus (Tab or ↓ from the field): the highlight wears
+   the focus ring, and slides with it from row to row. */
+.rows:focus {
+  outline: none;
+}
+
+.list:has(.rows:focus) .highlight {
+  box-shadow: inset 0 0 0 2px var(--focus);
+}
+
 .row {
   all: unset;
   position: relative;
@@ -88,6 +98,12 @@ body {
   padding: 0 10px;
   border-radius: var(--radius-lg);
   cursor: pointer;
+}
+
+/* The unlock row, the one row that's a tab stop of its own. */
+.row:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
 }
 
 .row.notice {
@@ -175,7 +191,7 @@ body.held *::after {
   line-height: 14px;
   font-weight: var(--weight);
   letter-spacing: 0;
-  color: var(--faint);
+  color: var(--text-faint);
 }
 
 /* Only when there's something to say. */
@@ -251,7 +267,7 @@ body.held *::after {
   margin-left: -8px;
   overflow: hidden;
   opacity: 0;
-  color: var(--success);
+  color: var(--text-success);
   transition:
     width 370ms var(--settle),
     margin-left 370ms var(--settle),
@@ -357,7 +373,7 @@ body.save .surface {
   max-width: 320px;
   font-size: 11.5px;
   line-height: 14px;
-  color: var(--faint);
+  color: var(--text-faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -459,6 +475,12 @@ body[data-offer="open"] .bar {
   opacity: 0;
   pointer-events: none;
   transition: opacity 260ms ease-out;
+}
+
+.dot:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+  border-radius: 50%;
 }
 
 .dot svg {
