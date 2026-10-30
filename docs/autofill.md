@@ -163,7 +163,9 @@ not running without sending hello, which would start the agent again.
   frame of the page's own site gets the menu too, opened in the top page
   under the field; any other frame's fields get none (see Frames). It's an
   extension page in an iframe inside a closed shadow root, so the page can't
-  read it or click it for you.
+  read it or click it for you. It opens on the form as it is right then (a
+  fresh scan, not the last periodic one), so a password box the page has
+  just shown is part of the pick rather than a change that voids it.
 - **Menu in the top layer.** The host element of Deadbolt's surface (the
   menu, the pill it folds into and the save offer, see One surface) gets a
   fresh random custom-element name and inline `!important` styles, so page
