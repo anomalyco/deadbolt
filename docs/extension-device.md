@@ -321,6 +321,79 @@ icons of the websites you visit", which the content scripts' all-sites access
 already covers, so both builds ask for it. Where site icons come from and how
 they're drawn safely is in [autofill.md](autofill.md#site-icons).
 
+## Parity with the native build
+
+The standalone build should be usable instead of the native-host build day
+to day. This is what each native capability does there. "Same" means the
+same background code runs against the wasm vault, verified by the native e2e
+scenario named.
+
+### Native host requests (`protocol.ts`, `cli/src/browser/host.rs`)
+
+| Request | Standalone | Notes |
+| --- | --- | --- |
+| `hello` | Same | Capabilities: `list fill check save generate forms` (no `passkeys`, `learn`) |
+| `list` | Same | Shared `deadbolt-core::site` rules and ranking; `signIn` with the linked account |
+| `fill` (`username`, `password`, `totp`) | Same | Current TOTP from core |
+| `generate`, `generate-check`, `generate-keep`, `generate-drop` | Same | Shared page-rule planning and candidate lifetime |
+| `check`, `save` | Same | Shared login check and password-only update |
+| `forms`, `fill-form` | Same, except Touch ID | Strict asks for the passphrase in Deadbolt's own popup instead |
+| `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Missing | The browser's own passkey flow runs; separate work |
+| `learn` | Missing | "Learn this site" says this Deadbolt can't keep a log |
+| Rate limits | Same | The host's token buckets, in the service worker |
+
+### Background and page features
+
+| Feature | Standalone | Verified by |
+| --- | --- | --- |
+| Inline menu, keyboard entry, fills | Same | `fillAndTotp`, `keyboardEntry` |
+| One-time codes on code steps, split code boxes | Same | `fillAndTotp`, `signInSessions` |
+| Multi-step sign-in session (identifier, password, code; other origins of the site) | Same | `signInSessions` |
+| Same-site frame logins (#89) | Same | `frameLogins`, `securityPage` |
+| Google's password step narrowing (#80) | Same | `googleAccount`, `narrowing` |
+| Sign in with a provider: linked accounts, rings on the button and chooser | Same | `signInWith` |
+| Save and update offers, in the page and the popup | Same | `savePrompt`, `savedInPage`, `coldSave`, `signInOutcomes`, `signInShapes` |
+| Generated passwords | Same | `generator`, `rateLimited` |
+| Identity and card fills, provider frames | Same | `formsSurface`, `formsShapes`, `formsFrames` |
+| Clickjacking, occlusion, bfcache, navigation checks | Same | the `security` group, `midFill`, `coveredPill`, `corner` |
+| Toolbar popup: this site's logins and Fill, fill errors, the offer | Same (the vault's own popup) | `fillAndTotp`, `rateLimited`, `securityPage`, `savePrompt` |
+| Locked and not set up | The menu and popup offer to unlock or set up here | `locked`, `notInstalled` |
+| "Learn this site" (#65) | Missing | |
+| "Never for this site" | Same preference; no list to undo it in either build | |
+| Passkeys | Missing (separate work) | `passkeys` is native only |
+| Touch ID for card numbers | Strict passphrase instead | `formsTouchId` is native only; e2e/standalone.ts covers Strict |
+
+### Vault features of the native app
+
+| Feature | Standalone |
+| --- | --- |
+| Every item type: view, search, copy, add, edit, delete | Same (#97); item links (billing identity, sign-in account) kept, not edited |
+| Devices, pairing, sync, rename | Same |
+| Lock presets, idle and screen lock | Same; Touch ID unlock is separate work |
+| Several vaults, switching | Missing: one vault per browser |
+| Import from other password managers | Missing: import on a native device and sync |
+| Export | Neither build has one |
+| Activity | Missing: no standalone Activity log |
+
+### The parity run
+
+`bun e2e/run.ts --standalone` (and `bun run e2e:parallel --standalone`) runs
+the native e2e scenarios against a `--standalone` e2e build instead of the
+fake host. Each profile creates a vault through device.html with the real KDF
+and saves the fake host's data into it. That is the logins on every test site
+(the fake host lists them everywhere), with a real TOTP secret, the two
+identities and the card. The host log is what the service worker sent the
+vault. A locked vault and one never set up stand in for the fake host's
+statuses. Slow and rate-limited answers come from the service worker's side.
+Scenarios check the same things, except where the builds differ on purpose:
+
+- the standalone popup copies passwords and unlocks itself;
+- its menu offers to unlock;
+- cards ask for nothing more under Comfortable.
+
+`passkeys` and `formsTouchId` are skipped. CI runs it in four shards
+(`extension-standalone-e2e`).
+
 ## Verification
 
 Run on Linux, headless only. The default (native-host) build needs only Bun. The
@@ -343,6 +416,7 @@ bun e2e/standalone.ts --smoke
 cargo build -p deadbolt-cli --locked
 bun e2e/standalone.ts --deadbolt "${CARGO_TARGET_DIR:-../target}/debug/deadbolt"
 bun e2e/standalone.ts --join --deadbolt "${CARGO_TARGET_DIR:-../target}/debug/deadbolt"
+bun run e2e:parallel --standalone   # the native scenarios against the standalone build
 ```
 
 The smoke (`--smoke`, run in CI) needs no CLI and no network: Chromium resolves
