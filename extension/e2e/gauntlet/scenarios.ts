@@ -59,10 +59,7 @@ async function wait<T>(_what: string, fn: () => Promise<T | null | undefined | f
  * failures are reported, not counted; once one passes, it says so, and its
  * entry goes.
  */
-export const PENDING: Record<string, string> = {
-  "shadow-closed": "#141 closed shadow roots",
-  rerender: "#143 forms that re-render on each keystroke",
-}
+export const PENDING: Record<string, string> = {}
 const menuFrame = (page: Page) => page.frames().find((f) => f.url().includes("/menu.html")) ?? null
 
 export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scenarios: Record<string, () => Promise<void>>; cost: Record<string, number> } {
