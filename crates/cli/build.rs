@@ -17,6 +17,7 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src");
     println!("cargo:rerun-if-changed=src/agent/enclave-Info.plist");
+    println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_TEAM_ID");
     println!("cargo:rerun-if-env-changed=DEADBOLT_APPLE_SIGNING_IDENTITY");
     println!("cargo:rerun-if-env-changed=DEADBOLT_ENCLAVE_PREBUILT");
     println!("cargo:rerun-if-env-changed=DEADBOLT_BUILD_CHANNEL");
@@ -106,15 +107,45 @@ fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s != "-");
+    let signing_team = std::env::var("DEADBOLT_APPLE_TEAM_ID")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "-")
+        .or_else(|| signing_identity.as_deref().and_then(team_of));
     // Where the production helper came from: a prebuilt directory or the
-    // signing identity. A change rebuilds both helpers.
+    // signing identity and team. A change rebuilds both helpers.
     let source = match prebuilt {
         Some(dir) => format!("prebuilt:{}", dir.display()),
-        None => signing_identity.clone().unwrap_or_else(|| "-".into()),
+        None => format!(
+            "{}:{}",
+            signing_identity.as_deref().unwrap_or("-"),
+            signing_team.as_deref().unwrap_or("-")
+        ),
     };
     let id_stamp = out_dir.join("deadbolt-enclave.signing-identity");
     let prev_identity = std::fs::read_to_string(&id_stamp).ok();
     let identity_changed = prev_identity.as_deref() != Some(source.as_str());
+
+    let entitlements = match (&signing_identity, &signing_team) {
+        (Some(_), Some(team)) => {
+            let path = out_dir.join("enclave.entitlements");
+            let xml = format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+                 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
+                 <plist version=\"1.0\">\n\
+                 <dict>\n\
+                 \x20   <key>com.apple.security.application-groups</key>\n\
+                 \x20   <array>\n\
+                 \x20       <string>{team}.pw.deadbolt</string>\n\
+                 \x20   </array>\n\
+                 </dict>\n\
+                 </plist>\n"
+            );
+            std::fs::write(&path, xml).map_err(|e| format!("write {}: {e}", path.display()))?;
+            Some(path)
+        }
+        _ => None,
+    };
 
     match prebuilt {
         Some(dir) => copy_prebuilt(dir, &prod_bin)?,
@@ -124,6 +155,7 @@ fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
             &plist_path,
             target_triple,
             signing_identity.as_deref(),
+            entitlements.as_deref(),
             identity_changed,
             false,
             &prod_bin,
@@ -134,6 +166,7 @@ fn build_macos_enclave_helpers(prebuilt: Option<&Path>) -> Result<(), String> {
         &build_rs,
         &plist_path,
         target_triple,
+        None,
         None,
         identity_changed,
         true,
@@ -211,6 +244,7 @@ fn compile_one(
     plist_path: &Path,
     target_triple: Option<&str>,
     signing_identity: Option<&str>,
+    entitlements: Option<&Path>,
     force_rebuild: bool,
     test_mode: bool,
     out_bin: &Path,
@@ -267,7 +301,11 @@ fn compile_one(
     let mut sign_cmd = Command::new("codesign");
     sign_cmd.arg("--force");
     if let Some(identity) = signing_identity {
-        sign_cmd.args(["--options", "runtime", "--timestamp", "--sign", identity]);
+        sign_cmd.args(["--options", "runtime", "--timestamp"]);
+        if let Some(ent) = entitlements {
+            sign_cmd.arg("--entitlements").arg(ent);
+        }
+        sign_cmd.args(["--sign", identity]);
     } else {
         sign_cmd.args(["--sign", "-"]);
     }
@@ -284,6 +322,11 @@ fn compile_one(
         ));
     }
     Ok(())
+}
+
+fn team_of(identity: &str) -> Option<String> {
+    let team = identity.strip_suffix(')')?.rsplit_once('(')?.1;
+    (team.len() == 10 && team.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| team.to_string())
 }
 
 fn hex_encode(bytes: &[u8]) -> String {

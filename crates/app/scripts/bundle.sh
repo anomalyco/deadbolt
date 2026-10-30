@@ -66,6 +66,29 @@ for size in 16 32 128 256 512; do
   sips -z "$double" "$double" "$scratch/icon.png" --out "$scratch/Deadbolt.iconset/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbolt.icns"
+
+if $universal; then
+  bash crates/app/scripts/build-autofill.sh --universal "$scratch/DeadboltAutoFill.appex" "$version" "$build" >/dev/null
+else
+  bash crates/app/scripts/build-autofill.sh "$scratch/DeadboltAutoFill.appex" "$version" "$build" >/dev/null
+fi
+
+bundle_autofill=false
+if [[ ${DEADBOLT_BUNDLE_AUTOFILL:-} == 1 ]]; then
+  bundle_autofill=true
+elif [[ ${DEADBOLT_BUNDLE_AUTOFILL:-} == 0 ]]; then
+  bundle_autofill=false
+elif [[ -n ${DEADBOLT_AUTOFILL_PROVISION_PROFILE:-} || -z ${DEADBOLT_ENCLAVE_PREBUILT:-} ]]; then
+  bundle_autofill=true
+fi
+if $bundle_autofill; then
+  mkdir -p "$app/Contents/PlugIns"
+  cp -R "$scratch/DeadboltAutoFill.appex" "$app/Contents/PlugIns/DeadboltAutoFill.appex"
+fi
+if [[ -n ${DEADBOLT_APP_PROVISION_PROFILE:-} ]]; then
+  cp "$DEADBOLT_APP_PROVISION_PROFILE" "$app/Contents/embedded.provisionprofile"
+fi
+
 # Nested executable first, outer seal last.
 # Do NOT re-sign `Contents/Helpers/deadbolt-enclave` here: `crates/cli/build.rs`
 # already signed it (or took the release workflow's Developer ID-signed helper
@@ -76,14 +99,36 @@ iconutil -c icns "$scratch/Deadbolt.iconset" -o "$app/Contents/Resources/Deadbol
 # break the agent's SHA-256 verification.
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
 if [[ $sign_id != "-" ]]; then
-  codesign --force --options runtime --timestamp --identifier deadbolt --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
-  codesign --force --options runtime --timestamp --sign "$sign_id" "$app"
+  team_id=${DEADBOLT_APPLE_TEAM_ID:-}
+  if [[ -z $team_id && $sign_id =~ \(([A-Za-z0-9]{10})\)$ ]]; then
+    team_id=${BASH_REMATCH[1]}
+  fi
+  if [[ -n $team_id ]]; then
+    cat > "$scratch/app.entitlements" <<ENTITLEMENTS
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>com.apple.security.application-groups</key>
+<array><string>${team_id}.pw.deadbolt</string></array>
+</dict></plist>
+ENTITLEMENTS
+    plutil -lint "$scratch/app.entitlements" >/dev/null
+    codesign --force --options runtime --timestamp --identifier deadbolt --entitlements "$scratch/app.entitlements" --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
+    codesign --force --options runtime --timestamp --entitlements "$scratch/app.entitlements" --sign "$sign_id" "$app"
+  else
+    codesign --force --options runtime --timestamp --identifier deadbolt --sign "$sign_id" "$app/Contents/Helpers/deadbolt"
+    codesign --force --options runtime --timestamp --sign "$sign_id" "$app"
+  fi
 else
   codesign --force --identifier deadbolt --sign - "$app/Contents/Helpers/deadbolt"
   codesign --force --sign - "$app"
 fi
 plutil -lint "$app/Contents/Info.plist"
 codesign --verify --strict "$app/Contents/Helpers/deadbolt-enclave"
+if $bundle_autofill; then
+  plutil -lint "$app/Contents/PlugIns/DeadboltAutoFill.appex/Contents/Info.plist"
+  codesign --verify --strict "$app/Contents/PlugIns/DeadboltAutoFill.appex"
+fi
 codesign --verify --deep --strict "$app"
 # The app pins the helper it ships, as `deadbolt` does (crates/app/build.rs).
 helper="$app/Contents/Helpers/deadbolt-enclave"
