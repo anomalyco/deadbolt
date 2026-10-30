@@ -47,6 +47,13 @@ describe("login forms", () => {
     expect(roles()).toEqual(["password"])
   })
 
+  test("one box for an email or a phone number is an identifier, not a phone box", () => {
+    page(`<form><label for="a">Email or Phone Number</label><input id="a" name="account"><label for="p">Password</label><input id="p" type="password"><button>Sign in</button></form>`)
+    expect(roles()).toEqual(["username", "password"])
+    page(`<form><label for="a">Mobile number</label><input id="a" type="tel" name="phone"><button>Continue</button></form>`, "/signin")
+    expect(roles()).toEqual(["phone"])
+  })
+
   test("hidden fields are ignored", () => {
     page(`
       <form>

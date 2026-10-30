@@ -187,6 +187,9 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
     score.phone += 5
     score.otp += 1
   }
+  // "Email or phone number": one box for either, an identifier like a username, not a phone box (which takes only a number).
+  if (!isPassword && f.type !== "tel" && ["email", "e mail"].some((p) => hasPhrase(f.display, p)) && ["phone", "mobile"].some((p) => hasPhrase(f.display, p)))
+    score.username = Math.max(score.username, score.email, score.phone) + 1
   if (f.inputMode === "email") score.email += 3
   if (f.inputMode === "tel") score.phone += 3
   if (f.inputMode === "numeric") score.username -= 1

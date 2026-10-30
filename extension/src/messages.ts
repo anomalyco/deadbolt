@@ -19,6 +19,8 @@ export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password"
 /** Forms whose new-password boxes get a generated password. */
 export const GENERATE_KINDS: SurfaceKind[] = ["signup", "change-password"]
 export const IDENTIFIER_ROLES: FieldRole[] = ["username", "email", "phone"]
+/** A username that's a phone number (digits, with + ( ) . - and spaces), the only kind a phone box takes. */
+export const phoneLike = (username: string | undefined) => !!username && /^\+?[\d\s().-]{7,24}$/.test(username.trim()) && (username.match(/\d/g)?.length ?? 0) >= 7
 /** Roles a fill can write. */
 export const FIELD_ROLES: FieldRole[] = ["username", "email", "phone", "password", "new-password", "otp"]
 

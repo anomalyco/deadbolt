@@ -269,6 +269,10 @@ not running without sending hello, which would start the agent again.
   sign-in was cancelled (Esc, or a
   navigation the page didn't make) while the host was answering, the values
   are dropped instead of delivered.
+  A value the field can't take isn't written: longer than its
+  `maxlength` (a person couldn't type or paste it there either), or a
+  username that isn't a phone number into a phone box; a phone box's menu
+  lists only logins whose username is one.
   Each field is checked again right before its value is written, and before
   each digit of a split code: it must still be in the form and under the
   parent it was found in, enabled, editable, and visible through every

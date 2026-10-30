@@ -172,6 +172,16 @@ describe("fillFields", () => {
     expect([n1.value, n2.value]).toEqual(["", ""])
   })
 
+  test("a value the field can't take isn't written: past its maxlength, or not a phone number in a phone box", async () => {
+    document.body.innerHTML = `<form><input id="u" type="tel"><input id="p" type="password" maxlength="6"></form>`
+    const [u, p] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
+    const fields = [field(u, "phone"), field(p, "password")]
+    expect((await fillFields(fields, { username: "kit@acme.test", password: "correct horse" }, () => true)).filled).toEqual([])
+    expect([u.value, p.value]).toEqual(["", ""])
+    expect((await fillFields(fields, { username: "+1 (415) 555-0123", password: "482916" }, () => true)).filled).toEqual(["phone", "password"])
+    expect([u.value, p.value]).toEqual(["+1 (415) 555-0123", "482916"])
+  })
+
   test("a field moved to another form since the scan isn't written", async () => {
     document.body.innerHTML = `<form id="a"><input id="u"><input id="p" type="password"></form><form id="b" action="https://evil.test/"></form>`
     const u = document.getElementById("u") as HTMLInputElement
