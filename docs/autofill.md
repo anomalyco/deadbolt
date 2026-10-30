@@ -287,6 +287,13 @@ not running without sending hello, which would start the agent again.
     the login has one;
   - a username box on its own, empty, is "Not you? Use a different
     account": the session ends.
+  Only a sign-in step fills: a password goes only into a login form's
+  current-password box. An address the site doesn't know often gets a
+  sign-up form instead (Dropbox's "Sign up for Dropbox", found by the
+  real-site sweep), so a sign-up or change-password form ends the session,
+  and a login form with a new-password box, or whose password box asks for
+  a new password by autocomplete (a sign-up the detector may take for a
+  login), fills nothing. An explicit pick still can.
   The bounds: each step fills once, and only after the user's own submit of
   the step before: their trusted click on its submit control or Enter in
   one of its fields. A submit event without one just before it (a page's

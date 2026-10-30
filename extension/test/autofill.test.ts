@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, test } from "bun:test"
-import { Autofill, FLOWS_KEY, menuAccounts, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, stepLabel, stepRoles } from "../src/bg/autofill"
+import { Autofill, FLOWS_KEY, menuAccounts, menuRowCount, namedBy, nextStep, resizeMessage, sameHost, sessionStep, stepLabel, stepRoles } from "../src/bg/autofill"
 import { HostError } from "../src/bg/backend"
 import { SIGNIN_SETTING } from "../src/auth-state"
 import { SignInWith } from "../src/bg/signinwith"
@@ -993,6 +993,14 @@ describe("a sign-in session across steps", () => {
     expect(stepRoles(["otp"], both, false)).toEqual(["otp"])
     expect(stepRoles(["otp"], { hasPassword: true, hasTotp: false }, false)).toEqual([])
     expect(stepRoles(["email"], both, true)).toEqual([])
+    // A session fills sign-in steps only: a sign-up ends it, an unsure login fills nothing.
+    expect(sessionStep("login", ["email", "password"], false)).toContain("password")
+    expect(sessionStep("login", ["email", "password"], true)).toEqual([])
+    expect(sessionStep("login", ["password", "new-password"], false)).toEqual([])
+    expect(sessionStep("signup", ["email", "new-password"], false)).toBe("end")
+    expect(sessionStep("change-password", ["password", "new-password"], false)).toBe("end")
+    expect(sessionStep("mfa", ["otp"], false)).toEqual(["otp"])
+    expect(sessionStep("reset", ["email"], false)).toEqual([])
     expect(stepLabel(["password"])).toBe("Password filled")
     expect(stepLabel(["otp"])).toBe("Code filled")
     expect(namedBy(ACCOUNTS, " ADMIN ").map((a) => a.ref)).toEqual([ACCOUNTS[1].ref])

@@ -152,11 +152,14 @@ async function report(always: boolean) {
   const idEmpty = !!identifier && !identifier.el.value
   // Which of them are drawn, wherever the page is scrolled: a password box a step uncollapses in place (Apple's) is news.
   const shown = fields.map((f) => rendered(f.el))
-  const signature = JSON.stringify([location.href, kind, roles, formId, moved, idEmpty, shown])
+  // A password box that says it wants a new password (autocomplete), whatever
+  // the detector made of the form: a sign-in session doesn't fill it (see Autofill.page).
+  const asksNew = fields.some((f) => f.el.type === "password" && /\bnew-password\b/.test(f.el.autocomplete))
+  const signature = JSON.stringify([location.href, kind, roles, formId, moved, idEmpty, shown, asksNew])
   const tell = always || (kind ? signature !== lastSignature : reported)
   lastSignature = kind ? signature : ""
   reported = !!kind
-  if (tell) await send({ type: "db:page", kind, roles, form: formId, stepped: moved, idEmpty })
+  if (tell) await send({ type: "db:page", kind, roles, form: formId, stepped: moved, idEmpty, asksNew })
 }
 
 chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {

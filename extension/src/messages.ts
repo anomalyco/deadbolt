@@ -144,7 +144,7 @@ export type ToBackground =
   | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
-  | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean }
+  | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean; asksNew?: boolean }
   /** The top page may have finished a sign-in step: it showed no login form for a moment, or moved on to a code step. */
   | { type: "db:settled" }
   /** `kind` and `roles`: the submitted form's, to tell it if it shows again. */
