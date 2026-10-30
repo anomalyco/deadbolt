@@ -41,7 +41,7 @@ import { isAccountPage, pageAccountOf, provider } from "../signin"
 import { fillable, fillFields, ownValue, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { learning } from "./learn"
-import { deepActiveElement } from "./shadow"
+import { deepActiveElement, eventTarget, markOwnHost } from "./shadow"
 import { SIGNIN_SETTING } from "../auth-state"
 
 export interface PageState {
@@ -431,6 +431,7 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   box.addEventListener("beforetoggle", (e) => {
     if (e.isTrusted && (e as ToggleEvent).newState === "closed" && !raising) queueMicrotask(() => host === box && raise())
   })
+  markOwnHost(box)
   const root = box.attachShadow({ mode: "closed" })
   frame = document.createElement("iframe")
   // No token in the URL: the menu asks for it (see onMenuReady).
@@ -758,7 +759,7 @@ async function maybeOpenForms(el: FormControl, how: Asked) {
 const isControl = (el: unknown): el is FormControl => el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
 
 function onFocusIn(event: FocusEvent) {
-  const el = event.composedPath()[0]
+  const el = eventTarget(event)
   if (!isControl(el)) return
   const clicked = recentGesture() && (lastPointer === el || (lastPointer instanceof HTMLLabelElement && lastPointer.control === el))
   void maybeOpen(el, clicked ? "click" : "focus")
@@ -773,7 +774,7 @@ function onFocusIn(event: FocusEvent) {
  */
 function onInput(event: Event) {
   if (!event.isTrusted) return
-  const el = event.composedPath()[0]
+  const el = eventTarget(event)
   if (!(el instanceof HTMLInputElement)) return
   if (!el.value) {
     quiet.delete(el)
@@ -819,7 +820,7 @@ function onPointerMove(event: PointerEvent) {
 function onPointerDown(event: PointerEvent) {
   if (!event.isTrusted) return
   lastGestureAt = Date.now()
-  const target = event.composedPath()[0]
+  const target = eventTarget(event)
   lastPointer = target ?? null
   if (!isTop && framedFor && target !== framedFor) framedGone(true)
   // Clicking a field that already has focus (e.g. autofocus) opens the menu too.
@@ -836,7 +837,7 @@ function onPointerDown(event: PointerEvent) {
     return port ? void port.postMessage({ type: "db:tuck" }) : leave(true)
   }
   const path = event.composedPath()
-  if (path.includes(host) || path.includes(anchor as EventTarget)) return
+  if (path.includes(host) || path.includes(anchor as EventTarget) || target === anchor) return
   if (mode === "pill") return leave()
   closeMenu()
 }
@@ -846,7 +847,7 @@ function onKeyDown(event: KeyboardEvent) {
   if (mode === "signin" && event.key === "Escape") return closeMenu(false, true)
   lastGestureAt = Date.now()
   lastPointer = null
-  const target = event.composedPath()[0]
+  const target = eventTarget(event)
   if (!isTop && event.key === "Escape" && framedFor && target === framedFor) {
     dismissedFor = framedFor
     return framedGone(true, true)

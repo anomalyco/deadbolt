@@ -9,6 +9,7 @@
 
 import { IDENTIFIER_ROLES, type Box, type FieldRole, type FillValues } from "../messages"
 import { inPlace, type Field, type FormControl } from "./detect"
+import { eventTarget, shadowRootOf } from "./shadow"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -37,7 +38,7 @@ async function digest(value: string): Promise<string | null> {
 }
 
 export function trackUserInput(event: Event) {
-  const el = event.composedPath()[0]
+  const el = eventTarget(event)
   if (key && event.isTrusted && (el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement)) digests.set(el, digest(el.value))
 }
 
@@ -73,17 +74,6 @@ export async function ownValue(el: Element, value: string): Promise<string | und
 // ---- Can the user see it? -----------------------------------------------------
 
 const MIN_SIDE = 8
-
-function shadowRootOf(el: Element): ShadowRoot | null {
-  if (el.shadowRoot) return el.shadowRoot
-  // Content scripts can see closed roots too, where a page could hide a slot.
-  const dom = (globalThis as { chrome?: { dom?: { openOrClosedShadowRoot?: (e: HTMLElement) => ShadowRoot | null } } }).chrome?.dom
-  try {
-    return el instanceof HTMLElement ? (dom?.openOrClosedShadowRoot?.(el) ?? null) : null
-  } catch {
-    return null
-  }
-}
 
 /**
  * An element's parent as it's rendered: a shadow host's light-DOM child sits
