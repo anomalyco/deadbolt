@@ -1074,20 +1074,6 @@ main.vault.popup {
   display: none;
 }
 
-.gen-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.gen-value {
-  flex: 1;
-  min-width: 0;
-  font-size: 12.5px;
-  overflow-wrap: anywhere;
-  user-select: all;
-}
-
 .gen-length {
   display: flex;
   align-items: center;
@@ -1109,7 +1095,12 @@ main.vault.popup {
 
 .gen-options {
   display: flex;
+  align-items: center;
   gap: 16px;
+}
+
+.gen-options .gen-again {
+  margin-left: auto;
 }
 
 .check {
