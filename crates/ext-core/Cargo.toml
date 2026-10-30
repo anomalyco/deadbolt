@@ -31,3 +31,9 @@ url = "2"
 wasm-bindgen = "=0.2.129"
 wasm-bindgen-futures = "0.4.79"
 zeroize = "1.9"
+
+[dev-dependencies]
+deadbolt-core = { path = "../core" }
+deadbolt-store = { path = "../store" }
+redb = "4"
+thiserror = "2"

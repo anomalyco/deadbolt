@@ -117,6 +117,8 @@ enum Error {
     #[error(transparent)]
     Store(#[from] deadbolt_store::Error),
     #[error(transparent)]
+    History(#[from] crate::history::Error),
+    #[error(transparent)]
     Core(#[from] deadbolt_core::Error),
     #[error(transparent)]
     Decode(#[from] deadbolt_core::DecodeError),
@@ -151,11 +153,7 @@ struct Loaded {
 
 impl Loaded {
     fn open(store: Unlocked) -> Result<Self> {
-        let entries = store
-            .iter_all()?
-            .map(|bytes| Ok(Entry::decode(&bytes?)?))
-            .collect::<Result<Vec<_>>>()?;
-        let vault = Vault::load(entries)?;
+        let vault = crate::history::load(&store)?;
         let peers = store
             .meta_get("extension/peers")?
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -1038,6 +1036,8 @@ fn plain(error: &Error) -> String {
         | Error::NotFound
         | Error::Protocol(_) => error.to_string(),
         Error::Generation(_) | Error::Passkey(_) => error.to_string(),
+        Error::History(crate::history::Error::Unavailable { .. } | crate::history::Error::VaultCount(_)) => error.to_string(),
+        Error::History(_) => STORAGE.into(),
         Error::Item(error) | Error::Core(deadbolt_core::Error::Item(error)) => {
             sentence(&error.to_string())
         }
@@ -1047,6 +1047,7 @@ fn plain(error: &Error) -> String {
                 .into()
         }
         Error::Store(_) | Error::Decode(_) | Error::Json(_) => STORAGE.into(),
+        Error::Core(deadbolt_core::Error::MembershipLimit { .. }) => error.to_string(),
         Error::Core(_) | Error::Application(_) => {
             "Deadbolt couldn't make that change to the vault.".into()
         }

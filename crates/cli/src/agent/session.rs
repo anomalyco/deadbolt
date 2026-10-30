@@ -100,6 +100,14 @@ impl Changes {
     }
 }
 
+/// A history retained on disk but excluded from reads, writes and sync.
+pub struct UnavailableVault {
+    name: String,
+    /// Reserve every recorded name, including renames beyond the valid prefix.
+    names: BTreeSet<String>,
+    error: String,
+}
+
 /// The store opened and decoded, before the network node starts.
 pub struct Loaded {
     pub store: Unlocked,
@@ -107,6 +115,7 @@ pub struct Loaded {
     pub id: DeviceId,
     pub meta: Meta,
     pub vaults: IndexMap<VaultId, Vault>,
+    pub unavailable: IndexMap<VaultId, UnavailableVault>,
     pub changes: Changes,
 }
 
@@ -129,6 +138,7 @@ impl Loaded {
         id: VaultId,
         change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T>,
     ) -> Result<T> {
+        self.available(id)?;
         let store = &self.store;
         let secret = &self.secret;
         let changes = &mut self.changes;
@@ -178,6 +188,7 @@ impl Loaded {
             secret,
             meta,
             vaults: IndexMap::new(),
+            unavailable: IndexMap::new(),
             changes: Changes::default(),
         };
         save_meta(&loaded.store, &loaded.meta)?;
@@ -210,9 +221,45 @@ impl Loaded {
             grouped.entry(entry.vault()).or_default().push(entry);
         }
         let mut vaults = IndexMap::new();
+        let mut unavailable = IndexMap::new();
         for (id, entries) in grouped {
-            let vault = Vault::load(entries).with_context(|| format!("loading vault {id}"))?;
-            vaults.insert(id, vault);
+            let names: BTreeSet<String> = entries
+                .iter()
+                .filter_map(|entry| match entry.payload() {
+                    Payload::Membership(
+                        MembershipOp::Create { name, .. } | MembershipOp::Rename { name },
+                    ) => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            // Rebuild exactly as Vault::load does, retaining the last validated
+            // name on failure, but never publish a partial vault for use/sync.
+            let mut entries = entries.into_iter();
+            let mut name = id.to_string();
+            let genesis = entries.next().context("empty stored vault group")?;
+            let result = Vault::from_genesis(genesis).and_then(|mut vault| {
+                for entry in entries {
+                    name = vault.name().to_owned();
+                    vault.apply(entry)?;
+                }
+                Ok(vault)
+            });
+            match result {
+                Ok(vault) => {
+                    vaults.insert(id, vault);
+                }
+                Err(error) => {
+                    tracing::warn!(vault = %id, %error, "vault unavailable; stored entries retained");
+                    unavailable.insert(
+                        id,
+                        UnavailableVault {
+                            name,
+                            names,
+                            error: error.to_string(),
+                        },
+                    );
+                }
+            }
         }
         Ok(Self {
             store,
@@ -220,6 +267,7 @@ impl Loaded {
             secret,
             meta,
             vaults,
+            unavailable,
             changes: Changes::default(),
         })
     }
@@ -435,32 +483,58 @@ impl Loaded {
         }
     }
 
+    fn available(&self, id: VaultId) -> Result<VaultId> {
+        if let Some(vault) = self.unavailable.get(&id) {
+            bail!(
+                "vault {} ({id}) is unavailable: {}; its stored entries are retained",
+                vault.name,
+                vault.error
+            );
+        }
+        Ok(id)
+    }
+
+    /// Includes histories we cannot load; never replace them with a new welcome.
+    pub fn contains_vault(&self, id: &VaultId) -> bool {
+        self.vaults.contains_key(id) || self.unavailable.contains_key(id)
+    }
+
     /// Finds a vault by name or id prefix; `None` means the default vault.
     pub fn resolve(&self, vault: Option<&str>) -> Result<VaultId> {
         let Some(query) = vault else {
-            if let Some(id) = self
-                .meta
-                .default_vault
-                .filter(|id| self.vaults.contains_key(id))
-            {
-                return Ok(id);
+            if let Some(id) = self.meta.default_vault.filter(|id| self.contains_vault(id)) {
+                return self.available(id);
             }
-            return match self.vaults.len() {
+            return match self.vaults.len() + self.unavailable.len() {
                 0 => bail!(
                     "no vaults yet; create one with `deadbolt init` or join one with `deadbolt join`"
                 ),
-                1 => self.vaults.keys().next().copied().context("no vaults"),
+                1 => self
+                    .vaults
+                    .keys()
+                    .chain(self.unavailable.keys())
+                    .next()
+                    .copied()
+                    .context("no vaults")
+                    .and_then(|id| self.available(id)),
                 _ => bail!("no default vault; pick one with --vault or `deadbolt vault default`"),
             };
         };
         let matches = resolve_by_name_or_id(
             self.vaults
                 .iter()
-                .map(|(id, vault)| (*id, Some(vault.name()))),
+                .map(|(id, vault)| (*id, Some(vault.name())))
+                .chain(self.unavailable.iter().flat_map(|(id, vault)| {
+                    vault
+                        .names
+                        .iter()
+                        .map(move |name| (*id, Some(name.as_str())))
+                        .chain(std::iter::once((*id, Some(vault.name.as_str()))))
+                })),
             query,
         );
         match matches.as_slice() {
-            [id] => Ok(*id),
+            [id] => self.available(*id),
             [] => bail!("no vault named {query}"),
             _ => bail!("{query} matches several vaults; use the vault id"),
         }
@@ -479,12 +553,17 @@ impl Loaded {
         self.vaults
             .iter()
             .any(|(id, vault)| Some(*id) != except && vault.name() == name)
+            || self
+                .unavailable
+                .iter()
+                .any(|(id, vault)| Some(*id) != except && vault.names.contains(name))
     }
 
     /// Adds a vault this device just created or joined.
     pub fn add_vault(&mut self, vault: Vault) -> Result<()> {
         let id = vault.id();
-        if self.vaults.contains_key(&id) {
+        self.available(id)?;
+        if self.contains_vault(&id) {
             bail!("this device already holds vault {}", vault.name());
         }
         persist(&self.store, vault.entries())?;
@@ -492,7 +571,7 @@ impl Loaded {
         self.changes.vaults = true;
         self.changes.items.insert(id);
         self.changes.devices.insert(id);
-        if self.meta.default_vault.is_none() {
+        if self.meta.default_vault.is_none() && self.unavailable.is_empty() {
             self.meta.default_vault = Some(id);
         }
         self.save_meta()
@@ -521,11 +600,23 @@ impl Loaded {
             default: self.meta.default_vault == Some(*id),
             members: vault.members().count(),
             member: vault.is_member(&self.id),
+            error: None,
         }
     }
 
     pub fn vault_infos(&self) -> Vec<VaultInfo> {
-        self.vaults.keys().map(|id| self.vault_info(id)).collect()
+        self.vaults
+            .keys()
+            .map(|id| self.vault_info(id))
+            .chain(self.unavailable.iter().map(|(id, vault)| VaultInfo {
+                id: id.to_string(),
+                name: vault.name.clone(),
+                default: self.meta.default_vault == Some(*id),
+                members: 0,
+                member: false,
+                error: Some(format!("{}; stored entries retained", vault.error)),
+            }))
+            .collect()
     }
 
     pub fn device_info(&self, id: &DeviceId, connected: &HashSet<PeerId>) -> DeviceInfo {
@@ -577,7 +668,7 @@ impl Loaded {
     }
 }
 
-fn resolve_by_name_or_id<'a, T: Copy + std::fmt::Display>(
+fn resolve_by_name_or_id<'a, T: Copy + PartialEq + std::fmt::Display>(
     candidates: impl Iterator<Item = (T, Option<&'a str>)>,
     query: &str,
 ) -> Vec<T> {
@@ -585,10 +676,10 @@ fn resolve_by_name_or_id<'a, T: Copy + std::fmt::Display>(
     let mut prefixes = Vec::new();
     let prefix = query.to_ascii_lowercase();
     for (id, name) in candidates {
-        if name == Some(query) {
+        if name == Some(query) && !names.contains(&id) {
             names.push(id);
         }
-        if query.len() >= 4 && id.to_string().starts_with(&prefix) {
+        if query.len() >= 4 && id.to_string().starts_with(&prefix) && !prefixes.contains(&id) {
             prefixes.push(id);
         }
     }
@@ -623,6 +714,139 @@ pub(super) fn update<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_over_budget_history_is_visible_and_isolated_without_losing_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut loaded = Loaded::setup(
+            dir.path(),
+            b"test",
+            "device",
+            KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        let bad = loaded.create_vault("personal").unwrap();
+        let genesis = loaded.vault(&bad).entries()[0].clone();
+        let mut prev = genesis.hash();
+        let mut flood = Vec::new();
+        for seq in 1..=deadbolt_core::MAX_MEMBERSHIP_ENTRIES {
+            let entry = Entry::sign(
+                &loaded.secret,
+                bad,
+                seq,
+                [prev],
+                Payload::Membership(MembershipOp::Rename {
+                    name: if seq == deadbolt_core::MAX_MEMBERSHIP_ENTRIES {
+                        "postlimit"
+                    } else {
+                        "renamed"
+                    }
+                    .into(),
+                }),
+            );
+            prev = entry.hash();
+            flood.push(entry.encode());
+        }
+        loaded
+            .store
+            .append_batch(flood.iter().map(|b| b.as_slice()))
+            .unwrap();
+        let stored = |s: &Loaded| {
+            s.store
+                .iter_all()
+                .unwrap()
+                .map(|bytes| Entry::decode(&bytes.unwrap()).unwrap())
+                .filter(|entry| entry.vault() == bad)
+                .map(|entry| entry.encode())
+                .collect::<Vec<_>>()
+        };
+        let before = stored(&loaded);
+        drop(loaded);
+
+        let mut loaded = Loaded::open(dir.path(), b"test").unwrap();
+        assert!(loaded.vaults.is_empty());
+        assert_eq!(loaded.unavailable.len(), 1);
+        assert_eq!(loaded.vault_infos().len(), 1);
+        assert!(
+            loaded
+                .resolve(None)
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        let good = loaded.create_vault("healthy").unwrap();
+        assert_eq!(loaded.vaults.len(), 1);
+        assert!(loaded.contains_vault(&bad));
+        assert!(loaded.held(&bad).is_none());
+        let infos = loaded.vault_infos();
+        let info = infos.iter().find(|v| v.id == bad.to_string()).unwrap();
+        assert!(info.default);
+        assert_eq!(info.name, "renamed");
+        assert!(info.error.as_ref().unwrap().contains("1000 non-removal"));
+        assert!(
+            loaded
+                .resolve(None)
+                .unwrap_err()
+                .to_string()
+                .contains("unavailable")
+        );
+        for query in [
+            "personal",
+            "renamed",
+            "postlimit",
+            &bad.to_string(),
+            &bad.to_string()[..8],
+        ] {
+            assert!(
+                loaded
+                    .resolve(Some(query))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unavailable")
+            );
+        }
+        for name in ["personal", "renamed", "postlimit"] {
+            assert!(loaded.create_vault(name).is_err());
+        }
+        assert!(
+            loaded
+                .add_vault(Vault::from_genesis(genesis).unwrap())
+                .is_err()
+        );
+        assert!(
+            loaded
+                .update(bad, |v, key| Ok(v.rename(key, "replacement")?))
+                .is_err()
+        );
+        assert_eq!(loaded.resolve(Some("healthy")).unwrap(), good);
+        loaded
+            .update(good, |v, key| {
+                Ok(v.create_item(key, "login", Some("working".into()), [])?)
+            })
+            .unwrap();
+        assert_eq!(loaded.vault(&good).items().len(), 1);
+        assert_eq!(stored(&loaded), before);
+
+        // No implicit fallback when an unavailable history is the default or
+        // when default metadata is missing. Explicitly choosing healthy works.
+        loaded.meta.default_vault = None;
+        assert!(loaded.resolve(None).is_err());
+        loaded.create_vault("new-vault").unwrap();
+        assert_eq!(loaded.meta.default_vault, None);
+        assert!(loaded.resolve(None).is_err());
+        loaded.meta.default_vault = Some(good);
+        loaded.save_meta().unwrap();
+        drop(loaded);
+        let loaded = Loaded::open(dir.path(), b"test").unwrap();
+        assert_eq!(loaded.resolve(None).unwrap(), good);
+        assert_eq!(loaded.vault(&good).items().len(), 1);
+        assert_eq!(stored(&loaded), before);
+        assert_eq!(loaded.vault_infos().len(), 3);
+    }
 
     #[test]
     fn vault_and_device_prefixes_are_case_insensitive_but_names_win() {

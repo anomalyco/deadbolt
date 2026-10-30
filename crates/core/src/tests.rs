@@ -1875,10 +1875,6 @@ fn membership_entry_limit_bounds_commit_and_apply() {
             device: b.id(),
             consent,
         },
-        MembershipOp::Remove {
-            device: b.id(),
-            last_seen_seq: None,
-        },
     ] {
         let payload = Payload::Membership(op);
         let overflow = Entry::sign(
@@ -1911,6 +1907,19 @@ fn membership_entry_limit_bounds_commit_and_apply() {
     assert_eq!(a.vault.heads(), b.vault.heads());
     let loaded = Vault::load(a.vault.entries().into_iter().cloned()).unwrap();
     assert_eq!(loaded.heads(), a.vault.heads());
+    // Exhaustion must not prevent revoking a compromised device. The Remove
+    // is at seq 1000 and does not buy another Rename/Add slot.
+    let removal = a.vault.remove(&a.secret, b.id()).unwrap();
+    assert_eq!(removal.seq(), MAX_MEMBERSHIP_ENTRIES);
+    assert_eq!(b.vault.apply(removal), Ok(true));
+    assert!(!a.vault.is_member(&b.id()));
+    assert_eq!(a.vault.rename(&a.secret, "still-full"), Err(error));
+    assert_eq!(
+        Vault::load(a.vault.entries().into_iter().cloned())
+            .unwrap()
+            .heads(),
+        a.vault.heads()
+    );
     // The same key has a separate budget in another vault.
     let (mut other, _) = Vault::create(&a.secret, "other").unwrap();
     other.rename(&a.secret, "allowed").unwrap();
@@ -1950,7 +1959,7 @@ fn membership_entry_limit_is_independent_of_arrival_order_and_forks() {
                 name: "overflow".into(),
             }),
         );
-        for vault in [&mut a.vault, &mut fork, &mut b.vault] {
+        for vault in [&mut a.vault, &mut fork] {
             assert_eq!(
                 vault.apply(overflow.clone()),
                 Err(Error::MembershipLimit {
@@ -1971,5 +1980,35 @@ fn membership_entry_limit_is_independent_of_arrival_order_and_forks() {
     assert_eq!(
         before.members().collect::<Vec<_>>(),
         after.members().collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn removals_do_not_consume_the_membership_budget() {
+    let mut a = Dev::create();
+    let b = a.invite();
+    a.vault.remove(&a.secret, b.id()).unwrap();
+    for _ in 2..MAX_MEMBERSHIP_ENTRIES {
+        a.vault.rename(&a.secret, "within-budget").unwrap();
+    }
+    assert_eq!(
+        a.vault.heads().get(&LogId {
+            author: a.id(),
+            log: Log::Membership
+        }),
+        Some(MAX_MEMBERSHIP_ENTRIES)
+    );
+    assert_eq!(
+        a.vault.rename(&a.secret, "over-budget"),
+        Err(Error::MembershipLimit {
+            max: MAX_MEMBERSHIP_ENTRIES
+        })
+    );
+    let mut reloaded = Vault::load(a.vault.entries().into_iter().cloned()).unwrap();
+    assert_eq!(
+        reloaded.rename(&a.secret, "over-budget"),
+        Err(Error::MembershipLimit {
+            max: MAX_MEMBERSHIP_ENTRIES
+        })
     );
 }

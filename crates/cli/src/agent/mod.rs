@@ -2042,7 +2042,9 @@ impl Agent {
         if closed > 0 {
             info!(closed, "closed sync connections to removed devices");
         }
-        if !session.vaults.is_empty() && !session.vaults.values().any(|v| v.is_member(&session.id))
+        if session.unavailable.is_empty()
+            && !session.vaults.is_empty()
+            && !session.vaults.values().any(|v| v.is_member(&session.id))
         {
             drop(session.store.clear_biometric());
             self.biometric_was_enrolled.store(false, Ordering::SeqCst);

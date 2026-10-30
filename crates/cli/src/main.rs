@@ -1005,17 +1005,20 @@ fn presence(device: &DeviceInfo) -> String {
 }
 
 fn vault_line(vault: &VaultInfo) -> String {
-    let mut line = format!(
-        "{}\t{}\t{} device{}",
-        vault.name,
-        short(&vault.id),
-        vault.members,
-        if vault.members == 1 { "" } else { "s" }
-    );
+    let mut line = format!("{}\t{}", vault.name, short(&vault.id));
+    if vault.error.is_none() {
+        line.push_str(&format!(
+            "\t{} device{}",
+            vault.members,
+            if vault.members == 1 { "" } else { "s" }
+        ));
+    }
     if vault.default {
         line.push_str("\tdefault");
     }
-    if !vault.member {
+    if let Some(error) = &vault.error {
+        line.push_str(&format!("\tunavailable: {error}"));
+    } else if !vault.member {
         line.push_str("\tremoved");
     }
     line

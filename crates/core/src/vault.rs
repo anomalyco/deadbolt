@@ -20,9 +20,10 @@ pub const CREATE_BATCH_BYTES: usize = 1024 * 1024;
 /// sent to another device.
 pub const MAX_ENTRY_LEN: usize = 16 * 1024 * 1024 - 1;
 
-/// Maximum membership entries per author per vault, including the creator's
-/// genesis. Membership is re-resolved on every insert; bounding each author's
-/// contiguous log limits the history a single member can make us resolve.
+/// Maximum non-removal membership entries per author per vault, including the
+/// creator's genesis. Removes remain available after this budget is exhausted.
+/// Membership is re-resolved on every insert; this bounds each author's
+/// non-removal contribution, not the total history or Sybil growth.
 /// Data entries have a separate sequence and do not consume this budget.
 pub const MAX_MEMBERSHIP_ENTRIES: u64 = 1000;
 
@@ -119,6 +120,8 @@ pub struct Vault {
     logs: BTreeMap<LogId, Vec<Hash>>,
     /// Arrival order, which is always causal.
     membership_order: Vec<Hash>,
+    /// Non-removal entries in each author's validated membership chain.
+    membership_writes: BTreeMap<DeviceId, u64>,
     data_order: Vec<Hash>,
     /// Membership entries no membership entry depends on.
     membership_tips: BTreeSet<Hash>,
@@ -189,6 +192,7 @@ impl Vault {
             nodes: HashMap::new(),
             logs: BTreeMap::new(),
             membership_order: Vec::new(),
+            membership_writes: BTreeMap::new(),
             data_order: Vec::new(),
             membership_tips: BTreeSet::new(),
             tips: BTreeSet::new(),
@@ -257,14 +261,6 @@ impl Vault {
         if self.nodes.contains_key(&entry.hash()) {
             return Ok(false);
         }
-        // Sequence numbers are contiguous and every entry must depend on its
-        // predecessor below. Unlike an arrival counter, this bound is intrinsic
-        // to the signed chain, even for concurrent authors or rejected forks.
-        if entry.log() == Log::Membership && entry.seq() >= MAX_MEMBERSHIP_ENTRIES {
-            return Err(Error::MembershipLimit {
-                max: MAX_MEMBERSHIP_ENTRIES,
-            });
-        }
         let log_id = entry.log_id();
         let next = self.next_seq(log_id);
         if entry.seq() > next {
@@ -276,6 +272,9 @@ impl Vault {
         if entry.seq() < next {
             return Err(Error::Fork { seq: entry.seq() });
         }
+        // With a contiguous, fork-rejecting chain, this count covers exactly
+        // the author's predecessors, independent of other authors' arrival.
+        self.check_membership_budget(entry.author(), entry.payload())?;
         let missing: Vec<Hash> = entry
             .deps()
             .iter()
@@ -352,11 +351,7 @@ impl Vault {
             author,
             log: payload.log(),
         };
-        if log_id.log == Log::Membership && self.next_seq(log_id) >= MAX_MEMBERSHIP_ENTRIES {
-            return Err(Error::MembershipLimit {
-                max: MAX_MEMBERSHIP_ENTRIES,
-            });
-        }
+        self.check_membership_budget(author, &payload)?;
         if let Payload::Data(ops) = &payload {
             for op in ops {
                 data::check(&self.items, op)?;
@@ -564,6 +559,17 @@ impl Vault {
         self.missing_for(&Heads::default())
     }
 
+    fn check_membership_budget(&self, author: DeviceId, payload: &Payload) -> Result<(), Error> {
+        if matches!(payload, Payload::Membership(op) if !matches!(op, MembershipOp::Remove { .. }))
+            && self.membership_writes.get(&author).copied().unwrap_or(0) >= MAX_MEMBERSHIP_ENTRIES
+        {
+            return Err(Error::MembershipLimit {
+                max: MAX_MEMBERSHIP_ENTRIES,
+            });
+        }
+        Ok(())
+    }
+
     fn next_seq(&self, log: LogId) -> u64 {
         self.logs.get(&log).map_or(0, |hashes| hashes.len() as u64)
     }
@@ -610,6 +616,12 @@ impl Vault {
         self.tips.insert(hash);
         let log = entry.log();
         if log == Log::Membership {
+            if !matches!(
+                entry.payload(),
+                Payload::Membership(MembershipOp::Remove { .. })
+            ) {
+                *self.membership_writes.entry(entry.author()).or_default() += 1;
+            }
             for dep in entry.deps() {
                 self.membership_tips.remove(dep);
             }

@@ -12,7 +12,7 @@ pub enum Error {
     SeqGap { expected: u64, got: u64 },
     #[error("author already has a different entry at seq {seq}")]
     Fork { seq: u64 },
-    #[error("author reached the limit of {max} membership entries in this vault")]
+    #[error("author reached the limit of {max} non-removal membership entries in this vault")]
     MembershipLimit { max: u64 },
     #[error("missing {} dependencies", .0.len())]
     MissingDeps(Vec<Hash>),

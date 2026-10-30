@@ -644,6 +644,7 @@ mod tests {
             vaults: [(id, Vault::from_genesis(genesis).unwrap())]
                 .into_iter()
                 .collect(),
+            unavailable: Default::default(),
             changes: Default::default(),
         };
         let (_, entry) = source
