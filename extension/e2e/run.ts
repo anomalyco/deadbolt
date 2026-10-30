@@ -2442,6 +2442,47 @@ async function viewportResize() {
   }
 }
 
+/**
+ * The menu for a field in a frame below follows the frame element as the
+ * page moves it (a reflow, not only a scroll), and goes when the field moves
+ * inside its frame (the frame's own layout changed, as on a resize), which
+ * the top page can't see.
+ */
+async function frameMoves() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`http://appstoreconnect.apple.test:${server.port}/apple/login`)
+    const inner = await until("the sign-in frame loads", () => page.frames().find((f) => f.url().includes("/appleauth/auth/signin")) ?? null)
+    if (!inner) return void (await diagnose(run, page, "frame moves"))
+    await until("the frame's form is found", async () => (await run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)).some((s) => /^db:page@[1-9]\d*:\/appleauth\/auth\/signin$/.test(s)), 15_000)
+    await inner.click("#account_name_text_field")
+    const menu = await until("the menu opens for the frame's field", async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && (await f.locator("button.row").count()) > 0 ? f : null
+    }, 15_000)
+    if (!menu) return void (await diagnose(run, page, "frame moves"))
+    const gap = async () => {
+      const [m, f] = await Promise.all([menu.frameElement().then((e) => e.boundingBox()), inner.locator("#account_name_text_field").boundingBox()])
+      return m && f ? { dx: Math.round(m.x - f.x), dy: Math.round(m.y - (f.y + f.height)) } : null
+    }
+    const before = await gap()
+    // The page pushes the frame down and right, as a banner or a reflow above it would.
+    await page.evaluate(() => Object.assign(document.getElementById("aid-auth-widget-iFrame")!.style, { marginTop: "60px", marginLeft: "40px" }))
+    await Bun.sleep(300)
+    const after = await gap()
+    check(!!before && !!after && after.dx === before.dx && after.dy === before.dy, `the menu follows the frame the page moved (${JSON.stringify(before)} then ${JSON.stringify(after)})`)
+    // Wider, the frame centres its form: the field moves inside it.
+    await page.evaluate(() => (document.getElementById("aid-auth-widget-iFrame")!.style.width = "760px"))
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "and goes when the field moves inside its frame")
+  } catch (err) {
+    check(false, `frame moves threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "frame moves")
+  } finally {
+    await close(run)
+  }
+}
+
 /** The menu's host: a popover with a random name, raised over what the page puts in the top layer, and inside a login modal. */
 async function topLayer() {
   const run = await launch()
@@ -4279,6 +4320,7 @@ const once: Record<string, () => Promise<void>> = {
   corner,
   signInSessions,
   frameLogins,
+  frameMoves,
   conditionalHeld,
   rateLimited,
   securityPage,
@@ -4304,7 +4346,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // rough run times in seconds (per scheme; unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, frameMoves: 6, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
