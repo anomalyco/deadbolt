@@ -26,6 +26,9 @@ pub enum CallerClass {
     App,
     /// This build's `deadbolt browser-host`, run by a browser.
     BrowserHost,
+    /// Deadbolt's macOS AutoFill Credential Provider extension
+    /// (`Contents/PlugIns/DeadboltAutoFill.appex`).
+    AutoFill,
     /// Anything else, Kit's own terminal included.
     Caller,
 }

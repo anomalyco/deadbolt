@@ -339,6 +339,22 @@ pub fn helper() -> anyhow::Result<std::path::PathBuf> {
     macos::verified_helper_path()
 }
 
+/// Resolves the shared macOS App Group container directory (`<TEAM_ID>.pw.deadbolt`)
+/// through `deadbolt-enclave group-container`. Returns `Ok(None)` when the
+/// running agent or helper is not signed with that App Group entitlement (e.g.
+/// local ad-hoc builds) or off macOS.
+pub fn group_container(group: &str) -> anyhow::Result<Option<std::path::PathBuf>> {
+    #[cfg(target_os = "macos")]
+    {
+        macos::group_container(group)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = group;
+        Ok(None)
+    }
+}
+
 /// Generates a fresh `.biometryCurrentSet` Secure Enclave key and seals a new
 /// 256-bit `biometric_key` without touching `store.redb`.
 pub fn seal_new(now_secs: u64) -> Result<SealedBiometric, UnlockError> {
@@ -749,6 +765,38 @@ mod macos {
         Ok(status)
     }
 
+    pub fn group_container(group: &str) -> Result<Option<PathBuf>> {
+        let Ok(exe) = crate::caller::own_exe() else {
+            return Ok(None);
+        };
+        let mut cmd = Command::new(verified_helper_path()?);
+        cmd.args(["group-container", group]);
+        cmd.arg(exe);
+        let child = cmd
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("spawning deadbolt-enclave group-container")?;
+        let cancel = CancelHandle::default();
+        let (exit, stdout, stderr) = wait_with_timeout(child, &cancel, PROBE_TIMEOUT)
+            .map_err(|e| anyhow!("deadbolt-enclave group-container failed: {e}"))?;
+        if exit.success() {
+            let path =
+                String::from_utf8(stdout).context("App Group container path is not UTF-8")?;
+            let path = path.trim();
+            if path.is_empty() {
+                return Ok(None);
+            }
+            return Ok(Some(PathBuf::from(path)));
+        }
+        if exit.code() == Some(EXIT_UNAVAILABLE) {
+            return Ok(None);
+        }
+        let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
+        bail!("deadbolt-enclave group-container exited with {exit}: {stderr}")
+    }
+
     pub fn seal(
         key: &[u8; 32],
         header_aad: &[u8],
@@ -1147,6 +1195,12 @@ mod macos_tests {
         let expected = env!("DEADBOLT_ENCLAVE_SHA256");
         assert_eq!(expected.len(), 64);
         macos::verify_helper_at(&staged, expected).unwrap();
+    }
+
+    #[test]
+    fn adhoc_helper_refuses_app_group_without_touching_containermanager() {
+        assert_eq!(group_container("5NZ4Q7NXJ4.pw.deadbolt").unwrap(), None);
+        assert!(group_container("not-a-team-group").is_err());
     }
 
     #[test]
