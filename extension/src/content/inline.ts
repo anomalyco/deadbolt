@@ -32,16 +32,16 @@
 import { GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type Box, type FillAck, type FormsAck, type QueryReply, type SurfaceKind, type SurfaceMode, type ToBackground, type ToContent } from "../messages"
 import { epochNow, reducedMotion, Spring, timing } from "../ui/motion"
 import { approvals } from "./approvals"
-import { findAccountTile, findProviderButton, type Field, type FormControl } from "./detect"
+import { findAccountTile, findProviderButton, ownerOf, type Field, type FieldOwner, type FormControl } from "./detect"
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
 import { readPageIcon } from "./site-icon"
 import { isAccountPage, pageAccountOf, provider } from "../signin"
-import { fillable, fillFields, ownValue, visibleBox } from "./fill"
+import { fillable, fillFields, ownValue, successor, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
 import { learning } from "./learn"
-import { deepActiveElement } from "./shadow"
+import { deepActiveElement, eventTarget, markOwnHost } from "./shadow"
 import { SIGNIN_SETTING } from "../auth-state"
 
 export interface PageState {
@@ -92,6 +92,8 @@ let state: PageState
 let host: HTMLElement | null = null
 let frame: HTMLIFrameElement | null = null
 let anchor: FormControl | null = null
+/** Where the anchor was when the surface opened on it: a pill follows a box the page re-rendered in its place (see successor). */
+let anchorOwner: FieldOwner | null = null
 let unlockAnchor: FormControl | null = null
 /**
  * For a field in a frame below: where it showed in this page when the menu
@@ -348,6 +350,8 @@ function retarget(duration: number) {
 
 function position() {
   if (!host) return
+  // A pill's field re-rendered by the page as it filled: the pill moves to the box now in its place.
+  if (anchor instanceof HTMLInputElement && !anchor.isConnected && mode === "pill" && anchorOwner) anchor = successor({ el: anchor, owner: anchorOwner }) ?? anchor
   if ((anchor && !anchor.isConnected) || !host.isConnected) return closeMenu()
   const to = targetRect()
   if (!to) return closeMenu()
@@ -439,6 +443,7 @@ function frameStyle(radius: number) {
 function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMode = "accounts", at?: Box, captioned = false) {
   closeMenu()
   anchor = el
+  anchorOwner = el instanceof HTMLInputElement ? ownerOf(el) : null
   anchorBox = at ? { box: at, x: scrollX, y: scrollY } : null
   token = t
   mode = as
@@ -457,6 +462,7 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   box.addEventListener("beforetoggle", (e) => {
     if (e.isTrusted && (e as ToggleEvent).newState === "closed" && !raising) queueMicrotask(() => host === box && raise())
   })
+  markOwnHost(box)
   const root = box.attachShadow({ mode: "closed" })
   frame = document.createElement("iframe")
   // No token in the URL: the menu asks for it (see onMenuReady).
@@ -835,7 +841,7 @@ async function maybeOpenForms(el: FormControl, how: Asked) {
 const isControl = (el: unknown): el is FormControl => el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement
 
 function onFocusIn(event: FocusEvent) {
-  const el = event.composedPath()[0]
+  const el = eventTarget(event)
   if (!isControl(el)) return
   const clicked = recentGesture() && (lastPointer === el || (lastPointer instanceof HTMLLabelElement && lastPointer.control === el))
   void maybeOpen(el, clicked ? "click" : "focus")
@@ -850,7 +856,7 @@ function onFocusIn(event: FocusEvent) {
  */
 function onInput(event: Event) {
   if (!event.isTrusted) return
-  const el = event.composedPath()[0]
+  const el = eventTarget(event)
   if (!(el instanceof HTMLInputElement)) return
   if (!el.value) {
     quiet.delete(el)
@@ -896,7 +902,7 @@ function onPointerMove(event: PointerEvent) {
 function onPointerDown(event: PointerEvent) {
   if (!event.isTrusted) return
   lastGestureAt = Date.now()
-  const target = event.composedPath()[0]
+  const target = eventTarget(event)
   lastPointer = target ?? null
   if (!isTop && framedFor && target !== framedFor) framedGone(true)
   // Clicking a field that already has focus (e.g. autofocus) opens the menu too.
@@ -913,7 +919,7 @@ function onPointerDown(event: PointerEvent) {
     return port ? void port.postMessage({ type: "db:tuck" }) : leave(true)
   }
   const path = event.composedPath()
-  if (path.includes(host) || path.includes(anchor as EventTarget)) return
+  if (path.includes(host) || path.includes(anchor as EventTarget) || target === anchor) return
   if (mode === "pill") return leave()
   closeMenu()
 }
@@ -923,7 +929,7 @@ function onKeyDown(event: KeyboardEvent) {
   if (mode === "signin" && event.key === "Escape") return closeMenu(false, true)
   lastGestureAt = Date.now()
   lastPointer = null
-  const target = event.composedPath()[0]
+  const target = eventTarget(event)
   if (!isTop && event.key === "Escape" && framedFor && target === framedFor) {
     dismissedFor = framedFor
     return framedGone(true, true)
@@ -981,11 +987,11 @@ async function applyFill(message: Extract<ToContent, { type: "db:fill" }>): Prom
   // (see ownPill). Each write checks again.
   if (mode === "pill") await pillSettled(700)
   if (state.form() !== message.form) return { filled: [] }
-  const { filled, last } = await fillFields(targets, message.values, (el) => (!message.automatic || !document.hidden) && fillable(el, ownPill()))
+  const { filled, last, written } = await fillFields(targets, message.values, (el) => (!message.automatic || !document.hidden) && fillable(el, ownPill()))
   if (filled.includes("new-password") && message.values.newPassword && typeof message.generated === "string")
     rememberGenerated(message.generated, message.values.newPassword)
   if (filled.length) {
-    lastFilled = targets.filter((t) => filled.includes(t.role)).map((t) => t.el)
+    lastFilled = written
     submittedSinceFill = false
   }
   last?.focus({ preventScroll: true })
