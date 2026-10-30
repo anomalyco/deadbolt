@@ -476,6 +476,7 @@ export type DeviceCommand =
   | { type: "device-create"; passphrase: string; name: string }
   | ({ type: "device-unlock" } & UnlockProof)
   | { type: "device-biometric-info" }
+  | { type: "device-biometric-check"; passphrase: string }
   | { type: "device-biometric-set"; passphrase: string; prf: string; token: string }
   | { type: "device-biometric-reset" }
   | { type: "device-lock" }

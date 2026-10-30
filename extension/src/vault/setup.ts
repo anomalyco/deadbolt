@@ -345,7 +345,7 @@ export function unlockView(app: App): View {
     b.disabled = true
     error.hidden = true
     try {
-      const r = await app.run({ type: "device-unlock", prf: await verify(app) })
+      const r = await app.run({ type: "device-unlock", prf: await verify(app, true) })
       if (!r.ok) throw new Error(r.message)
       return app.opened()
     } catch (e) {

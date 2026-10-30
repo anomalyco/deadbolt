@@ -88,8 +88,8 @@ blinded metadata keys, XChaCha20-Poly1305 record encryption and Argon2id key wra
 Only ciphertext enters OPFS. The backend calls `flush()` on redb durability barriers,
 checks complete reads/writes, and holds OPFS's exclusive file lock until close.
 No plaintext snapshot or key is written to IndexedDB or persistent extension
-storage. Comfortable and Relaxed retain a wrapped key set **and its wrapping
-key** in memory-only `chrome.storage.session` (see Security review needed below).
+storage, including `chrome.storage.session`. Every preset keeps the unlocked
+key set and device secret only in the dedicated worker's memory.
 
 OPFS is preferable to a new IndexedDB key-value implementation for this proof:
 redb already supplies atomic multi-record updates and crash recovery; replacing it
@@ -189,8 +189,7 @@ so those setup operations never overlap each other. Everything else
 core interleaves requests at its await points, so a sync or pairing waiting on the
 network does not hold up a list or fill. Locking bypasses all of it: the offscreen
 document terminates the worker and rejects in-flight and queued requests. A new
-worker reopens the encrypted file after passphrase/PRF unlock or an allowed
-browser-session restoration.
+worker reopens the encrypted file only after passphrase or PRF unlock.
 
 Pairing's Argon2 rendezvous-key derivation is an exception: on wasm it runs
 synchronously on the vault worker and can stall its other requests for about
@@ -204,18 +203,11 @@ requests remain available immediately after unlock, even during the startup
 membership round. That barrier gates peer data exchange and invitations, not
 local reads. While the offscreen document exists, iroh can
 receive connections independently of the service worker, so peers can sync with
-the extension without it asking. Chrome may still discard the offscreen document
-or renderer. Strict fails closed in that case. Comfortable and Relaxed reopen the
-OPFS store from a browser-session envelope, provided its previous idle deadline
-has not passed. Restoration does not count as use. Screen lock clears
-Comfortable's envelope; Relaxed retains it. Explicit Lock removes it before
-terminating the worker, falling back to overwriting the record if removal fails.
-Even when both storage operations fail, the worker is terminated and this service
-worker refuses restoration. Quit the browser to clear session memory if storage
-errors persist: a subsequent service-worker restart cannot remember a failed
-deletion. Exports are generation-checked and serialized with removal. A setup or
-unlock crossing a lock/preset change ends the worker rather than retaining its
-old policy.
+the extension without it asking. Chrome does not document offscreen-document
+discard as normal operation for this use. If the worker, offscreen document or
+renderer is lost (including a crash), every preset locks and requires passphrase
+or PRF unlock. A setup or unlock crossing a lock/preset change ends the worker
+rather than retaining its old policy.
 
 ## Security compared with the native-host model
 
@@ -230,8 +222,8 @@ The passphrase necessarily crosses the trusted extension page, service worker an
 offscreen messaging boundary. Rust zeroizes its owned passphrase/key buffers, but
 JS strings, structured-clone copies and browser process memory cannot be reliably
 wiped. Lock terminates the worker and closes its network endpoint; it does not
-promise forensic erasure from RAM. No key is persisted unencrypted on disk;
-session restoration deliberately expands the in-memory secret boundary.
+promise forensic erasure from RAM. No key is retained in extension storage;
+trusted extension pages cannot retrieve an unlocked key from storage.session.
 
 The management command route accepts only the exact extension device page and the
 toolbar popup, which show the same vault UI (`extension/src/vault`); content
@@ -248,16 +240,15 @@ cannot retract secrets already received by a removed member.
 
 ## Lock presets
 
-Session restoration is gated by the preset: Strict never exports or accepts a
-session envelope. The Comfortable/Relaxed change requires security review before
-merge; its risks are explicit below rather than described as hardware protection.
+Every preset keeps unlocked keys in the dedicated worker's memory only. Worker,
+offscreen or renderer loss locks every preset; there is no session restoration.
 
 | | Strict | Comfortable (default) | Relaxed |
 | --- | --- | --- | --- |
 | Idle lock | 5 min | 1 h | 12 h |
 | Screen lock / sleep (`chrome.idle` locked) | locks | locks | stays unlocked |
 | Browser quit | locks | locks | locks |
-| Session restoration | none | wrapped key set + wrapping key in `chrome.storage.session` | same as Comfortable |
+| Worker/offscreen loss | locks | locks | locks |
 | Touch ID / passkey unlock | allowed | allowed | allowed |
 | Reveal/copy password; card number/CVV | re-auth every time | no re-auth | no re-auth |
 
@@ -287,10 +278,15 @@ without choosing or filling a credential.
 Enrollment creates a resident platform credential with `userVerification:
 "required"`, no attestation, and the extension's own RP (no remote website).
 A random 32-byte PRF input and credential id are public metadata in the store
-header. A subsequent assertion must return 32 PRF bytes before enrollment is
-committed. That output wraps the existing random store key set in the shared
+header. A subsequent assertion must return 32 PRF bytes with the authenticator's
+UV flag set before enrollment is committed. Rust derives the slot key with
+`blake3::derive_key("deadbolt ext-core v1 prf unlock", &prf)`; enrollment,
+unlock and Strict checks use the same fixed context. That derived key wraps
+the existing random store key set in the shared
 store's XChaCha20-Poly1305 biometric slot, alongside the Argon2id passphrase slot.
-Enrollment also requires the current passphrase. Neither passphrase nor PRF
+The current passphrase is checked with normal guessing backoff before creating
+a provider passkey, then checked again when saving the slot. A wrong passphrase
+therefore creates no orphan provider credential. Neither passphrase nor PRF
 output is saved in preferences. Reset Touch ID removes the slot and metadata;
 it does not delete the OS passkey. A deleted passkey, cancellation, missing
 platform authenticator or missing PRF output leaves passphrase unlock available.
@@ -321,40 +317,20 @@ as typed, or weaken future UI checks. PRF is not an enclave for extension code;
 Rust cannot establish fresh user presence from a PRF value alone. Origin binding
 protects against an unrelated website, not malicious code at this extension origin.
 
-### Security review needed: session restoration
+### Session persistence dropped after security review
 
-Comfortable and Relaxed keep a random 256-bit wrapping key beside the encrypted
-64-byte store key set in `chrome.storage.session`. The envelope authenticates a
-separate versioned purpose and the current passphrase slot/KDF header: it cannot
-open another store or survive a passphrase change. It does not change the native
-agent's lifecycle or write a session slot into OPFS.
+The proposed browser-session envelope was removed. A wrapping key beside its
+envelope in `chrome.storage.session` exposed the long-term key set and device
+secret to every trusted extension-origin context, including the web-accessible
+menu frame. `TRUSTED_CONTEXTS` does not isolate the vault page from that frame.
+No preset exports, saves or resumes a session key now. PRF makes relocking cheap
+without widening the storage boundary. Memory inspection, swap and crash dumps
+can still expose a currently unlocked worker or transient JS copies.
 
-**Co-location adds no confidentiality.** A wrapping key in only the service
-worker survives an offscreen discard; one in only the offscreen survives worker
-termination. Neither survives losing both. MV3 offers no always-live context.
-Restoring after both discards without a prompt requires session storage to hold
-all information needed to decrypt. Treat possession of this record as possession
-of the unlocked vault and device signing key, not harmless ciphertext.
-
-[`storage.session`](https://developer.chrome.com/docs/extensions/reference/api/storage)
-is memory-only: Chrome does not persist it to disk, sync it, or retain it across
-browser restart or extension reload/update/disable. Closing all windows may not
-quit a browser running in the background. We explicitly set `TRUSTED_CONTEXTS`.
-Content scripts (including our isolated worlds), ordinary websites and other
-extensions cannot read it through the API. **All trusted pages of this extension
-and its service worker can**, including the web-accessible menu frame: trusted
-does not mean only the vault page. Offscreen documents lack the storage API and
-route through the worker. Code execution in any trusted extension context thus
-compromises a retained session. Sender checks on commands are not a separate
-storage boundary.
-
-Memory inspection, swap/hibernation and crash dumps may contain the wrapping key,
-decrypted wasm memory, JS copies or typed passphrases. Memory-only API guarantees
-do not promise forensic erasure or exclusion from OS crash reports. Compared with
-Strict, the key remains available even while both extension execution contexts
-are absent. Manual/idle/screen lock removes the record, but cannot retract a
-copied key or guarantee browser-allocation zeroization. Review this exposure,
-especially trusted-page compromise and crash-dump policy, before shipping.
+Possible follow-up, not implemented: retain the key set only in the offscreen
+document's memory and respawn its dedicated worker after a wasm crash, with a
+capped number of respawns. Losing the offscreen document must still lock. This
+needs its own lifecycle/security review, not a storage.session fallback.
 
 Wrong passphrases back off. After three in a row, for unlocking or for Strict's
 check before a password, the service worker refuses the next try for 1 s, then 2,
@@ -546,8 +522,8 @@ name "this Mac" grants nothing: it only changes the wording.
    storage/lifetime adapters, and exercise
    suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
    startup contacts (the proof dials sequentially within the same 30-second budget).
-3. Complete security review of session restoration and PRF unlock; validate real
-   platform providers in Chrome and Helium on macOS.
+3. Validate real platform providers in Chrome and Helium on macOS; evaluate
+   capped wasm-worker crash recovery from offscreen memory only (not built).
 4. Stronger browser-lifetime guarantees and Comfortable biometric card policy.
 5. Finish OTP/identity/card editing, passkeys and learning; harden
    packaging/update/CSP permissions, measure wasm size/unlock across devices, and
@@ -572,6 +548,5 @@ name "this Mac" grants nothing: it only changes the wording.
 - No standalone Activity log or learning log. Neither capability is advertised.
 - The vault UI edits logins only: other item kinds and OTP secrets must be created
   on a peer and synced. No automatic save/update offers for identities or cards.
-- Strict locks after worker/offscreen loss; Comfortable/Relaxed restore for the
-  remaining browser session and idle lifetime. Extension removal or storage
+- Every preset locks after worker/offscreen loss. Extension removal or storage
   clearing destroys this replica.

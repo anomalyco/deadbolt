@@ -781,7 +781,7 @@ async function joinExistingVault(device: Page, worker: Worker) {
   await cli(...IDENTITY)
   await cli(...CARD)
   const begin = async () => {
-    await device.getByRole("button", { name: "Pair with an existing device", exact: true }).click()
+    await device.getByRole("button", { name: /^Pair with (an existing device|Deadbolt on this (Mac|computer))$/ }).click()
     return until("extension publishes its join code", async () => {
       const r = (await request(device, { type: "device-join-status" })).reply
       return r.phase === "waiting" && typeof r.code === "string" ? r.code : null
@@ -789,7 +789,7 @@ async function joinExistingVault(device: Page, worker: Worker) {
   }
   const abandoned = await begin()
   await device.getByRole("button", { name: "Cancel", exact: true }).click()
-  await device.getByRole("button", { name: "Pair with an existing device", exact: true }).waitFor()
+  await device.getByRole("button", { name: /^Pair with (an existing device|Deadbolt on this (Mac|computer))$/ }).waitFor()
   check((await request(device, { type: "device-join-status" })).reply.phase === "idle", "cancel discards the pending join")
   check(await state(device) === "not-set-up", "cancel does not create a browser vault")
 
@@ -826,21 +826,18 @@ async function joinExistingVault(device: Page, worker: Worker) {
 async function unlockLifetime(device: Page, worker: Worker) {
   for (const preset of ["comfortable", "relaxed", "strict"] as const) {
     await request(device, { type: "device-preset", preset })
-    const saved = await worker.evaluate(async () => !!(await chrome.storage.session.get("deadbolt.sessionKey"))["deadbolt.sessionKey"])
-    check(saved === (preset !== "strict"), `${preset}: session envelope is present only outside Strict`)
     await worker.evaluate(() => chrome.offscreen.closeDocument())
-    check(await state(device) === (preset === "strict" ? "locked" : "ready"), `${preset}: offscreen discard ${preset === "strict" ? "locks" : "restores"} the vault`)
-    if (preset === "strict") await request(device, { type: "device-unlock", passphrase })
+    check(await state(device) === "locked", `${preset}: offscreen loss locks the vault`)
+    await request(device, { type: "device-unlock", passphrase })
   }
   await request(device, { type: "device-preset", preset: "comfortable" })
   await request(device, { type: "device-lock" })
-  check(!await worker.evaluate(async () => !!(await chrome.storage.session.get("deadbolt.sessionKey"))["deadbolt.sessionKey"]), "explicit lock removes the session envelope")
   await worker.evaluate(() => chrome.offscreen.closeDocument())
   check(await state(device) === "locked", "offscreen restart after explicit lock cannot restore")
   await request(device, { type: "device-unlock", passphrase })
 }
 
-async function inlineUnlock(device: Page) {
+async function inlineUnlock(device: Page, previous: Worker) {
   await request(device, { type: "device-lock" })
   const page = await newPage("inline-unlock")
   await page.goto(origin)
@@ -849,6 +846,54 @@ async function inlineUnlock(device: Page) {
   await locked.getByRole("button", { name: /Unlock Deadbolt/ }).click()
   const surface = await opened
   await surface.waitForURL(`chrome-extension://${ID}/device.html#unlock`)
+  const denied = await surface.evaluate(async (url) => {
+    // No tabs permission: identify the fixture using the webNavigation API
+    // the real background already uses, not tabs.query's sensitive URL filter.
+    for (const tab of await chrome.tabs.query({})) {
+      if (tab.id === undefined) continue
+      const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id })
+      if (!frames?.some(f => f.frameId === 0 && f.url === `${url}/`)) continue
+      return Promise.all(["db:unlock-wait", "db:unlock-return"].map(type => chrome.tabs.sendMessage(tab.id!, { type }, { frameId: 0 })))
+    }
+    throw new Error("Missing inline fixture tab")
+  }, origin)
+  check(denied.every(answer => answer === false), "extension pages cannot forge inline unlock wait/return messages")
+  // Lose the service worker's in-memory tab id, then ask from the locked row
+  // again. getContexts must recover that exact surface, including its hash.
+  const cdp = await context!.newCDPSession(surface)
+  let version: string | undefined
+  let stopped = false
+  cdp.on("ServiceWorker.workerVersionUpdated", ({ versions }) => {
+    for (const v of versions) if (v.scriptURL === `chrome-extension://${ID}/background.js`) {
+      if (v.runningStatus === "running") version = v.versionId
+      if (v.runningStatus === "stopped") stopped = true
+    }
+  })
+  await cdp.send("ServiceWorker.enable")
+  const versionId = await until("running extension service worker", async () => version)
+  check(await previous.evaluate(() => (globalThis as unknown as { nativeCalls: number }).nativeCalls) === 0, "no native messaging before service-worker restart")
+  await cdp.send("ServiceWorker.stopWorker", { versionId })
+  await until("extension service worker stopped", async () => stopped)
+  await state(surface)
+  const worker = context!.serviceWorkers()[0] ?? await context!.waitForEvent("serviceworker")
+  await worker.evaluate(() => {
+    const global = globalThis as unknown as { nativeCalls: number }
+    global.nativeCalls = 0
+    chrome.runtime.connectNative = () => { global.nativeCalls++; throw new Error("Native host forbidden by standalone proof") }
+  })
+  await cdp.detach()
+  // A new locked-row click must reuse the first surface, not orphan it.
+  // A menu token minted by the old worker is intentionally invalid now;
+  // reload the fixture so this click comes from a freshly reported document.
+  await page.reload()
+  await page.bringToFront()
+  const again = await menuOn(page, "#username", "Unlock Deadbolt")
+  await again.getByRole("button", { name: /Unlock Deadbolt/ }).click()
+  // Don't focus the surface until the clickjacking gate has confirmed the
+  // pick. Playwright emulates document.hasFocus() even in background tabs.
+  await until("second unlock click is accepted", async () => !menuFrame(page))
+  await until("second unlock click reuses its surface", async () => surface.evaluate(async () => (await chrome.tabs.getCurrent())?.active))
+  check(context!.pages().filter(p => p.url() === `chrome-extension://${ID}/device.html#unlock`).length === 1, "second unlock click after a service-worker restart creates no extra tab")
   await surface.getByLabel("Passphrase", { exact: true }).fill(passphrase)
   await surface.getByLabel("Passphrase", { exact: true }).press("Enter")
   await until("inline unlock closes its own surface", async () => surface.isClosed())
@@ -858,6 +903,7 @@ async function inlineUnlock(device: Page) {
   })
   check(await page.inputValue("#password") === "", "inline unlock returns to the page and reopens the menu without filling")
   await page.close()
+  return worker
 }
 
 async function biometricUnlock(device: Page, worker: Worker) {
@@ -870,12 +916,32 @@ async function biometricUnlock(device: Page, worker: Worker) {
   await device.bringToFront()
   await device.getByRole("button", { name: "Settings", exact: true }).click()
   await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByLabel("Passphrase for Touch ID").fill("wrong enrollment passphrase")
+  await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
+  await device.getByText("That passphrase isn't right.", { exact: true }).waitFor()
+  check((await cdp.send("WebAuthn.getCredentials", { authenticatorId })).credentials.length === 0, "wrong enrollment passphrase creates no provider passkey")
   await device.getByLabel("Passphrase for Touch ID").fill(passphrase)
   await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
   await device.getByRole("button", { name: "Reset Touch ID", exact: true }).waitFor({ timeout: 60_000 })
   check(true, "extension-origin platform passkey enrolls with real WebAuthn PRF")
   await request(device, { type: "device-preset", preset: "strict" })
   await request(device, { type: "device-lock" })
+  // Exercise the UI's explicit UV check even if a provider/browser violates
+  // required UV: retain real PRF output but clear UV on the returned assertion.
+  await device.evaluate(() => {
+    const original = navigator.credentials.get.bind(navigator.credentials)
+    navigator.credentials.get = async (options) => {
+      navigator.credentials.get = original
+      const credential = await original(options) as PublicKeyCredential
+      const response = credential.response as AuthenticatorAssertionResponse
+      const data = response.authenticatorData.slice(0)
+      new Uint8Array(data)[32]! &= ~0x04
+      return { rawId: credential.rawId, response: { authenticatorData: data }, getClientExtensionResults: () => credential.getClientExtensionResults() } as unknown as PublicKeyCredential
+    }
+  })
+  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByText("The authenticator didn't verify you. Use your passphrase instead.", { exact: true }).waitFor()
+  check(await state(device) === "locked", "PRF output without the UV flag cannot unlock")
   await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
   await until("PRF unlock", async () => await state(device) === "ready")
   check(true, "Touch ID unlock unwraps the second slot without a passphrase")
@@ -907,6 +973,7 @@ async function biometricUnlock(device: Page, worker: Worker) {
   await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
   await device.getByText(/Touch ID was cancelled, unavailable, or its passkey was removed/).waitFor({ timeout: 70_000 })
   check(await state(device) === "locked", "a deleted authenticator passkey cannot unlock and explains passphrase fallback")
+  check(await device.evaluate(async () => (await chrome.storage.local.get("deadbolt.unlockMethod"))["deadbolt.unlockMethod"]) === "passphrase", "unavailable passkey resets the preferred unlock method")
   await request(device, { type: "device-unlock", passphrase })
   await request(device, { type: "device-biometric-reset" })
   check(!(await command(device, { type: "device-secret", ref, prf })).ok, "Reset Touch ID invalidates the old PRF slot")
@@ -958,7 +1025,7 @@ try {
   // The smoke's copy is one the CLI keeps (`deadbolt update` leaves this
   // marker), so first run offers Deadbolt on this computer by name.
   if (smoke) await writeFile(join(dist, ".deadbolt-extension"), "manifest.json\n")
-  const { worker, device } = await launch()
+  let { worker, device } = await launch()
   check((await readdir(join(profile, "NativeMessagingHosts")).catch(() => [])).filter((name) => name.endsWith(".json")).length === 0, "profile has no native host manifest")
   if (smoke) {
     const offline = await device.evaluate(() => fetch("https://example.com/", { mode: "no-cors" }).then(() => false, () => true))
@@ -1047,7 +1114,7 @@ try {
   }
 
   await unlockLifetime(device, worker)
-  await inlineUnlock(device)
+  worker = await inlineUnlock(device, worker)
   await biometricUnlock(device, worker)
   await request(device, { type: "device-lock" })
   check(await state(device) === "locked", "lock closes the vault")

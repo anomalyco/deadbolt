@@ -7,9 +7,8 @@ import type { LockPreset } from "./messages"
  * How long without use before the vault locks, whether the screen locking
  * locks it, and whether showing or copying a password asks for the
  * passphrase or platform verification again. Every preset locks when the
- * browser quits. Strict keeps keys only in worker memory; Comfortable and
- * Relaxed keep a session envelope AND its wrapping key in storage.session.
- * This is key-equivalent retention: see docs/extension-device.md.
+ * browser quits. Every preset keeps keys only in worker memory, and locks
+ * if the worker or its offscreen owner is lost. No key goes in storage.session.
  */
 export const PRESETS: Record<LockPreset, { name: string; idleMs: number; screenLock: boolean; reauth: boolean }> = {
   strict: { name: "Strict", idleMs: 5 * 60_000, screenLock: true, reauth: true },

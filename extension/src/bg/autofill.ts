@@ -191,6 +191,7 @@ export class Autofill {
   /** Sites whose fields already showed the locked row on focus since Deadbolt last locked or unlocked. */
   private lockedShown = new Set<string>()
   private lastState: string
+  /** The document whose locked row was clicked last, to focus again once unlocked. Memory only: a restarted worker returns nowhere. */
   private unlockReturn: MenuToken | null = null
 
   constructor(
@@ -832,6 +833,7 @@ export class Autofill {
     this.tracks.delete(tabId)
     this.submits.delete(tabId)
     for (const [token, t] of this.tokens) if (t.tabId === tabId) this.tokens.delete(token)
+    if (this.unlockReturn?.tabId === tabId) this.unlockReturn = null
     void this.cancel(tabId)
   }
 

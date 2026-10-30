@@ -22,6 +22,8 @@ export async function enrollment(app: App): Promise<Token | null> {
 }
 
 function output(credential: PublicKeyCredential): string {
+  const auth = new Uint8Array((credential.response as AuthenticatorAssertionResponse).authenticatorData)
+  if (auth.length < 33 || !(auth[32]! & 0x04)) throw new Error("The authenticator didn't verify you. Use your passphrase instead.")
   const value = (credential.getClientExtensionResults() as PrfResult).prf?.results?.first
   if (!value || value.byteLength !== 32) throw new Error("This authenticator doesn't support PRF unlock. Use your passphrase instead.")
   const data = new Uint8Array(value)
@@ -40,16 +42,23 @@ async function get(t: Token): Promise<string> {
   return output(credential)
 }
 
-export async function verify(app: App): Promise<string> {
+export async function verify(app: App, unlocking = false): Promise<string> {
   try {
     const t = await enrollment(app)
     if (!t) throw new Error("Touch ID isn't set up. Use your passphrase instead.")
     return await get(t)
-  } catch (e) { throw new Error(explain(e)) }
+  } catch (e) {
+    if (unlocking && e instanceof DOMException && e.name === "NotAllowedError") await chrome.storage.local.set({ "deadbolt.unlockMethod": "passphrase" }).catch(() => {})
+    throw new Error(explain(e))
+  }
 }
 
 export async function enroll(app: App, passphrase: string): Promise<void> {
   if (!globalThis.PublicKeyCredential || !(await PublicKeyCredential.isUserVerifyingPlatformAuthenticatorAvailable())) throw new Error("No platform authenticator is available. Keep using your passphrase.")
+  // Verify (with the normal guessing backoff) before creating anything in the
+  // platform provider. A mistyped passphrase must not leave an orphan passkey.
+  const checked = await app.run({ type: "device-biometric-check", passphrase })
+  if (!checked.ok) throw new Error(checked.message)
   const salt = random()
   try {
     const credential = await navigator.credentials.create({ publicKey: {

@@ -35,11 +35,7 @@ impl Preset {
 pub fn accepts_preset(command: &str) -> bool {
     matches!(
         command,
-        "device-preset"
-            | "device-create"
-            | "device-unlock"
-            | "device-join-finish"
-            | "device-resume"
+        "device-preset" | "device-create" | "device-unlock" | "device-join-finish"
     )
 }
 
@@ -102,6 +98,7 @@ mod tests {
             "check",
             "device-join-start",
             "device-status",
+            "device-biometric-check",
             "unknown",
         ] {
             assert!(!accepts_preset(command), "{command}");

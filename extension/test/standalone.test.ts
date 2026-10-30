@@ -52,6 +52,10 @@ beforeEach(() => {
           return { reply: { type: "error", code: "locked", message: "Deadbolt is locked" } }
         }
         return { reply: { type: "fill-form", values: { number: "4242424242424242" }, verified: true } }
+      case "device-biometric-check":
+        // Touch ID enrollment checks the passphrase first, without opening anything.
+        if (m.body.passphrase === "wrong") return { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } }
+        return { reply: { type: m.body.type, ok: true } }
       case "device-logins":
         return { reply: { type: "device-logins", accounts: [] } }
       case "device-join-start":
@@ -66,80 +70,22 @@ beforeEach(() => {
 
 afterEach(() => setSystemTime())
 
-describe("browser session restoration", () => {
-  const key = "deadbolt.sessionKey"
-  function sessions() {
-    const answer = fake.runtimeAnswer
-    chrome.idle.queryState = async () => "active" as const
-    fake.runtimeAnswer = (message) => {
-      const m = message as VaultRequest
-      if (m.type === VAULT_REQUEST && m.body.type === "device-session-wrap") return { reply: { type: m.body.type, wrapped: "ab".repeat(104) } }
-      if (m.type === VAULT_REQUEST && m.body.type === "device-resume") { vault = "ready"; return { reply: { type: m.body.type, ok: true } } }
-      return answer?.(message)
-    }
-  }
-
-  test("both execution contexts can disappear; Strict never keeps a session", async () => {
-    sessions()
+describe("the vault's worker lost", () => {
+  test("every preset locks once its worker or offscreen document is gone", async () => {
     for (const preset of ["comfortable", "relaxed", "strict"] as const) {
       const first = new StandaloneBackend()
       await first.device({ type: "device-preset", preset })
-      await first.device({ type: "device-unlock", passphrase: "right" })
-      expect(!!fake.session[key]).toBe(preset !== "strict")
+      expect((await first.device({ type: "device-unlock", passphrase: "right" })).ok).toBe(true)
+      // Chrome discarded the worker or closed the offscreen document: a fresh one answers, locked.
       vault = "locked"
       const restarted = new StandaloneBackend()
       await restarted.connect()
-      expect(restarted.status.state).toBe(preset === "strict" ? "locked" : "ready")
-      await restarted.lock()
-      expect(fake.session[key]).toBeUndefined()
+      expect(restarted.status.state).toBe("locked")
+      vault = "ready"
     }
   })
 
-  test("expired sessions are removed before an unlock surface can count as use", async () => {
-    sessions()
-    const first = new StandaloneBackend()
-    await first.device({ type: "device-unlock", passphrase: "right" })
-    setSystemTime(new Date(Date.now() + HOUR + 1))
-    vault = "locked"
-    const restarted = new StandaloneBackend()
-    await restarted.device({ type: "device-used" })
-    await restarted.connect()
-    expect(restarted.status.state).toBe("locked")
-    expect(fake.session[key]).toBeUndefined()
-  })
-
-  test("popup use before settings load cannot revive an expired session", async () => {
-    sessions()
-    const first = new StandaloneBackend()
-    await first.device({ type: "device-unlock", passphrase: "right" })
-    await settle()
-    setSystemTime(new Date(Date.now() + HOUR + 1))
-    vault = "locked"
-    const restarted = new StandaloneBackend()
-    restarted.used()
-    await restarted.connect()
-    expect(restarted.status.state).toBe("locked")
-    expect(fake.session[key]).toBeUndefined()
-    expect(requests().some(b => b.type === "device-resume")).toBe(false)
-  })
-
-  test("Lock ends the worker even if removing its saved session fails", async () => {
-    sessions()
-    const backend = new StandaloneBackend()
-    await backend.device({ type: "device-unlock", passphrase: "right" })
-    const remove = chrome.storage.session.remove
-    chrome.storage.session.remove = async () => { throw new Error("storage unavailable") }
-    try {
-      await backend.lock()
-      expect(vault).toBe("locked")
-      expect(fake.session[key]).toBeNull()
-      await backend.connect()
-      expect(backend.status.state).toBe("locked")
-    } finally { chrome.storage.session.remove = remove }
-  })
-
   test("an unlock crossing a preset change locks rather than keeping the old policy", async () => {
-    sessions()
     vault = "locked"
     const answer = fake.runtimeAnswer
     let release!: () => void
@@ -162,47 +108,6 @@ describe("browser session restoration", () => {
     expect((await unlock).ok).toBe(false)
     expect(vault).toBe("locked")
     expect(backend.status.state).toBe("locked")
-    expect(fake.session[key]).toBeUndefined()
-  })
-
-  test("Comfortable never restores while the screen is locked", async () => {
-    sessions()
-    const first = new StandaloneBackend()
-    await first.device({ type: "device-unlock", passphrase: "right" })
-    vault = "locked"
-    chrome.idle.queryState = async () => "locked" as const
-    const restarted = new StandaloneBackend()
-    await restarted.connect()
-    expect(restarted.status.state).toBe("locked")
-    expect(fake.session[key]).toBeUndefined()
-    expect(requests().some(b => b.type === "device-resume")).toBe(false)
-  })
-
-  test("a preset change while an opening command exports its session ends the old-policy worker", async () => {
-    sessions()
-    vault = "locked"
-    const answer = fake.runtimeAnswer
-    let release!: () => void
-    let exporting!: () => void
-    const reached = new Promise<void>(resolve => exporting = resolve)
-    fake.runtimeAnswer = (message) => {
-      const m = message as VaultRequest
-      if (m.type === VAULT_REQUEST && m.body.type === "device-session-wrap") {
-        exporting()
-        return new Promise(resolve => { release = () => resolve({ reply: { type: m.body.type, wrapped: "ab".repeat(104) } }) })
-      }
-      return answer?.(message)
-    }
-    const backend = new StandaloneBackend()
-    await backend.connect()
-    const unlock = backend.device({ type: "device-unlock", passphrase: "right" })
-    await reached
-    await backend.device({ type: "device-preset", preset: "strict" })
-    release()
-    expect((await unlock).ok).toBe(false)
-    expect(vault).toBe("locked")
-    expect(backend.status.state).toBe("locked")
-    expect(fake.session[key]).toBeUndefined()
   })
 
   test("Lock still terminates the worker if trusted storage initialization failed", async () => {
@@ -213,30 +118,6 @@ describe("browser session restoration", () => {
     await backend.lock()
     expect(vault).toBe("locked")
     expect(locks()).toBe(1)
-  })
-
-  test("an export completed after Lock cannot recreate the session", async () => {
-    sessions()
-    const answer = fake.runtimeAnswer
-    let release!: () => void
-    let exporting!: () => void
-    const reached = new Promise<void>(resolve => exporting = resolve)
-    fake.runtimeAnswer = (message) => {
-      const m = message as VaultRequest
-      if (m.type === VAULT_REQUEST && m.body.type === "device-session-wrap") {
-        exporting()
-        return new Promise(resolve => { release = () => resolve({ reply: { type: m.body.type, wrapped: "ab".repeat(104) } }) })
-      }
-      return answer?.(message)
-    }
-    const backend = new StandaloneBackend()
-    const unlock = backend.device({ type: "device-unlock", passphrase: "right" })
-    await reached
-    await backend.lock()
-    release()
-    await unlock
-    expect(fake.session[key]).toBeUndefined()
-    expect(vault).toBe("locked")
   })
 })
 
@@ -317,6 +198,11 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-reauth-confirm", id: reauthId, passphrase: "" })).toBeNull()
     expect(deviceCommand({ type: "device-reauth-confirm", id: "nope", passphrase: "p" })).toBeNull()
     expect(deviceCommand({ type: "device-reauth-cancel", id: reauthId })).toEqual({ type: "device-reauth-cancel", id: reauthId })
+    expect(deviceCommand({ type: "device-biometric-check", passphrase: "p", prf: "x", token: "t", extra: 1 })).toEqual({ type: "device-biometric-check", passphrase: "p" })
+    expect(deviceCommand({ type: "device-biometric-check", passphrase: "" })).toBeNull()
+    expect(deviceCommand({ type: "device-biometric-check" })).toBeNull()
+    expect(deviceCommand({ type: "device-biometric-check", passphrase: 7 })).toBeNull()
+    expect(deviceCommand({ type: "device-biometric-check", passphrase: "p".repeat(1025) })).toBeNull()
   })
 
   test("a join starts and polls without counting as use or asking hello again", async () => {
@@ -614,6 +500,25 @@ describe("wrong passphrases", () => {
     await backend.connect()
     for (let i = 0; i < 3; i++) await backend.device({ type: "device-secret", ref: "v:i", passphrase: "wrong" })
     expect(await backend.device({ type: "device-secret", ref: "v:i", passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
+  })
+
+  test("Touch ID's passphrase check before enrolling counts too, and a right one starts over", async () => {
+    const start = new Date("2026-10-29T12:00:00Z")
+    setSystemTime(start)
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const checks = () => requests().filter((b) => b.type === "device-biometric-check").length
+    expect(await backend.device({ type: "device-biometric-check", passphrase: "right" })).toMatchObject({ ok: true })
+    for (let i = 0; i < 3; i++) expect(await backend.device({ type: "device-biometric-check", passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
+    expect(checks()).toBe(4)
+    // Refused during the wait without reaching the vault, and it holds unlocking back too.
+    expect(await backend.device({ type: "device-biometric-check", passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
+    expect(await backend.device({ type: "device-unlock", passphrase: "right" })).toMatchObject({ ok: false, code: "backoff" })
+    expect(checks()).toBe(4)
+    setSystemTime(new Date(start.getTime() + 1000))
+    expect(await backend.device({ type: "device-biometric-check", passphrase: "right" })).toMatchObject({ ok: true })
+    // Starting over: three more wrong ones before any wait.
+    for (let i = 0; i < 3; i++) expect(await backend.device({ type: "device-biometric-check", passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
   })
 })
 

@@ -6,13 +6,11 @@
 // sends it requests, follows the vault's status, and locks the vault on the
 // lock preset's rules (docs/extension-device.md).
 //
-// Strict keeps keys only in worker memory. Comfortable/Relaxed retain a
-// browser-session envelope AND its wrapping key in storage.session; see the
-// explicit security tradeoff in docs/extension-device.md. Lock/quit erase it.
+// Every preset keeps keys only in worker memory. Losing the worker or its
+// offscreen owner locks the vault; no trusted page can read a retained key.
 
 import { DEFAULT_PRESET, isPreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { DeviceCommand, DeviceReply, LockPreset, Reauth, ReauthChanged, Status, UnlockProof } from "../messages"
-import { SESSION_KEY, isSessionKey, randomKey } from "./session-key"
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type FillFormReply, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type ReauthAsk, type SendOptions, type VaultBackend } from "./backend"
 import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, isCopied, type Copied } from "./clipboard"
@@ -34,6 +32,7 @@ const SLOW_MS: Partial<Record<string, number>> = {
   "device-secret": 120_000,
   "device-reauth-confirm": 120_000,
   "device-biometric-set": 120_000,
+  "device-biometric-check": 120_000,
 }
 /** How long a fill waits for its passphrase before it's dropped. */
 const REAUTH_MS = 2 * 60_000
@@ -140,7 +139,7 @@ const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-st
 /** Commands that open the vault: the worker is told the lock preset with them, and keeps Strict itself. */
 const OPENS = new Set<string>(["device-create", "device-unlock", "device-join-finish"])
 /** Commands that check a passphrase, and back off after wrong ones. */
-const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-reauth-confirm", "device-biometric-set"])
+const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-reauth-confirm", "device-biometric-set", "device-biometric-check"])
 
 const UNREADABLE = "Deadbolt's vault gave an answer it couldn't read. Reload the extension and try again."
 const unsupported = () => new HostError("failed", "The browser-only Deadbolt can't do this yet.")
@@ -183,12 +182,8 @@ export class StandaloneBackend implements VaultBackend {
    */
   private closing = new Set<number>()
   private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE) }
-  private restoring: Promise<void> | null = null
   private epoch = 0
-  /** Serialize session writes/removal so a late export cannot resurrect a lock. */
-  private sessionWrite: Promise<unknown> = Promise.resolve()
   private locking: Promise<void> | null = null
-  private opening = 0
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -291,7 +286,7 @@ export class StandaloneBackend implements VaultBackend {
     // Refused before the vault sees it, and before it counts as use.
     const rated = RATED[body.type]
     if (rated && !this.buckets[rated].take()) throw slowDown()
-    await this.restore()
+    await this.loaded
     if (USES.has(body.type)) this.used()
     const reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
     if (reply.type === "error") {
@@ -311,9 +306,7 @@ export class StandaloneBackend implements VaultBackend {
     // The user working on the vault's own page is use. The page reading the
     // vault (its status, logins and devices, which it does again on every
     // change) isn't, so an open page never keeps the vault unlocked; nor is Lock.
-    // Restore (or expire) against the PREVIOUS last-use timestamp. Otherwise
-    // opening the popup would revive a session whose idle deadline has passed.
-    if (command.type !== "device-lock" && command.type !== "device-join-cancel") await this.restore()
+    if (command.type !== "device-lock" && command.type !== "device-join-cancel") await this.loaded
     if (!PAGE_READS.has(command.type) && !OPENS.has(command.type)) this.used()
     if (command.type === "device-lock") {
       await this.lock()
@@ -331,11 +324,9 @@ export class StandaloneBackend implements VaultBackend {
       if (command.type === "device-preset") {
         this.epoch++
         this.preset = command.preset
-        await this.forgetSession()
         await chrome.storage.local.set({ [PRESET_KEY]: command.preset }).catch(() => {})
         // The worker keeps the preset too, to hold Strict itself.
         if (this.status.state === "ready") await this.raw({ type: "device-preset", preset: command.preset }, TIMEOUT_MS).catch(() => null)
-        if (this.status.state === "ready") await this.saveSession()
       }
       return { ok: true, reply: { type: "device-settings", preset: this.preset, retryAt: this.tries.until }, ms: Date.now() - started, status: this.status }
     }
@@ -400,7 +391,6 @@ export class StandaloneBackend implements VaultBackend {
     }
     if (command.type === "device-unlock" || command.type === "device-create" || command.type === "device-join-finish") {
       this.used(true)
-      await this.saveSession()
       if (operation !== this.epoch) {
         await this.lock()
         return fail("Deadbolt locked or its lock policy changed. Try again.", "locked")
@@ -429,14 +419,6 @@ export class StandaloneBackend implements VaultBackend {
   }
 
   private async lockNow(): Promise<void> {
-    // Storage failure must never prevent terminating the worker. A failed
-    // removal stays on sessionWrite, blocking restoration until it succeeds.
-    await this.forgetSession().catch(() => {})
-    await this.restoring?.catch(() => {})
-    await this.stopVault()
-  }
-
-  private async stopVault(): Promise<void> {
     const unlocked = this.status.state === "ready"
     this.endReauth(new HostError("locked", "Deadbolt locked. Nothing was filled."))
     // A copied password goes with the vault.
@@ -675,78 +657,11 @@ export class StandaloneBackend implements VaultBackend {
   }
 
   private async raw(body: Record<string, unknown> & { type: string }, timeout: number): Promise<Record<string, unknown>> {
+    const at = this.epoch
+    await this.loaded
     await this.locking
-    const at = this.epoch
-    if (!OPENS.has(body.type)) await this.restore()
     if (at !== this.epoch) throw new HostError("locked", "Deadbolt locked. Try again.")
-    if (OPENS.has(body.type)) this.opening++
-    try { return await this.transport(body, timeout) }
-    finally { if (OPENS.has(body.type)) this.opening-- }
-  }
-
-  private async forgetSession() {
-    this.sessionWrite = this.sessionWrite.catch(() => {}).then(() => chrome.storage.session.remove(SESSION_KEY).catch(() => chrome.storage.session.set({ [SESSION_KEY]: null })))
-    await this.sessionWrite
-  }
-
-  private async saveSession(at = this.epoch) {
-    try {
-      await this.exportSession(at)
-    } catch {
-      // Unlock still works when session storage is unavailable; never keep an
-      // older envelope after a failed replacement.
-      await this.forgetSession().catch(() => {})
-    }
-  }
-
-  private async exportSession(at: number) {
-    await this.loaded
-    if (at !== this.epoch) return
-    if (this.preset === "strict") return this.forgetSession()
-    const key = randomKey()
-    const reply = await this.transport({ type: "device-session-wrap", key }, TIMEOUT_MS)
-    if (reply.type === "error" || typeof reply.wrapped !== "string") return
-    this.sessionWrite = this.sessionWrite.catch(() => {}).then(async () => {
-      if (at === this.epoch && this.preset !== "strict") await chrome.storage.session.set({ [SESSION_KEY]: { key, wrapped: reply.wrapped } })
-    })
-    await this.sessionWrite
-  }
-
-  /** Single-flight, including for a worker trap that leaves its offscreen alive. */
-  private restore(): Promise<void> {
-    if (this.locking) return this.locking
-    this.restoring ??= this.restoreNow().finally(() => (this.restoring = null))
-    return this.restoring
-  }
-
-  private async restoreNow() {
-    await this.loaded
-    await this.sessionWrite
-    if (this.opening) return
-    const at = this.epoch
-    if (this.preset === "strict") return this.forgetSession()
-    const got = await chrome.storage.session.get(SESSION_KEY)
-    const session = got[SESSION_KEY]
-    // A fresh setup/join has no session to restore. Never end its in-memory
-    // welcome just because there isn't a last-use timestamp yet.
-    if (!isSessionKey(session) || at !== this.epoch) return
-    if (!this.lastUse || Date.now() < this.lastUse || Date.now() - this.lastUse >= PRESETS[this.preset].idleMs) {
-      await this.forgetSession().catch(() => {})
-      // Also enforce the deadline when the old worker survived the discard.
-      if (at === this.epoch) await this.stopVault()
-      return
-    }
-    if (PRESETS[this.preset].screenLock && await chrome.idle.queryState(60) === "locked") {
-      await this.forgetSession().catch(() => {})
-      if (at === this.epoch) await this.stopVault()
-      return
-    }
-    const hello = await this.transport({ type: "hello" }, TIMEOUT_MS)
-    if (hello.status !== "locked" || at !== this.epoch) return
-    if (at !== this.epoch) return
-    const reply = await this.transport({ type: "device-resume", ...session, preset: this.preset }, TIMEOUT_MS)
-    if (at !== this.epoch) return this.stopVault()
-    if (reply.type === "error") await this.forgetSession()
+    return this.transport(body, timeout)
   }
 
   private async transport(body: Record<string, unknown> & { type: string }, timeout: number): Promise<Record<string, unknown>> {
@@ -902,6 +817,8 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
       return text(c.passphrase, 1024) ? { type: "device-unlock", passphrase: c.passphrase } : null
     case "device-biometric-set":
       return prf(c.prf) && text(c.token, 8192) && c.token && text(c.passphrase, 1024) && c.passphrase ? { type: "device-biometric-set", prf: c.prf, token: c.token, passphrase: c.passphrase } : null
+    case "device-biometric-check":
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-biometric-check", passphrase: c.passphrase } : null
     case "device-join-start":
     case "device-join-status":
     case "device-join-cancel":

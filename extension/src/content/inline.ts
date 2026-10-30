@@ -1066,7 +1066,9 @@ export function initMenu(page: PageState) {
     submittedSinceFill = false
   })
   // Answering tells the background the message reached a live document.
-  chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
+  chrome.runtime.onMessage.addListener((message: ToContent, sender, respond) => {
+    // Unlock's wait and return come only from the service worker: this extension, and not from a tab (a page's frame or an extension page).
+    const fromWorker = sender.id === chrome.runtime.id && !sender.tab && sender.url === chrome.runtime.getURL("background.js")
     switch (message?.type) {
       case "db:fill":
         applyFill(message).then(respond, () => respond({ filled: [] }))
@@ -1097,7 +1099,7 @@ export function initMenu(page: PageState) {
         return void respond(true)
       case "db:close-menu":
         if (message.token === token) {
-          if (message.unlock) unlockAnchor = anchor
+          if (message.unlock && fromWorker) unlockAnchor = anchor
           if (mode === "accounts") {
             dismissedFor = anchor
             closeMenu(true)
@@ -1105,9 +1107,11 @@ export function initMenu(page: PageState) {
         }
         return void respond(true)
       case "db:unlock-wait":
+        if (!fromWorker) return void respond(false)
         unlockAnchor = framedFor instanceof HTMLInputElement || framedFor instanceof HTMLTextAreaElement || framedFor instanceof HTMLSelectElement ? framedFor : anchor
         return void respond(!!unlockAnchor)
       case "db:unlock-return": {
+        if (!fromWorker) return void respond(false)
         const el = unlockAnchor
         unlockAnchor = null
         if (!el?.isConnected || !fillable(el)) return void respond(false)
