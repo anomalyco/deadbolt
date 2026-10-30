@@ -228,10 +228,22 @@ not running without sending hello, which would start the agent again.
   avatar's ring is still, the save offer's bar is stepped frame by frame,
   never animated), and after narrowing's row animations the half second
   starts again, as after a move.
+- **A press takes no focus.** A pointer press in the menu leaves focus where
+  it was, in the page's field (the menu cancels the press's default
+  action). The page never sees its field blur at the moment of the press,
+  so it has nothing to time a cover or a fade by, and a field that redraws
+  on blur (a floating label dropping back, an outlined border thinning: the
+  real-site sweep found this on Google, Microsoft, Reddit, Chase and others)
+  can't move the menu under the press and cancel the pick. So a habit of
+  clicking a row and then pressing ⏎ sends that ⏎ to the page's field while
+  the pill says "Filling…" (it can submit the form there). A press that
+  passed its checks but picked nothing (a right click, a press dragged off
+  its row) leaves no ⏎ allowed: focus that comes in later without the
+  user's ↓, by Tab for one, starts with none.
 - **Keyboard picks.** ⏎ picks only after the user's own ↓ in the field
-  moved focus into the menu, or a real press inside the menu put it there
-  and passed the same visibility checks as a pick. A press the menu refused
-  lets no later ⏎ pick either. Focus that got into the menu any other way, such as by Tab from a field
+  moved focus into the menu, or, with focus already there, a real press
+  inside the menu passed the same visibility checks as a pick. A press the
+  menu refused lets no later ⏎ pick either. Focus that got into the menu any other way, such as by Tab from a field
   the page made last in the tab order or by a script, doesn't count, and
   leaving the menu ends it even if focus comes back. Such a menu says "Press
   ↓ in the field to choose." The locked menu's Unlock Deadbolt row takes ⏎

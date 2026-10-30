@@ -150,13 +150,14 @@ const OVERLAY: Record<string, string> = {
   // A near-opaque sheet over everything in the top layer, letting clicks
   // through to the menu, in a shadow root: Deadbolt can't see it go up.
   cover: topCover("shadow", false),
-  // Fade it out the moment the click starts (focus moves into the menu), so a
-  // visibility reading taken before the click is stale.
-  "on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0", "window.pressed")}`,
+  // Fade it out the moment the click lands, so a visibility reading taken
+  // before the click is stale. A press in the menu doesn't take focus, so the
+  // page has nothing to time it by: the test calls pressed() right after.
+  "on-press": `<script>window.press = () => (window.pressed = true)</script>${restyle("opacity", "0", "window.pressed")}`,
   // The reverse: keep it all but see-through over a decoy (still taking
   // clicks, which a fully transparent frame doesn't) and show it the moment
   // the press lands, so a reading taken after the click finds it visible.
-  "reveal-on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0.02", "!window.pressed")}`,
+  "reveal-on-press": `<script>window.press = () => (window.pressed = true)</script>${restyle("opacity", "0.02", "!window.pressed")}`,
   // Shown a moment before the press instead (as the pointer nears it), so
   // nothing changes after the press: the test calls reveal() 250 ms before.
   "reveal-before-press": `<script>window.reveal = () => (window.revealed = true)</script>${restyle("opacity", "0.02", "!window.revealed")}`,
@@ -200,8 +201,10 @@ const FRAMED: Record<string, string> = {
 }
 
 // Covers everything (letting clicks through) for `ms`, starting `after` ms
-// past the press into the menu (the page's blur), or right away with cover().
-// The cover is a popover in a shadow root, over the menu in the top layer.
+// past the press into the menu, or right away with cover(). A press in the
+// menu takes no focus, so the page never sees it: the test calls pressing()
+// just before it presses. The cover is a popover in a shadow root, over the
+// menu in the top layer.
 const SWEEP = `<script>
   const cover = (ms) => {
     const h = document.createElement("span")
@@ -215,8 +218,10 @@ const SWEEP = `<script>
     setTimeout(() => h.remove(), ms)
   }
   window.cover = cover
-  window.coverAfterPress = (after, ms) => addEventListener("blur", () => (after ? setTimeout(() => cover(ms), after) : cover(ms)), { once: true })
-  addEventListener("blur", () => (window.__press = performance.now()))
+  window.pressing = (after, ms) => {
+    window.__press = performance.now()
+    if (after !== undefined) after ? setTimeout(() => cover(ms), after) : cover(ms)
+  }
 </script>`
 
 const PASSKEY_PAGE = `<h1>Sign in to Acme</h1>
@@ -764,6 +769,9 @@ const server = Bun.serve({
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
         return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
+      // An outlined field, as Google's sign-in has: its border thins on blur and it grows a pixel each way, so a press that took its focus would shift the menu.
+      case "/outlined":
+        return html("Sign in to Acme", `<style>#email{border-width:1px;margin:0 0 1px}#email:focus{border:2px solid #18181b;width:calc(100% - 2px);height:36px;margin:1px 1px 2px}</style>${loginForm("/home")}`)
       case "/login": {
         const form = loginForm(url.searchParams.get("next") === "home" ? "/home" : "/mfa")
         // A password the page enables only once the email box is focused.
@@ -2298,7 +2306,6 @@ async function occlusionSweep() {
           await diagnose(run, page, "sweep")
           break
         }
-        // Focus back in the page, so the press moves it into the menu and the page sees blur.
         await page.focus("#email")
         await page.evaluate(() => {
           const w = window as unknown as { __shown?: number; __press?: number }
@@ -2308,7 +2315,8 @@ async function occlusionSweep() {
         if (offset < 0) {
           await page.evaluate((ms) => (window as unknown as { cover: (ms: number) => void }).cover(ms), ms)
           await Bun.sleep(-offset)
-        } else await page.evaluate(([after, ms]) => (window as unknown as { coverAfterPress: (a: number, ms: number) => void }).coverAfterPress(after, ms), [offset, ms])
+        }
+        await page.evaluate(([after, ms]) => (window as unknown as { pressing: (a?: number, ms?: number) => void }).pressing(after, ms), offset < 0 ? [] : [offset, ms])
         await page.mouse.click(at.x, at.y)
         await Bun.sleep(1500)
         const real = await page.evaluate(() => {
@@ -2344,20 +2352,29 @@ async function coveredMenu() {
         continue
       }
       const before = await fillCount(run)
+      const blurs = (await probe(page)).blurs
+      // The user's ↓ first, so focus is in the menu: a refused press must leave it unable to pick.
+      if (name !== "none") {
+        await page.keyboard.press("ArrowDown")
+        await Bun.sleep(200)
+      }
       if (name === "reveal-before-press") {
         await page.evaluate(() => (window as unknown as { reveal: () => void }).reveal())
         await Bun.sleep(250)
       }
       await menu.locator("button.row").first().click({ force: true })
+      if (name.endsWith("on-press")) await page.evaluate(() => (window as unknown as { press: () => void }).press())
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "none") check(password === "correct horse", `an uncovered menu fills (${password ? "" : await footText(menu)})`)
-      else {
+      if (name === "none") {
+        check(password === "correct horse", `an uncovered menu fills (${password ? "" : await footText(menu)})`)
+        check((await probe(page)).blurs === blurs, "the press in the menu took no focus from the page, which sees no blur")
+      } else {
         check(password === "" && (await fillCount(run)) === before, `a menu made ${name} fills nothing and asks the host for nothing`)
         const foot = await footText(menu)
         check(foot.includes("covered") || (name.startsWith("reveal") && foot.includes("in a moment")), `and says it's covered (${foot})`)
-        // The refused press put focus in the menu, which by now has been in
-        // plain view for a while: the user's next Enter there must not pick.
+        // Focus is in the menu, which by now has been in plain view for a
+        // while: after the refused press, the user's next Enter there must not pick.
         const focused = await menu.evaluate(() => document.hasFocus())
         await page.keyboard.press("Enter")
         await Bun.sleep(1500)
@@ -2366,6 +2383,37 @@ async function coveredMenu() {
           `and a later Enter in the menu ${focused ? "" : "(not focused!) "}fills nothing either (${await footText(menu)})`,
         )
       }
+    }
+    // A press that passed its checks but ended in no pick (a right click,
+    // a press dragged off its row) leaves no focus in the menu: a later Tab
+    // into it doesn't let ⏎ pick.
+    for (const how of ["right-click", "drag-out"]) {
+      await page.goto(`${site}/login?next=home`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `press then Tab: ${how}`)
+        continue
+      }
+      // Everything after the field leaves the tab order, so Tab goes to the menu.
+      await page.evaluate(() => document.querySelectorAll("input:not(#email), button").forEach((el) => el.setAttribute("tabindex", "-1")))
+      const before = await fillCount(run)
+      const row = menu.locator("button.row").first()
+      if (how === "right-click") await row.click({ button: "right" })
+      else {
+        const b = (await (await menu.frameElement()).boundingBox())!
+        await page.mouse.move(b.x + b.width / 2, b.y + 20)
+        await page.mouse.down()
+        await page.mouse.move(b.x + b.width / 2, b.y - 150, { steps: 4 })
+        await page.mouse.up()
+      }
+      // Past the press's 400 ms check.
+      await Bun.sleep(900)
+      await page.focus("#email")
+      await page.keyboard.press("Tab")
+      const inMenu = await menu.evaluate(() => document.hasFocus()).catch(() => false)
+      await page.keyboard.press("Enter")
+      await Bun.sleep(1500)
+      check(inMenu && (await page.inputValue("#password")) === "" && (await fillCount(run)) === before, `after a ${how} in the menu, Tab then ⏎ fills nothing (${inMenu ? "" : "Tab didn't reach the menu; "}${await footText(menu)})`)
     }
     for (const name of Object.keys(BEATEN)) {
       await page.goto(`${site}/beaten/${name}`)
@@ -2438,6 +2486,24 @@ async function viewportResize() {
     await menu.locator("button.row").first().click()
     await Bun.sleep(1200)
     check((await page.inputValue("#password")) === "" && (await fillCount(run)) === 1, `a page moving the menu further than a resize did fills nothing (${await footText(menu)})`)
+
+    // A few pixels is still a move: 5 px, 200 ms before the press.
+    await page.goto(`${site}/centred`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "viewport resize: small move"))
+    await page.evaluate(() => (document.querySelector("main")!.style.transform = "translateY(-5px)"))
+    await Bun.sleep(200)
+    await menu.locator("button.row").first().click()
+    await Bun.sleep(1200)
+    check((await page.inputValue("#password")) === "" && (await fillCount(run)) === 1, `a menu the page moved 5 px before the press fills nothing (${await footText(menu)})`)
+
+    // The field itself shifting a pixel as the press takes its focus (an outlined field's border thinning) isn't a move.
+    await page.goto(`${site}/outlined`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "viewport resize: outlined field"))
+    await menu.locator("button.row").first().click()
+    const outlined = await until("a pick on an outlined field fills", async () => (await page.inputValue("#password")) === "correct horse", 4000)
+    check(!!outlined, `a pick that shifts an outlined field by a pixel fills (${outlined ? "" : await footText(menu)})`)
   } catch (err) {
     check(false, `viewport resize threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "viewport resize")
