@@ -804,6 +804,10 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
+      // A page with a frame of its own beside the form (an ad, a captcha), and
+      // with ?blurs one that moves focus off the field onto <body> soon after it gets it (Zoom's sign-in).
+      case "/dismiss":
+        return html("Sign in to Acme", `${loginForm("/home")}<iframe id="ad" srcdoc="<button style='width:200px;height:60px'>An ad</button>" style="display:block;margin-top:220px;width:300px;height:80px;border:0"></iframe>${url.searchParams.has("blurs") ? `<script>document.getElementById("email").addEventListener("focus", (e) => setTimeout(() => e.target.blur(), 400))</script>` : ""}`)
       // A sign-in modal dialog that closes on Esc, natively and from its own key handler.
       case "/esc-dialog":
         return html("Sign in to Acme", `<style>dialog{border:0;border-radius:14px;padding:24px;width:360px}</style><dialog id="d">${loginForm("/home")}</dialog><script>
@@ -2669,6 +2673,51 @@ async function frameMoves() {
 }
 
 /**
+ * Putting the menu away where the page gets no event for it: a click into
+ * one of the page's own frames (only a window blur), and Esc after the page
+ * moved focus off the field onto <body>.
+ */
+async function pageDismiss() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/dismiss`)
+    let menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "page dismiss"))
+    // ↓ brings focus into the list (the page's window blurs too): that's the menu's own frame, so it stays.
+    await page.keyboard.press("ArrowDown")
+    await Bun.sleep(400)
+    check(!!extensionFrame(page, "menu.html") && (await menu.evaluate(() => document.hasFocus())), "focus going into the list with ↓ keeps the menu up")
+    // Tab leaves the list as Esc does: back in the field, the menu gone.
+    await page.keyboard.press("Tab")
+    check(!!(await until("Tab closes the list", () => !extensionFrame(page, "menu.html"), 3000)) && (await page.evaluate(() => document.activeElement?.id)) === "email", "and Tab closes it, focus back in the field")
+    // A click on the field it's still in brings the dismissed menu back.
+    await page.click("#email")
+    menu = await until("the menu opens again", async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && (await f.locator("button.row").count()) > 0 ? f : null
+    }, 8000)
+    if (!menu) return void (await diagnose(run, page, "page dismiss: reopen"))
+    await settled(menu)
+    await page.frameLocator("#ad").locator("button").click()
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "a click into the page's own frame puts the menu away")
+    await page.goto(`${site}/dismiss?blurs`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "page dismiss: blurs"))
+    await until("the page moves focus to <body>", () => page.evaluate(() => document.activeElement === document.body))
+    await page.keyboard.press("Escape")
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "Esc puts it away after the page moved focus off the field")
+    await page.click("#email")
+    check(!!(await until("the menu comes back", async () => (await extensionFrame(page, "menu.html")?.locator("button.row").count()) ?? 0, 4000)), "and a click on the field opens it again")
+  } catch (err) {
+    check(false, `page dismiss threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "page dismiss")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
  * The menu grows in only once its frame has its rows (see openMenu): never a
  * blank box (its shadow, a ghost) with the rows popping in half faded.
  */
@@ -4100,10 +4149,11 @@ async function formsFrames() {
         check(JSON.stringify(asked?.fields.sort()) === JSON.stringify(["cvv", "expiry", "number"]), `fill-form asks only for the provider frame's fields (${asked?.fields.join(",")})`)
         await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
         // From the page's own field: the page only, never the provider's frame.
+        // (Emptied first: focus going into a frame of the page puts the menu away.)
+        await frame.fill("#cardnumber", "")
         const own = await formsMenu(run, page, "#holder", "/forms/stripe")
         if (own) {
           check(((await own.locator("#caption").textContent()) ?? "").trim() === "On localhost", "the page's own card menu names only the site")
-          await frame.fill("#cardnumber", "")
           check((await pickRow(own, "Visa")) === "ok", "picking the card from the page's field fills")
           check((await page.inputValue("#holder")) === "Kit Langton", "the page's name-on-card box")
           check((await frame.inputValue("#cardnumber")) === "", "and nothing goes into the provider's frame from it")
@@ -4599,6 +4649,7 @@ const once: Record<string, () => Promise<void>> = {
   topLayer,
   viewportResize,
   menuReveal,
+  pageDismiss,
   escInDialog,
   occlusionSweep,
   midFill,
@@ -4625,6 +4676,7 @@ const cost: Record<string, number> = {
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
   menuReveal: 4,
+  pageDismiss: 5,
   escInDialog: 4,
   ...gauntletRun.cost,
 }
