@@ -2789,12 +2789,21 @@ async function menuPosition(scale = 1) {
             return seen.rowPressed === true && seen.rowClicked === true
           }).catch(() => false), `${surface} ${kind}: trusted press and click reach the action`)
         }
-        await Bun.sleep(1700)
+        // Read the refusal as soon as it shows: a status broadcast reloads the
+        // menu and clears its foot, which on a loaded machine can land before
+        // a fixed wait is over.
+        const foot = menu.locator(surface === "save" ? ".offer-status" : "#foot")
+        const settledAt = Date.now() + 1700
+        let refusal = ""
+        while (Date.now() < settledAt && !refusal.includes("covered")) {
+          refusal = (await foot.textContent().catch(() => "")) ?? ""
+          await Bun.sleep(50)
+        }
+        await Bun.sleep(Math.max(0, settledAt - Date.now()))
         check(!!restyled, `${surface} ${kind}: late restyle ran repeatedly`)
         check((await hostLog(run)).filter((r) => ["fill", "save"].includes(String(r.type))).length === before, `${surface} ${kind}: no credential request or save`)
         if (surface === "menu") check(await page.inputValue("#password") === "", `${kind}: no password written`)
-        const refusal = await menu.locator(surface === "save" ? ".offer-status" : "#foot").textContent().catch(() => "")
-        check(!!refusal?.includes("covered"), `${surface} ${kind}: covered refusal (${refusal})`)
+        check(refusal.includes("covered"), `${surface} ${kind}: covered refusal (${refusal})`)
       }
     }
   } catch (err) {
