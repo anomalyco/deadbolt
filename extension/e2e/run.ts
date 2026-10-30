@@ -804,6 +804,12 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
+      // A CSS zoom on <html> (some sites scale themselves this way), or on a modal dialog.
+      case "/zoomed":
+        // ?nested: both, so the zooms multiply (1.25 × 0.8 on the dialog's contents, with 0.6 on the dialog itself in ?nested=deep).
+        return url.searchParams.has("dialog") || url.searchParams.has("nested")
+          ? html("Sign in to Acme", `<style>${url.searchParams.has("nested") ? `html{zoom:1.25}dialog{zoom:${url.searchParams.get("nested") === "deep" ? 0.6 : 0.8}}` : "dialog{zoom:0.8}"}dialog{border:0;border-radius:14px;padding:24px;width:360px}</style><dialog id="d">${loginForm("/home")}</dialog><script>document.getElementById("d").showModal()</script>`)
+          : html("Sign in to Acme", `<style>html{zoom:1.25}</style>${loginForm("/home")}`)
       // A page with a frame of its own beside the form (an ad, a captcha), and
       // with ?blurs one that moves focus off the field onto <body> soon after it gets it (Zoom's sign-in).
       case "/dismiss":
@@ -2591,6 +2597,33 @@ async function viewportResize() {
   }
 }
 
+/** On a page with a CSS zoom above the menu's host, the menu still sits under the field at its own size, and fills. */
+async function pageZoom() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    for (const path of ["/zoomed", "/zoomed?dialog", "/zoomed?nested", "/zoomed?nested=deep"]) {
+      await page.goto(`${site}${path}`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `page zoom ${path}`)
+        continue
+      }
+      const [m, f, row] = await Promise.all([menu.frameElement().then((e) => e.boundingBox()), page.locator("#email").boundingBox(), menu.locator("button.row").first().boundingBox()])
+      const placed = !!m && !!f && Math.abs(m.x - f.x) < 2 && Math.abs(m.y - (f.y + f.height + 6)) < 2 && Math.abs(m.width - Math.max(f.width, 240)) < 2
+      check(placed && !!row && Math.abs(row.height - 46) < 2, `on ${path} the menu sits under the field at its own size (menu ${JSON.stringify(m)}, field ${JSON.stringify(f)}, row ${row?.height})`)
+      await menu.locator("button.row").first().click()
+      const filled = await until(`a pick on ${path} fills`, async () => (await page.inputValue("#password")) !== "", 4000)
+      check(!!filled, `and a pick there fills (${filled ? "" : await footText(menu)})`)
+    }
+  } catch (err) {
+    check(false, `page zoom threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "page zoom")
+  } finally {
+    await close(run)
+  }
+}
+
 /** Esc puts the menu away and nothing else: a sign-in dialog stays open, and the page's own handler doesn't see it. */
 async function escInDialog() {
   const run = await launch()
@@ -2630,7 +2663,6 @@ async function escInDialog() {
   }
 }
 
-/**
 /**
  * The menu for a field in a frame below follows the frame element as the
  * page moves it (a reflow, not only a scroll), and goes when the field moves
@@ -4649,6 +4681,7 @@ const once: Record<string, () => Promise<void>> = {
   topLayer,
   viewportResize,
   menuReveal,
+  pageZoom,
   pageDismiss,
   escInDialog,
   occlusionSweep,
@@ -4676,6 +4709,7 @@ const cost: Record<string, number> = {
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
   menuReveal: 4,
+  pageZoom: 5,
   pageDismiss: 5,
   escInDialog: 4,
   ...gauntletRun.cost,

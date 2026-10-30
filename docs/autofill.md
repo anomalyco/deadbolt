@@ -230,6 +230,15 @@ not running without sending hello, which would start the agent again.
   avatar's ring is still, the save offer's bar is stepped frame by frame,
   never animated), and after narrowing's row animations the half second
   starts again, as after a move.
+- **Zoom.** The visibility readings don't count CSS `zoom`: Intersection
+  Observer v2 treats a zoomed element as unscaled, and it accepts a
+  proportional scale-up as visible too. So the menu's host undoes any zoom
+  the page puts above it (on `<html>`, or on the dialog it's mounted in):
+  every frame, as it writes its place, it sets its own `zoom` to the inverse
+  of its parent's `currentCSSZoom` (1 when that can't be read or its
+  inverse isn't finite), so it renders at zoom 1, under the field, at its
+  own size. A page that changes the zoom after that write, within the same
+  frame, is covered separately (see issue #145).
 - **A press takes no focus.** A pointer press in the menu leaves focus where
   it was, in the page's field (the menu cancels the press's default
   action). The page never sees its field blur at the moment of the press,
