@@ -733,7 +733,10 @@ stays away and a sign-in session's later steps fill nothing.
   its reason. The native host writes it (see `learn` under Host messages);
   the agent and the vault are never involved, and nothing syncs. Starting a
   session's log removes logs older than 30 days, then the oldest beyond the
-  newest 50. `bun corpus/learned.ts` reports on the logs.
+  newest 50. `bun corpus/learned.ts` reports on the logs. The browser-only
+  build keeps the same lines in the extension's IndexedDB under the same
+  limits, and downloads them from Settings for `bun corpus/learned.ts --file`
+  (docs/extension-device.md, Learning logs).
 
 ## Which logins a page gets
 
