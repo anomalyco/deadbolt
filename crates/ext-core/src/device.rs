@@ -368,8 +368,9 @@ async fn start(store: Unlocked, device_name: Option<&str>) -> Result<()> {
 }
 
 /// Startup has the same membership-first barrier and bounded best-effort
-/// deadline as the CLI. A dial failure counts as unreachable; an exchange
-/// failure does not. Members learned in a round must also be contacted.
+/// deadline as the CLI. A dial failure counts as unreachable, except a peer
+/// refusing it at its inbound limit; an exchange failure does not. Members
+/// learned in a round must also be contacted.
 async fn sync_round() -> Result<()> {
     let node = node()?;
     let state = state();
@@ -406,6 +407,7 @@ async fn sync_round() -> Result<()> {
                         Ok(Err(_)) | Err(_) => {}
                     }
                 }
+                Ok(Err(deadbolt_net::Error::Rejected(_))) => {}
                 Ok(Err(_)) | Err(_) => {
                     attempts.insert(id);
                 }

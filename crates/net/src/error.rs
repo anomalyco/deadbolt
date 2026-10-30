@@ -70,6 +70,8 @@ pub(crate) mod close {
     pub const ABORTED: VarInt = VarInt::from_u32(6);
     pub const PROTOCOL: VarInt = VarInt::from_u32(7);
     pub const PAIRING_USED: VarInt = VarInt::from_u32(8);
+    /// The peer already has as many inbound connections open as it may.
+    pub const BUSY: VarInt = VarInt::from_u32(9);
 }
 
 /// Like [`from_conn`], but for I/O failures on a still-open connection waits briefly for
@@ -95,7 +97,7 @@ pub(crate) fn from_conn(conn: &Connection, fallback: Error) -> Error {
             let reason = String::from_utf8_lossy(&ac.reason).into_owned();
             match ac.error_code {
                 c if c == close::NOT_MEMBER => Error::MembershipRejected(reason),
-                c if c == close::PAIRING_UNAVAILABLE => Error::Rejected(reason),
+                c if c == close::PAIRING_UNAVAILABLE || c == close::BUSY => Error::Rejected(reason),
                 c if c == close::PAIRING_PROOF_FAILED => Error::PairingCodeMismatch,
                 c if c == close::PAIRING_USED => Error::PairingCodeUsed,
                 c if c == close::ABORTED => Error::Remote(reason),

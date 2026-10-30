@@ -290,3 +290,200 @@ async fn three_nodes_converge() {
         assert_eq!(x.store.sorted(), ["a", "b", "c"]);
     }
 }
+
+/// Runs one session on a fresh connection, retrying while the responder still
+/// counts a connection that was just closed.
+async fn sync_once_released(from: &TestNode, to: &TestNode) {
+    within(async {
+        loop {
+            if let Ok(conn) = from.node.connect(to.node.addr()).await
+                && conn.sync().await.is_ok()
+            {
+                conn.close();
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await;
+}
+
+/// A member gets at most two inbound sync connections at once: the third is
+/// closed as busy (not as a membership refusal, so the dialer retries), and a
+/// slot frees once one of the first two closes.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_connections_per_peer_are_bounded() {
+    let (a, b) = pair_of_members(&["a1"], &["b1"]).await;
+
+    let mut held = Vec::new();
+    for _ in 0..2 {
+        let conn = within(b.node.connect(a.node.addr())).await.unwrap();
+        within(conn.sync()).await.unwrap();
+        held.push(conn);
+    }
+
+    let extra = within(b.node.connect(a.node.addr())).await.unwrap();
+    let result = within(extra.sync()).await;
+    assert!(
+        matches!(&result, Err(Error::Rejected(r)) if r == "too many connections"),
+        "{result:?}"
+    );
+
+    held.pop().unwrap().close();
+    sync_once_released(&b, &a).await;
+    // The connection still held keeps working.
+    within(held[0].sync()).await.unwrap();
+}
+
+/// The node takes at most `max_inbound` inbound connections from everyone together,
+/// closing the next after membership admission, and frees a slot when one closes.
+/// Connections the node dialed itself count against neither limit.
+#[tokio::test(flavor = "multi_thread")]
+async fn inbound_connections_in_total_are_bounded() {
+    let mut config = NodeConfig::local_only(key());
+    config.max_inbound = 3;
+    let b = TestNode::with_config(Store::with(&["b1"]), config).await;
+    let a = TestNode::new(Store::with(&["a1"])).await;
+    let c = TestNode::new(Store::with(&["c1"])).await;
+    for peer in [&a, &c] {
+        peer.members.add(b.id());
+        b.members.add(peer.id());
+    }
+
+    // B's own dials, open while A and C dial in, don't use up B's inbound slots.
+    let mut outbound = Vec::new();
+    for peer in [&a, &a, &c] {
+        let conn = within(b.node.connect(peer.node.addr())).await.unwrap();
+        within(conn.sync()).await.unwrap();
+        outbound.push(conn);
+    }
+
+    let mut held = Vec::new();
+    for peer in [&a, &a, &c] {
+        let conn = within(peer.node.connect(b.node.addr())).await.unwrap();
+        within(conn.sync()).await.unwrap();
+        held.push(conn);
+    }
+
+    // Established sync capacity is checked only after membership admission.
+    let extra = within(c.node.connect(b.node.addr())).await.unwrap();
+    let result = within(extra.sync()).await;
+    assert!(
+        matches!(&result, Err(Error::Rejected(r)) if r == "too many connections"),
+        "{result:?}"
+    );
+
+    held.remove(0).close();
+    sync_once_released(&c, &b).await;
+    for conn in held.iter().chain(&outbound) {
+        within(conn.sync()).await.unwrap();
+    }
+}
+
+/// Forward Retry but drop the subsequent server Initial, holding a real TLS
+/// handshake open after address validation, before the server learns membership.
+async fn stall_handshake(
+    server: std::net::SocketAddr,
+    stalled: tokio::sync::oneshot::Sender<()>,
+    socket: tokio::net::UdpSocket,
+) {
+    let mut client = None;
+    let mut retried = false;
+    let mut stalled = Some(stalled);
+    let mut buf = [0; 65536];
+    loop {
+        let (len, from) = socket.recv_from(&mut buf).await.unwrap();
+        let packet = &buf[..len];
+        if from == server {
+            let quic_v1 = len >= 5 && packet[0] & 0xc0 == 0xc0 && packet[1..5] == [0, 0, 0, 1];
+            if retried {
+                if quic_v1
+                    && packet[0] & 0x30 == 0
+                    && let Some(tx) = stalled.take()
+                {
+                    tx.send(()).unwrap();
+                }
+                continue;
+            }
+            if quic_v1 && packet[0] & 0x30 == 0x30 {
+                retried = true;
+            }
+            socket.send_to(packet, client.unwrap()).await.unwrap();
+        } else {
+            client = Some(from);
+            socket.send_to(packet, server).await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn stalled_nonmember_handshakes_leave_member_sync_slots_free() {
+    let (member, server) = pair_of_members(&["member"], &["server"]).await;
+    let mut attackers = Vec::new();
+    // The server does not admit the attacker. Its identity will only become
+    // available after TLS; the proxies stop it before that check can run.
+    let mut tasks = tokio::task::JoinSet::new();
+    let mut waits = Vec::new();
+    for _ in 0..32 {
+        let attacker = TestNode::new(Store::with(&[])).await;
+        attacker.members.add(server.id());
+        let proxy = tokio::net::UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let mut addr = server.node.addr();
+        let target = addr.direct_addrs[0];
+        addr.direct_addrs = vec![proxy.local_addr().unwrap()];
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tasks.spawn(stall_handshake(target, tx, proxy));
+        let node = attacker.node.clone();
+        tasks.spawn(async move {
+            let _result = node.connect(addr).await;
+        });
+        waits.push(rx);
+        attackers.push(attacker);
+    }
+    // Every proxy observed Retry and a subsequent server Initial. These are
+    // live, address-validated transport handshakes, not held synthetic permits.
+    for wait in waits {
+        within(wait).await.unwrap();
+    }
+    assert!(server.node.connected_peers().is_empty());
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        member.node.sync(server.node.addr()),
+    )
+    .await
+    .unwrap();
+    assert!(result.is_ok(), "{result:?}");
+    assert_eq!(member.store.sorted(), ["member", "server"]);
+    tasks.abort_all();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn idle_inbound_connections_close_and_release_slots() {
+    let mut config = NodeConfig::local_only(key());
+    config.max_inbound = 1;
+    config.inbound_sync_timeout = std::time::Duration::from_millis(200);
+    let server = TestNode::with_config(Store::with(&["server"]), config).await;
+    let member = TestNode::new(Store::with(&["member"])).await;
+    member.members.add(server.id());
+    server.members.add(member.id());
+    for run_sessions in [false, true] {
+        let conn = within(member.node.connect(server.node.addr()))
+            .await
+            .unwrap();
+        if run_sessions {
+            // Repeated sessions on the same connection still work before idle expiry.
+            for _ in 0..3 {
+                within(conn.sync()).await.unwrap();
+            }
+        }
+        let reason = tokio::time::timeout(std::time::Duration::from_secs(2), conn.closed())
+            .await
+            .expect("idle connection kept its slot");
+        assert!(matches!(reason, Error::Closed(_)), "{reason:?}");
+        assert!(conn.is_closed());
+        assert!(within(conn.sync()).await.is_err());
+        // CLI and browser background rounds both dial fresh connections, so the
+        // next round works after idle closure without retaining a stale connection.
+        within(member.node.sync(server.node.addr())).await.unwrap();
+    }
+}
