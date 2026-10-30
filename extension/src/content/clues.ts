@@ -58,7 +58,13 @@ const NOT_A_LOGIN_FIELD: Clue[] = [
   ["card number", -6], ["card", -4], ["cvc", -6], ["cvv", -6], ["sort code", -6], ["iban", -6],
   ["message", -4], ["comment", -4], ["subject", -3], ["referral", -4], ["quantity", -5], ["amount", -5],
   ["price", -5], ["birth", -5], ["year", -4], ["age", -3],
+  // Security questions: answers the user knows, never a login field.
+  ["security question", -8], ["secret question", -8], ["security answer", -8], ["your answer", -6], ["answer", -5],
+  ["memorable", -5],
 ]
+
+/** A security question's answer, often in a masked box: never a password. */
+const SECRET_ANSWER: Clue[] = [["security question", -8], ["secret question", -8], ["answer", -6], ["question", -6], ["memorable", -5]]
 
 export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
   username: prepare([
@@ -95,6 +101,7 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
     ["new", -3], ["confirm", -4], ["repeat", -4], ["retype", -4], ["re enter", -4], ["again", -3], ["create", -3],
     ["choose", -3], ["nouveau", -3], ["neues", -3], ["nueva", -3], ["wiederholen", -4], ["confirmer", -4],
     ["confirmar", -4], ["otp", -3], ["one time", -3],
+    ...SECRET_ANSWER,
   ]),
   "new-password": prepare([
     ["new password", 5], ["create password", 5], ["create a password", 5], ["choose password", 5],
@@ -103,6 +110,7 @@ export const FIELD_CLUES: Record<FieldRole, Clue[]> = {
     ["nouveau mot de passe", 5], ["confirmer le mot de passe", 5], ["neues passwort", 5],
     ["passwort wiederholen", 5], ["nueva contrasena", 5], ["confirmar contrasena", 5], ["新しいパスワード", 5],
     ["新密码", 5], ["确认密码", 5], ["новый пароль", 5], ["새 비밀번호", 5],
+    ...SECRET_ANSWER,
   ]),
   otp: prepare([
     ["one time code", 6], ["one time password", 6], ["otp", 5], ["totp", 5], ["verification code", 6],
@@ -145,15 +153,22 @@ export interface FieldFacts {
   code: string
   maxLength: number
   inputMode: string
+  /** The field's label asks a question ("What was your first pet's name?"). */
+  question?: boolean
 }
 
 export const ROLES = Object.keys(FIELD_CLUES) as FieldRole[]
 
 export function scoreField(f: FieldFacts): Record<FieldRole, number> {
   const score = Object.fromEntries(ROLES.map((r) => [r, 0])) as Record<FieldRole, number>
+  // Whether the label itself names a login field: a question that doesn't is a security question.
+  let named = false
   for (const role of ROLES) {
     for (const [phrase, value] of FIELD_CLUES[role]) {
-      if (hasPhrase(f.display, phrase)) score[role] += value
+      if (hasPhrase(f.display, phrase)) {
+        score[role] += value
+        if (value > 0 && role !== "captcha") named = true
+      }
       const compact = squash(phrase)
       if ((compact.length >= 4 || SHORT_CODE_TOKENS.has(compact)) && f.code.includes(compact)) score[role] += value * 0.8
     }
@@ -198,6 +213,8 @@ export function scoreField(f: FieldFacts): Record<FieldRole, number> {
     if (f.maxLength >= 4 && f.maxLength <= 8 && !isPassword) score.otp += 2
   }
   if (f.type === "number") score.phone += 1
+  // "What was the name of your first pet?": an answer the user knows, whatever its type or autocomplete.
+  if (f.question && !named) for (const role of ROLES) score[role] -= 20
   return score
 }
 
