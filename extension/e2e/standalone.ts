@@ -182,7 +182,7 @@ async function request(page: Page, body: DeviceCommand) {
 }
 /** Every login in the vault, as the device page lists them. */
 async function logins(page: Page) {
-  return (await request(page, { type: "device-logins" })).reply.accounts as Array<{ title: string; username?: string }>
+  return ((await request(page, { type: "device-items" })).reply.items as Array<{ kind: string; title: string; username?: string }>).filter((i) => i.kind === "login")
 }
 async function state(page: Page) {
   return (await request(page, { type: "device-status" })).status.state
@@ -1085,13 +1085,30 @@ async function passkeyFlows(device: Page, worker: Worker) {
 
     // Rust enforces Strict even without the Settings UI or service-worker gate.
     await request(device, { type: "device-preset", preset: "strict" })
-    for (const supplied of [undefined, "wrong fixture passphrase"]) {
-      const refused = await vault(worker, { type: "device-delete", ref: second.ref, ...(supplied === undefined ? {} : { passphrase: supplied }) })
+    for (const type of ["device-delete", "device-item-delete"]) for (const supplied of [undefined, "wrong fixture passphrase"]) {
+      const refused = await vault(worker, { type, ref: second.ref, ...(supplied === undefined ? {} : { passphrase: supplied }) })
       check(refused.reply.type === "error" && refused.reply.code === (supplied === undefined ? "passphrase_needed" : "wrong_passphrase"), "Strict deletion refuses a missing or wrong passphrase in Rust")
       check((await devicePasskeys(device)).some((k) => k.credentialId === again.id), "refused deletion leaves the new same-user credential intact")
     }
-    const deleted = await vault(worker, { type: "device-delete", ref: second.ref, passphrase })
-    check(deleted.reply.type === "device-delete" && (await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Strict deletion with the right passphrase removes only the selected credential")
+    // The general item-detail page must enforce the same deletion consent as
+    // Settings, and neither its listing nor secret endpoint may expose the key.
+    const detail = await request(device, { type: "device-item", ref: second.ref })
+    check(Array.isArray(detail.reply.fields) && !detail.reply.fields.some((f: { name: string }) => f.name === "private-key"), "the general item detail omits the passkey private key")
+    check(!(await command(device, { type: "device-secret", ref: second.ref, field: "private-key", passphrase })).ok, "even reauthentication cannot reveal the passkey private key")
+    await device.reload()
+    await device.locator(".list-view .vrow").filter({ hasText: "second@acme.test" }).locator("button.vrow-main").click()
+    const deleteItem = device.getByRole("button", { name: "Delete localhost", exact: true })
+    await deleteItem.click()
+    await deleteItem.click()
+    const deletionAuth = device.locator("form.reauth")
+    await deletionAuth.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
+    await deletionAuth.getByRole("button", { name: "Delete", exact: true }).click()
+    await deletionAuth.locator(".error").waitFor({ state: "visible" })
+    check((await devicePasskeys(device)).some((k) => k.credentialId === again.id), "item-detail deletion keeps the passkey after a wrong Strict passphrase")
+    await deletionAuth.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+    await deletionAuth.getByRole("button", { name: "Delete", exact: true }).click()
+    await until("item detail deletes the selected passkey", async () => !(await devicePasskeys(device)).some((k) => k.credentialId === again.id))
+    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Strict item-detail deletion removes only the selected credential")
     // Delete through Settings under Strict, including confirmation and reauth,
     // not a worker shortcut. The page refreshes its preset from the service worker.
     await device.reload()
@@ -1106,7 +1123,11 @@ async function passkeyFlows(device: Page, worker: Worker) {
     await remove.click()
     await confirmation.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
     await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
-    await confirmation.getByText("That passphrase isn't right.", { exact: true }).waitFor()
+    await confirmation.getByText("That passphrase isn't right.", { exact: true }).waitFor().catch(async (error) => {
+      console.error("Settings deletion confirmation:", await confirmation.allTextContents())
+      console.error("Settings deletion controls:", await confirmation.locator("button").allTextContents())
+      throw error
+    })
     check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Settings keeps the passkey after a wrong Strict passphrase")
     await confirmation.getByLabel("Passphrase", { exact: true }).fill(passphrase)
     await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
@@ -1138,7 +1159,8 @@ async function passkeyFlows(device: Page, worker: Worker) {
 }
 
 async function addLogin(device: Page, title: string, username: string, password: string, website = origin) {
-  await device.getByRole("button", { name: "Add login", exact: true }).click()
+  await device.getByRole("button", { name: "Add an item", exact: true }).click()
+  await device.getByRole("button", { name: "Login", exact: true }).click()
   await device.getByLabel("Website", { exact: true }).fill(website)
   await device.getByLabel("Title", { exact: true }).fill(title)
   await device.getByLabel("Username", { exact: true }).fill(username)
@@ -1147,6 +1169,69 @@ async function addLogin(device: Page, title: string, username: string, password:
   // Saved, it shows the new login; back to the list.
   await device.getByRole("button", { name: "Edit", exact: true }).waitFor()
   await device.getByRole("button", { name: "Back", exact: true }).click()
+}
+/**
+ * Other item types on the device page: a secure note and an API credential
+ * added, shown (secrets only when asked), found by search (never by a
+ * secret), edited without touching the secret, and deleted; and a login
+ * given a one-time password, whose current code then shows.
+ */
+async function itemTypes(device: Page) {
+  const add = async (kind: string) => {
+    await device.getByRole("button", { name: "Add an item", exact: true }).click()
+    await device.getByRole("button", { name: kind, exact: true }).click()
+  }
+  const save = async () => {
+    await device.getByRole("button", { name: "Save", exact: true }).click()
+    await device.locator(".detail .detail-head .title").waitFor()
+  }
+  const title = () => device.locator(".detail .detail-head .title").textContent()
+  const back = () => device.getByRole("button", { name: "Back", exact: true }).click()
+  await add("Secure note")
+  await device.getByLabel("Name", { exact: true }).fill("Home router")
+  await device.getByLabel("Notes", { exact: true }).fill("admin / synthetic-router-secret\nsecond line")
+  await save()
+  check(await title() === "Home router", "the page adds a secure note")
+  check(!(await device.locator(".detail").textContent())?.includes("synthetic-router-secret"), "a note's body stays hidden until asked")
+  await device.getByRole("button", { name: "Show Notes", exact: true }).click()
+  await device.locator(".detail .secret", { hasText: "synthetic-router-secret" }).waitFor()
+  check(true, "and shows it when asked")
+  await back()
+  await add("API credential")
+  await device.getByLabel("Name", { exact: true }).fill("Stripe test key")
+  await device.getByLabel("Credential", { exact: true }).fill("sk_test_synthetic_4242")
+  await device.getByLabel("Username", { exact: true }).fill("acct_synthetic")
+  await device.getByLabel("Environment", { exact: true }).fill("test")
+  await save()
+  check(await title() === "Stripe test key", "the page adds an API credential")
+  await device.getByRole("button", { name: "Edit", exact: true }).click()
+  await device.getByLabel("Environment", { exact: true }).fill("staging")
+  await save()
+  await device.locator(".detail .value", { hasText: "staging" }).waitFor()
+  await device.getByRole("button", { name: "Show Credential", exact: true }).click()
+  await device.locator(".detail .secret", { hasText: "sk_test_synthetic_4242" }).waitFor()
+  check(true, "editing a plain field keeps the credential it didn't show")
+  await back()
+  const search = device.getByRole("searchbox", { name: "Search the vault" })
+  await search.fill("acct_synthetic")
+  await device.locator(".list-view .vrow .title", { hasText: "Stripe test key" }).waitFor()
+  await search.fill("sk_test_synthetic")
+  await device.locator(".list-view .empty").waitFor()
+  check(true, "search finds an API credential by its username, never by its secret")
+  await search.fill("")
+  await device.locator(".list-view .vrow .title", { hasText: "Home router" }).click()
+  await device.getByRole("button", { name: "Delete Home router", exact: true }).click()
+  await device.getByRole("button", { name: "Delete Home router", exact: true }).click()
+  await device.getByRole("searchbox", { name: "Search the vault" }).waitFor()
+  await until("the deleted note leaves the list", async () => !(await device.locator(".list-view .vrow .title", { hasText: "Home router" }).count()))
+  check(true, "a deleted item leaves the list")
+  await device.locator(".list-view .vrow .title", { hasText: "From browser" }).first().click()
+  await device.getByRole("button", { name: "Edit", exact: true }).click()
+  await device.getByLabel("One-time password", { exact: true }).fill("JBSWY3DPEHPK3PXP")
+  await device.getByRole("button", { name: "Save", exact: true }).click()
+  const code = await until("the login's one-time code shows", async () => (await device.locator(".detail .code-value").textContent().catch(() => null))?.replace(/\s/g, ""))
+  check(/^\d{6}$/.test(code), "a login given a one-time password shows its current code")
+  await back()
 }
 async function unlockOnPage(device: Page) {
   await device.reload()
@@ -1300,12 +1385,13 @@ try {
   await device.getByLabel("Passphrase", { exact: true }).fill(passphrase)
   await device.getByLabel("Passphrase again", { exact: true }).fill(passphrase)
   await device.getByRole("button", { name: "Create vault", exact: true }).click()
-  await device.getByRole("searchbox", { name: "Search logins" }).waitFor({ timeout: 60_000 })
+  await device.getByRole("searchbox", { name: "Search the vault" }).waitFor({ timeout: 60_000 })
   check(await state(device) === "ready", "extension creates and opens its own vault")
   await addLogin(device, "From browser", "browser@example.test", browserPassword)
   await shown(device, "From browser")
   check(true, "device page lists the saved login without being asked")
   check((await logins(device)).length === 1, "extension writes a login")
+  await itemTypes(device)
 
   if (smoke) {
     await quick(worker, "From browser", browserPassword, "with no peers")
@@ -1382,7 +1468,7 @@ try {
     return bytes.byteLength > 0 && markers.every((marker) => !text.includes(marker))
   }, [browserPassword, cliPassword, "browser@example.test", "From CLI", "From browser", "saved@acme.test", "Acme accounts", "4242424242424242", "strict@acme.test"])
   check(encrypted, "OPFS contains no plaintext credential or item-label markers")
-  check(!(await command(device, { type: "device-logins" })).ok, "locked vault refuses login listing")
+  check(!(await command(device, { type: "device-items" })).ok, "locked vault refuses item listing")
   check(!(await command(device, { type: "device-passkeys" })).ok, "locked vault refuses passkey listing")
   check(!(await command(device, { type: "device-unlock", passphrase: "wrong fixture passphrase" })).ok, "wrong passphrase is rejected")
   const unlocked = await request(device, { type: "device-unlock", passphrase })

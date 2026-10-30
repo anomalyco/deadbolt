@@ -467,7 +467,7 @@ export type PasskeyChoice = { action: "use"; ref: string } | { action: "save" } 
 /**
  * What the standalone device's own pages (device.html and the popup) ask of
  * it: set it up, unlock, lock, pair and sync it, manage its devices and
- * settings, and see, add and edit logins by hand. The background takes these
+ * settings, and see, add, edit and delete items by hand. The background takes these
  * only from those two pages of this extension.
  */
 export type DeviceCommand =
@@ -490,16 +490,35 @@ export type DeviceCommand =
   | { type: "device-join-cancel" }
   /** `wait`: answer once a sync round has finished (at most 30 s), not as soon as it starts. */
   | { type: "device-sync"; wait?: boolean }
-  /** Every login in the vault, for the page's list: `{ type: "device-logins", accounts: Account[] }`. */
-  | { type: "device-logins" }
+  /** Every item in the vault, for the page's list: `{ type: "device-items", items: ItemSummary[] }`. */
+  | { type: "device-items" }
+  /** The item types the page can add and their fields: `{ type: "device-kinds", kinds: ItemKind[] }`. */
+  | { type: "device-kinds" }
   /** The vault's devices: `{ type: "device-devices", devices: VaultDevice[] }`. */
   | { type: "device-devices" }
-  /** One login without its password (LoginDetail), with its current one-time code. */
+  /** One item without its secrets (ItemDetail), with a one-time code's current code. */
   | { type: "device-item"; ref: string }
-  /** A login's password, to reveal or copy: `{ type: "device-secret", password }`. Strict asks for the passphrase every time. */
-  | { type: "device-secret"; ref: string; passphrase?: string }
-  /** Adds a login by hand, or edits `ref`; an edit with an empty password keeps the one it has. */
-  | { type: "device-save"; ref?: string; entry: { title: string; url: string; username: string; password: string } }
+  /**
+   * One secret value, to reveal or copy (a login's password unless `field`
+   * names another), or a file's whole value (`name`, a line break, base64)
+   * to download: `{ type: "device-secret", value }`. Strict asks for the
+   * passphrase every time.
+   */
+  | { type: "device-secret"; ref: string; field?: string; passphrase?: string }
+  /**
+   * Adds a login by hand, or edits `ref`; an edit with an empty password
+   * keeps the one it has. `otp` and `notes`, when given, set the one-time
+   * password secret and the notes; empty, they remove them.
+   */
+  | { type: "device-save"; ref?: string; entry: { title: string; url: string; username: string; password: string; otp?: string; notes?: string } }
+  /**
+   * Adds an item of `kind`, or edits `ref`: `fields` are set, `remove` taken
+   * off, and `name` (when given, empty clears it) names it. Fields left out
+   * stay as they are. `{ type: "device-item-save", ref, created }`.
+   */
+  | { type: "device-item-save"; ref?: string; kind?: string; name?: string; fields: ItemInput[]; remove?: string[] }
+  /** Deletes an item, on every device once synced. */
+  | { type: "device-item-delete"; ref: string; passphrase?: string }
   /** Removes another device from the vault. */
   | { type: "device-remove"; id: string }
   /** Renames the vault. */
@@ -571,14 +590,52 @@ export type VaultDevice = { id: string; name: string; current: boolean; lastSeen
 /** How soon the browser-only Deadbolt locks by itself (docs/extension-device.md, Lock presets). */
 export type LockPreset = "strict" | "comfortable" | "relaxed"
 
-/** device-item's reply: a login without its password. `totp.until`: when the code ends (unix seconds). */
-export interface LoginDetail {
+/** A field to set in device-item-save. `type` only for a field the item's type doesn't know. */
+export interface ItemInput {
+  name: string
+  value: string
+  type?: string
+}
+
+/** An item type the page can add: its noun ("secure note") and its fields, as the core's schema has them. */
+export interface ItemKind {
+  kind: string
+  noun: string
+  fields: Array<{ name: string; type: string; required: boolean; multiline: boolean }>
+}
+
+/**
+ * One item in the page's list (device-items): its type, label and detail
+ * as the agent names them, and the words a search finds it by (never a
+ * secret). A login also has its Account's fields.
+ */
+export interface ItemSummary extends Partial<Account> {
   ref: string
+  kind: string
   title: string
-  url: string
-  username: string
-  hasPassword: boolean
-  hasTotp: boolean
+  detail?: string
+  urls: string[]
+  search: string[]
+  /** The field the item is for, which its row copies: a login's password, a card's number, a note's body. */
+  primary?: string
+}
+
+/** A field of an item's details. `secret`: its value comes only from device-secret. A file has its name as `value`, and its `size`. */
+export interface ItemField {
+  name: string
+  type: string
+  value?: string
+  secret?: boolean
+  size?: number
+}
+
+/** device-item's reply: an item without its secrets. `totp.until`: when the code ends (unix seconds). */
+export interface ItemDetail extends ItemSummary {
+  name: string | null
+  editable: boolean
+  /** A login's website. */
+  url?: string
+  fields: ItemField[]
   totp?: { code: string; period: number; until: number }
 }
 

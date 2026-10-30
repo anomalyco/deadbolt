@@ -3,6 +3,7 @@
 
 mod forms;
 mod generate;
+mod items;
 mod join;
 mod opfs;
 mod passkeys;
@@ -129,6 +130,8 @@ enum Error {
     Generation(#[from] deadbolt_core::site_password::Error),
     #[error(transparent)]
     Passkey(#[from] deadbolt_core::passkeys::Error),
+    #[error(transparent)]
+    Item(#[from] deadbolt_core::ItemError),
 }
 
 struct Loaded {
@@ -650,33 +653,6 @@ fn login(s: &Loaded, body: &Value) -> Result<Item> {
         .ok_or(Error::NotFound)
 }
 
-/// One login for the vault page's detail view: everything but its password,
-/// and its current one-time code with when that code ends.
-fn login_detail(body: &Value) -> Result<Value> {
-    state().with(|s| {
-        let item = login(s, body)?;
-        let mut reply = account(&item, &s.vault);
-        reply["type"] = json!("device-item");
-        reply["url"] = json!(field(&item, "url"));
-        if let Some(totp) = otp(&item).and_then(|f| Totp::parse(&f.value).ok()) {
-            let now = unix_time() as u64;
-            reply["totp"] = json!({"code": totp.code(now), "period": totp.period(), "until": totp.valid_until(now)});
-        }
-        Ok(reply)
-    })
-}
-
-/// A login's password, for the vault page's reveal and copy. With a
-/// `passphrase` (the Strict lock preset asks for it every time), only if it
-/// unlocks this store; the KDF runs without holding the vault.
-fn login_secret(body: &mut Value) -> Result<Value> {
-    reauthenticate(body, PRESET.with(Cell::get).reauth())?;
-    state().with(|s| {
-        let item = login(s, body)?;
-        Ok(json!({"type": "device-secret", "password": field(&item, "password")}))
-    })
-}
-
 /// Checks an explicit passphrase without holding the live vault during the KDF.
 fn reauthenticate(body: &mut Value, required: bool) -> Result<bool> {
     let passphrase = body.get_mut("passphrase").map(Value::take);
@@ -699,7 +675,8 @@ fn reauthenticate(body: &mut Value, required: bool) -> Result<bool> {
 
 /// Adds a login by hand, or edits one, from the vault page: unlike a page's
 /// save it isn't tied to the page's origin. An edit with no password keeps
-/// the one it has.
+/// the one it has. `otp` and `notes`, when given, set the one-time password
+/// (a TOTP secret or `otpauth://` URI) and the notes; empty, they remove it.
 fn edit_login(body: &Value) -> Result<Value> {
     let input = body.get("entry").ok_or(Error::Protocol("Missing login"))?;
     let url = origin(text(input, "url")?)?;
@@ -715,13 +692,37 @@ fn edit_login(body: &Value) -> Result<Value> {
         if !password.is_empty() {
             fields.push(("password".into(), Field::new(FieldType::Secret, password)));
         }
+        let existing = body.get("ref").map(|_| login(s, body)).transpose()?;
+        // Optional fields: absent leaves them, empty removes them.
+        let mut removed = Vec::new();
+        for key in ["otp", "notes"] {
+            match input.get(key) {
+                None | Some(Value::Null) => {}
+                Some(Value::String(v)) if v.trim().is_empty() => removed.push(key),
+                Some(Value::String(v)) => fields.push((
+                    key.into(),
+                    deadbolt_core::listing::input_field(
+                        "login",
+                        existing.as_ref(),
+                        key,
+                        None,
+                        v.trim().to_owned(),
+                    )?,
+                )),
+                Some(_) => return Err(Error::Protocol("A login's fields are text")),
+            }
+        }
         let mut staged = s.vault.clone();
-        let (id, created) = if body.get("ref").is_some() {
-            let item = login(s, body)?;
+        let (id, created) = if let Some(item) = existing {
             let id = item.id;
             let mut ops = vec![DataOp::name(id, Some(title.into()))];
             if username.is_empty() && item.fields.contains_key("username") {
                 ops.push(DataOp::remove(id, "username"));
+            }
+            for key in removed {
+                if item.fields.contains_key(key) {
+                    ops.push(DataOp::remove(id, key));
+                }
             }
             ops.extend(
                 fields
@@ -797,11 +798,6 @@ async fn sync_now(body: &Value) -> Result<Value> {
         .unwrap_or_default();
     }
     Ok(json!({"type": "device-sync", "ok": true}))
-}
-
-fn all_logins() -> Result<Value> {
-    state().with(|s| Ok(json!({"type": "device-logins", "accounts": s.vault.items().iter()
-        .filter(|i| !i.deleted && i.kind == "login").map(|i| account(i, &s.vault)).collect::<Vec<_>>()})))
 }
 
 fn devices() -> Result<Value> {
@@ -904,11 +900,14 @@ async fn dispatch(mut body: Value) -> Result<Value> {
         "device-join-status" => Ok(join::status()),
         "device-join-finish" => join::finish(&mut body).await,
         "device-sync" => sync_now(&body).await,
-        "device-logins" => all_logins(),
         "device-passkeys" => passkeys::all(),
         "device-delete" => passkeys::delete(&mut body),
-        "device-item" => login_detail(&body),
-        "device-secret" => login_secret(&mut body),
+        "device-items" => items::all(),
+        "device-item" => items::detail_of(&body),
+        "device-secret" => items::secret(&mut body),
+        "device-item-save" => items::save(&body),
+        "device-item-delete" => items::delete(&mut body),
+        "device-kinds" => Ok(items::kinds()),
         "device-save" => edit_login(&body),
         "device-remove" => remove_device(&body),
         "device-rename" => rename_vault(&body),
@@ -969,6 +968,9 @@ fn plain(error: &Error) -> String {
         | Error::NotFound
         | Error::Protocol(_) => error.to_string(),
         Error::Generation(_) | Error::Passkey(_) => error.to_string(),
+        Error::Item(error) | Error::Core(deadbolt_core::Error::Item(error)) => {
+            sentence(&error.to_string())
+        }
         Error::Store(deadbolt_store::Error::WrongPassphrase) => Error::WrongPassphrase.to_string(),
         Error::Store(_) | Error::Decode(_) | Error::Json(_) => STORAGE.into(),
         Error::Core(_) | Error::Application(_) => {
@@ -1000,6 +1002,16 @@ fn plain(error: &Error) -> String {
         ) => OFFLINE.into(),
         Error::Net(_) => "Deadbolt couldn't finish talking to your other device. Try again.".into(),
     }
+}
+
+/// An item rule's message as a sentence: "Missing required field number."
+fn sentence(message: &str) -> String {
+    let mut chars = message.chars();
+    let first = chars
+        .next()
+        .map(|c| c.to_uppercase().collect::<String>())
+        .unwrap_or_default();
+    format!("{first}{}.", chars.as_str())
 }
 
 /// A new password from the core's generator: random letters and digits, with
@@ -1045,7 +1057,9 @@ pub async fn request(body: JsValue) -> std::result::Result<JsValue, JsValue> {
                 Error::PassphraseNeeded => "passphrase_needed",
                 Error::DomainMismatch => "domain_mismatch",
                 Error::NotFound => "not_found",
-                Error::Protocol(_) => "bad_request",
+                Error::Protocol(_)
+                | Error::Item(_)
+                | Error::Core(deadbolt_core::Error::Item(_)) => "bad_request",
                 Error::WrongPassphrase | Error::Store(deadbolt_store::Error::WrongPassphrase) => {
                     "wrong_passphrase"
                 }
