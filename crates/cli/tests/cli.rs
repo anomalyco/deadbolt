@@ -4952,6 +4952,7 @@ fn favorites_and_tags() {
         names == ["Alpha", "Zeta"] && b.run(&["tags"]) == "personal\t1\nprod\t1\nTax 2026\t1\n"
     });
 }
-
 #[path = "cli/health.rs"]
 mod health;
+#[path = "cli/ssh.rs"]
+mod ssh;
