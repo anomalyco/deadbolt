@@ -53,10 +53,10 @@ async function copySecret(app: App, b: HTMLElement, value: string) {
   else app.announce("Couldn't copy.")
 }
 
-/** A login's row. `fill`: the popup's site, with Fill; `failed` shows why a fill didn't happen. `index`: its place in the list, for the reveal. */
-function row(app: App, a: Account, fill: boolean, failed: (message: string) => void = () => {}, index = 0): HTMLElement {
+/** A login's row. `fill`: the popup's site, with Fill; `failed` shows why a fill didn't happen. */
+function row(app: App, a: Account, fill: boolean, tile: HTMLElement, failed: (message: string) => void): HTMLElement {
   const link = url(a)
-  const main = button("vrow-main", [avatarFor(app, a.title, link, "list", index), h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
+  const main = button("vrow-main", [tile, h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
     app.go({ name: "item", ref: a.ref }),
   )
   main.setAttribute("aria-label", `${a.title}${a.username ? `, ${a.username}` : ""}`)
@@ -131,6 +131,22 @@ export function listView(app: App): View {
   const body = h("div", { class: "list-body" })
   const el = h("section", { class: "view list-view" }, h("div", { class: "search-row" }, h("span", { class: "search-wrap" }, glyph("search"), search), add), body)
 
+  // Keep real buttons in the DOM (Tab, arrow keys and accessibility still see
+  // every item), but resolve icons only near the viewport. A search reuses its
+  // rows instead of rebuilding thousands of SVGs, handlers and icon canvases.
+  const cached = new Map<string, HTMLElement>()
+  const pending = new Map<Element, () => void>()
+  const icons = new IntersectionObserver((entries) => {
+    for (const entry of entries) {
+      if (!entry.isIntersecting || !entry.target.isConnected) continue
+      pending.get(entry.target)?.()
+      pending.delete(entry.target)
+      icons.unobserve(entry.target)
+    }
+  }, { root: el, rootMargin: "92px" })
+  let previousItems = app.items
+  let previousSite = app.site
+
   // Why the popup's Fill didn't fill, shown under this site's logins (and said), as the native popup shows it.
   const fillError = h("p", { class: "error", id: "error", role: "alert" })
   fillError.hidden = true
@@ -160,11 +176,31 @@ export function listView(app: App): View {
   const section = (label: string, aside: string | null, items: ItemSummary[], fill: boolean) => {
     const rows = h("div", { class: "rows" })
     slidingHighlight(rows)
-    rows.append(...items.map((a, i) => (a.kind === "login" ? row(app, a as Account, fill, failed, i) : itemRow(app, a))))
+    rows.append(...items.map((a, i) => {
+      const key = `${fill}:${a.ref}`
+      let saved = cached.get(key)
+      if (!saved) {
+        const tile = avatar(a.title)
+        if (a.kind === "login" && app.icons.vault && url(a as Account)) {
+          pending.set(tile, () => tile.replaceWith(avatarFor(app, a.title, url(a as Account), "list", i)))
+          icons.observe(tile)
+        }
+        saved = a.kind === "login" ? row(app, a as Account, fill, tile, failed) : itemRow(app, a)
+        cached.set(key, saved)
+      }
+      return saved
+    }))
     return h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, label), aside ? h("span", { class: "mono muted" }, aside) : null), rows)
   }
 
   const paint = () => {
+    if (previousItems !== app.items || previousSite !== app.site) {
+      icons.disconnect()
+      cached.clear()
+      pending.clear()
+      previousItems = app.items
+      previousSite = app.site
+    }
     const q = app.query.trim().toLowerCase()
     const all = app.items
     const parts: Node[] = []
@@ -229,7 +265,7 @@ export function listView(app: App): View {
     }
   })
   paint()
-  return { el, update: paint, focus: () => search.focus() }
+  return { el, update: paint, focus: () => search.focus(), leave: () => icons.disconnect() }
 }
 
 /** The one-time code's ring: it empties over the code's period, by CSS, so nothing ticks here but the seconds. */
