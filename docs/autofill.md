@@ -507,7 +507,9 @@ not running without sending hello, which would start the agent again.
   the offer the popup showed; if another took its place, the popup shows that
   one instead. A check that finishes after the tab left the site, closed, or
   Deadbolt locked offers nothing. Offers expire after five minutes. A new login is named after
-  the title of the page the password was submitted on and saved with that page's URL, without its query or
+  the title of the page the password was submitted on, the part of it that names the site
+  ("GitHub" of "Sign in to GitHub · GitHub", "Acme" of "Create your account · Acme") without
+  the page's action ("Sign in to", "Create your account"), else the site; it's saved with that page's URL, without its query or
   fragment. A `rate_limited` check offers nothing; a `rate_limited` fill says
   to try again in a moment.
 - **Sign-in outcomes.** The content script answers with yes-or-no facts

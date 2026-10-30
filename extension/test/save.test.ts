@@ -86,7 +86,7 @@ describe("offers", () => {
     const { id } = saver.pending(1)!
     expect(await saver.choose(1, id, "save")).toEqual({ ok: true, message: "Saved to Deadbolt" })
     const save = requests("save")[0] as unknown as { entry: Record<string, string> }
-    expect(save.entry).toEqual({ title: "Sign in to Example", url: "https://www.example.com/login", username: "new@example.com", password: "a new password" })
+    expect(save.entry).toEqual({ title: "Example", url: "https://www.example.com/login", username: "new@example.com", password: "a new password" })
     expect(saver.pending(1)).toBeUndefined()
     expect(fake.badges[1]).toBe("")
     expect(await saver.choose(1, id, "save")).toEqual({ ok: false, message: "This offer has expired.", gone: true })
@@ -352,7 +352,7 @@ describe("new passwords", () => {
     await saver.choose(1, saver.pending(1)!.id, "save")
     expect(requests("save")[0]).toMatchObject({
       origin: "https://accounts.example.com",
-      entry: { title: "Create an account", url: "https://accounts.example.com/signup", username: "new@example.com", generated: "g4" },
+      entry: { title: "example.com", url: "https://accounts.example.com/signup", username: "new@example.com", generated: "g4" },
     })
   })
 
