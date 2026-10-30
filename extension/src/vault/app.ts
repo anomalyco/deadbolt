@@ -112,8 +112,13 @@ export class App {
     requestAnimationFrame(() => (this.live.textContent = message))
   }
 
+  /** Back in the list from an item: its row takes focus again, not the search. */
+  returnTo: string | null = null
+
   /** Shows `route`, coming in from the side it's going: 1 deeper, -1 back. */
   go(route: Route, dir: -1 | 0 | 1 = 1) {
+    const from = this.route
+    this.returnTo = route.name === "list" && "ref" in from && from.ref ? from.ref : null
     this.route = route
     this.show(dir)
   }
@@ -177,7 +182,7 @@ export class App {
     } else right.push(pill(this.status))
     this.header.replaceChildren(
       h("span", { class: "logo" }, svg(ICONS.deadbolt)),
-      h("span", { class: "brand" }, "Deadbolt", ready && this.vaultName ? h("span", { class: "vault-name" }, this.vaultName) : null),
+      h("h1", { class: "brand" }, "Deadbolt", ready && this.vaultName ? h("span", { class: "vault-name" }, this.vaultName) : null),
       ...right,
     )
     this.footer.hidden = !ready

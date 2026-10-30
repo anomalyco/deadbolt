@@ -193,7 +193,6 @@ export function rollLabel(el: HTMLElement, text: string): number {
   const current = el.dataset.text ?? el.textContent ?? ""
   if (current === text) return 0
   el.dataset.text = text
-  el.setAttribute("aria-label", text)
   if (reducedMotion() || typeof el.animate !== "function" || !el.isConnected) {
     el.replaceChildren(rollParts(text, "", ""))
     if (el.isConnected && typeof el.animate === "function") el.animate([{ opacity: 0.2 }, { opacity: 1 }], REDUCED_FADE)
@@ -237,13 +236,17 @@ function rollParts(text: string, old: string, fresh: string, same = text.length 
     f.append(span("roll-still", text))
     return f
   }
-  f.append(span("roll-still", text.slice(0, same)))
+  // The rolling parts are only seen; a screen reader reads the label whole
+  // from a copy of its own (split around the window, it would read "Delet e").
+  const still = span("roll-still", text.slice(0, same))
   const win = span("roll-window", "")
   win.append(span("roll-in", fresh))
   if (old) win.append(span("roll-out", old))
-  f.append(win)
+  still.setAttribute("aria-hidden", "true")
+  win.setAttribute("aria-hidden", "true")
+  f.append(still, win, span("roll-text", text))
   return f
 }
 
 /** The styles rollLabel needs, for pages that use it. */
-export const ROLL_CSS = `.roll-still{white-space:pre}.roll-window{position:relative;display:inline-block;overflow:hidden;height:1lh;vertical-align:bottom;white-space:pre}.roll-in{display:inline-block}.roll-out{position:absolute;left:0;top:0}`
+export const ROLL_CSS = `.roll-text{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%);white-space:nowrap}.roll-still{white-space:pre}.roll-window{position:relative;display:inline-block;overflow:hidden;height:1lh;vertical-align:bottom;white-space:pre}.roll-in{display:inline-block}.roll-out{position:absolute;left:0;top:0}`
