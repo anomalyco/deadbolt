@@ -314,6 +314,8 @@ pub(crate) async fn run(paths: &Paths, seq: u64, restore: Option<String>) -> Don
             query: Vec::new(),
             kind: None,
             deleted: true,
+            tags: Vec::new(),
+            favorites: false,
         };
         let items = crate::agent::call(paths, command, |r| match r {
             Reply::Items { items } => Some(items),

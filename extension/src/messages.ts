@@ -536,13 +536,13 @@ export type DeviceCommand =
    * keeps the one it has. `otp` and `notes`, when given, set the one-time
    * password secret and the notes; empty, they remove them.
    */
-  | { type: "device-save"; ref?: string; entry: { title: string; url: string; username: string; password: string; otp?: string; notes?: string } }
+  | { type: "device-save"; ref?: string; entry: { title: string; url: string; username: string; password: string; otp?: string; notes?: string; favorite?: boolean; tags?: string[] } }
   /**
    * Adds an item of `kind`, or edits `ref`: `fields` are set, `remove` taken
    * off, and `name` (when given, empty clears it) names it. Fields left out
    * stay as they are. `{ type: "device-item-save", ref, created }`.
    */
-  | { type: "device-item-save"; ref?: string; kind?: string; name?: string; fields: ItemInput[]; remove?: string[] }
+  | { type: "device-item-save"; ref?: string; kind?: string; name?: string; fields: ItemInput[]; remove?: string[]; favorite?: boolean; tags?: string[] }
   /** Deletes an item, on every device once synced. */
   | { type: "device-item-delete"; ref: string; passphrase?: string }
   /** Removes another device from the vault. */
@@ -642,6 +642,8 @@ export interface ItemSummary extends Partial<Account> {
   detail?: string
   urls: string[]
   search: string[]
+  favorite?: boolean
+  tags?: string[]
   /** The field the item is for, which its row copies: a login's password, a card's number, a note's body. */
   primary?: string
 }

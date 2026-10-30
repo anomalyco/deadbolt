@@ -336,6 +336,8 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
             value: "pw".into(),
         }],
         source: None,
+        favorite: false,
+        tags: Vec::new(),
         deleted_at: None,
     });
     rt.frame(0.0);
