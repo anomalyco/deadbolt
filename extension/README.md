@@ -29,7 +29,10 @@ For the opt-in standalone proof, use `bun run build:standalone`. It owns a
 separate encrypted vault in this browser; it does not open your native vault.
 `bun run e2e:standalone:smoke` exercises it offline, without a CLI or public relay.
 See [the device design](../docs/extension-device.md) for setup, limits and the
-migration required before changing the release default.
+migration required before changing the release default. Releases publish it
+too; `deadbolt browser install --standalone --extension-dir <dir>` and
+`deadbolt update` keep an unpacked copy current, and `deadbolt browser switch`
+swaps builds in place ([installing and updating](../docs/extension-device.md#installing-and-updating-the-standalone-build)).
 
 ## Layout
 
