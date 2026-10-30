@@ -87,7 +87,6 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
     before: number
   }
 
-  /** Waits for a frame of the page (0: the top) to report its form at `path`. */
   /** Waits (at most `timeout`, quietly) for a frame of the page (0: the top) to report a login or forms page at `path`. */
   async function reported(run: R, path: string, frame: "top" | "any" = "top", timeout = 6000) {
     const end = Date.now() + timeout
