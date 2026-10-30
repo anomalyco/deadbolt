@@ -71,10 +71,32 @@ export function toolbar(title: string, back: (() => void) | null, ...actions: No
     "div",
     { class: "toolbar" },
     back ? iconButton(glyph("back"), "Back", back, "back") : null,
-    h("h2", {}, title),
+    // No title (a login's own heading is under the toolbar): no empty heading either.
+    title ? h("h2", {}, title) : h("span", { class: "toolbar-spacer" }),
     h("div", { class: "toolbar-actions" }, ...actions),
   )
 }
+
+/**
+ * Repaints `el` with `paint`, and if keyboard focus was on a control inside
+ * it, puts it back on the same control: the one with the same name, else the
+ * one in the same place (Show password becomes Hide password). A new
+ * one-time code or a sync repaints a login, and focus would drop to the page.
+ */
+export function keepFocus(el: HTMLElement, paint: () => void) {
+  const was = document.activeElement
+  const inside = was instanceof HTMLElement && was !== el && el.contains(was)
+  const tag = inside ? was.tagName : ""
+  const name = inside ? nameOf(was) : ""
+  const at = inside ? [...el.querySelectorAll<HTMLElement>(tag)].indexOf(was) : -1
+  paint()
+  if (!inside || el.contains(document.activeElement)) return
+  const now = [...el.querySelectorAll<HTMLElement>(tag)]
+  ;(now.find((c) => nameOf(c) === name) ?? now[at])?.focus({ preventScroll: true })
+}
+
+/** A control's name, with the row it's in: every row has its own Copy password. */
+const nameOf = (el: HTMLElement) => `${el.closest(".vrow")?.querySelector<HTMLElement>(".vrow-main")?.dataset.ref ?? ""}|${el.getAttribute("aria-label") ?? el.textContent?.trim() ?? ""}`
 
 /** Writes `text` and shows a check on `b` for a moment. Answers whether it was copied. */
 export async function copied(b: HTMLElement, text: string, announce?: (message: string) => void, what = "Copied"): Promise<boolean> {
