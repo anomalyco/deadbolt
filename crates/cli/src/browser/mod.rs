@@ -249,11 +249,19 @@ fn register_extension_dir(dir: &Path, build: ExtensionBuild, config: &Path) -> R
     Ok(())
 }
 
-/// `dir` as an extension directory is registered: absolute, and with links
-/// resolved when it exists.
+/// `dir` as an extension directory is registered: absolute, with links
+/// resolved (its parent's when it doesn't exist yet), so it's the same path
+/// before `deadbolt update` creates it and after.
 pub fn extension_path(dir: &Path) -> Result<PathBuf> {
     let dir = std::path::absolute(dir).with_context(|| format!("finding {}", dir.display()))?;
-    Ok(dir.canonicalize().unwrap_or(dir))
+    if let Ok(path) = dir.canonicalize() {
+        return Ok(path);
+    }
+    let resolved = dir
+        .parent()
+        .zip(dir.file_name())
+        .and_then(|(parent, name)| Some(parent.canonicalize().ok()?.join(name)));
+    Ok(resolved.unwrap_or(dir))
 }
 
 /// Stops `deadbolt update` keeping the unpacked extension in `dir` current,
