@@ -454,22 +454,40 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     )
     return
   }
-  // Grows from the field: scale .96 → 1 from the edge that faces it. Only
-  // while it opens: the menu's visibility guard refuses picks while it's
-  // scaled or see-through, so they wait until it's at rest.
-  const r = el ? el.getBoundingClientRect() : boxNow()!
-  const below = ((lastTarget as Rect | null)?.top ?? r.bottom) >= r.bottom
-  frame.style.transformOrigin = below ? "top left" : "bottom left"
-  frame.animate(
-    reducedMotion()
-      ? [{ opacity: 0 }, { opacity: 1 }]
-      : [
-          { opacity: 0, transform: "scale(0.96)" },
-          { opacity: 1, transform: "none" },
-        ],
-    timing(0.25),
-  )
+  // Grows from the field once its frame has something to show (see reveal):
+  // until the frame first says its size it's blank, and the grow-in played on
+  // an empty box, a ghost of the shadow, with the rows popping in half faded.
+  const f = frame
+  f.style.opacity = "0"
+  revealTimer = setTimeout(() => reveal?.(), REVEAL_LATEST_MS)
+  reveal = () => {
+    reveal = null
+    clearTimeout(revealTimer)
+    if (frame !== f) return
+    f.style.opacity = ""
+    // Scale .96 → 1 from the edge that faces the field. Only while it opens:
+    // the menu's visibility guard refuses picks while it's scaled or
+    // see-through, so they wait until it's at rest.
+    const r = anchor ? anchor.getBoundingClientRect() : boxNow()
+    const below = !r || (lastTarget?.top ?? r.bottom) >= r.bottom
+    f.style.transformOrigin = below ? "top left" : "bottom left"
+    f.animate(
+      reducedMotion()
+        ? [{ opacity: 0 }, { opacity: 1 }]
+        : [
+            { opacity: 0, transform: "scale(0.96)" },
+            { opacity: 1, transform: "none" },
+          ],
+      timing(0.25),
+    )
+  }
 }
+
+/** Plays the open surface's grow-in, while its frame hasn't shown yet (see openMenu). */
+let reveal: (() => void) | null = null
+let revealTimer: ReturnType<typeof setTimeout> | undefined
+/** A frame that never says its size grows in anyway after this long. */
+const REVEAL_LATEST_MS = 500
 
 /**
  * The frame asked for a size, and maybe a new mode. It can only fold either
@@ -484,6 +502,13 @@ function resize(height: number, width: number | undefined, next: SurfaceMode | u
   if (mode === "accounts") menuHeight = height
   const same = !changed && wanted.width === (width ?? wanted.width) && wanted.height === height
   wanted = { width: width ?? wanted.width, height }
+  // The list's first size, before anything of it showed: it lands there, no
+  // spring from the guess, and grows in now that it has its rows.
+  if (reveal && mode === "accounts") {
+    lastTarget = targetRect()
+    return reveal()
+  }
+  reveal?.()
   if (same || !lastTarget) return
   // The offer's first size isn't a change anyone made: it lands there.
   if (first && mode === "save") return void (lastTarget = targetRect())
@@ -571,6 +596,8 @@ export const menuHost = (): HTMLElement | null => host
 
 export function closeMenu(refocus = false, dismissed = false) {
   cancelAnimationFrame(raf)
+  reveal = null
+  clearTimeout(revealTimer)
   if (token) void send({ type: "db:menu-close", token, dismissed })
   port?.close()
   port = null
