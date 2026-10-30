@@ -30,7 +30,11 @@ export function shadowRootOf(el: Element): ShadowRoot | null {
   }
 }
 
-/** The document plus every shadow root under it, open and closed (despite the name), outermost first. */
+/**
+ * The document plus every shadow root under it, open and closed (despite the
+ * name), outermost first. Closed roots include those other extensions put in
+ * the page; at most MAX_ROOTS are walked, whoever made them.
+ */
 export function openRoots(start: Document | ShadowRoot = document): Array<Document | ShadowRoot> {
   const roots: Array<Document | ShadowRoot> = [start]
   for (let i = 0; i < roots.length && roots.length < MAX_ROOTS; i++) {
@@ -61,20 +65,25 @@ export function deepActiveElement(): Element | null {
   return el
 }
 
+/** A pointer event that has a real position: not a click the keyboard made (Enter or Space on a button), whose clientX/Y are 0. */
+const positioned = (event: Event): event is MouseEvent =>
+  event instanceof MouseEvent && (event.detail > 0 || (typeof PointerEvent !== "undefined" && event instanceof PointerEvent && event.pointerType !== ""))
+
 /**
  * What an event is about, inside closed shadow roots too: for a listener
  * outside one, composedPath() stops at the closed root's host. Focus, key
- * and input events go on to the element focused inside it; pointer events
- * to the element under the pointer.
+ * and input events, and clicks the keyboard made, go on to the element
+ * focused inside it; pointer events to the element under the pointer. Only
+ * an element of that same root counts, so a point that lands elsewhere
+ * leaves the host as the target.
  */
 export function eventTarget(event: Event): EventTarget | null {
   let el: EventTarget | null = event.composedPath()[0] ?? event.target
   for (let depth = 0; depth < 32 && el instanceof Element; depth++) {
-    if (el.shadowRoot) break
     const root = shadowRootOf(el)
     if (!root) break
-    const inner = event instanceof MouseEvent ? root.elementFromPoint(event.clientX, event.clientY) : root.activeElement
-    if (!inner || inner === el) break
+    const inner = positioned(event) ? root.elementFromPoint(event.clientX, event.clientY) : root.activeElement
+    if (!inner || inner === el || inner.getRootNode() !== root) break
     el = inner
   }
   return el
