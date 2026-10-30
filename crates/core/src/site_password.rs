@@ -122,6 +122,60 @@ pub fn generate(origin: &str, field: &FieldRules) -> Result<Zeroizing<String>> {
     password_rules::generate(&rules, limits).map_err(Error::from)
 }
 
+/// The vendored `passwordrules` quirk for `url`'s host, if any.
+pub fn quirk_for_url(url: &str) -> Option<&'static str> {
+    let host = url_host(url)?;
+    quirk(&host)
+}
+
+/// True when `url` is on a site whose vendored quirk caps passwords below
+/// [`password_rules::MIN_BITS`] (for example a bank requiring 6 digits).
+pub fn site_caps_weak(url: &str) -> bool {
+    let Some(text) = quirk_for_url(url) else {
+        return false;
+    };
+    let rules = Rules::parse(text);
+    matches!(
+        password_rules::strength(&rules, password_rules::Field::default()),
+        Err(Refused::Weak)
+    )
+}
+
+/// Generates a password at `length` (with `symbols`), adapting to `url`'s
+/// vendored site rules when `url` has a quirk that still allows a strong
+/// password.
+pub fn generate_for_url(
+    url: Option<&str>,
+    length: usize,
+    symbols: bool,
+) -> std::result::Result<Zeroizing<String>, crate::password::LengthError> {
+    if let Some(text) = url.and_then(quirk_for_url) {
+        let mut rules = Rules::parse(text);
+        rules.min_length = Some(rules.min_length.map_or(length, |min| min.max(length)));
+        if let Some(max) = rules.max_length
+            && rules.min_length.is_some_and(|min| min > max)
+        {
+            rules.min_length = Some(max);
+        }
+        let field = if !symbols && !rules.has_classes() {
+            password_rules::Field {
+                allowed: Some(
+                    CharSet::LOWER
+                        .union(CharSet::UPPER)
+                        .union(CharSet::DIGIT),
+                ),
+                ..password_rules::Field::default()
+            }
+        } else {
+            password_rules::Field::default()
+        };
+        if let Ok(password) = password_rules::generate(&rules, field) {
+            return Ok(password);
+        }
+    }
+    crate::password::generate(length, symbols)
+}
+
 struct Held {
     id: String,
     origin: String,

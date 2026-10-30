@@ -148,6 +148,17 @@ pub enum Change {
     TagAdd(String),
     /// Removes a tag (matched case-insensitively).
     TagRemove(String),
+    /// Marks or clears an ignored health finding (`kind`, such as `"weak"`).
+    /// `Some(hash)` ignores it (`Hash::from_bytes([0; 32])` for item-wide
+    /// findings; a `password` write's entry hash for password findings);
+    /// `None` restores the warning.
+    Ignore {
+        kind: String,
+        at: Option<Hash>,
+    },
+    /// Records or clears the UTC date (`YYYY-MM-DD`) the item's password
+    /// last changed, kept apart from `fields`.
+    PasswordChanged(Option<String>),
 }
 
 impl DataOp {
@@ -239,6 +250,20 @@ impl DataOp {
 
     pub fn restore(item: ItemId) -> Self {
         Self::edit(item, Change::Restore)
+    }
+
+    pub fn ignore(item: ItemId, kind: impl Into<String>, at: Option<Hash>) -> Self {
+        Self::edit(
+            item,
+            Change::Ignore {
+                kind: kind.into(),
+                at,
+            },
+        )
+    }
+
+    pub fn password_changed(item: ItemId, date: Option<String>) -> Self {
+        Self::edit(item, Change::PasswordChanged(date))
     }
 
     fn edit(item: ItemId, change: Change) -> Self {
@@ -562,6 +587,21 @@ fn write_data_op(w: &mut DynWriter<'_>, op: &DataOp) {
                     w.u8(9);
                     w.str(tag);
                 }
+                Change::Ignore { kind, at } => {
+                    w.u8(10);
+                    w.str(kind);
+                    match at {
+                        None => w.u8(0),
+                        Some(hash) => {
+                            w.u8(1);
+                            w.bytes(hash.as_bytes());
+                        }
+                    }
+                }
+                Change::PasswordChanged(date) => {
+                    w.u8(11);
+                    write_opt_str(w, date.as_deref());
+                }
             }
         }
     }
@@ -680,6 +720,15 @@ fn read_data_op(r: &mut Reader<'_>) -> Result<DataOp, DecodeError> {
                 }),
                 8 => Change::TagAdd(r.string()?),
                 9 => Change::TagRemove(r.string()?),
+                10 => Change::Ignore {
+                    kind: r.string()?,
+                    at: match r.u8()? {
+                        0 => None,
+                        1 => Some(Hash(r.array()?)),
+                        tag => return Err(DecodeError::InvalidTag(tag)),
+                    },
+                },
+                11 => Change::PasswordChanged(read_opt_str(r)?),
                 tag => return Err(DecodeError::InvalidTag(tag)),
             };
             DataOp::Edit { item, change }
@@ -774,6 +823,10 @@ mod tests {
                     }),
                 ),
                 DataOp::source(item, None),
+                DataOp::ignore(item, "weak", Some(Hash::from_bytes([3; 32]))),
+                DataOp::ignore(item, "weak", None),
+                DataOp::password_changed(item, Some("2026-10-30".into())),
+                DataOp::password_changed(item, None),
             ]),
         )
     }
