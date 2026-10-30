@@ -1483,7 +1483,7 @@ async function biometricUnlock(device: Page, worker: Worker) {
   } })
   await device.bringToFront()
   await device.getByRole("button", { name: "Settings", exact: true }).click()
-  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByRole("button", { name: "Set up Touch ID", exact: true }).click()
   await device.getByLabel("Passphrase for Touch ID").fill("wrong enrollment passphrase")
   await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
   await device.getByText("That passphrase isn't right.", { exact: true }).waitFor()
@@ -1573,7 +1573,7 @@ async function biometricUnlock(device: Page, worker: Worker) {
     hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: false,
   } })
   await device.getByRole("button", { name: "Settings", exact: true }).click()
-  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByRole("button", { name: "Set up Touch ID", exact: true }).click()
   await device.getByLabel("Passphrase for Touch ID").fill(passphrase)
   await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
   await device.getByText(/This authenticator doesn't support PRF unlock/).waitFor()

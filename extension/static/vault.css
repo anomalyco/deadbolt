@@ -700,6 +700,11 @@ main.vault.popup {
   margin: 0 -6px;
 }
 
+/* A list's empty line lines up with the text around it, not with the rows' bleed. */
+.rows > .hint {
+  padding: 0 6px;
+}
+
 /* The one highlight, as in the inline menu: it slides between rows. */
 .rows .highlight {
   position: absolute;
