@@ -72,7 +72,8 @@
 //!
 //! 1. On open, redb verifies every page checksum (`check_integrity`). A
 //!    flipped byte anywhere in live data makes unlocking fail with
-//!    [`Error::Corrupt`]. redb can panic on some structurally damaged files;
+//!    [`Error::Corrupt`]. Only [`biometric_token_with_backend`], which reads
+//!    public metadata, skips this walk. redb can panic on some structurally damaged files;
 //!    opening runs under `catch_unwind` and turns that into
 //!    [`Error::Corrupt`] too (the panic message still goes to stderr).
 //! 2. Every record is AEAD-sealed, so edits that keep redb's (non-
@@ -138,6 +139,7 @@ pub use store::native::{
 };
 pub use store::{
     ActivityPage, ActivityRow, Budget, DB_FILE, Dropped, FORMAT_VERSION, LogIter, PassphraseCheck,
-    Unlocked, generate_biometric_key, init_with_backend, unlock_with_backend,
+    Unlocked, biometric_token_with_backend, generate_biometric_key, init_with_backend,
+    unlock_biometric_with_backend, unlock_with_backend,
 };
 pub use zeroize::Zeroizing;

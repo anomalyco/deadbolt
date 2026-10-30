@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use wasm_bindgen::prelude::*;
 
 use super::{
-    Error, PRESET, Result, item_ref, reauthenticate, reference, request_sync, state, text,
+    Error, PRESET, Result, check_passphrase, item_ref, reference, request_sync, state, text,
 };
 use crate::policy;
 
@@ -127,7 +127,7 @@ fn find(s: &super::Loaded, body: &Value) -> Result<Item> {
 
 /// A trusted management-page action, never reachable from the page bridge.
 pub(super) fn delete(body: &mut Value) -> Result<Value> {
-    reauthenticate(body, PRESET.with(Cell::get).reauth())?;
+    check_passphrase(body, PRESET.with(Cell::get).reauth())?;
     let reply = state().with(|s| {
         let item = find(s, body)?;
         let mut staged = s.vault.clone();
@@ -152,7 +152,7 @@ fn consent(body: &mut Value) -> Result<()> {
     if !matches!(verify, "preferred" | "discouraged") {
         return Err(Error::Protocol("Invalid user verification preference"));
     }
-    reauthenticate(
+    check_passphrase(
         body,
         policy::passkey_reauth(PRESET.with(Cell::get), verify == "discouraged"),
     )?;

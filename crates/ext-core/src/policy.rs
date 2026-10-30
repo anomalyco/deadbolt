@@ -112,6 +112,7 @@ mod tests {
             "check",
             "device-join-start",
             "device-status",
+            "device-biometric-check",
             "unknown",
         ] {
             assert!(!accepts_preset(command), "{command}");

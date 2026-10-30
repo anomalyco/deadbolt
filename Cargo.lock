@@ -1094,6 +1094,7 @@ dependencies = [
 name = "deadbolt-ext-core"
 version = "0.0.0"
 dependencies = [
+ "blake3",
  "data-encoding",
  "deadbolt-core",
  "deadbolt-net",

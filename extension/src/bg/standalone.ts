@@ -6,12 +6,11 @@
 // sends it requests, follows the vault's status, and locks the vault on the
 // lock preset's rules (docs/extension-device.md).
 //
-// The unwrapped key lives only in the worker's memory. Nothing secret is put
-// in chrome.storage; closing the browser, a crash of the offscreen document or
-// its worker, and Lock all end that memory, so each leaves the vault locked.
+// Every preset keeps keys only in worker memory. Losing the worker or its
+// offscreen owner locks the vault; no trusted page can read a retained key.
 
 import { DEFAULT_PRESET, isPreset, PRESETS, VAULT_NAME } from "../device-rules"
-import type { DeviceCommand, DeviceReply, ItemInput, LockPreset, Reauth, ReauthChanged, Status } from "../messages"
+import type { DeviceCommand, DeviceReply, ItemInput, LockPreset, Reauth, ReauthChanged, Status, UnlockProof } from "../messages"
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type ReauthAsk, type ReauthBody, type ReauthReply, type SendOptions, type VaultBackend } from "./backend"
 import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, digest, isCopied, type Copied } from "./clipboard"
@@ -36,6 +35,8 @@ const SLOW_MS: Partial<Record<string, number>> = {
   // Strict checks the passphrase before a passkey is deleted, from Settings or the item list.
   "device-delete": 120_000,
   "device-item-delete": 120_000,
+  "device-biometric-set": 120_000,
+  "device-biometric-check": 120_000,
 }
 /** How long a fill waits for its passphrase before it's dropped. */
 const REAUTH_MS = 2 * 60_000
@@ -137,6 +138,7 @@ const PAGE_READS = new Set<string>([
   "device-join-status",
   "device-join-cancel",
   "device-settings",
+  "device-biometric-info",
   "device-copied",
   "device-reauth",
   "device-reauth-cancel",
@@ -152,7 +154,7 @@ const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-st
 /** Commands that open the vault: the worker is told the lock preset with them, and keeps Strict itself. */
 const OPENS = new Set<string>(["device-create", "device-unlock", "device-join-finish"])
 /** Commands that check a passphrase, and back off after wrong ones. */
-const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-delete", "device-item-delete", "device-reauth-confirm"])
+const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-delete", "device-item-delete", "device-reauth-confirm", "device-biometric-set", "device-biometric-check"])
 
 const UNREADABLE = "Deadbolt's vault gave an answer it couldn't read. Reload the extension and try again."
 const unsupported = () => new HostError("failed", "The browser-only Deadbolt can't do this yet.")
@@ -189,6 +191,7 @@ export class StandaloneBackend implements VaultBackend {
   private lastUse = 0
   /** The last use, read back after the service worker restarts. */
   private loaded: Promise<void>
+  private initialized = false
   private lastSync = 0
   preset: LockPreset = DEFAULT_PRESET
   private tries = { fails: 0, until: 0 }
@@ -202,6 +205,8 @@ export class StandaloneBackend implements VaultBackend {
   private closing = new Set<number>()
   private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE), passkeys: new Bucket({ capacity: 10, everyMs: 1000 }), learns: new Bucket(LEARNS_RATE) }
   private ceremonies = 0
+  private epoch = 0
+  private locking: Promise<void> | null = null
 
   constructor() {
     // Registered synchronously, so the events wake the service worker.
@@ -224,6 +229,7 @@ export class StandaloneBackend implements VaultBackend {
     void ensureAlarm(TICK_ALARM, 1)
     void ensureAlarm(SYNC_ALARM, SYNC_EVERY_MIN)
     this.loaded = Promise.all([
+      chrome.storage.session.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" }).then(() => {}),
       chrome.storage.session.get(LAST_USE_KEY).then(
         (got) => {
           const at = got[LAST_USE_KEY]
@@ -245,7 +251,7 @@ export class StandaloneBackend implements VaultBackend {
         },
         () => {},
       ),
-    ]).then(() => {})
+    ]).then(() => { this.initialized = true })
   }
 
   onChange(listener: Listener): () => void {
@@ -268,7 +274,12 @@ export class StandaloneBackend implements VaultBackend {
     return this.connect()
   }
 
-  used() {
+  used(force = false) {
+    if (!this.initialized) {
+      void this.loaded.then(() => this.used(force)).catch(() => {})
+      return
+    }
+    if (!force && this.lastUse && Date.now() - this.lastUse >= PRESETS[this.preset].idleMs) return
     this.lastUse = Date.now()
     void chrome.storage.session.set({ [LAST_USE_KEY]: this.lastUse }).catch(() => {})
     if (this.status.state === "ready" && this.lastUse - this.lastSync > SYNC_AFTER_MS) void this.sync()
@@ -301,13 +312,16 @@ export class StandaloneBackend implements VaultBackend {
     // Refused before the vault sees it, and before it counts as use.
     const rated = RATED[body.type]
     if (rated && !this.buckets[rated].take()) throw slowDown()
+    // Counted before any await, so concurrent ceremonies can't all pass the cap.
     const ceremony = body.type === "passkey-create" || body.type === "passkey-get"
     if (ceremony && this.ceremonies >= 4) throw slowDown()
-    if (USES.has(body.type)) this.used()
-    if (body.type === "learn") return (await this.learn(body as Extract<RequestBody, { type: "learn" }>)) as ReplyFor[T]
     if (ceremony) this.ceremonies++
     let reply
     try {
+      await this.loaded
+      if (signal?.aborted) throw cancelled()
+      if (USES.has(body.type)) this.used()
+      if (body.type === "learn") return (await this.learn(body as Extract<RequestBody, { type: "learn" }>)) as ReplyFor[T]
       reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
     } finally {
       if (ceremony) this.ceremonies--
@@ -334,11 +348,12 @@ export class StandaloneBackend implements VaultBackend {
   /** device.html's commands (see DeviceCommand); the background checks the sender (fromVaultPage). */
   async device(command: DeviceCommand): Promise<DeviceReply> {
     const started = Date.now()
-    const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
+    const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}), ...(this.tries.until > Date.now() ? { retryAt: this.tries.until } : {}) })
     // The user working on the vault's own page is use. The page reading the
     // vault (its status, logins and devices, which it does again on every
     // change) isn't, so an open page never keeps the vault unlocked; nor is Lock.
-    if (!PAGE_READS.has(command.type)) this.used()
+    if (command.type !== "device-lock" && command.type !== "device-join-cancel") await this.loaded
+    if (!PAGE_READS.has(command.type) && !OPENS.has(command.type)) this.used()
     if (command.type === "device-lock") {
       await this.lock()
       return { ok: true, reply: { type: "device-lock", ok: true }, ms: Date.now() - started, status: this.status }
@@ -353,18 +368,25 @@ export class StandaloneBackend implements VaultBackend {
     if (command.type === "device-settings" || command.type === "device-preset") {
       await this.loaded
       if (command.type === "device-preset") {
+        // An unlock already under way would open with the old policy: it
+        // fails instead, and is tried again under this one.
+        this.epoch++
         // The worker holds the preset too, and enforces Strict itself: an
         // unlocked one hears of it first, so what this page and the passkey
         // prompts say is the preset the worker keeps. A locked one is told
-        // when it opens.
+        // when it opens. If it refuses, the vault locks rather than run on
+        // a policy the page doesn't show.
         if (this.status.state === "ready") {
           const told = await this.raw({ type: "device-preset", preset: command.preset }, TIMEOUT_MS).catch((err: Error) => ({ type: "error", message: err.message }))
-          if (told.type === "error") return fail(typeof told.message === "string" && told.message ? told.message : "Deadbolt couldn't change the lock preset.")
+          if (told.type === "error") {
+            await this.lock()
+            return fail(typeof told.message === "string" && told.message ? told.message : "Deadbolt couldn't change the lock preset.")
+          }
         }
         this.preset = command.preset
         await chrome.storage.local.set({ [PRESET_KEY]: command.preset }).catch(() => {})
       }
-      return { ok: true, reply: { type: "device-settings", preset: this.preset }, ms: Date.now() - started, status: this.status }
+      return { ok: true, reply: { type: "device-settings", preset: this.preset, retryAt: this.tries.until }, ms: Date.now() - started, status: this.status }
     }
     if (command.type === "device-copied") {
       const clears = await this.copiedNow({ salt: command.salt, hash: command.hash })
@@ -375,18 +397,18 @@ export class StandaloneBackend implements VaultBackend {
       if (this.pending?.prompt.id === command.id) this.pending.settle({ error: cancelled() })
       return { ok: true, reply: { type: "device-reauth-cancel", ok: true }, ms: 0, status: this.status }
     }
-    if (command.type === "device-secret" && !command.passphrase) {
+    if (command.type === "device-secret" && !command.passphrase && !command.prf) {
       await this.loaded
       // Strict: showing a password asks for the passphrase every time.
       if (PRESETS[this.preset].reauth) return fail("Enter your passphrase to show this password.", "passphrase_needed")
     }
-    const checks = CHECKS.has(command.type) && (command.type === "device-unlock" || !!(command as { passphrase?: string }).passphrase)
+    const checks = CHECKS.has(command.type) && typeof (command as { passphrase?: string }).passphrase === "string"
     if (checks) {
       await this.loaded
       const wait = this.tries.until - Date.now()
       if (wait > 0) return fail(`Too many wrong passphrases. Try again in ${Math.ceil(wait / 1000)} s.`, "backoff")
     }
-    if (command.type === "device-reauth-confirm") return this.confirm(command.id, command.passphrase, started)
+    if (command.type === "device-reauth-confirm") return this.confirm(command.id, command.prf ? { prf: command.prf } : { passphrase: command.passphrase! }, started)
     if (command.type === "device-status") {
       await this.hello()
       return { ok: true, reply: { type: "hello" }, ms: Date.now() - started, status: this.status }
@@ -407,10 +429,17 @@ export class StandaloneBackend implements VaultBackend {
       ...(OPENS.has(command.type) ? { preset: this.preset } : {}),
     }
     let raw: Record<string, unknown>
+    const operation = this.epoch
     try {
       raw = await this.raw(body, SLOW_MS[command.type] ?? TIMEOUT_MS)
     } catch (err) {
       return fail((err as Error).message)
+    }
+    if (operation !== this.epoch) {
+      // An opening command may have installed keys and the previous policy
+      // after Lock or a preset change. Never leave that worker running.
+      if (OPENS.has(command.type)) await this.lock()
+      return fail("Deadbolt locked or its lock policy changed. Try again.", "locked")
     }
     const ms = Date.now() - started
     if (checks) await this.tried(raw.type === "error" && raw.code === "wrong_passphrase" ? "wrong" : raw.type === "error" ? "other" : "right")
@@ -419,7 +448,12 @@ export class StandaloneBackend implements VaultBackend {
       return fail(typeof raw.message === "string" && raw.message ? raw.message : "Deadbolt couldn't do that.", typeof raw.code === "string" ? raw.code : undefined)
     }
     if (command.type === "device-unlock" || command.type === "device-create" || command.type === "device-join-finish") {
-      this.used()
+      this.used(true)
+      if (operation !== this.epoch) {
+        await this.lock()
+        return fail("Deadbolt locked or its lock policy changed. Try again.", "locked")
+      }
+      if (command.type === "device-unlock") await chrome.storage.local.set({ "deadbolt.unlockMethod": command.prf ? "touch-id" : "passphrase" }).catch(() => {})
       await this.hello("unlocked")
       // Catch up with the other devices now, not at the next sync alarm.
       void this.sync()
@@ -437,17 +471,27 @@ export class StandaloneBackend implements VaultBackend {
    * document doesn't answer, it's closed, which ends the memory just as well.
    */
   async lock(): Promise<void> {
+    this.epoch++
+    this.locking ??= this.lockNow().finally(() => (this.locking = null))
+    return this.locking
+  }
+
+  private async lockNow(): Promise<void> {
     const unlocked = this.status.state === "ready"
     this.endReauth(new HostError("locked", "Deadbolt locked. Nothing was filled."))
     // A copied password goes with the vault.
-    await this.clearClipboard()
+    await this.clearClipboard().catch(() => {})
     const ok = await this.message<boolean>({ type: VAULT_LOCK } satisfies VaultLock, 5_000).catch(() => false)
     if (!ok) await chrome.offscreen.closeDocument().catch(() => {})
     this.capabilities = []
     // Only an unlocked vault is known to be locked now. Before the first one
     // (a join waiting, say) there's nothing to unlock: the fresh worker says
     // how it is.
-    if (!unlocked) return this.hello()
+    if (!unlocked) {
+      const reply = await this.transport({ type: "hello" }, TIMEOUT_MS).catch(() => null)
+      this.setStatus({ state: reply?.status === "not-set-up" ? "not-set-up" : "locked" }, "locked")
+      return
+    }
     this.setStatus({ state: "locked", detail: "Unlock Deadbolt to fill passwords" }, "locked")
   }
 
@@ -580,17 +624,21 @@ export class StandaloneBackend implements VaultBackend {
    * same backoff as unlocking); anything else ends it. The passphrase goes
    * to the vault in this one request and is kept nowhere.
    */
-  private async confirm(id: string, passphrase: string, started: number): Promise<DeviceReply> {
+  private async confirm(id: string, proof: UnlockProof, started: number): Promise<DeviceReply> {
     const p = this.pending
     if (!p || p.prompt.id !== id) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
-    if (p.body.type === "fill-form") return this.confirmOnce(p, passphrase, started)
+    // A card may be filled after Touch ID. A passkey always takes the
+    // passphrase: this keeps it waiting, so the passphrase can still answer it.
+    if (p.body.type === "fill-form") return this.confirmOnce(p, proof, started)
+    if (typeof proof.passphrase !== "string") return { ok: false, message: "Enter your passphrase to use this passkey.", code: "passphrase_needed", status: this.status }
+    const passphrase = proof.passphrase
     const key = await digest(p.prompt.id, passphrase)
     const prior = p.confirming
     if (prior?.key === key) return prior.reply
     if (this.pending !== p) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
     // Another passphrase is being checked: this one runs after it, if the request still waits and no backoff began.
     const after = () => this.confirmAfter(p, passphrase, started)
-    const reply = prior ? prior.reply.then(after, after) : this.confirmOnce(p, passphrase, started)
+    const reply = prior ? prior.reply.then(after, after) : this.confirmOnce(p, { passphrase }, started)
     const entry = { key, reply }
     p.confirming = entry
     // Kept once the request has ended, so the same passphrase sent again late gets the same answer.
@@ -606,17 +654,17 @@ export class StandaloneBackend implements VaultBackend {
     if (this.pending !== p) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
     const wait = this.tries.until - Date.now()
     if (wait > 0) return { ok: false, message: `Too many wrong passphrases. Try again in ${Math.ceil(wait / 1000)} s.`, code: "backoff", status: this.status }
-    return this.confirmOnce(p, passphrase, started)
+    return this.confirmOnce(p, { passphrase }, started)
   }
 
-  private async confirmOnce(p: Pending, passphrase: string, started: number): Promise<DeviceReply> {
+  private async confirmOnce(p: Pending, proof: UnlockProof, started: number): Promise<DeviceReply> {
     const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
     let raw: Record<string, unknown>
     // The KDF may outlast the time left to answer: the fill waits on it, not the clock.
     p.checking(true)
     try {
       const passkey = p.body.type !== "fill-form"
-      raw = await this.raw(passkey ? { type: "passkey-authorize", ceremony: p.body, passphrase } : { ...p.body, passphrase }, SLOW_MS["device-reauth-confirm"]!)
+      raw = await this.raw(passkey ? { type: "passkey-authorize", ceremony: p.body, passphrase: proof.passphrase } : { ...p.body, ...proof }, SLOW_MS["device-reauth-confirm"]!)
       // Checking the passphrase does not register/sign. Only a still-live
       // ceremony may spend its one-shot, command-bound authorization.
       if (passkey && raw.type === "passkey-authorized") {
@@ -707,6 +755,14 @@ export class StandaloneBackend implements VaultBackend {
   }
 
   private async raw(body: Record<string, unknown> & { type: string }, timeout: number): Promise<Record<string, unknown>> {
+    const at = this.epoch
+    await this.loaded
+    await this.locking
+    if (at !== this.epoch) throw new HostError("locked", "Deadbolt locked. Try again.")
+    return this.transport(body, timeout)
+  }
+
+  private async transport(body: Record<string, unknown> & { type: string }, timeout: number): Promise<Record<string, unknown>> {
     const response = await this.message<VaultResponse>({ type: VAULT_REQUEST, body } satisfies VaultRequest, timeout)
     if (!response) throw new HostError("disconnected", "Deadbolt's vault didn't start. Reload the extension and try again.")
     if ("error" in response) throw new HostError(response.locked ? "locked" : "failed", response.error)
@@ -734,7 +790,12 @@ export class StandaloneBackend implements VaultBackend {
   private async offscreen(): Promise<void> {
     const url = chrome.runtime.getURL(OFFSCREEN_PAGE)
     const open = await chrome.runtime.getContexts({ contextTypes: ["OFFSCREEN_DOCUMENT"], documentUrls: [url] })
-    if (open.length) return
+    if (open.length) {
+      // Chrome exposes the context before its script is ready to receive.
+      // A concurrent request must still wait for the initial page load.
+      await this.creating
+      return
+    }
     this.creating ??= chrome.offscreen
       .createDocument({
         url: OFFSCREEN_PAGE,
@@ -804,6 +865,7 @@ export function fromVaultPage(sender: chrome.runtime.MessageSender): boolean {
 }
 
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max
+const prf = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{64}$/.test(v)
 /** A field's name as the core takes it: lowercase letters, digits, `-` and `_`, starting with a letter. */
 const fieldName = (v: unknown): v is string => typeof v === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(v)
 const reauthId = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{32}$/.test(v)
@@ -829,6 +891,8 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
     case "device-passkeys":
     case "device-devices":
     case "device-settings":
+    case "device-biometric-info":
+    case "device-biometric-reset":
       return { type: c.type }
     case "device-sync":
       return c.wait === true ? { type: "device-sync", wait: true } : { type: "device-sync" }
@@ -842,6 +906,7 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
       if (!text(c.ref, 200) || !c.ref) return null
       if (c.field !== undefined && !fieldName(c.field)) return null
       const field = c.field === undefined ? {} : { field: c.field as string }
+      if (prf(c.prf)) return { type: "device-secret", ref: c.ref, ...field, prf: c.prf }
       if (c.passphrase === undefined) return { type: "device-secret", ref: c.ref, ...field }
       return text(c.passphrase, 1024) && c.passphrase ? { type: "device-secret", ref: c.ref, ...field, passphrase: c.passphrase } : null
     }
@@ -896,13 +961,19 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
     case "device-reauth":
       return { type: "device-reauth" }
     case "device-reauth-confirm":
+      if (reauthId(c.id) && prf(c.prf)) return { type: "device-reauth-confirm", id: c.id, prf: c.prf }
       return reauthId(c.id) && text(c.passphrase, 1024) && c.passphrase ? { type: "device-reauth-confirm", id: c.id, passphrase: c.passphrase } : null
     case "device-reauth-cancel":
       return reauthId(c.id) ? { type: "device-reauth-cancel", id: c.id } : null
     case "device-create":
       return text(c.passphrase, 1024) && c.passphrase && text(c.name, 200) ? { type: "device-create", passphrase: c.passphrase, name: c.name } : null
     case "device-unlock":
+      if (prf(c.prf)) return { type: "device-unlock", prf: c.prf }
       return text(c.passphrase, 1024) ? { type: "device-unlock", passphrase: c.passphrase } : null
+    case "device-biometric-set":
+      return prf(c.prf) && text(c.token, 8192) && c.token && text(c.passphrase, 1024) && c.passphrase ? { type: "device-biometric-set", prf: c.prf, token: c.token, passphrase: c.passphrase } : null
+    case "device-biometric-check":
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-biometric-check", passphrase: c.passphrase } : null
     case "device-join-start":
     case "device-join-status":
     case "device-join-cancel":

@@ -161,7 +161,9 @@ worker. This preserves the existing redb transactions, sealed log-length check,
 blinded metadata keys, XChaCha20-Poly1305 record encryption and Argon2id key wrapping.
 Only ciphertext enters OPFS. The backend calls `flush()` on redb durability barriers,
 checks complete reads/writes, and holds OPFS's exclusive file lock until close.
-No plaintext snapshot or unwrapped key is stored in IndexedDB or extension storage.
+No plaintext snapshot or key is written to IndexedDB or persistent extension
+storage, including `chrome.storage.session`. Every preset keeps the unlocked
+key set and device secret only in the dedicated worker's memory.
 
 OPFS is preferable to a new IndexedDB key-value implementation for this proof:
 redb already supplies atomic multi-record updates and crash recovery; replacing it
@@ -261,7 +263,7 @@ so those setup operations never overlap each other. Everything else
 core interleaves requests at its await points, so a sync or pairing waiting on the
 network does not hold up a list or fill. Locking bypasses all of it: the offscreen
 document terminates the worker and rejects in-flight and queued requests. A new
-worker reopens the encrypted file only after passphrase unlock.
+worker reopens the encrypted file only after passphrase or PRF unlock.
 
 Pairing's Argon2 rendezvous-key derivation is an exception: on wasm it runs
 synchronously on the vault worker and can stall its other requests for about
@@ -275,10 +277,11 @@ requests remain available immediately after unlock, even during the startup
 membership round. That barrier gates peer data exchange and invitations, not
 local reads. While the offscreen document exists, iroh can
 receive connections independently of the service worker, so peers can sync with
-the extension without it asking. Chrome may still discard the offscreen document
-or renderer. This proof fails closed in that case: the vault relocks, even under
-Comfortable. It does **not** claim guaranteed offscreen lifetime or any session-key
-restoration.
+the extension without it asking. Chrome does not document offscreen-document
+discard as normal operation for this use. If the worker, offscreen document or
+renderer is lost (including a crash), every preset locks and requires passphrase
+or PRF unlock. A setup or unlock crossing a lock/preset change ends the worker
+rather than retaining its old policy.
 
 ## Security compared with the native-host model
 
@@ -293,7 +296,8 @@ The passphrase necessarily crosses the trusted extension page, service worker an
 offscreen messaging boundary. Rust zeroizes its owned passphrase/key buffers, but
 JS strings, structured-clone copies and browser process memory cannot be reliably
 wiped. Lock terminates the worker and closes its network endpoint; it does not
-promise forensic erasure from RAM. No key is persisted unencrypted in this proof.
+promise forensic erasure from RAM. No key is retained in extension storage;
+trusted extension pages cannot retrieve an unlocked key from storage.session.
 
 The management command route accepts only the exact extension device page and the
 toolbar popup, which show the same vault UI (`extension/src/vault`); content
@@ -310,19 +314,17 @@ cannot retract secrets already received by a removed member.
 
 ## Lock presets
 
-These are the target product contract, not a claim that all settings ship in Phase 1.
-The Unwrapped key row for Comfortable and Relaxed is a proposal, not a settled
-decision: keeping the unwrapped key in `chrome.storage.session` needs its own
-security review before anything implements it.
+Every preset keeps unlocked keys in the dedicated worker's memory only. Worker,
+offscreen or renderer loss locks every preset; there is no session restoration.
 
 | | Strict | Comfortable (default) | Relaxed |
 | --- | --- | --- | --- |
 | Idle lock | 5 min | 1 h | 12 h |
 | Screen lock / sleep (`chrome.idle` locked) | locks | locks | stays unlocked |
 | Browser quit | locks | locks | locks |
-| Unwrapped key | offscreen memory only | proposed: memory + `chrome.storage.session` for offscreen restart | proposed: same as Comfortable |
+| Worker/offscreen loss | locks | locks | locks |
 | Touch ID / passkey unlock | allowed | allowed | allowed |
-| Reveal/copy password; card number/CVV | re-auth every time | re-auth card number/CVV | no re-auth |
+| Reveal/copy password; card number/CVV | re-auth every time | no re-auth | no re-auth |
 
 Use means a pick, fill, save, opening the popup, opening a login, or reveal. Passive
 listing for a page menu is not use, and neither is a page reading the vault again
@@ -332,14 +334,81 @@ passphrase check before a password is shown or copied. The choice is a setting i
 `chrome.storage.local`, never a key. The service worker sends it to the vault's
 worker with every unlock and change, and the Rust core enforces Strict itself
 (`crates/ext-core/src/policy.rs`): under Strict it returns no password without a
-passphrase, which it checks against the open store's key set, and a worker that
-was never told assumes Strict. Card number/CVV fills also require the passphrase on every Strict fill.
+passphrase or PRF key, which it checks against the open store's key set, and a
+worker that was never told assumes Strict. Card number/CVV fills require the
+same verification on every Strict fill.
 Comfortable and Relaxed currently follow the native rule with Touch ID off (the
 explicit pick is enough), rather than claiming biometric reauthentication.
-Touch ID/passkey unlock is not implemented. The unwrapped key stays in worker memory only under every
-preset: session-key restoration and passkey PRF wrapping need their own security
-review and browser capability handling, so an offscreen restart still locks under
-Comfortable and Relaxed.
+Opt-in **Unlock with Touch ID** uses a platform WebAuthn passkey with PRF. Strict
+reveals/copies and card fills accept a new PRF assertion or the passphrase. Rust
+checks the actual PRF key against the enrolled store slot, never a JS boolean.
+Website-passkey ceremonies and passkey deletion remain passphrase-only under
+Strict. The unlock factor does not change `canVerify=false` or UV=false for
+website passkeys, and Rust refuses PRF-only consent through either delete API
+or a ceremony. These are separate from the extension-origin unlock passkey.
+The UI remembers the successful unlock method, keeps passphrase fallback visible,
+submits on Enter, and shows the backoff countdown. The locked inline row opens
+the device page; unlock returns to the requesting document and reopens its menu,
+without choosing or filling a credential.
+
+### Platform passkey unlock
+
+Enrollment creates a resident platform credential with `userVerification:
+"required"`, no attestation, and the extension's own RP (no remote website).
+A random 32-byte PRF input and credential id are public metadata in the store
+header. A subsequent assertion must return 32 PRF bytes with the authenticator's
+UV flag set before enrollment is committed. Rust derives the slot key with
+`blake3::derive_key("deadbolt ext-core v1 prf unlock", &prf)`; enrollment,
+unlock and Strict checks use the same fixed context. That derived key wraps
+the existing random store key set in the shared
+store's XChaCha20-Poly1305 biometric slot, alongside the Argon2id passphrase slot.
+The current passphrase is checked with normal guessing backoff before creating
+a provider passkey, then checked again when saving the slot. A wrong passphrase
+therefore creates no orphan provider credential. Neither passphrase nor PRF
+output is saved in preferences. Reset Touch ID removes the slot and metadata;
+it does not delete the OS passkey. A deleted passkey, cancellation, missing
+platform authenticator or missing PRF output leaves passphrase unlock available.
+Changing the passphrase through the store API also clears the biometric slot.
+
+**Browser evidence:** headless Chromium 156 and Helium 0.20.2.1 (Chromium
+156.0.8078.73) both create internal-platform PRF credentials on
+`chrome-extension://` with CDP's CTAP2.1 virtual authenticator (`hasPrf: true`).
+The standalone e2e exercises registration, assertion, wrapping, unlock, Strict
+secret checks, fake-output rejection and reset. This proves the origin/browser
+plumbing, **not real Touch ID hardware**: exos is Linux. Availability depends on
+the provider. Chromium's legacy local-profile macOS authenticator lacks PRF;
+Google Password Manager and supported system passkey providers may supply it
+([Chromium discussion](https://groups.google.com/a/chromium.org/g/blink-dev/c/iTNOgLwD2bI)).
+There is no insecure emulation when PRF is absent: the closest standalone option
+is a PRF-capable platform provider, otherwise keep the passphrase (native Secure
+Enclave unlock remains a separate native-host option). No HTTPS bridge/helper is
+introduced. Real Chrome and Helium on macOS still need an on-device acceptance
+check. UV may be a device PIN/password or provider verification: the UI label is
+**not a guarantee of biometric-only, device-bound Secure Enclave protection**.
+A synced provider may copy the unlock credential.
+
+An attacker with only OPFS gets public credential metadata and two encrypted key
+slots. Without PRF output they must guess the passphrase through Argon2id; the
+public salt/id alone cannot evaluate PRF. A compromised extension can read all
+unlocked secrets, solicit an assertion and cache its output, steal the passphrase
+as typed, or weaken future UI checks. PRF is not an enclave for extension code;
+Rust cannot establish fresh user presence from a PRF value alone. Origin binding
+protects against an unrelated website, not malicious code at this extension origin.
+
+### Session persistence dropped after security review
+
+The proposed browser-session envelope was removed. A wrapping key beside its
+envelope in `chrome.storage.session` exposed the long-term key set and device
+secret to every trusted extension-origin context, including the web-accessible
+menu frame. `TRUSTED_CONTEXTS` does not isolate the vault page from that frame.
+No preset exports, saves or resumes a session key now. PRF makes relocking cheap
+without widening the storage boundary. Memory inspection, swap and crash dumps
+can still expose a currently unlocked worker or transient JS copies.
+
+Possible follow-up, not implemented: retain the key set only in the offscreen
+document's memory and respawn its dedicated worker after a wasm crash, with a
+capped number of respawns. Losing the offscreen document must still lock. This
+needs its own lifecycle/security review, not a storage.session fallback.
 
 Wrong passphrases back off. After three in a row, for unlocking or for Strict's
 check before a password, the service worker refuses the next try for 1 s, then 2,
@@ -388,7 +457,7 @@ scenario named.
 | `fill` (`username`, `password`, `totp`) | Same | Current TOTP from core |
 | `generate`, `generate-check`, `generate-keep`, `generate-drop` | Same | Shared page-rule planning and candidate lifetime |
 | `check`, `save` | Same | Shared login check and password-only update |
-| `forms`, `fill-form` | Same, except Touch ID | Strict asks for the passphrase in Deadbolt's own popup instead |
+| `forms`, `fill-form` | Shared form rules | Strict asks for the passphrase or an enrolled platform PRF assertion |
 | `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Shared ceremony rules, without biometric UV | Strict uses passphrase reauthentication; required UV uses the browser |
 | `learn` | Same, kept in the browser | See "Learning logs" below |
 | Rate limits | Same | The host's token buckets, in the service worker |
@@ -412,7 +481,7 @@ scenario named.
 | Passkeys | Registration, assertions, account selection, conditional UI, sync and deletion | `e2e/standalone.ts`; native adapter covered by `passkeys` |
 | "Learn this site" (#65), in the popup | Same | `learnAndNever` |
 | "Never for this site", and "Saving is off… Turn on" in the popup | Same; Settings also lists every such site | `learnAndNever` |
-| Touch ID for card numbers | Strict passphrase instead | `formsTouchId` is native only; e2e/standalone.ts covers Strict |
+| Touch ID for card numbers | Strict passphrase or enrolled PRF | `formsTouchId` is native only; e2e/standalone.ts covers Strict and PRF |
 
 ### Vault features of the native app
 
@@ -420,7 +489,7 @@ scenario named.
 | --- | --- |
 | Every item type: view, search, copy, add, edit, delete | Same (#97); item links (billing identity, sign-in account) kept, not edited |
 | Devices, pairing, sync, rename | Same |
-| Lock presets, idle and screen lock | Same; Touch ID unlock is separate work |
+| Lock presets, idle and screen lock | Same; optional platform PRF unlock with passphrase fallback |
 | Several vaults, switching | Missing: one vault per browser |
 | Import from other password managers | Missing: import on a native device and sync |
 | Export | Neither build has one |
@@ -641,11 +710,10 @@ name "this Mac" grants nothing: it only changes the wording.
    storage/lifetime adapters, and exercise
    suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
    startup contacts (the proof dials sequentially within the same 30-second budget).
-3. Offscreen session-key restoration (security review first), stronger
-   browser-lifetime guarantees and biometric card reauthentication.
-4. Add WebAuthn PRF/passkey unlock with capability detection; review key wrapping,
-   extension origin binding and memory/permission boundaries.
-5. Finish learning; harden
+3. Validate real platform providers in Chrome and Helium on macOS; evaluate
+   capped wasm-worker crash recovery from offscreen memory only (not built).
+4. Stronger browser-lifetime guarantees and Comfortable biometric card policy.
+5. Harden
    packaging/update/CSP permissions, measure wasm size/unlock across devices, and
    decide native-path retirement.
 
@@ -653,7 +721,7 @@ name "this Mac" grants nothing: it only changes the wording.
 
 - One vault per browser device; no automatic migration from the native build.
   "On this Mac" is known only for a copy the CLI keeps, not by asking the host.
-- No biometric/PRF unlock or passkey UV provider. Required-UV WebAuthn ceremonies
+- No website-passkey UV provider. Required-UV WebAuthn ceremonies
   use the browser, not a false claim that the local passphrase performed Touch ID.
   As native, passkeys are ES256 with `none` attestation only, with no editing,
   import/export, PRF or largeBlob support.
