@@ -103,14 +103,27 @@ export function labelText(el: FormControl): string {
   return parts.filter(Boolean).join(" ").slice(0, 300)
 }
 
+/**
+ * A password box, or a text box the page masks with CSS
+ * (`-webkit-text-security`) to keep the browser's own password handling away.
+ */
+export function masked(el: HTMLInputElement): boolean {
+  if (el.type === "password") return true
+  if (el.type !== "text") return false
+  const security = getComputedStyle(el).getPropertyValue("-webkit-text-security")
+  return !!security && security !== "none"
+}
+
 function factsFor(el: HTMLInputElement): FieldFacts {
   const code = [el.id, el.name, el.getAttribute("class"), el.getAttribute("data-testid"), el.getAttribute("data-test")]
     .filter((v): v is string => typeof v === "string" && v.length > 0)
     .join(" ")
+  const label = labelText(el)
   return {
-    type: (el.getAttribute("type") || "text").toLowerCase(),
+    type: masked(el) ? "password" : (el.getAttribute("type") || "text").toLowerCase(),
     autocomplete: (el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).filter(Boolean),
-    display: words(labelText(el)),
+    display: words(label),
+    question: /[?？]\s*$/.test(Array.from(el.labels ?? [], (l) => innerText(l)).join(" ") || label),
     code: squash(words(code.slice(0, 300))),
     maxLength: el.maxLength > 0 ? el.maxLength : 0,
     inputMode: (el.getAttribute("inputmode") || "").toLowerCase(),
@@ -338,6 +351,39 @@ function adjustRoles(fields: ScannedField[], kind: FormKind) {
   }
 }
 
+// One-time codes Deadbolt holds are an authenticator app's (TOTP). A code
+// the site sent by text message or email, or a backup or recovery code, is
+// one the user brings: its box gets no menu and no fill. The field's own
+// label says which first; else the page does, an authenticator winning over
+// a code it sent; else it's taken for an authenticator's, as before.
+const CODE_AUTHENTICATOR = ["authenticator", "authentication app", "authenticator app", "totp", "app generated", "authenticator application"]
+const CODE_SENT = [
+  "we sent", "we ve sent", "we have sent", "we just sent", "sent a", "sent you", "sent to", "text message", "texted", "sms",
+  "resend", "send a new code", "send again", "send another", "didn t get", "didn t receive", "did not receive",
+  "check your email", "check your inbox", "check your phone", "by email", "via email", "emailed", "email code",
+  "phone ending", "number ending",
+]
+const CODE_BACKUP = ["backup code", "back up code", "backup codes", "recovery code", "recovery codes", "recovery key", "scratch code", "emergency code"]
+const prepared = (list: string[]) => list.map((p) => words(p).trim())
+const [AUTHENTICATOR, SENT, BACKUP] = [prepared(CODE_AUTHENTICATOR), prepared(CODE_SENT), prepared(CODE_BACKUP)]
+
+/** Whether a code box with this label (words()) on this page takes the login's authenticator code. */
+export function heldCode(label: string, page: () => string): boolean {
+  const any = (text: string, list: string[]) => list.some((p) => hasPhrase(text, p))
+  if (any(label, BACKUP)) return false
+  if (any(label, AUTHENTICATOR)) return true
+  if (any(label, SENT)) return false
+  const text = page()
+  if (any(text, AUTHENTICATOR)) return true
+  return !any(text, SENT) && !any(text, BACKUP)
+}
+
+/** What the page says around its code box: title, headings and the start of its text. */
+function codePageText(form: HTMLFormElement | null): string {
+  const heads = Array.from(document.querySelectorAll("h1, h2, h3, [role=heading]")).slice(0, 6).map((h) => innerText(h))
+  return words([document.title, ...heads, innerText(form), innerText(document.body).slice(0, 3000)].join(" \n "))
+}
+
 export function scanPage(): ScanResult {
   const roots = openRoots()
   const { fields: all, otpBoxes } = collectFields(roots)
@@ -350,11 +396,26 @@ export function scanPage(): ScanResult {
   const formKind = decideKind(scanned, otpBoxes.length, contextText(form), controls)
   if (formKind) adjustRoles(scanned, formKind)
 
-  const fields: Field[] = scanned.filter((f) => f.role).map((f) => ({ el: f.el, role: f.role!, owner: ownerOf(f.el) }))
-  if (otpBoxes.length && inScope(otpBoxes[0])) for (const el of otpBoxes) fields.push({ el, role: "otp", split: otpBoxes.length, owner: ownerOf(el) })
+  // Codes the user brings themselves (sent, or backup) aren't the login's to fill.
+  let page: string | undefined
+  const pageText = () => (page ??= codePageText(form))
+  let brought = 0
+  for (const f of scanned)
+    if (f.role === "otp" && !heldCode(f.facts.display, pageText)) {
+      f.role = null
+      brought++
+    }
+  const boxes = otpBoxes.length && inScope(otpBoxes[0]) ? otpBoxes : []
+  const split = boxes.length && heldCode(words(labelText(boxes[0])), pageText) ? boxes : []
+  if (boxes.length && !split.length) brought++
 
-  // Sign-in wording with no fields to fill isn't a form.
-  const kind = formKind === "newsletter" || !fields.length ? null : formKind
+  const fields: Field[] = scanned.filter((f) => f.role).map((f) => ({ el: f.el, role: f.role!, owner: ownerOf(f.el) }))
+  for (const el of split) fields.push({ el, role: "otp", split: split.length, owner: ownerOf(el) })
+
+  // Sign-in wording with no fields to fill isn't a form; a code step whose
+  // code the user brings still is one (a sign-in that isn't over), with
+  // nothing in it to fill.
+  const kind = formKind === "newsletter" || (!fields.length && !(formKind === "mfa" && brought)) ? null : formKind
   return { kind, fields, submit: controls.submit, provider: controls.provider }
 }
 

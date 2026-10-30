@@ -100,6 +100,8 @@ const CLUES: Array<[FormRole, RegExp]> = ([
   ["bday", /\b(birth|birthday|birthdate|dob|date of birth|geburts\w*|nacimiento|naissance|nascita|geboortedatum|生年月日|出生)\b/],
 ] as Array<[FormRole, RegExp]>).map(([role, re]) => [role, w(re)])
 
+/** A whole date's format in one box: mm/dd/yyyy, dd mm yyyy, yyyy mm dd (plain() turns . and - into spaces). */
+const FULL_DATE = /(^|[^a-z])(mm|dd|jj|tt|yyyy|aaaa|jjjj)[/ ](mm|dd|jj|tt)[/ ](yyyy|yy|aaaa|aa|jjjj|jj|dd|tt)([^a-z]|$)/
 const DAY = w(/\b(day|dd|tag|dia|jour|giorno)\b/)
 const MONTH = w(/\b(month|mm|monat|mes|mois|mese)\b/)
 const YEAR = w(/\b(year|yyyy|yy|jahr|ano|annee|anno)\b/)
@@ -114,7 +116,7 @@ function fromText(display: string, code: string): FormRole | null {
       if (!re.test(text)) continue
       // "Name" next to "card" is the cardholder; plain "card" words never make an address.
       if (role === "name" && CARD_CONTEXT.test(text)) return "cc-name"
-      if (role === "bday") return DAY.test(text) ? "bday-day" : MONTH.test(text) ? "bday-month" : YEAR.test(text) ? "bday-year" : "bday"
+      if (role === "bday") return FULL_DATE.test(text) ? "bday" : DAY.test(text) ? "bday-day" : MONTH.test(text) ? "bday-month" : YEAR.test(text) ? "bday-year" : "bday"
       return role
     }
   }

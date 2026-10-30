@@ -19,6 +19,8 @@ export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password"
 /** Forms whose new-password boxes get a generated password. */
 export const GENERATE_KINDS: SurfaceKind[] = ["signup", "change-password"]
 export const IDENTIFIER_ROLES: FieldRole[] = ["username", "email", "phone"]
+/** A username that's a phone number (digits, with + ( ) . - and spaces), the only kind a phone box takes. */
+export const phoneLike = (username: string | undefined) => !!username && /^\+?[\d\s().-]{7,24}$/.test(username.trim()) && (username.match(/\d/g)?.length ?? 0) >= 7
 /** Roles a fill can write. */
 export const FIELD_ROLES: FieldRole[] = ["username", "email", "phone", "password", "new-password", "otp"]
 
@@ -144,7 +146,7 @@ export type ToBackground =
   | { type: "db:query"; roles: FieldRole[]; focused: FieldRole; form: number; kind: SurfaceKind | null; rules?: FieldRules; explicit?: boolean; again?: boolean; identifier?: string; pageAccount?: string; box?: Box }
   /** `stepped`: since the last fill in this document, the user submitted or the filled fields went. */
   /** `idEmpty`: the form has a username or email box and it's empty (a "Use a different account" step). */
-  | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean }
+  | { type: "db:page"; kind: SurfaceKind | null; roles: FieldRole[]; form: number; stepped: boolean; idEmpty?: boolean; asksNew?: boolean }
   /** The top page may have finished a sign-in step: it showed no login form for a moment, or moved on to a code step. */
   | { type: "db:settled" }
   /** `kind` and `roles`: the submitted form's, to tell it if it shows again. */

@@ -99,8 +99,18 @@ describe("sameSite", () => {
 })
 
 describe("saveTitle", () => {
+  test("names the site, not the page's action", () => {
+    expect(saveTitle("Sign in to GitHub · GitHub", "github.com")).toBe("GitHub")
+    expect(saveTitle("Log in | Linear", "linear.app")).toBe("Linear")
+    expect(saveTitle("Create your account · Acme", "vogel.dev")).toBe("Acme")
+    expect(saveTitle("Sign in - Google Accounts", "google.com")).toBe("Google Accounts")
+    expect(saveTitle("Amazon Sign-In", "amazon.com")).toBe("Amazon")
+    expect(saveTitle("Kit's Notes", "notes.example")).toBe("Kit's Notes")
+    expect(saveTitle("Pay-as-you-go plans", "example.com")).toBe("Pay-as-you-go plans")
+  })
+
   test("the page title, tidied", () => {
-    expect(saveTitle("  Sign in \n\t to   Acme\u0000 ", "acme.com")).toBe("Sign in to Acme")
+    expect(saveTitle("  Sign in \n\t to   Acme\u0000 ", "acme.com")).toBe("Acme")
   })
 
   test("capped at 128 characters without splitting one", () => {
@@ -111,6 +121,7 @@ describe("saveTitle", () => {
 
   test("the site when the page has no title", () => {
     expect(saveTitle("", "acme.com")).toBe("acme.com")
+    expect(saveTitle("Sign in", "acme.com")).toBe("acme.com")
     expect(saveTitle(" \n ", "acme.com")).toBe("acme.com")
     expect(saveTitle(undefined, "acme.com")).toBe("acme.com")
   })

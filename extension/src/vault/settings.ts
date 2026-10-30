@@ -192,7 +192,7 @@ export function settingsView(app: App): View {
   const paintBiometric = async () => {
     const enabled = !!(await enrollment(app))
     const error = h("p", { class: "error", role: "alert" })
-    const action = button("btn", enabled ? "Reset Touch ID" : "Unlock with Touch ID", async (b) => {
+    const action = button("btn", enabled ? "Reset Touch ID" : "Set up Touch ID", async (b) => {
       if (enabled) {
         b.disabled = true
         const r = await app.run({ type: "device-biometric-reset" })
@@ -216,7 +216,7 @@ export function settingsView(app: App): View {
       pass.focus()
     })
     biometrics.replaceChildren(h("div", { class: "section-head" }, h("span", { class: "label" }, "Touch ID")),
-      para(enabled ? "Touch ID unlock is on. Reset removes Deadbolt's key slot, not the passkey in your authenticator." : "Optional: use a platform passkey with PRF. Your browser may offer its device PIN instead of Touch ID. Your passphrase always works."), action, error)
+      h("p", { class: "hint" }, enabled ? "Touch ID unlocks Deadbolt in this browser. Reset turns it off here; the passkey it made stays in your browser's settings until you remove it." : "Unlock with Touch ID instead of typing your passphrase. Your browser may ask for its PIN instead. Your passphrase always works."), action, error)
   }
   void paintBiometric()
 
@@ -358,10 +358,10 @@ export function settingsView(app: App): View {
   paint()
   el.append(
     toolbar("Settings", () => app.go({ name: "list" }, -1)),
-    biometrics,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Devices")), devices, pairArea),
     passkeysGroup,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Lock")), presets, h("p", { class: "hint" }, "Every preset locks when the browser quits.")),
+    biometrics,
     h(
       "section",
       { class: "group" },
