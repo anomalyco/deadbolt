@@ -161,6 +161,9 @@ let near = false
 /** The origin the menu frame said it's on, and where its frame last was on screen. */
 let menuOrigin = ""
 let lastRect = ""
+let lastGeometry = ""
+let scaleVisible = false
+let scaleObserver: ResizeObserver | null = null
 /** Where a frame's field is in this page now (see anchorBox). */
 function boxNow(): DOMRect | null {
   if (!anchorBox) return null
@@ -353,6 +356,8 @@ function position() {
   written = at
   host.style.cssText = important({
     all: "initial",
+    // Keep the menu at its own size on CSS-zoomed pages (including dialogs).
+    zoom: String(unzoom(host)),
     position: "fixed",
     inset: "auto",
     top: `${at.top}px`,
@@ -369,6 +374,8 @@ function position() {
   // Dwell). From inside its frame it can't tell it was moved, so say so: the
   // page can restyle the host, and the field it follows can move.
   if (frame) {
+    // This layout read also syncs the child viewport. Its scale observers
+    // rely on seeing restored layout as well as a page's later scaled paint.
     const f = frame.getBoundingClientRect()
     const rect = [f.left, f.top, f.width, f.height].map(Math.round).join()
     if (rect !== lastRect && !followedResize(lastRect, rect)) tellMoved()
@@ -379,6 +386,25 @@ function position() {
   // read as a cover): only a surface still in use goes back on top.
   if (!closing && !held && covered(host)) raise()
   if (host) raf = requestAnimationFrame(position)
+}
+
+/** The inverse of the CSS zoom above the host; viewport coordinates must not be scaled again. */
+function unzoom(el: Element): number {
+  const parent = el.parentNode instanceof ShadowRoot ? el.parentNode.host : el.parentElement
+  const zoom = (parent as (Element & { currentCSSZoom?: number }) | null)?.currentCSSZoom
+  if (typeof zoom !== "number" || !(zoom > 0)) return 1
+  const inverse = 1 / zoom
+  return Number.isFinite(inverse) && inverse > 0 ? inverse : 1
+}
+
+/** The intended size, not a rect the page may have restyled; only the menu gets it. */
+function tellGeometry() {
+  if (!port || !written) return
+  const geometry = { width: Math.round(written.width), height: Math.round(written.height), visible: scaleVisible }
+  const key = JSON.stringify(geometry)
+  if (key === lastGeometry) return
+  lastGeometry = key
+  port.postMessage({ type: "db:menu-geometry", geometry })
 }
 
 /**
@@ -443,6 +469,23 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   ;((el && modalAround(el)) ?? document.documentElement).append(box)
   show(box)
   position()
+  // ResizeObserver runs after all rAF callbacks, including a page's later
+  // restyle. Observe physical pixels so zoom alone triggers it. Keep this
+  // verdict until another rendered size arrives: a task can restore layout
+  // before a press without undoing the scaled paint the user saw. A deeper
+  // page ResizeObserver can run later still: the menu's own observers cover
+  // that deferred-host-observation case (see readScale in menu.ts).
+  scaleObserver = new ResizeObserver(() => {
+    if (host !== box || !written) return
+    const r = box.getBoundingClientRect()
+    const zoom = (box as HTMLElement & { currentCSSZoom?: number }).currentCSSZoom
+    const matches = (a: number, b: number) => Math.abs(a - b) <= 2
+    scaleVisible =
+      typeof zoom === "number" && Math.abs(zoom - 1) < 0.001 &&
+      matches(r.left, written.left) && matches(r.top, written.top) && matches(r.width, written.width) && matches(r.height, written.height)
+    tellGeometry()
+  })
+  scaleObserver.observe(box, { box: "device-pixel-content-box" })
   if (as === "save" || as === "signin") {
     // From the corner, where the toolbar button is: 24 px of travel and a fade.
     frame.style.borderRadius = `${SAVE_GUESS.height / 2}px`
@@ -599,6 +642,9 @@ export const menuHost = (): HTMLElement | null => host
 
 export function closeMenu(refocus = false, dismissed = false) {
   cancelAnimationFrame(raf)
+  scaleObserver?.disconnect()
+  scaleObserver = null
+  scaleVisible = false
   reveal = null
   clearTimeout(revealTimer)
   if (token) void send({ type: "db:menu-close", token, dismissed })
@@ -618,7 +664,7 @@ export function closeMenu(refocus = false, dismissed = false) {
   near = false
   for (const t of saveTimers) clearTimeout(t)
   saveTimers = []
-  menuOrigin = lastRect = ""
+  menuOrigin = lastRect = lastGeometry = ""
   if (refocus) field?.focus({ preventScroll: true })
 }
 
@@ -1050,6 +1096,7 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   port = channel.port1
   // The frame's own word that its pill or offer is done, over the channel only it and this script hold.
   port.onmessage = onPortMessage
+  tellGeometry()
   // Typed before the frame was ready: narrow it now.
   const typed = anchor && mode === "accounts" && anchor.value && typedSinceOpen ? anchor.value : ""
   if (typed) port.postMessage({ type: "db:filter", query: typed.slice(0, 200) })

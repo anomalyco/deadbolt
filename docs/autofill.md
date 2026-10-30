@@ -210,7 +210,8 @@ not running without sending hello, which would start the agent again.
 - **Menu visibility.** The menu samples its own visibility rather than
   watching it continuously: an `IntersectionObserver` with `trackVisibility`
   gives a reading at most every 100 ms, saying whether the menu is fully on
-  screen, unscaled, opaque and uncovered. A pick, by mouse or keyboard,
+  screen, opaque and uncovered. It ignores CSS `zoom` and also permits
+  proportional transform upscaling; it is not a scale check. A pick, by mouse or keyboard,
   counts only if every reading for at least 500 ms before the key or button
   went down said so and the menu hadn't moved or changed size, and nothing
   changes until a fresh reading taken 400 ms after the press confirms it. A
@@ -230,6 +231,30 @@ not running without sending hello, which would start the agent again.
   avatar's ring is still, the save offer's bar is stepped frame by frame,
   never animated), and after narrowing's row animations the half second
   starts again, as after a move.
+- **Rendered menu scale.** The host cancels its ancestors' CSS zoom, so an
+  ordinary zoomed page still gets the menu at its own size. A
+  `ResizeObserver` watches the host's device-pixel box: unlike our positioning
+  rAF, its callback runs after the page's later rAF callbacks. It checks that
+  the host's cumulative `currentCSSZoom` is 1 (within 0.1%) and its rect still
+  matches the intended placement and size (within 2 CSS px). The verdict
+  stays until another rendered size is observed; restoring zoom in a task
+  cannot turn a bad painted size into an approval. The private menu channel
+  carries that verdict and intended viewport size. At the press and after
+  the fresh visibility check, the menu requires a good verdict and matching
+  viewport dimensions; a changed verdict or size restarts the dwell. A
+  disagreement uses the same "This menu is covered" refusal. Inside the
+  menu, separate CSS and device-pixel observers watch its physical/CSS ratio
+  (a page can compensate zoom with size to keep physical pixels unchanged):
+  a change restarts the dwell, even if IO v2 still says visible. This covers
+  a page's deeper ResizeObserver changing the host after its observer ran
+  (the browser defers that shallower observation). It relies on Chromium
+  syncing the extension frame at both our forced layout and the scaled
+  paint; removing that layout read would remove the deeper-observer defense.
+  This is tested in headless Chromium, not a claim about other engines.
+  Checking only inside our rAF, or only when the fields are approved,
+  would miss a page that restores layout between frames. The host observer
+  watches size, not position-only restyles; this is not a new guarantee
+  against late movement.
 - **A press takes no focus.** A pointer press in the menu leaves focus where
   it was, in the page's field (the menu cancels the press's default
   action). The page never sees its field blur at the moment of the press,
