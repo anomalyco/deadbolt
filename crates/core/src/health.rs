@@ -162,7 +162,10 @@ impl Finding {
                 title,
                 date,
                 date_known: false,
-            } => format!("{title} breached {} · password date unknown", short_month(date)),
+            } => format!(
+                "{title} breached {} · password date unknown",
+                short_month(date)
+            ),
             Self::Reused { others, .. } => match others.as_slice() {
                 [one] => format!("Same password as {}", one.label),
                 [first, rest @ ..] => {
@@ -325,7 +328,10 @@ pub fn item_fingerprint(key: &[u8; 32], vault_name: &str, item: &Item) -> [u8; 3
         feed(&mut hasher, name.as_bytes());
         feed(&mut hasher, field.kind.as_str().as_bytes());
         if field.kind == crate::FieldType::File {
-            feed(&mut hasher, crate::item::file_parts(&field.value).0.as_bytes());
+            feed(
+                &mut hasher,
+                crate::item::file_parts(&field.value).0.as_bytes(),
+            );
         } else {
             feed(&mut hasher, field.value.as_bytes());
         }
@@ -541,7 +547,7 @@ pub fn evaluate(
                     });
                 }
             }
-            others.sort_by(|a, b| a.label.to_lowercase().cmp(&b.label.to_lowercase()));
+            others.sort_by_key(|a| a.label.to_lowercase());
             push(Finding::Reused {
                 count: accounts.len(),
                 others,

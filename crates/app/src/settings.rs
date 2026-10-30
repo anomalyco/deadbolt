@@ -194,7 +194,7 @@ pub fn page(s: &App, k: &Kit) -> El {
         .color(k.c.text_faint)
         .wrap()
         .w_full()
-        .pt(6.0),
+        .pt(10.0),
     );
     let (problems, recorder) = crate::shortcut::setting(s, k);
     let shortcut_about = if problems.is_empty() {

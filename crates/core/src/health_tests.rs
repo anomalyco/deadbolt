@@ -29,7 +29,10 @@ fn non_password_secrets_and_pins_never_trigger_password_health() {
             "card",
             Some("Visa".into()),
             [
-                ("number".into(), Field::new(FieldType::Secret, "4242424242424242")),
+                (
+                    "number".into(),
+                    Field::new(FieldType::Secret, "4242424242424242"),
+                ),
                 ("pin".into(), Field::new(FieldType::Secret, "1234")),
                 ("cvv".into(), Field::new(FieldType::Secret, "123")),
             ],
@@ -38,7 +41,10 @@ fn non_password_secrets_and_pins_never_trigger_password_health() {
             "bank",
             Some("Checking".into()),
             [
-                ("account-number".into(), Field::new(FieldType::Secret, "00012345")),
+                (
+                    "account-number".into(),
+                    Field::new(FieldType::Secret, "00012345"),
+                ),
                 ("pin".into(), Field::new(FieldType::Secret, "0000")),
             ],
         ),
@@ -144,7 +150,10 @@ fn reuse_collapses_same_account_and_shared_domains_but_flags_distinct_accounts()
                     "login",
                     Some("GitHub".into()),
                     [
-                        ("url".into(), Field::new(FieldType::Url, "https://github.com")),
+                        (
+                            "url".into(),
+                            Field::new(FieldType::Url, "https://github.com"),
+                        ),
                         ("username".into(), Field::new(FieldType::Text, "alex")),
                         ("password".into(), Field::new(FieldType::Secret, dup_pw)),
                     ],
@@ -166,7 +175,10 @@ fn reuse_collapses_same_account_and_shared_domains_but_flags_distinct_accounts()
                     "login",
                     Some("Envato".into()),
                     [
-                        ("url".into(), Field::new(FieldType::Url, "https://envato.com")),
+                        (
+                            "url".into(),
+                            Field::new(FieldType::Url, "https://envato.com"),
+                        ),
                         ("username".into(), Field::new(FieldType::Text, "alex")),
                         (
                             "password".into(),
@@ -194,7 +206,10 @@ fn reuse_collapses_same_account_and_shared_domains_but_flags_distinct_accounts()
                     "login",
                     Some("Linear".into()),
                     [
-                        ("url".into(), Field::new(FieldType::Url, "https://linear.app")),
+                        (
+                            "url".into(),
+                            Field::new(FieldType::Url, "https://linear.app"),
+                        ),
                         ("username".into(), Field::new(FieldType::Text, "alex")),
                         ("password".into(), Field::new(FieldType::Secret, shared_pw)),
                     ],
@@ -237,7 +252,12 @@ fn reuse_collapses_same_account_and_shared_domains_but_flags_distinct_accounts()
     let mut memos = memos_for(&personal);
     memos.extend(memos_for(&work));
 
-    let (counts, items) = evaluate(&memos, Some(&personal.id().to_string()), &BTreeMap::new(), None);
+    let (counts, items) = evaluate(
+        &memos,
+        Some(&personal.id().to_string()),
+        &BTreeMap::new(),
+        None,
+    );
     assert_eq!(counts.reused, 1, "{items:?}");
     let linear = items.iter().find(|i| i.label == "Linear").unwrap();
     assert_eq!(linear.risk, Some(RiskLevel::Danger));
@@ -266,7 +286,10 @@ fn directory_rollups_match_google_and_apple_and_passkeys_satisfy_2fa() {
             "login",
             Some("GitHub".into()),
             [
-                ("url".into(), Field::new(FieldType::Url, "https://github.com")),
+                (
+                    "url".into(),
+                    Field::new(FieldType::Url, "https://github.com"),
+                ),
                 ("username".into(), Field::new(FieldType::Text, "alex")),
                 (
                     "password".into(),
@@ -282,7 +305,10 @@ fn directory_rollups_match_google_and_apple_and_passkeys_satisfy_2fa() {
             "login",
             Some("Notion".into()),
             [
-                ("url".into(), Field::new(FieldType::Url, "https://notion.so")),
+                (
+                    "url".into(),
+                    Field::new(FieldType::Url, "https://notion.so"),
+                ),
                 ("sign-in-with".into(), Field::new(FieldType::Text, "google")),
             ],
         )
@@ -327,13 +353,19 @@ fn breach_dates_and_synced_ignores_lapse_automatically_when_password_changes() {
             "login",
             Some("Example".into()),
             [
-                ("url".into(), Field::new(FieldType::Url, "https://breached.example.com")),
+                (
+                    "url".into(),
+                    Field::new(FieldType::Url, "https://breached.example.com"),
+                ),
                 ("password".into(), Field::new(FieldType::Secret, "hunter22")),
             ],
         )
         .unwrap();
     vault
-        .write(&secret, vec![DataOp::password_changed(id, Some("2020-01-01".into()))])
+        .write(
+            &secret,
+            vec![DataOp::password_changed(id, Some("2020-01-01".into()))],
+        )
         .unwrap();
 
     let mut extra_breaches = BTreeMap::new();
@@ -352,7 +384,10 @@ fn breach_dates_and_synced_ignores_lapse_automatically_when_password_changes() {
 
     let memos = memos_for(&vault);
     let (counts, _) = evaluate(&memos, None, &BTreeMap::new(), Some(&extra_breaches));
-    assert_eq!((counts.site_breach, counts.weak, counts.risk_items), (1, 1, 1));
+    assert_eq!(
+        (counts.site_breach, counts.weak, counts.risk_items),
+        (1, 1, 1)
+    );
 
     // Ignore Weak bound to current password_entry, and MissingTwoFactor item-wide.
     vault
@@ -361,14 +396,26 @@ fn breach_dates_and_synced_ignores_lapse_automatically_when_password_changes() {
             vec![
                 DataOp::ignore(id, FindingKind::Weak.as_str(), Some(pw_entry)),
                 DataOp::ignore(id, FindingKind::SiteBreach.as_str(), Some(pw_entry)),
-                DataOp::ignore(id, FindingKind::MissingTwoFactor.as_str(), Some(IGNORE_ALWAYS)),
+                DataOp::ignore(
+                    id,
+                    FindingKind::MissingTwoFactor.as_str(),
+                    Some(IGNORE_ALWAYS),
+                ),
             ],
         )
         .unwrap();
 
     let memos = memos_for(&vault);
     let (counts, items) = evaluate(&memos, None, &BTreeMap::new(), Some(&extra_breaches));
-    assert_eq!((counts.weak, counts.site_breach, counts.risk_items, counts.ignored), (0, 0, 0, 2));
+    assert_eq!(
+        (
+            counts.weak,
+            counts.site_breach,
+            counts.risk_items,
+            counts.ignored
+        ),
+        (0, 0, 0, 2)
+    );
     assert_eq!(items[0].ignored.len(), 2);
 
     // Changing the password to another weak password gives a new entry hash ->
@@ -386,7 +433,15 @@ fn breach_dates_and_synced_ignores_lapse_automatically_when_password_changes() {
 
     let memos = memos_for(&vault);
     let (counts, _) = evaluate(&memos, None, &BTreeMap::new(), Some(&extra_breaches));
-    assert_eq!((counts.weak, counts.site_breach, counts.risk_items, counts.ignored), (1, 0, 1, 0));
+    assert_eq!(
+        (
+            counts.weak,
+            counts.site_breach,
+            counts.risk_items,
+            counts.ignored
+        ),
+        (1, 0, 1, 0)
+    );
 }
 
 #[test]

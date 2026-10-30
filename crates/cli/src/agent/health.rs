@@ -43,12 +43,14 @@ pub struct State {
 
 impl State {
     pub fn new(store: &Unlocked) -> Self {
-        let mut reuse_key = Zeroizing::new([0u8; 32]);
-        let _ = getrandom::fill(reuse_key.as_mut_slice());
-        let hibp_key = Zeroizing::new(blake3::derive_key(
-            HIBP_KDF_CONTEXT,
+        let mut reuse_key = Zeroizing::new(blake3::derive_key(
+            "deadbolt health reuse fallback v1",
             store.device_secret(),
         ));
+        if let Err(err) = getrandom::fill(reuse_key.as_mut_slice()) {
+            warn!("OS RNG failed for health reuse key, using device-derived fallback: {err}");
+        }
+        let hibp_key = Zeroizing::new(blake3::derive_key(HIBP_KDF_CONTEXT, store.device_secret()));
         Self {
             reuse_key,
             hibp_key,
@@ -126,10 +128,7 @@ impl Agent {
                         None
                     };
                     s.update(vid, |v, secret| {
-                        Ok(v.write(
-                            secret,
-                            vec![DataOp::ignore(item.id, kind.as_str(), at)],
-                        )?)
+                        Ok(v.write(secret, vec![DataOp::ignore(item.id, kind.as_str(), at)])?)
                     })?;
                     Ok(())
                 })?;
@@ -261,12 +260,8 @@ impl Agent {
             let memos: Vec<ItemMemo> = s.health.memos.values().cloned().collect();
             let hibp_counts = s.health.hibp_cache.counts_map();
             let refreshed = s.health.site_breaches.as_ref().map(|b| &b.breaches);
-            let (counts, items) = evaluate(
-                &memos,
-                target_vault.as_deref(),
-                &hibp_counts,
-                refreshed,
-            );
+            let (counts, items) =
+                evaluate(&memos, target_vault.as_deref(), &hibp_counts, refreshed);
             Ok(HealthReport {
                 vault: target_vault,
                 counts,
@@ -356,11 +351,13 @@ impl Agent {
             match fetch_site_breaches(&mut interrupts).await {
                 Ok(breaches) => {
                     if !interrupts.has_changed().unwrap_or(true) {
-                        let _ = self.with(|s| {
+                        if let Err(err) = self.with(|s| {
                             set_json(&s.store, META_SITE_BREACHES, &breaches)?;
                             s.health.site_breaches = Some(breaches);
                             Ok(())
-                        });
+                        }) {
+                            warn!("saving site breaches failed: {err:#}");
+                        }
                         changed = true;
                     }
                 }

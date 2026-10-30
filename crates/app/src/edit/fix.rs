@@ -105,11 +105,11 @@ impl App {
             return;
         };
         let id = form.id.clone();
-        if let Some(id) = id {
-            if self.health.item(&id).is_some() {
-                self.open_health_url(&id, None, tx);
-                return;
-            }
+        if let Some(id) = id
+            && self.health.item(&id).is_some()
+        {
+            self.open_health_url(&id, None, tx);
+            return;
         }
         if let Some(url) = form.site_url().and_then(|u| crate::keys::safe_web_url(&u))
             && let Err(e) = tx.open_url(&url)
@@ -120,15 +120,14 @@ impl App {
 
     /// Label for the Fix form's site button (`"Open github.com"`), if the item has a web URL.
     pub fn fix_site_label(&self, f: &Form) -> Option<String> {
-        let raw = f
-            .id
-            .as_deref()
-            .and_then(|id| {
-                let ih = self.health.item(id)?;
-                ih.change_url.as_deref().or(ih.site_url.as_deref())
-            })
-            .map(str::to_owned)
-            .or_else(|| f.site_url())?;
+        let raw =
+            f.id.as_deref()
+                .and_then(|id| {
+                    let ih = self.health.item(id)?;
+                    ih.change_url.as_deref().or(ih.site_url.as_deref())
+                })
+                .map(str::to_owned)
+                .or_else(|| f.site_url())?;
         let url = crate::keys::safe_web_url(&raw)?;
         let parsed = url::Url::parse(&url).ok()?;
         let host = parsed.host_str()?;

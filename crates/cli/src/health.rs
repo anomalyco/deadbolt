@@ -45,10 +45,7 @@ pub enum HealthCommand {
         kind: String,
     },
     /// Restore a previously ignored finding on an item.
-    Unignore {
-        item: String,
-        kind: String,
-    },
+    Unignore { item: String, kind: String },
     /// Enable, disable, or check opt-in Have I Been Pwned breach checks.
     Breaches {
         #[arg(value_parser = ["on", "off", "status"])]
@@ -140,8 +137,7 @@ pub async fn run(
                 vault: target,
                 online: args.online,
             };
-            let Reply::Health { mut report } =
-                crate::request(paths, cmd, passphrase_stdin).await?
+            let Reply::Health { mut report } = crate::request(paths, cmd, passphrase_stdin).await?
             else {
                 bail!("unexpected reply");
             };
@@ -238,7 +234,11 @@ fn print_item(item: &ItemHealth, show_ignored: bool) {
     };
     let short = &item.id[..item.id.len().min(8)];
     for f in &item.findings {
-        println!("  {short}  {:<11}  {who} · {}", f.kind().as_str(), f.summary());
+        println!(
+            "  {short}  {:<11}  {who} · {}",
+            f.kind().as_str(),
+            f.summary()
+        );
     }
     if show_ignored {
         for f in &item.ignored {

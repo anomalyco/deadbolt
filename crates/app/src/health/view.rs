@@ -22,9 +22,8 @@ pub fn page(s: &App, k: &Kit) -> El {
         .key("security-col")
         .w_full()
         .max_w(PAGE_W + 2.0 * BLEED)
-        .px(BLEED)
         .gap(16.0)
-        .child(head)
+        .child(head.px(BLEED))
         .children(s.health.error.as_deref().map(|err| {
             text(err.to_owned())
                 .key("health-error")
@@ -32,8 +31,9 @@ pub fn page(s: &App, k: &Kit) -> El {
                 .color(k.c.danger.fg)
                 .wrap()
                 .w_full()
+                .px(BLEED)
         }))
-        .child(bar)
+        .child(bar.px(BLEED))
         .child(body);
 
     col()
@@ -211,6 +211,7 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
     col()
         .key(key)
         .w_full()
+        .px(BLEED)
         .py(20.0)
         .gap(4.0)
         .child(text(title).font(k.ty.ui_medium).color(k.c.text_base))
@@ -236,7 +237,7 @@ fn finding_row(k: &Kit, entry: &super::RowEntry<'_>, i: usize, on: bool) -> El {
             FindingKind::MissingTwoFactor | FindingKind::PasskeyAvailable => k.c.text_muted,
         }
     };
-    let dot_ink = (!is_ignored && kind.is_risk()).then(|| match kind {
+    let dot_ink = (!is_ignored && kind.is_risk()).then_some(match kind {
         FindingKind::Weak => k.c.warning.icon,
         _ => k.c.danger.icon,
     });
@@ -304,8 +305,6 @@ fn finding_row(k: &Kit, entry: &super::RowEntry<'_>, i: usize, on: bool) -> El {
         .label(format!("{}, {}", entry.item.label, entry.finding.summary()))
         .w_full()
         .min_h(52.0)
-        .ml(-BLEED)
-        .mr(-BLEED)
         .px(BLEED)
         .py(8.0)
         .gap(10.0)
@@ -327,10 +326,11 @@ fn finding_row(k: &Kit, entry: &super::RowEntry<'_>, i: usize, on: bool) -> El {
                 s.health.row = i;
             }
         })
-        .child(
-            icon(kind_icon(&entry.item.kind), 16.0)
-                .color(if on { k.c.icon_base } else { k.c.icon_muted }),
-        )
+        .child(icon(kind_icon(&entry.item.kind), 16.0).color(if on {
+            k.c.icon_base
+        } else {
+            k.c.icon_muted
+        }))
         .child(
             col()
                 .key("words")
@@ -364,7 +364,7 @@ fn foot(s: &App, k: &Kit) -> El {
     };
     let has_rows = !s.health.rows().is_empty();
     let on_ignored = s.health.tab == Tab::Ignored;
-    let mut hints = vec![hint(k, "h-tabs", &[tab_keys], "Category")];
+    let mut hints = vec![hint(k, "h-tabs", &[tab_keys], "Tabs")];
     if has_rows {
         hints.push(hint(
             k,
@@ -373,7 +373,7 @@ fn foot(s: &App, k: &Kit) -> El {
             if on_ignored { "Restore" } else { "Fix" },
         ));
         if !on_ignored {
-            hints.push(hint(k, "h-open", &["O"], "Open site"));
+            hints.push(hint(k, "h-open", &["O"], "Site"));
             hints.push(hint(k, "h-ignore", &["I"], "Ignore"));
         }
     }
@@ -537,12 +537,7 @@ pub fn row_dot(k: &Kit, risk: Option<RiskLevel>) -> Option<El> {
         RiskLevel::Danger => k.c.danger.icon,
         RiskLevel::Caution => k.c.warning.icon,
     };
-    Some(
-        el().key("risk-dot")
-            .size(6.0, 6.0)
-            .radius(3.0)
-            .fill(ink),
-    )
+    Some(el().key("risk-dot").size(6.0, 6.0).radius(3.0).fill(ink))
 }
 
 /// Formats `YYYY-MM-DD` as `"Oct 30, 2026"`.

@@ -61,13 +61,12 @@ fn vault_head_keeps_exact_height_when_health_arrives_and_clears_on_lock() {
 
     // Upgrade-only item (`gitlab.com`, PasskeyAvailable) gets no risk dot in the sidebar,
     // while risk items (`github.com`, `Linear`, `Cloudflare`, `Hetzner`) do.
-    let gitlab = r
-        .rt
-        .state
-        .items
-        .iter()
-        .find(|i| i.label == "gitlab.com")
-        .unwrap();
+    let gitlab =
+        r.rt.state
+            .items
+            .iter()
+            .find(|i| i.label == "gitlab.com")
+            .unwrap();
     assert_eq!(r.rt.state.health.risk_for(&gitlab.id), None);
 
     // Locking wipes the health report completely.

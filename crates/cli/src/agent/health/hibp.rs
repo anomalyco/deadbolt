@@ -183,7 +183,11 @@ fn shuffle<T>(slice: &mut [T]) {
     }
 }
 
-async fn fetch_range(client: &reqwest::Client, base: &Url, prefix: [u8; 5]) -> Result<([u8; 5], String)> {
+async fn fetch_range(
+    client: &reqwest::Client,
+    base: &Url,
+    prefix: [u8; 5],
+) -> Result<([u8; 5], String)> {
     let prefix_str = std::str::from_utf8(&prefix).unwrap_or("00000");
     let url = base.join(&format!("range/{prefix_str}"))?;
     let mut resp = client
@@ -312,9 +316,7 @@ struct ApiBreach {
 
 /// Downloads the full HIBP site-breach list (`GET /api/v3/breaches`, sending
 /// zero user domains). Errors are non-fatal when bundled breaches exist.
-pub async fn fetch_site_breaches(
-    interrupts: &mut watch::Receiver<u64>,
-) -> Result<StoredBreaches> {
+pub async fn fetch_site_breaches(interrupts: &mut watch::Receiver<u64>) -> Result<StoredBreaches> {
     let endpoints = Endpoints::new()?;
     let url = endpoints.breaches.clone();
     let req = async {

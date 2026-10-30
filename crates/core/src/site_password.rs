@@ -159,11 +159,7 @@ pub fn generate_for_url(
         }
         let field = if !symbols && !rules.has_classes() {
             password_rules::Field {
-                allowed: Some(
-                    CharSet::LOWER
-                        .union(CharSet::UPPER)
-                        .union(CharSet::DIGIT),
-                ),
+                allowed: Some(CharSet::LOWER.union(CharSet::UPPER).union(CharSet::DIGIT)),
                 ..password_rules::Field::default()
             }
         } else {

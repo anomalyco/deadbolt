@@ -570,9 +570,13 @@ mod tests {
         assert_eq!(super::save(&mut s, update).unwrap(), (saved.clone(), false));
         let (_, mut after) = find(&s, &saved, &page).unwrap();
         assert_eq!(value(&after, "password"), Some("replacement"));
+        assert!(after.password_changed.is_some());
+        assert_ne!(after.password_entry, before.password_entry);
         after
             .fields
             .insert("password".into(), before.fields["password"].clone());
+        after.password_entry = before.password_entry;
+        after.password_changed = before.password_changed.clone();
         assert_eq!(after, before);
     }
 

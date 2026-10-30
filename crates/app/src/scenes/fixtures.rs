@@ -605,9 +605,8 @@ fn fixture_code() -> Code {
 
 pub(super) fn vault_with_health(s: &mut App) {
     vault(s);
-    let full_id = |short: &str| {
-        format!("{short}0000000000000000000000000000000000000000000000000000000000")
-    };
+    let full_id =
+        |short: &str| format!("{short}0000000000000000000000000000000000000000000000000000000000");
     let github = full_id("3f9a1c");
     let linear = full_id("7b20e4");
     let cloudflare = full_id("f5c312");

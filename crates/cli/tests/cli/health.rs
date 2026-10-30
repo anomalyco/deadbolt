@@ -107,7 +107,9 @@ fn hibp_range_checks_are_opt_in_padded_deduplicated_and_cached() {
                 continue;
             }
             if req_line.starts_with("GET /quit ") {
-                let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .ok();
                 break;
             }
             let mut padded = false;
@@ -127,8 +129,8 @@ fn hibp_range_checks_are_opt_in_padded_deduplicated_and_cached() {
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     body.len()
                 );
-                let _ = stream.write_all(head.as_bytes());
-                let _ = stream.write_all(body);
+                stream.write_all(head.as_bytes()).ok();
+                stream.write_all(body).ok();
                 continue;
             }
             assert!(padded, "missing Add-Padding: true header on {req_line}");
@@ -146,8 +148,8 @@ fn hibp_range_checks_are_opt_in_padded_deduplicated_and_cached() {
                 "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                 body.len()
             );
-            let _ = stream.write_all(head.as_bytes());
-            let _ = stream.write_all(body.as_bytes());
+            stream.write_all(head.as_bytes()).ok();
+            stream.write_all(body.as_bytes()).ok();
         }
     });
 
@@ -197,7 +199,8 @@ fn hibp_range_checks_are_opt_in_padded_deduplicated_and_cached() {
 
     // Shut down local server cleanly.
     if let Ok(mut s) = std::net::TcpStream::connect(addr) {
-        let _ = s.write_all(b"GET /quit HTTP/1.1\r\nHost: localhost\r\n\r\n");
+        s.write_all(b"GET /quit HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .ok();
     }
-    let _ = server.join();
+    server.join().unwrap();
 }

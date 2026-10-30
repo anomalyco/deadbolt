@@ -121,11 +121,11 @@ blake3::keyed_hash(hibp_cache_key, &sha1_bytes) -> { count: u64, checked_day: u3
 
 Deadbolt's signed log entries intentionally carry no wall-clock timestamps (`docs/design.md`), so `Entry` cannot tell when a password was set. Recording a device-local `first_seen` timestamp in `store.redb` also fails: existing items and newly paired devices would appear "changed today" and silently miss older site breaches.
 
-Instead, add an optional agent-managed `password-changed` (`FieldType::Date`, `YYYY-MM-DD`) field to password-bearing schemas (`login`, `database`, `server`, `wifi`, `crypto`):
+Instead, store an optional agent-managed `password_changed` (`YYYY-MM-DD`) stamp on `Item` via `Change::PasswordChanged(Option<String>)` (wire tag `8` in `crates/core/src/entry.rs`), kept apart from `Item::fields` just like `Change::Source`:
 
-- **Day precision (`YYYY-MM-DD`)** matches `passkey.created` and HIBP's `BreachDate`, leaks no typing-time or timezone patterns across synced devices, keeps `data.rs` conflict resolution 100% causal, and also powers `docs/app.md`'s planned password age line on the item page.
-- **Written automatically:** whenever the agent creates an item with `password` or changes `password` (`items::create`, `items::set`, `autofill::site_save`), it writes `password-changed` to today's UTC date in the same entry.
-- **Preserved on import and 1Password sync:** `.1pux` and `op` imports populate `password-changed` from the latest `passwordHistory` timestamp (falling back to `updatedAt`), and Bitwarden JSON imports populate it from `login.passwordRevisionDate` (falling back to `revisionDate`). Because `onepassword.rs` maps the same field on both `.1pux` and `sync 1password`, `MirrorVersion` digests remain stable.
+- **Day precision (`YYYY-MM-DD`)** matches `passkey.created` and HIBP's `BreachDate`, leaks no typing-time or timezone patterns across synced devices, keeps `data.rs` conflict resolution 100% causal (ties broken by entry hash), and powers the password age line on the item page (`"Login · Changed Mar 14, 2024"`).
+- **Written automatically:** whenever the agent creates an item with an audited password or changes that password (`items::create`, `items::set`, `autofill::site_save`), it writes `Change::PasswordChanged(Some(today))` in the same signed entry.
+- **Preserved on import and 1Password sync:** `.1pux` and `op` imports populate `password_changed` from the latest `passwordHistory` timestamp (falling back to `updatedAt`), and Bitwarden JSON imports populate it from `login.passwordRevisionDate` (falling back to `revisionDate`). Keeping `password_changed` off `Item::fields` preserves `item.fields` invariants and leaves `deadbolt sync 1password` `MirrorVersion` digests unchanged.
 
 Site breaches come from `GET https://haveibeenpwned.com/api/v3/breaches` (CC-BY-4.0, unauthenticated), filtered to verified, non-retired, non-fabricated, non-spam breaches that have a `Domain` and include `"Passwords"` in `DataClasses` (622 domains, 48 KiB compact JSON). Downloading the full 622-domain list sends **zero** user domains over the network. A snapshot ships bundled for offline use and refreshes at most once every 7 days into `"cli/site-breaches"` when `breach_checks = true`.
 
@@ -168,15 +168,15 @@ Include upstream license files and commit/date stamps in `crates/core/data/healt
 
 ### Protocol and caller policy
 
-Put health wire types in `crates/client/src/protocol/health.rs` (keeping `protocol.rs` below its 1,500-line ceiling):
+Put health wire types in `crates/client/src/protocol/health.rs` (keeping `protocol.rs` below its 1,500-line ceiling, protocol v21):
 
-- `Command::Health { vault: Option<String>, check_online: bool }` -> `Reply::Health { report: HealthReport }`.
-- `Command::HealthIgnore { vault: String, item: String, kind: FindingKind, ignored: bool }` -> `Reply::Health { report: HealthReport }`.
-- `Command::ConfigBreachChecks { enabled: bool }` -> `Reply::Done` (writes `breach_checks` in `config.toml` and triggers an initial check when turned on).
+- `Command::Health { vault: Option<String>, online: bool }` -> `Reply::Health { report: HealthReport }`.
+- `Command::HealthIgnore { vault: Option<String>, query: Vec<String>, kind: FindingKind, ignored: bool }` -> `Reply::Health { report: HealthReport }`.
+- `Command::BreachChecksSet { enabled: bool }` -> `Reply::Done` (writes `breach_checks` in `config.toml` and triggers an initial check when turned on).
+- `Command::Generate { length, symbols, url: Option<String> }`: when `url` is supplied, honors `password-rules.json` site quirks with a 60-bit minimum floor (`site_password::generate_for_url`).
 - `Change::Health` on the `watch` stream whenever the memo, breach cache, or ignore state changes.
-- Optional lightweight `risk: Option<RiskLevel>` (`Danger` for Breached / CompromisedSite / Reused, `Caution` for Weak) on `ItemInfo` so `ItemList` carries sidebar row dots in one round-trip with zero extra socket requests.
 
-Under `docs/agent-control.md`, `Health`, `HealthIgnore`, and `ConfigBreachChecks` are allowed for `Deadbolt.app` and human CLI callers, and **refused (`forbidden`) to AI callers**, so an AI session cannot ask Deadbolt which accounts have weak or reused passwords. None of them count toward `unlock_timeout` activity.
+Under `docs/agent-control.md`, `Health`, `HealthIgnore`, and `BreachChecksSet` are allowed for `Deadbolt.app` and human CLI callers, and **refused (`forbidden`) to AI callers**, so an AI session cannot ask Deadbolt which accounts have weak or reused passwords. None of them count toward `unlock_timeout` activity.
 
 ### Cost and incremental rerun on 3,000 items
 
@@ -253,7 +253,7 @@ deadbolt health unignore Linear weak
 ## Sync: derived findings stay local, ignored warnings sync cleanly
 
 - **Health findings and HIBP cache never sync.** Weak, Reused, Missing 2FA, and Passkeys are deterministic functions of the vault and bundled tables; each device computes them locally. `"cli/hibp-cache"` and `"cli/site-breaches"` stay in local `store.redb` so enabling `breach_checks` on one device never writes network-derived rows to the append-only signed log or reveals `breach_checks` activity to another device.
-- **Ignored warnings (`Change::Ignore`, Decision 1).** Ignoring a voicemail PIN on a desktop should not leave the laptop nagging about the same item. Keep dismissals on `Item` **apart from `fields`**, just like `Source` (`Change::Source`, wire tag `4` in `crates/core/src/entry.rs`), by adding `Change::Ignore { kind: FindingKind, at: Option<Hash> }` (wire tag `5`, `None` clears the ignore):
+- **Ignored warnings (`Change::Ignore`).** Ignoring a voicemail PIN on a desktop should not leave the laptop nagging about the same item. Keep dismissals on `Item` **apart from `fields`**, just like `Source` (`Change::Source`, wire tag `4` in `crates/core/src/entry.rs`), via `Change::Ignore { kind: String, at: Option<Hash> }` (wire tag `7`, `None` clears the ignore):
   - Because `mirror::item_digest` hashes `&item.fields` only, ignoring a warning on a 1Password-mirrored item survives every future `deadbolt sync 1password`.
   - Dismissals never appear in `ItemGet`, edit forms, exports, or `deadbolt send`.
   - For password findings (`weak`, `reused`, `breached`, `site-breach`), `at` is the `Entry::hash()` of the winning write to `password` (`ItemState` in `crates/core/src/data.rs`). Every vault member already holds that `Entry` hash, so storing it leaks zero password-equality information while automatically expiring the ignore the instant any new `password` write wins. For item-level findings (`missing-2fa`, `passkey`), `at` is `Hash([0; 32])` and clears automatically once an `otp` or `passkey` exists.
@@ -283,29 +283,11 @@ Follow Deadbolt's capability layout (no `mod.rs`, files well under 800 non-test 
    - Debug-only `DEADBOLT_HIBP_URL` (restricted to `127.0.0.1` and `[::1]` under `cfg!(debug_assertions)`, matching `DEADBOLT_RELEASE_URL` in `crates/cli/src/update.rs`).
    - Local `TcpListener` fixture serving padded `:0` and breached `:N` suffixes for public test vectors (`"password"` -> `5BAA6...`), verifying `Add-Padding: true`, prefix deduplication, permanent `count > 0` caching, 14-day TTL on `count == 0`, zero network traffic when `breach_checks = false`, and immediate cancellation on `deadbolt lock`.
 3. **Headless Rune app tests and scenes (`crates/app/tests/app/health.rs`, wired in `tests/app/main.rs`):**
-   - Loopback-agent fixtures (`scenes/fixtures.rs`) verifying `Security` opens from `⌘K` and `⇧⌘H` without fetching item secret values, `vault-head` does not shift row y-positions when health arrives, `Fix` opens the form with a revealed generated password and working `Copy current password`, and `snap.sh` captures `security`, `item-health`, and `fix-password` stills.
+   - Loopback-agent fixtures (`scenes/fixtures.rs`) verifying `Security` opens from `⌘K` and `⇧⌘H` without fetching item secret values, `vault-head` does not shift row y-positions when health arrives, `Fix` opens the form with a revealed generated password and working `Copy current password`, and `snap.sh` captures `security`, `vault-risk`, and `fix-password` stills.
 
-### PR-sized steps and risks
+## Decisions
 
-| PR | Scope | Main risks and mitigations |
-|---|---|---|
-| **1. Core engine & directories** | `crates/core/src/health*`, `crates/core/data/health/`, `password-changed` date field on password schemas + importers, `zxcvbn` behind `health` feature | **Risk:** `zxcvbn` bloating `ext-core` wasm or retaining matched slices. **Mitigation:** gate `health` off for `ext-core` (`bun run check:wasm` verifies), drop `Entropy` immediately after reading `score`. |
-| **2. Agent memo, dismissals & CLI** | `protocol/health.rs`, `Change::Ignore` (or local meta per Decision 1), `agent/health.rs` incremental memo + `spawn_blocking`, caller-tier `Deny` for AIs, `deadbolt health` CLI | **Risk:** holding `Session` mutex during cold `zxcvbn` scan stalls unlock/fills. **Mitigation:** snapshot inputs under lock, score on `spawn_blocking`, merge by `item_fingerprint`. |
-| **3. Opt-in HIBP client & cache** | `agent/health/hibp.rs`, `config.toml` `breach_checks`, `store.redb` keyed-hash `"cli/hibp-cache"` + weekly `"cli/site-breaches"`, loopback CLI tests | **Risk:** accidental network traffic when off, or holding idle lock open. **Mitigation:** gate every HTTP path on `breach_checks || explicit_online`, abort on lock, never touch `Idle`. |
-| **4. Desktop Security view & badges** | `crates/app/src/health*`, `palette.rs`, `keys.rs`, `vault-head` count, row risk dots, item callout, Settings switch + attribution, `snap.sh` stills | **Risk:** layout jump when health loads or noisy row badges. **Mitigation:** render count inside fixed-height `vault-head`; dot only risk items, never 2FA/passkey upgrades. |
-| **5. Fix flow & site-aware generate** | `App::fix_password`, site-rule-aware `Generate`, `Copy current password` (`⇧⌘C`), `change-urls.json` / setup-doc `Open`, onboarding meter on `zxcvbn` | **Risk:** generating a 24-char password a quirked site rejects, or losing the old password mid-rotation. **Mitigation:** honor `password-rules.json` on `url` and expose `form.base` copy + `Vault::history`. |
-
-## Open decisions
-
-1. **Syncing "Ignore warning" across devices (`Change::Ignore` vs local `store.redb`).**
-   - **Recommendation:** Sync dismissals via `Change::Ignore` on `Item` (wire tag `5` in `entry.rs`, apart from `fields` like `Source`, bound to the winning `password` write's `Entry::hash()`). Dismissing a voicemail PIN once covers desktop and laptop and survives `sync 1password`.
-   - **Alternative:** Keep dismissals device-local in `store.redb` (`"cli/health-ignored"`), avoiding a new `Change` wire tag at the cost of dismissing per device.
-2. **Near-duplicate ("similar") passwords in Reuse.**
-   - **Recommendation:** Ship exact password reuse only in PR 1 (zero false positives), and leave $O(N)$ skeleton matching (`Summer2025!` / `Summer2026!`, site-name stripping) out unless exact reuse misses real items you want caught.
-   - **Alternative:** Include skeleton `Similar` findings in PR 1 as a secondary label under Reused.
-3. **What counts in the sidebar warning number and row dots.**
-   - **Recommendation:** Count and dot only **risks** (Breached password, Compromised website, Reused, Weak) in the everyday vault sidebar, and keep **Missing 2FA** and **Passkey available** as separate upgrade tabs inside the Security view (plus a quiet line on the item page) so 100+ healthy logins do not carry permanent badges.
-   - **Alternative:** Count **Missing 2FA** (TOTP-capable sites without an `otp` or `passkey`) as a warning too, leaving only **Passkey available** as an upgrade tab.
-4. **`password-changed` dates and site-level breach alerts.**
-   - **Recommendation:** Stamp `password-changed` (`FieldType::Date`, `YYYY-MM-DD`) automatically on password writes and imports, and ship both HIBP Pwned Passwords hash checks and HIBP `/breaches` site-date alerts (marking pre-existing items with no recorded date as *"password date not recorded"*, dismissible in one key).
-   - **Alternative:** Skip site-level breach alerts (`breaches.json`) and check password hashes only, avoiding `password-changed` schema additions and undated-item warnings.
+1. **Syncing "Ignore warning" across devices:** Synced via `Change::Ignore` on `Item` (wire tag `7` in `entry.rs`, apart from `fields` like `Source`, bound to `Item::password_entry` for password findings and `Hash([0; 32])` for item-wide findings).
+2. **Near-duplicate ("similar") passwords in Reuse:** Exact password reuse only (`blake3::keyed_hash`), collapsing same-account logins across `shared-credentials.json` and excluding `wifi` and `ssh`.
+3. **Sidebar warning number and row dots:** Count and dot only **risks** (`Breached`, `SiteBreach`, `Reused`, `Weak`) in the everyday vault sidebar; keep `MissingTwoFactor` and `PasskeyAvailable` as upgrade tabs inside `Security` (`⇧⌘H`, `⌘K`) and item-page callouts.
+4. **Password change dates and site-level breach alerts:** Stamp `password_changed` (`YYYY-MM-DD`, `Change::PasswordChanged`, wire tag `8`) automatically on password writes and `.1pux` / `op` / Bitwarden imports, checking both opt-in HIBP Pwned Passwords ranges and bundled HIBP `/breaches` site dates.

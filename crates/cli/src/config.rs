@@ -113,7 +113,8 @@ pub struct Config {
     pub lock_on_sleep: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touch_id: Option<bool>,
-<<<<<<< HEAD
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breach_checks: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<ExtensionDir>,
     /// The single directory older configs registered, moved into
@@ -131,19 +132,6 @@ pub struct ExtensionDir {
     pub dir: PathBuf,
     #[serde(default)]
     pub build: ExtensionBuild,
-||||||| parent of a3e6250 (feat(cli): add agent health memo, opt-in HIBP range cache, and deadbolt health)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension_dir: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension_build: Option<ExtensionBuild>,
-=======
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub breach_checks: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension_dir: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub extension_build: Option<ExtensionBuild>,
->>>>>>> a3e6250 (feat(cli): add agent health memo, opt-in HIBP range cache, and deadbolt health)
 }
 
 /// The two builds of the browser extension (`extension/scripts/build.ts`).

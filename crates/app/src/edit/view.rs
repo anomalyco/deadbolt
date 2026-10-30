@@ -603,7 +603,12 @@ fn generator(s: &App, k: &Kit, saving: bool) -> El {
 }
 
 fn fix_actions(s: &App, k: &Kit, f: &Form) -> El {
-    let mut bar = row().key("fix-actions").w_full().gap(8.0).center_y();
+    let mut bar = row()
+        .key("fix-actions")
+        .w_full()
+        .ml(-8.0)
+        .gap(4.0)
+        .center_y();
     bar = bar.child(
         Button::new("Copy current password")
             .variant(ButtonVariant::GhostMuted)

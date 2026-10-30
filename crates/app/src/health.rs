@@ -137,10 +137,7 @@ impl Health {
     }
 
     pub fn primary_risk(&self, id: &str) -> Option<&Finding> {
-        self.item(id)?
-            .findings
-            .iter()
-            .find(|f| f.kind().is_risk())
+        self.item(id)?.findings.iter().find(|f| f.kind().is_risk())
     }
 
     pub fn password_changed_for(&self, id: &str) -> Option<&str> {
@@ -304,7 +301,12 @@ impl App {
         });
     }
 
-    pub(crate) fn on_health(&mut self, seq: u64, result: Result<HealthReport, Failure>, tx: &mut Tx) {
+    pub(crate) fn on_health(
+        &mut self,
+        seq: u64,
+        result: Result<HealthReport, Failure>,
+        tx: &mut Tx,
+    ) {
         if seq != self.health.seq || !self.accepts_vault_replies() {
             return;
         }
@@ -363,38 +365,39 @@ impl App {
         if !self.leave_edit() {
             return;
         }
-        let doc_url = self.health.item(id).and_then(|ih| {
-            match kind {
-                Some(FindingKind::MissingTwoFactor) => ih
-                    .findings
-                    .iter()
-                    .find_map(|f| match f {
-                        Finding::MissingTwoFactor { doc_url } => doc_url.clone(),
-                        _ => None,
-                    })
-                    .or_else(|| ih.site_url.clone()),
-                Some(FindingKind::PasskeyAvailable) => ih
-                    .findings
-                    .iter()
-                    .find_map(|f| match f {
-                        Finding::PasskeyAvailable { doc_url, .. } => doc_url.clone(),
-                        _ => None,
-                    })
-                    .or_else(|| ih.site_url.clone()),
-                _ => None,
-            }
+        let doc_url = self.health.item(id).and_then(|ih| match kind {
+            Some(FindingKind::MissingTwoFactor) => ih
+                .findings
+                .iter()
+                .find_map(|f| match f {
+                    Finding::MissingTwoFactor { doc_url } => doc_url.clone(),
+                    _ => None,
+                })
+                .or_else(|| ih.site_url.clone()),
+            Some(FindingKind::PasskeyAvailable) => ih
+                .findings
+                .iter()
+                .find_map(|f| match f {
+                    Finding::PasskeyAvailable { doc_url, .. } => doc_url.clone(),
+                    _ => None,
+                })
+                .or_else(|| ih.site_url.clone()),
+            _ => None,
         });
 
         if matches!(kind, Some(FindingKind::PasskeyAvailable)) {
-            if let Some(url) = doc_url.and_then(|u| crate::keys::safe_web_url(&u)) {
-                let _ = tx.open_url(&url);
+            if let Some(url) = doc_url.and_then(|u| crate::keys::safe_web_url(&u))
+                && let Err(e) = tx.open_url(&url)
+            {
+                self.notice = Some(format!("Couldn't open {url}: {e}"));
             }
             return;
         }
         if matches!(kind, Some(FindingKind::MissingTwoFactor))
             && let Some(url) = doc_url.and_then(|u| crate::keys::safe_web_url(&u))
+            && let Err(e) = tx.open_url(&url)
         {
-            let _ = tx.open_url(&url);
+            self.notice = Some(format!("Couldn't open {url}: {e}"));
         }
 
         tx.instant();

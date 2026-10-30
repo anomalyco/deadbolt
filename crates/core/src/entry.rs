@@ -152,10 +152,7 @@ pub enum Change {
     /// `Some(hash)` ignores it (`Hash::from_bytes([0; 32])` for item-wide
     /// findings; a `password` write's entry hash for password findings);
     /// `None` restores the warning.
-    Ignore {
-        kind: String,
-        at: Option<Hash>,
-    },
+    Ignore { kind: String, at: Option<Hash> },
     /// Records or clears the UTC date (`YYYY-MM-DD`) the item's password
     /// last changed, kept apart from `fields`.
     PasswordChanged(Option<String>),

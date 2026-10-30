@@ -137,7 +137,10 @@ fn page(s: &App, k: &Kit, item: &ItemInfo, full: Option<&ItemInfo>) -> Vec<El> {
         sub = format!("{sub} · From {source}");
     }
     if let Some(changed) = s.health.password_changed_for(&item.id) {
-        sub = format!("{sub} · Changed {}", crate::health::view::human_date(changed));
+        sub = format!(
+            "{sub} · Changed {}",
+            crate::health::view::human_date(changed)
+        );
     }
     let tags_source = full.map_or(&item.tags, |f| &f.tags);
     let mut titles = col()
