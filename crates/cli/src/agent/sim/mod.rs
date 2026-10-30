@@ -252,6 +252,11 @@ enum Action {
     /// Sets a file field (its name and contents carrying the marker) on
     /// the first item, or a new note.
     Attach(usize, u64),
+    Favorite(usize, bool),
+    /// Adds a nested tag carrying [`SECRET_MARKER`] so disk and wire scans
+    /// catch any plaintext tag leak.
+    Tag(usize, u64),
+    Untag(usize),
     Delete(usize),
     Pair(usize),
     Remove(usize),
@@ -607,6 +612,95 @@ impl World {
                     Ok(())
                 })?;
             }
+            Action::Favorite(i, fav) if self.can_write(i) => {
+                let value = format!("{SECRET_MARKER}{i:04x}-fav-pw");
+                self.devices[i].with(|s| {
+                    match s.vault(&self.vault).items().first() {
+                        Some(item) => {
+                            let id = [item.id.to_string()];
+                            super::items::set_with(
+                                s,
+                                None,
+                                &id,
+                                vec![],
+                                None,
+                                &[],
+                                Some(fav),
+                                &[],
+                                &[],
+                            )?;
+                        }
+                        None => {
+                            let fields = vec![crate::protocol::FieldInput {
+                                name: "password".into(),
+                                kind: None,
+                                value,
+                            }];
+                            super::items::create_with(
+                                s,
+                                None,
+                                "login",
+                                None,
+                                fields,
+                                fav,
+                                Vec::new(),
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            Action::Tag(i, value) if self.can_write(i) => {
+                let tag = format!("{SECRET_MARKER}{:08x}/sub", value & 0xffff_ffff);
+                let pw = format!("{SECRET_MARKER}{value:016x}-tag-pw");
+                self.devices[i].with(|s| {
+                    match s.vault(&self.vault).items().first() {
+                        Some(item) if item.tags.len() < deadbolt_core::tag::MAX_TAGS => {
+                            let id = [item.id.to_string()];
+                            super::items::set_with(
+                                s,
+                                None,
+                                &id,
+                                vec![],
+                                None,
+                                &[],
+                                None,
+                                &[tag],
+                                &[],
+                            )?;
+                        }
+                        Some(_) => {}
+                        None => {
+                            let fields = vec![crate::protocol::FieldInput {
+                                name: "password".into(),
+                                kind: None,
+                                value: pw,
+                            }];
+                            super::items::create_with(
+                                s,
+                                None,
+                                "login",
+                                None,
+                                fields,
+                                false,
+                                vec![tag],
+                            )?;
+                        }
+                    }
+                    Ok(())
+                })?;
+            }
+            Action::Untag(i) if self.can_write(i) => {
+                self.devices[i].with(|s| {
+                    if let Some(item) = s.vault(&self.vault).items().first()
+                        && let Some(tag) = item.tags.first().cloned()
+                    {
+                        let id = [item.id.to_string()];
+                        super::items::set_with(s, None, &id, vec![], None, &[], None, &[], &[tag])?;
+                    }
+                    Ok(())
+                })?;
+            }
             Action::Delete(i) if self.can_write(i) => {
                 self.devices[i].with(|s| {
                     if let Some(item) = s.vault(&self.vault).items().first() {
@@ -789,7 +883,7 @@ fn actions(seed: u64) -> Vec<Action> {
         let i = (rng.next() % DEVICES as u64) as usize;
         let j = (rng.next() % DEVICES as u64) as usize;
         let value = rng.next();
-        actions.push(match rng.next() % 15 {
+        actions.push(match rng.next() % 18 {
             0 => Action::Add(i, value),
             1 => Action::Edit(i, value),
             2 => Action::Delete(i),
@@ -805,6 +899,9 @@ fn actions(seed: u64) -> Vec<Action> {
             12 => Action::WriteFailure(i),
             13 => Action::RevokeDuringSync(i, value, (value % 400) as usize),
             14 => Action::Startup(i),
+            15 => Action::Favorite(i, value & 1 == 0),
+            16 => Action::Tag(i, value),
+            17 => Action::Untag(i),
             _ => Action::Sync(i, j, value, None),
         });
     }

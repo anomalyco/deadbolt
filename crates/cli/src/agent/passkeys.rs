@@ -73,19 +73,29 @@ pub(super) fn passkeys<'a>(
 
 pub fn list(s: &Loaded, origin: &str, rp: Option<&str>) -> Result<(String, Vec<SitePasskey>)> {
     let rp = rp_id(origin, rp)?;
-    let mut found: Vec<SitePasskey> = passkeys(s, &rp)
-        .map(|(vault, item)| SitePasskey {
-            passkey: passkey_ref(&vault, &item.id),
-            vault: s.vault(&vault).name().to_string(),
-            credential_id: value(&item, "credential-id").unwrap_or_default().into(),
-            username: value(&item, "username").map(str::to_string),
-            created: value(&item, "created").map(str::to_string),
+    let mut found: Vec<(bool, SitePasskey)> = passkeys(s, &rp)
+        .map(|(vault, item)| {
+            (
+                item.favorite,
+                SitePasskey {
+                    passkey: passkey_ref(&vault, &item.id),
+                    vault: s.vault(&vault).name().to_string(),
+                    credential_id: value(&item, "credential-id").unwrap_or_default().into(),
+                    username: value(&item, "username").map(str::to_string),
+                    created: value(&item, "created").map(str::to_string),
+                },
+            )
         })
         .collect();
-    found.sort_by(|a, b| {
-        (&a.username, &a.vault, &a.passkey.item).cmp(&(&b.username, &b.vault, &b.passkey.item))
+    found.sort_by(|(fa, a), (fb, b)| {
+        (!*fa, &a.username, &a.vault, &a.passkey.item).cmp(&(
+            !*fb,
+            &b.username,
+            &b.vault,
+            &b.passkey.item,
+        ))
     });
-    Ok((rp, found))
+    Ok((rp, found.into_iter().map(|(_, p)| p).collect()))
 }
 
 /// Refuses a registration when the site already has one of `exclude` here.

@@ -571,6 +571,8 @@ mod tests {
                 kind: "login".into(),
                 name: Some("offline-login".into()),
                 fields: fields(),
+                favorite: false,
+                tags: Vec::new(),
             },
             Command::ItemGet {
                 vault: None,
@@ -582,6 +584,8 @@ mod tests {
                 vault: None,
                 query: vec![],
                 kind: None,
+                tags: Vec::new(),
+                favorites: false,
             },
             Command::ItemSet {
                 vault: None,
@@ -589,6 +593,9 @@ mod tests {
                 fields: fields(),
                 name: None,
                 unset: Vec::new(),
+                favorite: None,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
             },
             Command::ItemUnset {
                 vault: None,
@@ -1599,22 +1606,59 @@ impl Agent {
                     items::code(s, vault.as_deref(), &query, crate::config::wall_clock())
                 })?,
             }),
-            Command::ItemList { vault, query, kind } => Ok(Reply::Items {
-                items: self.with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref()))?,
+            Command::ItemList {
+                vault,
+                query,
+                kind,
+                tags,
+                favorites,
+            } => Ok(Reply::Items {
+                items: self.with(|s| {
+                    items::list_filtered(
+                        s,
+                        vault.as_deref(),
+                        &query,
+                        kind.as_deref(),
+                        &tags,
+                        favorites,
+                    )
+                })?,
+            }),
+            Command::TagList { vault } => Ok(Reply::Tags {
+                tags: self.with(|s| items::tags(s, vault.as_deref()))?,
             }),
             Command::ItemNew {
                 vault,
                 kind,
                 name,
                 fields,
-            } => self.item_write(|s| items::create(s, vault.as_deref(), &kind, name, fields)),
+                favorite,
+                tags,
+            } => self.item_write(|s| {
+                items::create_with(s, vault.as_deref(), &kind, name, fields, favorite, tags)
+            }),
             Command::ItemSet {
                 vault,
                 query,
                 fields,
                 name,
                 unset,
-            } => self.item_write(|s| items::set(s, vault.as_deref(), &query, fields, name, &unset)),
+                favorite,
+                add_tags,
+                remove_tags,
+            } => self.item_write(|s| {
+                items::set_with(
+                    s,
+                    vault.as_deref(),
+                    &query,
+                    fields,
+                    name,
+                    &unset,
+                    favorite,
+                    &add_tags,
+                    &remove_tags,
+                )
+            }),
             Command::ItemUnset {
                 vault,
                 query,

@@ -40,6 +40,9 @@
 
 mod caller;
 mod reference;
+mod reports;
+#[cfg(test)]
+mod tests;
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -52,8 +55,11 @@ pub use caller::{
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
 pub use reference::{Reference, SCHEME};
+pub use reports::{
+    Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
+};
 
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -149,6 +155,10 @@ pub enum Command {
         kind: String,
         name: Option<String>,
         fields: Vec<FieldInput>,
+        #[serde(default)]
+        favorite: bool,
+        #[serde(default)]
+        tags: Vec<String>,
     },
     /// Finds exactly one item, with its field values; replies `item`. One-time
     /// password secrets (fields of type otp) come back empty unless `otp`
@@ -176,15 +186,30 @@ pub enum Command {
         vault: Option<String>,
         query: Vec<String>,
         kind: Option<String>,
+        #[serde(default)]
+        tags: Vec<String>,
+        #[serde(default)]
+        favorites: bool,
     },
-    /// Sets fields, removes the `unset` ones and/or sets the name (`Some("")`
-    /// clears it), all in one change; replies `item`.
+    /// Lists every tag in `vault` with how many items match it; replies `tags`.
+    TagList {
+        vault: Option<String>,
+    },
+    /// Sets fields, removes the `unset` ones, sets the name (`Some("")`
+    /// clears it), stars/unstars (`favorite`), and/or adds/removes tags,
+    /// all in one change; replies `item`.
     ItemSet {
         vault: Option<String>,
         query: Vec<String>,
         fields: Vec<FieldInput>,
         name: Option<String>,
         unset: Vec<String>,
+        #[serde(default)]
+        favorite: Option<bool>,
+        #[serde(default)]
+        add_tags: Vec<String>,
+        #[serde(default)]
+        remove_tags: Vec<String>,
     },
     ItemUnset {
         vault: Option<String>,
@@ -1064,6 +1089,9 @@ pub enum Reply {
     Items {
         items: Vec<ItemInfo>,
     },
+    Tags {
+        tags: Vec<TagCount>,
+    },
     Import {
         report: ImportReport,
     },
@@ -1234,311 +1262,10 @@ pub struct SenderInfo {
     pub direct_addrs: Vec<String>,
 }
 
-/// What a sync from 1Password did, or would do. Titles only, never values.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MirrorReport {
-    /// False for a dry run.
-    pub applied: bool,
-    /// Items already the same on both sides.
-    pub unchanged: usize,
-    /// Every item that was, or would be, added, updated, deleted, adopted,
-    /// released or skipped, in that order, each by title.
-    pub items: Vec<MirrorItem>,
-    /// Values mirrored differently, by reason.
-    pub warnings: Vec<Tally>,
-    /// What deadbolt has no place for (attachments, passkeys, ...).
-    pub dropped: Vec<Tally>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct MirrorItem {
-    pub action: MirrorAction,
-    pub title: String,
-    /// The fields changed, or why it was skipped, released, taken over or
-    /// added beside another item.
-    pub reason: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum MirrorAction {
-    /// New in 1Password.
-    Add,
-    /// Changed in 1Password, or in deadbolt: 1Password wins.
-    Update,
-    /// Deleted or archived in 1Password, or a second copy; only items the
-    /// mirror created.
-    Delete,
-    /// An item already in deadbolt, now mirrored: imported from a
-    /// 1Password export, the same content, or a login with the same
-    /// username and URL. Fields only deadbolt has are kept.
-    Adopt,
-    /// Adopted, then deleted in 1Password or a second copy: kept, and no
-    /// longer mirrored.
-    Release,
-    /// Not mirrored (a document, an SSH key without a private key, ...),
-    /// or changed in deadbolt while 1Password was asked.
-    Skip,
-}
-
-impl MirrorAction {
-    fn done(self, applied: bool) -> &'static str {
-        match (self, applied) {
-            (Self::Add, true) => "added",
-            (Self::Add, false) => "would add",
-            (Self::Update, true) => "updated",
-            (Self::Update, false) => "would update",
-            (Self::Delete, true) => "deleted",
-            (Self::Delete, false) => "would delete",
-            (Self::Adopt, true) => "adopted",
-            (Self::Adopt, false) => "would adopt",
-            (Self::Release, true) => "released",
-            (Self::Release, false) => "would release",
-            (Self::Skip, _) => "skipped",
-        }
-    }
-
-    fn verb(self) -> &'static str {
-        match self {
-            Self::Add => "add",
-            Self::Update => "update",
-            Self::Delete => "delete",
-            Self::Adopt => "adopt",
-            Self::Release => "release",
-            Self::Skip => "skip",
-        }
-    }
-}
-
-impl MirrorReport {
-    pub fn count(&self, action: MirrorAction) -> usize {
-        self.items.iter().filter(|i| i.action == action).count()
-    }
-
-    /// Whether anything was, or would be, written.
-    pub fn changed(&self) -> bool {
-        self.items.iter().any(|i| i.action != MirrorAction::Skip)
-    }
-
-    /// One line of what changed: "12 updated, 3 added", or "Up to date".
-    pub fn summary(&self) -> String {
-        use MirrorAction::*;
-        let parts: Vec<String> = [Update, Add, Delete, Adopt, Release]
-            .into_iter()
-            .map(|a| (a, self.count(a)))
-            .filter(|(_, n)| *n > 0)
-            .map(|(a, n)| format!("{n} {}", a.done(self.applied)))
-            .collect();
-        match (parts.is_empty(), self.applied) {
-            (true, true) => "Up to date".into(),
-            (true, false) => "Nothing to do".into(),
-            (false, _) => parts.join(", "),
-        }
-    }
-
-    /// The report as lines: the counts, then one line per item.
-    pub fn lines(&self) -> Vec<String> {
-        let skipped = match self.count(MirrorAction::Skip) {
-            0 => String::new(),
-            n => format!(", {n} skipped"),
-        };
-        let mut lines = vec![format!(
-            "{}{} ({} unchanged{skipped})",
-            if self.applied { "" } else { "dry run: " },
-            self.summary(),
-            self.unchanged
-        )];
-        lines.extend(self.items.iter().map(|i| match &i.reason {
-            Some(reason) => format!("  {:<7} {} ({reason})", i.action.verb(), i.title),
-            None => format!("  {:<7} {}", i.action.verb(), i.title),
-        }));
-        lines.extend(self.warnings.iter().map(|t| format!("warning: {t}")));
-        if !self.dropped.is_empty() {
-            let dropped: Vec<String> = self.dropped.iter().map(Tally::to_string).collect();
-            lines.push(format!("not mirrored: {}", dropped.join(", ")));
-        }
-        lines
-    }
-}
-
-/// A one-time code and when it stops being valid.
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Code {
-    pub code: Zeroizing<String>,
-    /// Seconds each code lasts.
-    pub period: u64,
-    /// Unix seconds when the next code takes over.
-    pub valid_until: u64,
-    /// Milliseconds until then, from the agent's clock; at least 1.
-    pub remaining_ms: u64,
-}
-
-impl fmt::Debug for Code {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Code")
-            .field("code", &"<redacted>")
-            .field("period", &self.period)
-            .field("valid_until", &self.valid_until)
-            .field("remaining_ms", &self.remaining_ms)
-            .finish()
-    }
-}
-
-/// What an import did, or would do. Counts only, never values.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ImportReport {
-    pub source: ImportSource,
-    /// New items by item type; duplicates are not counted here.
-    pub new: BTreeMap<String, usize>,
-    /// Items already in the vault, or earlier in the export.
-    pub duplicates: usize,
-    /// Items not imported, by reason.
-    pub skipped: Vec<Tally>,
-    /// Values not imported or imported differently, by reason.
-    pub warnings: Vec<Tally>,
-    /// What deadbolt has no place for (folders, favorites, attachments, ...).
-    pub dropped: Vec<Tally>,
-    /// The new logins' sign-in methods ("Sign in with Google").
-    #[serde(default)]
-    pub sign_in: SignInCounts,
-}
-
-/// The new logins that sign in with another account.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct SignInCounts {
-    /// By provider ([`SignIn::provider`]).
-    pub providers: BTreeMap<String, usize>,
-    /// How many of them are linked to the login they sign in with.
-    pub linked: usize,
-}
-
-/// The app an export came from, detected from its content.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ImportSource {
-    Bitwarden,
-    OnePassword,
-    ApplePasswords,
-    /// A CSV with recognizable columns, such as a browser's export.
-    Csv,
-}
-
-impl fmt::Display for ImportSource {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Bitwarden => "Bitwarden",
-            Self::OnePassword => "1Password",
-            Self::ApplePasswords => "Apple Passwords",
-            Self::Csv => "CSV",
-        })
-    }
-}
-
-/// A count of something, named in the singular and the plural.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Tally {
+pub struct TagCount {
+    pub tag: String,
     pub count: usize,
-    pub one: String,
-    pub many: String,
-}
-
-impl fmt::Display for Tally {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let what = if self.count == 1 {
-            &self.one
-        } else {
-            &self.many
-        };
-        write!(f, "{} {what}", self.count)
-    }
-}
-
-impl ImportReport {
-    /// How many new items of type `kind`.
-    pub fn count(&self, kind: &str) -> usize {
-        self.new.get(kind).copied().unwrap_or(0)
-    }
-
-    /// How many new items in all.
-    pub fn total(&self) -> usize {
-        self.new.values().sum()
-    }
-
-    /// New items by type, in [`KINDS`] order then by identifier, leaving out
-    /// types with none: `[("login", 12), ("note", 3)]`.
-    pub fn counts(&self) -> Vec<(&str, usize)> {
-        let known = KINDS.iter().map(|(kind, ..)| *kind);
-        let other = self
-            .new
-            .keys()
-            .map(String::as_str)
-            .filter(|k| !KINDS.iter().any(|(kind, ..)| kind == k));
-        known
-            .chain(other)
-            .map(|kind| (kind, self.count(kind)))
-            .filter(|(_, n)| *n > 0)
-            .collect()
-    }
-
-    /// The report as lines of text; `applied` is false for a preview.
-    pub fn lines(&self, applied: bool) -> Vec<String> {
-        // Logins and cards always, the other types when there are some.
-        let mut kinds = vec!["login", "card"];
-        kinds.extend(
-            self.counts()
-                .into_iter()
-                .map(|(kind, _)| kind)
-                .filter(|kind| !matches!(*kind, "login" | "card")),
-        );
-        let counts: Vec<String> = kinds
-            .into_iter()
-            .map(|kind| format!("{} {}", noun(kind, 2), self.count(kind)))
-            .collect();
-        let mut lines = vec![format!(
-            "{} {} from {} ({})",
-            if applied {
-                "imported"
-            } else {
-                "dry run: would import"
-            },
-            self.total(),
-            self.source,
-            counts.join(", ")
-        )];
-        let methods: usize = self.sign_in.providers.values().sum();
-        if methods > 0 {
-            let mut providers: Vec<(&String, &usize)> = self.sign_in.providers.iter().collect();
-            providers.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
-            let providers: Vec<String> = providers
-                .into_iter()
-                .map(|(p, n)| format!("{} {n}", sign_in_name(p)))
-                .collect();
-            let methods = Tally {
-                count: methods,
-                one: "sign-in method".into(),
-                many: "sign-in methods".into(),
-            };
-            lines.push(format!("kept {methods} ({})", providers.join(", ")));
-            if self.sign_in.linked > 0 {
-                lines.push(format!("linked {} to their accounts", self.sign_in.linked));
-            }
-        }
-        if self.duplicates > 0 {
-            let duplicates = Tally {
-                count: self.duplicates,
-                one: "duplicate".into(),
-                many: "duplicates".into(),
-            };
-            lines.push(format!("skipped {duplicates}"));
-        }
-        lines.extend(self.skipped.iter().map(|t| format!("skipped {t}")));
-        lines.extend(self.warnings.iter().map(|t| format!("warning: {t}")));
-        if !self.dropped.is_empty() {
-            let dropped: Vec<String> = self.dropped.iter().map(Tally::to_string).collect();
-            lines.push(format!("dropped: {}", dropped.join(", ")));
-        }
-        lines
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1559,6 +1286,10 @@ pub struct ItemInfo {
     /// The app the item is mirrored from ("1Password"), which overwrites
     /// changes made here; `None` for the user's own.
     pub source: Option<String>,
+    #[serde(default)]
+    pub favorite: bool,
+    #[serde(default)]
+    pub tags: Vec<String>,
 }
 
 /// The field an item's one-time code comes from, as the agent picks it:
@@ -1646,364 +1377,4 @@ pub struct PeerSync {
     pub sent: usize,
     pub received: usize,
     pub error: Option<String>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn wiped_on_drop<T: ZeroizeOnDrop>() {}
-
-    /// Values are wiped as fields drop.
-    #[test]
-    fn field_values_are_wiped() {
-        wiped_on_drop::<FieldInput>();
-        wiped_on_drop::<FieldInfo>();
-        let mut input = FieldInput {
-            name: "password".into(),
-            kind: None,
-            value: "hunter22".into(),
-        };
-        input.zeroize();
-        assert!(input.value.is_empty());
-    }
-
-    #[test]
-    fn field_debug_redacts_values() {
-        let input = FieldInput {
-            name: "password".into(),
-            kind: None,
-            value: "private-marker".into(),
-        };
-        let info = FieldInfo {
-            name: "notes".into(),
-            kind: "secret".into(),
-            value: "private-marker".into(),
-        };
-        for debug in [format!("{input:?}"), format!("{info:?}")] {
-            assert!(debug.contains("<redacted>"), "{debug}");
-            assert!(!debug.contains("private-marker"), "{debug}");
-        }
-    }
-
-    #[test]
-    fn mirror_reports_read_as_lines() {
-        let item = |action, title: &str, reason: Option<&str>| MirrorItem {
-            action,
-            title: title.into(),
-            reason: reason.map(Into::into),
-        };
-        let mut report = MirrorReport {
-            applied: true,
-            unchanged: 40,
-            items: vec![
-                item(MirrorAction::Add, "Bank", None),
-                item(MirrorAction::Update, "GitHub", Some("password")),
-                item(MirrorAction::Update, "Wi-Fi", Some("notes")),
-                item(MirrorAction::Skip, "Scan", Some("document")),
-            ],
-            warnings: vec![],
-            dropped: vec![Tally {
-                count: 2,
-                one: "attachment".into(),
-                many: "attachments".into(),
-            }],
-        };
-        assert_eq!(report.summary(), "2 updated, 1 added");
-        assert_eq!(
-            report.lines(),
-            [
-                "2 updated, 1 added (40 unchanged, 1 skipped)",
-                "  add     Bank",
-                "  update  GitHub (password)",
-                "  update  Wi-Fi (notes)",
-                "  skip    Scan (document)",
-                "not mirrored: 2 attachments",
-            ]
-        );
-        assert!(report.changed());
-        report.applied = false;
-        assert_eq!(report.summary(), "2 would update, 1 would add");
-        report.items.retain(|i| i.action == MirrorAction::Skip);
-        assert!(!report.changed());
-        assert_eq!(report.summary(), "Nothing to do");
-        report.applied = true;
-        assert_eq!(report.summary(), "Up to date");
-    }
-
-    #[test]
-    fn sign_in_providers_are_ids_or_one_line() {
-        for (text, id) in [
-            ("google", "google"),
-            ("Google", "google"),
-            ("Sign in with GitHub", "github"),
-            ("twitter", "x"),
-            (" Linked In ", "linkedin"),
-            ("Acme\tcorp\nSSO ", "Acme corp SSO"),
-        ] {
-            assert_eq!(sign_in_provider(text).as_deref(), Some(id), "{text:?}");
-        }
-        assert_eq!(sign_in_provider(" \n"), None);
-        assert_eq!(
-            sign_in_provider(&"é".repeat(100)).unwrap().chars().count(),
-            64
-        );
-        assert_eq!(
-            (sign_in_name("github"), sign_in_name("Acme")),
-            ("GitHub", "Acme")
-        );
-    }
-
-    #[test]
-    fn import_reports_read_as_lines() {
-        let tally = |count, one: &str, many: &str| Tally {
-            count,
-            one: one.into(),
-            many: many.into(),
-        };
-        let report = ImportReport {
-            source: ImportSource::OnePassword,
-            new: [("login".into(), 3), ("card".into(), 1)].into(),
-            duplicates: 2,
-            skipped: vec![tally(1, "secure note", "secure notes")],
-            warnings: vec![tally(2, "URL kept as text", "URLs kept as text")],
-            dropped: vec![tally(1, "favorite", "favorites"), tally(3, "tag", "tags")],
-            sign_in: SignInCounts {
-                providers: [
-                    ("google".into(), 2),
-                    ("x".into(), 1),
-                    ("Acme SSO".into(), 2),
-                ]
-                .into(),
-                linked: 3,
-            },
-        };
-        assert_eq!(
-            report.lines(true),
-            [
-                "imported 4 from 1Password (logins 3, cards 1)",
-                "kept 5 sign-in methods (Acme SSO 2, Google 2, X 1)",
-                "linked 3 to their accounts",
-                "skipped 2 duplicates",
-                "skipped 1 secure note",
-                "warning: 2 URLs kept as text",
-                "dropped: 1 favorite, 3 tags",
-            ]
-        );
-        let kinds = ImportReport {
-            source: ImportSource::Bitwarden,
-            new: [
-                ("identity".into(), 1),
-                ("note".into(), 2),
-                ("ssh".into(), 1),
-                ("future".into(), 1),
-            ]
-            .into(),
-            duplicates: 0,
-            skipped: vec![],
-            warnings: vec![],
-            dropped: vec![],
-            sign_in: SignInCounts::default(),
-        };
-        assert_eq!(
-            kinds.lines(true),
-            [
-                "imported 5 from Bitwarden (logins 0, cards 0, secure notes 2, SSH keys 1, identities 1, future 1)"
-            ]
-        );
-        assert_eq!(
-            kinds.counts(),
-            [("note", 2), ("ssh", 1), ("identity", 1), ("future", 1)]
-        );
-        assert_eq!(
-            (noun("ssh", 1), noun("identity", 2)),
-            ("SSH key", "identities")
-        );
-        let empty = ImportReport {
-            source: ImportSource::ApplePasswords,
-            new: BTreeMap::new(),
-            duplicates: 1,
-            skipped: vec![],
-            warnings: vec![],
-            dropped: vec![],
-            sign_in: SignInCounts::default(),
-        };
-        assert_eq!(
-            empty.lines(false),
-            [
-                "dry run: would import 0 from Apple Passwords (logins 0, cards 0)",
-                "skipped 1 duplicate",
-            ]
-        );
-        let json = serde_json::to_string(&Reply::Import { report: empty }).unwrap();
-        assert!(json.contains(r#""source":"apple-passwords""#), "{json}");
-    }
-
-    #[test]
-    fn app_activate_and_its_replies_are_flat_json_lines() {
-        let request = serde_json::to_string(&Request {
-            v: PROTOCOL_VERSION,
-            claimed: None,
-            command: Command::AppActivate {
-                token: Some("launcher-token".into()),
-            },
-        })
-        .unwrap();
-        assert_eq!(
-            request,
-            format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"app-activate","token":"launcher-token"}}"#)
-        );
-        let replies = [
-            (
-                Reply::Activated,
-                r#"{"type":"ok","reply":{"reply":"activated"}}"#,
-            ),
-            (Reply::NoApp, r#"{"type":"ok","reply":{"reply":"no-app"}}"#),
-        ];
-        for (reply, json) in replies {
-            let line = serde_json::to_string(&Message::Ok { reply }).unwrap();
-            assert_eq!(line, json);
-        }
-    }
-
-    #[test]
-    fn watch_round_trips_as_flat_json_lines() {
-        let request = serde_json::to_string(&Request {
-            v: PROTOCOL_VERSION,
-            claimed: None,
-            command: Command::Watch { app: true },
-        })
-        .unwrap();
-        assert_eq!(
-            request,
-            format!(r#"{{"v":{PROTOCOL_VERSION},"cmd":"watch","app":true}}"#)
-        );
-        assert!(matches!(
-            serde_json::from_str::<Request>(&request).unwrap().command,
-            Command::Watch { app: true }
-        ));
-        let changes = [
-            (Change::Watching, r#"{"type":"change","change":"watching"}"#),
-            (Change::Locked, r#"{"type":"change","change":"locked"}"#),
-            (Change::Unlocked, r#"{"type":"change","change":"unlocked"}"#),
-            (Change::Vaults, r#"{"type":"change","change":"vaults"}"#),
-            (
-                Change::Items { vault: "ab".into() },
-                r#"{"type":"change","change":"items","vault":"ab"}"#,
-            ),
-            (
-                Change::Devices { vault: "ab".into() },
-                r#"{"type":"change","change":"devices","vault":"ab"}"#,
-            ),
-            (Change::Activity, r#"{"type":"change","change":"activity"}"#),
-            (Change::Resync, r#"{"type":"change","change":"resync"}"#),
-            (Change::Stopping, r#"{"type":"change","change":"stopping"}"#),
-            (
-                Change::Activate {
-                    token: Some("t".into()),
-                },
-                r#"{"type":"change","change":"activate","token":"t"}"#,
-            ),
-            (
-                Change::Activate { token: None },
-                r#"{"type":"change","change":"activate","token":null}"#,
-            ),
-        ];
-        for (change, json) in changes {
-            let line = serde_json::to_string(&Message::Change {
-                change: change.clone(),
-            })
-            .unwrap();
-            assert_eq!(line, json);
-            match serde_json::from_str::<Message>(&line).unwrap() {
-                Message::Change { change: back } => assert_eq!(back, change),
-                other => panic!("expected a change, got {other:?}"),
-            }
-        }
-    }
-
-    /// A claim rides beside the command and is left out when there is none,
-    /// so a status request reads the same to agents of every protocol.
-    #[test]
-    fn a_claim_rides_beside_the_command() {
-        let claimed = Request {
-            v: PROTOCOL_VERSION,
-            claimed: Some(Claim {
-                caller: Some("deploy bot".into()),
-                opencode_session: None,
-            }),
-            command: Command::Status,
-        };
-        let line = serde_json::to_string(&claimed).unwrap();
-        assert_eq!(
-            line,
-            format!(
-                r#"{{"v":{PROTOCOL_VERSION},"claimed":{{"caller":"deploy bot","opencode_session":null}},"cmd":"status"}}"#
-            )
-        );
-        let back = serde_json::from_str::<Request>(&line).unwrap();
-        assert_eq!(back.claimed, claimed.claimed);
-        let old = serde_json::from_str::<Request>(r#"{"v":1,"cmd":"status"}"#).unwrap();
-        assert!(old.claimed.is_none() && matches!(old.command, Command::Status));
-    }
-
-    #[test]
-    fn an_item_set_carries_its_unset_fields() {
-        let command = Command::ItemSet {
-            vault: None,
-            query: vec!["a".into()],
-            fields: Vec::new(),
-            name: None,
-            unset: vec!["notes".into()],
-        };
-        let line = serde_json::to_string(&command).unwrap();
-        assert!(line.ends_with(r#""unset":["notes"]}"#), "{line}");
-        match serde_json::from_str::<Command>(&line).unwrap() {
-            Command::ItemSet { unset, .. } => assert_eq!(unset, ["notes"]),
-            other => panic!("expected item-set, got {other:?}"),
-        }
-        // An older client's item-set, without unset, is refused.
-        let old = r#"{"cmd":"item-set","vault":null,"query":["a"],"fields":[],"name":"x"}"#;
-        assert!(serde_json::from_str::<Command>(old).is_err());
-    }
-
-    #[test]
-    fn generate_round_trips() {
-        let request = serde_json::to_string(&Request {
-            v: PROTOCOL_VERSION,
-            claimed: None,
-            command: Command::Generate {
-                length: 20,
-                symbols: false,
-            },
-        })
-        .unwrap();
-        assert!(
-            request.ends_with(r#""cmd":"generate","length":20,"symbols":false}"#),
-            "{request}"
-        );
-        assert!(matches!(
-            serde_json::from_str::<Request>(&request).unwrap().command,
-            Command::Generate {
-                length: 20,
-                symbols: false
-            }
-        ));
-        let reply = serde_json::to_string(&Message::Ok {
-            reply: Reply::Password {
-                password: Zeroizing::new("hunter2hunter2".into()),
-            },
-        })
-        .unwrap();
-        assert_eq!(
-            reply,
-            r#"{"type":"ok","reply":{"reply":"password","password":"hunter2hunter2"}}"#
-        );
-        match serde_json::from_str::<Message>(&reply).unwrap() {
-            Message::Ok {
-                reply: Reply::Password { password },
-            } => assert_eq!(*password, "hunter2hunter2"),
-            other => panic!("expected a password, got {other:?}"),
-        }
-    }
 }

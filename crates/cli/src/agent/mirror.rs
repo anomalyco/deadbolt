@@ -353,6 +353,7 @@ fn copy(item: &Item) -> Option<Copy<'_>> {
         digest: String::new(),
         origin: Origin::Adopted,
         fields: BTreeSet::new(),
+        tags: BTreeSet::new(),
     });
     Some(Copy {
         account,
@@ -363,7 +364,13 @@ fn copy(item: &Item) -> Option<Copy<'_>> {
 }
 
 fn item_digest(item: &Item) -> String {
-    digest(&item.kind, item.name.as_deref(), &item.fields)
+    digest(
+        &item.kind,
+        item.name.as_deref(),
+        &item.fields,
+        item.favorite,
+        &item.tags,
+    )
 }
 
 /// A 1Password item: the account (or, for an import, the user) and its id.
@@ -553,10 +560,21 @@ impl Plan {
         let source = mapped.source(account, Origin::Sync, mapped.item.digest());
         let title = title(&mapped.item);
         let Imported {
-            kind, name, fields, ..
+            kind,
+            name,
+            fields,
+            favorite,
+            tags,
+            ..
         } = mapped.item;
-        self.creates
-            .push(DataOp::create_mirror(kind, name, fields, source));
+        self.creates.push(DataOp::create_with(
+            kind,
+            name,
+            fields,
+            Some(source),
+            favorite,
+            tags,
+        ));
         self.note(MirrorAction::Add, title, reason);
     }
 
@@ -602,17 +620,25 @@ impl Plan {
             .and_then(|s| MirrorVersion::parse(&s.version));
         // Of the fields 1Password lacks, a mirror the sync added loses them
         // all; one taken over only those 1Password wrote before.
-        let from_op = match origin {
-            Origin::Sync => None,
-            _ => Some(
-                old.as_ref()
-                    .filter(|v| v.origin == Origin::Adopted)
-                    .map(|v| v.fields.clone())
-                    .unwrap_or_default(),
-            ),
+        let (from_fields, from_tags) = match origin {
+            Origin::Sync => (None, None),
+            _ => {
+                let adopted = old.as_ref().filter(|v| v.origin == Origin::Adopted);
+                (
+                    Some(adopted.map(|v| v.fields.clone()).unwrap_or_default()),
+                    Some(adopted.map(|v| v.tags.clone()).unwrap_or_default()),
+                )
+            }
         };
-        let (ops, changed, fields) = diff(item, &mapped.item, from_op.as_ref());
-        let digest = digest(&item.kind, mapped.item.name.as_deref(), &fields);
+        let (ops, changed, fields, tags) =
+            diff(item, &mapped.item, from_fields.as_ref(), from_tags.as_ref());
+        let digest = digest(
+            &item.kind,
+            mapped.item.name.as_deref(),
+            &fields,
+            mapped.item.favorite,
+            &tags,
+        );
         let source = mapped.source(account, origin, digest);
         // The same but for 1Password's time.
         let new = MirrorVersion::parse(&source.version);
@@ -646,13 +672,19 @@ fn title(item: &Imported) -> String {
 }
 
 /// The ops that make `item` hold what `to` does, the names changed, and
-/// the fields after. Of the fields `to` lacks, those in `from_op` go, or
-/// with `None` all of them.
+/// the fields and tags after. Of the fields and tags `to` lacks, those in
+/// `from_fields` / `from_tags` go, or with `None` all of them.
 fn diff(
     item: &Item,
     to: &Imported,
-    from_op: Option<&BTreeSet<String>>,
-) -> (Vec<DataOp>, Vec<String>, BTreeMap<String, Field>) {
+    from_fields: Option<&BTreeSet<String>>,
+    from_tags: Option<&BTreeSet<String>>,
+) -> (
+    Vec<DataOp>,
+    Vec<String>,
+    BTreeMap<String, Field>,
+    BTreeSet<String>,
+) {
     let mut ops = Vec::new();
     let mut changed = Vec::new();
     let mut fields = item.fields.clone();
@@ -667,7 +699,7 @@ fn diff(
             fields.insert(name.clone(), field.clone());
         }
     }
-    let gone = |name: &String| from_op.is_none_or(|from| from.contains(name));
+    let gone = |name: &String| from_fields.is_none_or(|from| from.contains(name));
     for name in item.fields.keys().filter(|n| !to.fields.contains_key(*n)) {
         if gone(name) {
             ops.push(DataOp::remove(item.id, name.clone()));
@@ -675,7 +707,38 @@ fn diff(
             fields.remove(name);
         }
     }
-    (ops, changed, fields)
+    if item.favorite != to.favorite {
+        ops.push(DataOp::favorite(item.id, to.favorite));
+        changed.push("favorite".to_string());
+    }
+    let mut tags = item.tags.clone();
+    let mut tags_changed = false;
+    for t in &to.tags {
+        if !tags.contains(t) {
+            let folded = deadbolt_core::tag::fold_tag(t);
+            tags.retain(|e| deadbolt_core::tag::fold_tag(e) != folded);
+            tags.insert(t.clone());
+            ops.push(DataOp::tag_add(item.id, t.clone()));
+            tags_changed = true;
+        }
+    }
+    let tag_gone = |folded: &str| from_tags.is_none_or(|from| from.contains(folded));
+    for existing in &item.tags {
+        let folded = deadbolt_core::tag::fold_tag(existing);
+        let in_to = to
+            .tags
+            .iter()
+            .any(|t| deadbolt_core::tag::fold_tag(t) == folded);
+        if !in_to && tag_gone(&folded) {
+            tags.remove(existing);
+            ops.push(DataOp::tag_remove(item.id, existing.clone()));
+            tags_changed = true;
+        }
+    }
+    if tags_changed {
+        changed.push("tags".to_string());
+    }
+    (ops, changed, fields, tags)
 }
 
 /// Edits in entries of about [`CREATE_BATCH_BYTES`] of values each.
@@ -1419,20 +1482,43 @@ pub(super) mod tests {
         let github = &named(&s, "GitHub")[0];
         assert_eq!(github.fields["password"].value, "op-github-pw");
         assert_eq!(github.fields["pin"].value, "2468");
+        assert!(github.favorite);
+        assert_eq!(github.tags, BTreeSet::from(["dev".into(), "work".into()]));
         assert_eq!(version(github).origin, Origin::Adopted);
         assert!(named(&s, "GitHub (work)").is_empty());
+
+        // A tag added only in Deadbolt survives a 1Password sync, while a tag
+        // 1Password wrote and later removed goes.
+        super::super::items::set_with(
+            &mut s,
+            None,
+            &["GitHub".into()],
+            vec![],
+            None,
+            &[],
+            None,
+            &["local/only".into()],
+            &[],
+        )
+        .unwrap();
 
         // Later changes keep it too.
         let mut op = op_items();
         let item = titled(&mut op, "GitHub");
         item["fields"][1]["value"] = json!("op-github-pw-2");
+        item["tags"] = json!(["work"]);
         item["updated_at"] = json!("2024-04-01T00:00:00Z");
         let report = sync(&mut s, &op);
         assert_eq!(
             actions(&report)[0],
-            (MirrorAction::Update, "GitHub", Some("password"))
+            (MirrorAction::Update, "GitHub", Some("password, tags"))
         );
-        assert_eq!(named(&s, "GitHub")[0].fields["pin"].value, "2468");
+        let after = &named(&s, "GitHub")[0];
+        assert_eq!(after.fields["pin"].value, "2468");
+        assert_eq!(
+            after.tags,
+            BTreeSet::from(["local/only".into(), "work".into()])
+        );
         // And it is fresh: written as it now is, with its own field.
         assert_eq!(requested(&s, &op), ["item9"]);
 
@@ -1795,13 +1881,24 @@ pub(super) mod tests {
         version.origin = origin;
         if origin == Origin::Adopted {
             version.fields = item.fields.keys().cloned().collect();
+            version.tags = item
+                .tags
+                .iter()
+                .map(|t| deadbolt_core::tag::fold_tag(t))
+                .collect();
         }
         source.version = version.to_string();
         let vault = s.resolve(None).unwrap();
         s.update(vault, |v, secret| {
             v.write(secret, vec![DataOp::source(item.id, Some(source.clone()))])?;
-            let copy =
-                DataOp::create_mirror(&item.kind, item.name.clone(), item.fields.clone(), source);
+            let copy = DataOp::create_with(
+                &item.kind,
+                item.name.clone(),
+                item.fields.clone(),
+                Some(source),
+                item.favorite,
+                item.tags.clone(),
+            );
             v.create_items(secret, vec![copy])?;
             Ok(())
         })

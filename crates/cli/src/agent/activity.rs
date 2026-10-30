@@ -61,6 +61,7 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::ItemGet { .. } => (T::Read, "item-get"),
         C::ItemCode { .. } => (T::Read, "item-code"),
         C::ItemList { .. } => (T::Look, "item-list"),
+        C::TagList { .. } => (T::Look, "tag-list"),
         // Adding a field or editing a plain one will be Add (build order 6).
         C::ItemSet { .. } => (T::Write, "item-set"),
         C::ItemUnset { .. } => (T::Write, "item-unset"),
@@ -224,15 +225,24 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             query,
             fields,
             unset,
+            favorite,
+            add_tags,
+            remove_tags,
             ..
-        } => (
-            named(vault, query),
-            fields
+        } => {
+            let mut names: Vec<String> = fields
                 .iter()
                 .map(|f| f.name.clone())
                 .chain(unset.iter().cloned())
-                .collect(),
-        ),
+                .collect();
+            if favorite.is_some() {
+                names.push("favorite".into());
+            }
+            if !add_tags.is_empty() || !remove_tags.is_empty() {
+                names.push("tags".into());
+            }
+            (named(vault, query), names)
+        }
         Command::ItemUnset {
             vault,
             query,
@@ -769,6 +779,8 @@ mod tests {
                         value: SECRET.into(),
                     },
                 ],
+                favorite: false,
+                tags: Vec::new(),
             },
         )
         .await;
@@ -1107,6 +1119,8 @@ mod tests {
                     kind: None,
                     value: big.clone(),
                 }],
+                favorite: false,
+                tags: Vec::new(),
             },
         })
         .unwrap();
@@ -1192,6 +1206,8 @@ mod tests {
             vault: None,
             query: Vec::new(),
             kind: None,
+            tags: Vec::new(),
+            favorites: false,
         };
         for _ in 0..ledger::PER_ANCHOR + 40 {
             let listed = ask(&agent, list()).await;
