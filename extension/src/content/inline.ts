@@ -665,6 +665,10 @@ const emptyUntil = new WeakMap<Element, number>()
 type Asked = "focus" | "click" | "again"
 
 async function maybeOpen(el: FormControl, how: Asked = "focus") {
+  // The form as it is now, not as the last scan (up to 750 ms ago) saw it:
+  // a password box the page just showed, say. A menu opened on an older
+  // scan would fill nothing ("The page changed") once the next one runs.
+  if (el instanceof HTMLInputElement && !querying && !(anchor === el && host)) state.rescan()
   if (!(el instanceof HTMLInputElement) || !targetFor(el)) return maybeOpenForms(el, how)
   // While the tab learns its site, the user signs in by hand.
   if (querying || dismissedFor === el || !recentGesture() || learning()) return
