@@ -35,13 +35,15 @@ export interface View {
   leave?: () => void
 }
 
-/** This tab's site in the popup: its logins, an offer to save, a passkey call waiting, and the tab to fill. */
+/** This tab's site in the popup: logins, offers, passkeys, saving and learning state. */
 export interface Site {
   tabId: number
   host: string
   accounts: Account[]
   offer?: PopupReply["offer"]
   passkey?: PasskeyPrompt
+  savingOff?: string
+  learning?: PopupReply["learning"]
 }
 
 /** How long the popup stays open after a passkey choice for the passphrase prompt it leads to. */
@@ -357,6 +359,15 @@ export class App {
     this.paintChrome()
   }
 
+  /** This tab's site again (a learning session's steps), and the view follows. */
+  async refreshSite() {
+    if (this.status.state !== "ready" || this.surface !== "popup") return
+    const prompt = this.site?.passkey?.id
+    this.site = await this.loadSite()
+    if (this.site?.passkey?.id !== prompt && !this.reauth) return this.show(0)
+    this.view?.update?.()
+  }
+
   async loadPreset() {
     const s = await this.run({ type: "device-settings" })
     if (s.ok && typeof s.reply.preset === "string") this.preset = s.reply.preset as LockPreset
@@ -369,7 +380,7 @@ export class App {
     if (tab?.id === undefined) return null
     const reply = (await chrome.runtime.sendMessage({ type: "db:popup-load", tabId: tab.id }).catch(() => null)) as PopupReply | null
     if (!reply || reply.unfillable || !(reply.site || reply.host)) return null
-    return { tabId: tab.id, host: reply.site || reply.host || "", accounts: reply.accounts, offer: reply.offer, passkey: reply.passkey }
+    return { tabId: tab.id, host: reply.site || reply.host || "", accounts: reply.accounts, offer: reply.offer, passkey: reply.passkey, savingOff: reply.savingOff, learning: reply.learning }
   }
 
   /** Follows the background's status pushes, and starts. */
@@ -397,6 +408,8 @@ export class App {
       // popup or another tab did), so it leaves the fill waiting.
       if (this.reauth && document.visibilityState === "visible") void this.ask({ type: "device-reauth-cancel", id: this.reauth.id })
     })
+    // While the tab is learning, its step count follows along, as in the native popup.
+    if (this.surface === "popup") setInterval(() => this.site?.learning && void this.refreshSite(), 1000)
     // A vault slow to answer shows that it's starting, never an empty frame.
     const slow = setTimeout(() => this.shell === "" && this.render(), 250)
     void this.run({ type: "device-status" }).then(async () => {

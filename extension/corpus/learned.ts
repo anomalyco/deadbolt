@@ -3,9 +3,11 @@
 // typing shows (ground truth, unlike the crawl's weak labels) against the
 // detector's, plus whether the detector found the page and its submit control.
 //
-//   bun corpus/learned.ts [--dir <learn dir>] [--out report-learned.md]
+//   bun corpus/learned.ts [--dir <learn dir> | --file <deadbolt-learn-….jsonl>] [--out report-learned.md]
 //
 // The default dir is $XDG_STATE_HOME/deadbolt/learn, else ~/.local/state/deadbolt/learn.
+// `--file` reads the browser-only Deadbolt's download (Settings › Learning
+// logs): every session's lines in one file, each with its `session`.
 
 import { readdir, readFile, writeFile } from "node:fs/promises"
 import { homedir } from "node:os"
@@ -17,6 +19,7 @@ const arg = (name: string) => {
   const i = process.argv.indexOf(name)
   return i > 0 ? process.argv[i + 1] : undefined
 }
+const file = arg("--file")
 const dir = arg("--dir") ?? join(process.env.XDG_STATE_HOME || join(homedir(), ".local", "state"), "deadbolt", "learn")
 const out = arg("--out")
 
@@ -51,16 +54,30 @@ function verdict(truth: string, role: string | null): Verdict {
 // ---- Load -----------------------------------------------------------------------
 
 const sessions: Session[] = []
-let files: string[] = []
+/** Each session's log, by its id: a file of the dir each, or the download's lines by `session`. */
+const logs = new Map<string, string[]>()
 try {
-  files = (await readdir(dir)).filter((f) => f.endsWith(".jsonl")).sort()
+  if (file) {
+    for (const raw of (await readFile(file, "utf8")).split("\n")) {
+      const id = (() => {
+        try {
+          return String((JSON.parse(raw) as { session?: unknown }).session ?? "")
+        } catch {
+          return ""
+        }
+      })()
+      if (id) logs.set(id, [...(logs.get(id) ?? []), raw])
+    }
+  } else {
+    for (const f of (await readdir(dir)).filter((f) => f.endsWith(".jsonl")).sort()) logs.set(f.replace(/\.jsonl$/, ""), (await readFile(join(dir, f), "utf8")).split("\n"))
+  }
 } catch {
-  console.error(`No learning logs in ${dir}. Use "Learn this site" in the extension's popup first.`)
+  console.error(`No learning logs in ${file ?? dir}. Use "Learn this site" in the extension's popup first.`)
   process.exit(1)
 }
-for (const file of files) {
-  const s: Session = { id: file.replace(/\.jsonl$/, ""), site: "", at: "", steps: [] }
-  for (const raw of (await readFile(join(dir, file), "utf8")).split("\n")) {
+for (const [id, lines] of logs) {
+  const s: Session = { id, site: "", at: "", steps: [] }
+  for (const raw of lines) {
     if (!raw) continue
     let line: Line
     try {
@@ -104,7 +121,7 @@ const outcomes = new Map<string, number>()
 for (const s of sessions) outcomes.set(s.end?.reason ?? "unfinished", (outcomes.get(s.end?.reason ?? "unfinished") ?? 0) + 1)
 lines.push("# Learned sign-ins", "")
 lines.push(
-  `${sessions.length} sessions on ${new Set(sessions.map((s) => s.site)).size} sites (${[...outcomes].map(([k, v]) => `${v} ${k}`).join(", ")}), ${rows.length} typed fields, from ${dir}.`,
+  `${sessions.length} sessions on ${new Set(sessions.map((s) => s.site)).size} sites (${[...outcomes].map(([k, v]) => `${v} ${k}`).join(", ")}), ${rows.length} typed fields, from ${file ?? dir}.`,
   "",
 )
 

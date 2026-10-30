@@ -15,6 +15,7 @@ import type { DeviceCommand, DeviceReply, ItemInput, LockPreset, Reauth, ReauthC
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type ReauthAsk, type ReauthBody, type ReauthReply, type SendOptions, type VaultBackend } from "./backend"
 import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, digest, isCopied, type Copied } from "./clipboard"
+import { appendLearnLine } from "./learn-log"
 import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultClipboard, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
 
 export const OFFSCREEN_PAGE = "offscreen.html"
@@ -62,9 +63,11 @@ export const backoff = (fails: number) => (fails < FREE_TRIES ? 0 : Math.min(MAX
 /**
  * What this device does today, as the vault's hello names it. Anything else
  * is refused here, before the vault sees it, and no capability is claimed
- * for it. The learning log is a follow-up.
+ * for it. `learn` never reaches the vault: the
+ * learning log is kept here (bg/learn-log.ts), locked or not, as the host
+ * keeps it outside the agent.
  */
-const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel"])
+const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel", "learn"])
 /** Requests that count as use for the idle lock. Listing a page's logins or forms doesn't (docs/autofill.md). */
 const USES = new Set<string>(["fill", "save", "fill-form", "generate", "passkey-create", "passkey-get"])
 
@@ -75,7 +78,12 @@ const USES = new Set<string>(["fill", "save", "fill-form", "generate", "passkey-
  */
 const CHECKS_RATE = { capacity: 20, everyMs: 1000 }
 const FILLS_RATE = { capacity: 60, everyMs: 250 }
-const RATED: Partial<Record<string, "checks" | "fills" | "passkeys">> = {
+/** Learning logs a line per sign-in step and frame: a burst, then a steady trickle. */
+const LEARNS_RATE = { capacity: 100, everyMs: 100 }
+/** The host's limit on one request, which bounds a learning line too. */
+const MAX_REQUEST = 64 * 1024
+const RATED: Partial<Record<string, "checks" | "fills" | "passkeys" | "learns">> = {
+  learn: "learns",
   check: "checks",
   "generate-check": "checks",
   fill: "fills",
@@ -192,7 +200,7 @@ export class StandaloneBackend implements VaultBackend {
    * a newer fill never counts on one of them to show its prompt.
    */
   private closing = new Set<number>()
-  private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE), passkeys: new Bucket({ capacity: 10, everyMs: 1000 }) }
+  private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE), passkeys: new Bucket({ capacity: 10, everyMs: 1000 }), learns: new Bucket(LEARNS_RATE) }
   private ceremonies = 0
 
   constructor() {
@@ -272,7 +280,8 @@ export class StandaloneBackend implements VaultBackend {
       const reply = await this.request({ type: "hello" }, TIMEOUT_MS)
       if (reply.type !== "hello") throw new HostError("failed", UNREADABLE)
       // Only what this build sends on: a capability it would refuse is never offered.
-      this.capabilities = reply.capabilities.filter((c) => c === "passkeys" || SUPPORTED.has(c))
+      // The learning log is this side's own, whatever the vault says.
+      this.capabilities = [...reply.capabilities.filter((c) => c !== "learn" && (c === "passkeys" || SUPPORTED.has(c))), "learn"]
       if (reply.protocol !== PROTOCOL) {
         this.setStatus({ state: "unavailable", detail: "This extension and its vault are different versions. Reload the extension." }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
@@ -295,6 +304,7 @@ export class StandaloneBackend implements VaultBackend {
     const ceremony = body.type === "passkey-create" || body.type === "passkey-get"
     if (ceremony && this.ceremonies >= 4) throw slowDown()
     if (USES.has(body.type)) this.used()
+    if (body.type === "learn") return (await this.learn(body as Extract<RequestBody, { type: "learn" }>)) as ReplyFor[T]
     if (ceremony) this.ceremonies++
     let reply
     try {
@@ -311,6 +321,14 @@ export class StandaloneBackend implements VaultBackend {
     if (reply.type !== expected) throw new HostError("failed", UNREADABLE)
     if (body.type === "save") void this.hello("items")
     return reply as ReplyFor[T]
+  }
+
+  /** A line of a learning log, as the host's `learn`: kept here, never in the vault. */
+  private async learn(body: Extract<RequestBody, { type: "learn" }>): Promise<ReplyFor["learn"]> {
+    if (typeof body.line !== "object" || body.line === null || JSON.stringify(body).length > MAX_REQUEST) throw new HostError("bad_request", `a request is at most ${MAX_REQUEST} bytes`)
+    const refused = await appendLearnLine(body.session, body.line).catch(() => "couldn't write the learning log")
+    if (refused) throw new HostError(refused.startsWith("couldn't") ? "failed" : "bad_request", refused)
+    return { type: "learned" }
   }
 
   /** device.html's commands (see DeviceCommand); the background checks the sender (fromVaultPage). */
