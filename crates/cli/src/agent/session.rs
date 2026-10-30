@@ -25,6 +25,11 @@ const META_PEERS: &str = "cli/peers";
 const META_FILLED: &str = "cli/autofill-filled";
 /// The most logins whose last fill is remembered; the longest unused go first.
 const MAX_FILLED: usize = 1000;
+/// The most devices the address book keeps. Past it, hints for a device it
+/// doesn't know are dropped, so a peer can't grow it without bound.
+const MAX_PEERS: usize = 4096;
+/// The most hints one hello may carry.
+const MAX_HINTS: usize = 256;
 
 /// A device counts as online if it synced this recently.
 pub const ONLINE_WINDOW_SECS: u64 = 90;
@@ -401,7 +406,11 @@ impl Loaded {
     }
 
     /// Records what `from` says about itself (authoritative) and about others
-    /// (fills gaps; newer addresses win).
+    /// (fills gaps; newer addresses win). A hint is taken only for a device
+    /// that is a member of a vault this device shares with `from`: `from`
+    /// can't seed the address book with strangers, or with devices of a
+    /// vault it isn't in. The browser device applies the same rule
+    /// (`crates/ext-core/src/device/wire.rs`).
     pub fn learn(
         &mut self,
         from: &DeviceId,
@@ -409,8 +418,15 @@ impl Loaded {
         addr: Option<Addr>,
         hints: BTreeMap<String, Hint>,
     ) {
-        let me = self.id.to_string();
         let now = now();
+        let known: BTreeSet<String> = self
+            .vaults
+            .values()
+            .filter(|vault| vault.is_member(from))
+            .flat_map(|vault| vault.members())
+            .filter(|id| *id != self.id)
+            .map(|id| id.to_string())
+            .collect();
         let peer = self.peer_mut(from);
         if let Some(name) = name.map(clean_name).filter(|n| !n.is_empty()) {
             peer.name = Some(name);
@@ -420,8 +436,11 @@ impl Loaded {
             peer.addr_seen = now;
         }
         let from = from.to_string();
-        for (id, hint) in hints.into_iter().take(256) {
-            if id == me || id == from || unhex::<32>(&id).is_err() {
+        for (id, hint) in hints.into_iter().take(MAX_HINTS) {
+            if id == from || !known.contains(&id) {
+                continue;
+            }
+            if !self.meta.peers.contains_key(&id) && self.meta.peers.len() >= MAX_PEERS {
                 continue;
             }
             let peer = self.meta.peers.entry(id).or_default();
@@ -666,6 +685,85 @@ mod tests {
             vec![second]
         );
         assert!(resolve_by_name_or_id([(first, None)].into_iter(), "ABA").is_empty());
+    }
+
+    fn fast() -> KdfParams {
+        KdfParams {
+            m_cost_kib: 64,
+            t_cost: 1,
+            p_cost: 1,
+        }
+    }
+
+    /// Adds `secret` to `id` as a member, as pairing does.
+    fn join(loaded: &mut Loaded, id: VaultId, secret: &DeviceSecret) {
+        let consent = secret.join_consent(&id, &loaded.id);
+        loaded
+            .update(id, |v, key| Ok(v.add(key, secret.device_id(), consent)?))
+            .unwrap();
+    }
+
+    /// A hint fills the address book only for a device in a vault the sender
+    /// shares; the sender's own name is the authoritative one, and neither
+    /// this device nor a stranger is taken.
+    #[test]
+    fn hints_are_only_for_devices_in_a_shared_vault() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut loaded = Loaded::setup(dir.path(), b"test", "alpha", fast()).unwrap();
+        let id = loaded.create_vault("personal").unwrap();
+        let member = DeviceSecret::from_bytes(&[2; 32]);
+        let stranger = DeviceSecret::from_bytes(&[3; 32]);
+        join(&mut loaded, id, &member);
+
+        let hint = |name: &str| Hint {
+            name: Some(name.into()),
+            addr: None,
+            addr_seen: 0,
+        };
+        let mut hints = BTreeMap::new();
+        hints.insert(member.device_id().to_string(), hint("From a hint"));
+        hints.insert(stranger.device_id().to_string(), hint("Stranger"));
+        hints.insert(loaded.id.to_string(), hint("This device"));
+        loaded.learn(&member.device_id(), Some("Laptop"), None, hints);
+
+        assert_eq!(
+            loaded.peer(&member.device_id()).unwrap().name.as_deref(),
+            Some("Laptop")
+        );
+        assert!(loaded.peer(&stranger.device_id()).is_none());
+        assert!(loaded.peer(&loaded.id).is_none());
+        assert_eq!(loaded.meta.peers.len(), 1);
+    }
+
+    /// The address book stops at its cap, so a member can't grow it without
+    /// bound; a hint for a device already known still lands.
+    #[test]
+    fn the_address_book_stops_at_its_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut loaded = Loaded::setup(dir.path(), b"test", "alpha", fast()).unwrap();
+        let id = loaded.create_vault("personal").unwrap();
+        let member = DeviceSecret::from_bytes(&[2; 32]);
+        let other = DeviceSecret::from_bytes(&[4; 32]);
+        join(&mut loaded, id, &member);
+        join(&mut loaded, id, &other);
+        for i in 0..MAX_PEERS {
+            loaded
+                .meta
+                .peers
+                .insert(format!("{i:064x}"), Peer::default());
+        }
+        let mut hints = BTreeMap::new();
+        hints.insert(
+            other.device_id().to_string(),
+            Hint {
+                name: Some("Other".into()),
+                addr: None,
+                addr_seen: 0,
+            },
+        );
+        loaded.learn(&member.device_id(), None, None, hints);
+        assert!(loaded.peer(&other.device_id()).is_none());
+        assert_eq!(loaded.meta.peers.len(), MAX_PEERS + 1);
     }
 
     #[test]
