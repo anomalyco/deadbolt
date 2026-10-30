@@ -170,7 +170,7 @@ fn line(entry: &ActivityEntry, now: u64) -> String {
     clippy::disallowed_methods,
     reason = "wall clock for how long ago an entry was"
 )]
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())

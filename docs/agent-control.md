@@ -58,7 +58,8 @@ How today's protocol (`crates/client/src/protocol.rs`) maps:
   adding `evil.example` to the GitHub login would hand the GitHub password
   to that site. Values come from stdin or the agent's generator, never
   argv. Old values stay in the item's history (`Vault::history`), so a bad
-  write can be undone.
+  write can be undone. `item-restore` too: a restored login fills on its
+  sites again.
 - **Never:** `item-remove`, `import`, `join`, `pair`, `device-remove`,
   `vault-create`, `vault-rename`, `vault-default`, `touch-id-set`,
   `sync-one-password`, and answering approvals. There is no export command,

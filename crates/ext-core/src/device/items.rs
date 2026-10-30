@@ -268,7 +268,7 @@ pub(super) fn delete(body: &mut Value) -> Result<Value> {
     state().with(|s| {
         let item = find(s, body)?;
         let mut staged = s.vault.clone();
-        staged.write(&s.secret, vec![DataOp::delete(item.id)])?;
+        staged.write(&s.secret, vec![DataOp::delete(item.id, unix_time() as u64)])?;
         s.commit(staged)
     })?;
     request_sync();

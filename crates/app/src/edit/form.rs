@@ -580,6 +580,7 @@ mod tests {
                 })
                 .collect(),
             source: None,
+            deleted_at: None,
         }
     }
 

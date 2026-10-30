@@ -75,14 +75,43 @@ fn short_id(ids: &[String], id: &str) -> String {
 pub(super) struct Listing {
     pub(super) items: Vec<Item>,
     ids: Vec<String>,
+    /// A listing of deleted items, and when each was deleted.
+    deleted: Option<BTreeMap<ItemId, u64>>,
 }
 
 impl Listing {
     pub(super) fn new(vault: &Vault) -> Self {
-        let items = vault.items();
+        Self::of(vault.items(), None)
+    }
+
+    /// The deleted items instead, newest first ([`Vault::deleted`]). Short
+    /// ids are unique among them.
+    pub(super) fn deleted(vault: &Vault) -> Self {
+        let deleted = vault.deleted();
+        let at = deleted
+            .iter()
+            .filter_map(|d| Some((d.item.id, d.at?)))
+            .collect();
+        Self::of(deleted.into_iter().map(|d| d.item).collect(), Some(at))
+    }
+
+    /// The live items, or with `deleted` the deleted ones.
+    pub(super) fn pick(vault: &Vault, deleted: bool) -> Self {
+        if deleted {
+            Self::deleted(vault)
+        } else {
+            Self::new(vault)
+        }
+    }
+
+    fn of(items: Vec<Item>, deleted: Option<BTreeMap<ItemId, u64>>) -> Self {
         let mut ids: Vec<String> = items.iter().map(|i| i.id.to_string()).collect();
         ids.sort();
-        Self { items, ids }
+        Self {
+            items,
+            ids,
+            deleted,
+        }
     }
 
     /// The item, without field values unless `with_fields`, and without
@@ -130,6 +159,10 @@ impl Listing {
             detail: detail(item),
             fields,
             source: super::mirror::source_app(item.source.as_ref()),
+            deleted_at: self
+                .deleted
+                .as_ref()
+                .and_then(|at| at.get(&item.id).copied()),
         }
     }
 
@@ -138,6 +171,7 @@ impl Listing {
         let query = query.join(" ");
         match found.as_slice() {
             [item] => Ok(item),
+            [] if self.deleted.is_some() => bail!("no deleted item matches {query:?}"),
             [] => bail!("no item matches {query:?}"),
             many => {
                 let mut lines: Vec<String> = many
@@ -190,15 +224,17 @@ fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
 }
 
 /// One item with its values; one-time password secrets only with `otp`,
-/// and the contents only of the file fields `files` names.
+/// and the contents only of the file fields `files` names. With `deleted`,
+/// one of the deleted items instead.
 pub fn get(
     s: &Loaded,
     vault: Option<&str>,
     query: &[String],
     otp: bool,
     files: &[String],
+    deleted: bool,
 ) -> Result<ItemInfo> {
-    let listing = Listing::new(s.vault(&s.resolve(vault)?));
+    let listing = Listing::pick(s.vault(&s.resolve(vault)?), deleted);
     let item = listing.find(query)?;
     let mut info = listing.info(item, true, otp);
     if !files.is_empty() {
@@ -239,20 +275,24 @@ pub fn code(s: &Loaded, vault: Option<&str>, query: &[String], now: Duration) ->
     })
 }
 
+/// Matching items by label, or with `deleted` the deleted ones newest first.
 pub fn list(
     s: &Loaded,
     vault: Option<&str>,
     query: &[String],
     kind: Option<&str>,
+    deleted: bool,
 ) -> Result<Vec<ItemInfo>> {
-    let listing = Listing::new(s.vault(&s.resolve(vault)?));
+    let listing = Listing::pick(s.vault(&s.resolve(vault)?), deleted);
     let mut items: Vec<ItemInfo> = listing
         .items
         .iter()
         .filter(|i| kind.is_none_or(|k| i.kind == k) && matches(i, query))
         .map(|i| listing.info(i, false, false))
         .collect();
-    items.sort_by_key(|i| (i.label.to_lowercase(), i.id.clone()));
+    if !deleted {
+        items.sort_by_key(|i| (i.label.to_lowercase(), i.id.clone()));
+    }
     Ok(items)
 }
 
@@ -596,7 +636,11 @@ pub fn remove(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<I
     let listing = Listing::new(s.vault(&vault));
     let item = listing.find(query)?;
     let info = listing.info(item, false, false);
-    write(s, vault, vec![DataOp::delete(item.id)])?;
+    write(
+        s,
+        vault,
+        vec![DataOp::delete(item.id, crate::config::now())],
+    )?;
     Ok(info)
 }
 
@@ -611,8 +655,16 @@ pub(super) fn remove_id(s: &mut Loaded, vault: VaultId, id: ItemId) -> Result<It
         .filter(|item| !item.deleted)
         .ok_or_else(|| anyhow!("no such item"))?;
     let info = Listing::new(stored).info(&item, false, false);
-    write(s, vault, vec![DataOp::delete(id)])?;
+    write(s, vault, vec![DataOp::delete(id, crate::config::now())])?;
     Ok(info)
+}
+
+/// Brings back the one deleted item `query` matches, as it was.
+pub fn restore(s: &mut Loaded, vault: Option<&str>, query: &[String]) -> Result<ItemInfo> {
+    let vault = s.resolve(vault)?;
+    let id = Listing::deleted(s.vault(&vault)).find(query)?.id;
+    write(s, vault, vec![DataOp::restore(id)])?;
+    Ok(info(s, vault, &id))
 }
 
 #[cfg(test)]
@@ -690,6 +742,43 @@ mod tests {
         assert_eq!(code.code.as_str(), "287082");
     }
 
+    /// Deleted items list newest first and only there, read by query with
+    /// `deleted`, and a restore brings one back with its values.
+    #[test]
+    fn deleted_items_list_apart_and_restore() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        for name in ["Alpha", "Beta", "Gamma"] {
+            let fields = vec![input("password", &format!("{name}-pw"))];
+            create(&mut s, None, "login", Some(name.into()), fields).unwrap();
+        }
+        remove(&mut s, None, &words("alpha")).unwrap();
+        remove(&mut s, None, &words("beta")).unwrap();
+        let labels = |s: &Loaded, deleted| {
+            list(s, None, &[], None, deleted)
+                .unwrap()
+                .into_iter()
+                .map(|i| (i.label, i.deleted_at.is_some()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(&s, false), [("Gamma".into(), false)]);
+        // Both were deleted within the same second: then by id, so check
+        // the set rather than the order.
+        let mut gone = labels(&s, true);
+        gone.sort();
+        assert_eq!(gone, [("Alpha".into(), true), ("Beta".into(), true)]);
+        assert!(get(&s, None, &words("alpha"), false, &[], false).is_err());
+        let alpha = get(&s, None, &words("alpha"), false, &[], true).unwrap();
+        assert_eq!(alpha.fields[0].value, "Alpha-pw");
+        assert!(restore(&mut s, None, &words("gamma")).is_err());
+
+        let back = restore(&mut s, None, &words("alpha")).unwrap();
+        assert_eq!((back.label.as_str(), back.deleted_at), ("Alpha", None));
+        let alpha = get(&s, None, &words("alpha"), false, &[], false).unwrap();
+        assert_eq!(alpha.fields[0].value, "Alpha-pw");
+        assert_eq!(labels(&s, true), [("Beta".into(), true)]);
+    }
+
     /// Under a millisecond before the boundary still reads as time left.
     #[test]
     fn a_code_always_has_time_left() {
@@ -714,7 +803,7 @@ mod tests {
         ];
         create(&mut s, None, "login", Some("Site".into()), fields).unwrap();
         let values = |otp| {
-            let item = get(&s, None, &words("site"), otp, &[]).unwrap();
+            let item = get(&s, None, &words("site"), otp, &[], false).unwrap();
             item.fields
                 .into_iter()
                 .map(|f| (f.name.clone(), f.value.clone()))
@@ -763,7 +852,15 @@ mod tests {
             "{error}"
         );
 
-        let item = get(&s, None, &words("parts"), false, &["part-3".to_string()]).unwrap();
+        let item = get(
+            &s,
+            None,
+            &words("parts"),
+            false,
+            &["part-3".to_string()],
+            false,
+        )
+        .unwrap();
         for field in &item.fields {
             let (name, contents) = deadbolt_core::item::file_parts(&field.value);
             if field.name == "part-3" {
@@ -780,7 +877,7 @@ mod tests {
             "one file's worth: {}",
             reply.len()
         );
-        let none = get(&s, None, &words("parts"), false, &[]).unwrap();
+        let none = get(&s, None, &words("parts"), false, &[], false).unwrap();
         assert!(none.fields.iter().all(|f| !f.value.contains('\n')));
     }
 
@@ -951,7 +1048,7 @@ mod tests {
         let figma = named(&s, "Figma");
         assert_eq!(value(&figma, "sign-in-with").as_deref(), Some("x"));
         assert_eq!(value(&named(&s, "Linear"), "sign-in-account"), None);
-        let listed = list(&s, None, &words("notion"), None).unwrap();
+        let listed = list(&s, None, &words("notion"), None, false).unwrap();
         assert_eq!(listed[0].detail.as_deref(), Some("Sign in with Google"));
         // The link is not content: importing again adds nothing.
         let again = import(&mut s, &export, true);
@@ -1007,7 +1104,7 @@ mod tests {
         let item = set(&mut s, None, &query, fields, name, &unset).unwrap();
         assert_eq!(s.vault(&vault).entries().len(), before + 1);
         assert_eq!(item.label, "GitHub");
-        let item = get(&s, None, &query, false, &[]).unwrap();
+        let item = get(&s, None, &query, false, &[], false).unwrap();
         let fields: Vec<(&str, &str)> = item
             .fields
             .iter()
@@ -1064,7 +1161,7 @@ mod tests {
         );
         assert!(item.is_ok(), "{item:?}");
         assert_eq!(s.vault(&vault).entries().len(), before + 1);
-        let item = get(&s, None, &query, false, &[]).unwrap();
+        let item = get(&s, None, &query, false, &[], false).unwrap();
         let names: Vec<&str> = item.fields.iter().map(|f| f.name.as_str()).collect();
         assert_eq!(names, ["password"]);
 

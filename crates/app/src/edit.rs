@@ -120,6 +120,7 @@ impl App {
         self.screen == Screen::Vault
             && self.panel.is_none()
             && !self.settings_open
+            && !self.trash.open
             && !self.installing()
             && !self.import.showing()
             && !self.drop_hovering()

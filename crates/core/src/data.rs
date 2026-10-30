@@ -30,8 +30,26 @@ pub struct Item {
     pub fields: BTreeMap<String, Field>,
     /// Where the item is mirrored from; `None` for the user's own.
     pub source: Option<Source>,
-    /// Tombstone. Fields are kept so the item can be restored by a later edit.
+    /// Tombstone. Fields are kept so the item can be restored.
     pub deleted: bool,
+}
+
+/// A deleted item and when it was deleted, from [`crate::Vault::deleted`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Deleted {
+    pub item: Item,
+    /// Seconds since the Unix epoch, on the deleting device's clock: the
+    /// latest of the deletes that count, or `None` if none of them said.
+    pub at: Option<u64>,
+}
+
+/// Whether an item is alive, as one write to its tombstone register says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Life {
+    /// Any change but a delete: an edit or a restore.
+    Alive,
+    /// A delete, and when it was made.
+    Deleted(Option<u64>),
 }
 
 /// One past change to an item, from [`crate::Vault::history`]. An item's
@@ -117,15 +135,28 @@ pub(crate) struct ItemState {
     name: Vec<Write<Option<String>>>,
     source: Vec<Write<Option<Source>>>,
     fields: BTreeMap<String, Vec<Write<Option<Field>>>>,
-    /// `true` writes are edits, `false` writes are deletions.
-    alive: Vec<Write<bool>>,
+    /// Deletes, and every other change (which brings the item back).
+    alive: Vec<Write<Life>>,
     history: Vec<Record>,
 }
 
 impl ItemState {
-    /// Concurrent edit and delete: the edit wins.
+    /// Concurrent edit (or restore) and delete: the edit wins.
     fn deleted(&self) -> bool {
-        !self.alive.iter().any(|w| w.value)
+        !self.alive.iter().any(|w| w.value == Life::Alive)
+    }
+
+    /// When a deleted item was deleted: the latest time among the deletes
+    /// left in the frontier, which every device holding the same entries
+    /// agrees on.
+    pub(crate) fn deleted_at(&self) -> Option<u64> {
+        self.alive
+            .iter()
+            .filter_map(|w| match w.value {
+                Life::Deleted(at) => at,
+                Life::Alive => None,
+            })
+            .max()
     }
 
     pub(crate) fn item(&self, id: ItemId) -> Item {
@@ -172,9 +203,13 @@ impl ItemState {
             }
             Change::Name(_) => of(&self.name, record.at),
             Change::Source(_) => of(&self.source, record.at),
-            Change::Delete => {
+            Change::Delete { .. } => {
                 let live = self.alive.iter().any(|w| w.at == record.at);
                 (live, live && self.deleted())
+            }
+            Change::Restore => {
+                let live = self.alive.iter().any(|w| w.at == record.at);
+                (live, live && !self.deleted())
             }
         };
         match (live, current) {
@@ -206,10 +241,13 @@ impl ItemState {
             }
             Change::Name(name) => write(&mut self.name, node, at, name.clone()),
             Change::Source(source) => write(&mut self.source, node, at, source.clone()),
-            Change::Delete => {}
+            Change::Delete { .. } | Change::Restore => {}
         }
-        let alive = *change != Change::Delete;
-        write(&mut self.alive, node, at, alive);
+        let life = match change {
+            Change::Delete { at } => Life::Deleted(*at),
+            _ => Life::Alive,
+        };
+        write(&mut self.alive, node, at, life);
     }
 }
 

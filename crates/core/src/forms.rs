@@ -389,7 +389,8 @@ mod tests {
             })
         );
         assert!(list(&[&work], &["card"]).1[0].billing.is_none());
-        home.write(&secret, vec![DataOp::delete(identity)]).unwrap();
+        home.write(&secret, vec![DataOp::delete(identity, 1)])
+            .unwrap();
         assert!(list(&[&home, &work], &["card"]).1[0].billing.is_none());
         assert!(list(&[&home], &["identity"]).0.is_empty());
         assert_eq!(

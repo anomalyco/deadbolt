@@ -125,6 +125,7 @@ impl App {
             installer.close();
         }
         self.close_settings();
+        self.trash.forget();
         self.nav = crate::keys::Nav::default();
         self.import.open = true;
     }

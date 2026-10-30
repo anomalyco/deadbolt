@@ -1222,6 +1222,7 @@ fn many_items() -> Vec<ItemInfo> {
             detail: Some("dax".into()),
             fields: Vec::new(),
             source: None,
+            deleted_at: None,
         })
         .collect()
 }
