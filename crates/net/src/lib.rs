@@ -50,7 +50,7 @@ pub use sync::{INBOUND_SYNC_TIMEOUT, SyncConnection, SyncHandler, SyncOutcome};
 /// ALPN of the sync protocol. Membership-gated.
 pub const SYNC_ALPN: &[u8] = b"deadbolt/sync/1";
 /// ALPN of the pairing protocol. Only accepted while a pairing code is outstanding.
-pub const PAIR_ALPN: &[u8] = b"deadbolt/pair/2";
+pub const PAIR_ALPN: &[u8] = b"deadbolt/pair/3";
 
 /// A device's Ed25519 public key, which is also its iroh endpoint id.
 pub type PeerId = [u8; 32];

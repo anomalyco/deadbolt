@@ -150,7 +150,7 @@ The main flows, as states (see the PR for the chat version):
 
 1. Launch → agent starting ("Starting Deadbolt…") → locked or first-run.
    - First run → Create → device, vault, passphrase twice → Protecting your passphrase → Creating personal → the bolt throws → empty vault with the CLI guide.
-   - First run → Join → device, passphrase twice → Making a pairing code → violin garden tiger lamp + `deadbolt pair violin-garden-tiger-lamp` (Copy command) → other device pairs → the bolt throws → synced vault. Cancel or Escape, the other device refusing, a wrong code tried or the code expiring → the join form with a notice; the device stays set up.
+   - First run → Join → device, passphrase twice → Making a pairing code → violin garden tiger lamp zoo + `deadbolt pair violin-garden-tiger-lamp-zoo` (Copy command) → other device pairs → the bolt throws → synced vault. Cancel or Escape, the other device refusing, a wrong code tried or the code expiring → the join form with a notice; the device stays set up.
 2. Locked: type the passphrase → ↵ → vault, or the error in place.
 3. Vault: type "git" → list narrows → ↵ → "Copied, clears in 0:30" → 30 s → "Clipboard cleared" → notice leaves.
 4. ⌘L → locked; the clipboard copy is gone.

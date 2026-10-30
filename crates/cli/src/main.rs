@@ -87,7 +87,7 @@ enum Commands {
     /// Add the device showing a code from `deadbolt join` to a vault (the
     /// default vault, or --vault).
     Pair {
-        /// The code, such as violin-garden-tiger-lamp.
+        /// The code, such as violin-garden-tiger-lamp-zoo.
         #[arg(required = true, num_args = 1.., value_name = "CODE")]
         code: Vec<String>,
     },

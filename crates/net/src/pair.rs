@@ -1,4 +1,4 @@
-//! Pairing (`deadbolt/pair/2`).
+//! Pairing (`deadbolt/pair/3`).
 //!
 //! The new device ("listener") makes a [`PairingCode`] and calls [`Node::start_pairing`],
 //! which publishes its address under the code's rendezvous key (`rendezvous.rs`). The
@@ -17,7 +17,7 @@
 //! ```
 //!
 //! SPAKE2 (Ed25519 group) runs on the code, with the dialer's and the listener's endpoint
-//! ids as identities A and B. `K = HMAC-SHA256(SPAKE2 key, "deadbolt/pair/2" || listener
+//! ids as identities A and B. `K = HMAC-SHA256(SPAKE2 key, "deadbolt/pair/3" || listener
 //! id || dialer id || TLS exporter)`, so the confirmations hold only on this QUIC
 //! connection between these two keys. Nothing but PAKE messages and confirmations flows
 //! before both confirmations check out, so a party without the code learns nothing about
@@ -47,7 +47,7 @@ use crate::{
     Blob, Node, PAIR_ALPN, PairingCode, PeerAddr, PeerId,
     error::{Error, HandlerError, Result, close, from_conn},
     frame::{self, tag},
-    rendezvous::{Client, Lookup, Record},
+    rendezvous::{Client, Lookup, Record, current_bucket},
     sync::{fail, truncate},
 };
 
@@ -67,8 +67,8 @@ const FIND_INTERVAL: Duration = Duration::from_millis(500);
 const RECORD_MAX_AGE: Duration = Duration::from_secs(10 * 60);
 const REPUBLISH_INTERVAL: Duration = Duration::from_secs(2);
 const FINAL_PUBLISH_TIMEOUT: Duration = Duration::from_secs(10);
-const EXPORTER_LABEL: &[u8] = b"EXPORTER-deadbolt-pair-v2";
-const TRANSCRIPT_LABEL: &[u8] = b"deadbolt/pair/2";
+const EXPORTER_LABEL: &[u8] = b"EXPORTER-deadbolt-pair-v3";
+const TRANSCRIPT_LABEL: &[u8] = b"deadbolt/pair/3";
 const DIALER_LABEL: &[u8] = b"dialer-confirm";
 const LISTENER_LABEL: &[u8] = b"listener-confirm";
 /// A frame carrying the rendezvous key and a SPAKE2 message.
@@ -533,7 +533,16 @@ impl Node {
         code: &PairingCode,
         options: PairingOptions,
     ) -> Result<PairingListener> {
-        let lookup = Arc::new(Lookup::derive_async(code).await?);
+        self.start_pairing_in(code, options, current_bucket()).await
+    }
+
+    async fn start_pairing_in(
+        &self,
+        code: &PairingCode,
+        options: PairingOptions,
+        bucket: u64,
+    ) -> Result<PairingListener> {
+        let lookup = Arc::new(Lookup::derive_async(code, bucket).await?);
         let client = Client::new(&self.inner.rendezvous, &self.inner.endpoint)?;
         let expires_at = Instant::now() + options.ttl;
         let (tx, rx) = mpsc::channel(MAX_PROVING);
@@ -558,13 +567,28 @@ impl Node {
         options: PairingOptions,
         inviter: &impl Inviter,
     ) -> Result<PairingOutcome> {
-        let lookup = Lookup::derive_async(code).await?;
+        self.pair_in(code, options, inviter, current_bucket()).await
+    }
+
+    async fn pair_in(
+        &self,
+        code: &PairingCode,
+        options: PairingOptions,
+        inviter: &impl Inviter,
+        bucket: u64,
+    ) -> Result<PairingOutcome> {
+        let mut lookups = Vec::new();
         let client = Client::new(&self.inner.rendezvous, &self.inner.endpoint)?;
         let deadline = Instant::now() + options.find_timeout;
         loop {
-            let found = client.resolve(&lookup.public, RECORD_MAX_AGE).await?;
+            let found = n0_future::time::timeout(
+                deadline.saturating_duration_since(Instant::now()),
+                client.resolve_code(code, bucket, &mut lookups, RECORD_MAX_AGE),
+            )
+            .await
+            .map_err(|_| Error::PairingNotFound)??;
             match found {
-                Some(Record::Waiting(addr)) => {
+                Some((lookup, Record::Waiting(addr))) => {
                     if addr.id == self.id() {
                         return Err(Error::OwnCode);
                     }
@@ -583,12 +607,12 @@ impl Node {
                     #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
                     let attempt = tokio::time::timeout_at(
                         deadline,
-                        self.pair_with(&addr, code, lookup.public, inviter),
+                        self.pair_with(&addr, code, lookup, inviter),
                     );
                     #[cfg(all(target_family = "wasm", target_os = "unknown"))]
                     let attempt = n0_future::time::timeout(
                         deadline.saturating_duration_since(Instant::now()),
-                        self.pair_with(&addr, code, lookup.public, inviter),
+                        self.pair_with(&addr, code, lookup, inviter),
                     );
                     let attempt = attempt.await.unwrap_or(Err(Error::PairingNotFound));
                     match attempt {
@@ -603,8 +627,8 @@ impl Node {
                         other => return other,
                     }
                 }
-                Some(Record::Used) => return Err(Error::PairingCodeUsed),
-                Some(Record::Closed) => return Err(Error::PairingNotFound),
+                Some((_, Record::Used)) => return Err(Error::PairingCodeUsed),
+                Some((_, Record::Closed)) => return Err(Error::PairingNotFound),
                 None if Instant::now() >= deadline => return Err(Error::PairingNotFound),
                 None => {}
             }
@@ -673,7 +697,7 @@ async fn fail_pairing(conn: &Connection, err: Error) -> Error {
     err
 }
 
-/// `"deadbolt/pair/2" || listener id || dialer id || TLS exporter(32)`. The exporter value
+/// `"deadbolt/pair/3" || listener id || dialer id || TLS exporter(32)`. The exporter value
 /// is unique to this QUIC connection, binding the confirmations to it.
 fn transcript(conn: &Connection, listener: &PeerId, dialer: &PeerId) -> Result<Vec<u8>> {
     let mut ekm = Zeroizing::new([0u8; 32]);
@@ -790,7 +814,7 @@ mod tests {
     use super::*;
 
     fn code() -> PairingCode {
-        "violin-garden-tiger-lamp".parse().unwrap()
+        "violin-garden-tiger-lamp-zoo".parse().unwrap()
     }
 
     fn stream(code: &PairingCode, exporter: [u8; 32], listener: bool) -> PairingStream {
@@ -837,7 +861,7 @@ mod tests {
 
     #[test]
     fn a_wrong_code_fails_both_confirmations() {
-        let other: PairingCode = "violin-garden-tiger-lady".parse().unwrap();
+        let other: PairingCode = "violin-garden-tiger-lady-zoo".parse().unwrap();
         assert_eq!(
             exchange(
                 stream(&code(), [9; 32], false),
@@ -920,6 +944,55 @@ mod tests {
             .expect("timed out")
     }
 
+    #[tokio::test]
+    async fn the_old_pairing_alpn_is_rejected_without_waiting_for_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let new = spawn(dir.path()).await;
+        let old = iroh::Endpoint::builder(iroh::endpoint::presets::Minimal)
+            .bind()
+            .await
+            .unwrap();
+        let addr = new.addr().to_endpoint_addr().unwrap();
+        let control = within(old.connect(addr.clone(), PAIR_ALPN)).await.unwrap();
+        within(control.closed()).await;
+        let error = within(old.connect(addr, b"deadbolt/pair/2"))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("protocol"), "{error:?}");
+        old.close().await;
+        new.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn pairing_uses_the_resolved_adjacent_bucket_in_the_pake() {
+        use crate::code::{LOOKUP_BUCKET_SECONDS, lookup_bucket};
+        let boundary = 1234 * LOOKUP_BUCKET_SECONDS;
+        let before = lookup_bucket(boundary - 1);
+        let after = lookup_bucket(boundary);
+        for (listener_bucket, dialer_bucket) in [(before, after), (after, before)] {
+            let dir = tempfile::tempdir().unwrap();
+            let new = spawn(dir.path()).await;
+            let existing = spawn(dir.path()).await;
+            let code = code();
+            let options = PairingOptions::default();
+            let listener = new
+                .start_pairing_in(&code, options, listener_bucket)
+                .await
+                .unwrap();
+            let (joined, invited) = within(async {
+                tokio::join!(
+                    listener.complete(&Joins),
+                    existing.pair_in(&code, options, &Invites, dialer_bucket),
+                )
+            })
+            .await;
+            assert_eq!(joined.unwrap().peer, existing.id());
+            assert_eq!(invited.unwrap().peer, new.id());
+            new.shutdown().await;
+            existing.shutdown().await;
+        }
+    }
+
     /// Someone who found the new device (its address leaked) but guesses the code gets
     /// one try: the new device fails loudly and the code is spent, so the real
     /// existing device hears that it was used.
@@ -930,7 +1003,7 @@ mod tests {
         let attacker = spawn(dir.path()).await;
         let existing = spawn(dir.path()).await;
         let code = PairingCode::generate().unwrap();
-        let lookup = Lookup::derive(&code).unwrap().public;
+        let lookup = Lookup::derive(&code, current_bucket()).unwrap().public;
         let listener = new
             .start_pairing(&code, PairingOptions::default())
             .await
@@ -960,7 +1033,7 @@ mod tests {
         let stale = spawn(dir.path()).await;
         let existing = spawn(dir.path()).await;
         let old = PairingCode::generate().unwrap();
-        let old_lookup = Lookup::derive(&old).unwrap().public;
+        let old_lookup = Lookup::derive(&old, current_bucket()).unwrap().public;
         let code = PairingCode::generate().unwrap();
         let listener = new
             .start_pairing(&code, PairingOptions::default())

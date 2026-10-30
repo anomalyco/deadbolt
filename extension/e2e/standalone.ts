@@ -1322,7 +1322,7 @@ async function pair(device: Page) {
         const part = await reader.read()
         if (part.done) throw new Error("CLI join ended before a code")
         output += new TextDecoder().decode(part.value)
-        const match = /Code: ([a-z]+(?:-[a-z]+){3})/.exec(output)
+        const match = /Code: ([a-z]+(?:-[a-z]+){4})/.exec(output)
         if (match) return match[1]
       }
     })(),
@@ -1368,7 +1368,7 @@ async function joinExistingVault(device: Page, worker: Worker) {
   check(await state(device) === "not-set-up", "cancel does not create a browser vault")
 
   const code = await begin()
-  check(/^[a-z]+(?:-[a-z]+){3}$/.test(code) && code !== abandoned, "retry generates a new four-word code")
+  check(/^[a-z]+(?:-[a-z]+){4}$/.test(code) && code !== abandoned, "retry generates a new five-word code")
   await device.reload()
   await device.getByText(code, { exact: true }).first().waitFor()
   check((await request(device, { type: "device-join-status" })).reply.code === code, "waiting join survives device-page reload")
