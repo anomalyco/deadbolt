@@ -4725,6 +4725,67 @@ fn import_1pux_with_files() {
         "{again}"
     );
 }
+
+#[test]
+fn favorites_and_tags() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "Alpha",
+            "username=personal",
+            "password=pw-a",
+            "-t",
+            "personal",
+        ],
+    );
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "Zeta",
+            "username=ops",
+            "password=pw-z",
+            "--favorite",
+            "-t",
+            "Work/AWS",
+            "-t",
+            "Tax 2026",
+        ],
+    );
+
+    // Favorites rank first in `ls` and `items`.
+    let ls = a.run(&["items"]);
+    let labels: Vec<&str> = ls.lines().map(|l| l.split('\t').nth(1).unwrap()).collect();
+    assert_eq!(labels, ["Zeta", "Alpha"]);
+
+    // Hierarchical tag queries and `deadbolt tags` counts.
+    assert_eq!(
+        a.run(&["tags"]),
+        "personal\t1\nTax 2026\t1\nWork\t1\nWork/AWS\t1\n"
+    );
+    assert!(a.run(&["ls", "#work"]).contains("\tZeta\tops\n"));
+    assert!(!a.run(&["ls", "#work"]).contains("Alpha"));
+    assert!(a.run(&["ls", "#tax-2026"]).contains("\tZeta\tops\n"));
+    assert!(a.run(&["ls", "is:favorite"]).contains("\tZeta\tops\n"));
+
+    // Updating favorite and tags in place, and syncing to a paired device.
+    let b = Device::new();
+    pair(&a, &b, "beta", None);
+    a.run(&[
+        "set",
+        "zeta",
+        "--no-favorite",
+        "--tag",
+        "prod",
+        "--untag",
+        "work/aws",
+    ]);
+    a.run(&["set", "alpha", "--favorite"]);
     eventually("b to converge on favorite and tags", || {
         b.run(&["sync"]);
         let items = b.run(&["items"]);
