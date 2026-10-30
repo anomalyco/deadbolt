@@ -231,6 +231,7 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 vault: None,
                 query: Vec::new(),
                 kind: None,
+                deleted: false,
             };
             let result = call(paths, command, |r| match r {
                 Reply::Items { items } => Some(items),
@@ -389,6 +390,7 @@ async fn values(paths: &Paths, id: String) -> Result<Values, Failure> {
         query: vec![id.clone()],
         otp: false,
         files: Vec::new(),
+        deleted: false,
     };
     let got = item(paths, command).await?;
     if code_field(&got.fields).is_some() {
@@ -405,6 +407,7 @@ async fn save_file(paths: &Paths, id: String, field: &str, path: &Path) -> Resul
         query: vec![id],
         otp: false,
         files: vec![field.to_owned()],
+        deleted: false,
     };
     let mut got = item(paths, command).await?;
     let file = got

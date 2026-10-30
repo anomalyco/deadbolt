@@ -319,6 +319,7 @@ pub(super) fn info(id: &str, kind: &str, label: &str) -> ItemInfo {
         detail: None,
         fields: Vec::new(),
         source: None,
+        deleted_at: None,
     }
 }
 

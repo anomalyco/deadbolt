@@ -53,7 +53,7 @@ pub use caller::{
 };
 pub use reference::{Reference, SCHEME};
 
-pub const PROTOCOL_VERSION: u32 = 19;
+pub const PROTOCOL_VERSION: u32 = 20;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -156,12 +156,16 @@ pub enum Command {
     /// A file field (type file) comes back as its name alone unless `files`
     /// names it, for its contents too (`deadbolt_core::item::file_parts`):
     /// a client asks for the one file it needs, never all of an item's.
+    /// With `deleted` it finds one of the deleted items instead, to show
+    /// before restoring it.
     ItemGet {
         vault: Option<String>,
         query: Vec<String>,
         otp: bool,
         #[serde(default)]
         files: Vec<String>,
+        #[serde(default)]
+        deleted: bool,
     },
     /// Finds exactly one item and computes its current one-time code from
     /// its code field (`code_field`); replies `code`. The secret itself
@@ -171,11 +175,15 @@ pub enum Command {
         vault: Option<String>,
         query: Vec<String>,
     },
-    /// Lists matching items without field values; replies `items`.
+    /// Lists matching items without field values; replies `items`. With
+    /// `deleted`, the deleted items instead, newest first, each with when it
+    /// was deleted.
     ItemList {
         vault: Option<String>,
         query: Vec<String>,
         kind: Option<String>,
+        #[serde(default)]
+        deleted: bool,
     },
     /// Sets fields, removes the `unset` ones and/or sets the name (`Some("")`
     /// clears it), all in one change; replies `item`.
@@ -191,7 +199,15 @@ pub enum Command {
         query: Vec<String>,
         field: String,
     },
+    /// Deletes the item. It stays in the vault, listed by `ItemList` with
+    /// `deleted`, until `ItemRestore` brings it back.
     ItemRemove {
+        vault: Option<String>,
+        query: Vec<String>,
+    },
+    /// Brings back the one deleted item `query` matches, as it was when it
+    /// was deleted; replies `item`.
+    ItemRestore {
         vault: Option<String>,
         query: Vec<String>,
     },
@@ -1559,6 +1575,11 @@ pub struct ItemInfo {
     /// The app the item is mirrored from ("1Password"), which overwrites
     /// changes made here; `None` for the user's own.
     pub source: Option<String>,
+    /// When a deleted item was deleted (seconds since the Unix epoch, on
+    /// the deleting device's clock), in `ItemList` with `deleted`. `None`
+    /// for live items, and for deletes from before deletes were timed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<u64>,
 }
 
 /// The field an item's one-time code comes from, as the agent picks it:

@@ -83,6 +83,10 @@ pub enum ItemCommand {
         /// Only items of this type.
         #[arg(long = "type", value_name = "TYPE")]
         kind: Option<String>,
+        /// List deleted items instead, newest first, with when each was
+        /// deleted.
+        #[arg(long)]
+        deleted: bool,
     },
     /// Set fields and/or the name. Arguments containing `=` are
     /// assignments, the others are the query.
@@ -103,8 +107,14 @@ pub enum ItemCommand {
         #[arg(short, long)]
         field: String,
     },
-    /// Delete an item.
+    /// Delete an item. It can be brought back with `restore`.
     Rm {
+        #[arg(required = true, value_name = "QUERY")]
+        query: Vec<String>,
+    },
+    /// Bring back a deleted item as it was (`ls --deleted` lists them).
+    Restore {
+        /// Words that must all match a deleted item, or its id prefix.
         #[arg(required = true, value_name = "QUERY")]
         query: Vec<String>,
     },
@@ -298,6 +308,7 @@ async fn get(
         query,
         otp,
         files: Vec::new(),
+        deleted: false,
     };
     let mut item = fetch(command).await?;
     let name = match field {
@@ -333,6 +344,7 @@ async fn get(
             } else {
                 Vec::new()
             },
+            deleted: false,
         };
         (_, value, kind) = find(&mut fetch(command).await?)?;
     }
@@ -383,6 +395,7 @@ async fn sign_in_account(
         vault,
         query: vec![id.clone()],
         kind: None,
+        deleted: false,
     };
     let Ok(Reply::Items { items }) = crate::request(paths, command, from_stdin).await else {
         return None;
@@ -462,6 +475,7 @@ pub async fn run(
                 query,
                 otp: reveal,
                 files: Vec::new(),
+                deleted: false,
             };
             let item = item(paths, command, from_stdin).await?;
             let code = match code_field(&item.fields) {
@@ -487,13 +501,26 @@ pub async fn run(
             };
             show(&item, reveal, code, account);
         }
-        ItemCommand::Ls { query, kind } => {
-            let command = Command::ItemList { vault, query, kind };
+        ItemCommand::Ls {
+            query,
+            kind,
+            deleted,
+        } => {
+            let command = Command::ItemList {
+                vault,
+                query,
+                kind,
+                deleted,
+            };
             let Reply::Items { items } = crate::request(paths, command, from_stdin).await? else {
                 bail!("unexpected reply");
             };
             for item in &items {
-                println!("{}", line(item));
+                match (deleted, item.deleted_at) {
+                    (true, Some(at)) => println!("{}\tdeleted {}", line(item), crate::ago(at)),
+                    (true, None) => println!("{}\tdeleted", line(item)),
+                    (false, _) => println!("{}", line(item)),
+                }
             }
         }
         ItemCommand::Set { args, name } => {
@@ -511,6 +538,7 @@ pub async fn run(
                 vault: vault.clone(),
                 query: query.clone(),
                 kind: None,
+                deleted: false,
             };
             let kind = match crate::request(paths, list, from_stdin).await? {
                 Reply::Items { items } if items.len() == 1 => Some(items[0].kind.clone()),
@@ -535,6 +563,10 @@ pub async fn run(
         }
         ItemCommand::Rm { query } => {
             let command = Command::ItemRemove { vault, query };
+            println!("{}", item(paths, command, from_stdin).await?.short);
+        }
+        ItemCommand::Restore { query } => {
+            let command = Command::ItemRestore { vault, query };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
     }
@@ -577,6 +609,7 @@ mod tests {
             })
             .collect(),
             source: None,
+            deleted_at: None,
         };
         let cases = [
             (None, "pw", vec![("github", false)]),

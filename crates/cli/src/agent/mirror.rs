@@ -566,7 +566,8 @@ impl Plan {
             self.write(item, origin, MirrorAction::Update, mapped, account);
         } else if origin == Origin::Sync {
             // An item's type is fixed: replace the mirror's own copy.
-            self.edits.push(DataOp::delete(item.id));
+            self.edits
+                .push(DataOp::delete(item.id, crate::config::now()));
             self.add(mapped, account, Some("type".into()));
             if let Some(added) = self.items.last_mut() {
                 added.action = MirrorAction::Update;
@@ -765,7 +766,8 @@ pub fn apply(s: &mut Loaded, known: &Known, fetched: Fetched, write: bool) -> Re
         for (item, c) in copies.drain(1..) {
             let reason = Some("a second copy".to_string());
             if c.version.origin == Origin::Sync {
-                plan.edits.push(DataOp::delete(item.id));
+                plan.edits
+                    .push(DataOp::delete(item.id, crate::config::now()));
                 plan.note(MirrorAction::Delete, label(item), reason);
             } else {
                 plan.edits.push(DataOp::source(item.id, None));
@@ -942,7 +944,8 @@ pub fn apply(s: &mut Loaded, known: &Known, fetched: Fetched, write: bool) -> Re
         }
         gone += 1;
         if c.version.origin == Origin::Sync {
-            plan.edits.push(DataOp::delete(item.id));
+            plan.edits
+                .push(DataOp::delete(item.id, crate::config::now()));
             plan.note(MirrorAction::Delete, label(item), None);
         } else {
             plan.edits.push(DataOp::source(item.id, None));

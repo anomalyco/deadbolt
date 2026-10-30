@@ -252,6 +252,7 @@ fn fixture_item(id: &str, kind: &str, label: &str, detail: Option<&str>) -> Item
         detail: detail.map(Into::into),
         fields: Vec::new(),
         source: None,
+        deleted_at: None,
     }
 }
 
@@ -306,6 +307,7 @@ fn many_item(i: usize) -> ItemInfo {
         detail: Some(format!("user{i}@anoma.ly")),
         fields: Vec::new(),
         source: None,
+        deleted_at: None,
     }
 }
 

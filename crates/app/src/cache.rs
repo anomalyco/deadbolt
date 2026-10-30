@@ -116,6 +116,7 @@ impl Cache {
                 detail: item.detail.clone(),
                 fields,
                 source: item.source.clone(),
+                deleted_at: None,
             },
             code: code.map(|c| (c.clone(), now)),
         });
@@ -147,6 +148,7 @@ mod tests {
                 field("otp", "otp", ""),
             ],
             source: None,
+            deleted_at: None,
         }
     }
 

@@ -234,6 +234,7 @@ impl Values {
             detail: self.0.detail.take(),
             fields: std::mem::take(&mut self.0.fields),
             source: self.0.source.take(),
+            deleted_at: None,
         };
         (item, self.1.take())
     }

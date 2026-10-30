@@ -1673,6 +1673,28 @@ fn items() {
     assert!(a.fail(&["get", "gitlab"]).contains("no item matches"));
     assert_eq!(a.run(&["ls", "--type", "login"]).lines().count(), 4);
 
+    // A deleted item is listed with when, and comes back as it was.
+    let deleted = a.run(&["ls", "--deleted"]);
+    assert_eq!(deleted.lines().count(), 1, "{deleted}");
+    let columns: Vec<&str> = deleted.trim_end().split('\t').collect();
+    // Both are prefixes of the item's id, unique among different items.
+    assert!(
+        github.starts_with(columns[0]) || columns[0].starts_with(&*github),
+        "{deleted}"
+    );
+    assert_eq!(columns.len(), 3, "{deleted}");
+    assert_eq!(columns[1], "gitlab.com");
+    assert!(columns[2].starts_with("deleted "), "{deleted}");
+    assert!(deleted.trim_end().ends_with("s ago"), "{deleted}");
+    assert_eq!(a.run(&["restore", "gitlab"]).trim(), github);
+    assert_eq!(a.run(&["get", "gitlab", "-f", "pin"]), "1234\n");
+    assert_eq!(a.run(&["ls", "--deleted"]), "");
+    assert!(
+        a.fail(&["restore", "gitlab"])
+            .contains("no deleted item matches")
+    );
+    a.run(&["rm", "gitlab"]);
+
     // Everything survives an agent restart.
     a.run(&["agent", "stop"]);
     a.run(&["unlock"]);
