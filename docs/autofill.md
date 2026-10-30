@@ -301,7 +301,18 @@ not running without sending hello, which would start the agent again.
   it and its containing block, Intercom's sign-in; a fixed one every box up
   to a transformed or contained one). The centre of what shows is
   hit-tested too, and only the centre. Split one-time
-  code boxes fill only as one whole group within one form.
+  code boxes fill only as one whole group within one form. One exception
+  to "the field it was found as": some pages re-render their form on every
+  input event, with new elements. When a single field (never a box of a
+  split code or a new-password pair) was in the page as the fill's last
+  write began and is gone at its turn, the one box the page put in its
+  place (under the same parent, in the same form, with the same id, name,
+  type and autocomplete, covering at least half of where the field was
+  when the fill began) takes its value instead, after every check above; a
+  look-alike anywhere else, or two of them, takes nothing, and nothing is
+  ever written into a box that wasn't there when the fill began unless one
+  of its own writes replaced it. The pill on such a field follows its
+  successor.
 - **Sign-in sessions.** Many sign-ins take more than one step: the
   username on its own, then the password, sometimes a code. Picking a login
   on any step starts a session in that tab, bound to the login, the tab and

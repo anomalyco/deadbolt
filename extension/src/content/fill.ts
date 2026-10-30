@@ -321,6 +321,28 @@ export function placeBoxes(boxes: Box[], offset: { x: number; y: number }, clip:
 // ---- Writing ------------------------------------------------------------------
 
 /**
+ * The input a page's framework put in the place of `f.el` while a fill was
+ * writing (some re-render a form on every input event, with new elements):
+ * under the same parent, in the same form, with the same id, name, type and
+ * autocomplete, the only one there, and (given `was`, the field's box when
+ * the fill began) covering at least half of where the field was. It still
+ * has to pass every check a field does before anything is written into it.
+ */
+export function successor(f: Pick<Field, "el" | "owner">, was?: DOMRect): HTMLInputElement | null {
+  const { el, owner } = f
+  if (el.isConnected || !owner.parent?.isConnected || (!el.id && !el.name)) return null
+  const same = Array.from(owner.parent.childNodes).filter(
+    (c): c is HTMLInputElement =>
+      c instanceof HTMLInputElement && c.id === el.id && c.name === el.name && c.type === el.type && c.getAttribute("autocomplete") === el.getAttribute("autocomplete") && (c.form ?? c.closest("form")) === owner.form,
+  )
+  if (same.length !== 1) return null
+  if (!was) return same[0]
+  const r = same[0].getBoundingClientRect()
+  const overlap = Math.max(0, Math.min(r.right, was.right) - Math.max(r.left, was.left)) * Math.max(0, Math.min(r.bottom, was.bottom) - Math.max(r.top, was.top))
+  return was.width * was.height > 0 && overlap >= 0.5 * was.width * was.height ? same[0] : null
+}
+
+/**
  * Focuses the field, then checks it once more right before the value goes in:
  * the page's focus and key handlers run in between and could move or hide it.
  */
@@ -355,12 +377,37 @@ export function fits(el: HTMLInputElement, role: FieldRole, value: string): bool
  * as many boxes as digits, all in the same form and all fillable, and none
  * moved before each digit goes in.
  */
-export async function fillFields(fields: Field[], values: FillValues, check: (el: HTMLInputElement) => boolean = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement }> {
+export async function fillFields(fields: Field[], values: FillValues, check: (el: HTMLInputElement) => boolean = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement; written: HTMLInputElement[] }> {
   const filled: FieldRole[] = []
   let last: HTMLInputElement | undefined
-  const write = (f: Field, value: string, group: Field[] = [f]) => {
-    const ok = (el: HTMLInputElement) => group.every(inPlace) && check(el)
-    return ok(f.el) && setInputValue(f.el, value, ok)
+  const written: HTMLInputElement[] = []
+  // A single field (not a box of a group) that one of this fill's own
+  // writes replaced is checked, and written, as its successor (see
+  // successor): it was in the page when the last write began and is gone
+  // now. Pages re-render after the write returns (a microtask, a batched
+  // update), so it's the last write's start that's compared, at the field's
+  // turn. Its successor has to sit where the field was when the fill began.
+  const single = (f: Field) => !f.split && f.role !== "new-password"
+  const was = new Map(fields.filter((f) => f.el.isConnected && single(f)).map((f) => [f.el, f.el.getBoundingClientRect()]))
+  let liveAtLastWrite = new Set<HTMLInputElement>()
+  const now = (f: Field): Field => {
+    const next = !f.el.isConnected && single(f) && liveAtLastWrite.has(f.el) ? successor(f, was.get(f.el)) : null
+    return next ? { ...f, el: next } : f
+  }
+  const checkField = check
+  check = (el) => {
+    const f = fields.find((x) => x.el === el)
+    return checkField(f ? now(f).el : el)
+  }
+  const write = (field: Field, value: string, group: Field[] = [field]) => {
+    const f = group.length === 1 ? now(field) : field
+    const all = group.length === 1 ? [f] : group
+    const ok = (el: HTMLInputElement) => all.every(inPlace) && checkField(el)
+    if (!ok(f.el)) return false
+    liveAtLastWrite = new Set([...was.keys()].filter((el) => el.isConnected))
+    if (!setInputValue(f.el, value, ok)) return false
+    written.push(f.el)
+    return true
   }
   // A beat between fields for pages that react to each one. None after the
   // last: the ack has to leave before a page that submits on fill navigates.
@@ -417,5 +464,5 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
       }
     }
   }
-  return { filled, last }
+  return { filled, last: written.at(-1) ?? last, written }
 }
