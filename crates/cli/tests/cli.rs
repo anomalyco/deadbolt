@@ -1444,6 +1444,80 @@ fn ai_agents_use_secrets_only_with_a_grant() {
     );
 }
 
+/// Until `policy::decide` (#111): an AI sees a value only with Touch ID
+/// each time, as `deadbolt read` does, and never runs the Never tier.
+#[test]
+fn ai_agents_read_values_only_with_touch_id_and_never_administer() {
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            &format!("otp={OTP_SECRET}"),
+        ],
+    );
+    let refused = |out: &Output, says: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(4), "{err}");
+        assert!(err.contains(says), "{err}");
+        assert!(!err.contains(TOKEN) && out.stdout.is_empty(), "{err}");
+    };
+    // No Touch ID here: values are refused, the item named or not.
+    refused(&as_ai(&a, &["get", "GitHub"]), "Touch ID");
+    refused(&as_ai(&a, &["show", "--reveal", "GitHub"]), "Touch ID");
+    refused(&as_ai(&a, &["code", "GitHub"]), "Touch ID");
+    // A claimed caller name alone isn't an AI.
+    let out = a.output(
+        a.cmd(&["get", "GitHub"])
+            .env("DEADBOLT_CALLER", "an AI")
+            .env_remove("OPENCODE_SESSION_ID"),
+    );
+    assert!(out.status.success());
+
+    for (args, says) in [
+        (&["init", "work"][..], "can't create a vault"),
+        (
+            &["vault", "rename", "personal", "mine"],
+            "can't rename a vault",
+        ),
+        (
+            &["vault", "default", "personal"],
+            "can't change the default vault",
+        ),
+        (&["devices", "remove", "gamma"], "can't remove a device"),
+        (&["rm", "GitHub"], "can't delete an item"),
+        (&["touch-id", "off"], "can't turn Touch ID"),
+    ] {
+        refused(&as_ai(&a, args), says);
+    }
+    // Nothing changed, and the user can still do all of it.
+    assert_eq!(a.run(&["vault", "ls"]).lines().count(), 1);
+    assert_eq!(a.run(&["init", "work"]), "created vault work\n");
+    assert!(a.run(&["ls"]).contains("GitHub"));
+    // Listing stays open to AIs: no values.
+    let ls = as_ai(&a, &["ls"]);
+    assert!(ls.status.success());
+    assert!(String::from_utf8_lossy(&ls.stdout).contains("GitHub"));
+
+    let raw = a.run(&["activity", "--json"]);
+    assert!(!raw.contains(TOKEN), "{raw}");
+    let entries = activity(&a);
+    let refused_as = |command: &str| {
+        entries.iter().any(|e| {
+            e["command"] == command
+                && e["outcome"] == "refused"
+                && e["caller"]["claimed"]["opencode_session"] == "ses_test"
+        })
+    };
+    for command in ["item-get", "item-code", "vault-create", "item-remove"] {
+        assert!(refused_as(command), "{command}: {raw}");
+    }
+}
+
 #[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();
