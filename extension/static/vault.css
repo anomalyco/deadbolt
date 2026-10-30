@@ -777,6 +777,13 @@ main.vault.popup {
   cursor: pointer;
 }
 
+/* Keep offscreen list buttons accessible without laying out every subtree.
+   Rows have a 46px minimum; auto remembers the actual size after a visit. */
+.list-body .vrow {
+  content-visibility: auto;
+  contain-intrinsic-block-size: auto 46px;
+}
+
 .vrow .text {
   display: flex;
   flex-direction: column;

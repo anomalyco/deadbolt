@@ -403,7 +403,10 @@ function position() {
   written = at
   host.style.cssText = important({
     all: "initial",
-    // Keep the menu at its own size on CSS-zoomed pages (including dialogs).
+    // Undoes a CSS zoom the page put on an element the host is in (<html>,
+    // or the field's dialog): zoom multiplies down the tree, top layer or
+    // not, so the place and size written here, which are in the viewport's
+    // pixels, would be scaled and land elsewhere, and the list with them.
     zoom: String(unzoom(host)),
     position: "fixed",
     inset: "auto",
@@ -435,15 +438,6 @@ function position() {
   if (host) raf = requestAnimationFrame(position)
 }
 
-/** The inverse of the CSS zoom above the host; viewport coordinates must not be scaled again. */
-function unzoom(el: Element): number {
-  const parent = el.parentNode instanceof ShadowRoot ? el.parentNode.host : el.parentElement
-  const zoom = (parent as (Element & { currentCSSZoom?: number }) | null)?.currentCSSZoom
-  if (typeof zoom !== "number" || !(zoom > 0)) return 1
-  const inverse = 1 / zoom
-  return Number.isFinite(inverse) && inverse > 0 ? inverse : 1
-}
-
 /** The intended size, not a rect the page may have restyled; only the menu gets it. */
 function tellGeometry() {
   if (!port || !written) return
@@ -452,6 +446,19 @@ function tellGeometry() {
   if (key === lastGeometry) return
   lastGeometry = key
   port.postMessage({ type: "db:menu-geometry", geometry })
+}
+
+/**
+ * The zoom that undoes the CSS zoom in effect where `el` is mounted (the
+ * product of the page's zooms above it, read each frame), or 1 when that
+ * can't be read or its inverse isn't a finite number.
+ */
+function unzoom(el: Element): number {
+  const parent = el.parentNode instanceof ShadowRoot ? el.parentNode.host : el.parentElement
+  const zoom = (parent as (Element & { currentCSSZoom?: number }) | null)?.currentCSSZoom
+  if (typeof zoom !== "number" || !(zoom > 0)) return 1
+  const inverse = 1 / zoom
+  return Number.isFinite(inverse) && inverse > 0 ? inverse : 1
 }
 
 /**
@@ -988,6 +995,16 @@ function onKeyDown(event: KeyboardEvent) {
     }
     return
   }
+  // Esc also when the page moved focus off the field onto nothing (Zoom's
+  // sign-in leaves it on <body>): the user is still answering this menu.
+  // The field isn't focused, so clicking it again is a fresh focus that
+  // opens the menu: it isn't marked dismissed.
+  // Like Esc in the field, it answers the menu only: the page doesn't also get it.
+  if (event.key === "Escape" && mode === "accounts" && (target === document.body || target === document.documentElement)) {
+    event.preventDefault()
+    event.stopPropagation()
+    return closeMenu(false, true)
+  }
   if (target !== anchor || mode !== "accounts") return
   if (event.key === "Escape") {
     // Esc answers the menu only, as with the browser's own autofill: the
@@ -1157,6 +1174,23 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   win.postMessage({ type: "db:menu-token", token }, event.origin, [channel.port2])
 }
 
+/**
+ * The top window lost focus. A click into one of the page's own frames (an
+ * ad, a captcha, an embedded panel) gives the page no pointerdown, only
+ * this: the user is elsewhere, and the account list goes, as for a click in
+ * the page. Not for the frame the menu's own field is in (that frame tells
+ * the background), nor when focus went into the menu itself.
+ */
+function onWindowBlur(event: FocusEvent) {
+  if (event.target !== window || !host || mode !== "accounts" || closing) return
+  const into = document.activeElement
+  if (!(into instanceof HTMLIFrameElement || into instanceof HTMLFrameElement)) return
+  const r = into.getBoundingClientRect()
+  const b = boxNow()
+  if (b && r.left <= b.left + 1 && r.top <= b.top + 1 && r.right >= b.right - 1 && r.bottom >= b.bottom - 1) return
+  closeMenu()
+}
+
 /** The page showed a popover, or a dialog through `beforetoggle`: once it's in the top layer, go back over it. */
 function onBeforeToggle(event: Event) {
   if (host && event.isTrusted && event.target !== host && (event as ToggleEvent).newState === "open") queueMicrotask(raise)
@@ -1191,6 +1225,7 @@ export function initMenu(page: PageState) {
   if (isTop) {
     document.addEventListener("beforetoggle", onBeforeToggle, true)
     addEventListener("resize", onResize, true)
+    addEventListener("blur", onWindowBlur)
     document.addEventListener("fullscreenchange", onFullscreen)
     new MutationObserver(onDialogs).observe(document, { subtree: true, attributes: true, attributeFilter: ["open"] })
   }

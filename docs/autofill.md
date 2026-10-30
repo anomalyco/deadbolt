@@ -231,9 +231,15 @@ not running without sending hello, which would start the agent again.
   avatar's ring is still, the save offer's bar is stepped frame by frame,
   never animated), and after narrowing's row animations the half second
   starts again, as after a move.
-- **Rendered menu scale.** The host cancels its ancestors' CSS zoom, so an
-  ordinary zoomed page still gets the menu at its own size. A
-  `ResizeObserver` watches the host's device-pixel box: unlike our positioning
+- **Zoom.** The visibility readings don't count CSS `zoom`: Intersection
+  Observer v2 treats a zoomed element as unscaled, and it accepts a
+  proportional scale-up as visible too. So the menu's host undoes any zoom
+  the page puts above it (on `<html>`, or on the dialog it's mounted in):
+  every frame, as it writes its place, it sets its own `zoom` to the inverse
+  of its parent's `currentCSSZoom` (1 when that can't be read or its
+  inverse isn't finite), so it renders at zoom 1, under the field, at its
+  own size. Late changes are checked separately below.
+- **Rendered menu scale.** A `ResizeObserver` watches the host's device-pixel box: unlike our positioning
   rAF, its callback runs after the page's later rAF callbacks. It checks that
   the host's cumulative `currentCSSZoom` is 1 (within 0.1%) and its rect still
   matches the intended placement and size (within 2 CSS px). The verdict
