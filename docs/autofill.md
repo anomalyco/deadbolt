@@ -104,6 +104,41 @@ If the toolbar popup says the helper isn't installed, run
 
 ## The extension
 
+### Opt-in corner sign-in authority
+
+**Default off.** “Offer to sign in” extends a trusted account pick in the
+extension-owned corner menu to same-origin navigation and submission. Page
+arrival and detector confidence never authorize a fill. The existing 500 ms
+visible dwell and fresh 400 ms post-pick visibility check remain mandatory;
+ordinary inline, popup and Browse-agent fills retain manual-submit behavior.
+
+The automatic session is bound to the selected account, exact saved origin
+(scheme, host and port), top frame and current document/form snapshots. Its
+entry window is 20 seconds, followed by the existing bounded sign-in session.
+It permits at most four automatic submit requests. Once a password has filled,
+the identifier re-fill exemption is removed. Escape, lock, setting-off and
+unrelated navigation cancel it, including pending backend calls.
+
+A TOTP can fill without another pick, but Deadbolt submits a code step only
+when the site's learned `Flow.code` is true. A current SMS/email-looking prompt
+vetoes that submission even with a learned flow. Site scripts can submit on fill;
+Deadbolt does not duplicate an observed trusted submit event or mint a user-gesture timestamp.
+Every explicit submit rechecks visible fields, the button's form ownership and
+containment, and the effective form/submitter action and target: same origin,
+same browsing context only. Provider/OAuth clicks remain manual guidance.
+
+Auth-state evidence is local and value-free. The probe does not receive vault
+usernames or compare arbitrary text, aria-labels, titles or alt text with them.
+Open offers are stable instead of being re-probed as page text changes. Fresh
+signed-in memory and cooldowns skip probes; URL/form evidence is cached locally.
+Only a trusted click on a visible real link/button no larger than 320×96 pixels
+inside the viewport invalidates sign-out memory, not a large `role=button`
+wrapper. Pointer coordinates must hit that bounded control; keyboard activation
+must focus it. Navigation, pick, dismissal, lock and setting-off end the offer. These
+bounds reduce probing; surface presence is not invisible to the page.
+
+### Host connection
+
 One service worker owns the extension's only port to the host
 (`chrome.runtime.connectNative("pw.deadbolt.browser")`). It sends hello on
 connect, reconnects with backoff (1s up to 60s) when the host goes away, and
