@@ -174,7 +174,7 @@ touch_id = true
 
 ### 4. Protocol, CLI, and App UI
 
-- **Protocol (`crates/client/src/protocol.rs`, `PROTOCOL_VERSION = 5`):**
+- **Protocol (`crates/client/src/protocol.rs`, since protocol version 5):**
   - `Command::UnlockBiometric { timeout_secs: Option<u64> }`
   - `Command::TouchIdSet { enabled: bool }`
   - `Status` adds:

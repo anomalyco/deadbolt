@@ -85,10 +85,15 @@ The agent reads the socket's peer, not anything the caller says:
 
 - **The process:** macOS gives the peer's audit token (`LOCAL_PEERTOKEN`):
   pid plus pid version, so a reused pid can't pass. Linux gives
-  `SO_PEERCRED`, with no pid version: the process's start time (clock
-  ticks, from `/proc`) stands in. The workspace forbids `unsafe`, so this
-  comes from a dependency (`nix`, in `deadbolt-client`'s `peer` module,
-  shared by the agent, the CLI and the app).
+  `SO_PEERCRED`: pid and uid, with no pid version. The agent remembers
+  each peer it identified by pid, uid and pid version; on Linux the last is
+  the process's start time (clock ticks), read from `/proc` after the
+  connection, so it is missing if the process has already exited, and a
+  process that `exec`s another program keeps its start time and so the
+  entry made for the first. One more reason a Linux peer is labels only
+  (below). The workspace forbids `unsafe`, so this comes from a dependency
+  (`nix`, in `deadbolt-client`'s `peer` module, shared by the agent, the
+  CLI and the app).
 - **Its code signature:** checked against the audit token
   (`SecCodeCopyGuestWithAttributes`) in the hash-pinned Swift helper that
   already does Touch ID (`docs/touch-id.md`), as `deadbolt-enclave
