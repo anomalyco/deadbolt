@@ -681,12 +681,19 @@ addEventListener("pointerdown", (e) => {
   const press = entry.pressed()
   if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && entry.confirmed(press))
 }, true)
+// A press leaves focus where it was, in the page's field. Taking it would
+// tell the page the moment of the press (its field blurs), and many fields
+// redraw on blur (a floating label drops back, an outlined border thins, the
+// box changes width): the field moves at the very press, the menu with it,
+// and the move cancels the pick (see Dwell). Tab and the user's ↓ in the
+// field still bring focus in.
+addEventListener("mousedown", (e) => void (e.isTrusted && e.preventDefault()), true)
 addEventListener("focus", (e) => {
   if (e.target !== window) return
   if (e.isTrusted) entry.focused(performance.now())
   // Focus that came in with the keyboard (↓ in the field, or Tab) goes to the
-  // list, so a screen reader reads it and its active row; a click keeps the
-  // focus it gives the row it lands on.
+  // list, so a screen reader reads it and its active row. A click brings no
+  // focus in (see the mousedown handler above).
   setTimeout(() => {
     if (document.hasFocus() && document.activeElement === document.body && rowsEl.getAttribute("role") === "listbox" && mode === "accounts") rowsEl.focus({ preventScroll: true })
   }, 0)
