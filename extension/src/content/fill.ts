@@ -7,7 +7,7 @@
 // framework's own value tracker lives in the page's world, so it sees the DOM
 // value differ from what it last rendered and runs its change handler.
 
-import { IDENTIFIER_ROLES, type Box, type FieldRole, type FillValues } from "../messages"
+import { IDENTIFIER_ROLES, phoneLike, type Box, type FieldRole, type FillValues } from "../messages"
 import { inPlace, type Field, type FormControl } from "./detect"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -348,6 +348,17 @@ export function setInputValue(el: HTMLInputElement, value: string, guard: (el: H
 }
 
 /**
+ * Whether the user could have entered `value` in the field: no longer than
+ * its maxlength (the browser stops typing and pasting there), and a phone
+ * number in a phone box. A value that doesn't fit isn't written: the site
+ * would reject it, or keep a cut-off copy.
+ */
+export function fits(el: HTMLInputElement, role: FieldRole, value: string): boolean {
+  if (el.maxLength > 0 && value.length > el.maxLength) return false
+  return role !== "phone" || phoneLike(value)
+}
+
+/**
  * Fills the fields of one form snapshot. Every write is checked right before
  * it happens: the field must still be where it was scanned (same form, same
  * parent) and pass `check`. One-digit code boxes fill only as a whole group:
@@ -366,14 +377,14 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
   const pause = () => (filled.length ? sleep(30) : undefined)
 
   const ident = fields.find((t) => IDENTIFIER_ROLES.includes(t.role) && check(t.el))
-  if (ident && values.username && write(ident, values.username)) {
+  if (ident && values.username && fits(ident.el, ident.role, values.username) && write(ident, values.username)) {
     filled.push(ident.role)
     last = ident.el
   }
 
   if (values.password) await pause()
   const password = fields.find((t) => t.role === "password" && check(t.el))
-  if (password && values.password && write(password, values.password)) {
+  if (password && values.password && fits(password.el, "password", values.password) && write(password, values.password)) {
     filled.push("password")
     last = password.el
   }
@@ -410,7 +421,7 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
       }
     } else {
       const otp = fields.find((t) => t.role === "otp" && check(t.el))
-      if (otp && write(otp, values.totp)) {
+      if (otp && fits(otp.el, "otp", values.totp) && write(otp, values.totp)) {
         filled.push("otp")
         last = otp.el
       }

@@ -1199,6 +1199,11 @@ describe("sign in with a provider", () => {
     expect(menuRowCount([google, both, ACCOUNTS[0]], "email")).toBe(4)
   })
 
+  test("a phone box lists only logins whose username is a phone number", () => {
+    const phone = { ...ACCOUNTS[0], username: "+1 415 555 0123" }
+    expect(menuAccounts([ACCOUNTS[0], phone, google], "phone")).toEqual([phone])
+  })
+
   test("picking it starts following the sign-in and points at the page's button; it never fills", async () => {
     fake.answer = (m) => (m.type === "db:point" ? true : m.type === "db:approve" ? { approval: "x", roles: ["email"] } : true)
     const token = await autofill.query(pageSender(), ["email", "password"], "email", 1)

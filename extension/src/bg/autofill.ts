@@ -5,7 +5,7 @@
 // Ryan Vogel), and so is the start of the sign-in session (its email-first
 // continuation), which here follows a login through every step of a sign-in.
 
-import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, type ToContent, type SignInReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
+import { FIELD_ROLES, GENERATE_KINDS, IDENTIFIER_ROLES, MENU_ROLES, phoneLike, type ToContent, type SignInReply, type Approved, type Box, type FieldRole, type FillAck, type FillValues, type MenuLoadReply, type MenuPasskey, type PickReply, type PopupReply, type QueryReply, type SurfaceKind } from "../messages"
 import type { Account, FieldRules, ListReply, Want } from "../protocol"
 import { boxesInTop, cleanApproved, cleanBox, LOGIN_FRAME_PLACE, menuFrameOf, newToken, sameSiteTop, sendToFrame, shownInPage, stillShown, targetFor, topTarget, type FrameTarget } from "./frames"
 import { HostError, type VaultBackend } from "./backend"
@@ -131,11 +131,14 @@ export function wantFor(roles: FieldRole[], account: Pick<Account, "hasPassword"
 
 /**
  * What the menu offers under a field: on a code field, only logins with a
- * one-time password; on a password field, logins with a password or a
+ * one-time password; on a phone field, only logins whose username is a
+ * phone number; on a password field, logins with a password or a
  * "Sign in with …" (which shows as that, never as a fill).
  */
 export function menuAccounts(accounts: Account[], focused: FieldRole): Account[] {
   if (focused === "otp") return accounts.filter((a) => a.hasTotp)
+  // A phone box takes only a phone number: a login saved under an email or a name can't go in it.
+  if (focused === "phone") return accounts.filter((a) => phoneLike(a.username))
   if (focused === "password") return accounts.filter((a) => a.hasPassword || a.signIn)
   return accounts
 }

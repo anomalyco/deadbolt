@@ -3459,8 +3459,8 @@ async function conditionalHeld() {
       await until("the frame's form is found", async () => (await reports()) > 0, 15_000)
       const before = await reports()
       await widget.evaluate(CONDITIONAL_GET, "#account_name_text_field")
-      // The new autocomplete changes the frame's form: let it report again before the click.
-      await until("the frame reports its webauthn field", async () => (await reports()) > before, 5000)
+      // If the new autocomplete changes the frame's form (its field's role), let it report again before the click.
+      for (let i = 0; i < 30 && (await reports()) <= before; i++) await Bun.sleep(100)
       await widget.click("#account_name_text_field")
       const menu = await until("the menu opens for the frame's field", menuNow, 15_000)
       const framed = await nativeGets(widget)
