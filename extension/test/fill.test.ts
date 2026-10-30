@@ -335,6 +335,26 @@ describe("form values", () => {
     expect((document.getElementById("c") as HTMLSelectElement).value).toBe("US")
   })
 
+  test("a birth date box whose placeholder shows a whole date takes the whole date", async () => {
+    document.body.innerHTML = `<form><label for="g">First name</label><input id="g"><label for="d">Date of birth</label><input id="d" placeholder="MM/DD/YYYY" maxlength="10"></form>`
+    const fields = scanForms()
+    expect(fields.map((f) => f.role)).toEqual(["given-name", "bday"])
+    await fillForm(fields, kit, () => true)
+    expect((document.getElementById("d") as HTMLInputElement).value).toBe("07/04/1990")
+  })
+
+  test("a select the page loads once an earlier field is chosen fills after it", async () => {
+    document.body.innerHTML = `<form><select id="c" autocomplete="country"><option value="">-</option><option value="US">United States</option></select><select id="s" autocomplete="address-level1" disabled><option value="">Choose a country first</option></select></form>`
+    const [country, state] = ["c", "s"].map((id) => document.getElementById(id) as HTMLSelectElement)
+    country.addEventListener("change", () => setTimeout(() => {
+      state.innerHTML = `<option value="">State</option><option value="CA">California</option><option value="NY">New York</option>`
+      state.disabled = false
+    }, 200))
+    const { filled } = await fillForm(scanForms(), kit, (el) => !el.disabled)
+    expect(filled).toEqual(["country", "address-level1"])
+    expect(state.value).toBe("NY")
+  })
+
   test("split card boxes fill only as a whole", async () => {
     document.body.innerHTML = `<form><label for="a">Card number</label><input id="a" maxlength="4"><input maxlength="4"><input maxlength="4"><input maxlength="4"></form>`
     const fields = scanForms()
