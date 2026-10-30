@@ -15,7 +15,7 @@ import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped 
 import { initLearn, learnScanned } from "./content/learn"
 import { pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
-import { deepActiveElement, openRoots } from "./content/shadow"
+import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 
 const isTop = window === window.top
@@ -331,7 +331,7 @@ function watchForFailure(submittedKind: SurfaceKind | null, roles: Field["role"]
   }, FAILED_AFTER_MS)
 }
 
-const realTarget = (event: Event) => event.composedPath()[0] ?? event.target
+const realTarget = (event: Event) => eventTarget(event)
 
 // Only the user's own clicks and keypresses count: pages can dispatch
 // synthetic ones. Two things hang off a submit, with two different bars:
