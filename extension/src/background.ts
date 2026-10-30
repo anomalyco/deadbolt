@@ -25,6 +25,14 @@ const signInWith = new SignInWith(host)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
 const learner = new Learner(host)
 const forms = new Forms(host)
+/**
+ * The device.html tab the inline menu's locked row opened. Memory only, like
+ * Autofill's return target: a restarted worker returns nowhere. A later click
+ * finds and reuses an existing unlock surface through getContexts. Forgotten
+ * when the tab closes or leaves device.html.
+ */
+let unlockTab: number | undefined
+let openingUnlock: Promise<void> | null = null
 saver.signedIn = (tabId, site) => {
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
@@ -144,14 +152,40 @@ async function device(raw: unknown, sender: chrome.runtime.MessageSender): Promi
   if (!standalone) return { ok: false, message: "This build talks to the Deadbolt app; set it up there.", status: host.status }
   const command = deviceCommand(raw)
   if (!command) return { ok: false, message: "Deadbolt didn't understand that request. Reload the extension and try again.", status: host.status }
-  return standalone.device(command)
+  const reply = await standalone.device(command)
+  if (command.type === "device-unlock" && reply.ok) {
+    const opened = unlockTab
+    unlockTab = undefined
+    // Only the tab the locked row opened closes, and only when it is the one that unlocked (fromVaultPage: device.html).
+    if (await autofill.returnAfterUnlock() && opened !== undefined && sender.tab?.id === opened) void chrome.tabs.remove(opened).catch(() => {})
+  }
+  return reply
 }
 
 /** The inline menu's locked row, from the menu frame its token was made for: device.html, where the user unlocks. Nothing else is asked of the vault. */
 async function menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
   if (!standalone || !(await autofill.menuUnlock(token, sender))) return false
-  await chrome.tabs.create({ url: chrome.runtime.getURL(DEVICE_PAGE) })
+  openingUnlock ??= openUnlock().finally(() => (openingUnlock = null))
+  await openingUnlock
   return true
+}
+
+async function openUnlock(): Promise<void> {
+  const url = `${chrome.runtime.getURL(DEVICE_PAGE)}#unlock`
+  if (unlockTab === undefined) {
+    const contexts = await chrome.runtime.getContexts({ contextTypes: ["TAB" as chrome.runtime.ContextType] })
+    unlockTab = contexts.find(c => c.documentUrl === url)?.tabId
+  }
+  // A second click brings back the unlock tab already open rather than opening another.
+  if (unlockTab !== undefined) {
+    const open = await chrome.tabs.update(unlockTab, { active: true }).catch(() => null)
+    if (open) {
+      await chrome.windows.update(open.windowId, { focused: true }).catch(() => {})
+      return
+    }
+  }
+  const page = await chrome.tabs.create({ url })
+  unlockTab = page.id
 }
 
 chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) => {
@@ -164,6 +198,7 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) =>
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (tabId === unlockTab) unlockTab = undefined
   autofill.forgetTab(tabId)
   forms.forgetTab(tabId)
   saver.forgetTab(tabId)
@@ -171,6 +206,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   learner.forgetTab(tabId)
 })
 chrome.webNavigation.onCommitted.addListener((d) => {
+  if (d.tabId === unlockTab && d.frameId === 0 && d.url.split(/[?#]/)[0] !== chrome.runtime.getURL(DEVICE_PAGE)) unlockTab = undefined
   void autofill.navigated(d)
   forms.navigated(d)
   if (d.frameId === 0) {

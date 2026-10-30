@@ -650,8 +650,23 @@ fn login(s: &Loaded, body: &Value) -> Result<Item> {
         .ok_or(Error::NotFound)
 }
 
-/// Checks an explicit passphrase without holding the live vault during the KDF.
+/// Checks an explicit passkey PRF or passphrase without holding the live
+/// vault during the KDF.
 fn reauthenticate(body: &mut Value, required: bool) -> Result<bool> {
+    if body.get("prf").is_some() {
+        let key = take_prf(body)?;
+        return state().with(|s| {
+            if !s.store.check_biometric(&key)? {
+                return Err(Error::Protocol("Touch ID didn't unlock this vault. Use your passphrase, then reset Touch ID in Settings."));
+            }
+            Ok(true)
+        });
+    }
+    check_passphrase(body, required)
+}
+
+/// Checks an explicit passphrase only, never a passkey.
+fn check_passphrase(body: &mut Value, required: bool) -> Result<bool> {
     let passphrase = body.get_mut("passphrase").map(Value::take);
     if required && passphrase.is_none() {
         return Err(Error::PassphraseNeeded);
@@ -668,6 +683,18 @@ fn reauthenticate(body: &mut Value, required: bool) -> Result<bool> {
         return Err(Error::WrongPassphrase);
     }
     Ok(true)
+}
+
+/// Domain-separates a passkey's raw PRF output from the store's slot key, so
+/// the PRF value itself never keys the store.
+const PRF_CONTEXT: &str = "deadbolt ext-core v1 prf unlock";
+
+/// Takes the raw `prf` output and derives the biometric slot key from it.
+/// Enrollment, unlock and reauthentication all go through here.
+fn take_prf(body: &mut Value) -> Result<Zeroizing<[u8; 32]>> {
+    let encoded = take_secret(body, "prf")?;
+    let prf = Zeroizing::new(unhex::<32>(&encoded)?);
+    Ok(Zeroizing::new(blake3::derive_key(PRF_CONTEXT, &prf[..])))
 }
 
 /// Adds a login by hand, or edits one, from the vault page: unlike a page's
@@ -882,14 +909,57 @@ async fn dispatch(mut body: Value) -> Result<Value> {
             start(store, body.get("deviceName").and_then(Value::as_str)).await?;
             Ok(json!({"type":"device-create", "ok":true}))
         }
+        "device-biometric-info" => {
+            let token = if node().is_ok() {
+                state().with(|s| Ok(s.store.biometric_token()?))?
+            } else if storage_exists()
+                .await
+                .map_err(|_| Error::Protocol(STORAGE))?
+                .as_bool()
+                == Some(true)
+            {
+                deadbolt_store::biometric_token_with_backend(backend(false).await?)?
+            } else {
+                None
+            };
+            Ok(
+                json!({"type":"device-biometric-info", "token":token.and_then(|t| String::from_utf8(t).ok())}),
+            )
+        }
+        "device-biometric-set" => {
+            // Enrolling a new unlock factor requires the passphrase, not just
+            // possession of an already-open popup or another cached factor.
+            let key = take_prf(&mut body)?;
+            check_passphrase(&mut body, true)?;
+            let token = text(&body, "token")?;
+            if token.len() > 8192 {
+                return Err(Error::Protocol("Invalid passkey metadata"));
+            }
+            state().with(|s| Ok(s.store.set_biometric(&key, token.as_bytes())?))?;
+            Ok(json!({"type":"device-biometric-set", "ok":true}))
+        }
+        "device-biometric-check" => {
+            // Lets the extension confirm the passphrase before the passkey
+            // ceremony, so a wrong one doesn't waste it; enrolls nothing.
+            check_passphrase(&mut body, true)?;
+            Ok(json!({"type":"device-biometric-check", "ok":true}))
+        }
+        "device-biometric-reset" => {
+            state().with(|s| Ok(s.store.clear_biometric()?))?;
+            Ok(json!({"type":"device-biometric-reset", "ok":true}))
+        }
         "device-unlock" => {
             join::require_idle()?;
             if node().is_ok() {
                 return Err(Error::Protocol("Deadbolt is already unlocked"));
             }
-            let passphrase = take_secret(&mut body, "passphrase")?;
-            let store =
-                deadbolt_store::unlock_with_backend(backend(false).await?, passphrase.as_bytes())?;
+            let store = if body.get("prf").is_some() {
+                let key = take_prf(&mut body)?;
+                deadbolt_store::unlock_biometric_with_backend(backend(false).await?, &key)?
+            } else {
+                let passphrase = take_secret(&mut body, "passphrase")?;
+                deadbolt_store::unlock_with_backend(backend(false).await?, passphrase.as_bytes())?
+            };
             start(store, body.get("deviceName").and_then(Value::as_str)).await?;
             Ok(json!({"type":"device-unlock", "ok":true}))
         }
@@ -962,6 +1032,10 @@ fn plain(error: &Error) -> String {
             sentence(&error.to_string())
         }
         Error::Store(deadbolt_store::Error::WrongPassphrase) => Error::WrongPassphrase.to_string(),
+        Error::Store(deadbolt_store::Error::InvalidBiometric) => {
+            "That passkey couldn't unlock Deadbolt. Use your passphrase, then set up Touch ID again."
+                .into()
+        }
         Error::Store(_) | Error::Decode(_) | Error::Json(_) => STORAGE.into(),
         Error::Core(_) | Error::Application(_) => {
             "Deadbolt couldn't make that change to the vault.".into()

@@ -11,6 +11,7 @@ import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
 import { clearLearnLogs, learnExport, learnLogs } from "../bg/learn-log"
 import { NEVER_KEY } from "../bg/save"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
+import { enroll, enrollment } from "./biometric"
 import { aboutSection } from "./about"
 
 function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
@@ -110,6 +111,37 @@ function learnRows(app: App): HTMLElement {
 
 export function settingsView(app: App): View {
   const el = h("section", { class: "view settings" })
+  const biometrics = h("section", { class: "group" })
+  const paintBiometric = async () => {
+    const enabled = !!(await enrollment(app))
+    const error = h("p", { class: "error", role: "alert" })
+    const action = button("btn", enabled ? "Reset Touch ID" : "Unlock with Touch ID", async (b) => {
+      if (enabled) {
+        b.disabled = true
+        const r = await app.run({ type: "device-biometric-reset" })
+        if (!r.ok) { error.textContent = r.message; b.disabled = false; return }
+        await chrome.storage.local.set({ "deadbolt.unlockMethod": "passphrase" })
+        return paintBiometric()
+      }
+      const pass = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase for Touch ID", placeholder: "Current passphrase" })
+      const submit = h("button", { class: "btn primary", type: "submit" }, "Enable Touch ID")
+      const form = h("form", { novalidate: "" }, h("div", { class: "reauth-row" }, pass, submit), error)
+      form.addEventListener("submit", async (e) => {
+        e.preventDefault()
+        if (!pass.value || submit.disabled) return refuse(pass)
+        submit.disabled = true
+        const value = pass.value
+        pass.value = ""
+        try { await enroll(app, value); await paintBiometric() }
+        catch (e) { error.textContent = (e as Error).message; submit.disabled = false }
+      })
+      action.replaceWith(form)
+      pass.focus()
+    })
+    biometrics.replaceChildren(h("div", { class: "section-head" }, h("span", { class: "label" }, "Touch ID")),
+      para(enabled ? "Touch ID unlock is on. Reset removes Deadbolt's key slot, not the passkey in your authenticator." : "Optional: use a platform passkey with PRF. Your browser may offer its device PIN instead of Touch ID. Your passphrase always works."), action, error)
+  }
+  void paintBiometric()
 
   // Vault name: renaming is the vault's own, and syncs to the other devices.
   const name = h("input", { class: "input", value: app.vaultName, maxlength: "64", "aria-label": "Vault name", spellcheck: "false" })
@@ -229,6 +261,7 @@ export function settingsView(app: App): View {
   paint()
   el.append(
     toolbar("Settings", () => app.go({ name: "list" }, -1)),
+    biometrics,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Devices")), devices, pairArea),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Lock")), presets, h("p", { class: "hint" }, "Every preset locks when the browser quits.")),
     h(

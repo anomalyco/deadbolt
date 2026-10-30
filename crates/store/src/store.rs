@@ -93,17 +93,7 @@ pub fn init_with_backend(
 /// is rejected without creating a database. As on native, all live redb page
 /// checksums are checked before unwrapping the key set.
 pub fn unlock_with_backend(backend: impl StorageBackend, passphrase: &[u8]) -> Result<Unlocked> {
-    if backend.len()? == 0 {
-        return Err(Error::NotInitialized(PathBuf::from(DB_FILE)));
-    }
-    let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Database> {
-        let mut db = redb::Builder::new()
-            .set_cache_size(CACHE_BYTES)
-            .create_with_backend(backend)?;
-        db.check_integrity()?;
-        Ok(db)
-    }));
-    let db = opened.unwrap_or_else(|_| Err(Error::corrupt("database file is damaged")))?;
+    let db = open_backend(backend, true)?;
     let header = {
         let txn = db.begin_read()?;
         Header::read(&txn.open_table(HEADER)?)?
@@ -114,6 +104,61 @@ pub fn unlock_with_backend(backend: impl StorageBackend, passphrase: &[u8]) -> R
         dir: PathBuf::from(DB_FILE),
         keys: Keys::new(keyset),
     })
+}
+
+/// Opens a nonempty backend. With `verify`, every live page checksum is
+/// checked first; without it, redb still repairs an unclean shutdown, but
+/// pages are read unverified, so only use that for public metadata.
+fn open_backend(backend: impl StorageBackend, verify: bool) -> Result<Database> {
+    if backend.len()? == 0 {
+        return Err(Error::NotInitialized(PathBuf::from(DB_FILE)));
+    }
+    let opened = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| -> Result<Database> {
+        let mut db = redb::Builder::new()
+            .set_cache_size(CACHE_BYTES)
+            .create_with_backend(backend)?;
+        if verify {
+            db.check_integrity()?;
+        }
+        Ok(db)
+    }));
+    opened.unwrap_or_else(|_| Err(Error::corrupt("database file is damaged")))
+}
+
+/// Opens the platform-key slot on an exclusively owned backend. The key must
+/// come from a fresh authenticator ceremony, not a stored verification flag.
+pub fn unlock_biometric_with_backend(
+    backend: impl StorageBackend,
+    key: &[u8; KEY_LEN],
+) -> Result<Unlocked> {
+    let db = open_backend(backend, true)?;
+    let keyset = {
+        let txn = db.begin_read()?;
+        let table = txn.open_table(HEADER)?;
+        Header::read(&table)?;
+        let (token, wrapped) = read_biometric(&table)?.ok_or(Error::InvalidBiometric)?;
+        KeySet::unwrap_biometric(key, &token, &wrapped)?
+    };
+    Ok(Unlocked {
+        db,
+        dir: PathBuf::from(DB_FILE),
+        keys: Keys::new(keyset),
+    })
+}
+
+/// Public enrollment metadata, readable without unlocking. Never contains the key.
+///
+/// Skips the full page-checksum walk that unlocking does: the token is public
+/// and unauthenticated on disk anyway (redb checksums are not cryptographic),
+/// and it is bound into the slot's AEAD, so a damaged or altered token only
+/// makes the platform ceremony or the verified [`unlock_biometric_with_backend`]
+/// fail.
+pub fn biometric_token_with_backend(backend: impl StorageBackend) -> Result<Option<Vec<u8>>> {
+    let db = open_backend(backend, false)?;
+    let txn = db.begin_read()?;
+    let table = txn.open_table(HEADER)?;
+    Header::read(&table)?;
+    Ok(read_biometric(&table)?.map(|(token, _)| token))
 }
 
 fn initialize_db(db: &Database, keys: &Keys, kdf: &KdfHeader, wrapped: &[u8]) -> Result<()> {
