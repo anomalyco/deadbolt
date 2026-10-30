@@ -1219,8 +1219,13 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
       if (data?.type === "db:menu-checked" && typeof data.check === "number") placementChecks.get(data.check)?.(data.ok === true)
       else if (data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
       else if (data?.type === "db:menu-geometry" && data.geometry) {
-        geometry = data.geometry
-        dwell.moved(performance.now())
+        const was = geometry
+        const now = data.geometry
+        geometry = now
+        // Only "visible" coming back isn't a move: the parent restarted the
+        // wait (a new version) when it changed, not again on recovery.
+        const back = !!was && now.visible && !was.visible && was.width === now.width && was.height === now.height && was.dpr === now.dpr && was.version === now.version
+        if (!back) dwell.moved(performance.now())
       } else if (data?.type === "db:fold") onFold(e.data as Parameters<typeof onFold>[0])
       else if (data?.type === "db:filter" && typeof data.query === "string") narrow(data.query)
       // The pointer near the offer pauses its bar, as being on it does.

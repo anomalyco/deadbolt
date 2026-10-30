@@ -197,8 +197,13 @@ const BEATEN: Record<string, string> = {
 }
 
 /** Restyle after our rAF, or from a deeper ResizeObserver that defers the host's observer. */
-const lateZoom = (where: "host" | "html", zoom: number, observer: boolean, compensate: boolean) => onMenu(`
+const lateZoom = (where: "host" | "html" | "attr", zoom: number, observer: boolean, compensate: boolean) => onMenu(`
   const target = ${where === "host" ? "host" : "document.documentElement"}
+  if (${where === "attr"}) {
+    const rule = document.createElement("style")
+    rule.textContent = "html[data-late-zoom] { zoom: ${zoom} }"
+    document.head.append(rule)
+  }
   const trigger = document.createElement("i")
   const wrapper = document.createElement("div")
   wrapper.style.cssText = "position:fixed;left:-10000px;top:0"
@@ -219,10 +224,12 @@ const lateZoom = (where: "host" | "html", zoom: number, observer: boolean, compe
       host.style.setProperty("width", (parseFloat(host.style.width) / ${zoom}) + "px", "important")
       host.style.setProperty("height", (parseFloat(host.style.height) / ${zoom}) + "px", "important")
     }
-    target.style.setProperty("zoom", "${zoom}", "important")
+    if (${where === "attr"}) target.dataset.lateZoom = ""
+    else target.style.setProperty("zoom", "${zoom}", "important")
     window.zoomPaints = (window.zoomPaints || 0) + 1
     setTimeout(() => {
-      target.style.removeProperty("zoom")
+      if (${where === "attr"}) delete target.dataset.lateZoom
+      else target.style.removeProperty("zoom")
       host.style.cssText = css
       // Register in the task, after Deadbolt registered its next rAF.
       requestAnimationFrame(loop)
@@ -866,7 +873,7 @@ const server = Bun.serve({
         const late = url.searchParams.get("late")
         const zoom = url.searchParams.get("zoom") === "1.5" ? 1.5 : 0.5
         const style = url.searchParams.has("fractional") ? "<style>main{max-width:313.5px}</style>" : url.searchParams.has("static") ? `<style>html{zoom:${url.searchParams.get("static") === "small" ? "0.8" : "1.25"}}</style>` : ""
-        return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" ? "html" : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
+        return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" || late === "attr" ? late : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
       }
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
@@ -2596,7 +2603,7 @@ async function menuScale(scale = 1) {
     // The downscale also exercises IO v2's incidental OOPIF intersection
     // flapping. The upscale is essential: IO stays visible and the old
     // guard actually fills, so this isn't just testing an existing refusal.
-    for (const query of ["?late=host", "?late=html", "?late=host&zoom=1.5", "?late=html&zoom=1.5", "?late=host&zoom=1.5&observer", "?late=html&zoom=1.5&observer", "?late=host&comp", "?late=html&zoom=1.5&comp", "?late=host&comp&observer", "?late=html&zoom=1.5&comp&observer"]) {
+    for (const query of ["?late=host", "?late=html", "?late=host&zoom=1.5", "?late=html&zoom=1.5", "?late=host&zoom=1.5&observer", "?late=html&zoom=1.5&observer", "?late=host&comp", "?late=html&zoom=1.5&comp", "?late=host&comp&observer", "?late=html&zoom=1.5&comp&observer", "?late=attr&zoom=1.5", "?late=attr&zoom=1.5&comp"]) {
       for (const how of ["pointer", "keyboard"]) {
         await page.goto(`${site}/menu-scale${query}`)
         const menu = await menuOn(page)
@@ -2671,8 +2678,8 @@ async function menuPosition(scale = 1) {
     }, site)
     for (const surface of ["menu", "save", "signin"] as const) {
       const kinds = surface === "menu" && scale === 1
-        ? ["left", "translate", "scale", "left-task", "translate-task", "scale-task", "left-observer", "translate-observer", "scale-observer", "left-keyboard", "translate-keyboard", "scale-keyboard"]
-        : ["left", "translate", "scale"]
+        ? ["left", "translate", "scale", "left-task", "translate-task", "scale-task", "hidden-task", "left-observer", "translate-observer", "scale-observer", "left-keyboard", "translate-keyboard", "scale-keyboard"]
+        : ["left", "translate", "scale", "hidden-task"]
       for (const kind of kinds) {
         await run.worker.evaluate(async (on) => {
           await chrome.storage.local.set({ offerToSignIn: on })
@@ -2707,7 +2714,10 @@ async function menuPosition(scale = 1) {
         const restore = kind.endsWith("task") || kind.endsWith("observer")
         // Restored variants overlap the original row. After their burst,
         // prove refusal of a real press, not a click outside the frame.
-        const dx = restore ? -80 : -220, dy = restore ? 10 : 200
+        // A hidden host is drawn only a few pixels off, so a press on its row
+        // also reaches the real row once it's back (even the save offer's button).
+        const hidden = kind.startsWith("hidden")
+        const dx = hidden ? -12 : restore ? -80 : -220, dy = hidden ? 6 : restore ? 10 : 200
         const point = { x: frame.x + dx + (target.x - frame.x + target.width / 2) * factor, y: frame.y + dy + (target.y - frame.y + target.height / 2) * factor }
         const triggerPoint = restore ? { x: 20, y: 600 } : point
         if (kind.endsWith("keyboard")) await page.keyboard.press("ArrowDown")
@@ -2728,8 +2738,15 @@ async function menuPosition(scale = 1) {
           decoy.textContent = "Continue reading"
           decoy.style.cssText = `position:fixed;left:${point.x - 20}px;top:${point.y - 15}px;width:180px;height:40px;margin:0`
           document.body.append(decoy)
-          const state = { restyles: 0, restored: false }
+          const state = { restyles: 0, restored: false, closedDrawn: "" }
           ;(window as unknown as { attack: typeof state }).attack = state
+          if (kind.startsWith("hidden")) {
+            // Set up once, well before the loop: by then any restart of the
+            // wait this caused is long over.
+            for (const type of ["beforetoggle", "toggle"]) addEventListener(type, (e) => { if (e.target === host) e.stopPropagation() }, true)
+            document.documentElement.style.transform = `translate(${dx}px,${dy}px)`
+            document.body.style.transform = `translate(${-dx}px,${-dy}px)`
+          }
           window.addEventListener("pointermove", function trigger(e) {
             if (!e.isTrusted || Math.abs(e.clientX - triggerPoint.x) > 25 || Math.abs(e.clientY - triggerPoint.y) > 25) return
             removeEventListener("pointermove", trigger)
@@ -2743,6 +2760,23 @@ async function menuPosition(scale = 1) {
             let n = 0
             const apply = () => {
               if (!host.isConnected) return
+              if (kind.startsWith("hidden")) {
+                // Closed, the host leaves the top layer; if it were still drawn
+                // it would follow <html>'s transform, which <body>'s cancels for
+                // the page itself. Deadbolt's own listener on the host never
+                // hears it close.
+                try { host.hidePopover() } catch {}
+                // Laid out at all while closed, it would be painted there.
+                const drawn = host.getBoundingClientRect()
+                if (drawn.width || drawn.height) state.closedDrawn = `${drawn.left - r.left},${drawn.top - r.top}`
+                state.restyles++
+                setTimeout(() => {
+                  try { host.showPopover() } catch {}
+                  if (state.restyles < 3) requestAnimationFrame(loop)
+                  else state.restored = true
+                }, 0)
+                return
+              }
               const css = host.style.cssText
               if (kind.startsWith("scale")) {
                 host.style.setProperty("transform-origin", "top left", "important")
@@ -2768,6 +2802,7 @@ async function menuPosition(scale = 1) {
             else requestAnimationFrame(loop)
           })
         }, { kind, point, triggerPoint, dx, dy })
+        if (hidden) await Bun.sleep(700)
         await page.mouse.move(triggerPoint.x, triggerPoint.y)
         const restyled = await until(`${surface} ${kind}: three late restyles`, () => page.evaluate(() => (window as unknown as { attack: { restyles: number } }).attack.restyles >= 3), 350)
         if (restore) {
@@ -2801,6 +2836,10 @@ async function menuPosition(scale = 1) {
         }
         await Bun.sleep(Math.max(0, settledAt - Date.now()))
         check(!!restyled, `${surface} ${kind}: late restyle ran repeatedly`)
+        if (hidden) {
+          const drawn = await page.evaluate(() => (window as unknown as { attack: { closedDrawn: string } }).attack.closedDrawn)
+          check(!drawn, `${surface} ${kind}: the closed host isn't drawn (offset ${drawn || "none"})`)
+        }
         check((await hostLog(run)).filter((r) => ["fill", "save"].includes(String(r.type))).length === before, `${surface} ${kind}: no credential request or save`)
         if (surface === "menu") check(await page.inputValue("#password") === "", `${kind}: no password written`)
         check(refusal.includes("covered"), `${surface} ${kind}: covered refusal (${refusal})`)

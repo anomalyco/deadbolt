@@ -175,7 +175,15 @@ not running without sending hello, which would start the agent again.
   when the field is there), because content outside is inert or not drawn.
   If the page puts something in the top layer after the surface (a popover,
   a modal dialog, full screen) or hides its popover, the surface goes back
-  on top and waits its 500 ms again. It does this at most three times, then
+  on top and waits its 500 ms again. The host's `beforetoggle` and `toggle`
+  are heard on the window in the capture phase, registered at
+  document_start before any page script, so a page listener can't stop
+  them reaching Deadbolt. A closed host isn't drawn at all: a rule in its
+  closed shadow root, `:host(:not(:popover-open)) { display: none
+  !important }`, beats the inline `display` (important declarations from a
+  shadow tree win over the light tree's). Out of the top layer it would
+  otherwise be an ordinary fixed box that an ancestor's transform can move,
+  with `<body>` transformed back so the page looks unchanged. It does this at most three times, then
   closes. A modal dialog or full screen that the surface isn't inside closes
   it. Each frame it hit-tests five points of its own box, and anything else
   there (such as a popover in a shadow root it can't watch) counts as
@@ -270,18 +278,38 @@ not running without sending hello, which would start the agent again.
   The private channel carries the generation and the latched verdict. After
   confirmation, the frame asks the content script to check that generation
   and the current, **unrestored** rect again. A missing answer fails closed.
-  This applies to pointer and keyboard picks, including passkey rows, save
-  offers and universal sign-in. It doesn't infer the viewport origin from
+  It also requires the host to be an open popover. This applies to pointer
+  and keyboard picks, including passkey rows, save offers and universal
+  sign-in. It doesn't infer the viewport origin from
   `window.screenX/Y` (those describe the browser window, not its content
   viewport), or mix CSS pixels with device pixels at browser zoom.
+- **Painted placement.** An `IntersectionObserver` on the host, rooted at the
+  document with its root margin shrunk to the written rect ± 2 px and a
+  threshold of 1, reports where the browser actually laid the host out, in
+  its own pass after every script in the frame. Whatever draws the host
+  elsewhere, including ways not listed here, leaves part of it outside: that
+  latches "displaced", bumps the geometry generation and restarts the wait,
+  and the pick verdict requires it clear. Coming back in place is a move
+  too, so a pick waits another 500 ms. The observer is remade whenever the
+  written rect or the viewport size changes, so following a scrolled or
+  reflowed field doesn't count; an entry whose root bounds don't match the
+  rect it was made for (a scrollbar came or went) is no evidence either way.
+  The menu restarts its own wait for every geometry message except one
+  where only "visible" came back: the content script already restarted it
+  when the verdict changed, so recovery takes 500 ms, not twice that.
 - **Chromium timing.** A deeper page ResizeObserver can change the host after
   its observer ran; Chromium defers that shallower observation. The child's
   ratio-change defense relies on Chromium syncing the frame at both our
   forced layout and the scaled paint. The absolute physical-width reference
   above does not require that alternation. These checks are tested in
   headless Chromium, not a claim about other engines. Size observers alone
-  do not see position-only or transform restyles; mutation generations and
-  the unrestored placement check above cover those changes independently.
+  do not see position-only or transform restyles; mutation generations,
+  the unrestored placement check and painted placement above cover those
+  changes independently. An ancestor zoom applied through an attribute and
+  a stylesheet rule (no style or class mutation) is left to the size
+  observers. In headless Chromium, a click during a continuous hide/show loop
+  went to the host element rather than its frame, and a short loop restarted
+  the frame's own visibility wait; neither is relied on.
 - **A press takes no focus.** A pointer press in the menu leaves focus where
   it was, in the page's field (the menu cancels the press's default
   action). The page never sees its field blur at the moment of the press,
