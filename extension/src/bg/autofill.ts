@@ -714,18 +714,13 @@ export class Autofill {
 
   /** Entry from an extension-owned, visibility-guarded offer only. No popup,
    * inline-menu or agent fill gains this authority implicitly. */
-  async startAutomatic(target: FrameTarget, account: Account, action: string, provider = false): Promise<PickReply> {
+  async startAutomatic(target: FrameTarget, account: Account, action: string): Promise<PickReply> {
     if (this.host.status.state !== "ready" || target.frameId !== 0 || (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true ||
         !account.urls.some((u) => exactSignInOrigin(u, target.origin))) return { ok: false, message: "This sign-in isn't available here." }
     await this.cancel(target.tabId)
     const generation = this.generation(target.tabId)
     const site = siteOf(new URL(target.origin).hostname)
     if (!site) return { ok: false, message: "This sign-in isn't available here." }
-    if (provider && account.signIn) {
-      this.signInWith?.start(target.tabId, account.signIn, site)
-      const found = await sendToFrame(target, { type: "db:point", provider: account.signIn.provider })
-      return found ? { ok: true } : { ok: false, message: "Open the site's provider sign-in to continue." }
-    }
     const now = Date.now()
     if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return { ok: false, message: "Sign-in stopped." }
     await this.setSession(target.tabId, { ref: account.ref, site, origin: target.origin, documentId: target.documentId,

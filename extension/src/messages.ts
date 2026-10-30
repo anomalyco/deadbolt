@@ -125,7 +125,18 @@ export type Status =
   | { state: Exclude<HostStatus, "ready">; detail?: string }
   | { state: "ready"; version: string }
 
+/** Value-free provider step; its opaque handle fixes the controls before an RPC. */
+export interface ProviderReport {
+  kind: "entry" | "chooser" | "form" | "passkey" | "stop" | "success"
+  action?: string
+  form?: number
+  roles?: FieldRole[]
+  reason?: "consent" | "phone" | "sms" | "security-key" | "captcha" | "unknown"
+  approval?: string
+}
+
 export type ToBackground =
+  | { type: "db:provider-check" }
   // content script
   /**
    * `explicit`: the user clicked into the field or pressed ↓ in it, rather
@@ -214,6 +225,9 @@ export type ToBackground =
   | { type: "pk:popup-choose"; tabId: number; id: string; choice: PasskeyChoice }
 
 export type ToContent =
+  | { type: "db:provider-probe"; session: string; provider: string; account?: string; entry?: boolean }
+  | { type: "db:provider-act"; session: string; action: string; values?: FillValues }
+  | { type: "db:provider-status"; session: string; label: string; done?: boolean }
   /**
    * `form` is the form snapshot the fill was chosen for; a changed form gets
    * nothing. `approval` names the fields db:approve said may be filled: only

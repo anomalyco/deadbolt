@@ -42,6 +42,10 @@ const KNOWN: Record<string, Omit<Provider, "id">> = {
   gitlab: { name: "GitLab", hosts: ["gitlab.com"], words: ["gitlab"], chooser: false },
 }
 
+export function providerForPage(url: string): Provider | undefined {
+  return Object.keys(KNOWN).map(provider).find((p) => isProviderPage(p, url))
+}
+
 export function provider(id: string): Provider {
   const known = KNOWN[id.toLowerCase()]
   return known ? { id: id.toLowerCase(), ...known } : { id, name: id, hosts: [], words: [id.toLowerCase()], chooser: false }
@@ -60,7 +64,7 @@ export function isProviderPage(p: Provider, url: string): boolean {
     return false
   }
   const host = u.hostname.toLowerCase()
-  if (u.protocol === "https:" && p.hosts.includes(host)) return true
+  if (u.protocol === "https:" && !u.port && p.hosts.includes(host)) return true
   // DEADBOLT_E2E is true only in an e2e build (scripts/build.ts --e2e); every
   // other build defines it false, and this branch drops out of its code.
   if (typeof DEADBOLT_E2E !== "undefined" && DEADBOLT_E2E === true)

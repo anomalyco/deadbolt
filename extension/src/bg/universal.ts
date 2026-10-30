@@ -1,4 +1,6 @@
 import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, type AuthReport } from "../auth-state"
+import { providerForPage } from "../signin"
+import type { ProviderChain } from "./provider-chain"
 import type { MenuLoadReply, PickReply, SignInReply } from "../messages"
 import type { Account } from "../protocol"
 import { Autofill, resizeMessage } from "./autofill"
@@ -22,7 +24,7 @@ export class UniversalSignIn {
   private checking = new Set<number>()
   private lists = new Map<string, { at: number; accounts: Account[] }>()
   private on?: Promise<boolean>
-  constructor(private host: VaultBackend, private autofill: Autofill, private occupied: (tab: number) => boolean) {
+  constructor(private host: VaultBackend, private autofill: Autofill, private occupied: (tab: number) => boolean, private providers: ProviderChain) {
     host.onChange((status) => { this.lists.clear(); if (status.state !== "ready") void this.closeAll() })
     chrome.storage.onChanged?.addListener((changes, area) => {
       if (area !== "local" || !(SIGNIN_SETTING in changes)) return
@@ -88,7 +90,7 @@ export class UniversalSignIn {
     // Cheapest first. An open offer stays until navigation, pick, dismissal,
     // lock or the setting going off; it is never re-probed.
     if (!target || target.frameId !== 0 || this.checking.has(target.tabId) || this.open(target.tabId)) return
-    if (this.host.status.state !== "ready" || this.occupied(target.tabId)) return
+    if (this.host.status.state !== "ready" || this.occupied(target.tabId) || this.providers.active(target.tabId)) return
     this.checking.add(target.tabId)
     try {
       if (!await this.enabled() || this.quiet(await this.memory(target.origin)) || await this.autofill.signingIn(target.tabId)) return
@@ -136,8 +138,19 @@ export class UniversalSignIn {
       const memory = await this.memory(o.origin)
       if (o.cancelled || !account || !facts?.action || authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) !== "signed-out")
         return { ok: false, message: "The page changed. Nothing was filled." }
-      const reply = await this.autofill.startAutomatic(o, account, facts.action, provider)
-      if (o.cancelled) await this.autofill.stopAutomatic(o.tabId)
+      const chain = provider && !!account.signIn || !!providerForPage(o.origin)
+      let reply: PickReply
+      if (chain) {
+        await this.autofill.stopAutomatic(o.tabId)
+        if (o.cancelled) return { ok: true }
+        const starting = this.providers.start(o, account, provider)
+        await this.closeTab(o.tabId)
+        reply = await starting
+      } else reply = await this.autofill.startAutomatic(o, account, facts.action)
+      if (o.cancelled) {
+        this.providers.stop(o.tabId)
+        await this.autofill.stopAutomatic(o.tabId)
+      }
       return reply
     } finally { o.picking = false }
   }
@@ -155,6 +168,7 @@ export class UniversalSignIn {
     const o = await this.token(token, sender)
     if (!o) return
     o.cancelled = true
+    this.providers.stop(o.tabId)
     if (o.picked) await this.autofill.stopAutomatic(o.tabId)
     await this.remember(o.origin, { quietUntil: Date.now() + SIGNIN_QUIET_MS })
     await this.closeTab(o.tabId)
@@ -163,7 +177,10 @@ export class UniversalSignIn {
     const o = this.offers.get(token)
     if (o && o.tabId === sender.tab?.id && o.documentId === sender.documentId) {
       if (dismissed) o.cancelled = true
-      if (dismissed && o.picked) void this.autofill.stopAutomatic(o.tabId)
+      if (dismissed && o.picked) {
+        this.providers.stop(o.tabId)
+        void this.autofill.stopAutomatic(o.tabId)
+      }
       this.offers.delete(token)
     }
   }
@@ -173,5 +190,11 @@ export class UniversalSignIn {
       await sendToFrame(o, { type: "db:close-menu", token })
     }
   }
-  private async closeAll() { for (const o of this.offers.values()) await this.closeTab(o.tabId) }
+  private async closeAll() {
+    for (const o of this.offers.values()) {
+      o.cancelled = true
+      this.providers.stop(o.tabId)
+      await this.closeTab(o.tabId)
+    }
+  }
 }

@@ -82,6 +82,10 @@ interface Pending extends FrameTarget {
   conditional?: { passkeys: Passkey[]; challenge: string; rpId?: string; userVerification: UserVerification }
   /** An autofill sign-in held in a login frame on another origin of the top page's site (see conditional). */
   framed?: boolean
+  automaticSignal?: AbortSignal
+  automaticCleanup?: () => void
+  automaticOptional?: boolean
+  automaticUsed?: boolean
 }
 
 const DOMAIN = /^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$/
@@ -149,6 +153,9 @@ interface Lister {
 }
 
 export class Passkeys {
+  /** Only the guarded provider chain supplies this one-ceremony authority. */
+  automatic?: (target: FrameTarget, keys: Passkey[], optional?: boolean) => Promise<{ ref: string; signal: AbortSignal } | null | undefined>
+  automaticSession?: (target: FrameTarget) => AbortSignal | undefined
   private pending = new Map<string, Pending>()
   private lists = new Map<string, Lister>()
   private openPopup: NonNullable<PasskeyOptions["openPopup"]>
@@ -238,11 +245,15 @@ export class Passkeys {
   }
 
   private async start(p: Pending, kind: "get" | "create", raw: unknown): Promise<HookReply> {
-    const same = await this.sameOrigin(p)
-    this.live(p)
     const options = parseOptions(kind, raw)
     if (!options) return FALLBACK
     const conditional = options.kind === "get" && options.mediation === "conditional"
+    p.automaticOptional = conditional
+    const automatic = !conditional && this.automaticSession?.(p)
+    if (automatic) this.bindAutomatic(p, automatic)
+    const same = await this.sameOrigin(p)
+    this.live(p)
+    if (p.automaticSignal && options.kind === "create") return fail("NotAllowedError")
     // Off one origin all the way up, only a login frame's autofill sign-in is Deadbolt's (see conditional).
     if (!same && !(conditional && (await sameSiteTop(p)))) return FALLBACK
     this.live(p)
@@ -262,8 +273,17 @@ export class Passkeys {
     const listed = await this.passkeysFor(p, options.rpId)
     if (!("passkeys" in listed)) return listed
     // Without Touch ID the agent can't verify the user; the browser may.
-    if (options.userVerification === "required" && !listed.canVerify) return FALLBACK
+    if (options.userVerification === "required" && !listed.canVerify) {
+      // A chain must hand off, not open an unsolicited browser-device fallback.
+      if (options.kind === "get" && await this.automatic?.(p, []) !== undefined) return fail("NotAllowedError")
+      return FALLBACK
+    }
     p.rpId = listed.rpId
+    if (options.kind === "get") {
+      const keys = options.allow.length ? listed.passkeys.filter((k) => options.allow.includes(k.credentialId)) : listed.passkeys
+      const automatic = await this.automaticGet(p, keys, options)
+      if (automatic !== undefined) return automatic
+    }
     return options.kind === "create" ? this.create(p, options, listed) : this.get(p, options, listed)
   }
 
@@ -310,6 +330,8 @@ export class Passkeys {
       // Without Touch ID the agent can't verify the user. A nonempty allow list names the only passkeys the site takes.
       if (o.userVerification !== "required" || listed.canVerify) passkeys = o.allow.length ? listed.passkeys.filter((k) => o.allow.includes(k.credentialId)) : listed.passkeys
     }
+    const automatic = await this.automaticGet(p, passkeys, o, true)
+    if (automatic !== undefined) return automatic
     if (!passkeys.length && !(await this.hasLogins(p))) return FALLBACK
     // One autofill sign-in per document; a newer one replaces it.
     for (const other of this.pending.values()) if (other !== p && other.conditional && other.documentId === p.documentId) this.finish(other, fail("NotAllowedError"))
@@ -451,6 +473,7 @@ export class Passkeys {
    */
   private async deliver(p: Pending, reply: HookReply): Promise<boolean> {
     if (p.done) return false
+    if (p.automaticSignal?.aborted) { this.finish(p, fail("NotAllowedError")); return false }
     if (!("credential" in reply)) {
       this.finish(p, reply)
       return false
@@ -470,6 +493,11 @@ export class Passkeys {
   private finish(p: Pending, reply: HookReply) {
     if (p.done) return
     p.done = true
+    p.automaticCleanup?.()
+    if (p.automaticSignal && !("credential" in reply)) {
+      reply = fail("NotAllowedError")
+      if (!p.automaticSignal.aborted && (!p.automaticOptional || p.automaticUsed)) void this.automatic?.(p, []).catch(() => {})
+    }
     p.stop.abort()
     this.pending.delete(p.key)
     clearTimeout(p.timer)
@@ -513,6 +541,43 @@ export class Passkeys {
   prompt(tabId: number): PasskeyPrompt | undefined {
     for (const p of this.pending.values()) if (p.tabId === tabId && p.prompt) return p.prompt
     return undefined
+  }
+
+  private bindAutomatic(p: Pending, signal: AbortSignal) {
+    if (p.automaticSignal === signal) return
+    p.automaticCleanup?.()
+    p.automaticSignal = signal
+    const cancel = () => this.finish(p, fail("NotAllowedError"))
+    signal.addEventListener("abort", cancel, { once: true })
+    p.automaticCleanup = () => signal.removeEventListener("abort", cancel)
+    if (signal.aborted) cancel()
+  }
+
+  /** Reuses all existing RP, allow-list, UV and Strict ceremony checks. */
+  private async automaticGet(p: Pending, keys: Passkey[], o: { challenge: string; rpId?: string; userVerification: UserVerification }, optional = false): Promise<HookReply | undefined> {
+    const choice = await this.automatic?.(p, keys, optional)
+    if (choice === undefined) return undefined
+    if (!choice || choice.signal.aborted) return fail("NotAllowedError")
+    const key = keys.find((k) => k.ref === choice.ref)
+    if (!key) return fail("NotAllowedError")
+    p.automaticUsed = true
+    this.bindAutomatic(p, choice.signal)
+    this.live(p)
+    return this.assert(p, key, o.challenge, o.rpId, o.userVerification)
+  }
+
+  /** A conditional call can predate a corner pick on the provider itself. */
+  async resumeAutomatic(target: FrameTarget): Promise<boolean> {
+    const p = this.conditionalFor(target)
+    if (!p?.conditional) return false
+    const options = p.conditional
+    p.conditional = undefined
+    try {
+      const reply = await this.automaticGet(p, options.passkeys, options, true)
+      if (reply === undefined) { p.conditional = options; return false }
+      await this.deliver(p, reply)
+    } catch (err) { this.finish(p, err === GONE ? fail("NotAllowedError") : errorReply(err)) }
+    return true
   }
 
   /** The popup's answer to prompt `id`; any other prompt is untouched. */

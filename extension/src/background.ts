@@ -13,6 +13,7 @@ import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
+import { ProviderChain } from "./bg/provider-chain"
 import { SiteIcons } from "./bg/site-icons"
 import { UniversalSignIn } from "./bg/universal"
 import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
@@ -24,11 +25,12 @@ const host: VaultBackend = DEADBOLT_NATIVE ? new Host() : standalone!
 const saver = new Saver(host)
 const passkeys = new Passkeys(host, { keepBadge: (tabId) => saver.pending(tabId) !== undefined })
 const signInWith = new SignInWith(host)
+const providers = new ProviderChain(host, passkeys, signInWith)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
 const learner = new Learner(host)
 const forms = new Forms(host)
 const siteIcons = new SiteIcons(host)
-const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(tabId) !== undefined)
+const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(tabId) !== undefined, providers)
 /**
  * The device.html tab the inline menu's locked row opened. Memory only, like
  * Autofill's return target: a restarted worker returns nowhere. A later click
@@ -38,6 +40,7 @@ const universal = new UniversalSignIn(host, autofill, (tabId) => saver.pending(t
 let unlockTab: number | undefined
 let openingUnlock: Promise<void> | null = null
 saver.signedIn = (tabId, site) => {
+  void providers.signedIn(tabId)
   void universal.signedIn(tabId)
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
@@ -71,14 +74,18 @@ host.onChange((status, change) => {
 
 async function handle(message: ToBackground, sender: chrome.runtime.MessageSender): Promise<unknown> {
   switch (message.type) {
+    case "db:provider-check":
+      return providers.check(sender)
     case "db:signin-check":
       return universal.check(sender)
     case "db:signin-signout":
       return universal.signedOut(sender)
     case "db:signin-stop":
+      if (sender.tab?.id !== undefined) providers.stop(sender.tab.id)
       if (sender.tab?.id !== undefined) return autofill.stopAutomatic(sender.tab.id)
       return
     case "db:query":
+      if (sender.tab?.id !== undefined && providers.active(sender.tab.id)) return { rows: 0 }
       return autofill.query(sender, message.roles, message.focused, message.form, message.explicit === true, message.identifier, message.again === true, message.kind, message.rules, message.pageAccount, message.box)
     case "db:page":
       if (Array.isArray(message.roles)) saver.page(sender, message.kind, message.roles)
@@ -219,6 +226,7 @@ chrome.runtime.onMessage.addListener((message: ToBackground, sender, respond) =>
 })
 
 chrome.tabs.onRemoved.addListener((tabId) => {
+  void providers.closed(tabId)
   void universal.closeTab(tabId)
   if (tabId === unlockTab) unlockTab = undefined
   autofill.forgetTab(tabId)
@@ -228,6 +236,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   learner.forgetTab(tabId)
 })
 chrome.webNavigation.onCommitted.addListener((d) => {
+  providers.navigated(d)
   if (d.tabId === unlockTab && d.frameId === 0 && d.url.split(/[?#]/)[0] !== chrome.runtime.getURL(DEVICE_PAGE)) unlockTab = undefined
   void autofill.navigated(d)
   forms.navigated(d)
@@ -238,8 +247,17 @@ chrome.webNavigation.onCommitted.addListener((d) => {
   }
 })
 // A sign-in with a provider: its popup follows it, and its pages get told the account to point at.
-chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => signInWith.opened(d.sourceTabId, d.tabId))
-chrome.webNavigation.onDOMContentLoaded.addListener((d) => void signInWith.loaded(d))
-chrome.webNavigation.onHistoryStateUpdated.addListener((d) => void signInWith.loaded(d))
+chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => {
+  if (providers.active(d.sourceTabId)) void providers.opened(d)
+  else signInWith.opened(d.sourceTabId, d.tabId)
+})
+chrome.webNavigation.onDOMContentLoaded.addListener((d) => {
+  if (providers.active(d.tabId)) void providers.loaded(d)
+  else void signInWith.loaded(d)
+})
+chrome.webNavigation.onHistoryStateUpdated.addListener((d) => {
+  if (providers.active(d.tabId)) { providers.navigated(d); void providers.loaded(d) }
+  else void signInWith.loaded(d)
+})
 
 void host.connect()
