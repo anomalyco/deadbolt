@@ -50,13 +50,18 @@
   --border-muted: #00000014;
   --border-strong: #00000033;
   --border-weak: #dbdbdb;
-  --focus: #7698fd;
+  /* Rune's border_focus is #7698fd, 2.7:1 on white: a little deeper here, so
+     the focus ring has 3:1 against the light surfaces (WCAG 1.4.11). */
+  --focus: #5b7ef9;
   --hover: #0000000a;
   --pressed: #00000014;
   --text: #161616;
   --text-strong: #171717;
   --muted: #5c5c5c;
   --faint: #808080;
+  /* Text in the faint tone: Rune's text_faint (#808080) is under 4.5:1 on
+     white and on a selected row, so text takes these instead (WCAG AA). */
+  --text-faint: #666666;
   --icon: #3a3a3a;
   --icon-muted: #808080;
   --icon-faint: #aeaeae;
@@ -74,6 +79,8 @@
   --danger-bg: #fcecebff;
   --danger-border: #f2bbb7;
   --success: #198b43;
+  /* Success as text: #198b43 is under 4.5:1 on success_bg. */
+  --text-success: #167a3b;
   --success-bg: #e7f9ea;
   --warning: #cb9f34;
   --warning-bg: #fefaec;
@@ -125,6 +132,7 @@
     --text-strong: #ededed;
     --muted: #aeaeae;
     --faint: #808080;
+    --text-faint: #a3a3a3;
     --icon: #dbdbdb;
     --icon-muted: #808080;
     --icon-faint: #5c5c5c;
@@ -138,6 +146,8 @@
     --danger-bg: #461516;
     --danger-border: #97252b;
     --success: #6bd586;
+    --text-success: #6bd586;
+    --focus: #7698fd;
     --success-bg: #14361d;
     --warning: #f2cf76;
     --warning-bg: #4b4025;
@@ -216,7 +226,17 @@ code {
 }
 
 .faint {
-  color: var(--faint);
+  color: var(--text-faint);
+}
+
+/* There for screen readers only. */
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 /* A section's name: Rune's `small_medium` (11/530), muted, as the app's
@@ -352,7 +372,7 @@ code {
 }
 
 .icon-button.confirmed {
-  color: var(--success);
+  color: var(--text-success);
 }
 
 /* Rune's focus ring: 2px of border_focus, clear of the control. */
