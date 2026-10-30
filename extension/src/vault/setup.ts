@@ -179,11 +179,12 @@ export class Setup {
   }
 
   private code(code: string | null): View {
-    const copy = button("btn", [icon("copy"), "Copy"], (b) => code && void copied(b, code, (m) => this.app.announce(m), "Copied the code"))
-    if (!code) copy.disabled = true
+    const copy = button("btn", [icon("copy"), "Copy code"], (b) => code && void copied(b, code, (m) => this.app.announce(m), "Copied the code"))
     // The whole command, for a terminal on the other device (or this one).
     const command = code ? `deadbolt pair ${code}` : ""
-    const copyCommand = button("link", "Copy the command", (b) => command && void copied(b, command, (m) => this.app.announce(m), "Copied the command"))
+    const copyCommand = button("btn", "Copy command", (b) => command && void copied(b, command, (m) => this.app.announce(m), "Copied the command"))
+    // Both wait for the code in place, so nothing moves when it comes.
+    if (!code) copy.disabled = copyCommand.disabled = true
     // Long codes wrap between words, never inside one.
     const words = code ? code.split("-").flatMap((w, i) => (i ? ["-", h("wbr"), w] : [w])) : ["Getting a code…"]
     const shown = h("span", { class: `code${code ? "" : " pending"}`, id: "join-code" })
@@ -194,9 +195,9 @@ export class Setup {
         "section",
         { class: "view" },
         toolbar("Pair with a device", () => void this.cancel()),
-        para("On a device that has your vault, run ", h("code", {}, code ? command : "deadbolt pair"), code ? "" : " with this code", ", or choose Pair in the Deadbolt app."),
-        h("div", { class: "code-box" }, shown, copy),
-        code ? h("p", { class: "small" }, copyCommand) : null,
+        // The same words before and after the code comes: it shows once, below, on its own line.
+        para("On a device that has your vault, run ", h("code", {}, "deadbolt pair"), " with this code, or choose Pair in the Deadbolt app."),
+        h("div", { class: "code-box pair" }, shown, h("div", { class: "code-actions" }, copy, copyCommand)),
         h("div", { class: "waiting" }, h("span", { class: "sync-dot busy", "aria-hidden": "true" }), h("span", {}, code ? "Waiting for the other device…" : "Connecting to Deadbolt's sync service…")),
         h("p", { class: "faint small" }, "The code works once, for five minutes. Keep this open, or come back to it: it waits either way."),
         h("div", { class: "buttons end" }, button("btn", "Cancel", () => void this.cancel())),
@@ -243,7 +244,7 @@ export class Setup {
     const form = h(
       "form",
       { class: "view", novalidate: "" },
-      h("div", { class: "hero small" }, h("span", { class: "done-mark" }, icon("check")), h("h1", {}, vault ? `Joined ${vault}` : "Joined your vault"), para("Choose a passphrase for this browser. It unlocks Deadbolt here only; your other devices keep their own.")),
+      h("div", { class: "hero small" }, h("span", { class: "done-mark" }, icon("check")), h("h1", {}, vault ? `Joined the ${vault} vault` : "Joined your vault"), para("Choose a passphrase for this browser. It unlocks Deadbolt here only; your other devices keep their own.")),
       ...p.fields,
       p.error,
       h("div", { class: "buttons stack" }, submit, button("link", "Cancel", () => void this.cancel())),
