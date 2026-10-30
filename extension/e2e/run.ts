@@ -761,6 +761,10 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
+      // A page with a frame of its own beside the form (an ad, a captcha), and
+      // with ?blurs one that moves focus off the field onto <body> soon after it gets it (Zoom's sign-in).
+      case "/dismiss":
+        return html("Sign in to Acme", `${loginForm("/home")}<iframe id="ad" srcdoc="<button style='width:200px;height:60px'>An ad</button>" style="display:block;margin-top:220px;width:300px;height:80px;border:0"></iframe>${url.searchParams.has("blurs") ? `<script>document.getElementById("email").addEventListener("focus", (e) => setTimeout(() => e.target.blur(), 400))</script>` : ""}`)
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
         return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
@@ -2442,6 +2446,34 @@ async function viewportResize() {
   }
 }
 
+/**
+ * Putting the menu away where the page gets no event for it: a click into
+ * one of the page's own frames (only a window blur), and Esc after the page
+ * moved focus off the field onto <body>.
+ */
+async function pageDismiss() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/dismiss`)
+    let menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "page dismiss"))
+    await page.frameLocator("#ad").locator("button").click()
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "a click into the page's own frame puts the menu away")
+    await page.goto(`${site}/dismiss?blurs`)
+    menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "page dismiss: blurs"))
+    await until("the page moves focus to <body>", () => page.evaluate(() => document.activeElement === document.body))
+    await page.keyboard.press("Escape")
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "Esc puts it away after the page moved focus off the field")
+  } catch (err) {
+    check(false, `page dismiss threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "page dismiss")
+  } finally {
+    await close(run)
+  }
+}
+
 /** The menu's host: a popover with a random name, raised over what the page puts in the top layer, and inside a login modal. */
 async function topLayer() {
   const run = await launch()
@@ -3790,10 +3822,11 @@ async function formsFrames() {
         check(JSON.stringify(asked?.fields.sort()) === JSON.stringify(["cvv", "expiry", "number"]), `fill-form asks only for the provider frame's fields (${asked?.fields.join(",")})`)
         await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)
         // From the page's own field: the page only, never the provider's frame.
+        // (Emptied first: focus going into a frame of the page puts the menu away.)
+        await frame.fill("#cardnumber", "")
         const own = await formsMenu(run, page, "#holder", "/forms/stripe")
         if (own) {
           check(((await own.locator("#caption").textContent()) ?? "").trim() === "On localhost", "the page's own card menu names only the site")
-          await frame.fill("#cardnumber", "")
           check((await pickRow(own, "Visa")) === "ok", "picking the card from the page's field fills")
           check((await page.inputValue("#holder")) === "Kit Langton", "the page's name-on-card box")
           check((await frame.inputValue("#cardnumber")) === "", "and nothing goes into the provider's frame from it")
@@ -4286,6 +4319,7 @@ const once: Record<string, () => Promise<void>> = {
   coveredMenu,
   topLayer,
   viewportResize,
+  pageDismiss,
   occlusionSweep,
   midFill,
   coveredPill,
@@ -4308,6 +4342,7 @@ const cost: Record<string, number> = {
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
+  pageDismiss: 5,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
 const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])

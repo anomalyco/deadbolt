@@ -850,6 +850,12 @@ function onKeyDown(event: KeyboardEvent) {
     }
     return
   }
+  // Esc also when the page moved focus off the field onto nothing (Zoom's
+  // sign-in leaves it on <body>): the user is still answering this menu.
+  if (event.key === "Escape" && mode === "accounts" && (target === document.body || target === document.documentElement)) {
+    dismissedFor = anchor
+    return closeMenu(false, true)
+  }
   if (target !== anchor || mode !== "accounts") return
   if (event.key === "Escape") {
     dismissedFor = anchor
@@ -1013,6 +1019,23 @@ function onMenuReady(event: MessageEvent<{ type?: unknown }>) {
   win.postMessage({ type: "db:menu-token", token }, event.origin, [channel.port2])
 }
 
+/**
+ * The top window lost focus. A click into one of the page's own frames (an
+ * ad, a captcha, an embedded panel) gives the page no pointerdown, only
+ * this: the user is elsewhere, and the account list goes, as for a click in
+ * the page. Not for the frame the menu's own field is in (that frame tells
+ * the background), nor when focus went into the menu itself.
+ */
+function onWindowBlur(event: FocusEvent) {
+  if (event.target !== window || !host || mode !== "accounts" || closing) return
+  const into = document.activeElement
+  if (!(into instanceof HTMLIFrameElement || into instanceof HTMLFrameElement)) return
+  const r = into.getBoundingClientRect()
+  const b = boxNow()
+  if (b && r.left <= b.left + 1 && r.top <= b.top + 1 && r.right >= b.right - 1 && r.bottom >= b.bottom - 1) return
+  closeMenu()
+}
+
 /** The page showed a popover, or a dialog through `beforetoggle`: once it's in the top layer, go back over it. */
 function onBeforeToggle(event: Event) {
   if (host && event.isTrusted && event.target !== host && (event as ToggleEvent).newState === "open") queueMicrotask(raise)
@@ -1047,6 +1070,7 @@ export function initMenu(page: PageState) {
   if (isTop) {
     document.addEventListener("beforetoggle", onBeforeToggle, true)
     addEventListener("resize", onResize, true)
+    addEventListener("blur", onWindowBlur)
     document.addEventListener("fullscreenchange", onFullscreen)
     new MutationObserver(onDialogs).observe(document, { subtree: true, attributes: true, attributeFilter: ["open"] })
   }
