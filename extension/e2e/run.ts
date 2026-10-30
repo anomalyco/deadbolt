@@ -1100,6 +1100,8 @@ interface LaunchOptions {
   listDelay?: number
   /** Playwright turns the back/forward cache off; keep it on. */
   bfcache?: boolean
+  /** Real classic scrollbars, as on Windows and Linux (Playwright hides them by default). */
+  scrollbars?: boolean
   /** Runs the deadbolt binary as the host, with this environment. */
   realHost?: Record<string, string>
   /** Records every page to this directory. */
@@ -1147,7 +1149,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     // CDP DPR emulation alone does not change ResizeObserver device pixels
     // or an extension OOPIF's DPR. Scale the renderer too, as a real display does.
     args: [`--force-device-scale-factor=${options.scale ?? 2}`, `--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1", ...(options.secure ? [`--unsafely-treat-insecure-origin-as-secure=${options.secure.join(",")}`] : [])],
-    ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
+    ignoreDefaultArgs: [...(options.bfcache ? ["--disable-back-forward-cache"] : []), ...(options.scrollbars ? ["--hide-scrollbars"] : [])],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
       ...process.env,
@@ -2638,7 +2640,8 @@ async function menuScale(scale = 1) {
 
 /** Late page-world restyles: the user's click on a decoy must not authorize the surface. */
 async function menuPosition(scale = 1) {
-  const run = await launch({ scale, universal: true })
+  // Real scrollbars: the scrollbar case below changes the viewport's width.
+  const run = await launch({ scale, universal: true, scrollbars: true })
   const page = await run.context.newPage()
   try {
     // Real browser zoom, not CDP page-scale emulation. The normal pick must
@@ -2678,8 +2681,8 @@ async function menuPosition(scale = 1) {
     }, site)
     for (const surface of ["menu", "save", "signin"] as const) {
       const kinds = surface === "menu" && scale === 1
-        ? ["left", "translate", "scale", "left-task", "translate-task", "scale-task", "hidden-task", "left-observer", "translate-observer", "scale-observer", "left-keyboard", "translate-keyboard", "scale-keyboard"]
-        : ["left", "translate", "scale", "hidden-task"]
+        ? ["left", "translate", "scale", "left-task", "translate-task", "scale-task", "hidden-task", "scrollbar-task", "batch-task", "left-observer", "translate-observer", "scale-observer", "left-keyboard", "translate-keyboard", "scale-keyboard"]
+        : ["left", "translate", "scale", "hidden-task", "scrollbar-task", "batch-task"]
       for (const kind of kinds) {
         await run.worker.evaluate(async (on) => {
           await chrome.storage.local.set({ offerToSignIn: on })
@@ -2714,10 +2717,11 @@ async function menuPosition(scale = 1) {
         const restore = kind.endsWith("task") || kind.endsWith("observer")
         // Restored variants overlap the original row. After their burst,
         // prove refusal of a real press, not a click outside the frame.
-        // A hidden host is drawn only a few pixels off, so a press on its row
+        // Hidden, scrollbar and batch hosts are drawn only a few pixels off, so a press on its row
         // also reaches the real row once it's back (even the save offer's button).
         const hidden = kind.startsWith("hidden")
-        const dx = hidden ? -12 : restore ? -80 : -220, dy = hidden ? 6 : restore ? 10 : 200
+        const small = hidden || kind.startsWith("scrollbar") || kind.startsWith("batch")
+        const dx = small ? -12 : restore ? -80 : -220, dy = small ? 6 : restore ? 10 : 200
         const point = { x: frame.x + dx + (target.x - frame.x + target.width / 2) * factor, y: frame.y + dy + (target.y - frame.y + target.height / 2) * factor }
         const triggerPoint = restore ? { x: 20, y: 600 } : point
         if (kind.endsWith("keyboard")) await page.keyboard.press("ArrowDown")
@@ -2739,6 +2743,9 @@ async function menuPosition(scale = 1) {
           decoy.style.cssText = `position:fixed;left:${point.x - 20}px;top:${point.y - 15}px;width:180px;height:40px;margin:0`
           document.body.append(decoy)
           const state = { restyles: 0, restored: false, closedDrawn: "" }
+          const scrollbar = document.createElement("style")
+          scrollbar.textContent = "html[data-late-scrollbar] { overflow-y: scroll }"
+          document.head.append(scrollbar)
           ;(window as unknown as { attack: typeof state }).attack = state
           if (kind.startsWith("hidden")) {
             // Set up once, well before the loop: by then any restart of the
@@ -2786,9 +2793,25 @@ async function menuPosition(scale = 1) {
                 host.style.setProperty("left", `${r.left + dx}px`, "important")
                 host.style.setProperty("top", `${r.top + dy}px`, "important")
               }
+              // A root scrollbar comes with the displacement, through an
+              // attribute and a stylesheet rule: the viewport the paint
+              // observer was made for is a scrollbar wider than the one it
+              // measures in.
+              if (kind.startsWith("scrollbar")) document.documentElement.toggleAttribute("data-late-scrollbar", true)
               state.restyles++
-              if (restore) setTimeout(() => {
+              if (kind.startsWith("batch")) setTimeout(() => {
+                // Starve the event loop: Chromium then renders the next frame
+                // (where Deadbolt's own write has put the host back) before it
+                // delivers this one's intersection entries, so one delivery
+                // carries the displaced paint and then a good one.
+                const until = performance.now() + 130
+                while (performance.now() < until);
+                if (state.restyles < 3) requestAnimationFrame(() => requestAnimationFrame(loop))
+                else state.restored = true
+              }, 0)
+              else if (restore) setTimeout(() => {
                 host.style.cssText = css
+                document.documentElement.toggleAttribute("data-late-scrollbar", false)
                 if (state.restyles < 3) requestAnimationFrame(loop)
                 else state.restored = true
               }, 0)
@@ -2804,9 +2827,9 @@ async function menuPosition(scale = 1) {
         }, { kind, point, triggerPoint, dx, dy })
         if (hidden) await Bun.sleep(700)
         await page.mouse.move(triggerPoint.x, triggerPoint.y)
-        const restyled = await until(`${surface} ${kind}: three late restyles`, () => page.evaluate(() => (window as unknown as { attack: { restyles: number } }).attack.restyles >= 3), 350)
+        const restyled = await until(`${surface} ${kind}: three late restyles`, () => page.evaluate(() => (window as unknown as { attack: { restyles: number } }).attack.restyles >= 3), kind.startsWith("batch") ? 2000 : 350)
         if (restore) {
-          await until("the task restored the host", () => page.evaluate(() => (window as unknown as { attack: { restored: boolean } }).attack.restored), 350)
+          await until("the task restored the host", () => page.evaluate(() => (window as unknown as { attack: { restored: boolean } }).attack.restored), kind.startsWith("batch") ? 2000 : 350)
           // Chromium can route a click to the host instead of its OOPIF while
           // their hit-test maps disagree. Let that map settle, still well
           // inside the dwell: restoration must not erase the earlier moves.

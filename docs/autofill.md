@@ -285,15 +285,21 @@ not running without sending hello, which would start the agent again.
   viewport), or mix CSS pixels with device pixels at browser zoom.
 - **Painted placement.** An `IntersectionObserver` on the host, rooted at the
   document with its root margin shrunk to the written rect ± 2 px and a
-  threshold of 1, reports where the browser actually laid the host out, in
-  its own pass after every script in the frame. Whatever draws the host
-  elsewhere, including ways not listed here, leaves part of it outside: that
-  latches "displaced", bumps the geometry generation and restarts the wait,
-  and the pick verdict requires it clear. Coming back in place is a move
-  too, so a pick waits another 500 ms. The observer is remade whenever the
-  written rect or the viewport size changes, so following a scrolled or
-  reflowed field doesn't count; an entry whose root bounds don't match the
-  rect it was made for (a scrollbar came or went) is no evidence either way.
+  threshold of 1, fires when the browser lays the host out leaving that box
+  or coming back, in its own pass after every script in the frame. The root
+  margin is only the trigger: each entry is judged by the host's own
+  `boundingClientRect` in it against the written rect ± 2 px, so a viewport
+  the page changed after Deadbolt's frame (a root scrollbar toggled through
+  an attribute) still yields evidence. Every entry in a delivery counts, not
+  just the last: a page that starves the event loop makes Chromium render
+  the next frame (with the host back in place) before it delivers the
+  displaced one, so one delivery can hold both. Any entry drawn elsewhere
+  latches "displaced", bumps the geometry generation and restarts the wait;
+  the last entry says whether it's in place now, and the pick verdict
+  requires it. Coming back in place is a move too, so a pick waits another
+  500 ms. The observer is remade whenever the written rect or the viewport
+  size changes, so following a scrolled or reflowed field doesn't count;
+  records still pending on the old observer are judged first.
   The menu restarts its own wait for every geometry message except one
   where only "visible" came back: the content script already restarted it
   when the verdict changed, so recovery takes 500 ms, not twice that.
