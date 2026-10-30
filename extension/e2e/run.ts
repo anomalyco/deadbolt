@@ -845,7 +845,12 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
-      // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
+      // A sign-in modal dialog that closes on Esc, natively and from its own key handler.
+      case "/esc-dialog":
+        return html("Sign in to Acme", `<style>dialog{border:0;border-radius:14px;padding:24px;width:360px}</style><dialog id="d">${loginForm("/home")}</dialog><script>
+          const d = document.getElementById("d"); d.showModal(); window.pageEsc = 0
+          document.addEventListener("keydown", (e) => { if (e.key === "Escape") window.pageEsc++ })
+        </script>`)
       case "/menu-scale": {
         if (url.searchParams.get("static") === "dialog") return html("Sign in to Acme", `<style>html{zoom:1.25}dialog{zoom:0.6;border:0;padding:24px;width:360px}</style><dialog id="d">${loginForm("/home")}</dialog><script>document.getElementById("d").showModal()</script>`)
         const late = url.searchParams.get("late")
@@ -853,6 +858,7 @@ const server = Bun.serve({
         const style = url.searchParams.has("static") ? `<style>html{zoom:${url.searchParams.get("static") === "small" ? "0.8" : "1.25"}}</style>` : ""
         return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" ? "html" : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
       }
+      // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
         return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
       // An outlined field, as Google's sign-in has: its border thins on blur and it grows a pixel each way, so a press that took its focus would shift the menu.
@@ -2675,6 +2681,87 @@ async function viewportResize() {
   } catch (err) {
     check(false, `viewport resize threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "viewport resize")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Esc puts the menu away and nothing else: a sign-in dialog stays open, and the page's own handler doesn't see it. */
+async function escInDialog() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/esc-dialog`)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "esc in dialog"))
+    await page.keyboard.press("Escape")
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "Esc in the field puts the menu away")
+    await Bun.sleep(200)
+    const after = await page.evaluate(() => ({ open: (document.getElementById("d") as HTMLDialogElement).open, esc: (window as unknown as { pageEsc: number }).pageEsc }))
+    check(after.open && after.esc === 0, `and the sign-in dialog stays open, the page seeing no Esc (${JSON.stringify(after)})`)
+    // With the list focused (↓), Esc and Tab are the list's: the page never gets them.
+    for (const key of ["Escape", "Tab"]) {
+      await page.click("#email")
+      const again = await until("the menu opens again", async () => {
+        const f = extensionFrame(page, "menu.html")
+        return f && (await f.locator("button.row").count()) > 0 ? f : null
+      }, 8000)
+      if (!again) return void (await diagnose(run, page, `esc in dialog: ${key}`))
+      await settled(again)
+      await page.keyboard.press("ArrowDown")
+      await Bun.sleep(300)
+      await page.keyboard.press(key)
+      check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), `${key} in the focused list puts it away`)
+      const state = await page.evaluate(() => ({ open: (document.getElementById("d") as HTMLDialogElement).open, esc: (window as unknown as { pageEsc: number }).pageEsc, focus: document.activeElement?.id }))
+      check(state.open && state.esc === 0 && state.focus === "email", `and the dialog stays open with focus back in the field (${JSON.stringify(state)})`)
+    }
+    await page.keyboard.press("Escape")
+    check(!(await page.evaluate(() => (document.getElementById("d") as HTMLDialogElement).open)), "with no menu up, Esc closes the dialog as before")
+  } catch (err) {
+    check(false, `esc in dialog threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "esc in dialog")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+/**
+ * The menu for a field in a frame below follows the frame element as the
+ * page moves it (a reflow, not only a scroll), and goes when the field moves
+ * inside its frame (the frame's own layout changed, as on a resize), which
+ * the top page can't see.
+ */
+async function frameMoves() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`http://appstoreconnect.apple.test:${server.port}/apple/login`)
+    const inner = await until("the sign-in frame loads", () => page.frames().find((f) => f.url().includes("/appleauth/auth/signin")) ?? null)
+    if (!inner) return void (await diagnose(run, page, "frame moves"))
+    await until("the frame's form is found", async () => (await run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)).some((s) => /^db:page@[1-9]\d*:\/appleauth\/auth\/signin$/.test(s)), 15_000)
+    await inner.click("#account_name_text_field")
+    const menu = await until("the menu opens for the frame's field", async () => {
+      const f = extensionFrame(page, "menu.html")
+      return f && (await f.locator("button.row").count()) > 0 ? f : null
+    }, 15_000)
+    if (!menu) return void (await diagnose(run, page, "frame moves"))
+    const gap = async () => {
+      const [m, f] = await Promise.all([menu.frameElement().then((e) => e.boundingBox()), inner.locator("#account_name_text_field").boundingBox()])
+      return m && f ? { dx: Math.round(m.x - f.x), dy: Math.round(m.y - (f.y + f.height)) } : null
+    }
+    const before = await gap()
+    // The page pushes the frame down and right, as a banner or a reflow above it would.
+    await page.evaluate(() => Object.assign(document.getElementById("aid-auth-widget-iFrame")!.style, { marginTop: "60px", marginLeft: "40px" }))
+    await Bun.sleep(300)
+    const after = await gap()
+    check(!!before && !!after && after.dx === before.dx && after.dy === before.dy, `the menu follows the frame the page moved (${JSON.stringify(before)} then ${JSON.stringify(after)})`)
+    // Wider, the frame centres its form: the field moves inside it.
+    await page.evaluate(() => (document.getElementById("aid-auth-widget-iFrame")!.style.width = "760px"))
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "and goes when the field moves inside its frame")
+  } catch (err) {
+    check(false, `frame moves threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "frame moves")
   } finally {
     await close(run)
   }
@@ -4602,6 +4689,7 @@ const once: Record<string, () => Promise<void>> = {
   signInSessions,
   signUpStep,
   frameLogins,
+  frameMoves,
   conditionalHeld,
   rateLimited,
   securityPage,
@@ -4611,6 +4699,7 @@ const once: Record<string, () => Promise<void>> = {
   topLayer,
   viewportResize,
   menuReveal,
+  escInDialog,
   occlusionSweep,
   midFill,
   coveredPill,
@@ -4631,11 +4720,12 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // rough run times in seconds (per scheme; unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, signUpStep: 14, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  detection: 108, occlusionSweep: 55, signInSessions: 52, signUpStep: 14, frameLogins: 25, frameMoves: 6, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
   menuReveal: 4, menuScale: 65,
+  escInDialog: 4,
   ...gauntletRun.cost,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
