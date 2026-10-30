@@ -9,7 +9,7 @@
 
 import { IDENTIFIER_ROLES, phoneLike, type Box, type FieldRole, type FillValues } from "../messages"
 import { inPlace, type Field, type FormControl } from "./detect"
-import { eventTarget, shadowRootOf } from "./shadow"
+import { eventTarget, isOwnHost, openRoots, shadowRootOf } from "./shadow"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -107,6 +107,83 @@ function filterOpacity(filter: string): number {
   return factor
 }
 
+/** The largest blur a field may be drawn with and still count as readable, in CSS pixels. */
+const MAX_BLUR_PX = 1
+
+/** A filter's functions, each with its argument text: `drop-shadow(rgb(0 0 0) 1px 1px)` is one. Null for text it can't split. */
+export function filterFunctions(filter: string): Array<{ name: string; arg: string }> | null {
+  const out: Array<{ name: string; arg: string }> = []
+  let i = 0
+  while (i < filter.length) {
+    if (/\s/.test(filter[i])) {
+      i++
+      continue
+    }
+    const m = /^([a-z-]+)\(/i.exec(filter.slice(i))
+    if (!m) return null
+    let depth = 0
+    let j = i + m[1].length
+    for (; j < filter.length; j++) {
+      if (filter[j] === "(") depth++
+      else if (filter[j] === ")" && --depth === 0) break
+    }
+    if (depth !== 0 || j >= filter.length) return null
+    out.push({ name: m[1].toLowerCase(), arg: filter.slice(i + m[1].length + 1, j).trim() })
+    i = j + 1
+  }
+  return out
+}
+
+/** A filter amount: a number or a percentage, as a factor; NaN for anything else. */
+const amount = (arg: string, empty = 1) => {
+  if (!arg) return empty
+  const m = /^([\d.]+)(%?)$/.exec(arg)
+  return m ? Number(m[1]) / (m[2] ? 100 : 1) : NaN
+}
+
+/**
+ * Whether a filter can make what's under it unreadable. Allowed, as filters
+ * that keep a page readable (Dark Reader puts invert() and hue-rotate() on
+ * <html>): opacity() (counted with opacity), a blur of at most MAX_BLUR_PX,
+ * drop-shadow(), hue-rotate(), saturate(), sepia(), grayscale(), invert()
+ * other than near half (which turns everything one grey), brightness() from
+ * 0.2 to 5 and contrast() from 0.2 to 5. Anything else, an SVG url() filter
+ * or a function it doesn't know counts; fails closed.
+ */
+export function obscuringFilter(filter: string): boolean {
+  if (!filter || filter === "none") return false
+  const fns = filterFunctions(filter)
+  if (!fns) return true
+  return !fns.every(({ name, arg }) => {
+    const n = amount(arg)
+    switch (name) {
+      case "opacity":
+      case "drop-shadow":
+      case "hue-rotate":
+      case "saturate":
+      case "sepia":
+      case "grayscale":
+        return true
+      case "blur": {
+        const m = /^([\d.]+)px$/.exec(arg || "0px")
+        return !!m && Number(m[1]) <= MAX_BLUR_PX
+      }
+      case "invert":
+        return n <= 0.35 || n >= 0.65
+      case "brightness":
+      case "contrast":
+        return n >= 0.2 && n <= 5
+      default:
+        return false
+    }
+  })
+}
+
+/** Whether a box with this style is painted through a mask: any mask image or mask border, which can make it transparent. */
+function masked(style: CSSStyleDeclaration): boolean {
+  return ["mask-image", "-webkit-mask-image", "mask-border-source", "-webkit-mask-box-image-source"].some((p) => (style.getPropertyValue(p) || "none") !== "none")
+}
+
 /** Whether a box with this style is drawn transformed: its client rect is then only a bounding box. */
 function transformed(style: CSSStyleDeclaration): boolean {
   return ["transform", "translate", "rotate", "scale", "offset-path"].some((p) => (style.getPropertyValue(p) || "none") !== "none")
@@ -149,10 +226,10 @@ export function insetKeepsField(node: Element, clipPath: string, field: Element,
 
 /**
  * Style anywhere up the rendered tree that hides the element: opacity
- * (multiplied, filters too), display, content-visibility, or a clip (a
- * clip-path counts unless it is an inset that leaves the whole field
- * showing, see insetKeepsField). No depth limit: every shadow host and slot
- * counts.
+ * (multiplied, filters too), display, content-visibility, a mask, a filter
+ * that can obscure it (see obscuringFilter), a blend mode, or a clip (a clip-path counts
+ * unless it is an inset that leaves the whole field showing, see
+ * insetKeepsField). No depth limit: every shadow host and slot counts.
  */
 export function hiddenByStyle(el: Element): boolean {
   const own = getComputedStyle(el)
@@ -164,6 +241,7 @@ export function hiddenByStyle(el: Element): boolean {
     if (style.display === "none" || style.getPropertyValue("content-visibility") === "hidden") return true
     opacity *= cssNumber(style.opacity) * filterOpacity(style.getPropertyValue("filter"))
     if (opacity < 0.1) return true
+    if (masked(style) || obscuringFilter(style.getPropertyValue("filter")) || (style.getPropertyValue("mix-blend-mode") || "normal") !== "normal") return true
     bent ||= transformed(style)
     const clipPath = style.getPropertyValue("clip-path")
     const clip = style.getPropertyValue("clip")
@@ -253,16 +331,419 @@ export function visibleBox(el: Element): Box | null {
 }
 
 /**
- * What the user would hit in the middle of the visible part is the field.
- * `ours`, Deadbolt's own menu, doesn't count as covering it.
+ * What the user would hit in the middle of the visible part is the field,
+ * and nothing that lets clicks through paints over it there (see
+ * paintedOver, unless `paint` is false). `ours`, Deadbolt's own menu,
+ * doesn't count as covering it.
  */
-export function onTop(el: FormControl, box: Box, ours?: Element | null): boolean {
+export function onTop(el: FormControl, box: Box, ours?: Element | null, paint = true): boolean {
   const root = el.getRootNode() as Document | ShadowRoot
   const x = (box.left + box.right) / 2
   const y = (box.top + box.bottom) / 2
   const hit = ours ? root.elementsFromPoint?.(x, y).find((h) => h !== ours) : root.elementFromPoint?.(x, y)
   if (!hit) return false
-  return hit === el || el.contains(hit) || (hit.closest("label") as HTMLLabelElement | null)?.control === el
+  if (hit !== el && !el.contains(hit) && (hit.closest("label") as HTMLLabelElement | null)?.control !== el) return false
+  return !paint || !paintedOver(el, root, x, y, ours)
+}
+
+/** Shadow roots the paint check walks; a page with more counts as covering. */
+const PROBE_ROOTS = 5000
+
+/**
+ * Every element takes part in hit tests, whatever the page's styles say, for
+ * the length of one synchronous check. In a cascade layer declared before
+ * any of the page's, its !important beats every other rule of the page, in
+ * a layer or not (only inline !important beats it: see paintedOver).
+ */
+const PROBE_CSS = `@layer deadbolt-probe {
+  *, *::before, *::after { pointer-events: auto !important; interactivity: auto !important }
+  ::backdrop { pointer-events: auto !important }
+  :host { pointer-events: auto !important; interactivity: auto !important }
+}`
+let probeSheet: CSSStyleSheet | null = null
+
+/** The alpha of a computed colour; 1 (fails closed) for one it can't read. */
+function alpha(color: string): number {
+  if (!color || color === "transparent") return 0
+  const legacy = /^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/.exec(color)
+  if (legacy) return Number(legacy[1])
+  const slash = /\/\s*([\d.]+)(%?)\s*\)$/.exec(color)
+  if (slash) return Number(slash[1]) / (slash[2] ? 100 : 1)
+  return 1
+}
+
+const GRAPHIC = new Set(["IMG", "VIDEO", "CANVAS", "IFRAME", "EMBED", "OBJECT", "INPUT", "TEXTAREA", "SELECT", "BUTTON", "METER", "PROGRESS"])
+
+const within = (r: Box, x: number, y: number, by = 0) => x >= r.left - by && x <= r.right + by && y >= r.top - by && y <= r.bottom + by
+
+/**
+ * Whether a box with this style paints over what's under it at the point
+ * (x, y) inside its border box: a background colour that isn't (nearly)
+ * transparent, a background image, a backdrop filter, an inset shadow, or a
+ * border the point is on.
+ */
+function opaqueStyle(style: CSSStyleDeclaration, at?: { r: DOMRect; x: number; y: number }): boolean {
+  if (alpha(style.backgroundColor) >= 0.1 || (style.backgroundImage || "none") !== "none") return true
+  if ((style.getPropertyValue("backdrop-filter") || "none") !== "none" || /\binset\b/.test(style.boxShadow || "")) return true
+  if ((style.getPropertyValue("border-image-source") || "none") !== "none") return true
+  const sides = (["top", "right", "bottom", "left"] as const).map((s) => ({
+    width: parseFloat(style.getPropertyValue(`border-${s}-width`)) || 0,
+    shown: !/none|hidden/.test(style.getPropertyValue(`border-${s}-style`)) && alpha(style.getPropertyValue(`border-${s}-color`)) >= 0.1,
+  }))
+  if (!sides.some((s) => s.width > 0 && s.shown)) return false
+  // Without the point (a pseudo-element's box is unknown), any border counts.
+  if (!at || transformed(style)) return true
+  const { r, x, y } = at
+  const [t, ri, b, l] = sides.map((s) => (s.shown ? s.width : 0))
+  return y < r.top + t || x > r.right - ri || y > r.bottom - b || x < r.left + l
+}
+
+/** Whether text in this style is drawn: its fill, a stroke or a text-shadow isn't (nearly) transparent. */
+function inkShown(style: CSSStyleDeclaration): boolean {
+  const fill = style.getPropertyValue("-webkit-text-fill-color") || style.color
+  if (alpha(fill) >= 0.1 || ((parseFloat(style.getPropertyValue("-webkit-text-stroke-width")) || 0) > 0 && alpha(style.getPropertyValue("-webkit-text-stroke-color")) >= 0.1)) return true
+  return shadows(style.getPropertyValue("text-shadow")).some((sh) => sh.alpha >= 0.1)
+}
+
+/** Whether the element's own text (its text node children) has a glyph run over (x, y), drawn in a colour that shows. */
+function textAt(h: Element, x: number, y: number, style: CSSStyleDeclaration): boolean {
+  if (!inkShown(style)) return false
+  const range = document.createRange()
+  for (const node of Array.from(h.childNodes)) {
+    if (node.nodeType !== Node.TEXT_NODE || !node.textContent?.trim()) continue
+    range.selectNodeContents(node)
+    for (const r of Array.from(range.getClientRects())) if (within(r, x, y)) return true
+  }
+  return false
+}
+
+/** Whether the element's computed opacity, up the rendered tree, leaves it (nearly) invisible, or it's hidden. */
+function faded(h: Element, own: CSSStyleDeclaration): boolean {
+  if (own.visibility === "hidden" || own.visibility === "collapse") return true
+  let opacity = 1
+  for (let node: Element | null | undefined = h; node; node = renderedParent(node)) {
+    const style = node === h ? own : getComputedStyle(node)
+    opacity *= cssNumber(style.opacity) * filterOpacity(style.getPropertyValue("filter"))
+    if (opacity < 0.1) return true
+  }
+  return false
+}
+
+/**
+ * Whether the element, hit at (x, y), draws anything there: it isn't
+ * (nearly) faded out, and it's a graphic or form control, an SVG shape, its
+ * own text runs over the point, or it or its ::before or ::after has opaque
+ * style (see opaqueStyle).
+ */
+function paints(h: Element, x: number, y: number): boolean {
+  const own = getComputedStyle(h)
+  if (faded(h, own)) return false
+  if (GRAPHIC.has(h.tagName) || h instanceof SVGElement) return true
+  return opaqueStyle(own, { r: h.getBoundingClientRect(), x, y }) || textAt(h, x, y, own) || pseudoPaints(h)
+}
+
+/** Whether a ::before or ::after style draws anything: an image, text that shows, or opaque style. Its box is unknown, so anywhere counts. */
+function pseudoDraws(s: CSSStyleDeclaration): boolean {
+  const content = s.getPropertyValue("content")
+  if (!content || content === "none" || content === "normal" || s.display === "none") return false
+  return /url\(|image\(|gradient\(/.test(content) || (/"[^"]+"|counter|attr\(/.test(content) && inkShown(s)) || opaqueStyle(s)
+}
+
+/** Whether the element's ::before or ::after draws anything (see pseudoDraws). */
+function pseudoPaints(h: Element): boolean {
+  return ["::before", "::after"].some((p) => pseudoDraws(getComputedStyle(h, p)))
+}
+
+/** A computed shadow list (box-shadow, text-shadow) split into shadows: its colour's alpha, its lengths in px, and whether it's inset. */
+function shadows(list: string): Array<{ alpha: number; lengths: number[]; inset: boolean }> {
+  if (!list || list === "none") return []
+  const parts: string[] = []
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] === "(") depth++
+    else if (list[i] === ")") depth--
+    else if (list[i] === "," && depth === 0) {
+      parts.push(list.slice(start, i))
+      start = i + 1
+    }
+  }
+  parts.push(list.slice(start))
+  return parts.map((p) => {
+    const color = /[a-z-]+\([^()]*\)|#[0-9a-f]+|\btransparent\b/i.exec(p)?.[0] ?? ""
+    const rest = color ? p.replace(color, " ") : p
+    return { alpha: color ? alpha(color) : 1, lengths: Array.from(rest.matchAll(/(-?[\d.]+)px/g), (m) => Number(m[1])), inset: /\binset\b/.test(rest) }
+  })
+}
+
+/**
+ * Whether paint the browser doesn't hit-test, drawn outside the element's
+ * box, reaches (x, y): an outline (drawn over the element's own content,
+ * so the field's own and an ancestor's count too), or, for anything but the field and its ancestors
+ * (whose shadows are drawn under it), an SVG url() filter (anywhere: it
+ * fails closed), a -webkit-box-reflect mirror, an outer box-shadow's solid
+ * part, a text-shadow, a drop-shadow() filter or a border image outset. Anything
+ * not (nearly) transparent counts; where shadows of text or content fall
+ * is taken as anywhere within their reach.
+ */
+function overflowPaintAt(style: CSSStyleDeclaration, r: DOMRect, x: number, y: number, ancestor: boolean): boolean {
+  const outline = style.getPropertyValue("outline-style")
+  if (outline && !/none|hidden/.test(outline) && alpha(style.getPropertyValue("outline-color")) >= 0.1) {
+    const w = parseFloat(style.getPropertyValue("outline-width")) || 0
+    const o = parseFloat(style.getPropertyValue("outline-offset")) || 0
+    if (w > 0 && within(r, x, y, o + w) && !within(r, x, y, o)) return true
+  }
+  if (ancestor) return false
+  // An SVG filter can draw anything anywhere (feFlood, feOffset): fails closed.
+  if (/url\(/.test(style.getPropertyValue("filter")) && r.width > 0 && r.height > 0) return true
+  const reflect = reflection(style.getPropertyValue("-webkit-box-reflect"), r)
+  if (reflect && within(reflect, x, y)) return true
+  if (within(r, x, y)) return false
+  for (const s of shadows(style.boxShadow)) {
+    if (s.inset || s.alpha < 0.1) continue
+    const [ox = 0, oy = 0, , spread = 0] = s.lengths
+    if (within({ left: r.left + ox, right: r.right + ox, top: r.top + oy, bottom: r.bottom + oy }, x, y, spread)) return true
+  }
+  const reach: Array<{ alpha: number; lengths: number[] }> = shadows(style.getPropertyValue("text-shadow"))
+  const filter = style.getPropertyValue("filter")
+  if (filter && filter !== "none") for (const f of filterFunctions(filter) ?? []) if (f.name === "drop-shadow") reach.push(...shadows(f.arg))
+  for (const s of reach) {
+    if (s.alpha < 0.1) continue
+    const [ox = 0, oy = 0, blur = 0] = s.lengths
+    if (within({ left: r.left + ox, right: r.right + ox, top: r.top + oy, bottom: r.bottom + oy }, x, y, blur)) return true
+  }
+  if ((style.getPropertyValue("border-image-source") || "none") !== "none") {
+    const widths = ["top", "right", "bottom", "left"].map((s) => parseFloat(style.getPropertyValue(`border-${s}-width`)) || 0)
+    const outset = Math.max(0, ...(style.getPropertyValue("border-image-outset") || "0").split(/\s+/).map((v) => (/px$/.test(v) ? parseFloat(v) : (parseFloat(v) || 0) * Math.max(...widths))))
+    if (outset > 0 && within(r, x, y, outset)) return true
+  }
+  return false
+}
+
+/**
+ * Where a -webkit-box-reflect draws the element's mirror image: its box
+ * flipped across the side it names, `offset` away. A value it can't read
+ * reaches everywhere (fails closed); none, nowhere.
+ */
+function reflection(value: string, r: DOMRect): Box | null {
+  if (!value || value === "none") return null
+  const m = /^(above|below|left|right)\s*(-?[\d.]+px)?/.exec(value.trim())
+  if (!m) return { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity }
+  const o = parseFloat(m[2] ?? "0") || 0
+  const w = r.right - r.left
+  const h = r.bottom - r.top
+  if (m[1] === "below") return { left: r.left, right: r.right, top: r.bottom + o, bottom: r.bottom + o + h }
+  if (m[1] === "above") return { left: r.left, right: r.right, top: r.top - o - h, bottom: r.top - o }
+  if (m[1] === "right") return { top: r.top, bottom: r.bottom, left: r.right + o, right: r.right + o + w }
+  return { top: r.top, bottom: r.bottom, left: r.left - o - w, right: r.left - o }
+}
+
+/** Whether a box with this style may paint outside itself (see overflowPaintAt): cheap, before its box is measured. */
+function overflows(style: CSSStyleDeclaration): boolean {
+  const outline = style.getPropertyValue("outline-style")
+  return (
+    (!!outline && outline !== "none") ||
+    (style.boxShadow || "none") !== "none" ||
+    (style.getPropertyValue("text-shadow") || "none") !== "none" ||
+    /drop-shadow|url\(/.test(style.getPropertyValue("filter")) ||
+    (style.getPropertyValue("-webkit-box-reflect") || "none") !== "none" ||
+    (style.getPropertyValue("border-image-source") || "none") !== "none"
+  )
+}
+
+/** Whether `h` is `el` or an ancestor of it, across shadow roots. */
+function holds(h: Node, el: Node): boolean {
+  for (let n: Node | null = el; n; n = composedParent(n)) if (n === h) return true
+  return false
+}
+
+const composedParent = (n: Node): Node | null => n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)
+
+/** Whether anything from the field up to (not including) its ancestor `h` has a negative z-index, which puts it under `h`'s own paint. */
+function behind(el: Element, h: Element): boolean {
+  for (let n: Node | null = el; n && n !== h; n = composedParent(n)) if (n instanceof Element && (parseFloat(getComputedStyle(n).zIndex) || 0) < 0) return true
+  return false
+}
+
+/** Set once a page's CSP refused the probe's style element: not tried again, so the page's violation reports aren't spammed. */
+let probeRefused = false
+
+/** The first style sheet of a root that applies to it and whose rules this script may change; null if that first sheet isn't one. */
+function firstSheet(r: Document | ShadowRoot): CSSStyleSheet | null {
+  const first = r.styleSheets[0]
+  if (!first || first.disabled) return null
+  const media = first.media?.mediaText
+  if (media && !matchMedia(media).matches) return null
+  try {
+    void first.cssRules
+    return first
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Puts the probe's rules in `r` in a cascade layer declared before any of
+ * the page's, recording how to undo it. A root with no style sheets of its
+ * own (only adopted ones, a web component's) gets `sheet` adopted first. One
+ * whose first sheet this script may change gets the layer declared at its
+ * top (`@layer deadbolt-probe;`) and `sheet` adopted last. Either way no
+ * node is added, so nothing a page's selectors match (`:first-child`,
+ * `* + *`, `:empty`) changes. A shadow root without styles of its own
+ * needs nothing: the document's rule reaches its host and is inherited
+ * (inline styles are lifted by the caller). Failing those, the document, or
+ * a root whose first sheet is another origin's, gets a style element first
+ * (the document's in <html>, outside the page's content). False when the
+ * probe's layer may come after the page's: the CSP refused the element.
+ */
+function probeRoot(r: Document | ShadowRoot, sheet: CSSStyleSheet, undo: Array<() => void>): boolean {
+  const adopt = (first: boolean) => {
+    r.adoptedStyleSheets = first ? [sheet, ...r.adoptedStyleSheets] : [...r.adoptedStyleSheets, sheet]
+    undo.push(() => (r.adoptedStyleSheets = r.adoptedStyleSheets.filter((s) => s !== sheet)))
+  }
+  if (r.styleSheets.length === 0) {
+    if (r !== document && r.adoptedStyleSheets.length === 0) return true
+    adopt(true)
+    return true
+  }
+  const first = firstSheet(r)
+  if (first) {
+    try {
+      first.insertRule("@layer deadbolt-probe;", 0)
+      const rule = first.cssRules[0]
+      undo.push(() => {
+        if (first.cssRules[0] === rule) first.deleteRule(0)
+      })
+      adopt(false)
+      return true
+    } catch {}
+  }
+  if (!probeRefused) {
+    const probe = document.createElement("style")
+    probe.textContent = PROBE_CSS
+    ;(r === document ? document.documentElement : r).prepend(probe)
+    undo.push(() => probe.remove())
+    if (probe.sheet) return true
+    probeRefused = true
+  }
+  adopt(false)
+  return false
+}
+
+/**
+ * Whether something the page lets clicks through (`pointer-events: none`,
+ * `inert`) paints over the field at (x, y), or paint the browser never
+ * hit-tests does (see overflowPaintAt). Hit tests skip such elements, so
+ * for one synchronous check every element of the document and its shadow
+ * roots is made to take part: PROBE_CSS ahead of the page's layers in
+ * each root (`:host` too, see probeRoot), `inert` lifted, and an inline `!important` pointer-events on each element
+ * over the point that still has none (one with its own inline !important).
+ * All of it is put back before the check returns, each part even if
+ * another fails. Each element the browser then stacks above the field must
+ * draw nothing there (see paints); inside a shadow host above it, so must
+ * each element of its root. An ancestor listed above the field draws over
+ * it through a pseudo-element, or, if the field sits under it by a negative
+ * z-index, through its own box too. Deadbolt's own surfaces don't count.
+ * Fails closed: no hit testing, more shadow roots than PROBE_ROOTS, an
+ * element over the point that still can't be hit and draws, or a field the
+ * test doesn't find all mean covered.
+ */
+function paintedOver(el: Element, root: Document | ShadowRoot, x: number, y: number, ours: Element | null | undefined): boolean {
+  if (typeof root.elementsFromPoint !== "function") return true
+  const roots = openRoots(document, PROBE_ROOTS)
+  if (roots.length >= PROBE_ROOTS) return true
+  const undo: Array<() => void> = []
+  const lifted = new Set<Element>()
+  const lift = (e: Element) => {
+    const style = (e as HTMLElement).style as CSSStyleDeclaration | undefined
+    if (lifted.has(e) || !style) return
+    lifted.add(e)
+    const before = e.getAttribute("style")
+    style.setProperty("pointer-events", "auto", "important")
+    style.setProperty("interactivity", "auto", "important")
+    undo.push(() => (before === null ? e.removeAttribute("style") : e.setAttribute("style", before)))
+  }
+  const skip = (h: Element) => h === ours || (!!ours && ours.contains(h)) || isOwnHost(h)
+  const stuck = (s: CSSStyleDeclaration) => s.pointerEvents === "none" || s.getPropertyValue("interactivity") === "inert"
+  try {
+    // The probe's rules (PROBE_CSS, adopted) in a cascade layer declared
+    // before any of the page's, without adding a node anywhere a page's
+    // selectors could see it (see probeRoot). Where that can't be done and
+    // a style element can't be added either, the probe's layer comes after
+    // the page's, whose own layered !important beats it: then every
+    // pseudo-element is looked at too.
+    if (typeof CSSStyleSheet === "undefined") return true
+    if (!probeSheet) {
+      probeSheet = new CSSStyleSheet()
+      probeSheet.replaceSync(PROBE_CSS)
+    }
+    let thorough = false
+    for (const r of roots) {
+      if (!probeRoot(r, probeSheet, undo)) thorough = true
+      for (const e of Array.from(r.querySelectorAll("[inert]"))) {
+        const inert = e.getAttribute("inert")!
+        e.removeAttribute("inert")
+        undo.push(() => e.setAttribute("inert", inert))
+      }
+    }
+    // One pass over every element: lift what's over the point and still
+    // can't be hit (an inline !important, which beats any layer), and look
+    // for paint that isn't hit-tested reaching it.
+    const over: Element[] = []
+    for (const r of roots) {
+      for (const e of Array.from(r.querySelectorAll("*"))) {
+        if (skip(e) || (e !== el && el.contains(e))) continue
+        const style = getComputedStyle(e)
+        const isStuck = stuck(style)
+        if (!isStuck && !overflows(style) && !thorough) continue
+        const rect = e.getBoundingClientRect()
+        if (isStuck && within(rect, x, y)) {
+          over.push(e)
+          lift(e)
+        }
+        // The field's own outline counts as one over it; its shadows are outside it.
+        const ancestor = holds(e, el)
+        if (overflowPaintAt(style, rect, x, y, ancestor) && !faded(e, style)) return true
+        if (thorough && ["::before", "::after"].some((p) => {
+          const s = getComputedStyle(e, p)
+          return stuck(s) && pseudoDraws(s)
+        }) && !faded(e, style)) return true
+      }
+    }
+    // Still none after all that (a transition holding it): covered if it draws.
+    for (const e of over) if (e !== el && !holds(e, el) && stuck(getComputedStyle(e)) && paints(e, x, y)) return true
+    // `stop` is the field, in the list of what's at the point in its own
+    // root; null for the list inside a shadow host above it, of which only
+    // that root's elements count (the rest are in the outer list).
+    const above = (list: Element[], stop: Element | null, scope: Document | ShadowRoot): boolean => {
+      for (const h of list) {
+        if (h === stop) return false
+        if ((!stop && h.getRootNode() !== scope) || skip(h) || el.contains(h)) continue
+        if (holds(h, el)) {
+          if (pseudoPaints(h)) return true
+          if (behind(el, h)) {
+            const s = getComputedStyle(h)
+            if (!faded(h, s) && (opaqueStyle(s, { r: h.getBoundingClientRect(), x, y }) || textAt(h, x, y, s))) return true
+          }
+          continue
+        }
+        const inner = shadowRootOf(h)
+        if (inner && above(inner.elementsFromPoint(x, y), null, inner)) return true
+        if (paints(h, x, y)) return true
+      }
+      // The field itself never came up: fail closed.
+      return stop !== null
+    }
+    return above(root.elementsFromPoint(x, y), el, root)
+  } catch {
+    return true
+  } finally {
+    for (const f of undo.reverse()) {
+      try {
+        f()
+      } catch {}
+    }
+  }
 }
 
 /**
@@ -271,15 +752,16 @@ export function onTop(el: FormControl, box: Box, ours?: Element | null): boolean
  * right before each value is written. When fields are approved for a fill,
  * the menu the user is picking from is still open, perhaps over the next
  * field: `ours` names it, so it isn't taken for a cover. It's gone by the
- * time anything is written.
+ * time anything is written. `paint: false` leaves out the paint check
+ * (see paintedOver), for checks that aren't about writing a value.
  */
-export function fillable(el: FormControl, ours?: Element | null): boolean {
+export function fillable(el: FormControl, ours?: Element | null, paint = true): boolean {
   if (!el.isConnected || el.disabled || ("readOnly" in el && el.readOnly)) return false
   const r = el.getBoundingClientRect()
   if (r.width < MIN_SIDE || r.height < MIN_SIDE || hiddenByStyle(el)) return false
   el.scrollIntoView?.({ block: "nearest", inline: "nearest" })
   const box = visibleBox(el)
-  return !!box && onTop(el, box, ours)
+  return !!box && onTop(el, box, ours, paint)
 }
 
 /**

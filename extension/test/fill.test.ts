@@ -209,8 +209,9 @@ describe("fillFields", () => {
     const fill = (u: HTMLInputElement, p: HTMLInputElement, check: (el: HTMLInputElement) => boolean) => fillFields([field(u, "username"), field(p, "password")], { username: "kit", password: "secret" }, check)
     const cover = document.createElement("section")
     let hit: () => Element | null = () => null
-    const before = document.elementFromPoint
+    const before = { one: document.elementFromPoint, all: document.elementsFromPoint }
     document.elementFromPoint = (() => hit()) as typeof document.elementFromPoint
+    document.elementsFromPoint = (() => [hit()].filter((h) => !!h)) as typeof document.elementsFromPoint
     try {
       // Shown and on top: it takes the password, through the same checks.
       let { u, p, next } = setup()
@@ -236,7 +237,7 @@ describe("fillFields", () => {
       expect((await fill(u, p, () => true)).filled).toEqual(["username"])
       expect(next.el?.value).toBe("")
     } finally {
-      document.elementFromPoint = before
+      Object.assign(document, { elementFromPoint: before.one, elementsFromPoint: before.all })
     }
   })
 

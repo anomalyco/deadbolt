@@ -18,6 +18,11 @@ export function markOwnHost(host: Element) {
   own.add(host)
 }
 
+/** Whether the element hosts one of Deadbolt's own closed roots. */
+export function isOwnHost(el: Element): boolean {
+  return own.has(el)
+}
+
 /** The element's shadow root, open or closed, unless it's Deadbolt's own. */
 export function shadowRootOf(el: Element): ShadowRoot | null {
   if (own.has(el)) return null
@@ -33,16 +38,16 @@ export function shadowRootOf(el: Element): ShadowRoot | null {
 /**
  * The document plus every shadow root under it, open and closed (despite the
  * name), outermost first. Closed roots include those other extensions put in
- * the page; at most MAX_ROOTS are walked, whoever made them.
+ * the page; at most `max` (MAX_ROOTS) are walked, whoever made them.
  */
-export function openRoots(start: Document | ShadowRoot = document): Array<Document | ShadowRoot> {
+export function openRoots(start: Document | ShadowRoot = document, max = MAX_ROOTS): Array<Document | ShadowRoot> {
   const roots: Array<Document | ShadowRoot> = [start]
-  for (let i = 0; i < roots.length && roots.length < MAX_ROOTS; i++) {
+  for (let i = 0; i < roots.length && roots.length < max; i++) {
     const walker = document.createTreeWalker(roots[i], NodeFilter.SHOW_ELEMENT)
     for (let node = walker.nextNode() as Element | null; node; node = walker.nextNode() as Element | null) {
       const root = shadowRootOf(node)
       if (root) roots.push(root)
-      if (roots.length >= MAX_ROOTS) break
+      if (roots.length >= max) break
     }
   }
   return roots
