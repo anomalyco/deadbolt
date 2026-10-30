@@ -555,6 +555,11 @@ impl App {
     // The generator
 
     /// Asks the agent for a password at the form's length and symbols.
+    pub(crate) fn next_generation_seq(&mut self) -> u64 {
+        self.edit.generations += 1;
+        self.edit.generations
+    }
+
     pub fn generate(&mut self) {
         let Some(form) = self
             .edit

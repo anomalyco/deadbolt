@@ -31,6 +31,7 @@ pub struct Paths {
     pub socket: PathBuf,
     pub lock: PathBuf,
     pub log: PathBuf,
+    pub ssh_link: Option<PathBuf>,
 }
 
 impl Paths {
@@ -42,6 +43,27 @@ impl Paths {
     /// one JSON-lines file per session, beside the agent's log.
     pub fn learn_dir(&self) -> PathBuf {
         self.log.with_file_name("learn")
+    }
+
+    /// Where the SSH agent listens inside the agent's `0700` runtime directory.
+    pub fn ssh_socket(&self) -> PathBuf {
+        self.socket.with_file_name("ssh.sock")
+    }
+
+    /// Optional local SSH key selection rules (`$XDG_CONFIG_HOME/deadbolt/ssh.toml`).
+    pub fn ssh_config(&self) -> PathBuf {
+        self.config.with_file_name("ssh.toml")
+    }
+
+    /// Stable `~/.deadbolt/ssh.sock` symlink for the default store, omitted
+    /// whenever `DEADBOLT_HOME` or a test runtime socket is in use.
+    pub fn ssh_link(&self) -> Option<PathBuf> {
+        self.ssh_link.clone()
+    }
+
+    /// The path SSH clients (`IdentityAgent`, `SSH_AUTH_SOCK`) should connect to.
+    pub fn ssh_client_socket(&self) -> PathBuf {
+        self.ssh_link().unwrap_or_else(|| self.ssh_socket())
     }
 
     /// The paths for an environment given by `vars` instead of the process's
@@ -73,6 +95,8 @@ impl Paths {
             None => env::temp_dir().join(format!("deadbolt{suffix}-{uid}")),
         };
         let state = xdg("XDG_STATE_HOME", &[".local", "state"]).join(format!("deadbolt{suffix}"));
+        let ssh_link = (var("DEADBOLT_HOME").is_none() && var("HOME").is_some())
+            .then(|| home.join(".deadbolt").join("ssh.sock"));
         Self {
             data,
             config: xdg("XDG_CONFIG_HOME", &[".config"])
@@ -81,6 +105,7 @@ impl Paths {
             socket: runtime.join("agent.sock"),
             lock: runtime.join("agent.lock"),
             log: state.join("agent.log"),
+            ssh_link,
         }
     }
 }

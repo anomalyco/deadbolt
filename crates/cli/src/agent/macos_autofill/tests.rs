@@ -190,6 +190,7 @@ async fn autofill_extension_is_confined_to_its_narrow_command_set() {
             vault: None,
             query: vec![gh.item.clone()],
             otp: false,
+            ssh_private: false,
             files: Vec::new(),
             deleted: false,
         },

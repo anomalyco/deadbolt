@@ -1449,6 +1449,7 @@ mod tests {
             socket: dir.join("s"),
             lock: dir.join("lock"),
             log: dir.join("log"),
+            ssh_link: None,
         }
     }
 

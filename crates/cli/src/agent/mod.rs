@@ -20,6 +20,7 @@ mod send;
 mod session;
 #[cfg(test)]
 mod sim;
+pub(crate) mod ssh;
 mod sync;
 mod system;
 #[cfg(test)]
@@ -149,6 +150,8 @@ pub struct Agent {
     send_server: tokio::sync::Mutex<Option<deadbolt_send::Server>>,
     /// Set as the agent stops, ending sends and anyone waiting on one.
     stopping: watch::Sender<bool>,
+    /// SSH agent (`ssh.sock`) listener, Touch ID queue and TTY grants.
+    ssh: ssh::SshState,
 }
 
 impl Agent {
@@ -191,6 +194,7 @@ impl Agent {
             guesses: guesses::Guesses::default(),
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
+            ssh: ssh::SshState::default(),
         })
     }
 
@@ -235,6 +239,7 @@ impl Agent {
         {
             prompt.cancel();
         }
+        self.ssh.policy.cancel_prompt();
     }
 }
 
@@ -272,6 +277,7 @@ mod tests {
             socket: dir.join("socket"),
             lock: dir.join("lock"),
             log: dir.join("log"),
+            ssh_link: None,
         }
     }
 
@@ -590,6 +596,7 @@ mod tests {
                 vault: None,
                 query: vec!["offline-login".into()],
                 otp: false,
+                ssh_private: false,
                 files: Vec::new(),
                 deleted: false,
             },
@@ -1163,6 +1170,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     );
     let agent = Agent::new(paths, local_net, env.kdf);
     let mut autofill = macos_autofill::bind_default().await;
+    agent.start_ssh_if_enabled();
     info!(
         pid = std::process::id(),
         version = %version(),
@@ -1216,6 +1224,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
         drop(autofill_listener);
         path
     });
+    agent.ssh.shutdown();
     agent.cancel_biometric_prompt();
     agent.interrupt_op();
     agent.watchers.stopping();
@@ -1493,7 +1502,7 @@ impl Agent {
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.
-        // Nor are sends, which never touch the vault.
+        // Nor are sends, which never touch the vault, nor SSH keygen/inspect.
         // Nor is bringing the app forward.
         let send = matches!(
             command,
@@ -1502,6 +1511,8 @@ impl Agent {
                 | Command::SendShow { .. }
                 | Command::SendRevoke { .. }
                 | Command::SendWait { .. }
+                | Command::SshGenerate { .. }
+                | Command::SshInspect { .. }
         );
         let used = !send
             && !matches!(
@@ -1522,6 +1533,7 @@ impl Agent {
                     | Command::AutofillStatus
                     | Command::AutofillIdentities
                     | Command::AutofillList { .. }
+                    | Command::SshSign { .. }
             );
         // Nor does a sync from 1Password hold the vault open: `op` may hang,
         // and a lock stops it before it writes anything. Nor does waiting
@@ -1675,11 +1687,21 @@ impl Agent {
                 vault,
                 query,
                 otp,
+                ssh_private,
                 files,
                 deleted,
             } => Ok(Reply::Item {
-                item: self
-                    .with(|s| items::get(s, vault.as_deref(), &query, otp, &files, deleted))?,
+                item: self.with(|s| {
+                    items::get(
+                        s,
+                        vault.as_deref(),
+                        &query,
+                        otp,
+                        ssh_private,
+                        &files,
+                        deleted,
+                    )
+                })?,
             }),
             Command::ItemCode { vault, query } => Ok(Reply::Code {
                 code: self.with(|s| {
@@ -1962,6 +1984,17 @@ impl Agent {
             Command::SecretGrantList => Ok(Reply::SecretGrants {
                 grants: self.with(|s| secrets::list_grants(s, session::now()))?,
             }),
+            Command::SshAgentSet { enabled } => {
+                self.set_ssh_agent(enabled)?;
+                Ok(Reply::Done)
+            }
+            Command::SshGenerate { kind, comment } => self.ssh_generate(kind, comment.as_deref()),
+            Command::SshInspect {
+                private_key,
+                passphrase,
+                comment,
+            } => self.ssh_inspect(&private_key, passphrase.as_ref(), comment.as_deref()),
+            Command::SshSign { .. } => bail!("ssh-sign is answered with the caller"),
             command @ (Command::AgentLogins { .. }
             | Command::AgentFill { .. }
             | Command::AgentPasskeyGet { .. }) => self.agent_client(command),
@@ -2140,9 +2173,10 @@ impl Agent {
     fn status(&self) -> Status {
         let initialized = deadbolt_store::is_initialized(&self.paths.data);
         let touch_id_available = self.is_touch_id_available();
-        let touch_id_cfg = Config::load(&self.paths.config)
-            .map(|c| c.touch_id())
-            .unwrap_or(false);
+        let cfg = Config::load(&self.paths.config).unwrap_or_default();
+        let touch_id_cfg = cfg.touch_id();
+        let ssh_agent = cfg.ssh_agent() && self.ssh.is_listening();
+        let ssh_socket = ssh_agent.then(|| self.paths.ssh_client_socket().display().to_string());
         let touch_id_enabled = touch_id_available && touch_id_cfg;
         let now = session::now();
         let slot = *self
@@ -2186,6 +2220,8 @@ impl Agent {
             touch_id_enabled,
             touch_id_ready,
             touch_id_reset,
+            ssh_agent,
+            ssh_socket,
             // Filled in for the connection that asked (`handle`).
             caller: caller::nobody(),
         }
@@ -2404,7 +2440,7 @@ impl Agent {
     /// sheet. Returns `Ok(true)` only when this call's own Touch ID prompt
     /// unsealed the biometric key (as opposed to returning early while already
     /// unlocked or coalescing onto another caller's prompt).
-    async fn unlock_biometric_with_reason(
+    pub(super) async fn unlock_biometric_with_reason(
         self: &Arc<Self>,
         timeout_secs: Option<u64>,
         reason: &str,
@@ -2864,6 +2900,7 @@ impl Agent {
     }
 
     async fn lock(&self) {
+        self.ssh.clear_on_lock();
         self.cancel_biometric_prompt();
         self.interrupt_op();
         let _transition = self.transition.lock().await;

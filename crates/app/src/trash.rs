@@ -335,6 +335,7 @@ pub(crate) async fn item(paths: &Paths, id: String, seq: u64) -> Done {
         vault: None,
         query: vec![id],
         otp: false,
+        ssh_private: true,
         files: Vec::new(),
         deleted: true,
     };
