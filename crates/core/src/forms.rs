@@ -46,6 +46,7 @@ pub struct Identity {
     pub vault: String,
     pub title: String,
     pub summary: String,
+    pub favorite: bool,
     pub fields: Vec<String>,
 }
 
@@ -60,6 +61,7 @@ pub struct Card {
     pub expiry: Option<String>,
     pub cardholder: Option<String>,
     pub billing: Option<Reference>,
+    pub favorite: bool,
     pub fields: Vec<String>,
 }
 
@@ -188,6 +190,7 @@ pub fn list(vaults: &[&Vault], kinds: &[&str]) -> (Vec<Identity>, Vec<Card>) {
                     vault: vault.name().into(),
                     title: title(&item),
                     summary: summary(&item),
+                    favorite: item.favorite,
                     fields: present(&item),
                 }),
                 "card" => cards.push(Card {
@@ -199,14 +202,15 @@ pub fn list(vaults: &[&Vault], kinds: &[&str]) -> (Vec<Identity>, Vec<Card>) {
                     expiry: value(&item, "expiry").map(str::to_string),
                     cardholder: value(&item, "cardholder").map(str::to_string),
                     billing: billing(vaults, &item),
+                    favorite: item.favorite,
                     fields: present(&item),
                 }),
                 _ => {}
             }
         }
     }
-    identities.sort_by_key(|i| (i.title.to_lowercase(), i.item.item));
-    cards.sort_by_key(|c| (c.title.to_lowercase(), c.item.item));
+    identities.sort_by_key(|i| (!i.favorite, i.title.to_lowercase(), i.item.item));
+    cards.sort_by_key(|c| (!c.favorite, c.title.to_lowercase(), c.item.item));
     (identities, cards)
 }
 
