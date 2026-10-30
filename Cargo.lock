@@ -3732,7 +3732,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.45.0",
 ]
 
 [[package]]
@@ -4548,7 +4548,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
+source = "git+https://github.com/anomalyco/rune?rev=f07723f32c8e6d2be7eaa2416364c037c0c9c139#f07723f32c8e6d2be7eaa2416364c037c0c9c139"
 dependencies = [
  "arboard",
  "blake3",
@@ -4614,7 +4614,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
+source = "git+https://github.com/anomalyco/rune?rev=f07723f32c8e6d2be7eaa2416364c037c0c9c139#f07723f32c8e6d2be7eaa2416364c037c0c9c139"
 dependencies = [
  "rune",
  "rune-motion",
@@ -4624,12 +4624,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
+source = "git+https://github.com/anomalyco/rune?rev=f07723f32c8e6d2be7eaa2416364c037c0c9c139#f07723f32c8e6d2be7eaa2416364c037c0c9c139"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
+source = "git+https://github.com/anomalyco/rune?rev=f07723f32c8e6d2be7eaa2416364c037c0c9c139#f07723f32c8e6d2be7eaa2416364c037c0c9c139"
 dependencies = [
  "wgpu",
 ]
@@ -4637,7 +4637,7 @@ dependencies = [
 [[package]]
 name = "rune-theme-opencode"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
+source = "git+https://github.com/anomalyco/rune?rev=f07723f32c8e6d2be7eaa2416364c037c0c9c139#f07723f32c8e6d2be7eaa2416364c037c0c9c139"
 dependencies = [
  "rune",
  "rune-kit",
