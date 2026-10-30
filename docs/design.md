@@ -21,6 +21,7 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 
 ## Membership
 - Signed log of `Add(device)` / `Remove(device)` ops, each referencing the ops it saw (causal).
+- Each author has a lifetime budget of **1,000 membership entries per vault**, including the creator's genesis; data has a separate log and does not consume it. Commit and apply enforce the cap by the contiguous signed membership sequence, not arrival order. An exhausted author cannot `Rename`, `Add` or `Remove` in that vault. Historical logs already over budget now fail loading. This is a per-author bound, not a bound on Sybil devices or total membership growth.
 - `Add` carries the new device's signature too: it consents to joining *this* vault through *this* inviter (vault id, inviter, new device), so the consent can't back anyone else's `Add`.
 - `Remove(B)` records the last entry of B's log the remover had seen; anything B wrote beyond that is ignored. Removed keys can never be re-added (`Vault::add` and `Vault::apply` reject an `Add` of a removed key, and any concurrent `Add` that did not see the removal is ignored once resolved). Only a current member can be removed.
 - A removal cuts every op by B it didn't see, including devices B added that the remover hadn't seen. A device with several `Add`s stays a member while any of them survives, so an extra `Add` never takes membership away.
