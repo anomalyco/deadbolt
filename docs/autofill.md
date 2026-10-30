@@ -1125,7 +1125,9 @@ textarea a role named by its HTML autocomplete token (`given-name`,
    select's options (twelve months, 28–31 days, years in the past or the
    future, a country list, a US, Canadian or Australian region list); and a
    card number split over short boxes (`maxlength` up to 6), where the
-   first box says what it is and the next ones say nothing.
+   first box says what it is and the next ones say nothing. A birth date
+   box whose text shows a whole date's format (`MM/DD/YYYY`, `DD.MM.YYYY`,
+   `YYYY-MM-DD`) takes the whole date in that format, not just its day.
 
 Fields are grouped into sections, which is what one pick fills: per form
 (or the page, for fields outside one), then by the autocomplete section
@@ -1138,6 +1140,14 @@ Login detection (`detect.ts`) is unchanged and runs first: a field a login
 form claims (the email box of a sign-in) stays the login's. The same
 opt-out marks apply (`data-1p-ignore`, `data-lpignore="true"`,
 `data-deadbolt-ignore`, …).
+
+A select the page fills in only once an earlier field is chosen (a state
+list that loads, or is disabled, until its country is picked) is approved
+with the rest of the section when it's on screen, disabled or not, and
+written last: only if the same fill wrote something before it, once it has
+an option for the value, within two and a half seconds, and after the full
+field check again (enabled, on screen, uncovered). Nothing else the page
+enables later is filled.
 
 ### The menu
 
