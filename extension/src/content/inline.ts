@@ -944,6 +944,10 @@ function onKeyDown(event: KeyboardEvent) {
   }
   if (target !== anchor || mode !== "accounts") return
   if (event.key === "Escape") {
+    // Esc answers the menu only, as with the browser's own autofill: the
+    // page doesn't also get it, so a sign-in dialog doesn't close with it.
+    event.preventDefault()
+    event.stopPropagation()
     dismissedFor = anchor
     closeMenu(false, true)
   } else if (event.key === "ArrowDown") {

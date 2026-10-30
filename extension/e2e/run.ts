@@ -804,6 +804,12 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
+      // A sign-in modal dialog that closes on Esc, natively and from its own key handler.
+      case "/esc-dialog":
+        return html("Sign in to Acme", `<style>dialog{border:0;border-radius:14px;padding:24px;width:360px}</style><dialog id="d">${loginForm("/home")}</dialog><script>
+          const d = document.getElementById("d"); d.showModal(); window.pageEsc = 0
+          document.addEventListener("keydown", (e) => { if (e.key === "Escape") window.pageEsc++ })
+        </script>`)
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
         return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
@@ -2581,6 +2587,46 @@ async function viewportResize() {
   }
 }
 
+/** Esc puts the menu away and nothing else: a sign-in dialog stays open, and the page's own handler doesn't see it. */
+async function escInDialog() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/esc-dialog`)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "esc in dialog"))
+    await page.keyboard.press("Escape")
+    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "Esc in the field puts the menu away")
+    await Bun.sleep(200)
+    const after = await page.evaluate(() => ({ open: (document.getElementById("d") as HTMLDialogElement).open, esc: (window as unknown as { pageEsc: number }).pageEsc }))
+    check(after.open && after.esc === 0, `and the sign-in dialog stays open, the page seeing no Esc (${JSON.stringify(after)})`)
+    // With the list focused (↓), Esc and Tab are the list's: the page never gets them.
+    for (const key of ["Escape", "Tab"]) {
+      await page.click("#email")
+      const again = await until("the menu opens again", async () => {
+        const f = extensionFrame(page, "menu.html")
+        return f && (await f.locator("button.row").count()) > 0 ? f : null
+      }, 8000)
+      if (!again) return void (await diagnose(run, page, `esc in dialog: ${key}`))
+      await settled(again)
+      await page.keyboard.press("ArrowDown")
+      await Bun.sleep(300)
+      await page.keyboard.press(key)
+      check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), `${key} in the focused list puts it away`)
+      const state = await page.evaluate(() => ({ open: (document.getElementById("d") as HTMLDialogElement).open, esc: (window as unknown as { pageEsc: number }).pageEsc, focus: document.activeElement?.id }))
+      check(state.open && state.esc === 0 && state.focus === "email", `and the dialog stays open with focus back in the field (${JSON.stringify(state)})`)
+    }
+    await page.keyboard.press("Escape")
+    check(!(await page.evaluate(() => (document.getElementById("d") as HTMLDialogElement).open)), "with no menu up, Esc closes the dialog as before")
+  } catch (err) {
+    check(false, `esc in dialog threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "esc in dialog")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
 /**
  * The menu for a field in a frame below follows the frame element as the
  * page moves it (a reflow, not only a scroll), and goes when the field moves
@@ -4553,6 +4599,7 @@ const once: Record<string, () => Promise<void>> = {
   topLayer,
   viewportResize,
   menuReveal,
+  escInDialog,
   occlusionSweep,
   midFill,
   coveredPill,
@@ -4578,6 +4625,7 @@ const cost: Record<string, number> = {
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
   menuReveal: 4,
+  escInDialog: 4,
   ...gauntletRun.cost,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
