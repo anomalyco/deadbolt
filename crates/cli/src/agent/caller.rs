@@ -350,6 +350,35 @@ pub fn is_ai(info: &CallerInfo) -> bool {
         .is_some_and(|c| c.opencode_session.is_some())
 }
 
+/// The AI host among `info`'s parents ("OpenCode"), if any.
+fn ai_host(info: &CallerInfo) -> Option<&'static str> {
+    let host = |name: &str| {
+        let name = name.trim_start_matches('-');
+        HOSTS
+            .iter()
+            .find(|(host, _)| host.eq_ignore_ascii_case(name))
+            .map(|(_, label)| *label)
+    };
+    info.ancestry.iter().find_map(|a| {
+        host(&a.name).or_else(|| {
+            a.path
+                .as_deref()
+                .and_then(|p| Path::new(p).file_name())
+                .and_then(|n| host(&n.to_string_lossy()))
+        })
+    })
+}
+
+/// Why the agent takes `info` for an AI, and where to go instead: for a
+/// refusal, so a person in a terminal inside an AI host knows what to do.
+pub fn not_from_here(info: &CallerInfo) -> String {
+    let why = match ai_host(info) {
+        Some(host) => format!("This shell runs under {host} ({})", info.label),
+        None => format!("This shell has OPENCODE_SESSION_ID set ({})", info.label),
+    };
+    format!("{why}; run it from a terminal outside it, or in the app (see `deadbolt whoami`)")
+}
+
 /// Nobody in particular: a status asked for without a connection.
 pub fn nobody() -> CallerInfo {
     CallerInfo::unverified("nobody")
