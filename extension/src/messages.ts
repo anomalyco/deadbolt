@@ -246,7 +246,9 @@ export type ToContent =
   | { type: "db:chooser"; account: string }
   /** Report the login form now, or that there's none. Answers once the background has it. */
   | { type: "db:report" }
-  | { type: "db:close-menu"; token: string }
+  | { type: "db:close-menu"; token: string; unlock?: boolean }
+  | { type: "db:unlock-return" }
+  | { type: "db:unlock-wait" }
   | { type: "db:resize-menu"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /**
    * Open the menu under `box` (in this page's viewport), for a login,
@@ -476,10 +478,16 @@ export type PasskeyChoice = { action: "use"; ref: string } | { action: "save" } 
  * settings, and see, add, edit and delete items by hand. The background takes these
  * only from those two pages of this extension.
  */
+export type UnlockProof = { passphrase: string; prf?: never } | { prf: string; passphrase?: never }
+
 export type DeviceCommand =
   | { type: "device-status" }
   | { type: "device-create"; passphrase: string; name: string }
-  | { type: "device-unlock"; passphrase: string }
+  | ({ type: "device-unlock" } & UnlockProof)
+  | { type: "device-biometric-info" }
+  | { type: "device-biometric-check"; passphrase: string }
+  | { type: "device-biometric-set"; passphrase: string; prf: string; token: string }
+  | { type: "device-biometric-reset" }
   | { type: "device-lock" }
   /** Admit the device that `deadbolt join` shows this code on. */
   | { type: "device-pair"; code: string }
@@ -508,9 +516,9 @@ export type DeviceCommand =
    * One secret value, to reveal or copy (a login's password unless `field`
    * names another), or a file's whole value (`name`, a line break, base64)
    * to download: `{ type: "device-secret", value }`. Strict asks for the
-   * passphrase every time.
+   * passphrase or platform verification every time.
    */
-  | { type: "device-secret"; ref: string; field?: string; passphrase?: string }
+  | { type: "device-secret"; ref: string; field?: string; passphrase?: string; prf?: string }
   /**
    * Adds a login by hand, or edits `ref`; an edit with an empty password
    * keeps the one it has. `otp` and `notes`, when given, set the one-time
@@ -545,7 +553,7 @@ export type DeviceCommand =
   /** The fill waiting on the passphrase, if any: `{ type: "device-reauth", reauth: Reauth | null }`. */
   | { type: "device-reauth" }
   /** The passphrase for fill `id`, once: the background runs that fill with it and forgets it. */
-  | { type: "device-reauth-confirm"; id: string; passphrase: string }
+  | ({ type: "device-reauth-confirm"; id: string } & UnlockProof)
   /** The user turned fill `id` down: nothing is filled. */
   | { type: "device-reauth-cancel"; id: string }
   | { type: "list"; origin: string }
@@ -626,4 +634,4 @@ export interface ItemDetail extends ItemSummary {
 export type DeviceReply =
   | { ok: true; reply: Record<string, unknown>; ms: number; status: Status }
   /** `code`: why, for the page to act on ("wrong_passphrase", "passphrase_needed", "backoff", "locked", "expired"). */
-  | { ok: false; message: string; status: Status; code?: string }
+  | { ok: false; message: string; status: Status; code?: string; retryAt?: number }

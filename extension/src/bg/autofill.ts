@@ -195,6 +195,8 @@ export class Autofill {
   private lastState: string
   /** A picked login was filled in `tabId` on `site` (bg/site-icons.ts reads the site's icon then). */
   filled?: (tabId: number, site: string) => void
+  /** The document whose locked row was clicked last, to focus again once unlocked. Memory only: a restarted worker returns nowhere. */
+  private unlockReturn: MenuToken | null = null
 
   constructor(
     private host: VaultBackend,
@@ -469,9 +471,22 @@ export class Autofill {
   async menuUnlock(token: string, sender: chrome.runtime.MessageSender): Promise<boolean> {
     const t = await this.token(token, sender)
     if (!t || this.host.status.state !== "locked") return false
+    this.unlockReturn = t
+    await sendToFrame(t, { type: "db:unlock-wait" })
     await this.cancel(t.tabId)
-    await sendToFrame(t.owner ?? t, { type: "db:close-menu", token })
+    await sendToFrame(t.owner ?? t, { type: "db:close-menu", token, unlock: true })
     return true
+  }
+
+  /** Returns only to the document that requested unlock; never fills anything. */
+  async returnAfterUnlock(): Promise<boolean> {
+    const t = this.unlockReturn
+    this.unlockReturn = null
+    if (!t || Date.now() - t.createdAt > TOKEN_TTL_MS) return false
+    const tab = await chrome.tabs.update(t.tabId, { active: true }).catch(() => null)
+    if (!tab) return false
+    await chrome.windows.update(tab.windowId, { focused: true }).catch(() => {})
+    return (await sendToFrame(t, { type: "db:unlock-return" })) === true
   }
 
   async menuResize(token: string, height: number, sender: chrome.runtime.MessageSender, width?: unknown, mode?: unknown) {
@@ -826,6 +841,7 @@ export class Autofill {
     this.tracks.delete(tabId)
     this.submits.delete(tabId)
     for (const [token, t] of this.tokens) if (t.tabId === tabId) this.tokens.delete(token)
+    if (this.unlockReturn?.tabId === tabId) this.unlockReturn = null
     void this.cancel(tabId)
   }
 
