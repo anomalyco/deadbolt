@@ -11,9 +11,9 @@
 
 import { DEFAULT_PRESET, isPreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { DeviceCommand, DeviceReply, ItemInput, LockPreset, Reauth, ReauthChanged, Status, UnlockProof } from "../messages"
-import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type FillFormReply, type ReplyFor, type RequestBody } from "../protocol"
-import { cancelled, HostError, type Listener, type ReauthAsk, type SendOptions, type VaultBackend } from "./backend"
-import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, isCopied, type Copied } from "./clipboard"
+import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type ReplyFor, type RequestBody } from "../protocol"
+import { cancelled, HostError, type Listener, type ReauthAsk, type ReauthBody, type ReauthReply, type SendOptions, type VaultBackend } from "./backend"
+import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, digest, isCopied, type Copied } from "./clipboard"
 import { appendLearnLine } from "./learn-log"
 import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultChanged, type VaultClipboard, type VaultLock, type VaultRequest, type VaultResponse } from "./vault-messages"
 
@@ -32,12 +32,15 @@ const SLOW_MS: Partial<Record<string, number>> = {
   // Strict checks the passphrase (the KDF) before a password is shown, or a card's number filled.
   "device-secret": 120_000,
   "device-reauth-confirm": 120_000,
+  // Strict checks the passphrase before a passkey is deleted, from Settings or the item list.
+  "device-delete": 120_000,
+  "device-item-delete": 120_000,
   "device-biometric-set": 120_000,
   "device-biometric-check": 120_000,
 }
 /** How long a fill waits for its passphrase before it's dropped. */
 const REAUTH_MS = 2 * 60_000
-const EXPIRED = "This fill isn't waiting anymore. Pick the card in the page again."
+const EXPIRED = "This request isn't waiting anymore. Try again on the page."
 
 /** The chosen preset (src/device-rules.ts), in chrome.storage.local: a setting, nothing secret. */
 const PRESET_KEY = "deadbolt.lockPreset"
@@ -61,13 +64,13 @@ export const backoff = (fails: number) => (fails < FREE_TRIES ? 0 : Math.min(MAX
 /**
  * What this device does today, as the vault's hello names it. Anything else
  * is refused here, before the vault sees it, and no capability is claimed
- * for it: passkeys are a follow-up. `learn` never reaches the vault: the
+ * for it. `learn` never reaches the vault: the
  * learning log is kept here (bg/learn-log.ts), locked or not, as the host
  * keeps it outside the agent.
  */
-const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "learn"])
+const SUPPORTED = new Set<string>(["hello", "list", "fill", "check", "save", "generate", "generate-check", "generate-keep", "generate-drop", "forms", "fill-form", "passkey-list", "passkey-create", "passkey-get", "passkey-cancel", "learn"])
 /** Requests that count as use for the idle lock. Listing a page's logins or forms doesn't (docs/autofill.md). */
-const USES = new Set<string>(["fill", "save", "fill-form", "generate"])
+const USES = new Set<string>(["fill", "save", "fill-form", "generate", "passkey-create", "passkey-get"])
 
 /**
  * As the native host (crates/cli/src/browser/host.rs): checks are a password
@@ -80,13 +83,15 @@ const FILLS_RATE = { capacity: 60, everyMs: 250 }
 const LEARNS_RATE = { capacity: 100, everyMs: 100 }
 /** The host's limit on one request, which bounds a learning line too. */
 const MAX_REQUEST = 64 * 1024
-const RATED: Partial<Record<string, "checks" | "fills" | "learns">> = {
+const RATED: Partial<Record<string, "checks" | "fills" | "passkeys" | "learns">> = {
   learn: "learns",
   check: "checks",
   "generate-check": "checks",
   fill: "fills",
   generate: "fills",
   "fill-form": "fills",
+  "passkey-create": "passkeys",
+  "passkey-get": "passkeys",
 }
 
 /** A token bucket: `capacity` at once, refilled one per `everyMs`. The host's Bucket, on Date.now(). */
@@ -123,7 +128,7 @@ const slowDown = () => new HostError("rate_limited", "too many requests; try aga
 const PAGE_READS = new Set<string>([
   "device-status",
   "device-lock",
-  "device-logins",
+  "device-passkeys",
   "device-devices",
   "device-items",
   "device-kinds",
@@ -149,7 +154,7 @@ const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-st
 /** Commands that open the vault: the worker is told the lock preset with them, and keeps Strict itself. */
 const OPENS = new Set<string>(["device-create", "device-unlock", "device-join-finish"])
 /** Commands that check a passphrase, and back off after wrong ones. */
-const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-reauth-confirm", "device-biometric-set", "device-biometric-check"])
+const CHECKS = new Set<string>(["device-unlock", "device-secret", "device-delete", "device-item-delete", "device-reauth-confirm", "device-biometric-set", "device-biometric-check"])
 
 const UNREADABLE = "Deadbolt's vault gave an answer it couldn't read. Reload the extension and try again."
 const unsupported = () => new HostError("failed", "The browser-only Deadbolt can't do this yet.")
@@ -158,7 +163,14 @@ const unsupported = () => new HostError("failed", "The browser-only Deadbolt can
 interface Pending {
   prompt: Reauth
   tabId: number
-  body: Extract<RequestBody, { type: "fill-form" }>
+  body: ReauthBody
+  /**
+   * The passphrase check running for a passkey, whose authorization is spent
+   * once. `key` is a hash of its passphrase salted with the prompt's id (never
+   * the passphrase): the same passphrase sent again (two open vault surfaces)
+   * shares its answer, and a different one waits for it, then runs on its own.
+   */
+  confirming?: { key: string; reply: Promise<DeviceReply> }
   /** The device.html tab opened to ask, closed again once it's answered. */
   opened?: number
   /**
@@ -167,7 +179,7 @@ interface Pending {
    * once none is and the fill still waits (a wrong one), it gets REAUTH_MS again.
    */
   checking(on: boolean): void
-  settle(result: { reply: FillFormReply } | { error: HostError }): void
+  settle(result: { reply: ReauthReply } | { error: HostError }): void
 }
 
 export class StandaloneBackend implements VaultBackend {
@@ -191,7 +203,8 @@ export class StandaloneBackend implements VaultBackend {
    * a newer fill never counts on one of them to show its prompt.
    */
   private closing = new Set<number>()
-  private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE), learns: new Bucket(LEARNS_RATE) }
+  private buckets = { checks: new Bucket(CHECKS_RATE), fills: new Bucket(FILLS_RATE), passkeys: new Bucket({ capacity: 10, everyMs: 1000 }), learns: new Bucket(LEARNS_RATE) }
+  private ceremonies = 0
   private epoch = 0
   private locking: Promise<void> | null = null
 
@@ -279,7 +292,7 @@ export class StandaloneBackend implements VaultBackend {
       if (reply.type !== "hello") throw new HostError("failed", UNREADABLE)
       // Only what this build sends on: a capability it would refuse is never offered.
       // The learning log is this side's own, whatever the vault says.
-      this.capabilities = [...reply.capabilities.filter((c) => SUPPORTED.has(c)), "learn"]
+      this.capabilities = [...reply.capabilities.filter((c) => c !== "learn" && (c === "passkeys" || SUPPORTED.has(c))), "learn"]
       if (reply.protocol !== PROTOCOL) {
         this.setStatus({ state: "unavailable", detail: "This extension and its vault are different versions. Reload the extension." }, change)
       } else if (reply.status === "ready") this.setStatus({ state: "ready", version: reply.version }, change)
@@ -292,15 +305,28 @@ export class StandaloneBackend implements VaultBackend {
 
   async send<T extends keyof ReplyFor>(body: Extract<RequestBody, { type: T }>, { timeout = TIMEOUT_MS, signal }: SendOptions = {}): Promise<ReplyFor[T]> {
     if (signal?.aborted) throw cancelled()
-    // `onId` names a request for passkey-cancel; passkeys aren't supported here.
+    // Standalone cancels through the ceremony's AbortSignal, including its
+    // passphrase prompt. There is no native prompt/request id to cancel.
+    if (body.type === "passkey-cancel") return { type: "passkey-cancelled", found: false } as ReplyFor[T]
     if (!SUPPORTED.has(body.type)) throw unsupported()
     // Refused before the vault sees it, and before it counts as use.
     const rated = RATED[body.type]
     if (rated && !this.buckets[rated].take()) throw slowDown()
-    await this.loaded
-    if (USES.has(body.type)) this.used()
-    if (body.type === "learn") return (await this.learn(body as Extract<RequestBody, { type: "learn" }>)) as ReplyFor[T]
-    const reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
+    // Counted before any await, so concurrent ceremonies can't all pass the cap.
+    const ceremony = body.type === "passkey-create" || body.type === "passkey-get"
+    if (ceremony && this.ceremonies >= 4) throw slowDown()
+    if (ceremony) this.ceremonies++
+    let reply
+    try {
+      await this.loaded
+      if (signal?.aborted) throw cancelled()
+      if (USES.has(body.type)) this.used()
+      if (body.type === "learn") return (await this.learn(body as Extract<RequestBody, { type: "learn" }>)) as ReplyFor[T]
+      reply = await this.request(body as Record<string, unknown> & { type: string }, timeout)
+    } finally {
+      if (ceremony) this.ceremonies--
+    }
+    if (signal?.aborted) throw cancelled()
     if (reply.type === "error") {
       if (reply.code === "locked" && this.status.state === "ready") void this.hello("locked")
       throw new HostError(reply.code, reply.message)
@@ -342,11 +368,23 @@ export class StandaloneBackend implements VaultBackend {
     if (command.type === "device-settings" || command.type === "device-preset") {
       await this.loaded
       if (command.type === "device-preset") {
+        // An unlock already under way would open with the old policy: it
+        // fails instead, and is tried again under this one.
         this.epoch++
+        // The worker holds the preset too, and enforces Strict itself: an
+        // unlocked one hears of it first, so what this page and the passkey
+        // prompts say is the preset the worker keeps. A locked one is told
+        // when it opens. If it refuses, the vault locks rather than run on
+        // a policy the page doesn't show.
+        if (this.status.state === "ready") {
+          const told = await this.raw({ type: "device-preset", preset: command.preset }, TIMEOUT_MS).catch((err: Error) => ({ type: "error", message: err.message }))
+          if (told.type === "error") {
+            await this.lock()
+            return fail(typeof told.message === "string" && told.message ? told.message : "Deadbolt couldn't change the lock preset.")
+          }
+        }
         this.preset = command.preset
         await chrome.storage.local.set({ [PRESET_KEY]: command.preset }).catch(() => {})
-        // The worker keeps the preset too, to hold Strict itself.
-        if (this.status.state === "ready") await this.raw({ type: "device-preset", preset: command.preset }, TIMEOUT_MS).catch(() => null)
       }
       return { ok: true, reply: { type: "device-settings", preset: this.preset, retryAt: this.tries.until }, ms: Date.now() - started, status: this.status }
     }
@@ -463,11 +501,12 @@ export class StandaloneBackend implements VaultBackend {
    * popup opens over the tab if Chrome lets it; otherwise device.html opens
    * in a new tab. A page already open hears of it.
    */
-  reauth(body: Extract<RequestBody, { type: "fill-form" }>, ask: ReauthAsk, signal: AbortSignal): Promise<FillFormReply> {
+  reauth<T extends ReauthBody["type"]>(body: Extract<ReauthBody, { type: T }>, ask: ReauthAsk, signal: AbortSignal): Promise<ReplyFor[T]> {
+    const request: ReauthBody = body
     if (signal.aborted) return Promise.reject(cancelled())
     if (this.status.state !== "ready") return Promise.reject(new HostError("locked", "Deadbolt is locked. Nothing was filled."))
     this.endReauth(cancelled())
-    return new Promise<FillFormReply>((resolve, reject) => {
+    return new Promise<ReplyFor[T]>((resolve, reject) => {
       let done = false
       let timer: ReturnType<typeof setTimeout> | undefined
       /** Passphrases being checked for it now (the popup and device.html may both answer). */
@@ -478,9 +517,9 @@ export class StandaloneBackend implements VaultBackend {
       }
       const abort = () => p.settle({ error: cancelled() })
       const p: Pending = {
-        prompt: { id: newId(), title: ask.title, site: ask.site },
+        prompt: { id: newId(), title: reauthTitle(ask.title, request.type === "fill-form" ? "Card" : "Passkey"), site: ask.site, kind: request.type === "fill-form" ? "card" : request.type },
         tabId: ask.tabId,
-        body: { type: "fill-form", origin: body.origin, ref: body.ref, fields: [...body.fields] },
+        body: structuredClone(body),
         checking: (on) => {
           if (done) return
           checks = Math.max(0, checks + (on ? 1 : -1))
@@ -499,7 +538,7 @@ export class StandaloneBackend implements VaultBackend {
             reauthChanged()
           }
           // A fill goes on once its page is in front again, where its fields are checked once more.
-          if ("reply" in result) void left.catch(() => {}).then(() => resolve(result.reply))
+          if ("reply" in result) void left.catch(() => {}).then(() => resolve(result.reply as ReplyFor[T]))
           else reject(result.error)
         },
       }
@@ -586,36 +625,75 @@ export class StandaloneBackend implements VaultBackend {
    * to the vault in this one request and is kept nowhere.
    */
   private async confirm(id: string, proof: UnlockProof, started: number): Promise<DeviceReply> {
-    const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
     const p = this.pending
-    if (!p || p.prompt.id !== id) return fail(EXPIRED, "expired")
+    if (!p || p.prompt.id !== id) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
+    // A card may be filled after Touch ID. A passkey always takes the
+    // passphrase: this keeps it waiting, so the passphrase can still answer it.
+    if (p.body.type === "fill-form") return this.confirmOnce(p, proof, started)
+    if (typeof proof.passphrase !== "string") return { ok: false, message: "Enter your passphrase to use this passkey.", code: "passphrase_needed", status: this.status }
+    const passphrase = proof.passphrase
+    const key = await digest(p.prompt.id, passphrase)
+    const prior = p.confirming
+    if (prior?.key === key) return prior.reply
+    if (this.pending !== p) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
+    // Another passphrase is being checked: this one runs after it, if the request still waits and no backoff began.
+    const after = () => this.confirmAfter(p, passphrase, started)
+    const reply = prior ? prior.reply.then(after, after) : this.confirmOnce(p, { passphrase }, started)
+    const entry = { key, reply }
+    p.confirming = entry
+    // Kept once the request has ended, so the same passphrase sent again late gets the same answer.
+    const clear = () => {
+      if (p.confirming === entry && this.pending === p) p.confirming = undefined
+    }
+    reply.then(clear, clear)
+    return reply
+  }
+
+  /** A passkey's passphrase that waited for another check: it runs only if that one left the request waiting. */
+  private async confirmAfter(p: Pending, passphrase: string, started: number): Promise<DeviceReply> {
+    if (this.pending !== p) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
+    const wait = this.tries.until - Date.now()
+    if (wait > 0) return { ok: false, message: `Too many wrong passphrases. Try again in ${Math.ceil(wait / 1000)} s.`, code: "backoff", status: this.status }
+    return this.confirmOnce(p, { passphrase }, started)
+  }
+
+  private async confirmOnce(p: Pending, proof: UnlockProof, started: number): Promise<DeviceReply> {
+    const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
     let raw: Record<string, unknown>
     // The KDF may outlast the time left to answer: the fill waits on it, not the clock.
     p.checking(true)
     try {
-      raw = await this.raw({ ...p.body, ...proof }, SLOW_MS["device-reauth-confirm"]!)
+      const passkey = p.body.type !== "fill-form"
+      raw = await this.raw(passkey ? { type: "passkey-authorize", ceremony: p.body, passphrase: proof.passphrase } : { ...p.body, ...proof }, SLOW_MS["device-reauth-confirm"]!)
+      // Checking the passphrase does not register/sign. Only a still-live
+      // ceremony may spend its one-shot, command-bound authorization.
+      if (passkey && raw.type === "passkey-authorized") {
+        await this.tried("right")
+        if (this.pending !== p) return fail(EXPIRED, "expired")
+        raw = await this.raw({ type: "passkey-finish", token: raw.token }, TIMEOUT_MS)
+      }
     } catch (err) {
-      p.checking(false)
       const error = err instanceof HostError ? err : new HostError("failed", UNREADABLE)
       p.settle({ error })
       // The worker ended under it (Lock, or Chrome discarding it): say how the vault is now.
       if ((error.code === "locked" || error.code === "disconnected") && this.status.state === "ready") await this.hello()
       return fail(error.message, error.code === "locked" ? "locked" : undefined)
+    } finally {
+      p.checking(false)
     }
-    p.checking(false)
     await this.tried(raw.type === "error" && raw.code === "wrong_passphrase" ? "wrong" : raw.type === "error" ? "other" : "right")
     // Cancelled, locked or replaced while the passphrase was checked: its values go nowhere.
     if (this.pending !== p) return fail(EXPIRED, "expired")
     const reply = parseReply(raw)
     if (reply?.type === "error" && reply.code === "wrong_passphrase") return fail(reply.message || "That passphrase isn't right.", "wrong_passphrase")
-    if (reply?.type !== "fill-form") {
-      const error = reply?.type === "error" ? new HostError(reply.code, reply.message || "Deadbolt couldn't fill that.") : new HostError("failed", UNREADABLE)
+    if (reply?.type !== REPLY_TYPE[p.body.type]) {
+      const error = reply?.type === "error" ? new HostError(reply.code, reply.message || "Deadbolt couldn't complete that request.") : new HostError("failed", UNREADABLE)
       p.settle({ error })
       // A fresh worker answers locked: the page should show Unlock, not a vault that's gone.
       if (error.code === "locked" && this.status.state === "ready") await this.hello("locked")
       return fail(error.message, reply?.type === "error" ? reply.code : undefined)
     }
-    p.settle({ reply })
+    p.settle({ reply: reply as ReauthReply })
     return { ok: true, reply: { type: "device-reauth-confirm", ok: true }, ms: Date.now() - started, status: this.status }
   }
 
@@ -749,6 +827,20 @@ function reauthChanged() {
   void Promise.resolve(chrome.runtime.sendMessage({ type: "db:reauth" } satisfies ReauthChanged)).catch(() => {})
 }
 
+/** Controls and bidi overrides, as the core strips them from passkey names (crates/core). */
+const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g
+const MAX_TITLE = 64
+
+/**
+ * A passphrase prompt's title, which a page may have chosen (a passkey's
+ * account name): no controls or bidi overrides, at most 64 characters (code
+ * points, never half of one), trimmed; `fallback` when nothing is left.
+ */
+export function reauthTitle(title: string, fallback: string): string {
+  const clean = Array.from(title.replace(UNSAFE_TEXT, "").trim()).slice(0, MAX_TITLE).join("").trimEnd()
+  return clean || fallback
+}
+
 const newId = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("")
 
 function fromOffscreen(sender: chrome.runtime.MessageSender): boolean {
@@ -796,6 +888,7 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
     case "device-lock":
     case "device-items":
     case "device-kinds":
+    case "device-passkeys":
     case "device-devices":
     case "device-settings":
     case "device-biometric-info":
@@ -805,6 +898,10 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
       return c.wait === true ? { type: "device-sync", wait: true } : { type: "device-sync" }
     case "device-item":
       return text(c.ref, 200) && c.ref ? { type: "device-item", ref: c.ref } : null
+    case "device-delete":
+      if (!text(c.ref, 200) || !c.ref) return null
+      if (c.passphrase === undefined) return { type: "device-delete", ref: c.ref }
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-delete", ref: c.ref, passphrase: c.passphrase } : null
     case "device-secret": {
       if (!text(c.ref, 200) || !c.ref) return null
       if (c.field !== undefined && !fieldName(c.field)) return null
@@ -844,7 +941,9 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
       return text(c.kind, 32) && /^[a-z-]+$/.test(c.kind) ? { type: "device-item-save", kind: c.kind, ...rest } : null
     }
     case "device-item-delete":
-      return text(c.ref, 200) && c.ref ? { type: "device-item-delete", ref: c.ref } : null
+      if (!text(c.ref, 200) || !c.ref) return null
+      if (c.passphrase === undefined) return { type: "device-item-delete", ref: c.ref }
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-item-delete", ref: c.ref, passphrase: c.passphrase } : null
     case "device-remove":
       return typeof c.id === "string" && /^[0-9a-f]{64}$/.test(c.id) ? { type: "device-remove", id: c.id } : null
     case "device-rename":

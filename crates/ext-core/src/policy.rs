@@ -45,6 +45,12 @@ pub fn card_reauth(preset: Preset, sensitive: bool) -> bool {
     preset == Preset::Strict && sensitive
 }
 
+/// Native skips verification when discouraged; Strict substitutes a local
+/// passphrase for the native preferred-UV prompt, without asserting Touch ID UV.
+pub fn passkey_reauth(preset: Preset, discouraged: bool) -> bool {
+    preset == Preset::Strict && !discouraged
+}
+
 /// A login's title as saved: trimmed, and never empty.
 pub fn login_title(title: &str) -> Result<&str, &'static str> {
     let title = title.trim();
@@ -72,6 +78,14 @@ mod tests {
         assert!(!card_reauth(Preset::Relaxed, true));
         assert!(!card_reauth(Preset::Strict, false));
         assert!(card_reauth(Preset::default(), true));
+    }
+
+    #[test]
+    fn strict_passkeys_follow_the_native_verification_preference() {
+        assert!(passkey_reauth(Preset::Strict, false));
+        assert!(!passkey_reauth(Preset::Strict, true));
+        assert!(!passkey_reauth(Preset::Comfortable, false));
+        assert!(!passkey_reauth(Preset::Relaxed, false));
     }
 
     #[test]

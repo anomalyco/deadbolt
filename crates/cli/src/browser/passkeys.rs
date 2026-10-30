@@ -32,8 +32,8 @@ const MAX_RP_ID: usize = 253;
 /// Base64url of 1024 bytes.
 const MAX_CHALLENGE: usize = 1366;
 /// Base64url of 64 bytes.
-const MAX_USER_ID: usize = 86;
-const MAX_USER_NAME: usize = 256;
+const MAX_USER_ID: usize = (deadbolt_core::webauthn::MAX_USER_HANDLE * 4).div_ceil(3);
+use deadbolt_core::passkeys::MAX_USER_NAME;
 /// Base64url of 1023 bytes, WebAuthn's longest credential id.
 const MAX_CREDENTIAL_ID: usize = 1364;
 const MAX_EXCLUDE: usize = 64;

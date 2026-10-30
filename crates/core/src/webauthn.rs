@@ -1,12 +1,11 @@
 //! WebAuthn authenticator crypto for passkeys: ES256 (P-256) keys, `none`
 //! attestation, client data and the canonical CBOR WebAuthn needs. Only the
-//! agent calls it; private keys never leave it (see docs/autofill.md).
+//! vault adapters call it; private keys never leave them (see docs/autofill.md).
 //!
 //! Adapted from Foyer (github.com/R44VC0RP/foyer, bridge/webauthn.ts, by
 //! Ryan Vogel): the flags, the zero sign counter, a fixed AAGUID, 16-byte
 //! random credential ids and PKCS#8 storage follow it.
 
-use anyhow::{Context, Result, bail};
 use data_encoding::BASE64URL_NOPAD;
 use p256::ecdsa::signature::Signer;
 use p256::ecdsa::{DerSignature, SigningKey};
@@ -15,6 +14,16 @@ use p256::pkcs8::{DecodePrivateKey, EncodePrivateKey, EncodePublicKey};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
+
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("{0}")]
+    Invalid(&'static str),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+}
+
+type Result<T> = std::result::Result<T, Error>;
 
 /// COSE algorithm id of ES256, the only one Deadbolt signs with.
 pub const ES256: i64 = -7;
@@ -33,7 +42,7 @@ const AT: u8 = 0x40;
 /// The longest challenge taken, in base64url characters.
 const MAX_CHALLENGE: usize = 1024;
 /// The longest user handle WebAuthn allows, in bytes.
-const MAX_USER_HANDLE: usize = 64;
+pub const MAX_USER_HANDLE: usize = 64;
 
 pub fn b64(bytes: &[u8]) -> String {
     BASE64URL_NOPAD.encode(bytes)
@@ -44,22 +53,27 @@ pub fn b64(bytes: &[u8]) -> String {
 pub fn unb64(text: &str) -> Result<Vec<u8>> {
     BASE64URL_NOPAD
         .decode(text.trim_end_matches('=').as_bytes())
-        .context("not base64url")
+        .map_err(|_| Error::Invalid("not base64url"))
 }
 
 /// A WebAuthn challenge as the page gave it: base64url, 16 bytes or more.
 pub fn challenge(text: &str) -> Result<&str> {
     if text.len() > MAX_CHALLENGE || unb64(text)?.len() < 16 || text.contains('=') {
-        bail!("a challenge is 16 or more bytes of base64url");
+        return Err(Error::Invalid(
+            "a challenge is 16 or more bytes of base64url",
+        ));
     }
     Ok(text)
 }
 
 /// A user handle: 1 to 64 bytes of base64url.
 pub fn user_handle(text: &str) -> Result<Vec<u8>> {
+    if text.len() > MAX_USER_HANDLE.div_ceil(3) * 4 {
+        return Err(Error::Invalid("a user handle is 1 to 64 bytes"));
+    }
     let bytes = unb64(text)?;
     if bytes.is_empty() || bytes.len() > MAX_USER_HANDLE {
-        bail!("a user handle is 1 to {MAX_USER_HANDLE} bytes");
+        return Err(Error::Invalid("a user handle is 1 to 64 bytes"));
     }
     Ok(bytes)
 }
@@ -112,9 +126,12 @@ pub struct NewKey {
 
 pub fn generate() -> Result<NewKey> {
     let key = SigningKey::generate();
-    let der = key.to_pkcs8_der().context("encoding a passkey key")?;
+    let der = key
+        .to_pkcs8_der()
+        .map_err(|_| Error::Invalid("encoding a passkey key"))?;
     let mut credential_id = vec![0u8; 16];
-    getrandom::fill(&mut credential_id).context("OS random number generator failed")?;
+    getrandom::fill(&mut credential_id)
+        .map_err(|_| Error::Invalid("OS random number generator failed"))?;
     Ok(NewKey {
         credential_id,
         private_key: Zeroizing::new(der.as_bytes().to_vec()),
@@ -122,7 +139,8 @@ pub fn generate() -> Result<NewKey> {
 }
 
 fn signing_key(private_key: &[u8]) -> Result<SigningKey> {
-    SigningKey::from_pkcs8_der(private_key).context("the stored passkey key is unreadable")
+    SigningKey::from_pkcs8_der(private_key)
+        .map_err(|_| Error::Invalid("the stored passkey key is unreadable"))
 }
 
 /// What a registration returns besides client data.
@@ -145,7 +163,7 @@ pub fn attest(
     let public = key.verifying_key();
     let point = public.to_sec1_point(false);
     let (Some(x), Some(y)) = (point.x(), point.y()) else {
-        bail!("a passkey's public key has no coordinates");
+        return Err(Error::Invalid("a passkey's public key has no coordinates"));
     };
     let cose = cbor::encode(&cbor::Value::Map(vec![
         (cbor::Value::Int(1), cbor::Value::Int(2)),
@@ -154,7 +172,8 @@ pub fn attest(
         (cbor::Value::Int(-2), cbor::Value::Bytes(x.to_vec())),
         (cbor::Value::Int(-3), cbor::Value::Bytes(y.to_vec())),
     ]));
-    let length = u16::try_from(credential_id.len()).context("credential id too long")?;
+    let length =
+        u16::try_from(credential_id.len()).map_err(|_| Error::Invalid("credential id too long"))?;
     let mut data = auth_data(rp_id, flags(verified, true));
     data.extend_from_slice(&AAGUID);
     data.extend_from_slice(&length.to_be_bytes());
@@ -170,7 +189,7 @@ pub fn attest(
     ]));
     let spki = public
         .to_public_key_der()
-        .context("encoding a passkey's public key")?;
+        .map_err(|_| Error::Invalid("encoding a passkey's public key"))?;
     Ok(Attestation {
         authenticator_data: data,
         attestation_object: object,

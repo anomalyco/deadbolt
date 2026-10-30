@@ -24,16 +24,24 @@
 // loopback checkout and the demo's: Relaxed and Comfortable fill the card at
 // once; Strict asks for the passphrase on a trusted extension surface first.
 //
+// Every run also makes and uses passkeys in the browser's own vault on a
+// localhost page (passkeyFlows): registration, modal and autofill sign-in,
+// required UV handed to the browser, Strict's passphrase for preferred UV
+// and none for discouraged, and deletion from the device page, each checked
+// with @simplewebauthn/server. The CLI runs also sync passkeys both ways and
+// sign with them through `deadbolt browser-host`.
+//
 // `--latency-ms <n>` is the limit for hello, list and fill over the vault's
 // RPC (default 1000 ms, 1500 ms when CI is set). `--video <dir>` records each
 // page (headless) to <dir>/<nn>-<flow>.webm. Only synthetic credentials,
 // in a disposable profile and store, deleted at the end. Online runs leave
 // synthetic accounts on the demo backend. Toolbar popup stills accompany --video.
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
-import { copyFile, mkdir, mkdtemp, rm, readdir, writeFile } from "node:fs/promises"
+import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
+import { copyFile, mkdir, mkdtemp, rm, readdir, readFile, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
-import type { DeviceCommand, DeviceReply, VaultDevice } from "../src/messages"
+import type { DeviceCommand, DevicePasskey, DeviceReply, VaultDevice } from "../src/messages"
 import { VAULT_REQUEST, type VaultResponse } from "../src/bg/vault-messages"
 
 const arg = (name: string) => { const i = process.argv.indexOf(name); return i < 0 ? undefined : process.argv[i + 1] }
@@ -48,6 +56,7 @@ const limit = Number(arg("--latency-ms") ?? (process.env.CI ? 1500 : 1000))
 if (!(limit > 0)) throw new Error("--latency-ms wants a positive number")
 const root = await mkdtemp(join(tmpdir(), "db-ext-device-"))
 const dist = arg("--dist") ? resolve(arg("--dist")!) : join(root, "extension")
+let cliMarker: Buffer | null | undefined
 const profile = join(root, "profile")
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 /** The background's sync alarm (bg/standalone.ts). */
@@ -75,6 +84,26 @@ const html = (title: string, body: string) => new Response(`<!doctype html><html
     <main style="width:360px;margin:60px auto;font:16px sans-serif">${body}</main></body></html>`, { headers: { "content-type": "text/html" } })
 const input = (id: string, label: string, attrs: string) =>
   `<label for="${id}">${label}</label><input id="${id}" name="${id}" ${attrs} style="display:block;width:100%;height:36px;margin-bottom:8px">`
+/**
+ * A WebAuthn test page (as e2e/run.ts's): the test drives
+ * navigator.credentials through start/result/abort, with an email box that
+ * takes an autofill (conditional) passkey sign-in.
+ */
+const PASSKEY_PAGE = `<label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username webauthn" style="display:block;width:100%;height:36px">
+  <script>
+    const calls = {}
+    window.start = (name, kind, json, extra = {}) => {
+      const publicKey = kind === "create" ? PublicKeyCredential.parseCreationOptionsFromJSON(json) : PublicKeyCredential.parseRequestOptionsFromJSON(json)
+      const abort = new AbortController()
+      const call = (calls[name] = { abort })
+      navigator.credentials[kind]({ publicKey, signal: abort.signal, ...extra }).then(
+        (c) => (call.done = { ok: true, value: c.toJSON() }),
+        (e) => (call.done = { ok: false, value: e.name + ": " + e.message }),
+      )
+    }
+    window.result = (name) => calls[name]?.done ?? null
+    window.abort = (name) => calls[name].abort.abort()
+  </script>`
 /** Sign-in, sign-up, password change and checkout pages, like the demo site's; each sign-in lands on an account page. */
 /** Each request for /iconed's icon, by its Sec-Fetch-Dest: the page's own loads are "image", a script's fetch "empty". */
 const iconRequests: string[] = []
@@ -108,6 +137,8 @@ async function fixture(request: Request) {
     case "/icon.svg":
       iconRequests.push(request.headers.get("sec-fetch-dest") ?? "")
       return new Response(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#e5484d"/><script>alert(1)</script></svg>`, { headers: { "content-type": "image/svg+xml", "cache-control": "max-age=3600" } })
+    case "/passkey":
+      return html("Sign in to Acme", PASSKEY_PAGE)
     case "/account":
       return html("Acme", `<h1>Your account</h1><p>Signed in as ${escape(url.searchParams.get("u") ?? "")}</p><a href="/signin">Sign out</a>`)
     case "/checkout":
@@ -527,8 +558,12 @@ const IDENTITY = ["new", "identity", "--name", "Home", "given-name=Kit", "family
 const CARD = ["new", "card", "--name", "Visa", "number=4242424242424242", "expiry=2028-08", "cvv=123", "cardholder=Kit Proof", "brand=Visa"]
 const digits = (s: string) => s.replace(/\D/g, "")
 /** The re-auth prompt a card fill raises: "Fill <card>", a Passphrase box, Fill and Cancel. */
-const reauthPrompt = (page: Page) => page.locator("form.view.center.unlock").filter({ has: page.getByRole("heading", { name: /^Fill / }) })
-/** A prompt the test answers as a person would: its heading, typing the passphrase and pressing Fill, its error, and whether it's gone. */
+const CARD_REAUTH = /^Fill /
+/** The re-auth prompt a passkey sign-in or registration on localhost raises under Strict. */
+const PASSKEY_REAUTH = /^(Sign in to|Save a passkey for) localhost$/
+/** A re-auth prompt whose heading matches `heading`: a Passphrase box, its submit button and Cancel. */
+const reauthPrompt = (page: Page, heading = CARD_REAUTH) => page.locator("form.view.center.unlock").filter({ has: page.getByRole("heading", { name: heading }) })
+/** A prompt the test answers as a person would: its heading, typing the passphrase and pressing its submit button, its error, and whether it's gone. */
 interface Prompt {
   where: "toolbar popup" | "new device tab"
   heading(): Promise<string>
@@ -574,14 +609,16 @@ async function devtools(url: string) {
   const evaluate = async <T>(expression: string) => ((await send("Runtime.evaluate", { expression, returnByValue: true, awaitPromise: true })).result as { value: T }).value
   return { send, evaluate, close: () => ws.close() }
 }
-/** In the popup's document: the prompt's form. */
-const POPUP_FORM = `[...document.querySelectorAll("form.view.center.unlock")].find((f) => /^Fill /.test(f.querySelector("h2")?.textContent ?? ""))`
+/** In the popup's document: the form of the prompt whose heading matches `heading`. */
+const popupForm = (heading: RegExp) => `[...document.querySelectorAll("form.view.center.unlock")].find((f) => ${heading}.test(f.querySelector("h2")?.textContent ?? ""))`
 /**
  * The toolbar popup's prompt. Playwright doesn't list an action popup among
  * the context's pages, so this drives it over DevTools, with trusted input:
- * typed text and a mouse click on Fill.
+ * typed text and a mouse click on its submit button (Fill for a card).
+ * `shots` names its stills.
  */
-async function popupPrompt(): Promise<Prompt | null> {
+async function popupPrompt(heading = CARD_REAUTH, shots = "strict-reauth"): Promise<Prompt | null> {
+  const POPUP_FORM = popupForm(heading)
   const target = (await targets()).find((t) => t.url.startsWith(`chrome-extension://${ID}/popup.html`))
   if (!target) return null
   const popup = await devtools(target.webSocketDebuggerUrl)
@@ -592,21 +629,21 @@ async function popupPrompt(): Promise<Prompt | null> {
     const image = await popup.send("Page.captureScreenshot", { format: "png" })
     await Bun.write(join(video, `${name}.png`), Buffer.from(image.data as string, "base64"))
   }
-  await still("strict-reauth-prompt")
+  await still(`${shots}-prompt`)
   return {
     where: "toolbar popup",
     heading: () => popup.evaluate<string>(`${POPUP_FORM}?.querySelector("h2")?.textContent ?? ""`),
     async answer(given) {
       // As a person waits for Fill to come back after a wrong try.
-      await until("the popup's Fill button is ready", () => popup.evaluate<boolean>(`[...(${POPUP_FORM})?.querySelectorAll("button") ?? []].some((b) => b.textContent.trim() === "Fill" && !b.disabled)`), 15_000)
+      await until("the popup's submit button is ready", () => popup.evaluate<boolean>(`!!(${POPUP_FORM})?.querySelector("button[type=submit]:not([disabled])")`), 15_000)
       await popup.evaluate(`(() => { const box = ${POPUP_FORM}.querySelector("input[type=password]"); box.focus(); box.select() })()`)
       await popup.send("Input.insertText", { text: given })
-      const at = await popup.evaluate<{ x: number; y: number }>(`(() => { const r = [...${POPUP_FORM}.querySelectorAll("button")].find((b) => b.textContent.trim() === "Fill").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`)
+      const at = await popup.evaluate<{ x: number; y: number }>(`(() => { const r = ${POPUP_FORM}.querySelector("button[type=submit]").getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 } })()`)
       for (const type of ["mousePressed", "mouseReleased"]) await popup.send("Input.dispatchMouseEvent", { type, ...at, button: "left", clickCount: 1 })
     },
     refused: async () => {
       const refused = await popup.evaluate<boolean>(`!!(${POPUP_FORM}?.querySelector("p.error")?.textContent?.trim())`).catch(() => false)
-      if (refused) await still("strict-reauth-wrong-passphrase")
+      if (refused) await still(`${shots}-wrong-passphrase`)
       return refused
     },
     gone: async () => !(await targets()).some((t) => t.id === target.id) || !await popup.evaluate<boolean>(`!!(${POPUP_FORM})`).catch(() => false),
@@ -619,21 +656,22 @@ async function popupPrompt(): Promise<Prompt | null> {
  * sits in a background tab and gets the broadcast too: answering there would
  * hide the product's real path.
  */
-async function promptShown(device: Page): Promise<Prompt | null> {
-  const popup = await popupPrompt().catch(() => null)
+async function promptShown(device: Page, heading = CARD_REAUTH, shots = "strict-reauth"): Promise<Prompt | null> {
+  const popup = await popupPrompt(heading, shots).catch(() => null)
   if (popup) return popup
   for (const p of context!.pages()) {
-    if (p === device || p.isClosed() || !p.url().startsWith(`chrome-extension://${ID}/device.html`) || !await reauthPrompt(p).count().catch(() => 0)) continue
-    const prompt = reauthPrompt(p)
+    if (p === device || p.isClosed() || !p.url().startsWith(`chrome-extension://${ID}/device.html`) || !await reauthPrompt(p, heading).count().catch(() => 0)) continue
+    const prompt = reauthPrompt(p, heading)
     const path = await p.video()?.path()
-    if (path && !recordings.some((r) => r.path === path)) recordings.push({ path, name: "reauth-device-tab" })
+    if (path && !recordings.some((r) => r.path === path)) recordings.push({ path, name: `${shots}-device-tab` })
     return {
       where: "new device tab",
       heading: async () => await prompt.getByRole("heading").first().textContent() ?? "",
       async answer(given) {
-        await prompt.getByRole("button", { name: "Fill", exact: true }).waitFor({ timeout: 15_000 })
+        const submit = prompt.locator("button[type=submit]:not([disabled])")
+        await submit.waitFor({ timeout: 15_000 })
         await prompt.getByLabel("Passphrase", { exact: true }).fill(given)
-        await prompt.getByRole("button", { name: "Fill", exact: true }).click()
+        await submit.click()
       },
       refused: async () => !!(await prompt.locator("p.error").first().textContent().catch(() => ""))?.trim(),
       gone: async () => p.isClosed() || await prompt.count() === 0,
@@ -758,6 +796,428 @@ async function formFlows(device: Page, worker: Worker, url: string) {
     await page.close()
   }
 }
+// ---- Passkeys (the browser's own vault signs) ---------------------------------------
+
+/** Deadbolt's AAGUID (crates/cli/src/webauthn.rs): the browser vault's passkeys carry it too. */
+const DEADBOLT_AAGUID = "3a31ecda-fefc-f251-1f3e-a11bfdc1de5f"
+async function devicePasskeys(device: Page) {
+  const reply = (await request(device, { type: "device-passkeys" })).reply
+  const metadata = new Set(["ref", "vault", "rpId", "credentialId", "username", "created"])
+  if (!Array.isArray(reply.passkeys) || reply.passkeys.some((k) => Object.keys(k).some((key) => !metadata.has(key)))) throw new Error("device-passkeys returned more than public metadata")
+  return reply.passkeys as DevicePasskey[]
+}
+type Outcome = { ok: boolean; value: any }
+const startCall = (page: Page, name: string, kind: "create" | "get", json: unknown, extra: Record<string, unknown> = {}) =>
+  page.evaluate(([n, k, j, e]) => (window as any).start(n, k, j, e), [name, kind, json, extra] as const)
+const result = (page: Page, name: string) => page.evaluate((n) => (window as any).result(n), name) as Promise<Outcome | null>
+const outcome = (page: Page, name: string, what: string, ms = 30_000) => until<Outcome>(what, () => result(page, name), ms)
+/** The client data in a credential's JSON. */
+const clientData = (credential: any) => JSON.parse(Buffer.from(credential.response.clientDataJSON, "base64url").toString())
+/** Deadbolt's credentials are for the page's own origin, never cross-origin. */
+function ownOrigin(credential: any, how: string) {
+  const data = clientData(credential)
+  check(data.origin === origin && data.crossOrigin === false && !("topOrigin" in data), `${how}: for this origin, crossOrigin false`)
+}
+/** The toolbar badge of the tab showing `prefix`. */
+const badge = (worker: Worker, prefix: string) =>
+  worker.evaluate(async (prefix) => {
+    for (const t of await chrome.tabs.query({})) {
+      const frame = t.id === undefined ? null : await chrome.webNavigation.getFrame({ tabId: t.id, frameId: 0 }).catch(() => null)
+      if (frame?.url.startsWith(prefix)) return chrome.action.getBadgeText({ tabId: t.id })
+    }
+    return ""
+  }, prefix)
+/** In the popup's document: the passkey prompt. */
+const PASSKEY_CARD = `document.querySelector(".passkey-prompt")`
+/** The toolbar popup's passkey prompt: its heading, the passkeys it lists by username, and a trusted click on one of its buttons. */
+interface PasskeyPopup {
+  heading: string
+  accounts: string[]
+  /** "Deadbolt asks for your passphrase next.", or empty. */
+  note: string
+  /** Presses `label` (in `account`'s row, if given), and waits for the popup to close. */
+  press(label: string, account?: string): Promise<void>
+  close(): void
+}
+/** Waits for the toolbar popup the page's passkey call opens, as the card prompt's is driven: over DevTools. */
+function passkeyPopup(what: string, ms = 20_000): Promise<PasskeyPopup> {
+  return until(what, async () => {
+    const target = (await targets()).find((t) => t.url.startsWith(`chrome-extension://${ID}/popup.html`))
+    if (!target) return null
+    const popup = await devtools(target.webSocketDebuggerUrl)
+    const seen = await popup.evaluate<{ heading: string; accounts: string[]; note: string } | null>(`(() => {
+      const card = ${PASSKEY_CARD}
+      return card && { heading: card.querySelector("h2")?.textContent ?? "", accounts: [...card.querySelectorAll(".account-title")].map((e) => e.textContent), note: card.querySelector(".note")?.textContent?.trim() ?? "" }
+    })()`).catch(() => null)
+    if (!seen) return popup.close(), null
+    if (video) {
+      await mkdir(video, { recursive: true })
+      const image = await popup.send("Page.captureScreenshot", { format: "png" }).catch(() => null)
+      if (image) await Bun.write(join(video, `passkey-${seen.heading.split(" ")[0].toLowerCase()}.png`), Buffer.from(image.data as string, "base64"))
+    }
+    return {
+      ...seen,
+      async press(label, account) {
+        const scope = account
+          ? `[...card.querySelectorAll(".account")].find((a) => a.querySelector(".account-title")?.textContent === ${JSON.stringify(account)})`
+          : "card"
+        const at = await popup.evaluate<{ x: number; y: number } | null>(`(() => {
+          const card = ${PASSKEY_CARD}
+          const b = [...(${scope})?.querySelectorAll("button") ?? []].find((b) => b.textContent.trim() === ${JSON.stringify(label)})
+          if (!b) return null
+          const r = b.getBoundingClientRect()
+          return { x: r.x + r.width / 2, y: r.y + r.height / 2 }
+        })()`)
+        if (!at) throw new Error(`the passkey prompt has no ${label} button${account ? ` for ${account}` : ""}`)
+        for (const type of ["mousePressed", "mouseReleased"]) await popup.send("Input.dispatchMouseEvent", { type, ...at, button: "left", clickCount: 1 })
+        // It closes, or shows what comes next (Strict's passphrase) in place of the prompt.
+        await until("the passkey prompt goes", async () => !(await targets()).some((t) => t.id === target.id) || !await popup.evaluate<boolean>(`!!${PASSKEY_CARD}`).catch(() => false), 10_000)
+        popup.close()
+      },
+      close: () => popup.close(),
+    }
+  }, ms)
+}
+/** That no passkey prompt shows for the page within `ms`: no badge and no popup prompt. */
+async function noPasskeyPrompt(worker: Worker, ms = 2000) {
+  const deadline = Date.now() + ms
+  while (Date.now() < deadline) {
+    if ((await badge(worker, origin)) !== "") return false
+    if (await passkeyPopup("a passkey popup", 1).then((p) => (p.close(), true), () => false)) return false
+    await Bun.sleep(200)
+  }
+  return true
+}
+async function verifyRegistration(response: any, expectedChallenge: string, how: string) {
+  const v = await verifyRegistrationResponse({ response, expectedChallenge, expectedOrigin: origin, expectedRPID: "localhost", requireUserVerification: false })
+  check(v.verified, `@simplewebauthn/server verifies the ${how} registration`)
+  return v.registrationInfo!
+}
+/** A Deadbolt registration: ES256, none attestation, synced, never user-verified (a passphrase isn't UV), counter 0. */
+async function deadboltRegistration(response: any, expectedChallenge: string, how: string) {
+  const info = await verifyRegistration(response, expectedChallenge, how)
+  check(info.aaguid === DEADBOLT_AAGUID, `${how}: made by Deadbolt (AAGUID ${info.aaguid})`)
+  check(info.fmt === "none" && info.credentialType === "public-key", `${how}: with none attestation`)
+  check(info.credentialDeviceType === "multiDevice" && info.credentialBackedUp, `${how}: flagged as a synced (backed-up) passkey`)
+  check(!info.userVerified, `${how}: not user-verified`)
+  check(info.credential.counter === 0, `${how}: with a zero sign counter`)
+  return info.credential
+}
+async function verifyAssertion(response: any, expectedChallenge: string, credential: WebAuthnCredential, how: string) {
+  const v = await verifyAuthenticationResponse({ response, expectedChallenge, expectedOrigin: origin, expectedRPID: "localhost", credential, requireUserVerification: false })
+  check(v.verified && !v.authenticationInfo.userVerified, `@simplewebauthn/server verifies the ${how} assertion, not user-verified`)
+  check(response.id === credential.id, `${how}: signed with the expected passkey`)
+}
+/** A registration from the page, saved in the popup; under Strict, `reauth` answers the passphrase prompt that follows. */
+async function registerInPage(page: Page, device: Page, name: string, username: string, how: string, reauth = false, userID?: Uint8Array<ArrayBuffer>) {
+  const reg = await generateRegistrationOptions({
+    rpName: "Acme", rpID: "localhost", userName: username, userID, attestationType: "none",
+    authenticatorSelection: { residentKey: "required", userVerification: "preferred" }, supportedAlgorithmIDs: [-7, -257],
+  })
+  await page.bringToFront()
+  await startCall(page, name, "create", reg)
+  const save = await passkeyPopup(`${how}: the popup asks to save the passkey`)
+  check(save.heading === "Save a passkey for localhost?", `${how}: the popup asks to save a passkey for localhost`)
+  check(save.note === (reauth ? "Deadbolt asks for your passphrase next." : ""), `${how}: the popup ${reauth ? "says the passphrase comes next" : "promises no Touch ID or passphrase"}`)
+  await save.press("Save")
+  if (reauth) await answerReauth(page, device, name, "passkey-create", how)
+  const made = await outcome(page, name, `${how}: registration settles`)
+  if (!made.ok) throw new Error(`${how}: ${made.value}`)
+  ownOrigin(made.value, how)
+  return deadboltRegistration(made.value, reg.challenge, how)
+}
+/** A modal sign-in, answered in the popup with `account`'s passkey; returns the assertion and its challenge. */
+async function signInInPage(page: Page, device: Page, name: string, account: string, how: string, { listed, verification = "preferred", reauth = false }: { listed?: string[]; verification?: "preferred" | "discouraged"; reauth?: boolean } = {}) {
+  const auth = await generateAuthenticationOptions({ rpID: "localhost", userVerification: verification })
+  await page.bringToFront()
+  await startCall(page, name, "get", auth)
+  const signIn = await passkeyPopup(`${how}: the popup asks which passkey`)
+  check(signIn.heading === "Sign in to localhost with a passkey?", `${how}: the popup asks to sign in to localhost`)
+  check(signIn.note === (reauth ? "Deadbolt asks for your passphrase next." : ""), `${how}: the popup ${reauth ? "says the passphrase comes next" : "promises no Touch ID or passphrase"}`)
+  if (listed) check(JSON.stringify([...signIn.accounts].sort()) === JSON.stringify([...listed].sort()), `${how}: the popup lists ${listed.join(", ")} (${signIn.accounts.join(", ")})`)
+  await signIn.press("Sign in", account)
+  if (reauth) await answerReauth(page, device, name, "passkey-get", how)
+  const r = await outcome(page, name, `${how}: sign-in settles`)
+  if (!r.ok) throw new Error(`${how}: ${r.value}`)
+  ownOrigin(r.value, how)
+  return { response: r.value, challenge: auth.challenge }
+}
+/** Strict's passphrase prompt for a passkey ceremony: nothing reaches the page before it; a wrong passphrase first, then the right one. */
+async function answerReauth(page: Page, device: Page, name: string, kind: "passkey-get" | "passkey-create", how: string) {
+  const waiting = await until(`${how}: the background waits on the passphrase`, async () => (await request(device, { type: "device-reauth" })).reply.reauth as { kind?: string; site?: string } | null, 15_000)
+  check(waiting.kind === kind && waiting.site === "localhost", `${how}: Strict holds the ${kind} for the passphrase`)
+  const prompt = await until(`${how}: the passphrase prompt shows`, () => promptShown(device, PASSKEY_REAUTH, "passkey-reauth"), 15_000)
+  try {
+    console.log(`note: ${how}: the passphrase prompt shows in the ${prompt.where} ("${await prompt.heading()}")`)
+    check(await result(page, name) === null, `${how}: Strict asks for the passphrase before the page gets anything`)
+    await prompt.answer("wrong fixture passphrase")
+    await until(`${how}: the prompt says the passphrase is wrong`, () => prompt.refused(), 30_000)
+    check(await result(page, name) === null, `${how}: a wrong passphrase is refused and the page still has nothing`)
+    await prompt.answer(passphrase)
+    check(await until(`${how}: the prompt goes`, () => prompt.gone(), 15_000), `${how}: the prompt goes once the passphrase is right`)
+  } finally {
+    prompt.close()
+  }
+}
+
+/** `deadbolt browser-host`, as the native-host build's browser starts it: framed JSON on stdin and stdout. */
+function browserHost() {
+  const child = Bun.spawn([deadbolt, "browser-host", `chrome-extension://${ID}/`], { env, stdin: "pipe", stdout: "pipe", stderr: "inherit" })
+  const waiting = new Map<number, (reply: Record<string, any>) => void>()
+  void (async () => {
+    let buffer = Buffer.alloc(0)
+    for await (const chunk of child.stdout as ReadableStream<Uint8Array>) {
+      buffer = Buffer.concat([buffer, chunk])
+      while (buffer.length >= 4 && buffer.length >= 4 + buffer.readUInt32LE(0)) {
+        const n = buffer.readUInt32LE(0)
+        const message = JSON.parse(buffer.subarray(4, 4 + n).toString()) as Record<string, any>
+        buffer = buffer.subarray(4 + n)
+        if (typeof message.id === "number") waiting.get(message.id)?.(message)
+      }
+    }
+  })().catch(() => {})
+  let next = 0
+  const send = (body: Record<string, unknown> & { type: string }, ms = 30_000) =>
+    new Promise<Record<string, any>>((ok, fail) => {
+      const id = ++next
+      const timer = setTimeout(() => { waiting.delete(id); fail(new Error(`browser-host ${body.type}: timed out`)) }, ms)
+      waiting.set(id, (reply) => {
+        clearTimeout(timer)
+        waiting.delete(id)
+        if (reply.type === "error") fail(new Error(`browser-host ${body.type}: ${reply.code}: ${reply.message}`))
+        else ok(reply)
+      })
+      const data = Buffer.from(JSON.stringify({ id, ...body }))
+      const head = Buffer.alloc(4)
+      head.writeUInt32LE(data.length)
+      child.stdin.write(Buffer.concat([head, data]))
+      void child.stdin.flush()
+    })
+  return { send, close: () => { void child.stdin.end(); child.kill() } }
+}
+/** The CLI vault's passkeys for this origin, after a CLI sync, through browser-host's passkey-list. */
+async function cliPasskeys(host: ReturnType<typeof browserHost>) {
+  await cli("sync").catch(() => {})
+  return (await host.send({ type: "passkey-list", origin })).passkeys as Array<{ ref: string; credentialId: string; username?: string }>
+}
+
+/**
+ * Passkeys in the browser's own vault, on a trusted localhost page: a
+ * registration (ES256, preferred UV) saved in the popup, a modal sign-in and
+ * an autofill one from the inline menu, each checked with
+ * @simplewebauthn/server; required UV handed to the browser's own WebAuthn
+ * (a virtual authenticator); Strict asking for the passphrase for preferred
+ * verification, never for discouraged, with UV false either way; and a
+ * passkey deleted from the device page. With the CLI: a browser passkey
+ * signs on the CLI, and a CLI passkey signs in the browser, both through
+ * `deadbolt browser-host` and synced, and the deletion reaches the CLI.
+ */
+async function passkeyFlows(device: Page, worker: Worker) {
+  const page = await newPage("passkeys")
+  // The browser's own WebAuthn, for the calls Deadbolt hands back to it.
+  const cdp = await context!.newCDPSession(page)
+  await cdp.send("WebAuthn.enable", { enableUI: false })
+  await cdp.send("WebAuthn.addVirtualAuthenticator", {
+    options: { protocol: "ctap2", transport: "internal", hasResidentKey: true, hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true },
+  })
+  const host = smoke ? null : browserHost()
+  try {
+    await page.goto(`${origin}/passkey`)
+    check((await devicePasskeys(device)).length === 0, "the browser vault starts with no passkeys")
+
+    // Registration and modal sign-in, under Comfortable.
+    const kit = await registerInPage(page, device, "register", "kit@acme.test", "browser registration")
+    const listed = await devicePasskeys(device)
+    const saved = listed.find((k) => k.credentialId === kit.id)
+    check(true, "device-passkeys never holds a passkey's private key")
+    check(listed.length === 1 && saved?.rpId === "localhost" && saved.username === "kit@acme.test" && !!saved.ref && !!saved.vault, "device-passkeys lists the new passkey with its relying party and username")
+    const modal = await signInInPage(page, device, "modal", "kit@acme.test", "modal sign-in", { listed: ["kit@acme.test"] })
+    await verifyAssertion(modal.response, modal.challenge, kit, "modal sign-in")
+
+    // Autofill sign-in: the passkey waits in the inline menu, with no prompt.
+    await page.reload()
+    const auto = await generateAuthenticationOptions({ rpID: "localhost", userVerification: "preferred" })
+    await startCall(page, "auto", "get", auto, { mediation: "conditional" })
+    check(await noPasskeyPrompt(worker), "an autofill sign-in opens no prompt by itself")
+    const menu = await menuOn(page, "#email", "kit@acme.test")
+    const row = menu.locator("button.row").filter({ has: menu.locator(".sub", { hasText: /^Passkey · \S/ }) })
+    check(await row.count() === 1 && (await row.locator(".title").textContent()) === "kit@acme.test", "the inline menu offers the passkey, with its vault")
+    await row.click()
+    const picked = await outcome(page, "auto", "autofill sign-in settles")
+    if (!picked.ok) throw new Error(`autofill sign-in: ${picked.value}`)
+    ownOrigin(picked.value, "autofill sign-in")
+    await verifyAssertion(picked.value, auto.challenge, kit, "autofill sign-in")
+
+    // Required UV: no Touch ID here, so the browser's own WebAuthn takes it without asking.
+    const required = await generateRegistrationOptions({
+      rpName: "Acme", rpID: "localhost", userName: "required@acme.test", attestationType: "none",
+      authenticatorSelection: { residentKey: "required", userVerification: "required" }, supportedAlgorithmIDs: [-7],
+    })
+    await page.bringToFront()
+    await startCall(page, "required", "create", required)
+    const native = await outcome(page, "required", "required-UV registration settles")
+    check(native.ok, `required UV registration settles in the browser (${native.ok ? "ok" : native.value})`)
+    const nativeInfo = await verifyRegistration(native.value, required.challenge, "required-UV")
+    check(nativeInfo.aaguid !== DEADBOLT_AAGUID && nativeInfo.userVerified, "required UV goes to the browser's own authenticator, which verifies the user")
+    check(await noPasskeyPrompt(worker, 500), "with no Deadbolt prompt")
+    const requiredGet = await generateAuthenticationOptions({ rpID: "localhost", userVerification: "required" })
+    await startCall(page, "required-get", "get", requiredGet)
+    const nativeGet = await outcome(page, "required-get", "required-UV sign-in settles")
+    check(nativeGet.ok && nativeGet.value.id === nativeInfo.credential.id, `a required-UV sign-in goes to the browser too (${nativeGet.ok ? nativeGet.value.id === nativeInfo.credential.id ? "the browser's passkey" : nativeGet.value.id : nativeGet.value})`)
+    check((await devicePasskeys(device)).length === 1, "the browser's own passkey never lands in Deadbolt")
+
+    let cliCredential: WebAuthnCredential | undefined
+    if (host) {
+      const hello = await host.send({ type: "hello" })
+      check((hello.capabilities as string[]).includes("passkeys"), "the CLI's browser-host takes passkeys")
+      // Browser to CLI: the CLI lists the browser's passkey and signs with it.
+      const onCli = await until("the browser's passkey reaches the CLI", async () => (await cliPasskeys(host)).find((k) => k.credentialId === kit.id), 90_000)
+      check(onCli.username === "kit@acme.test", "the browser's passkey syncs to the CLI")
+      const challenge = Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString("base64url")
+      const signed = await host.send({ type: "passkey-get", origin, ref: onCli.ref, challenge, userVerification: "preferred" }, 60_000)
+      await verifyAssertion({
+        id: signed.credentialId, rawId: signed.credentialId, type: "public-key", clientExtensionResults: {},
+        response: { clientDataJSON: signed.clientDataJSON, authenticatorData: signed.authenticatorData, signature: signed.signature, userHandle: signed.userHandle },
+      }, challenge, kit, "CLI browser-host (browser-made passkey)")
+
+      // CLI to browser: browser-host makes one; the browser syncs it and signs in with it.
+      const reg = await generateRegistrationOptions({ rpName: "Acme", rpID: "localhost", userName: "cli@acme.test", attestationType: "none", supportedAlgorithmIDs: [-7] })
+      const made = await host.send({ type: "passkey-create", origin, challenge: reg.challenge, user: { id: reg.user.id, name: "cli@acme.test" }, exclude: [], userVerification: "preferred" }, 60_000)
+      cliCredential = await deadboltRegistration({
+        id: made.credentialId, rawId: made.credentialId, type: "public-key", clientExtensionResults: {},
+        response: { clientDataJSON: made.clientDataJSON, attestationObject: made.attestationObject, transports: [] },
+      }, reg.challenge, "CLI browser-host registration")
+      await until("the CLI's passkey reaches the browser", async () => {
+        await request(device, { type: "device-sync", wait: true }).catch(() => {})
+        return (await devicePasskeys(device)).some((k) => k.credentialId === cliCredential!.id)
+      }, 90_000)
+      check(true, "the CLI's passkey syncs to the browser")
+      const fromCli = await signInInPage(page, device, "from-cli", "cli@acme.test", "sign-in with the CLI's passkey", { listed: ["kit@acme.test", "cli@acme.test"] })
+      await verifyAssertion(fromCli.response, fromCli.challenge, cliCredential, "sign-in with the CLI's passkey")
+    }
+
+    // Strict: preferred verification asks for the passphrase; discouraged doesn't; UV stays false.
+    await request(device, { type: "device-preset", preset: "strict" })
+    const strict = await signInInPage(page, device, "strict-get", "kit@acme.test", "Strict preferred sign-in", { reauth: true })
+    await verifyAssertion(strict.response, strict.challenge, kit, "Strict preferred sign-in")
+    const quiet = await signInInPage(page, device, "strict-discouraged", "kit@acme.test", "Strict discouraged sign-in", { verification: "discouraged" })
+    check((await request(device, { type: "device-reauth" })).reply.reauth === null, "Strict asks no passphrase when the site discourages verification")
+    await verifyAssertion(quiet.response, quiet.challenge, kit, "Strict discouraged sign-in")
+    const strictMade = await registerInPage(page, device, "strict-register", "strict@acme.test", "Strict preferred registration", true)
+    // Discoverable: Deadbolt has passkeys here, so only the required UV sends it to the browser.
+    await page.bringToFront()
+    await startCall(page, "strict-required", "get", await generateAuthenticationOptions({ rpID: "localhost", userVerification: "required" }))
+    const strictRequired = await outcome(page, "strict-required", "Strict required-UV sign-in settles")
+    check(strictRequired.ok && strictRequired.value.id === nativeInfo.credential.id, `Strict hands required UV to the browser too (${strictRequired.ok ? "the browser's passkey" : strictRequired.value})`)
+    await request(device, { type: "device-preset", preset: "comfortable" })
+
+    // The offline CI run also chooses among several accounts, not only the
+    // online run that adds a CLI key. Verify the chosen account's actual key.
+    const multiple = await signInInPage(page, device, "multiple", "strict@acme.test", "multiple-account sign-in", { listed: ["kit@acme.test", "strict@acme.test", ...(cliCredential ? ["cli@acme.test"] : [])] })
+    await verifyAssertion(multiple.response, multiple.challenge, strictMade, "multiple-account sign-in")
+
+    // The RP might discard a new registration. Reusing the user handle must
+    // leave the original credential usable with its original public key.
+    const again = await registerInPage(page, device, "same-user", "second@acme.test", "same-user registration", false, Uint8Array.from(Buffer.from(modal.response.response.userHandle, "base64url")))
+    const kept = await devicePasskeys(device)
+    const second = kept.find((k) => k.credentialId === again.id)!
+    check(again.id !== kit.id && second.ref !== saved!.ref && kept.some((k) => k.credentialId === kit.id), "same-user registration creates a separate item and preserves the old credential")
+    const original = await signInInPage(page, device, "original-again", "kit@acme.test", "original sign-in after same-user registration")
+    await verifyAssertion(original.response, original.challenge, kit, "original sign-in after same-user registration")
+    const repeated = await signInInPage(page, device, "second-sign-in", "second@acme.test", "new same-user sign-in")
+    await verifyAssertion(repeated.response, repeated.challenge, again, "new same-user sign-in")
+
+    // Rust enforces Strict even without the Settings UI or service-worker gate.
+    await request(device, { type: "device-preset", preset: "strict" })
+    for (const type of ["device-delete", "device-item-delete"]) for (const supplied of [undefined, "wrong fixture passphrase"]) {
+      const refused = await vault(worker, { type, ref: second.ref, ...(supplied === undefined ? {} : { passphrase: supplied }) })
+      check(refused.reply.type === "error" && refused.reply.code === (supplied === undefined ? "passphrase_needed" : "wrong_passphrase"), "Strict deletion refuses a missing or wrong passphrase in Rust")
+      check((await devicePasskeys(device)).some((k) => k.credentialId === again.id), "refused deletion leaves the new same-user credential intact")
+    }
+    // The general item-detail page must enforce the same deletion consent as
+    // Settings, and neither its listing nor secret endpoint may expose the key.
+    const detail = await request(device, { type: "device-item", ref: second.ref })
+    check(Array.isArray(detail.reply.fields) && !detail.reply.fields.some((f: { name: string }) => f.name === "private-key"), "the general item detail omits the passkey private key")
+    check(!(await command(device, { type: "device-secret", ref: second.ref, field: "private-key", passphrase })).ok, "even reauthentication cannot reveal the passkey private key")
+    await device.reload()
+    await device.locator(".list-view .vrow").filter({ hasText: "second@acme.test" }).locator("button.vrow-main").click()
+    const deleteItem = device.getByRole("button", { name: "Delete localhost", exact: true })
+    await deleteItem.click()
+    await deleteItem.click()
+    const deletionAuth = device.locator("form.reauth")
+    await deletionAuth.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
+    await deletionAuth.getByRole("button", { name: "Delete", exact: true }).click()
+    await deletionAuth.locator(".error").waitFor({ state: "visible" })
+    check((await devicePasskeys(device)).some((k) => k.credentialId === again.id), "item-detail deletion keeps the passkey after a wrong Strict passphrase")
+    await deletionAuth.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+    await deletionAuth.getByRole("button", { name: "Delete", exact: true }).click()
+    await until("item detail deletes the selected passkey", async () => !(await devicePasskeys(device)).some((k) => k.credentialId === again.id))
+    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Strict item-detail deletion removes only the selected credential")
+    // Delete through Settings under Strict, including confirmation and reauth,
+    // not a worker shortcut. The page refreshes its preset from the service worker.
+    await device.reload()
+    await device.bringToFront()
+    const settings = device.getByRole("button", { name: "Settings", exact: true })
+    if (await settings.getAttribute("aria-pressed") !== "true") await settings.click()
+    const remove = device.getByRole("button", { name: "Delete passkey kit@acme.test for localhost", exact: true })
+    await remove.click()
+    const confirmation = device.locator(".vrow.confirming").filter({ hasText: "Delete passkey for localhost?" })
+    await confirmation.getByRole("button", { name: "Cancel", exact: true }).click()
+    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "cancelling deletion keeps the passkey")
+    await remove.click()
+    await confirmation.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
+    // A sync/status refresh must not discard the confirmation or its input.
+    // Observe the devices repaint to know App.refresh has actually completed.
+    await device.evaluate(() => {
+      const rows = document.querySelector(".settings .rows")!
+      rows.removeAttribute("data-refreshed")
+      const observer = new MutationObserver(() => {
+        observer.disconnect()
+        rows.setAttribute("data-refreshed", "true")
+      })
+      observer.observe(rows, { childList: true })
+    })
+    const current = (await request(device, { type: "device-status" })).status
+    await worker.evaluate((status) => chrome.runtime.sendMessage({ type: "db:status", status, change: "items" }), current)
+    await device.locator('.settings .rows[data-refreshed="true"]').waitFor()
+    check(await confirmation.count() === 1, "a vault refresh preserves the passkey deletion confirmation")
+    check(await confirmation.getByLabel("Passphrase", { exact: true }).inputValue() === "wrong fixture passphrase", "a vault refresh preserves the entered deletion passphrase")
+    await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
+    await confirmation.getByText("That passphrase isn't right.", { exact: true }).waitFor().catch(async (error) => {
+      console.error("Settings deletion confirmation:", await confirmation.allTextContents())
+      console.error("Settings deletion controls:", await confirmation.locator("button").allTextContents())
+      throw error
+    })
+    check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "Settings keeps the passkey after a wrong Strict passphrase")
+    await confirmation.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+    await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
+    await until("Settings deletes the passkey", async () => !(await devicePasskeys(device)).some((k) => k.credentialId === kit.id))
+    await request(device, { type: "device-preset", preset: "comfortable" })
+    await settings.click()
+    const left = (await devicePasskeys(device)).map((k) => k.credentialId)
+    check(!left.includes(kit.id) && left.includes(strictMade.id) && (!cliCredential || left.includes(cliCredential.id)), "device-delete removes the passkey, and only it")
+    const auth = await generateAuthenticationOptions({ rpID: "localhost" })
+    await page.bringToFront()
+    await startCall(page, "after-delete", "get", auth)
+    const after = await passkeyPopup("a sign-in after the deletion asks which passkey")
+    check(!after.accounts.includes("kit@acme.test") && after.accounts.includes("strict@acme.test"), `the deleted passkey isn't offered (${after.accounts.join(", ")})`)
+    await after.press("Cancel")
+    const cancelled = await outcome(page, "after-delete", "cancelled sign-in settles")
+    check(!cancelled.ok && String(cancelled.value).startsWith("NotAllowedError"), `Cancel rejects with NotAllowedError (${cancelled.value})`)
+    if (host) {
+      await until("the deletion reaches the CLI", async () => {
+        const ids = (await cliPasskeys(host)).map((k) => k.credentialId)
+        return !ids.includes(kit.id) && ids.includes(cliCredential!.id) && ids.includes(strictMade.id)
+      }, 90_000)
+      check(true, "the deletion syncs to the CLI")
+    }
+  } finally {
+    await request(device, { type: "device-preset", preset: "comfortable" }).catch(() => {})
+    host?.close()
+    await page.close()
+  }
+}
+
 async function addLogin(device: Page, title: string, username: string, password: string, website = origin) {
   await device.getByRole("button", { name: "Add an item", exact: true }).click()
   await device.getByRole("button", { name: "Login", exact: true }).click()
@@ -887,8 +1347,9 @@ async function joinExistingVault(device: Page, worker: Worker) {
   // Not logins: the forms flows fill them, and the counts leave them out.
   await cli(...IDENTITY)
   await cli(...CARD)
+  const pairChoice = device.getByRole("button", { name: /^Pair with (?:an existing device|Deadbolt on this (?:Mac|computer))$/ })
   const begin = async () => {
-    await device.getByRole("button", { name: /^Pair with (an existing device|Deadbolt on this (Mac|computer))$/ }).click()
+    await pairChoice.click()
     return until("extension publishes its join code", async () => {
       const r = (await request(device, { type: "device-join-status" })).reply
       return r.phase === "waiting" && typeof r.code === "string" ? r.code : null
@@ -896,7 +1357,7 @@ async function joinExistingVault(device: Page, worker: Worker) {
   }
   const abandoned = await begin()
   await device.getByRole("button", { name: "Cancel", exact: true }).click()
-  await device.getByRole("button", { name: /^Pair with (an existing device|Deadbolt on this (Mac|computer))$/ }).waitFor()
+  await pairChoice.waitFor()
   check((await request(device, { type: "device-join-status" })).reply.phase === "idle", "cancel discards the pending join")
   check(await state(device) === "not-set-up", "cancel does not create a browser vault")
 
@@ -1067,6 +1528,25 @@ async function biometricUnlock(device: Page, worker: Worker) {
     return Array.from(new Uint8Array(result.prf.results.first), b => b.toString(16).padStart(2, "0")).join("")
   }, info.reply.token)
   check((await command(device, { type: "device-secret", ref, prf })).ok, "Strict reveal accepts the authenticator's PRF output")
+  // Unlock PRF is not website-passkey consent: both deletion routes and
+  // ceremony authorization must still require the explicit Strict passphrase.
+  const passkeys = await devicePasskeys(device)
+  const passkey = passkeys.find((k) => k.rpId === "localhost")!
+  const listed = await vault(worker, { type: "passkey-list", origin, rpId: "localhost" })
+  check(listed.reply.canVerify === false && listed.reply.asksPassphrase === true, "PRF unlock does not advertise website UV or weaken Strict passkey policy")
+  for (const type of ["device-delete", "device-item-delete"]) {
+    const denied = await vault(worker, { type, ref: passkey.ref, prf })
+    check(denied.reply.type === "error" && denied.reply.code === "passphrase_needed", "valid unlock PRF cannot bypass Strict passkey deletion")
+  }
+  const ceremony = {
+    type: "passkey-get", origin, rpId: "localhost", ref: passkey.ref,
+    challenge: Buffer.from("strict-prf-separation").toString("base64url"), userVerification: "preferred",
+  }
+  const assertion = await vault(worker, { ...ceremony, prf })
+  check(assertion.reply.type === "error" && assertion.reply.code === "passphrase_needed", "valid unlock PRF cannot bypass Strict website-passkey signing")
+  const denied = await vault(worker, { type: "passkey-authorize", prf, ceremony })
+  check(denied.reply.type === "error" && denied.reply.code === "passphrase_needed", "valid unlock PRF cannot authorize a Strict website-passkey ceremony")
+  check((await devicePasskeys(device)).length === passkeys.length, "PRF refusal preserves every website passkey")
   check(!(await command(device, { type: "device-secret", ref, prf: "00".repeat(32) })).ok, "Strict reveal rejects a fake PRF output")
   if (!smoke) {
     const forms = await vault(worker, { type: "forms", origin, kinds: ["card"] })
@@ -1131,7 +1611,13 @@ try {
   }
   // The smoke's copy is one the CLI keeps (`deadbolt update` leaves this
   // marker), so first run offers Deadbolt on this computer by name.
-  if (smoke) await writeFile(join(dist, ".deadbolt-extension"), "manifest.json\n")
+  if (smoke) {
+    cliMarker = await readFile(join(dist, ".deadbolt-extension")).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null
+      throw error
+    })
+    await writeFile(join(dist, ".deadbolt-extension"), "manifest.json\n")
+  }
   let { worker, device } = await launch()
   check((await readdir(join(profile, "NativeMessagingHosts")).catch(() => [])).filter((name) => name.endsWith(".json")).length === 0, "profile has no native host manifest")
   if (smoke) {
@@ -1216,12 +1702,14 @@ try {
   }
 
   count += await siteFlows(device, worker)
+  await passkeyFlows(device, worker)
   if (!smoke) {
     count += await demoFlows(device, worker)
     await formFlows(device, worker, `${origin}/checkout`)
     await formFlows(device, worker, `${DEMO}/checkout`)
   }
 
+  const keptPasskeys = (await devicePasskeys(device)).map((k) => k.credentialId).sort()
   await unlockLifetime(device, worker)
   worker = await inlineUnlock(device, worker)
   await biometricUnlock(device, worker)
@@ -1234,9 +1722,10 @@ try {
     const bytes = await (await handle.getFile()).arrayBuffer()
     const text = new TextDecoder().decode(bytes)
     return bytes.byteLength > 0 && markers.every((marker) => !text.includes(marker))
-  }, [browserPassword, cliPassword, "browser@example.test", "From CLI", "From browser", "saved@acme.test", "Acme accounts", "4242424242424242"]))
+  }, [browserPassword, cliPassword, "browser@example.test", "From CLI", "From browser", "saved@acme.test", "Acme accounts", "4242424242424242", "strict@acme.test"]))
   check(encrypted, "OPFS contains no plaintext credential or item-label markers")
-  check(!(await command(device, { type: "device-items" })).ok, "locked vault refuses login listing")
+  check(!(await command(device, { type: "device-items" })).ok, "locked vault refuses item listing")
+  check(!(await command(device, { type: "device-passkeys" })).ok, "locked vault refuses passkey listing")
   check(!(await command(device, { type: "device-unlock", passphrase: "wrong fixture passphrase" })).ok, "wrong passphrase is rejected")
   const unlocked = await request(device, { type: "device-unlock", passphrase })
   console.log(`MEASURE wasm unlock real Argon2id (64 MiB, 3 passes, 1 lane), RPC wall time: ${unlocked.ms.toFixed(1)} ms`)
@@ -1256,15 +1745,22 @@ try {
   await request(restarted.device, { type: "device-unlock", passphrase })
   await until("encrypted vault survives browser restart", async () => (await logins(restarted.device)).length === count, 60_000)
   check(true, "encrypted vault survives browser restart")
+  check(JSON.stringify((await devicePasskeys(restarted.device)).map((k) => k.credentialId).sort()) === JSON.stringify(keptPasskeys), "passkeys and deletions survive browser restart")
   console.log(smoke
-    ? "PASS: standalone smoke: create, save, list, actual fill, subdomain fill, save and update offers, generated sign-up and change, lock/unlock and restart, offline"
+    ? "PASS: standalone smoke: create, save, list, actual fill, subdomain fill, save and update offers, generated sign-up and change, passkeys, lock/unlock and restart, offline"
     : joinExisting
-      ? "PASS: standalone joins existing CLI vault, cancel/retry, five logins, TOTP, actual fill, site and demo save/update/generate, identity and card fills with Strict re-auth, lock/unlock and restart"
-      : "PASS: standalone create, pair, background sync both ways, quick answers during sync, actual fill, site and demo save/update/generate, identity and card fills with Strict re-auth, lock/unlock and restart")
+      ? "PASS: standalone joins existing CLI vault, cancel/retry, five logins, TOTP, actual fill, site and demo save/update/generate, identity and card fills with Strict re-auth, passkeys synced both ways, lock/unlock and restart"
+      : "PASS: standalone create, pair, background sync both ways, quick answers during sync, actual fill, site and demo save/update/generate, identity and card fills with Strict re-auth, passkeys synced both ways, lock/unlock and restart")
 } finally {
   if (suspended) process.kill(suspended, "SIGCONT")
   joining?.kill()
   await context?.close()
+  // An explicitly supplied build may be reused by full/join runs. Restore its
+  // install provenance instead of leaking this smoke-only fixture into them.
+  if (cliMarker !== undefined) {
+    if (cliMarker === null) await rm(join(dist, ".deadbolt-extension"), { force: true })
+    else await writeFile(join(dist, ".deadbolt-extension"), cliMarker)
+  }
   if (!smoke) await cli("agent", "stop").catch(() => {})
   server.stop(true)
   if (video && recordings.length) {

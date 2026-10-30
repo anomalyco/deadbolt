@@ -3,11 +3,12 @@
 // never copied: anything on the clipboard can be read by every app, and
 // clipboard managers keep it.
 
-import type { PasskeyChoice, PasskeyPrompt, PickReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
+import type { PickReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 import type { Account } from "./protocol"
 import { provider } from "./signin"
 import { h, icon, ICONS, monogram, svg } from "./ui/dom"
 import { offerCard } from "./ui/offer"
+import { passkeyCard } from "./ui/passkey"
 import { learnLine, learningCard, savingOffLine } from "./ui/site-notes"
 import { mountVault } from "./vault/app"
 import { animateTo, reducedMotion, ROLL_CSS, timing } from "./ui/motion"
@@ -216,76 +217,6 @@ function showError(message: string) {
   el.hidden = false
 }
 
-/**
- * A page's passkey call, asked here rather than in the page: "Sign in to
- * acme.com with a passkey?" or "Save a passkey for acme.com?".
- */
-function passkeyCard(prompt: PasskeyPrompt): HTMLElement {
-  const status = h("p", { class: "error", role: "status" })
-  status.hidden = true
-  const card = h("section", { class: "offer passkey-prompt", "aria-label": prompt.kind === "get" ? "Sign in with a passkey" : "Save a passkey" })
-  const choose = async (choice: PasskeyChoice, button: HTMLElement) => {
-    if (tabId === undefined) return
-    card.classList.add("busy")
-    button.setAttribute("disabled", "")
-    const reply = await send<{ ok: boolean }>({ type: "pk:popup-choose", tabId, id: prompt.id, choice })
-    // Touch ID, or the page, takes it from here.
-    if (reply?.ok) return window.close()
-    status.textContent = "This request has ended."
-    status.hidden = false
-    setTimeout(() => void render(true), 1200)
-  }
-  const button = (label: string, choice: PasskeyChoice, primary = false) => {
-    const b = h("button", { class: `btn${primary ? " primary" : ""}`, type: "button" }, label)
-    b.addEventListener("click", () => void choose(choice, b))
-    return b
-  }
-  const touch = prompt.verify ? h("p", { class: "note" }, icon("lock"), h("span", {}, "Deadbolt asks for Touch ID next.")) : null
-  const other = button("Use another device", { action: "fallback" })
-  if (prompt.kind === "get") {
-    card.append(
-      h("h2", {}, `Sign in to ${prompt.rpId} with a passkey?`),
-      h(
-        "div",
-        { class: "list" },
-        ...prompt.passkeys.map((k, i) =>
-          h(
-            "div",
-            { class: "account" },
-            h("span", { class: "tile", "aria-hidden": "true" }, icon("passkey")),
-            h("div", { class: "account-text" }, h("div", { class: "account-title" }, k.username || "Passkey"), h("div", { class: "account-sub" }, `Passkey · ${k.vault}`)),
-            button("Sign in", { action: "use", ref: k.ref }, i === 0),
-          ),
-        ),
-      ),
-      status,
-      touch ?? "",
-      h("div", { class: "buttons" }, other, button("Cancel", { action: "cancel" })),
-    )
-  } else if (prompt.registered) {
-    card.append(
-      h("h2", {}, "This passkey is already saved"),
-      para(`Deadbolt already has a passkey for this account on ${prompt.rpId}.`),
-      status,
-      h("div", { class: "buttons" }, other, button("OK", { action: "cancel" }, true)),
-    )
-  } else {
-    card.append(
-      h("h2", {}, `Save a passkey for ${prompt.rpId}?`),
-      h(
-        "div",
-        { class: "box" },
-        h("div", { class: "line" }, h("span", { class: "muted" }, "Username"), h("span", { class: "value" }, prompt.username || "None")),
-        h("div", { class: "line" }, h("span", { class: "muted" }, "Site"), h("span", { class: "value" }, prompt.rpId)),
-      ),
-      status,
-      touch ?? "",
-      h("div", { class: "buttons" }, other, button("Cancel", { action: "cancel" }), button("Save", { action: "save" }, true)),
-    )
-  }
-  return card
-}
-
 /** With an offer showing, its Save is the one primary button. */
 function siteBody(reply: PopupReply): HTMLElement {
   if (reply.unfillable === "scheme") return state(icon("keyhole"), "Nothing to fill here", para("Open a website to see its logins."))
@@ -364,7 +295,10 @@ function paint(reply: PopupReply | null, changed: boolean) {
       ...(settingsOpen
         ? [body]
         : reply?.passkey
-        ? [passkeyCard(reply.passkey)]
+        ? [
+            // Touch ID, or the page, takes it from here.
+            passkeyCard(reply.passkey, tabId, { chosen: () => window.close(), ended: () => void render(true) }),
+          ]
         : [
             reply?.learning ? learningCard(reply.learning, tabId, () => void render(true)) : null,
             reply?.offer ? offerCard(reply.offer, tabId, () => void render(true)) : null,

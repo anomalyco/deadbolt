@@ -23,6 +23,8 @@ export interface SendOptions {
 }
 
 export type Listener = (status: Status, change?: Change) => void
+export type ReauthBody = Extract<RequestBody, { type: "fill-form" | "passkey-create" | "passkey-get" }>
+export type ReauthReply = ReplyFor[ReauthBody["type"]]
 
 export interface VaultBackend {
   status: Status
@@ -43,7 +45,7 @@ export interface VaultBackend {
    * once with it. Rejects if the user cancels, Deadbolt locks, `signal`
    * aborts (the page navigated) or nobody answers in time.
    */
-  reauth?(body: Extract<RequestBody, { type: "fill-form" }>, ask: ReauthAsk, signal: AbortSignal): Promise<ReplyFor["fill-form"]>
+  reauth?<T extends ReauthBody["type"]>(body: Extract<ReauthBody, { type: T }>, ask: ReauthAsk, signal: AbortSignal): Promise<ReplyFor[T]>
   /** The browser-only vault only: whether a card's number or code asks for the passphrase (Strict), so the menu can say so. */
   asksPassphrase?(): Promise<boolean>
 }
