@@ -887,6 +887,10 @@ pub enum ItemError {
     Empty,
     #[error("invalid item source")]
     InvalidSource,
+    #[error("invalid tag {0:?}: use 1-128 characters with non-empty / segments and no leading #")]
+    InvalidTag(String),
+    #[error("an item can have at most {} tags", crate::tag::MAX_TAGS)]
+    TooManyTags,
 }
 
 fn invalid(field: &str, reason: impl Into<String>) -> ItemError {
@@ -1161,7 +1165,16 @@ pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError>
         }
         Change::Name(Some(name)) if !valid_item_name(name) => Err(ItemError::InvalidItemName),
         Change::Source(Some(source)) if !valid_source(source) => Err(ItemError::InvalidSource),
-        Change::Name(_) | Change::Delete { .. } | Change::Source(_) | Change::Restore => Ok(()),
+        Change::TagAdd(tag) | Change::TagRemove(tag) if !crate::tag::valid_tag(tag) => {
+            Err(ItemError::InvalidTag(tag.clone()))
+        }
+        Change::Name(_)
+        | Change::Delete { .. }
+        | Change::Source(_)
+        | Change::Restore
+        | Change::Favorite(_)
+        | Change::TagAdd(_)
+        | Change::TagRemove(_) => Ok(()),
     }
 }
 
@@ -1172,9 +1185,35 @@ pub fn check_create(
     fields: &BTreeMap<String, Field>,
     source: Option<&Source>,
 ) -> Result<(), ItemError> {
+    check_create_with(
+        kind,
+        name,
+        fields,
+        source,
+        &std::collections::BTreeSet::new(),
+    )
+}
+
+/// Checks a `Create` op carrying `tags`.
+pub fn check_create_with(
+    kind: &str,
+    name: Option<&str>,
+    fields: &BTreeMap<String, Field>,
+    source: Option<&Source>,
+    tags: &std::collections::BTreeSet<String>,
+) -> Result<(), ItemError> {
     let schema = schema(kind).ok_or_else(|| ItemError::UnknownType(kind.into()))?;
     if source.is_some_and(|s| !valid_source(s)) {
         return Err(ItemError::InvalidSource);
+    }
+    if tags.len() > crate::tag::MAX_TAGS {
+        return Err(ItemError::TooManyTags);
+    }
+    let mut folded = std::collections::BTreeSet::new();
+    for tag in tags {
+        if !crate::tag::valid_tag(tag) || !folded.insert(crate::tag::fold_tag(tag)) {
+            return Err(ItemError::InvalidTag(tag.clone()));
+        }
     }
     if let Some(missing) = schema
         .fields

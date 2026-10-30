@@ -90,15 +90,26 @@ pub enum Job {
         kind: String,
         name: Option<String>,
         fields: Vec<FieldInput>,
+        favorite: bool,
+        tags: Vec<String>,
         seq: u64,
     },
-    /// Changes an item in one entry: sets `fields`, removes `unset` and
-    /// renames it (`Some("")` clears the name).
+    /// Changes an item in one entry: sets `fields`, removes `unset`, updates
+    /// `favorite` / tags, and renames it (`Some("")` clears the name).
     Save {
         id: String,
         name: Option<String>,
         fields: Vec<FieldInput>,
         unset: Vec<String>,
+        favorite: Option<bool>,
+        add_tags: Vec<String>,
+        remove_tags: Vec<String>,
+        seq: u64,
+    },
+    /// Stars or unstars an item in place (`⌘D`).
+    Favorite {
+        id: String,
+        favorite: bool,
         seq: u64,
     },
     Remove {
@@ -195,6 +206,10 @@ pub enum Done {
         seq: u64,
         result: Result<ItemInfo, Failure>,
     },
+    Favorited {
+        seq: u64,
+        result: Result<ItemInfo, Failure>,
+    },
     Removed {
         seq: u64,
         result: Result<ItemInfo, Failure>,
@@ -253,7 +268,9 @@ impl Values {
             detail: self.0.detail.take(),
             fields: std::mem::take(&mut self.0.fields),
             source: self.0.source.take(),
-            deleted_at: None,
+            favorite: self.0.favorite,
+            tags: std::mem::take(&mut self.0.tags),
+            deleted_at: self.0.deleted_at,
         };
         (item, self.1.take())
     }

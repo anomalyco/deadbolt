@@ -87,8 +87,8 @@ pub struct Mapped {
 
 impl Mapped {
     /// What its copy in `account` records, holding what `digest` is of.
-    /// One taken over records the fields 1Password wrote, unless they are
-    /// too many to: then a later sync removes none of its fields.
+    /// One taken over records the fields and tags 1Password wrote, unless they
+    /// are too many to: then a later sync removes none of its fields or tags.
     pub fn source(&self, account: &str, origin: Origin, digest: String) -> Source {
         let mut version = MirrorVersion {
             updated: self.updated,
@@ -98,12 +98,22 @@ impl Mapped {
                 Origin::Adopted => self.item.fields.keys().cloned().collect(),
                 Origin::Sync | Origin::Import => BTreeSet::new(),
             },
+            tags: match origin {
+                Origin::Adopted => self
+                    .item
+                    .tags
+                    .iter()
+                    .map(|t| deadbolt_core::tag::fold_tag(t))
+                    .collect(),
+                Origin::Sync | Origin::Import => BTreeSet::new(),
+            },
         };
         let source = onepassword::source(account, &self.vault, &self.id, &version);
         if deadbolt_core::item::valid_source(&source) {
             return source;
         }
         version.fields.clear();
+        version.tags.clear();
         onepassword::source(account, &self.vault, &self.id, &version)
     }
 }
@@ -390,6 +400,8 @@ pub(crate) mod tests {
                 fields: (0..count)
                     .map(|i| (format!("{i:0>60}"), Field::new(FieldType::Text, "v")))
                     .collect(),
+                favorite: true,
+                tags: ["work/aws".into(), "env:prod,1".into()].into(),
                 source: None,
                 sign_in_link: None,
             },
@@ -403,11 +415,13 @@ pub(crate) mod tests {
             MirrorVersion::parse(&source.version).unwrap()
         };
         assert_eq!(version(3, Origin::Adopted).fields.len(), 3);
+        assert_eq!(version(3, Origin::Adopted).tags.len(), 2);
         assert!(version(3, Origin::Sync).fields.is_empty());
+        assert!(version(3, Origin::Sync).tags.is_empty());
         // Too many to record: none, so a later sync removes none.
         let many = version(100, Origin::Adopted);
         assert_eq!(many.origin, Origin::Adopted);
-        assert!(many.fields.is_empty());
+        assert!(many.fields.is_empty() && many.tags.is_empty());
     }
 
     #[test]

@@ -116,12 +116,21 @@ impl Cache {
                 detail: item.detail.clone(),
                 fields,
                 source: item.source.clone(),
+                favorite: item.favorite,
+                tags: item.tags.clone(),
                 deleted_at: None,
             },
             code: code.map(|c| (c.clone(), now)),
         });
         while self.entries.len() > CAP {
             self.entries.pop_front();
+        }
+    }
+
+    /// Updates `favorite` on a cached page if kept.
+    pub fn set_favorite(&mut self, id: &str, favorite: bool) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.item.id == id) {
+            entry.item.favorite = favorite;
         }
     }
 }
@@ -148,6 +157,8 @@ mod tests {
                 field("otp", "otp", ""),
             ],
             source: None,
+            favorite: false,
+            tags: Vec::new(),
             deleted_at: None,
         }
     }

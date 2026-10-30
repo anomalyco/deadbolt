@@ -710,6 +710,12 @@ fn edit_login(body: &Value) -> Result<Value> {
     let title = policy::login_title(text(input, "title")?).map_err(Error::Protocol)?;
     let password = text(input, "password")?;
     let username = text(input, "username")?.trim();
+    let favorite = match input.get("favorite") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err(Error::Protocol("favorite is true or false")),
+    };
+    let tags = items::parse_tags(input.get("tags"))?;
     let reply = state().with(|s| {
         // The core keeps no empty field: a login without a username has none.
         let mut fields = vec![("url".to_owned(), Field::new(FieldType::Url, &url))];
@@ -756,13 +762,21 @@ fn edit_login(body: &Value) -> Result<Value> {
                     .into_iter()
                     .map(|(name, value)| DataOp::set(id, name, value)),
             );
+            ops.extend(items::tag_ops(&item, favorite, tags.as_deref()));
             staged.write(&s.secret, ops)?;
             (id, false)
         } else {
             if password.is_empty() {
                 return Err(Error::Protocol("A new login needs a password"));
             }
-            let (id, _) = staged.create_item(&s.secret, "login", Some(title.into()), fields)?;
+            let (id, _) = staged.create_item_with(
+                &s.secret,
+                "login",
+                Some(title.into()),
+                fields,
+                favorite.unwrap_or(false),
+                tags.unwrap_or_default(),
+            )?;
             (id, true)
         };
         s.commit(staged)?;

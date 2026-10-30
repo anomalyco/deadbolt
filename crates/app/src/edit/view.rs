@@ -15,7 +15,7 @@ use rune_kit::{
 
 use super::{Conflict, Delete, Field, Form, Input, LENGTHS, editable, type_matches};
 use crate::model::{App, title_case};
-use crate::view::theme::{PLUS, REGENERATE, TRASH, kind_icon, kind_name};
+use crate::view::theme::{PLUS, REGENERATE, STAR, STAR_FILL, TRASH, kind_icon, kind_name};
 use crate::view::{Notice, Severity};
 use crate::view::{replace, reveal_button, scroll_col};
 
@@ -32,8 +32,16 @@ const FADE: Spring = Spring::new(0.2, 0.0);
 /// The detail pane while a form is open.
 pub fn form(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
     let mut fields = col().key("fields").w_full().gap(14.0);
+    let mut tags_placed = false;
     for i in 0..f.fields.len() {
+        if !tags_placed && f.kind != "note" && f.fields[i].name == "notes" {
+            fields = fields.child(super::tags::field(s, k, f, layer));
+            tags_placed = true;
+        }
         fields = fields.child(field(s, k, f, i));
+    }
+    if !tags_placed {
+        fields = fields.child(super::tags::field(s, k, f, layer));
     }
     let form = col()
         .key("form")
@@ -78,14 +86,35 @@ fn head(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
         .on_submit(|s: &mut App, _| s.save());
     let name = quiet(k, name.build(k), &f.name, invalid)
         .key("name")
-        .label("Name");
+        .label("Name")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0);
+    let fav_label = if f.favorite { "Unfavorite" } else { "Favorite" };
+    let star = IconButton::new(if f.favorite { &STAR_FILL } else { &STAR })
+        .variant(IconButtonVariant::GhostMuted)
+        .label(fav_label)
+        .help(fav_label)
+        .shortcut("⌘D")
+        .disabled(f.saving)
+        .on_press(|s: &mut App| s.toggle_form_favorite())
+        .build(k)
+        .key("form-favorite");
     let mut head = col().key("head").w_full().gap(8.0);
     if f.is_new() {
         // Spaced from the name as the fields are from each other.
         head = head.child(type_row(s, k, f, layer).mb(6.0));
     }
-    head.child(name)
-        .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
+    head.child(
+        row()
+            .key("name-row")
+            .w_full()
+            .gap(6.0)
+            .center_y()
+            .child(name)
+            .child(star),
+    )
+    .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
 }
 
 /// The New Item form's type: one row with the type's icon, name and a
@@ -486,7 +515,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
 
 /// A focused field keeps a neutral edge instead of the kit's blue ring;
 /// the caret says where typing goes.
-fn quiet(k: &Kit, field: El, edit: &rune::TextEdit, invalid: bool) -> El {
+pub(super) fn quiet(k: &Kit, field: El, edit: &rune::TextEdit, invalid: bool) -> El {
     if edit.focused && !invalid {
         field.outline(1.0, 0.0, k.c.border_strong)
     } else {
@@ -580,7 +609,7 @@ fn disable(mut control: SegmentedControl, segments: usize, disabled: bool) -> Se
     control
 }
 
-fn problem(k: &Kit, key: &str, message: &str) -> El {
+pub(super) fn problem(k: &Kit, key: &str, message: &str) -> El {
     text(message.to_owned())
         .key(key)
         .role("alert")
@@ -640,7 +669,18 @@ fn foot(k: &Kit, f: &Form) -> El {
 /// While its confirm shows, the delete button is the confirm.
 pub fn item_actions(s: &App, k: &Kit) -> El {
     let ready = s.detail.is_some();
-    let mut actions = row().key("item-actions").gap(4.0).center_y();
+    let fav = s.selected_item().is_some_and(|i| i.favorite);
+    let fav_label = if fav { "Unfavorite" } else { "Favorite" };
+    let mut actions = row().key("item-actions").gap(4.0).center_y().child(
+        IconButton::new(if fav { &STAR_FILL } else { &STAR })
+            .variant(IconButtonVariant::GhostMuted)
+            .label(fav_label)
+            .help(fav_label)
+            .shortcut("⌘D")
+            .on_press_tx(|s: &mut App, tx| s.toggle_favorite(tx))
+            .build(k)
+            .key("favorite"),
+    );
     if s.edit.delete.is_none() {
         actions = actions.child(
             IconButton::new(&TRASH)

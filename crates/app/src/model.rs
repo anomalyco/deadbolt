@@ -3,6 +3,7 @@
 //! `keys.rs` hold each capability's transitions.
 
 mod copy;
+mod favorite;
 mod otp;
 mod selection;
 mod unlock;
@@ -11,6 +12,7 @@ mod unlock;
 mod tests;
 
 pub use copy::{BAR_W, CLEAR_AFTER, Copy};
+pub use favorite::{sort_items, tag_token};
 pub use otp::{CODE_BAR, CODE_SLACK, Otp, group_code, has_code};
 pub use selection::HOLD;
 
@@ -63,6 +65,8 @@ pub struct App {
     /// Why enabling or disabling Touch ID failed, shown in Settings.
     pub touch_id_error: Option<String>,
     pub search: TextEdit,
+    /// Filter inside `⌘K`'s tag picker (`palette::tags`).
+    pub tag_filter: TextEdit,
     pub items: Vec<ItemInfo>,
     pub loaded: bool,
     pub selected: Option<String>,
@@ -106,6 +110,8 @@ pub struct App {
     generation: u64,
     /// Tells the current `Job::Get` from older ones; also bumped on forgetting.
     seq: u64,
+    /// Tells the newest `Job::Favorite` from older ones.
+    fav_seq: u64,
     /// A copy waiting for its item's values: (seq, field).
     pending_copy: Option<(u64, String)>,
 }
@@ -132,6 +138,7 @@ impl App {
             touch_id_busy: false,
             touch_id_error: None,
             search: TextEdit::new(""),
+            tag_filter: TextEdit::new(""),
             items: Vec::new(),
             loaded: false,
             selected: None,
@@ -159,6 +166,7 @@ impl App {
             clock: 0.0,
             generation: 0,
             seq: 0,
+            fav_seq: 0,
             pending_copy: None,
         }
     }
@@ -253,6 +261,7 @@ impl App {
             } => self.on_imported(seq, applied, result, tx),
             Done::Mirrored { seq, result } => self.on_mirrored(seq, result, tx),
             Done::Saved { seq, result } => self.on_saved(seq, result, tx),
+            Done::Favorited { seq, result } => self.on_favorited(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
             Done::FileSaved(result) => match result {
@@ -523,12 +532,17 @@ impl App {
     pub(crate) fn forget_items(&mut self) {
         self.generation += 1;
         self.seq += 1;
+        self.fav_seq += 1;
         self.set_detail(None);
         self.forget_pages();
+        for item in &mut self.items {
+            forget(item);
+        }
         self.items.clear();
         self.loaded = false;
         self.selected = None;
         self.search = TextEdit::new("");
+        self.tag_filter = TextEdit::new("");
         self.nav = crate::keys::Nav::default();
         self.pending_copy = None;
         self.notice = None;
@@ -584,10 +598,13 @@ impl App {
     }
 }
 
-/// Wipes an item's values.
+/// Wipes an item's values and tags.
 pub fn forget(item: &mut ItemInfo) {
     for FieldInfo { value, .. } in &mut item.fields {
         value.zeroize();
+    }
+    for tag in &mut item.tags {
+        tag.zeroize();
     }
 }
 

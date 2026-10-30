@@ -285,13 +285,14 @@ pub fn searchable(item: &Item) -> Vec<String> {
     if item.kind == "card" {
         texts.extend(last_four(item).map(str::to_string));
     }
-    // Every file's name, on any item.
+    // Every file's name and every tag, on any item.
     texts.extend(
         item.fields
             .values()
             .filter(|f| f.kind == FieldType::File)
             .map(|f| crate::item::file_parts(&f.value).0.to_string()),
     );
+    texts.extend(item.tags.iter().cloned());
     texts.into_iter().map(|t| t.to_lowercase()).collect()
 }
 
