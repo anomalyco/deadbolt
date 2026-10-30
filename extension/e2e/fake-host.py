@@ -12,6 +12,8 @@ origin, as the agent holds them: candidates until generate-keep, then
 pending, and check and save resolve only pending ones. Fields that allow
 under 60 bits are weak, as the agent's floor.
 
+`learn` answers `learned` (the log has each line), locked or not.
+
 `forms` lists two identities and a card, and `fill-form` answers with only
 the fields asked for. DEADBOLT_FAKE_TOUCHID=deny answers a fill-form that
 asks for a card's number or code with `failed`, as the agent does when
@@ -143,7 +145,10 @@ while True:
         why = refusal(req)
         write({"id": rid, "type": "error", "code": why, "message": "No strong password fits."} if why else {"id": rid, "type": "generate-check"})
     elif kind == "hello":
-        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms"]})
+        write({"id": rid, "type": "hello", "protocol": 3, "version": "0.0.0-e2e", "status": STATUS, "capabilities": ["list", "fill", "check", "save", "generate", "forms", "learn"]})
+    elif kind == "learn":
+        # As the host: it works locked too, and keeps no values (the log has the line).
+        write({"id": rid, "type": "learned"})
     elif STATUS != "ready":
         write({"id": rid, "type": "error", "code": "locked", "message": "Deadbolt is locked."})
     elif kind == "list":

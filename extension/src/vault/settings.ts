@@ -1,5 +1,6 @@
-// Settings: the vault's devices (pair another, remove one), the lock preset
-// and the vault's name.
+// Settings: the vault's devices (pair another, remove one), the lock preset,
+// the sites Deadbolt never offers to save, the learning logs and the vault's
+// name.
 
 import { describePreset, PRESETS, VAULT_NAME } from "../device-rules"
 import type { LockPreset, VaultDevice } from "../messages"
@@ -7,6 +8,8 @@ import { h } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
+import { clearLearnLogs, learnExport, learnLogs } from "../bg/learn-log"
+import { NEVER_KEY } from "../bg/save"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
 import { enroll, enrollment } from "./biometric"
 import { aboutSection } from "./about"
@@ -51,6 +54,59 @@ function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
     }
   }
   return row
+}
+
+/** The sites "Never for this site" turned saving off for (bg/save.ts keeps them in chrome.storage.local), each with Turn on. */
+function neverRows(app: App): HTMLElement {
+  const rows = h("div", { class: "rows" })
+  const paint = async () => {
+    const got = (await chrome.storage.local.get(NEVER_KEY).catch(() => ({}))) as Record<string, unknown>
+    const sites = Array.isArray(got[NEVER_KEY]) ? (got[NEVER_KEY] as unknown[]).filter((s): s is string => typeof s === "string").sort() : []
+    if (!sites.length) return rows.replaceChildren(h("p", { class: "hint" }, "Deadbolt offers to save on every site. “Never for this site” on an offer turns it off for that site."))
+    rows.replaceChildren(
+      ...sites.map((site) =>
+        h(
+          "div",
+          { class: "vrow" },
+          h("span", { class: "text" }, h("span", { class: "title mono" }, site), h("span", { class: "sub" }, "Never offered to save")),
+          h("span", { class: "vrow-actions shown" }, button("btn", "Turn on", async () => {
+            const now = (await chrome.storage.local.get(NEVER_KEY).catch(() => ({}))) as Record<string, unknown>
+            const list = Array.isArray(now[NEVER_KEY]) ? (now[NEVER_KEY] as unknown[]).filter((s) => s !== site) : []
+            await chrome.storage.local.set({ [NEVER_KEY]: list }).catch(() => {})
+            app.announce(`Saving is on for ${site}.`)
+            void paint()
+          }, { "aria-label": `Turn saving on for ${site}` })),
+        ),
+      ),
+    )
+  }
+  void paint()
+  return rows
+}
+
+/** "Learn this site" logs (bg/learn-log.ts): how many, Download for `bun corpus/learned.ts --file`, Delete. */
+function learnRows(app: App): HTMLElement {
+  const box = h("div", {})
+  const paint = async () => {
+    const logs = await learnLogs().catch(() => [])
+    if (!logs.length) return box.replaceChildren(h("p", { class: "hint" }, "None yet. “Learn this site” in the popup records how a sign-in form is built while you sign in by hand, never what you type."))
+    const download = button("btn", [glyph("open"), "Download"], async () => {
+      const url = URL.createObjectURL(new Blob([learnExport(await learnLogs())], { type: "application/x-ndjson" }))
+      const a = h("a", { href: url, download: `deadbolt-learn-${new Date().toISOString().slice(0, 10)}.jsonl` })
+      document.body.append(a)
+      a.click()
+      a.remove()
+      setTimeout(() => URL.revokeObjectURL(url), 10_000)
+    })
+    const clear = button("btn", [glyph("trash"), "Delete"], async () => {
+      await clearLearnLogs().catch(() => {})
+      app.announce("Deleted the learning logs.")
+      void paint()
+    })
+    box.replaceChildren(h("p", { class: "hint" }, `${logs.length} ${logs.length === 1 ? "session" : "sessions"} kept in this browser, the newest 50 for 30 days.`), h("div", { class: "buttons" }, download, clear))
+  }
+  void paint()
+  return box
 }
 
 export function settingsView(app: App): View {
@@ -219,6 +275,8 @@ export function settingsView(app: App): View {
         clearing,
       ),
     ),
+    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Saving")), neverRows(app)),
+    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Learning logs")), learnRows(app)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Vault name")), h("div", { class: "reauth-row" }, name, rename), nameHint),
     aboutSection(app),
     app.surface !== "popup"

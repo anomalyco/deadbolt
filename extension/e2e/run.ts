@@ -3959,6 +3959,94 @@ async function failedSignIns(run: Run, page: Page): Promise<number> {
   return passed
 }
 
+/** The lines of every learning log: what the native host was asked to write, or what the browser-only vault keeps (bg/learn-log.ts). */
+async function learnLines(run: Run): Promise<Array<Record<string, unknown>>> {
+  if (!standalone) return (await hostLog(run)).filter((r) => r.type === "learn").map((r) => r.line as Record<string, unknown>)
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`chrome-extension://${ID}/device.html`)
+    return await page.evaluate(
+      () =>
+        new Promise<Array<Record<string, unknown>>>((resolve) => {
+          const req = indexedDB.open("deadbolt-learn", 1)
+          req.onupgradeneeded = () => req.result.createObjectStore("logs", { keyPath: "session" })
+          req.onsuccess = () => {
+            const all = req.result.transaction("logs").objectStore("logs").getAll()
+            all.onsuccess = () => resolve((all.result as Array<{ lines: string[] }>).flatMap((l) => l.lines.map((x) => JSON.parse(x))))
+          }
+        }),
+    )
+  } finally {
+    await page.close()
+  }
+}
+
+/**
+ * "Learn this site" from the popup: a sign-in by hand is logged as steps
+ * (never what's typed) and the session ends after it works. Then "Never for
+ * this site" on an offer: the popup says saving is off, and Turn on undoes
+ * it (the browser-only vault also lists it in Settings).
+ */
+async function learnAndNever() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/login?next=home`)
+    await formFound(page)
+    const p = await popup(run, site)
+    await p.locator("button", { hasText: "Learn this site" }).click()
+    const learning = await until("the popup shows the site learning", async () => {
+      const again = await popup(run, site)
+      const shown = (await again.locator(".offer h2", { hasText: "Learning" }).count()) > 0
+      await again.close()
+      return shown
+    })
+    check(!!learning, "Learn this site starts a learning session for the tab")
+    await p.close().catch(() => {})
+    // While the tab learns, Deadbolt keeps its menu out of the way: type as a person would.
+    await page.click("#email")
+    await page.keyboard.type("learner@acme.test", { delay: 20 })
+    await page.click("#password")
+    await page.keyboard.type("typed-by-hand-secret", { delay: 20 })
+    await page.click("button[type=submit]")
+    await page.waitForURL("**/home")
+    const lines = await until("the session ends after the sign-in", async () => {
+      const got = await learnLines(run)
+      return got.some((l) => l.event === "end") ? got : null
+    }, 15_000)
+    const events = (lines ?? []).map((l) => l.event)
+    check(events[0] === "start" && events.includes("step") && (lines ?? []).at(-1)?.reason === "signed-in", `the log has the start, the steps and a signed-in end (${events.join(",")})`)
+    check(!JSON.stringify(lines).includes("typed-by-hand-secret") && !JSON.stringify(lines).includes("learner@acme.test"), "and never what was typed")
+    if (standalone) {
+      const s = await popup(run, site)
+      await s.getByRole("button", { name: "Settings", exact: true }).click()
+      check(!!(await until("Settings lists the learning log", async () => (await s.locator(".settings").textContent())?.includes("1 session"))), "Settings keeps the learning log, with Download")
+      await s.close()
+    }
+
+    await signIn(run, page, "/login?next=home", "never@acme.test", "never password")
+    await page.waitForURL("**/home")
+    if (!(await offered(run, "the sign-in is offered"))) return void (await diagnose(run, page, "never"))
+    const { p: o } = await offerIn(run)
+    await o.locator(".offer button.link", { hasText: "Never for this site" }).click()
+    check(!!(await until("the popup says saving is off", async () => (await o.locator(".saving-off", { hasText: "Saving is off for localhost" }).count()) > 0)), "Never for this site: the popup says saving is off, with Turn on")
+    if (standalone) {
+      const s = await popup(run, site)
+      await s.getByRole("button", { name: "Settings", exact: true }).click()
+      check(!!(await until("Settings lists the site", async () => (await s.getByRole("button", { name: "Turn saving on for localhost" }).count()) > 0)), "and Settings lists it")
+      await s.close()
+    }
+    await o.locator(".saving-off button", { hasText: "Turn on" }).click()
+    check(!!(await until("Turn on undoes it", async () => (await o.locator(".saving-off", { hasText: "Saving is off" }).count()) === 0)), "Turn on offers to save there again")
+    await o.close()
+  } catch (err) {
+    check(false, `learn and never threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "learn and never")
+  } finally {
+    await close(run)
+  }
+}
+
 const scenarios: Record<string, (scheme: Scheme) => Promise<void>> = { fillAndTotp, savePrompt, savedInPage, generator, signInWith, locked, notInstalled, formsSurface }
 const once: Record<string, () => Promise<void>> = {
   film,
@@ -3986,6 +4074,7 @@ const once: Record<string, () => Promise<void>> = {
   formsShapes,
   formsFrames,
   formsTouchId,
+  learnAndNever,
 }
 const groups: Record<string, string[]> = { forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
@@ -3998,7 +4087,7 @@ const cost: Record<string, number> = {
   detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
-  formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12,
+  formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15,
 }
 /** What only a native agent does: no standalone counterpart yet (Touch ID; passkeys are their own work). */
 const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])
