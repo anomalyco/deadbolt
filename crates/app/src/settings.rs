@@ -19,6 +19,7 @@ const CLEAR_STEPS: [f64; 6] = [10.0, 20.0, 30.0, 60.0, 90.0, 120.0];
 pub enum Row {
     TouchId,
     Clear,
+    Breaches,
     Shortcut,
     Command,
     Sync,
@@ -31,6 +32,7 @@ impl Row {
         match self {
             Row::TouchId => "touch-id",
             Row::Clear => "clear",
+            Row::Breaches => "breaches",
             Row::Shortcut => "shortcut",
             Row::Command => "command",
             Row::Sync => "op-sync",
@@ -47,6 +49,7 @@ pub fn rows(s: &App) -> Vec<Row> {
         rows.push(Row::TouchId);
     }
     rows.push(Row::Clear);
+    rows.push(Row::Breaches);
     rows.push(Row::Shortcut);
     if s.installer.is_some() {
         rows.push(Row::Command);
@@ -105,6 +108,7 @@ impl App {
         match row {
             Some(Row::TouchId) if !self.touch_id_busy => self.toggle_touch_id(),
             Some(Row::Clear) => self.step_clear_after(1),
+            Some(Row::Breaches) => self.toggle_breach_checks(),
             Some(Row::Shortcut) => {
                 self.hotkey.refused = None;
                 self.hotkey.recorder.begin();
@@ -161,6 +165,37 @@ pub fn page(s: &App, k: &Kit) -> El {
         about(k, "How long a copied password stays on the clipboard"),
         stepper(k, &clear_after(s.clear_after), on(Row::Clear)),
     ));
+    let breach_desc = match &s.health.error {
+        Some(error) => problem(k, "breach-error", error),
+        None => about(
+            k,
+            "Send the first 5 characters of each password's SHA-1 hash to Have I Been Pwned",
+        ),
+    };
+    let breach_switch = Switch::new(s.health.breach_checks_enabled())
+        .label("Check for breached passwords")
+        .hide_label()
+        .disabled(s.health.setting_busy)
+        .on_toggle(|s: &mut App| s.toggle_breach_checks())
+        .build(k)
+        .key("breaches-switch");
+    security.push(row_el(
+        Row::Breaches,
+        "Check for breached passwords",
+        breach_desc,
+        breach_switch,
+    ));
+    security.push(
+        text(
+            "Directory data from 2FA Directory, Passkeys Directory, Apple Password Manager Resources, and Have I Been Pwned.",
+        )
+        .key("health-attribution")
+        .font(FACT.lh(16.0))
+        .color(k.c.text_faint)
+        .wrap()
+        .w_full()
+        .pt(10.0),
+    );
     let (problems, recorder) = crate::shortcut::setting(s, k);
     let shortcut_about = if problems.is_empty() {
         about(k, "Search and copy from any app")

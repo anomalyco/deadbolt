@@ -2351,13 +2351,16 @@ fn watch_prints_changes_as_json_lines() {
             }
         }
     });
-    // Each command here is also an Activity entry; those come in between.
+    // Each command here is also an Activity entry, and item/unlock changes
+    // refresh the background health memo; those come in between.
     let next = || -> serde_json::Value {
         loop {
             let line = rx.recv_timeout(Duration::from_secs(30)).expect("a change");
             let change: serde_json::Value =
                 serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"));
-            if change != serde_json::json!({"change": "activity"}) {
+            if change != serde_json::json!({"change": "activity"})
+                && change != serde_json::json!({"change": "health"})
+            {
                 return change;
             }
         }
@@ -4790,3 +4793,6 @@ fn favorites_and_tags() {
         names == ["Alpha", "Zeta"] && b.run(&["tags"]) == "personal\t1\nprod\t1\nTax 2026\t1\n"
     });
 }
+
+#[path = "cli/health.rs"]
+mod health;

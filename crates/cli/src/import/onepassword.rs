@@ -800,6 +800,20 @@ pub(super) fn item(item: &Value, files: Files, summary: &mut Summary) -> Option<
     if !array(details, "passwordHistory").is_empty() {
         summary.drop_some(PASSWORD_HISTORY, 1);
     }
+    let mut mapped = mapped;
+    if let Some(pw_field) = deadbolt_core::health::audited_password_field(mapped.kind)
+        && mapped.fields.contains_key(pw_field)
+    {
+        let hist_max = array(details, "passwordHistory")
+            .iter()
+            .filter_map(|h| number(h, "time"))
+            .max();
+        mapped.password_changed = hist_max
+            .or_else(|| number(item, "updatedAt"))
+            .filter(|&secs| secs > 0)
+            .map(date)
+            .filter(|d| deadbolt_core::item::valid_date(d));
+    }
     summary.add(&mapped);
     Some(mapped)
 }

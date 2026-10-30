@@ -10,6 +10,7 @@ mod support;
 mod agent;
 mod codes;
 mod edit;
+mod health;
 mod import;
 mod install;
 mod instant;

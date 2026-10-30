@@ -116,6 +116,9 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::AutofillFill { .. } => (T::Browser, "autofill-fill"),
         C::AutofillPasskeyGet { .. } => (T::Browser, "autofill-passkey-get"),
         C::AutofillPasskeyCreate { .. } => (T::Browser, "autofill-passkey-create"),
+        C::Health { .. } => (T::Look, "health"),
+        C::HealthIgnore { .. } => (T::Write, "health-ignore"),
+        C::BreachChecksSet { .. } => (T::Never, "breach-checks-set"),
     }
 }
 
@@ -266,6 +269,9 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             query,
             field,
         } => (named(vault, query), vec![field.clone()]),
+        Command::HealthIgnore {
+            vault, query, kind, ..
+        } => (named(vault, query), vec![kind.as_str().into()]),
         Command::SiteFill {
             origin,
             login: target,
@@ -631,6 +637,11 @@ impl Agent {
                     }
                     Command::Resolve { refs, purpose } => {
                         self.resolve(&caller, &refs, purpose, conv).await
+                    }
+                    command @ (Command::Health { .. }
+                    | Command::HealthIgnore { .. }
+                    | Command::BreachChecksSet { .. }) => {
+                        self.health_command(&caller, command).await
                     }
                     command => self.clone().dispatch(&caller, command, conv).await,
                 },

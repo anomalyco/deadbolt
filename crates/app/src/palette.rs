@@ -22,6 +22,7 @@ pub enum Action {
     Delete,
     FilterTag,
     New,
+    Security,
     Import,
     Trash,
     Settings,
@@ -43,6 +44,7 @@ impl Action {
             Action::Delete => "delete",
             Action::FilterTag => "filter-tag",
             Action::New => "new",
+            Action::Security => "security",
             Action::Import => "import",
             Action::Trash => "trash",
             Action::Settings => "settings",
@@ -63,6 +65,7 @@ impl Action {
             Action::Delete => &["⌘", "⌫"],
             Action::FilterTag => &[],
             Action::New => &["⌘", "N"],
+            Action::Security => &["⇧", "⌘", "H"],
             Action::Import => &["⇧", "⌘", "I"],
             Action::Trash => &["⇧", "⌘", "⌫"],
             Action::Settings => &["⌘", ","],
@@ -118,6 +121,7 @@ pub fn actions(s: &App) -> Vec<Action> {
     }
     list.extend([
         Action::New,
+        Action::Security,
         Action::Import,
         Action::Trash,
         Action::Settings,
@@ -163,6 +167,11 @@ pub fn label(s: &App, a: Action) -> String {
         Action::Delete => "Delete…".into(),
         Action::FilterTag => "Filter by tag…".into(),
         Action::New => "New item".into(),
+        Action::Security => match s.health.risk_count() {
+            0 => "Security".into(),
+            1 => "Security (1 risk)".into(),
+            n => format!("Security ({n} risks)"),
+        },
         Action::Import => "Import passwords…".into(),
         Action::Trash => "Recently deleted".into(),
         Action::Settings => "Settings".into(),
@@ -232,8 +241,15 @@ impl App {
             Action::Edit => self.edit_selected(),
             Action::Delete => self.ask_delete(),
             Action::FilterTag => {}
-            Action::New => self.new_item(),
-            Action::Import => self.show_import(),
+            Action::New => {
+                self.close_security();
+                self.new_item();
+            }
+            Action::Security => self.open_security(),
+            Action::Import => {
+                self.close_security();
+                self.show_import();
+            }
             Action::Trash => self.open_trash(),
             Action::Settings => self.open_settings(),
             Action::Lock => self.lock(),
@@ -259,6 +275,7 @@ fn shortcut_action(ev: &KeyEvent) -> Option<Action> {
         _ if chord(ev, 'd') => Some(Action::Favorite),
         _ if chord(ev, 'e') => Some(Action::Edit),
         _ if chord(ev, 'n') => Some(Action::New),
+        _ if crate::health::is_shortcut(ev) => Some(Action::Security),
         _ if crate::import::is_shortcut(ev) => Some(Action::Import),
         _ if chord(ev, ',') => Some(Action::Settings),
         _ if chord(ev, 'l') => Some(Action::Lock),

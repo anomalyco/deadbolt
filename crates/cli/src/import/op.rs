@@ -404,6 +404,7 @@ pub(crate) mod tests {
                 tags: ["work/aws".into(), "env:prod,1".into()].into(),
                 source: None,
                 sign_in_link: None,
+                password_changed: None,
             },
             vault: "v1v1v1v1v1v1v1v1v1v1v1v1v1".into(),
             id: "item1item1item1item1item1a".into(),

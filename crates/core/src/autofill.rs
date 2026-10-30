@@ -89,6 +89,15 @@ pub fn password_update(id: ItemId, password: &str) -> DataOp {
     DataOp::set(id, "password", Field::new(FieldType::Secret, password))
 }
 
+/// Updates a login's saved password and records `date` (`YYYY-MM-DD`) as when
+/// it changed.
+pub fn password_update_at(id: ItemId, password: &str, date: &str) -> Vec<DataOp> {
+    vec![
+        password_update(id, password),
+        DataOp::password_changed(id, Some(date.into())),
+    ]
+}
+
 pub fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
     item.fields
         .get(field)

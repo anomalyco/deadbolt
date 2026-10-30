@@ -117,6 +117,7 @@ pub struct Loaded {
     pub vaults: IndexMap<VaultId, Vault>,
     pub unavailable: IndexMap<VaultId, UnavailableVault>,
     pub changes: Changes,
+    pub health: super::health::State,
 }
 
 pub(super) fn get_json<T: DeserializeOwned>(store: &Unlocked, name: &str) -> Result<Option<T>> {
@@ -182,6 +183,7 @@ impl Loaded {
             device_name: device_name.into(),
             ..Meta::default()
         };
+        let health = super::health::State::new(&store);
         let loaded = Self {
             store,
             id: secret.device_id(),
@@ -190,6 +192,7 @@ impl Loaded {
             vaults: IndexMap::new(),
             unavailable: IndexMap::new(),
             changes: Changes::default(),
+            health,
         };
         save_meta(&loaded.store, &loaded.meta)?;
         Ok(loaded)
@@ -261,6 +264,7 @@ impl Loaded {
                 }
             }
         }
+        let health = super::health::State::new(&store);
         Ok(Self {
             store,
             id: secret.device_id(),
@@ -269,6 +273,7 @@ impl Loaded {
             vaults,
             unavailable,
             changes: Changes::default(),
+            health,
         })
     }
 }
@@ -328,6 +333,7 @@ pub struct Session {
     state: Loaded,
     pub node: Node,
     pub(super) sync_task: Option<super::AbortOnDrop>,
+    pub(super) health_task: Option<super::AbortOnDrop>,
     /// Passwords made for web forms, until saved; locking drops them.
     pub generated: super::generate::Pending,
 }
@@ -351,6 +357,7 @@ impl Session {
             state: loaded,
             node,
             sync_task: None,
+            health_task: None,
             generated: Default::default(),
         }
     }

@@ -326,6 +326,7 @@ fn generate_round_trips() {
         command: Command::Generate {
             length: 20,
             symbols: false,
+            url: None,
         },
     })
     .unwrap();
@@ -337,7 +338,8 @@ fn generate_round_trips() {
         serde_json::from_str::<Request>(&request).unwrap().command,
         Command::Generate {
             length: 20,
-            symbols: false
+            symbols: false,
+            url: None,
         }
     ));
     let reply = serde_json::to_string(&Message::Ok {

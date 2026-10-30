@@ -958,7 +958,7 @@ fn check_value(name: &str, field: &Field) -> Result<(), ItemError> {
 }
 
 /// `YYYY-MM-DD`, a day that exists.
-fn valid_date(value: &str) -> bool {
+pub fn valid_date(value: &str) -> bool {
     let b = value.as_bytes();
     if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
         return false;
@@ -1168,13 +1168,21 @@ pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError>
         Change::TagAdd(tag) | Change::TagRemove(tag) if !crate::tag::valid_tag(tag) => {
             Err(ItemError::InvalidTag(tag.clone()))
         }
+        Change::Ignore { kind, .. } if !valid_field_name(kind) => {
+            Err(ItemError::InvalidFieldName(kind.clone()))
+        }
+        Change::PasswordChanged(Some(date)) if !valid_date(date) => {
+            Err(invalid("password-changed", "not a date (YYYY-MM-DD)"))
+        }
         Change::Name(_)
         | Change::Delete { .. }
         | Change::Source(_)
         | Change::Restore
         | Change::Favorite(_)
         | Change::TagAdd(_)
-        | Change::TagRemove(_) => Ok(()),
+        | Change::TagRemove(_)
+        | Change::Ignore { .. }
+        | Change::PasswordChanged(_) => Ok(()),
     }
 }
 

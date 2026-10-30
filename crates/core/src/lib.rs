@@ -80,6 +80,8 @@ mod encoding;
 mod entry;
 mod error;
 pub mod forms;
+#[cfg(feature = "health")]
+pub mod health;
 mod id;
 pub mod item;
 pub mod listing;
@@ -109,3 +111,6 @@ mod membership_tests;
 
 #[cfg(test)]
 mod tag_tests;
+
+#[cfg(all(test, feature = "health"))]
+mod health_tests;

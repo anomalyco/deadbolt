@@ -10,6 +10,7 @@
 //! is chosen or it's removed.
 //! Locking, or the agent stopping, wipes the form wherever it was.
 
+mod fix;
 mod form;
 pub mod tags;
 mod types;
@@ -122,6 +123,7 @@ impl App {
             && self.panel.is_none()
             && !self.settings_open
             && !self.trash.open
+            && !self.security_open()
             && !self.installing()
             && !self.import.showing()
             && !self.drop_hovering()
@@ -564,9 +566,11 @@ impl App {
         };
         self.edit.generations += 1;
         form.generating = Some(self.edit.generations);
+        let url = form.site_url();
         self.agent.send(Job::Generate {
             length: self.edit.length,
             symbols: self.edit.symbols,
+            url,
             seq: self.edit.generations,
         });
     }
@@ -604,13 +608,23 @@ impl App {
         let Some(at) = form.generates() else { return };
         match result {
             Ok(mut password) => {
+                let copy_once = std::mem::replace(&mut form.copy_generated_once, false);
+                let saved = form
+                    .base
+                    .as_ref()
+                    .map(|b| (b.0.id.clone(), b.0.label.clone()));
                 let input = &mut form.fields[at];
-                input.edit.replace_text(std::mem::take(&mut *password));
+                let field_name = input.name.clone();
+                let generated_text = std::mem::take(&mut *password);
+                input.edit.replace_text(generated_text.clone());
                 // A password the person didn't type shows, so they see what they got.
                 input.edit.set_revealed(true);
                 form.generated += 1;
-                if form.problem_for("password").is_some() {
+                if form.problem_for(&field_name).is_some() {
                     form.problem = None;
+                }
+                if copy_once {
+                    self.copy_value(saved, field_name, generated_text, tx);
                 }
             }
             Err(failure) if failure.locked() => self.on_locked(tx),
@@ -830,6 +844,10 @@ impl App {
             match ev.key {
                 _ if chord('t') => self.toggle_types(),
                 _ if chord('d') => self.toggle_form_favorite(),
+                _ if fix::is_copy_current_shortcut(ev) => {
+                    self.copy_base_password(tx);
+                }
+                _ if chord('o') => self.open_fix_site(tx),
                 Key::Escape => self.cancel_edit(),
                 Key::Tab if ev.mods.ctrl && !ev.mods.cmd && !ev.mods.alt => {
                     self.step_kind(if ev.mods.shift { -1 } else { 1 });
@@ -913,8 +931,16 @@ impl App {
     /// than leaving the field, ⌘S and ⌘⏎ save. Enter with other modifiers
     /// does nothing in a one-line field (it would submit); a text area keeps
     /// them for its lines. True when handled.
-    pub fn form_key(&mut self, ev: &KeyEvent, field: Field) -> bool {
+    pub fn form_key(&mut self, ev: &KeyEvent, field: Field, tx: &mut Tx) -> bool {
+        if fix::is_copy_current_shortcut(ev) {
+            self.copy_base_password(tx);
+            return true;
+        }
         let plain = !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
+        if ev.is_command('o') && plain {
+            self.open_fix_site(tx);
+            return true;
+        }
         let cmd_enter = ev.mods.cmd && plain;
         match (&ev.key, field) {
             (Key::Escape, _) => self.cancel_edit(),

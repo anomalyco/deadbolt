@@ -21,7 +21,8 @@ use fixtures::{
     fixture_pairing_code, form, generated, import_preview, import_report, inviter, join_notice,
     kind_scene, locked, locked_error, locked_touch_id, locked_touch_id_reset, mirrored, new_of,
     other_shortcut, panel_vault, settings_touch_id, show_preview, status, trash, trash_item, typed,
-    vault, vault_243, vault_info, vault_with_offered_installer, welcome, working,
+    vault, vault_243, vault_info, vault_with_health, vault_with_offered_installer, welcome,
+    working,
 };
 
 pub(crate) type Scene = (&'static str, fn(&mut App));
@@ -506,6 +507,20 @@ pub(crate) const SCENES: &[Scene] = &[
     ("sheet", |s| {
         vault(s);
         s.nav.sheet = true;
+    }),
+    // Password health: the Security view, an item's risk callout, and its Fix form.
+    ("security", |s| {
+        vault_with_health(s);
+        s.open_security();
+    }),
+    ("vault-risk", vault_with_health),
+    ("fix-password", |s| {
+        vault_with_health(s);
+        if let Some(id) = s.selected.clone() {
+            s.fix_finding(&id, None, &mut Tx::default());
+            generated(s);
+            s.copy = None;
+        }
     }),
     // Settings' Agents open: Browse paired, with a site-wide grant and one
     // for a single login, its passkey included.
