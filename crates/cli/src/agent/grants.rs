@@ -1627,7 +1627,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         use tokio::net::UnixStream;
 
-        use super::super::super::passkeys::tests::agent::{conversation, unlocked, unlocked_with};
+        use super::super::super::passkeys::tests::agent::{conversation, unlocked};
         use super::*;
         use crate::protocol::{Claim, MAX_LINE, Message, Outcome, PROTOCOL_VERSION, Request};
 
@@ -1774,42 +1774,59 @@ mod tests {
 
         /// The KDF runs off the session's lock: the vault answers while a
         /// passphrase is checked, and a second check meanwhile is refused.
-        #[tokio::test]
-        async fn a_passphrase_check_never_holds_the_vault() {
-            let f = unlocked_with(deadbolt_store::KdfParams {
-                m_cost_kib: 16 * 1024,
-                t_cost: 3,
-                p_cost: 1,
-            })
-            .await;
-            let checking = {
-                let agent = f.agent.clone();
-                tokio::spawn(async move {
+        #[test]
+        fn a_passphrase_check_never_holds_the_vault() {
+            use std::future::Future;
+            use std::task::Poll;
+
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .max_blocking_threads(1)
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let f = unlocked().await;
+                    // Occupy the blocking pool so the real KDF queues until
+                    // released. No assumption about Argon2 speed or when a
+                    // loaded CI runner will schedule a 20 ms timer.
+                    let (release, wait) = std::sync::mpsc::channel::<()>();
+                    let (started, ready) = tokio::sync::oneshot::channel();
+                    let blocker = tokio::task::spawn_blocking(move || {
+                        started.send(()).unwrap();
+                        // Dropping release also unblocks this on assertion failure.
+                        wait.recv().unwrap_or_default();
+                    });
+                    ready.await.unwrap();
                     let (conv, _closed) = conversation();
-                    agent.agents_admin(&kit(), add(Some("wrong")), &conv).await
-                })
-            };
-            tokio::time::sleep(Duration::from_millis(20)).await;
-            assert!(
-                !checking.is_finished(),
-                "the KDF should take longer than this"
-            );
-            let started = std::time::Instant::now();
-            f.agent.with(|s| list_clients(s)).unwrap();
-            assert!(started.elapsed() < Duration::from_millis(200));
-            let (conv, _closed) = conversation();
-            let error = f
-                .agent
-                .agents_admin(&kit(), add(Some("test")), &conv)
-                .await
-                .unwrap_err();
-            assert_eq!(code(&error), Some(ErrorCode::RateLimited));
-            assert!(
-                !checking.is_finished(),
-                "the vault answered during the check"
-            );
-            let error = checking.await.unwrap().unwrap_err();
-            assert_eq!(error.to_string(), "wrong passphrase");
+                    let me = kit();
+                    let mut checking =
+                        std::pin::pin!(f.agent.agents_admin(&me, add(Some("wrong")), &conv));
+                    std::future::poll_fn(|cx| {
+                        assert!(checking.as_mut().poll(cx).is_pending());
+                        Poll::Ready(())
+                    })
+                    .await;
+                    // A regression must fail, not deadlock on the session lock.
+                    assert!(f.agent.session.try_lock().is_ok());
+                    f.agent.with(|s| list_clients(s)).unwrap();
+                    let mut second =
+                        std::pin::pin!(f.agent.agents_admin(&me, add(Some("test")), &conv));
+                    let error = std::future::poll_fn(|cx| {
+                        let result = second.as_mut().poll(cx);
+                        assert!(
+                            result.is_ready(),
+                            "a concurrent check must be refused immediately"
+                        );
+                        result
+                    })
+                    .await
+                    .unwrap_err();
+                    assert_eq!(code(&error), Some(ErrorCode::RateLimited));
+                    release.send(()).unwrap();
+                    blocker.await.unwrap();
+                    let error = checking.await.unwrap_err();
+                    assert_eq!(error.to_string(), "wrong passphrase");
+                });
         }
 
         #[tokio::test]

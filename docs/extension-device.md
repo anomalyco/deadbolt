@@ -410,6 +410,42 @@ document's memory and respawn its dedicated worker after a wasm crash, with a
 capped number of respawns. Losing the offscreen document must still lock. This
 needs its own lifecycle/security review, not a storage.session fallback.
 
+**Reliability review (2026-10-30): deferred; Security review needed before
+implementation.** Memory-only recovery avoids the rejected session-storage
+design's cross-context key exposure, but changes the current fail-closed rule:
+a parser trap would no longer end access to the unlocked vault. There is no
+measured recurring worker-crash problem yet. Passphrase unlock remains available;
+PRF can reduce recovery friction where a supported provider is enrolled (real
+macOS provider availability is not established by the headless tests).
+
+The proposed cache would expose the long-term key set to offscreen JavaScript,
+including structured-clone/GC copies that cannot be reliably wiped. Compromised
+privileged extension code can already read an unlocked vault; ordinary web pages
+and menu frames must gain no key-export or key-import route. The store currently
+has no public key-set export/import API, so this is not just a worker retry.
+Required review and tests:
+
+- Keep the cache exclusively in offscreen memory, never storage, messages to the
+  service worker, logs or telemetry. Clear it on explicit/idle/screen lock,
+  failed restoration and document loss. A generation check must cancel a restore
+  crossing lock, policy change or a user unlock; no queued request may revive it.
+- Reopen and validate the durable encrypted store, including integrity and
+  membership, before serving data. Never reuse trapped wasm memory or replay an
+  interrupted write/ceremony: it may already have committed. Strict proofs and
+  one-shot authorizations must not survive; preserve the current preset and idle
+  deadline rather than treating recovery as user activity.
+- Bound retries across replacement workers (at most three per ten minutes in
+  the offscreen lifetime); a failed restore or exhausted budget locks and clears
+  the cache. Crafted synced data or an oversized store must not cause an endless
+  crash loop. OPFS's asynchronous handle release must not race the new open.
+- Inject real wasm traps during setup, writes, sync and pending Strict prompts;
+  race recovery with lock/removal and test budget exhaustion. Renderer OOM or
+  offscreen loss still destroys the cache and requires unlock; this design
+  cannot promise recovery from every OOM.
+
+Until those checks and an explicit security review exist, worker failure keeps
+the existing lock-and-unlock behavior. No persistent recovery key is added.
+
 Wrong passphrases back off. After three in a row, for unlocking or for Strict's
 check before a password, the service worker refuses the next try for 1 s, then 2,
 4, … up to 60 s, without reaching the vault; a right passphrase starts over. The

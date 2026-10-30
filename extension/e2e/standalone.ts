@@ -910,6 +910,10 @@ async function verifyAssertion(response: any, expectedChallenge: string, credent
 }
 /** A registration from the page, saved in the popup; under Strict, `reauth` answers the passphrase prompt that follows. */
 async function registerInPage(page: Page, device: Page, name: string, username: string, how: string, reauth = false, userID?: Uint8Array<ArrayBuffer>) {
+  // Independent ceremonies get a fresh document. Reusing one for the entire
+  // suite can exhaust its four-list burst (one/second), depending on CPU speed.
+  // The rate limit itself is covered with a controlled clock in passkeys.test.ts.
+  await page.reload()
   const reg = await generateRegistrationOptions({
     rpName: "Acme", rpID: "localhost", userName: username, userID, attestationType: "none",
     authenticatorSelection: { residentKey: "required", userVerification: "preferred" }, supportedAlgorithmIDs: [-7, -257],
@@ -928,6 +932,7 @@ async function registerInPage(page: Page, device: Page, name: string, username: 
 }
 /** A modal sign-in, answered in the popup with `account`'s passkey; returns the assertion and its challenge. */
 async function signInInPage(page: Page, device: Page, name: string, account: string, how: string, { listed, verification = "preferred", reauth = false }: { listed?: string[]; verification?: "preferred" | "discouraged"; reauth?: boolean } = {}) {
+  await page.reload() // A new ceremony scenario, not a page flooding passkey listings.
   const auth = await generateAuthenticationOptions({ rpID: "localhost", userVerification: verification })
   await page.bringToFront()
   await startCall(page, name, "get", auth)
