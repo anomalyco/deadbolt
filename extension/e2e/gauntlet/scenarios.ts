@@ -671,6 +671,9 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
           const verdict = fails ? (pending ? `PENDING (${pending})` : "FAIL") : pending ? `PASS (now passes: drop it from PENDING)` : "PASS"
           console.log(`gauntlet-page ${slug} ${verdict} (${((Date.now() - start) / 1000).toFixed(1)} s)`)
           await page.close().catch(() => {})
+          // With --video, each page's recording, for slowing down or stills.
+          const recorded = h.video ? await page.video()?.path().catch(() => null) : null
+          if (recorded) console.log(`gauntlet-video ${slug} ${recorded}`)
         }
       }
     } finally {
