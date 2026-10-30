@@ -541,6 +541,31 @@ main.vault.popup {
   user-select: none;
 }
 
+/* Pairing: the code on its own line, centred, with its two copies under it.
+   The line keeps its height while the code is coming. */
+.code-box.pair {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 12px;
+  padding: 14px 12px;
+}
+
+.code-box.pair .code {
+  min-height: 24px;
+  font-size: 17px;
+  text-align: center;
+}
+
+.code-box.pair .code.pending {
+  line-height: 24px;
+}
+
+.code-actions {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+}
+
 .waiting {
   display: flex;
   align-items: center;
