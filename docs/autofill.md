@@ -385,6 +385,14 @@ not running without sending hello, which would start the agent again.
   linked sign-in-with account and the user's own username. It only narrows:
   when it names logins, the menu shows those; when it names none, the menu
   shows the whole list, as if nothing were sent. It never hides the menu.
+- **Shadow roots.** Fields in shadow roots are found, open or closed:
+  a content script can open a closed root (`chrome.dom.openOrClosedShadowRoot`),
+  and a closed root hides a form from the page's other scripts, not from
+  the person looking at it. Focus, keys and clicks inside a closed root
+  reach the content script at the root's host, so it looks inside for the
+  focused element or the one under the pointer. Every fill still checks the
+  field shows through every host and slot up the tree. Deadbolt's own
+  closed roots (the menu's host, the provider ring) are never walked.
 - **What's remembered of a site's sign-in.** When a sign-in works (judged as
   for saving: confirmed or likely), the extension records its shape in
   local storage under `signinFlows`, with no usernames or values: whether
