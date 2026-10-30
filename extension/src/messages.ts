@@ -278,7 +278,7 @@ export type ToContent =
   /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
   | { type: "db:surface"; token: string }
   | { type: "db:signin-offer"; token: string }
-  | { type: "db:auth-probe"; usernames: string[] }
+  | { type: "db:auth-probe"; fresh?: boolean }
   | { type: "db:signin-go"; action: string }
   | { type: "db:signin-submit"; form: number }
   // Can the user see a frame's form? (see shownInPage)

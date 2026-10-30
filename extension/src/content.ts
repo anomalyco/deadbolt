@@ -55,6 +55,8 @@ let lastSubmitAt = 0
 /** This document's submits so far: a failure names the one it's about. */
 let submission = 0
 let failureTimer: number | undefined
+/** A site may submit itself when the last digit fills. Suppress only our duplicate click. */
+let submittedForm: HTMLFormElement | undefined
 
 const sameFields = (a: Field[], b: Field[]) =>
   a.length === b.length && a.every((f, i) => f.el === b[i].el && f.role === b[i].role && f.owner.form === b[i].owner.form && f.owner.parent === b[i].owner.parent)
@@ -158,9 +160,10 @@ async function report(always: boolean) {
 }
 
 chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
+  if (message?.type === "db:fill" && message.automatic) submittedForm = undefined
   if (message?.type === "db:auth-probe") {
     if (!isTop || !offerSignIn) return void respond(null)
-    return void respond(authReport(state, message.usernames))
+    return void respond(authReport(state, message.fresh === true))
   }
   if (message?.type === "db:signin-go") {
     const action = isTop && offerSignIn ? takeSignInAction(message.action, state) : null
@@ -176,19 +179,31 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     const label = button?.textContent?.trim() || (button instanceof HTMLInputElement ? button.value : "")
     const destination = button?.getAttribute("formaction") ?? form?.getAttribute("action") ?? location.href
     const target = button?.getAttribute("formtarget") ?? form?.getAttribute("target") ?? ""
+    // A remembered code step is not permission to send a TOTP into a prompt
+    // that currently describes delivery by SMS or email.
+    const codeContext = form?.closest<HTMLElement>("dialog, [role=dialog], main, [role=main]") ?? document.body
+    const codePrompts = fields.some((f) => f.role === "otp") ? [
+      ...fields.flatMap((f) => [f.el.getAttribute("aria-label") ?? "", f.el.placeholder, ...Array.from(f.el.labels ?? []).map((label) => label.innerText)]),
+      document.title, ...Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, [role=heading]")).map((el) => el.innerText),
+      codeContext.innerText,
+    ] : []
+    // Check each specific hint before the surrounding copy. Oversized context
+    // is unknown, not permission to truncate away a delivery warning.
+    const deliveredCode = codePrompts.some((text) => text.length > 12000 || /\b(?:sms|text(?:ed| message)?|e-?mail|phone|mobile|inbox|sent|messages?|deliver(?:ed|y)?|call|voice|whatsapp|push|notifications?|approve)\b|@|[•*]{2,}|\+\d/i.test(text))
     const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
       (kind === "login" || kind === "mfa") && button instanceof HTMLElement && isVisible(button) &&
       !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
-      !fields.some((f) => f.role === "captcha") && fields.every((f) => !!f.el.value && fillable(f.el)) &&
+      form instanceof HTMLFormElement && fields.length > 0 &&
+      !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el)) &&
+      !deliveredCode &&
       new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
     respond(!!safe)
     if (safe) {
       // The guarded extension pick explicitly authorized this submit. Other
       // script-generated submit events still cannot advance a session.
-      gesture()
       captured()
       stepSubmitted()
-      button.click()
+      if (submittedForm !== form) button.click()
     }
     return
   }
@@ -354,9 +369,17 @@ const SUBMITS = 'button:not([type]), button[type="submit"], input[type="submit"]
 function onClick(event: MouseEvent) {
   if (!event.isTrusted) return
   let node = realTarget(event) as Element | null
-  const control = node?.closest("a, button, [role=button], [role=menuitem]")
-  if (offerSignIn && isTop && control && SIGN_OUT.test((control.getAttribute("aria-label") || control.textContent || "").trim()))
-    void send({ type: "db:signin-signout" })
+  const control = node?.closest("a, button")
+  if (offerSignIn && isTop && control instanceof HTMLElement && isVisible(control) &&
+      !control.matches(":disabled, [aria-disabled=true]") && SIGN_OUT.test((control.getAttribute("aria-label") || control.textContent || "").trim())) {
+    const box = control.getBoundingClientRect()
+    const hit = event.detail === 0 ? deepActiveElement() === control :
+      event.clientX >= box.left && event.clientX <= box.right && event.clientY >= box.top && event.clientY <= box.bottom &&
+      control.contains(document.elementFromPoint(event.clientX, event.clientY))
+    if (box.width > 0 && box.width <= 320 && box.height > 0 && box.height <= 96 &&
+        box.top >= 0 && box.left >= 0 && box.bottom <= innerHeight && box.right <= innerWidth && hit)
+      void send({ type: "db:signin-signout" })
+  }
   for (let depth = 0; node instanceof Element && depth < 6; depth++, node = node.parentElement) {
     if (submitControl && node === submitControl) {
       gesture()
@@ -372,6 +395,7 @@ function onSubmit(event: Event) {
   if (!event.isTrusted) return
   const form = realTarget(event)
   if (!(form instanceof HTMLFormElement) || !fields.some((f) => form.contains(f.el))) return
+  submittedForm = form
   captured()
   if (performance.now() - submitGestureAt <= GESTURE_WINDOW_MS) stepSubmitted()
 }

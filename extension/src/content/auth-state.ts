@@ -1,6 +1,7 @@
-// Page text never leaves this isolated world. Only boolean evidence and an
-// opaque action handle go back to the background. No cookies are inspected.
-import { matchesAccount, type AuthReport } from "../auth-state"
+// Page text never leaves this isolated world and is never compared with vault
+// data. Only boolean evidence and an opaque action handle go back to the
+// background. No cookies are inspected.
+import type { AuthReport, AuthSignals } from "../auth-state"
 import { controlText, isVisible, LOGIN_URL } from "./detect"
 import { pageFacts } from "./outcome"
 import { deepQueryAll, openRoots } from "./shadow"
@@ -9,7 +10,10 @@ import type { PageState } from "./inline"
 const ENTRY = /^(sign\s?in|log\s?in|login)(?:\s+to\s+.{1,60})?$/i
 export const SIGN_OUT = /^(sign\s?out|log\s?out|logout|signout|sign off|log off|se déconnecter|déconnexion|abmelden|ausloggen|cerrar sesión)\b/i
 const ACCOUNT = /^(my account|your account|account menu|profile menu|user menu|avatar)$/i
+/** How long a page's scan answers repeat checks while its URL and form stay put. */
+const REPORT_MS = 2000
 const actions = new Map<string, { element?: HTMLElement; form: number; url: string; at: number }>()
+let last: { key: string; at: number; signals: AuthSignals; entry?: HTMLElement } | undefined
 
 function shown(el: Element): boolean {
   if (!isVisible(el)) return false
@@ -25,45 +29,43 @@ function safeEntry(el: Element): el is HTMLElement {
   return el instanceof HTMLButtonElement || el.getAttribute("role") === "button"
 }
 
-export function authReport(state: PageState, usernames: string[]): AuthReport {
-  state.rescan()
+function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement } {
   const facts = pageFacts(state.kind(), state.targets())
-  const loginForm = state.kind() === "login" && state.targets().some((f) => shown(f.el))
-  const result: AuthReport = {
-    loginForm, loginRoute: LOGIN_URL.test(location.pathname), entry: false,
-    signOut: facts.signOut, account: false, accountMenu: false,
+  const signals: AuthSignals = {
+    loginForm: state.kind() === "login" && state.targets().some((f) => shown(f.el)),
+    loginRoute: LOGIN_URL.test(location.pathname), entry: false,
+    signOut: facts.signOut, accountMenu: false,
     appShell: location.hostname === "mail.google.com", challenge: facts.challenge,
     uncertain: document.hidden || window !== window.top || facts.error || !!state.kind() && state.kind() !== "login",
   }
   const deadline = performance.now() + 25
-  const roots = openRoots()
-  const controls = deepQueryAll("a, button, [role=button], [role=menuitem], [aria-label], img[alt]", roots)
+  const controls = deepQueryAll("a, button, [role=button], [role=menuitem], [aria-label], img[alt]", openRoots())
   let entry: HTMLElement | undefined
   for (const el of controls.slice(0, 400)) {
-    if (performance.now() > deadline) { result.uncertain = true; break }
-    const label = controlText(el).trim()
-    if (ACCOUNT.test(label) && shown(el)) result.accountMenu = true
+    if (performance.now() > deadline) { signals.uncertain = true; break }
+    if (!signals.accountMenu && ACCOUNT.test(controlText(el).trim()) && shown(el)) signals.accountMenu = true
     if (!entry && safeEntry(el)) entry = el
-    if (matchesAccount([el.getAttribute("aria-label"), el.getAttribute("title"), el.getAttribute("alt")].join(" "), usernames) && shown(el)) result.account = true
   }
-  if (controls.length > 400) result.uncertain = true
-  let seen = 0
-  for (const root of roots) {
-    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
-    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-      if (++seen > 3000 || performance.now() > deadline) { result.uncertain = true; break }
-      const parent = node.parentElement
-      // A chooser or a prefilled login does not prove authentication. Counting
-      // its text still suppresses an offer (safe false negative), never fills.
-      if (parent && !parent.closest("script, style, noscript, template, input, textarea") &&
-          matchesAccount((node.nodeValue ?? "").slice(0, 2000), usernames) && shown(parent)) result.account = true
-    }
-  }
-  result.entry = !!entry
-  if (loginForm || entry) {
+  if (controls.length > 400) signals.uncertain = true
+  signals.entry = !!entry
+  return { signals, entry }
+}
+
+/**
+ * Repeat checks on the same URL and form reuse the last scan for a moment;
+ * `fresh` (the guarded pick) always scans. Each call mints its own action.
+ */
+export function authReport(state: PageState, fresh = false): AuthReport {
+  state.rescan()
+  const key = `${location.href}\n${state.form()}\n${state.kind() ?? ""}\n${document.hidden}`
+  const reuse = !fresh && last && last.key === key && Date.now() - last.at < REPORT_MS && (!last.entry || last.entry.isConnected && safeEntry(last.entry))
+  if (!reuse) last = { key, at: Date.now(), ...scan(state) }
+  const { signals, entry } = last!
+  const result: AuthReport = { ...signals }
+  if (signals.loginForm || entry) {
     const id = crypto.randomUUID()
     if (actions.size >= 8) actions.delete(actions.keys().next().value!)
-    actions.set(id, { ...(loginForm ? {} : { element: entry }), form: state.form(), url: location.href, at: Date.now() })
+    actions.set(id, { ...(signals.loginForm ? {} : { element: entry }), form: state.form(), url: location.href, at: Date.now() })
     result.action = id
   }
   return result

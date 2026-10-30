@@ -22,6 +22,7 @@ const LIST_TTL_MS = 30_000
 export const SESSION_TTL_MS = 3 * 60_000
 /** A home/modal entry must reach its first login step promptly, not arm a later task. */
 export const AUTOMATIC_ENTRY_MS = 20_000
+const MAX_AUTOMATIC_SUBMITS = 4
 /** On a site whose steps come by navigation (see Flow), this much longer, for a slow page. */
 const SESSION_GRACE_MS = 60_000
 /** chrome.storage.local: the shape of each site's sign-in (see Flow), by a salted hash of the site. */
@@ -68,6 +69,8 @@ interface MenuToken extends FrameTarget {
 interface Session {
   /** Only the opt-in corner offer's guarded pick may enable auto-submit. */
   automatic?: boolean
+  /** Submit calls made by this automatic session, carried across its steps. */
+  automaticSubmits?: number
   ref: string
   /** The site (registrable domain): leaving it ends the session. */
   site: string
@@ -633,7 +636,7 @@ export class Autofill {
     const startedAt = session?.ref === account.ref ? session.startedAt : now
     const until = startedAt + SESSION_TTL_MS + (flow?.navigates ? SESSION_GRACE_MS : 0)
     const origin = session?.ref === account.ref ? session.origin : target.origin
-    return { reply: { ok: true }, next: { ref: account.ref, site, origin, documentId: target.documentId, filledAt: now, filled: all, startedAt, until, ...(session?.automatic ? { automatic: true } : {}) } }
+    return { reply: { ok: true }, next: { ref: account.ref, site, origin, documentId: target.documentId, filledAt: now, filled: all, startedAt, until, ...(session?.automatic ? { automatic: true, automaticSubmits: session.automaticSubmits ?? 0 } : {}) } }
   }
 
   /** A fill the user chose (menu or popup), then the sign-in session that follows it. */
@@ -705,7 +708,7 @@ export class Autofill {
     const now = Date.now()
     if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return { ok: false, message: "Sign-in stopped." }
     await this.setSession(target.tabId, { ref: account.ref, site, origin: target.origin, documentId: target.documentId,
-      filled: [], filledAt: now, startedAt: now, until: now + AUTOMATIC_ENTRY_MS, automatic: true })
+      filled: [], filledAt: now, startedAt: now, until: now + AUTOMATIC_ENTRY_MS, automatic: true, automaticSubmits: 0 })
     if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) {
       await this.cancel(target.tabId)
       return { ok: false, message: "Sign-in stopped." }
@@ -822,7 +825,10 @@ export class Autofill {
 
     await this.serial(target.tabId, async () => {
       const s = await this.session(target.tabId)
-      if (!s || siteOf(new URL(target.origin).hostname) !== s.site) return
+      if (!s || generation !== this.generation(target.tabId) || siteOf(new URL(target.origin).hostname) !== s.site) return
+      if (s.automatic && (target.frameId !== 0 || target.origin !== s.origin ||
+          (kind !== "login" && kind !== "mfa") || (s.automaticSubmits ?? 0) >= MAX_AUTOMATIC_SUBMITS))
+        return this.endSession(target.tabId)
       // A form showing up isn't a step by itself: the user has to have
       // submitted the last one themselves. In the same document, content.ts
       // says so (`stepped`: their own click or Enter, never a page's own
@@ -833,14 +839,12 @@ export class Autofill {
       const first = s.automatic && s.filled.length === 0
       if (first && kind !== "login") return this.endSession(target.tabId)
       if (!first && (target.documentId === s.documentId ? !stepped : !sub || sub.documentId !== s.documentId || sub.at < s.filledAt)) return
-      if (s.automatic && (target.frameId !== 0 || target.origin !== s.origin ||
-          (kind !== "login" && kind !== "mfa") || (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true))
-        return this.endSession(target.tabId)
       const identifierOnly = clean.some((r) => IDENTIFIER_ROLES.includes(r)) && !clean.includes("password") && !clean.includes("otp")
       // "Not you? Use a different account": the username box came back
       // empty. The session ends; whoever signs in now picks again.
       if (identifierOnly && !first) return void (idEmpty && (await this.endSession(target.tabId)))
-      if (this.host.status.state !== "ready") return
+      if (s.automatic && (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true) return this.endSession(target.tabId)
+      if (this.host.status.state !== "ready" || generation !== this.generation(target.tabId)) return
       const reply = await this.list(target.origin).catch(() => null)
       const account = reply?.accounts.find((a) => a.ref === s.ref)
       if (!account || generation !== this.generation(target.tabId)) return
@@ -849,7 +853,7 @@ export class Autofill {
       // or one whose host a saved URL of the login names exactly.
       if (target.origin !== s.origin && !account.urls.some((u) => sameHost(u, target.origin))) return
       if (s.automatic && !account.urls.some((u) => exactSignInOrigin(u, target.origin))) return this.endSession(target.tabId)
-      const step = (first ? clean : stepRoles(clean, account, idEmpty)).filter((r) => !s.filled.includes(r) || IDENTIFIER_ROLES.includes(r))
+      const step = (first ? clean : stepRoles(clean, account, idEmpty)).filter((r) => !s.filled.includes(r) || (IDENTIFIER_ROLES.includes(r) && (!s.automatic || !s.filled.includes("password"))))
       if (!step.length) return
       const shown = framed ? await this.measured(target.tabId, () => shownInPage(target, form as number, true), null) : undefined
       // A frame's step fills only fields that show through every frame above. One
@@ -859,11 +863,22 @@ export class Autofill {
       // Used once: whatever happens next, this step in this document doesn't fill again.
       await this.setSession(target.tabId, { ...s, documentId: target.documentId })
       const { reply: filled, next } = await this.fillStep(target, account, step, form as number, generation, shown ?? undefined, s)
-      if (next !== undefined) await this.arm(target.tabId, generation, next)
+      if (generation !== this.generation(target.tabId)) return
       if (s.automatic && !filled.ok) return this.endSession(target.tabId)
-      if (s.automatic && filled.ok && generation === this.generation(target.tabId)) {
+      // A saved TOTP can fill an unfamiliar code step, but only a learned
+      // code flow authorizes submitting it. Content also vetoes SMS/email prompts.
+      const submit = s.automatic && filled.ok && (!clean.includes("otp") || (await flowFor(s.site))?.code === true)
+      if (generation !== this.generation(target.tabId)) return
+      if (s.automatic && (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true) return this.endSession(target.tabId)
+      if (generation !== this.generation(target.tabId)) return
+      const automaticSubmits = (s.automaticSubmits ?? 0) + (submit ? 1 : 0)
+      if (next !== undefined) await this.arm(target.tabId, generation, next && submit ? { ...next, automaticSubmits } : next)
+      if (submit && generation === this.generation(target.tabId)) {
         this.submits.set(target.tabId, { documentId: target.documentId, at: Date.now() })
-        if (!await sendToFrame(target, { type: "db:signin-submit", form: form as number })) await this.endSession(target.tabId)
+        const submitted = await sendToFrame(target, { type: "db:signin-submit", form: form as number })
+        if (generation !== this.generation(target.tabId)) return
+        // Four attempts are enough: leave any further step to a fresh user pick.
+        if (!submitted || automaticSubmits >= MAX_AUTOMATIC_SUBMITS) await this.endSession(target.tabId)
       }
     })
   }

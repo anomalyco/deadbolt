@@ -50,6 +50,94 @@ describe("opt-in automatic sign-in session", () => {
     expect((await autofill.startAutomatic({ ...target, origin: "https://other.example.com" }, account, "action")).ok).toBe(false)
     expect(fills()).toHaveLength(0)
   })
+  test.each([undefined, false, true])("fills a code but submits it only with a learned code flow (%s)", async (code) => {
+    if (code !== undefined) {
+      await autofill.page(pageSender(), "login", ["email", "password"], 1)
+      if (code) await autofill.page(pageSender(), "mfa", ["otp"], 2)
+      await autofill.learnFlow(1, "example.com")
+    }
+    fake.local[SIGNIN_SETTING] = true
+    await autofill.startAutomatic(target, account, "action")
+    await autofill.page(pageSender(), "login", ["email", "password"], 1)
+    fake.fillAck = () => ({ filled: ["otp"] })
+    await autofill.page(pageSender(), "mfa", ["otp"], 2, true)
+    expect(fills().map((r) => (r as { want: string[] }).want)).toEqual([["username", "password"], ["totp"]])
+    expect(delivered("db:signin-submit").map((d) => d.message.form)).toEqual(code === true ? [1, 2] : [1])
+    expect(fake.session).toEqual({})
+  })
+  test("ends after four submit attempts even when the password step keeps taking only the identifier", async () => {
+    fake.local[SIGNIN_SETTING] = true
+    fake.fillAck = () => ({ filled: ["email"] })
+    await autofill.startAutomatic(target, account, "action")
+    await autofill.page(pageSender(), "login", ["email"], 1)
+    for (let form = 2; form <= 4; form++) {
+      await autofill.page(pageSender(), "login", ["email", "password"], form, true, true)
+      expect(delivered("db:signin-submit")).toHaveLength(form)
+    }
+    expect(fake.session).toEqual({})
+    const requests = host.requests.length
+    await autofill.page(pageSender(), "login", ["email", "password"], 5, true, true)
+    expect(delivered("db:signin-submit")).toHaveLength(4)
+    expect(fills()).toHaveLength(4)
+    expect(host.requests).toHaveLength(requests)
+  })
+  test.each([false, true])("only manual sessions may refill the identifier after filling the password (automatic: %s)", async (automatic) => {
+    if (automatic) {
+      fake.local[SIGNIN_SETTING] = true
+      await autofill.startAutomatic(target, account, "action")
+      await autofill.page(pageSender(), "login", ["email", "password"], 1)
+    } else {
+      const token = await menu()
+      await autofill.menuLoad(token, menuSender(), SITE)
+      await autofill.menuPick(token, account.ref, menuSender())
+    }
+    fake.fillAck = () => ({ filled: ["email"] })
+    await autofill.page(pageSender(), "login", ["email", "password"], 2, true, true)
+    expect(fills().map((r) => (r as { want: string[] }).want)).toEqual(automatic ? [["username", "password"]] : [["username", "password"], ["username"]])
+    expect(delivered("db:signin-submit")).toHaveLength(automatic ? 1 : 0)
+  })
+  test("turning the setting off after a fill prevents its submit", async () => {
+    fake.local[SIGNIN_SETTING] = true
+    await autofill.startAutomatic(target, account, "action")
+    fake.fillAck = () => {
+      fake.local[SIGNIN_SETTING] = false
+      return { filled: ["email"] }
+    }
+    await autofill.page(pageSender(), "login", ["email"], 1)
+    expect(delivered("db:fill")).toHaveLength(1)
+    expect(delivered("db:signin-submit")).toHaveLength(0)
+    expect(fake.session).toEqual({})
+  })
+  test.each(["cancel", "setting-off"])("stopping while the learned code flow is being read prevents submitting (%s)", async (stop) => {
+    await autofill.page(pageSender(), "login", ["email", "password"], 1)
+    await autofill.page(pageSender(), "mfa", ["otp"], 2)
+    await autofill.learnFlow(1, "example.com")
+    fake.local[SIGNIN_SETTING] = true
+    await autofill.startAutomatic(target, account, "action")
+    await autofill.page(pageSender(), "login", ["email", "password"], 1)
+    fake.fillAck = () => ({ filled: ["otp"] })
+    const local = (globalThis as unknown as { chrome: { storage: { local: { get: (key: string) => Promise<unknown> } } } }).chrome.storage.local
+    const get = local.get
+    let reading = false
+    let release = () => {}
+    local.get = async (key) => {
+      if (key === FLOWS_KEY) {
+        reading = true
+        await new Promise<void>((resolve) => (release = resolve))
+      }
+      return get(key)
+    }
+    const filling = autofill.page(pageSender(), "mfa", ["otp"], 2, true)
+    await waitFor(() => reading)
+    const stopped = stop === "cancel" ? autofill.navigated({ tabId: 1, frameId: 0, url: `${SITE}/login`, transitionType: "typed" }) : Promise.resolve()
+    if (stop === "setting-off") fake.local[SIGNIN_SETTING] = false
+    local.get = get
+    release()
+    await Promise.all([filling, stopped])
+    expect(delivered("db:fill")).toHaveLength(2)
+    expect(delivered("db:signin-submit")).toHaveLength(1)
+    expect(fake.session).toEqual({})
+  })
   test("turning the setting off while credentials are pending writes and submits nothing", async () => {
     fake.local[SIGNIN_SETTING] = true
     await autofill.startAutomatic(target, account, "action")

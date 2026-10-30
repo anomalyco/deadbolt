@@ -21,14 +21,22 @@ export class UniversalSignIn {
   private offers = new Map<string, Offer>()
   private checking = new Set<number>()
   private lists = new Map<string, { at: number; accounts: Account[] }>()
+  private on?: Promise<boolean>
   constructor(private host: VaultBackend, private autofill: Autofill, private occupied: (tab: number) => boolean) {
     host.onChange((status) => { this.lists.clear(); if (status.state !== "ready") void this.closeAll() })
     chrome.storage.onChanged?.addListener((changes, area) => {
-      if (area === "local" && changes[SIGNIN_SETTING]?.newValue !== true && SIGNIN_SETTING in changes) void this.closeAll()
+      if (area !== "local" || !(SIGNIN_SETTING in changes)) return
+      this.on = undefined
+      if (changes[SIGNIN_SETTING].newValue !== true) void this.closeAll()
     })
   }
 
-  private async enabled() { return (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] === true }
+  /** Memoized until the setting changes; a failed read is retried next time. */
+  private enabled() {
+    const on = this.on ??= chrome.storage.local.get(SIGNIN_SETTING).then((s) => s[SIGNIN_SETTING] === true)
+    on.catch(() => { if (this.on === on) this.on = undefined })
+    return on.catch(() => false)
+  }
   private async key(origin: string) { return `signin-memory:${await hostHash(origin)}` }
   private async memory(origin: string): Promise<Memory> {
     const key = await this.key(origin)
@@ -49,7 +57,6 @@ export class UniversalSignIn {
     if (!await this.enabled()) return
     const { target } = await topTarget(tabId)
     if (target) await this.remember(target.origin, { signedIn: Date.now() })
-    await this.closeTab(tabId)
   }
 
   async signedOut(sender: chrome.runtime.MessageSender) {
@@ -66,30 +73,32 @@ export class UniversalSignIn {
     this.lists.set(origin, { at: Date.now(), accounts })
     return accounts
   }
-  private probe(target: FrameTarget, accounts: Account[]) {
-    return sendToFrame<AuthReport>(target, { type: "db:auth-probe", usernames: accounts.flatMap((a) => a.username ? [a.username] : []).slice(0, 50) })
+  /** `fresh` skips the page's short report cache, for the guarded pick. */
+  private probe(target: FrameTarget, fresh = false) {
+    return sendToFrame<AuthReport>(target, { type: "db:auth-probe", ...(fresh ? { fresh } : {}) })
+  }
+  private open(tabId: number) { return [...this.offers.values()].some((o) => o.tabId === tabId) }
+  /** A fresh sign-in or a recent offer/dismissal on this origin: don't probe at all. */
+  private quiet(memory: Memory) {
+    return Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS || Date.now() < (memory.quietUntil ?? 0)
   }
 
   async check(sender: chrome.runtime.MessageSender) {
     const target = await targetFor(sender)
-    if (!target || target.frameId !== 0 || this.checking.has(target.tabId)) return
-    if ([...this.offers.values()].some((o) => o.tabId === target.tabId && o.picking)) return
+    // Cheapest first. An open offer stays until navigation, pick, dismissal,
+    // lock or the setting going off; it is never re-probed.
+    if (!target || target.frameId !== 0 || this.checking.has(target.tabId) || this.open(target.tabId)) return
+    if (this.host.status.state !== "ready" || this.occupied(target.tabId)) return
     this.checking.add(target.tabId)
     try {
-      if (!await this.enabled() || this.host.status.state !== "ready" || this.occupied(target.tabId) || await this.autofill.signingIn(target.tabId)) return
-      const memory = await this.memory(target.origin)
-      if (Date.now() < (memory.quietUntil ?? 0) && ![...this.offers.values()].some((o) => o.tabId === target.tabId)) return
+      if (!await this.enabled() || this.quiet(await this.memory(target.origin)) || await this.autofill.signingIn(target.tabId)) return
       const accounts = await this.accounts(target.origin)
       if (!accounts.length || accounts.length > 50) return
-      const facts = await this.probe(target, accounts)
+      const facts = await this.probe(target)
       if (!facts) return
-      if ([...this.offers.values()].some((o) => o.tabId === target.tabId && o.picking)) return
-      const state = authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS)
-      if (facts.signOut || facts.account) await this.remember(target.origin, { signedIn: Date.now() })
-      if (state !== "signed-out") return this.closeTab(target.tabId)
-      if (!facts.action || Date.now() < (memory.quietUntil ?? 0)) return
-      if ([...this.offers.values()].some((o) => o.tabId === target.tabId)) return
-      if (!await this.enabled() || this.host.status.state !== "ready") return
+      if (facts.signOut) await this.remember(target.origin, { signedIn: Date.now() })
+      if (authState(facts) !== "signed-out" || !facts.action || this.open(target.tabId)) return
+      if (!await this.enabled() || this.host.status.state !== "ready" || this.quiet(await this.memory(target.origin))) return
       const token = crypto.randomUUID()
       this.offers.set(token, { ...target, at: Date.now(), accounts })
       if (await sendToFrame(target, { type: "db:signin-offer", token }))
@@ -123,7 +132,7 @@ export class UniversalSignIn {
     o.picked = o.picking = true
     try {
       const account = (await this.accounts(o.origin, true)).find((a) => a.ref === ref && o.accounts.some((saved) => saved.ref === ref))
-      const facts = account && await this.probe(o, [account])
+      const facts = account && await this.probe(o, true)
       const memory = await this.memory(o.origin)
       if (o.cancelled || !account || !facts?.action || authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) !== "signed-out")
         return { ok: false, message: "The page changed. Nothing was filled." }

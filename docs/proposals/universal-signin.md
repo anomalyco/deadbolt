@@ -12,7 +12,10 @@ vault or personal account data.
 The person enables “Offer to sign in” (default off). On an eligible page,
 Deadbolt shows a compact top-right offer without moving focus. Picking an account
 can activate the site's visible Sign in entry, navigate to its login page, then
-fill and submit identifier, password and TOTP steps using that selected account.
+fill identifier, password and TOTP steps using that selected account. Identifier
+and password steps can submit automatically. A code step submits automatically
+only when the learned Flow has `code === true`, and never when the current prompt
+looks like an SMS/email code. A site may itself submit when its code fields fill.
 A form does not have to be present when the offer appears.
 
 This broad homepage-entry behavior is intentional. It is not deferred or limited
@@ -45,7 +48,7 @@ how 1Password detects signed-out state, uses cookies or suppresses Gmail prompts
 
 | Area | Paths and responsibility |
 | --- | --- |
-| Detection and local evidence | `extension/src/auth-state.ts`, `extension/src/content/auth-state.ts`, `extension/src/content/detect.ts`, `extension/src/content/outcome.ts`: state judgment, visible entry handles, account matching and existing outcome facts. |
+| Detection and local evidence | `extension/src/auth-state.ts`, `extension/src/content/auth-state.ts`, `extension/src/content/detect.ts`, `extension/src/content/outcome.ts`: value-free state judgment, visible entry handles and existing outcome facts. |
 | Offer and local memory | `extension/src/bg/universal.ts`, `extension/src/background.ts`: exact-origin accounts, suppression, offer tokens, callbacks and message routing. |
 | Fill and continuation | `extension/src/bg/autofill.ts`, `extension/src/content.ts`, `extension/src/content/approvals.ts`, `extension/src/bg/frames.ts`: bounded automatic sessions, approved fields, effective submit destination and browser-derived document identity. |
 | Surface and setting | `extension/src/content/inline.ts`, `extension/src/menu.ts`, `extension/src/ui/dom.ts`, `extension/src/vault/settings.ts`: compact corner surface, trusted entry, visibility guard and default-off toggle. |
@@ -68,7 +71,7 @@ Its purpose is to decide whether a suggestion is useful or should be suppressed.
 | Known login route | Weak alone: stale SPA routes, public content, callbacks and errors can look like login paths. | Contributes 2 points, below the threshold of 6. URL hints alone never produce an offer. |
 | Visible sign-out control | Strong suppression clue, but stale markup or a chooser may not represent an app session. Absence proves nothing. | Vetoes an offer. A trusted sign-out action clears that origin's remembered suppression so fresh signed-out state can offer again. |
 | Account avatar/menu or app shell | Avatars can be placeholders, public profiles or remembered accounts. Loading shells can hide all useful clues. | Account-menu/app-shell uncertainty stays quiet. Gmail has an explicit shell suppression; this is not a general classifier for every app. |
-| Full email/username matching this origin's vault metadata | Strong suppression, but body text, public posts and login choosers can mention the same person while signed out. | Match full tokens, case-insensitively, not email local-parts. Broad visible-text matching deliberately favors suppression and can miss useful offers. Only exact-origin candidates are considered locally. |
+| Page text resembling a vault email/username | Letting arbitrary page text alter an account-dependent offer creates a username oracle. | Not compared against vault metadata, including visible text, aria-label, alt and title. No candidate username list is sent to the auth-state probe. |
 | Own recent outcome | A field write or passkey signature does not establish server acceptance. Existing outcomes include both confirmed and likely. | Short-lived per-origin memory suppresses offers only. A likely outcome is never proof, nor permission to fill, submit or report a successful login. |
 | Learned `Flow` | Useful for expected step order/timing; history does not establish current auth state. Learning can include likely outcomes. | Existing session machinery can use learned shape; it does not authorize a pick or add points to the prototype's offer score. |
 | Navigation/redirects | Sign-in, sign-out, errors, consent and canonicalization all redirect. An app URL alone proves nothing. | Observe/reassess alongside page evidence. `webNavigation` exposes redirect qualifiers and SPA history events, **not HTTP response status codes** [T1]. No inferred 401/403 detector. |
@@ -80,11 +83,12 @@ Its purpose is to decide whether a suggestion is useful or should be suppressed.
 
 1. Require opt-in, an unlocked backend, a visible top document and an eligible
    exact-origin account. Respect an occupied surface, active session and cooldown.
-2. Apply sign-out/account evidence and recent suppression memory before scoring.
+2. Apply sign-out/account-menu evidence and recent suppression memory before scoring.
    Account-menu, app-shell, challenge, error or other uncertainty keeps it quiet.
 3. Use the implemented score: login form 6, visible sign-in entry 6, login route
    2; threshold 6. The origin must have an actionable form or entry handle.
-4. Recheck the selected account and page after the trusted pick. That pick can
+4. Keep an open offer stable: no periodic re-probes or page-text-driven closing.
+   Recheck the selected account and page after the trusted pick. That pick can
    authorize the homepage entry followed by same-origin multi-step completion.
 5. Stop on cancellation, disabled setting, invalid destination or unusable step.
    Never treat detector confidence as authorization or automatically try another
@@ -95,25 +99,27 @@ even against an entry or form. Stronger route/Flow corroboration for homepage
 entries is a possible future tightening, not a requirement the requested
 prototype claims to implement.
 
-### Local identity matching and privacy
+### Local evidence and privacy
 
-The prototype sends at most 50 usernames from exact-origin login metadata into
-that top document's **isolated content-script world**, not page JavaScript. It
-compares full tokens against visible text/labels in memory and returns booleans.
-There is no whole-vault page scan, remote classifier or cookie dependency. The
-matching preserves the full email rather than matching its local-part, but folds
-case and accepts matches outside account-specific UI. These choices can suppress
-legitimate login offers; a mismatch never proves the person is signed out.
+The detector no longer compares arbitrary page text or attributes with vault
+usernames. It receives no username list. This removes the text-dependent username
+oracle instead of moving the same comparison to privileged code. Account-menu
+uncertainty, visible sign-out controls and recent outcomes can still suppress an
+offer, but arbitrary email text cannot determine which account is offered.
 
-A future privacy refinement could extract a small bounded set of page candidates
-and compare inside privileged background/backend code, with account-context and
-site-appropriate identifier normalization. That is an alternative to the current
-local transport, not a claim about this build.
+An open offer is not periodically re-probed or closed when the page changes its
+text. Navigation, pick, dismissal and lock close it; disabling the setting still
+cancels the feature. Fresh signed-in memory and active cooldowns skip probes.
+The content script caches auth evidence per URL/form snapshot, with fresh opaque
+action validation for a pick. No cookies, remote classification or page telemetry
+are involved.
 
-The page can observe surface presence even though it cannot read the extension
-frame. Vault-dependent suppression therefore retains a membership-probing side
-channel. Bounded work and cooldowns reduce repeated probes; they do not eliminate
-it. This remains part of the required security review.
+Only a trusted click on a visible real `<a>` or `<button>`, at most 320×96 pixels
+and inside the viewport, can invalidate sign-out memory. Pointer clicks must hit
+that bounded control; keyboard activation must focus it. Large wrappers and
+`role=button` ancestors are not sign-out controls. A page can still observe that an
+extension surface exists; stable offers and removal of account-text comparison
+do not make the extension invisible or eliminate all account-presence inference.
 
 ### Memory, timing and origin boundaries
 
@@ -121,7 +127,7 @@ Account lists are cached for 5 seconds with at most 100 entries; a pick requests
 fresh account metadata. Suppression records use hashed exact-origin keys in
 extension session storage, are capped at 100 and have expiry pruning. Recent
 outcome suppression lasts 5 minutes from its recorded observation; current
-account/logout evidence can refresh it. Offer/dismissal cooldown is 30 minutes,
+logout evidence can refresh it. Offer/dismissal cooldown is 30 minutes,
 including across reloads. These records contain timestamps, not passwords or
 stored page text. A field-fill acknowledgement is never successful-auth evidence.
 
@@ -163,7 +169,12 @@ not constitute a completed security review.
 4. **Effective submit destination.** Before submitting, check the current form,
    required fields, visible enabled control and effective `formaction`/`formtarget`
    overrides as well as the form defaults. Cross-origin action or another target
-   is blocked. Escape and disabling the setting stop pending automatic work,
+   is blocked, and the button's form must contain and own the filled fields.
+   Automatic sessions have at most four submit requests, do not refill identifiers
+   after filling a password, and require a learned authenticator flow before
+   submitting a code. SMS/email-looking prompts always require manual submission
+   by Deadbolt. An observed trusted submit-on-fill is not clicked a second time. Automatic
+   submission does not synthesize a user-gesture timestamp. Escape and disabling the setting stop pending automatic work,
    including during backend RPC. These checks cannot authenticate site scripts
    or recall a request already sent.
 5. **Surface and authority coexistence.** Reuse one page surface; existing menus,
@@ -187,16 +198,18 @@ has passed. Clips are being delivered separately.
 
 | Environment | Verified result |
 | --- | --- |
-| Local fixture: entry and completion | Default off; compact top-right offer without focus theft; one account pick completes home → identifier → password → TOTP → dashboard. Modal sign-in also completes fully. |
-| Local fixture: state and suppression | Signed-in dashboard with a stray Google button stays quiet; full-email matching suppresses; SPA logout changes state and allows an eligible offer; errors suppress. |
+| Local fixture: entry and completion | Default off; compact top-right offer without focus theft; an unlearned code fills but waits for confirmation. A learned authenticator flow completes home → identifier → password → TOTP → dashboard from one pick. Modal sign-in also completes. |
+| Local fixture: state and suppression | Signed-in dashboard with a stray Google button stays quiet; free-text usernames do not affect account visibility; open offers remain stable; SPA logout changes state and allows an eligible offer; errors suppress. |
 | Local fixture: boundaries and dismissal | Cross-site iframe gets no offer; dismissal cooldown survives reload; cross-origin form submission is blocked. |
-| Real HTTPS demo | On `https://acme-demo.i.vogel.dev`, a newly created synthetic account completes home → identifier → password → `/app` from one pick; signed-in suppression is verified. |
-| Focused tests | Five new session tests and nine detector tests passed, including setting-off-during-RPC and Escape cancellation coverage. |
+| Real HTTPS demo | The seeded synthetic account exercises identifier → password → TOTP → `/app`. Acme submits when the last code digit fills; the runner requires exactly one code POST and a successful authenticated dashboard response. |
+| Focused tests | Session and detector coverage includes setting-off-during-RPC, Escape cancellation, learned/unlearned code submission, the four-submit limit and post-password identifier restrictions. |
 
-**TOTP evidence is local-fixture only.** The newly created real-demo account had
-no exposed MFA setup. Probes of `/settings/security`, `/settings/2fa`, `/mfa`,
-`/otp` and `/login/otp` returned 404. The real-demo result therefore does not
-establish TOTP completion or that the service lacks MFA elsewhere.
+The live demo's **seeded account has MFA**. Newly created accounts did not expose
+an MFA enrollment route; that was not evidence that the demo lacked a TOTP step.
+The runner accepts `--demo-seed <private JSON>` to consume the synthetic account's
+username, password and otpauth directly into its disposable vault, without logging
+their values. It checks the email, password and code submissions separately and
+requires the server's authenticated `/app` destination after the single pick.
 
 ### Final prototype limits
 
@@ -204,7 +217,7 @@ establish TOTP completion or that the service lacks MFA elsewhere.
 | --- | --- |
 | Broad homepage entry gate | Intentional, default-off scope. Evaluate signed-in false positives across more sites; stricter corroboration is a future policy option. Security review is still required. |
 | Same-origin automatic flow; manual provider guidance | Separate auth hosts and OAuth/provider clicks are not automated by this feature. Existing provider guidance is reused. |
-| Exact-origin username metadata in isolated top-world, up to 50 | Local but wider metadata exposure than privileged-only matching. Broad case-insensitive body-text matching can cause safe false negatives. |
+| No vault-username matching in page evidence | Deliberately gives up identity-text suppression to remove the username oracle. A visible email alone is not authenticated-state evidence. |
 | Likely outcomes contribute suppression | Suppression can outlast an unsuccessful/ambiguous attempt for its short lifetime. It is never authentication proof or extra fill authority. |
 | No authenticated Browse-activity signal | UI backs off using existing surface/form/session state; this is not complete coordination with independently authorized agent fills. |
 
@@ -238,9 +251,9 @@ page text, usernames, item refs, URL queries, cookies or browsing-history logs.
    explicit authorization should cross-origin continuation require?
 3. Keep the 30-minute origin cooldown, or add separate dismissal, post-logout and
    Never offer here controls?
-4. Before broader rollout, should homepage entries require more corroboration,
-   and should account comparison move entirely into privileged code to reduce
-   metadata exposure and the residual surface-presence side channel?
+4. Before broader rollout, should homepage entries require more corroboration
+   beyond a visible sign-in control? Arbitrary vault-username comparison is removed,
+   not postponed as a product option.
 5. Should ambiguous reauthentication/account-switch pages always require explicit
    manual invocation? Recommendation: yes until independently verified.
 
