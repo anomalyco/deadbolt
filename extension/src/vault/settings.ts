@@ -69,7 +69,10 @@ function passkeyRow(app: App, k: DevicePasskey, repaint: () => void): HTMLElemen
     h("span", { class: "vrow-actions" }, iconButton(glyph("trash"), `Delete passkey ${name} for ${k.rpId}`, () => askDelete(app.preset === "strict"))),
   )
   const askDelete = (strict: boolean) => {
-    const no = button("btn", "Cancel", () => repaint())
+    const no = button("btn", "Cancel", () => {
+      row.classList.remove("confirming")
+      repaint()
+    })
     const label = h("span", { class: "roll-label" }, "Delete")
     label.dataset.text = "Delete"
     const passphrase = strict ? h("input", { class: "input", type: "password", autocomplete: "current-password", placeholder: "Passphrase", "aria-label": "Passphrase", spellcheck: "false" }) : null
@@ -222,12 +225,23 @@ export function settingsView(app: App): View {
   // Passkeys, once the vault has listed them.
   const passkeys = h("div", { class: "rows" })
   const passkeysGroup = h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Passkeys")), passkeys)
+  let passkeyRows = new Map<string, HTMLElement>()
 
   const paint = () => {
     passkeysGroup.hidden = app.passkeys === null
-    passkeys.replaceChildren(
-      ...(app.passkeys?.length ? app.passkeys.map((k) => passkeyRow(app, k, paint)) : [h("p", { class: "hint" }, "No passkeys yet. A site that offers one asks to save it in Deadbolt.")]),
-    )
+    // Refreshes can arrive while typing or awaiting the KDF. Keep that item's
+    // confirmation in place, but remove it if the item disappeared from sync.
+    passkeyRows = new Map((app.passkeys ?? []).map((k) => {
+      const previous = passkeyRows.get(k.ref)
+      return [k.ref, previous?.classList.contains("confirming") ? previous : passkeyRow(app, k, paint)]
+    }))
+    const rows = passkeyRows.size ? [...passkeyRows.values()] : [h("p", { class: "hint" }, "No passkeys yet. A site that offers one asks to save it in Deadbolt.")]
+    for (const child of [...passkeys.children]) {
+      if (!rows.includes(child as HTMLElement)) child.remove()
+    }
+    rows.forEach((row, i) => {
+      if (passkeys.children[i] !== row) passkeys.insertBefore(row, passkeys.children[i] ?? null)
+    })
     // This browser first, then the others by name.
     const sorted = [...(app.devices ?? [])].sort((a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name))
     devices.replaceChildren(...sorted.map((d) => deviceRow(app, d, paint)))

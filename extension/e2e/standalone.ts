@@ -1122,6 +1122,22 @@ async function passkeyFlows(device: Page, worker: Worker) {
     check((await devicePasskeys(device)).some((k) => k.credentialId === kit.id), "cancelling deletion keeps the passkey")
     await remove.click()
     await confirmation.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
+    // A sync/status refresh must not discard the confirmation or its input.
+    // Observe the devices repaint to know App.refresh has actually completed.
+    await device.evaluate(() => {
+      const rows = document.querySelector(".settings .rows")!
+      rows.removeAttribute("data-refreshed")
+      const observer = new MutationObserver(() => {
+        observer.disconnect()
+        rows.setAttribute("data-refreshed", "true")
+      })
+      observer.observe(rows, { childList: true })
+    })
+    const current = (await request(device, { type: "device-status" })).status
+    await worker.evaluate((status) => chrome.runtime.sendMessage({ type: "db:status", status, change: "items" }), current)
+    await device.locator('.settings .rows[data-refreshed="true"]').waitFor()
+    check(await confirmation.count() === 1, "a vault refresh preserves the passkey deletion confirmation")
+    check(await confirmation.getByLabel("Passphrase", { exact: true }).inputValue() === "wrong fixture passphrase", "a vault refresh preserves the entered deletion passphrase")
     await confirmation.getByRole("button", { name: "Delete", exact: true }).click()
     await confirmation.getByText("That passphrase isn't right.", { exact: true }).waitFor().catch(async (error) => {
       console.error("Settings deletion confirmation:", await confirmation.allTextContents())
