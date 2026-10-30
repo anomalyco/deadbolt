@@ -19,6 +19,6 @@ export function appearanceRows(icons: IconSettings, announce: (message: string) 
   }
   return [
     row("menu", "Site icons in the fill menu", "Every login there is for the page you're on, so it's off by default.", "The fill menu shows site icons.", "The fill menu shows titles and usernames only."),
-    row("vault", "Site icons in the vault", "From the sites themselves as you visit them, or bundled. Deadbolt never looks them up.", "The vault shows site icons.", "The vault shows letters."),
+    row("vault", "Site icons in the vault", "From a site after Deadbolt fills a login there, or bundled. Deadbolt never looks them up.", "The vault shows site icons.", "The vault shows letters."),
   ]
 }

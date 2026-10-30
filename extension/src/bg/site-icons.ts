@@ -1,28 +1,50 @@
-// Keeps a site's own SVG icon, read from the site as the user visits it
-// (content/site-icon.ts), for the vault's rows and the menu's (ui/site-icon.ts).
+// Keeps a site's own SVG icon, read from the site's page (content/site-icon.ts),
+// for the vault's rows and the menu's (ui/site-icon.ts).
 //
-// Only for a top page on a site with a saved login, only while a site icon
-// setting is on, and at most once a month per site: Deadbolt never asks
-// anyone else for an icon, and never asks a site the user isn't on, so no
-// server learns which sites the vault has logins for from Deadbolt. The
-// background decides which site an icon is for, from the browser's record
-// of the page, never the page's word: a page can only set its own site's
-// icon. It's kept under the page's host and under the hosts of the logins
-// listed for it (a login for acme.com gets accounts.acme.com's icon), the
-// same hosts that would get those logins filled.
+// Only after Deadbolt filled a login on the site or saw a sign-in there
+// go through (see `used`), never just because a page loaded: by then the
+// site already knows this visitor has an account, so reading its icon tells
+// it nothing new. The page's script could still notice the cache read; a
+// page load alone never reveals that the vault has a login for the site.
+// Only while a site icon setting is on, at most once a month per host, never
+// in an incognito tab, and the content script reads only what the browser
+// already has cached from the page's own origin: Deadbolt itself never
+// sends a request for an icon.
+//
+// The background decides which host an icon is for, from the browser's
+// record of the top document, never the page's word, and keeps it under
+// that exact host only (less a leading "www."): a page can't set the icon of
+// another subdomain's login, or of its parent domain's.
 
 import type { PageIcon } from "../content/site-icon"
-import type { ListReply } from "../protocol"
 import { ICON_FRESH_MS, iconKey, iconSettings, keepIcon, storedIcon } from "../ui/icon-store"
 import { MAX_SVG_BYTES } from "../ui/svg-safe"
 import type { VaultBackend } from "./backend"
-import { sendToFrame, topTarget } from "./frames"
+import { newToken, sendToFrame, topTarget } from "./frames"
 import { fillableOrigin, siteOf } from "./site"
 
-/** chrome.storage.session: hosts looked at lately with no login, or whose page had no SVG icon, so a visit doesn't ask the vault every time. */
+/** chrome.storage.session: salted hashes of hosts whose page had no cached SVG icon lately, so each fill doesn't ask again. */
 const CHECKED_KEY = "siteIconsChecked"
+/** chrome.storage.session: the salt for the hashes this file and the menu's reveals keep, made once per browser session. */
+const SALT_KEY = "siteIconsSalt"
 const CHECK_AGAIN_MS = 6 * 3600_000
 const MAX_CHECKED = 500
+
+let salting: Promise<string> | undefined
+
+/** A host under this browser session's salt: the session store lists no sites by name. */
+export async function hostHash(host: string): Promise<string> {
+  salting ??= (async () => {
+    const stored = (await chrome.storage.session.get(SALT_KEY))[SALT_KEY]
+    if (typeof stored === "string" && stored) return stored
+    const made = newToken()
+    await chrome.storage.session.set({ [SALT_KEY]: made })
+    return made
+  })()
+  salting.catch(() => (salting = undefined))
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(`${await salting}\n${iconKey(host)}`))
+  return Array.from(new Uint8Array(digest).slice(0, 16), (b) => b.toString(16).padStart(2, "0")).join("")
+}
 
 /** What the content script sent, if it's the shape asked for. */
 export function pageIconOf(raw: unknown): PageIcon | null {
@@ -33,52 +55,36 @@ export function pageIconOf(raw: unknown): PageIcon | null {
   return { svg: r.svg, ...(r.mask === true ? { mask: true } : {}), ...(color ? { color } : {}) }
 }
 
-/** The hosts an icon read on `pageHost` is kept under: the page's, and its listed logins' on the same site. */
-export function iconHosts(pageHost: string, reply: ListReply): string[] {
-  const site = siteOf(pageHost)
-  const hosts = new Set([iconKey(pageHost)])
-  for (const a of reply.accounts)
-    for (const u of a.urls) {
-      try {
-        const h = new URL(u.includes("://") ? u : `https://${u}`).hostname
-        if (site && siteOf(h) === site) hosts.add(iconKey(h))
-      } catch {}
-    }
-  return [...hosts]
-}
-
 export class SiteIcons {
   private busy = new Set<string>()
 
   constructor(private host: VaultBackend) {}
 
-  /** A top page finished loading (webNavigation.onCompleted). */
-  async completed(d: { tabId: number; frameId: number; url: string }) {
-    if (d.frameId !== 0) return
-    let url: URL
-    try {
-      url = new URL(d.url)
-    } catch {
-      return
-    }
-    if (!fillableOrigin(url) || this.host.status.state !== "ready") return
+  /**
+   * Deadbolt just filled a login in `tabId`, or a sign-in there went
+   * through, on `site`: read the top page's icon if it's on that site and
+   * this host's kept icon is missing or a month old.
+   */
+  async used(tabId: number, site: string) {
+    const tab = await chrome.tabs.get(tabId).catch(() => null)
+    if (!tab || tab.incognito) return
+    const { target, url } = await topTarget(tabId)
+    if (!target || !url || !fillableOrigin(url) || siteOf(url.hostname) !== site || this.host.status.state !== "ready") return
     const key = iconKey(url.hostname)
     if (this.busy.has(key)) return
     this.busy.add(key)
     try {
       const settings = await iconSettings()
       if (!settings.menu && !settings.vault) return
-      if (await this.checkedLately(key)) return
       const kept = await storedIcon(key)
       if (kept && Date.now() - kept.at < ICON_FRESH_MS) return
-      const reply = await this.host.send({ type: "list", origin: url.origin }).catch(() => null)
-      if (!reply) return
-      if (!reply.accounts.length) return void (await this.checked(key))
-      const { target } = await topTarget(d.tabId)
-      if (!target || target.origin !== url.origin) return
+      if (await this.checkedLately(key)) return
       const icon = pageIconOf(await sendToFrame(target, { type: "db:site-icon" }))
       if (!icon) return void (await this.checked(key))
-      await keepIcon(iconHosts(url.hostname, reply), { ...icon, at: Date.now() })
+      // The page may have moved on while it answered: only the document asked counts.
+      const now = await topTarget(tabId)
+      if (now.target?.documentId !== target.documentId) return
+      await keepIcon([key], { ...icon, at: Date.now() })
     } finally {
       this.busy.delete(key)
     }
@@ -86,12 +92,12 @@ export class SiteIcons {
 
   private async checkedLately(key: string): Promise<boolean> {
     const all = await this.checkedAll()
-    return Date.now() - (all[key] ?? 0) < CHECK_AGAIN_MS
+    return Date.now() - (all[await hostHash(key)] ?? 0) < CHECK_AGAIN_MS
   }
 
   private async checked(key: string) {
     const all = await this.checkedAll()
-    all[key] = Date.now()
+    all[await hostHash(key)] = Date.now()
     const kept = Object.entries(all).sort((a, b) => b[1] - a[1]).slice(0, MAX_CHECKED)
     await chrome.storage.session.set({ [CHECKED_KEY]: Object.fromEntries(kept) }).catch(() => {})
   }

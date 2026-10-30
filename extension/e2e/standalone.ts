@@ -76,6 +76,8 @@ const html = (title: string, body: string) => new Response(`<!doctype html><html
 const input = (id: string, label: string, attrs: string) =>
   `<label for="${id}">${label}</label><input id="${id}" name="${id}" ${attrs} style="display:block;width:100%;height:36px;margin-bottom:8px">`
 /** Sign-in, sign-up, password change and checkout pages, like the demo site's; each sign-in lands on an account page. */
+/** Each request for /iconed's icon, by its Sec-Fetch-Dest: the page's own loads are "image", a script's fetch "empty". */
+const iconRequests: string[] = []
 async function fixture(request: Request) {
   const url = new URL(request.url)
   const form = request.method === "POST" ? await request.formData() : null
@@ -97,6 +99,15 @@ async function fixture(request: Request) {
         <input type="email" name="username" value="${escape(url.searchParams.get("u") ?? "")}" autocomplete="username" hidden readonly>
         ${input("current", "Current password", `type="password" autocomplete="current-password"`)}${input("new", "New password", `type="password" autocomplete="new-password" minlength="12"`)}
         ${input("confirm", "Confirm new password", `type="password" autocomplete="new-password" minlength="12"`)}<button type="submit">Update password</button></form>`)
+    // A sign-in page with its own SVG icon, and that icon, which counts who asks for it (see siteIcon).
+    case "/iconed":
+      return new Response(`<!doctype html><html><head><meta charset="utf-8"><title>Iconed</title><link rel="icon" type="image/svg+xml" href="/icon.svg"></head><body>
+        <main style="width:360px;margin:60px auto;font:16px sans-serif"><img src="/icon.svg" width="24" height="24" alt=""><h1>Sign in</h1><form>
+        ${input("username", "Email", `type="email" autocomplete="username"`)}${input("password", "Password", `type="password" autocomplete="current-password"`)}
+        <button type="submit">Sign in</button></form></main></body></html>`, { headers: { "content-type": "text/html" } })
+    case "/icon.svg":
+      iconRequests.push(request.headers.get("sec-fetch-dest") ?? "")
+      return new Response(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#e5484d"/><script>alert(1)</script></svg>`, { headers: { "content-type": "image/svg+xml", "cache-control": "max-age=3600" } })
     case "/account":
       return html("Acme", `<h1>Your account</h1><p>Signed in as ${escape(url.searchParams.get("u") ?? "")}</p><a href="/signin">Sign out</a>`)
     case "/checkout":
@@ -159,6 +170,38 @@ async function state(page: Page) {
 /** The device page's list of logins shows `title` by itself, without a click. */
 async function shown(page: Page, title: string, ms = 15_000) {
   await page.locator(".list-view .vrow .title").getByText(title, { exact: true }).first().waitFor({ timeout: ms })
+}
+/** The site icon kept for `host`, if any, read from the extension's own IndexedDB (ui/icon-store.ts). */
+async function keptIcon(page: Page, host: string): Promise<string | null> {
+  return page.evaluate((host) => new Promise<string | null>((resolve) => {
+    const open = indexedDB.open("deadbolt-site-icons", 1)
+    open.onupgradeneeded = () => open.result.createObjectStore("icons")
+    open.onsuccess = () => {
+      const get = open.result.transaction("icons").objectStore("icons").get(host)
+      get.onsuccess = () => resolve((get.result as { svg?: string } | undefined)?.svg ?? null)
+      get.onerror = () => resolve(null)
+    }
+    open.onerror = () => resolve(null)
+  }), host)
+}
+/**
+ * A site's own icon is read only after a fill there, and only from the
+ * browser's cache: a page load reads nothing, and no request for it ever
+ * comes from Deadbolt (only the page's own "image" loads reach the server).
+ */
+async function siteIcon(device: Page) {
+  const page = await newPage("site-icon")
+  await page.goto(`${origin}/iconed`)
+  await page.locator("img").evaluate((img: HTMLImageElement) => img.decode())
+  await Bun.sleep(2000)
+  check(await keptIcon(device, "localhost") === null, "a page load alone reads no site icon")
+  const menu = await menuOn(page, "#username", "From browser")
+  await menu.locator("button.row", { hasText: "From browser" }).first().click()
+  await until("From browser filled on the iconed page", async () => await page.inputValue("#password") === browserPassword)
+  const svg = await until("the site's icon is kept after the fill", () => keptIcon(device, "localhost"), 10_000)
+  check(svg.includes("circle") && !svg.includes("script"), "after a fill, the site's icon is kept, sanitized")
+  check(iconRequests.length > 0 && iconRequests.every((dest) => dest === "image"), `no icon request ever came from Deadbolt (${iconRequests.join(", ")})`)
+  await page.close()
 }
 /** One request to the vault, as the service worker sends it to the offscreen document and its worker, timed there. */
 async function vault(worker: Worker, body: Record<string, unknown> & { type: string }) {
@@ -944,6 +987,7 @@ try {
 
   if (smoke) {
     await quick(worker, "From browser", browserPassword, "with no peers")
+    await siteIcon(device)
     await autofill("From browser", "browser@example.test", browserPassword)
     await about(device)
   } else {

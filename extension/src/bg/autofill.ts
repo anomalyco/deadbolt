@@ -13,6 +13,7 @@ import { isAccountPage, pageAccountOf } from "../signin"
 import type { SignInWith } from "./signinwith"
 import { siteOf } from "./site"
 import { iconKey, iconSettings, storedIcon, type StoredIcon } from "../ui/icon-store"
+import { hostHash } from "./site-icons"
 
 const TOKEN_TTL_MS = 2 * 60_000
 const LIST_TTL_MS = 30_000
@@ -192,6 +193,8 @@ export class Autofill {
   /** Sites whose fields already showed the locked row on focus since Deadbolt last locked or unlocked. */
   private lockedShown = new Set<string>()
   private lastState: string
+  /** A picked login was filled in `tabId` on `site` (bg/site-icons.ts reads the site's icon then). */
+  filled?: (tabId: number, site: string) => void
 
   constructor(
     private host: VaultBackend,
@@ -614,6 +617,8 @@ export class Autofill {
     const generation = this.generation(target.tabId)
     const { reply, next } = await this.fillStep(target, account, roles, form, generation, framed)
     if (next !== undefined) await this.serial(target.tabId, () => this.arm(target.tabId, generation, next))
+    const site = siteOf(new URL(target.origin).hostname)
+    if (reply.ok && site) this.filled?.(target.tabId, site)
     return reply
   }
 
@@ -914,7 +919,7 @@ async function menuIcons(accounts: Account[]): Promise<Record<string, StoredIcon
   return icons
 }
 
-/** chrome.storage.session: hosts whose icon a menu already dithered in this browser session. */
+/** chrome.storage.session: salted hashes of hosts whose icon a menu already dithered in this browser session. */
 const REVEALED_KEY = "siteIconsRevealed"
 
 /** Which of `hosts` no menu has revealed this browser session; they count as revealed from now. */
@@ -922,8 +927,11 @@ async function firstReveals(hosts: string[]): Promise<string[]> {
   if (!hosts.length) return []
   const got = (await chrome.storage.session.get(REVEALED_KEY).catch(() => ({}))) as Record<string, unknown>
   const seen = Array.isArray(got[REVEALED_KEY]) ? (got[REVEALED_KEY] as string[]) : []
-  const fresh = hosts.filter((h) => !seen.includes(h))
-  if (fresh.length) await chrome.storage.session.set({ [REVEALED_KEY]: [...fresh, ...seen].slice(0, 300) }).catch(() => {})
+  // Kept as salted hashes (see hostHash): the session store names no sites.
+  const hashes = await Promise.all(hosts.map(hostHash))
+  const fresh = hosts.filter((_, i) => !seen.includes(hashes[i]))
+  const added = hashes.filter((h) => !seen.includes(h))
+  if (added.length) await chrome.storage.session.set({ [REVEALED_KEY]: [...added, ...seen].slice(0, 300) }).catch(() => {})
   return fresh
 }
 

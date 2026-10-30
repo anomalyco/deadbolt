@@ -414,9 +414,9 @@ code {
 /* A login's site icon over its letter (ui/site-icon.ts): a canvas the tile's
    size, dithered in while the letter dithers out under it, then the letter
    goes. */
+/* No overflow clip: the menu's press ring sits just outside the tile. */
 .avatar.site {
   position: relative;
-  overflow: hidden;
 }
 
 .avatar.site canvas.site-icon {
@@ -424,6 +424,7 @@ code {
   inset: 0;
   width: 100%;
   height: 100%;
+  border-radius: inherit;
 }
 
 /* The tile keeps its ink (the icon is drawn in it), only the letter goes. */

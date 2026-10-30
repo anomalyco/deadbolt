@@ -1,14 +1,15 @@
 // The page's own SVG icon, for the background to keep (bg/site-icons.ts).
-// Asked only of a top page on a site the user has a login for, and at most
-// once a month per site. The page's <link rel="icon" type="image/svg+xml">
-// first, else its Safari mask-icon (monochrome, with its colour).
+// Asked only of a top page Deadbolt just filled a login on, or saw a
+// sign-in go through on, at most once a month per host. The page's
+// <link rel="icon" type="image/svg+xml"> first, else its Safari mask-icon
+// (monochrome, with its colour), from an inline data: URL or the page's own
+// origin only.
 //
-// Read from here, not fetched by the background: this request is the
-// page's own (its origin, its cache, no cookies sent, no referrer), to the
-// address the page itself names for its icon, which the browser usually
-// already loaded, so it most often comes from the cache. The background
-// would need host permissions to fetch it, and would ask as the extension,
-// telling the site that this visitor runs Deadbolt.
+// Never a network request: the read is `cache: "only-if-cached"`, same
+// origin, no cookies, no referrer, so it gets the icon only if the browser
+// already loaded it for the page, and nothing at all otherwise. The page's
+// own script could notice that read, but only after the fill or sign-in,
+// when the site already knows this visitor has an account.
 
 import { MAX_SVG_BYTES, sanitizeSvg } from "../ui/svg-safe"
 
@@ -36,16 +37,40 @@ async function text(href: string): Promise<string | null> {
       return null
     }
   }
-  if (url.protocol !== "https:" && url.protocol !== "http:") return null
+  // An icon on another origin (a CDN) is skipped: only-if-cached works only same-origin.
+  if ((url.protocol !== "https:" && url.protocol !== "http:") || url.origin !== location.origin) return null
   try {
-    const r = await fetch(url.href, { credentials: "omit", cache: "force-cache", referrerPolicy: "no-referrer", signal: AbortSignal.timeout(5000) })
-    if (!r.ok || !/svg/i.test(r.headers.get("content-type") ?? "")) return null
+    const r = await fetch(url.href, { mode: "same-origin", credentials: "omit", cache: "only-if-cached", referrerPolicy: "no-referrer", redirect: "error", signal: AbortSignal.timeout(5000) })
+    if (!r.ok || !/svg/i.test(r.headers.get("content-type") ?? "") || !r.body) return null
     if (Number(r.headers.get("content-length") ?? 0) > MAX_SVG_BYTES) return null
-    const body = await r.text()
-    return body.length <= MAX_SVG_BYTES ? body : null
+    return await capped(r.body)
   } catch {
     return null
   }
+}
+
+/** A body as text, read no further than MAX_SVG_BYTES: a longer one is null. */
+async function capped(body: ReadableStream<Uint8Array>): Promise<string | null> {
+  const reader = body.getReader()
+  const parts: Uint8Array[] = []
+  let size = 0
+  for (;;) {
+    const { done, value } = await reader.read()
+    if (done) break
+    size += value.byteLength
+    if (size > MAX_SVG_BYTES) {
+      void reader.cancel().catch(() => {})
+      return null
+    }
+    parts.push(value)
+  }
+  const all = new Uint8Array(size)
+  let at = 0
+  for (const p of parts) {
+    all.set(p, at)
+    at += p.byteLength
+  }
+  return new TextDecoder().decode(all)
 }
 
 /** A colour as CSS writes it: hex or a plain name, nothing else. */

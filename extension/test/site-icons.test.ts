@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test"
 import { sanitizeSvg, MAX_SVG_BYTES } from "../src/ui/svg-safe"
-import { iconHosts, pageIconOf } from "../src/bg/site-icons"
+import { pageIconOf, SiteIcons } from "../src/bg/site-icons"
+import { fakeHost, installChrome } from "./chrome"
 import { BAYER8, brandFor, ditherFrame } from "../src/ui/site-icon"
 import { iconSettingsOf } from "../src/ui/icon-store"
 
@@ -35,6 +36,9 @@ describe("sanitizeSvg", () => {
     expect(clean('<path d="M0 0h1v1z" fill="url(https://evil.test/p.svg#g)"/>')).not.toContain("evil")
     expect(clean('<path d="M0 0h1v1z" fill="url(data:image/svg+xml,x)"/>')).not.toContain("data:")
     expect(clean('<path d="M0 0h1v1z" mask="url( #m )"/>')).toContain("mask=")
+    expect(clean('<path d="M0 0h1v1z" fill="url(#g) #f00"/>')).toContain('fill="url(#g) #f00"')
+    expect(clean('<path d="M0 0h1v1z" fill="url(#g) url(evil.svg#x)"/>')).not.toContain("fill=")
+    expect(clean('<path d="M0 0h1v1z" fill="url(#g) rgb(1,2,3)"/>')).not.toContain("fill=")
   })
 
   test("refuses entity tricks, other roots, broken markup and the oversized", () => {
@@ -60,9 +64,46 @@ describe("what the background keeps", () => {
     expect(pageIconOf("x")).toBeNull()
   })
 
-  test("under the page's host and its logins' hosts on the same site only", () => {
-    const reply = { type: "list" as const, site: "acme.com", accounts: [{ ref: "a", vault: "v", title: "Acme", hasPassword: true, hasTotp: false, urls: ["https://www.acme.com/login", "evil.com", "shop.acme.com"] }] }
-    expect(iconHosts("accounts.acme.com", reply).sort()).toEqual(["accounts.acme.com", "acme.com", "shop.acme.com"])
+})
+
+// Reading a site's icon tells the site nothing only once Deadbolt filled or
+// saw a sign-in there; and never from an incognito tab.
+describe("when an icon is read", () => {
+  const asked = (fake: ReturnType<typeof installChrome>) => fake.delivered.filter((d) => d.message.type === "db:site-icon").length
+
+  test("after a fill on the top page's site, from that exact document", async () => {
+    const fake = installChrome()
+    await new SiteIcons(fakeHost().host).used(1, "example.com")
+    expect(asked(fake)).toBe(1)
+    expect(fake.delivered.find((d) => d.message.type === "db:site-icon")?.options).toEqual({ documentId: "top-doc" })
+  })
+
+  test("never from an incognito tab", async () => {
+    const fake = installChrome()
+    ;(fake.tabs[1] as { incognito?: boolean }).incognito = true
+    await new SiteIcons(fakeHost().host).used(1, "example.com")
+    expect(asked(fake)).toBe(0)
+  })
+
+  test("never for another site than the one filled, or with both settings off", async () => {
+    let fake = installChrome()
+    await new SiteIcons(fakeHost().host).used(1, "evil.test")
+    expect(asked(fake)).toBe(0)
+    fake = installChrome()
+    fake.local.siteIconsMenu = false
+    fake.local.siteIconsVault = false
+    await new SiteIcons(fakeHost().host).used(1, "example.com")
+    expect(asked(fake)).toBe(0)
+  })
+
+  test("a page with no cached icon isn't asked again for a while, by a salted hash", async () => {
+    const fake = installChrome()
+    fake.answer = () => null
+    const icons = new SiteIcons(fakeHost().host)
+    await icons.used(1, "example.com")
+    await icons.used(1, "example.com")
+    expect(asked(fake)).toBe(1)
+    expect(JSON.stringify(fake.session)).not.toContain("example.com")
   })
 })
 

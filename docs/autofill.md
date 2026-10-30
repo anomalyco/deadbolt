@@ -569,36 +569,42 @@ Turning both off deletes the kept icons and stops keeping more.
 
 ### Where icons come from
 
-No icon is ever fetched for a login from anywhere but the site the user is
-on: fetching an icon for every saved login, from the sites or an icon
-service, would tell those servers which sites the vault has accounts on. The
-first source that has one wins:
+Deadbolt never sends a request for an icon. Fetching one for every saved
+login, from the sites or an icon service, would tell those servers which
+sites the vault has accounts on, and even fetching a site's own icon when its
+page loads would tell that site (and any server the page names) "this
+visitor has a saved login here". The first source that has one wins:
 
-1. **The site's own SVG**, read while the user visits it. When a top page on
-   a site with a saved login finishes loading (`webNavigation.onCompleted`,
-   https or a local dev host, while unlocked and a switch is on), the
-   background asks that exact document (`db:site-icon`, by `documentId`) for
-   its `<link rel="icon" type="image/svg+xml">`, else its `mask-icon` (one
-   colour, with its `color`). The content script fetches that address itself,
-   with no cookies, no referrer and `cache: "force-cache"` (the browser has
-   usually loaded it already), caps it at 32 KiB and sanitizes it (below). It
-   reads it rather than the background because the request is then the
-   page's own, from the page's origin, to the address the page names for its
-   icon; the background would need host permissions and would ask as
-   `chrome-extension://…`, telling the site this visitor runs Deadbolt. The
-   background decides which site the icon is for from the browser's record of
-   the frame, never the page's word, so a page can only set its own site's
-   icon. It's kept under the page's host and the hosts of the logins listed
-   for it on the same site (a login for `acme.com` gets `accounts.acme.com`'s
-   icon), hosts that would get those logins filled anyway. Each is read again
-   after 30 days; a host with no login or no SVG icon isn't asked again for 6
-   hours (`chrome.storage.session`).
+1. **The site's own SVG**, read only after Deadbolt filled a login on the
+   site (a pick in the menu or the popup) or saw a sign-in there go through,
+   in a top page on https or a local dev host, outside incognito, while
+   unlocked and a switch is on. The background asks that exact document
+   (`db:site-icon`, by `documentId`) for its `<link rel="icon"
+   type="image/svg+xml">`, else its `mask-icon` (one colour, with its
+   `color`), from an inline `data:` URL or the page's own origin. The content
+   script reads it with `mode: "same-origin"`, `credentials: "omit"`, no
+   referrer and `cache: "only-if-cached"`: only what the browser already
+   loaded for the page, never the network. An icon on another origin (a CDN,
+   as GitHub's and Linear's are) or not in the cache is skipped. It stops
+   reading past 32 KiB and sanitizes what it read (below). The page's own
+   script could still notice the cache read, but only after the fill or
+   sign-in, when the site already knows this visitor has an account there;
+   a page load alone reads nothing. The background decides which host the
+   icon is for from the browser's record of the top document, never the
+   page's word, and keeps it under that exact host only (less a leading
+   `www.`), so a blog on one subdomain of a shared host can't set the icon of
+   another subdomain's login, or of the parent domain's. Each is read again
+   after 30 days; a page with no cached SVG icon isn't asked again for 6
+   hours. Those hosts, and those whose icon a menu already revealed, are kept
+   in `chrome.storage.session` as salted SHA-256 hashes, not by name.
 2. **A bundled Simple Icons subset** (`static/site-icons/simple-icons.json`):
    the brand mark and colour of 511 popular domains, loaded the first time a
    tile needs it. See below.
 3. **Chrome's favicon cache**, `chrome-extension://<id>/_favicon/?pageUrl=…&size=64`
    (the `favicon` permission), local and only for sites the browser has
-   shown. Chrome's generic globe counts as none. A raster at most half the
+   shown. It loads in the inline menu's frame too (checked headless: the
+   frame, loaded from its dynamic web-accessible URL, still has the
+   extension's origin). Chrome's generic globe counts as none. A raster at most half the
    drawn size scales by whole pixels without smoothing, so a 16 px icon stays
    crisp.
 4. **The letter tile.**

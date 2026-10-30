@@ -30,7 +30,10 @@ const siteIcons = new SiteIcons(host)
 saver.signedIn = (tabId, site) => {
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
+  void siteIcons.used(tabId, site)
 }
+// After a fill (or a sign-in, above), the site's own icon, kept for the rows (bg/site-icons.ts).
+autofill.filled = (tabId, site) => void siteIcons.used(tabId, site)
 passkeys.listen()
 
 function title(status: Status): string {
@@ -181,8 +184,6 @@ chrome.webNavigation.onCommitted.addListener((d) => {
   }
 })
 // A sign-in with a provider: its popup follows it, and its pages get told the account to point at.
-// A page on a site with a saved login: its own SVG icon, kept for the rows (bg/site-icons.ts).
-chrome.webNavigation.onCompleted.addListener((d) => void siteIcons.completed(d))
 chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => signInWith.opened(d.sourceTabId, d.tabId))
 chrome.webNavigation.onDOMContentLoaded.addListener((d) => void signInWith.loaded(d))
 chrome.webNavigation.onHistoryStateUpdated.addListener((d) => void signInWith.loaded(d))

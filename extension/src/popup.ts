@@ -48,6 +48,7 @@ function settingsBody(): HTMLElement {
     { class: "site settings" },
     h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")),
     ...appearanceRows(icons, () => {}),
+    h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks."),
     h("div", { class: "buttons" }, done),
   )
 }

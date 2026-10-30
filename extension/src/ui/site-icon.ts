@@ -1,8 +1,8 @@
 // A login's site icon, in its letter tile. Where it comes from, first found
 // first (none of them asks the network for anything):
 //
-// 1. the site's own SVG icon, kept when the user last visited it
-//    (bg/site-icons.ts), sanitized again here (ui/svg-safe.ts);
+// 1. the site's own SVG icon, read from the browser's cache after a fill or
+//    sign-in there (bg/site-icons.ts), sanitized again here (ui/svg-safe.ts);
 // 2. the site's mark from the bundled Simple Icons subset
 //    (static/site-icons/simple-icons.json, scripts/simple-icons.ts);
 // 3. Chrome's own favicon cache (`_favicon/`, the `favicon` permission);

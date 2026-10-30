@@ -31,7 +31,8 @@ const REFERENCES = new Set(["fill", "stroke", "clip-path", "mask"])
 /** A value with nothing in it that reaches out: no url() but a local one, no scheme, no escapes. */
 function safeValue(name: string, value: string): boolean {
   if (value.length > 8192 || /[\\<>]|&#|expression|javascript:|data:|@import/i.test(value)) return false
-  if (/url\s*\(/i.test(value)) return REFERENCES.has(name) && /^\s*url\(\s*#[\w-]{1,64}\s*\)\s*(?:[\w#(),.%\s-]*)$/i.test(value)
+  // A local reference, with at most a plain colour after it as the fallback paint.
+  if (/url\s*\(/i.test(value)) return REFERENCES.has(name) && /^\s*url\(\s*#[\w-]{1,64}\s*\)(?:\s+(?:none|currentColor|#[0-9a-f]{3,8}|[a-z]{3,20}))?\s*$/i.test(value)
   if (name === "id") return /^[\w-]{1,64}$/.test(value)
   // A colon would be a scheme: no attribute that's left needs one.
   return !value.includes(":")
