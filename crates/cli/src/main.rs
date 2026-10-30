@@ -287,6 +287,8 @@ enum BrowserCommand {
         browser: Vec<browser::Browser>,
         /// Also keep an unpacked copy of the extension in DIR current with
         /// `deadbolt update` (a new or empty directory; update owns it).
+        /// Each directory registered this way is kept current with its own
+        /// build.
         #[arg(long, value_name = "DIR")]
         extension_dir: Option<PathBuf>,
         /// Keep the standalone build in DIR instead: its own vault in the
@@ -294,7 +296,7 @@ enum BrowserCommand {
         #[arg(long, requires = "extension_dir")]
         standalone: bool,
     },
-    /// Put the other build of the extension in the directory registered with
+    /// Put the other build of the extension in a directory registered with
     /// `browser install --extension-dir`, then reload Deadbolt in
     /// chrome://extensions. Both builds have the same id, so the profile
     /// keeps its place for it; each keeps its own settings.
@@ -309,11 +311,19 @@ enum BrowserCommand {
         /// The release channel to fetch it from (default: this build's).
         #[arg(long, value_parser = ["dev", "beta", "stable"])]
         channel: Option<String>,
+        /// The registered directory to switch (needed when there are
+        /// several).
+        #[arg(long, value_name = "DIR")]
+        extension_dir: Option<PathBuf>,
     },
     /// Stop the extension reaching Deadbolt (default: in every browser).
     Uninstall {
-        #[arg(long, value_enum)]
+        #[arg(long, value_enum, conflicts_with = "extension_dir")]
         browser: Vec<browser::Browser>,
+        /// Only stop `deadbolt update` keeping DIR current, leaving its
+        /// files and the browsers' registration alone.
+        #[arg(long, value_name = "DIR")]
+        extension_dir: Option<PathBuf>,
     },
 }
 
@@ -549,12 +559,25 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             standalone,
             native: _,
             channel,
+            extension_dir,
         }) => {
-            update::switch_extension(&paths, extension_build(standalone), channel.as_deref())
-                .await?
+            update::switch_extension(
+                &paths,
+                extension_build(standalone),
+                extension_dir.as_deref(),
+                channel.as_deref(),
+            )
+            .await?
         }
         Commands::Update(args) => return update::run(&paths, args).await,
-        Commands::Browser(BrowserCommand::Uninstall { browser }) => browser::uninstall(&browser)?,
+        Commands::Browser(BrowserCommand::Uninstall {
+            browser,
+            extension_dir: None,
+        }) => browser::uninstall(&browser)?,
+        Commands::Browser(BrowserCommand::Uninstall {
+            browser: _,
+            extension_dir: Some(dir),
+        }) => browser::unregister_extension_dir(&dir, &paths.config)?,
         Commands::BrowserHost { origin } => browser::host::run(paths, &origin).await?,
         Commands::Agent {
             command: Some(AgentCommand::Stop),

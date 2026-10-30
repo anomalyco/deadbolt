@@ -3884,6 +3884,146 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
             .contains("nativeMessaging")
     );
     assert!(!ext.join("vault.css").exists());
+
+    // A second directory keeps the standalone build, beside the native one:
+    // `update` refreshes each with its own build.
+    let second = a.path("extension-standalone");
+    let output = a.output(
+        a.cmd(&[
+            "browser",
+            "install",
+            "--browser",
+            "chrome",
+            "--standalone",
+            "--extension-dir",
+        ])
+        .arg(&second)
+        .env("HOME", a.path("user")),
+    );
+    assert!(output.status.success());
+    let zip_of = |files: &[(&str, &str)]| {
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        for (name, body) in files {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    };
+    let native = zip_of(&[(
+        "manifest.json",
+        r#"{"name":"Deadbolt","version":"0.0.0.100","version_name":"0.0.0-dev-100","permissions":["storage","nativeMessaging"]}"#,
+    )]);
+    let standalone = zip_of(&[
+        (
+            "manifest.json",
+            r#"{"name":"Deadbolt","version":"0.0.0.100","version_name":"0.0.0-dev-100","permissions":["storage","offscreen"]}"#,
+        ),
+        ("vault.css", ""),
+    ]);
+    let (native_sha, standalone_sha) = (sha(&native), sha(&standalone));
+    let mut release: serde_json::Value = serde_json::from_slice(&manifest(
+        "extension",
+        "dev",
+        "0.0.0-dev-100",
+        "chromium",
+        native.len(),
+        native_sha.clone(),
+    ))
+    .unwrap();
+    release["sequence"] = 3.into();
+    release["release"]["targets"]["chromium-standalone"] = serde_json::json!({
+        "url": format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
+        "size": standalone.len(),
+        "sha256": standalone_sha,
+    });
+    // This test's deadbolt is the channel's current CLI, so `update` only
+    // touches the extensions.
+    let current_cli = String::from_utf8(manifest(
+        "cli",
+        "dev",
+        env!("CARGO_PKG_VERSION"),
+        &target,
+        tar.len(),
+        good.clone(),
+    ))
+    .unwrap()
+    .replace("\"sequence\":1", "\"sequence\":4")
+    .into_bytes();
+    files.lock().unwrap().extend([
+        (
+            format!("/release/deadbolt/files/{native_sha}/extension.bin"),
+            native,
+        ),
+        (
+            format!("/release/deadbolt/files/{standalone_sha}/standalone.bin"),
+            standalone,
+        ),
+        (
+            "/release/deadbolt/extension/dev.json".to_string(),
+            release.to_string().into_bytes(),
+        ),
+        ("/release/deadbolt/cli/dev.json".to_string(), current_cli),
+    ]);
+    let output = deadbolt(&["update", "--channel", "dev"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success(),
+        "{stdout}{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(stdout.contains("Updated the browser extension"), "{stdout}");
+    assert!(
+        stdout.contains("Updated the standalone browser extension"),
+        "{stdout}"
+    );
+    let manifest_of =
+        |dir: &std::path::Path| std::fs::read_to_string(dir.join("manifest.json")).unwrap();
+    assert!(manifest_of(&ext).contains("nativeMessaging"));
+    assert!(manifest_of(&ext).contains("0.0.0-dev-100"));
+    assert!(manifest_of(&second).contains("offscreen"));
+    assert!(manifest_of(&second).contains("0.0.0-dev-100"));
+
+    // With two registered, `switch` needs to be told which.
+    let output = deadbolt(&["browser", "switch", "--standalone", "--channel", "dev"]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("--extension-dir"));
+    let output = a.output(
+        a.cmd(&[
+            "browser",
+            "switch",
+            "--native",
+            "--channel",
+            "dev",
+            "--extension-dir",
+        ])
+        .arg(&second)
+        .env("DEADBOLT_RELEASE_URL", &base),
+    );
+    assert!(output.status.success());
+    assert!(manifest_of(&second).contains("nativeMessaging"));
+    assert!(!second.join("vault.css").exists());
+    assert!(manifest_of(&ext).contains("nativeMessaging"));
+
+    // Unregistered, a directory is left alone by `update`.
+    let output = a.output(
+        a.cmd(&["browser", "uninstall", "--extension-dir"])
+            .arg(&second)
+            .env("HOME", a.path("user")),
+    );
+    assert!(output.status.success());
+    let output = a.output(
+        a.cmd(&["browser", "uninstall", "--extension-dir"])
+            .arg(&second)
+            .env("HOME", a.path("user")),
+    );
+    assert!(!output.status.success(), "unregistered twice");
+    let output = deadbolt(&["update", "--check", "--channel", "dev"]);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let shown = |dir: &std::path::Path| dir.canonicalize().unwrap().display().to_string();
+    assert!(stdout.contains(&shown(&ext)), "{stdout}");
+    assert!(!stdout.contains(&shown(&second)), "{stdout}");
+    assert!(second.join("manifest.json").exists());
 }
 
 /// The `export.data` of a `.1pux` with an identity and a card, as
