@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test"
 import { findAccountTile, findProviderButton, scanPage, signInWithText } from "../src/content/detect"
+import { eventTarget } from "../src/content/shadow"
 import { isAccountPage, isChooserPage, isProviderPage, pageAccountOf, provider } from "../src/signin"
 import { pageFacts } from "../src/content/outcome"
 import { scanForms } from "../src/content/forms"
@@ -189,6 +190,51 @@ describe("shadow DOM", () => {
     expect(result.kind).toBe("login")
     expect(result.fields.map((f) => f.role)).toEqual(["username", "password"])
     expect(result.fields[1].el.getRootNode()).toBe(inner)
+  })
+})
+
+describe("events inside a closed shadow root", () => {
+  /** A host with a closed root holding a box and a button, opened the way chrome.dom does for a content script. */
+  function closedLogin() {
+    document.body.innerHTML = `<div id="host"></div><button id="outside">Outside</button>`
+    const host = document.getElementById("host")!
+    const root = host.attachShadow({ mode: "closed" })
+    root.innerHTML = `<input id="user"><button id="go">Sign in</button>`
+    const g = globalThis as { chrome?: unknown }
+    const before = g.chrome
+    g.chrome = { dom: { openOrClosedShadowRoot: (el: Element) => (el === host ? root : null) } }
+    const at = (event: Event) => {
+      Object.defineProperty(event, "composedPath", { value: () => [host, document.body, document.documentElement, document] })
+      return eventTarget(event)
+    }
+    return { host, root, at, restore: () => (g.chrome = before) }
+  }
+
+  test("a key, or a click the keyboard made, is about the element focused inside", () => {
+    const { root, at, restore } = closedLogin()
+    try {
+      const go = root.getElementById("go") as HTMLButtonElement
+      go.focus()
+      // A keyboard click has clientX/Y 0, where the point is outside the root.
+      root.elementFromPoint = () => document.getElementById("outside")
+      expect(at(new MouseEvent("click", { detail: 0, clientX: 0, clientY: 0 }))).toBe(go)
+      expect(at(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(go)
+    } finally {
+      restore()
+    }
+  })
+
+  test("a pointer click is about what's under it, and only inside the same root", () => {
+    const { host, root, at, restore } = closedLogin()
+    try {
+      const user = root.getElementById("user")!
+      root.elementFromPoint = () => user
+      expect(at(new MouseEvent("click", { detail: 1, clientX: 20, clientY: 10 }))).toBe(user)
+      root.elementFromPoint = () => document.getElementById("outside")
+      expect(at(new MouseEvent("click", { detail: 1, clientX: 20, clientY: 10 }))).toBe(host)
+    } finally {
+      restore()
+    }
   })
 })
 
