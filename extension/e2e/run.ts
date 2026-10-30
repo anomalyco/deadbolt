@@ -1299,7 +1299,7 @@ async function fillAndTotp(scheme: Scheme) {
       check((await page.inputValue("#email")) === "kit@acme.test", "username filled")
       check((await page.inputValue("#password")) === "correct horse", "password filled")
       // The menu folded into a pill on the field, which says Filled and goes by itself.
-      const filled = await until("the pill says Filled", async () => (await menu.locator(".pill.ok .pill-label[aria-label='Filled']").count().catch(() => 0)) > 0)
+      const filled = await until("the pill says Filled", async () => (await menu.locator(".pill.ok .pill-label[data-text='Filled']").count().catch(() => 0)) > 0)
       check(!!filled, "the menu folds into a pill that says Filled")
       await Bun.sleep(350)
       await shotAround(page, `surface-filled-${scheme}`, menu, "#email")

@@ -118,7 +118,11 @@ not running without sending hello, which would start the agent again.
   and username) and at most the viewport less 4 px each side. It doesn't
   name the site: logins are only ever offered for the page's own site, or a
   same-site frame's own site, which the page already shows. ↓/↑ choose, ⏎
-  fills, esc closes, and ↓ reopens it. While Deadbolt is locked, the menu's
+  fills, esc or ⇥ closes it with focus back in the field, and ↓ reopens it.
+  Inside, the rows are a listbox that takes focus itself and points at the
+  active row (`aria-activedescendant`); "Filled", "Saved" and why a pick
+  didn't go ahead are said through a live region in the frame. None of it,
+  ARIA included, is in the page's DOM. While Deadbolt is locked, the menu's
   "locked" row opens on focus once per site until Deadbolt locks or unlocks
   again; after that it takes a click into the field or ↓. A login field in a
   frame of the page's own site gets the menu too, opened in the top page
@@ -195,7 +199,10 @@ not running without sending hello, which would start the agent again.
   lets no later ⏎ pick either. Focus that got into the menu any other way, such as by Tab from a field
   the page made last in the tab order or by a script, doesn't count, and
   leaving the menu ends it even if focus comes back. Such a menu says "Press
-  ↓ in the field to choose."
+  ↓ in the field to choose." The locked menu's Unlock Deadbolt row takes ⏎
+  on the same terms. The save offer has no ↓ to enter it, so its buttons
+  take only a press; ⏎ or Space on one says to click or answer in the
+  toolbar button.
 - **Menu tokens.** The menu page's URL carries nothing. When it loads it asks
   its parent with `postMessage`; the content script answers only that frame's
   window, at the extension's origin, with a token bound to the tab, frame,
