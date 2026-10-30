@@ -383,13 +383,13 @@ scenario named.
 
 | Request | Standalone | Notes |
 | --- | --- | --- |
-| `hello` | Same | Capabilities: `list fill check save generate forms` (no `passkeys`, `learn`) |
+| `hello` | Same | Capabilities: `list fill check save generate forms passkeys` (no `learn`) |
 | `list` | Same | Shared `deadbolt-core::site` rules and ranking; `signIn` with the linked account |
 | `fill` (`username`, `password`, `totp`) | Same | Current TOTP from core |
 | `generate`, `generate-check`, `generate-keep`, `generate-drop` | Same | Shared page-rule planning and candidate lifetime |
 | `check`, `save` | Same | Shared login check and password-only update |
 | `forms`, `fill-form` | Same, except Touch ID | Strict asks for the passphrase in Deadbolt's own popup instead |
-| `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Missing | The browser's own passkey flow runs; separate work |
+| `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Shared ceremony rules, without biometric UV | Strict uses passphrase reauthentication; required UV uses the browser |
 | `learn` | Missing | "Learn this site" says this Deadbolt can't keep a log |
 | Rate limits | Same | The host's token buckets, in the service worker |
 
@@ -411,7 +411,7 @@ scenario named.
 | Locked and not set up | The menu and popup offer to unlock or set up here | `locked`, `notInstalled` |
 | "Learn this site" (#65) | Missing | |
 | "Never for this site" | Same preference; no list to undo it in either build | |
-| Passkeys | Missing (separate work) | `passkeys` is native only |
+| Passkeys | Registration, assertions, account selection, conditional UI, sync and deletion | `e2e/standalone.ts`; native adapter covered by `passkeys` |
 | Touch ID for card numbers | Strict passphrase instead | `formsTouchId` is native only; e2e/standalone.ts covers Strict |
 
 ### Vault features of the native app
@@ -442,8 +442,10 @@ Scenarios check the same things, except where the builds differ on purpose:
 - its menu offers to unlock;
 - cards ask for nothing more under Comfortable.
 
-`passkeys` and `formsTouchId` are skipped. CI runs it in four shards
-(`extension-standalone-e2e`).
+The native-agent `passkeys` and `formsTouchId` scenarios are skipped in this
+parity harness. Real standalone passkey ceremonies and Strict reauthentication
+are covered separately by `e2e/standalone.ts`, including offline smoke in CI.
+CI runs the parity harness in four shards (`extension-standalone-e2e`).
 
 ## Verification
 
