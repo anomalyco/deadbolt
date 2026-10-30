@@ -131,12 +131,73 @@ impl Device {
             .env_remove("DEADBOLT_TEST_VERSION")
             .env_remove("DEADBOLT_TEST_PROTOCOL")
             .env_remove("RUST_LOG")
+            // Not an AI's claim: a test that wants one sets it (`as_ai`).
+            .env_remove("OPENCODE_SESSION_ID")
+            .env_remove("DEADBOLT_CALLER")
             .stdin(Stdio::null());
         cmd
     }
 
+    /// `cmd`, to run reparented away from the test's process tree, as from
+    /// a person's own terminal: the tests may run under an AI host such as
+    /// OpenCode, and the agent walks a caller's parents (by ppid, so
+    /// `setsid` wouldn't help) to refuse AIs what a person may do.
+    ///
+    /// The returned `/bin/sh` stands in for `cmd`: give it stdio and spawn
+    /// or run it as `cmd`. It keeps its stdin as fd 3 (a background job's
+    /// stdin is /dev/null) and starts a launcher, which starts `cmd`'s
+    /// shell in the background and exits. That shell waits until the
+    /// launcher is gone, so it hangs off init or launchd, then runs `cmd`
+    /// with fd 3 as stdin and writes its exit status to a file. The stand-in
+    /// waits for the file and exits with that status. Killing the stand-in
+    /// leaves `cmd` running.
+    fn detach(&self, cmd: &Command) -> Command {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        const OUTER: &str = r#"exec 3<&0
+status=$1
+/bin/sh -c "$DB_LAUNCH" sh "$@"
+while [ ! -f "$status" ]; do
+  [ -d "${status%/*}" ] || exit 125
+  sleep 0.01
+done
+exit "$(cat "$status")"
+"#;
+        const LAUNCH: &str = r#"/bin/sh -c "$DB_DETACHED" sh "$$" "$@" &"#;
+        const DETACHED: &str = r#"launcher=$1; status=$2; shift 2
+unset DB_LAUNCH DB_DETACHED
+while [ "$(ps -o ppid= -p $$ | tr -d " ")" = "$launcher" ]; do sleep 0.01; done
+"$@" <&3 3<&-
+echo $? >"$status.tmp" && mv "$status.tmp" "$status"
+"#;
+        static RUNS: AtomicUsize = AtomicUsize::new(0);
+        let status = self.path(&format!(
+            "detached-{}.status",
+            RUNS.fetch_add(1, Ordering::SeqCst)
+        ));
+        let mut sh = Command::new("/bin/sh");
+        sh.arg("-c")
+            .arg(OUTER)
+            .arg("sh")
+            .arg(&status)
+            .arg(cmd.get_program())
+            .args(cmd.get_args());
+        for (key, value) in cmd.get_envs() {
+            match value {
+                Some(value) => sh.env(key, value),
+                None => sh.env_remove(key),
+            };
+        }
+        if let Some(dir) = cmd.get_current_dir() {
+            sh.current_dir(dir);
+        }
+        sh.env("DB_LAUNCH", LAUNCH)
+            .env("DB_DETACHED", DETACHED)
+            .stdin(Stdio::null());
+        sh
+    }
+
     fn output(&self, cmd: &mut Command) -> Output {
-        let output = cmd.output().unwrap();
+        let output = self.detach(cmd).output().unwrap();
         eprintln!(
             "$ {:?}\n{}{}",
             cmd.get_args().collect::<Vec<_>>(),
@@ -161,8 +222,9 @@ impl Device {
         self.with_stdin(self.cmd(args), input)
     }
 
-    fn with_stdin(&self, mut cmd: Command, input: &str) -> Output {
-        let mut child = cmd
+    fn with_stdin(&self, cmd: Command, input: &str) -> Output {
+        let mut child = self
+            .detach(&cmd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -261,11 +323,27 @@ fn wait(child: &mut Child, timeout: Duration) -> std::process::ExitStatus {
     }
 }
 
+/// Python relaying stdin to the Unix socket `argv[1]` and its replies to
+/// stdout; stdin's end shuts the socket's write side, as a client hanging up.
+const SOCKET_BRIDGE: &str = r#"
+import socket, sys, threading
+s = socket.socket(socket.AF_UNIX)
+s.connect(sys.argv[1])
+def send():
+    for line in iter(sys.stdin.buffer.readline, b""):
+        s.sendall(line)
+    s.shutdown(socket.SHUT_WR)
+threading.Thread(target=send, daemon=True).start()
+for chunk in iter(lambda: s.recv(65536), b""):
+    sys.stdout.buffer.write(chunk)
+    sys.stdout.buffer.flush()
+"#;
+
 /// Starts `deadbolt join` on `new`: the process, its stdout lines after the
 /// code, and the code.
 fn start_join(new: &Device, device_name: &str) -> (Child, mpsc::Receiver<String>, String) {
     let mut child = new
-        .cmd(&["join", "--device-name", device_name])
+        .detach(&new.cmd(&["join", "--device-name", device_name]))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -535,7 +613,6 @@ fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
 /// `devices remove` takes out.
 #[test]
 fn a_new_device_asks_for_its_passphrase_last() {
-    use std::os::unix::net::UnixStream;
     let a = Device::new();
     a.run(&["init", "--device-name", "alpha"]);
     for answer in [false, true] {
@@ -548,7 +625,19 @@ fn a_new_device_asks_for_its_passphrase_last() {
             "XDG_CONFIG_HOME" => Some(b.path("config").into()),
             _ => None,
         });
-        let mut socket = UnixStream::connect(&paths.socket).unwrap();
+        // The test's own process may run under an AI host, which the agent
+        // refuses `join`: talk to the socket through a bridge run as from a
+        // person's terminal (`Device::detach`). Closing its stdin hangs up.
+        let mut bridge = b
+            .detach(&b.cmd_of(
+                "python3".as_ref(),
+                &["-c", SOCKET_BRIDGE, paths.socket.to_str().unwrap()],
+            ))
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut socket = bridge.stdin.take().unwrap();
         let request = serde_json::json!({
             "v": deadbolt_client::protocol::PROTOCOL_VERSION,
             "cmd": "join",
@@ -556,7 +645,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
             "passphrase": null,
         });
         socket.write_all(format!("{request}\n").as_bytes()).unwrap();
-        let mut lines = BufReader::new(socket.try_clone().unwrap()).lines();
+        let mut lines = BufReader::new(bridge.stdout.take().unwrap()).lines();
         let mut next = || -> serde_json::Value {
             serde_json::from_str(&lines.next().unwrap().unwrap()).unwrap()
         };
@@ -578,6 +667,8 @@ fn a_new_device_asks_for_its_passphrase_last() {
             let reply = next();
             assert_eq!(reply["type"], "ok", "{reply}");
             assert_eq!(reply["reply"]["vault"]["name"], "personal");
+            drop(socket);
+            wait(&mut bridge, Duration::from_secs(30));
             assert_eq!(b.devices(), ["alpha", "beta"]);
             b.run(&["lock"]);
             let out = b.try_run_stdin(&["unlock", "--passphrase-stdin"], "chosen late\n");
@@ -590,6 +681,8 @@ fn a_new_device_asks_for_its_passphrase_last() {
         } else {
             drop(lines);
             drop(socket);
+            // It may die writing to the reader dropped above: only gone.
+            wait(&mut bridge, Duration::from_secs(30));
             std::thread::sleep(Duration::from_millis(500));
             assert!(b.run(&["status"]).contains("state\tnot set up\n"));
             assert!(!b.path("home").join("store.redb").exists());
@@ -619,8 +712,9 @@ fn a_new_device_join_needs_a_passphrase_source() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("--passphrase-stdin"));
 
     let mut cmd = b.cmd(&["join", "--passphrase-stdin", "--device-name", "beta"]);
-    cmd.env_remove("DEADBOLT_PASSPHRASE")
-        .stdin(Stdio::piped())
+    cmd.env_remove("DEADBOLT_PASSPHRASE");
+    let mut cmd = b.detach(&cmd);
+    cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = cmd.spawn().unwrap();
@@ -797,9 +891,8 @@ fn whoami_and_activity_name_the_caller_never_values() {
     );
 }
 
-/// Runs deadbolt with `input` on stdin, reparented away from the test's
-/// process tree, as from a person's own terminal: the tests may run under
-/// an AI host such as OpenCode, whom the agent refuses pairing and grants.
+/// Runs deadbolt with `input` on stdin, as from a person's own terminal
+/// (every run is: see [`Device::detached`]).
 fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, String) {
     let (code, out, err) = detached_code(device, args, input);
     (code == 0, out, err)
@@ -807,26 +900,12 @@ fn detached(device: &Device, args: &[&str], input: &str) -> (bool, String, Strin
 
 /// [`detached`], with the exit code.
 fn detached_code(device: &Device, args: &[&str], input: &str) -> (i32, String, String) {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static RUNS: AtomicUsize = AtomicUsize::new(0);
-    let n = RUNS.fetch_add(1, Ordering::SeqCst);
-    let file = |what: &str| device.path(&format!("detached-{n}.{what}"));
-    let script = r#"( sleep 0.5; printf %s "$DB_INPUT" | "$0" "$@" >"$DB_OUT" 2>"$DB_ERR"; echo $? >"$DB_CODE.tmp"; mv "$DB_CODE.tmp" "$DB_CODE" ) >/dev/null 2>&1 &"#;
-    let mut sh_args = vec!["-c", script, BIN];
-    sh_args.extend_from_slice(args);
-    let mut cmd = device.cmd_of("/bin/sh".as_ref(), &sh_args);
-    cmd.env("DB_INPUT", input)
-        .env("DB_OUT", file("out"))
-        .env("DB_ERR", file("err"))
-        .env("DB_CODE", file("code"))
-        .env_remove("OPENCODE_SESSION_ID")
-        .env_remove("DEADBOLT_CALLER");
-    assert!(cmd.status().unwrap().success());
-    eventually("the detached deadbolt", || file("code").exists());
-    let read = |what| std::fs::read_to_string(file(what)).unwrap();
-    let (out, err) = (read("out"), read("err"));
-    eprintln!("$ (detached) {args:?}\n{out}{err}");
-    (read("code").trim().parse().unwrap(), out, err)
+    let output = device.try_run_stdin(args, input);
+    (
+        output.status.code().unwrap(),
+        String::from_utf8(output.stdout).unwrap(),
+        String::from_utf8(output.stderr).unwrap(),
+    )
 }
 
 /// One request to the agent, as an agent client sends it.
@@ -881,7 +960,7 @@ fn agents_sign_in_unattended_only_where_allowed() {
         &proof,
     );
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI can't"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI agent can't"));
 
     // The user can, and the token is shown once.
     let (ok, out, _) = detached(
@@ -1339,7 +1418,7 @@ fn ai_agents_use_secrets_only_with_a_grant() {
     cmd.env("OPENCODE_SESSION_ID", "ses_test");
     let out = a.with_stdin(cmd, &format!("{PASSPHRASE}\n"));
     assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI can't"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("an AI agent can't"));
 
     // The user allows the token for run.
     let (ok, out, _) = detached(
@@ -1518,6 +1597,86 @@ fn ai_agents_read_values_only_with_touch_id_and_never_administer() {
     for command in ["item-get", "item-code", "vault-create", "item-remove"] {
         assert!(refused_as(command), "{command}: {raw}");
     }
+}
+
+/// The browser's fills and saves are the browser host's: an AI caller is
+/// refused them whatever process it sends them from, with what to do
+/// instead (#111). Looking stays open.
+#[test]
+fn ai_agents_cant_send_the_browsers_fills_and_saves() {
+    use deadbolt_client::protocol::{
+        Claim, Command as Cmd, Fill, LoginRef, PROTOCOL_VERSION, PagePassword, Request, Secret,
+    };
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            "username=kit",
+            "password=hunter2-hunter2",
+        ],
+    );
+    let ai = |command: Cmd| {
+        let request = Request {
+            v: PROTOCOL_VERSION,
+            claimed: Some(Claim {
+                caller: None,
+                opencode_session: Some("ses_test".into()),
+            }),
+            command,
+        };
+        agent_request(&a, serde_json::to_value(&request).unwrap())
+    };
+    let origin = "https://github.com".to_string();
+    let login = LoginRef {
+        vault: "personal".into(),
+        item: "0000".into(),
+    };
+    for (command, says) in [
+        (
+            Cmd::SiteFill {
+                origin: origin.clone(),
+                login: login.clone(),
+                want: vec![Fill::Password],
+            },
+            "can't fill a site's login",
+        ),
+        (
+            Cmd::SiteSave {
+                origin: origin.clone(),
+                login: Some(login.clone()),
+                title: "GitHub".into(),
+                url: origin.clone(),
+                username: "kit".into(),
+                password: PagePassword::Typed(Secret::new("pwned-pwned")),
+            },
+            "can't change a saved login",
+        ),
+        (
+            Cmd::FormFill {
+                origin: origin.clone(),
+                item: login.clone(),
+                fields: vec!["number".into()],
+            },
+            "can't fill a form",
+        ),
+    ] {
+        let reply = ai(command);
+        agent_error(&reply, "forbidden");
+        let message = reply["message"].as_str().unwrap();
+        assert!(message.contains(says), "{reply}");
+        // Why (a claim here, or an AI host above the test), and where to
+        // go instead.
+        assert!(message.contains("This shell "), "{reply}");
+        assert!(message.contains("deadbolt whoami"), "{reply}");
+        assert!(!reply.to_string().contains("hunter2"), "{reply}");
+    }
+    // Looking at a page's logins (no values) still answers.
+    let reply = ai(Cmd::SiteLogins { origin });
+    assert_eq!(reply["type"], "ok", "{reply}");
 }
 
 #[test]
@@ -3493,7 +3652,7 @@ fn send_files_secrets_and_items() {
 
     // One field; revoking ends a waiting send with exit code 5.
     let mut waiting = a
-        .cmd(&[
+        .detach(&a.cmd(&[
             "send",
             "--item",
             "github.com",
@@ -3503,7 +3662,7 @@ fn send_files_secrets_and_items() {
             "--ttl",
             "15m",
             "--yes",
-        ])
+        ]))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()

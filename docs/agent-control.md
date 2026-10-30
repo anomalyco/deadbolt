@@ -13,18 +13,35 @@ hint, so it only ever refuses):
 
 - sees a value (`item-get`, so `get` and `show`, and `item-code`) only with
   Touch ID raised by the agent each time, as `deadbolt read`; without Touch
-  ID it is `forbidden` (exit 4);
+  ID, or with it cancelled or denied, it is `forbidden` (exit 4, "refused"
+  in Activity);
 - is refused the Never tier outright: `setup`, `unlock`,
   `unlock-biometric`, `touch-id-set`, `vault-create`, `vault-rename`,
   `vault-default`, `device-remove`, `join`, `pair`, `item-remove`, `import`
   and `sync-one-password`;
-- gets values from `resolve` and agent sign-ins only as their sections
-  below say.
+- is refused the browser's fills and saves: `site-fill`, `site-save` with a
+  login (a new password for a saved one), `form-fill`, `passkey-get` and
+  `passkey-create`;
+- gets values from `resolve` and agent sign-ins (`agent-logins`,
+  `agent-fill`, `agent-passkey-get`, proved by the client's token) only as
+  their sections below say.
 
-Not yet: everyone else, Kit's terminal and an AI that started a terminal
-outside its own tree included, gets everything while unlocked. Site
-commands (`site-fill` and the rest) are open to any process that runs
-`deadbolt browser-host`, until browser pairing.
+A refusal names the AI host it saw ("This shell runs under OpenCode
+(OpenCode › zsh › deadbolt)") and points to a terminal outside it, the app,
+and `deadbolt whoami`. On Linux the app has no signature to check, so
+Deadbolt.app started from inside an AI's tree is a caller like any other
+there and is refused the same; start it from the desktop instead.
+
+Not yet:
+
+- Everyone else, Kit's terminal and an AI that started a terminal outside
+  its own tree included, gets everything while unlocked.
+- The browser's commands, `site-fill` and the rest, are open to any
+  same-user process on the socket that isn't taken for an AI, not only
+  `deadbolt browser-host`, until browser pairing.
+- Write-tier commands aren't gated for AIs yet: `item-set`, `item-unset`
+  and `item-restore` (`site-save` with a login and `passkey-create` are, as
+  above).
 
 Words: **the agent** is Deadbolt's background agent (`deadbolt agent`), as
 everywhere else in these docs. **An AI** is an AI agent calling Deadbolt.
