@@ -1570,8 +1570,17 @@ impl Agent {
                 Ok(Reply::Done)
             }
             Command::UnlockBiometric { timeout_secs } => {
-                self.unlock_biometric(timeout_secs).await?;
-                Ok(Reply::Done)
+                let outcome = tokio::select! {
+                    res = self.unlock_biometric(timeout_secs) => res,
+                    () = conv.closed() => return Err(fail(ErrorCode::Cancelled, "the request was cancelled")),
+                };
+                match outcome {
+                    Ok(()) => Ok(Reply::Done),
+                    Err(error) if macos_autofill::is_biometric_cancelled(&error) => {
+                        Err(fail(ErrorCode::Cancelled, error.to_string()))
+                    }
+                    Err(error) => Err(error),
+                }
             }
             Command::TouchIdSet { enabled } => {
                 self.set_touch_id(enabled).await?;
