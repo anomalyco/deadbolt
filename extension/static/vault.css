@@ -21,6 +21,19 @@ main.vault.popup {
   display: none !important;
 }
 
+/* A form's error line keeps its place while it's empty, so showing or
+   clearing it never moves the fields and buttons around it. */
+.vault p.error.reserve {
+  min-height: 16px;
+  line-height: 16px;
+  margin: 0;
+}
+
+.vault p.error.reserve[hidden] {
+  display: block !important;
+  visibility: hidden;
+}
+
 /* ---- Header and footer ---- */
 
 .vault .top {

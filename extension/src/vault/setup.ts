@@ -222,7 +222,7 @@ export class Setup {
   private passphrases(): { pass: HTMLInputElement; again: HTMLInputElement; error: HTMLElement; fields: HTMLElement[]; valid(): boolean } {
     const pass = field("Passphrase", { type: "password", autocomplete: "new-password" })
     const again = field("Passphrase again", { type: "password", autocomplete: "new-password" })
-    const error = h("p", { class: "error", role: "alert" })
+    const error = h("p", { class: "error reserve", role: "alert" })
     error.hidden = true
     const valid = () => {
       const problem = !pass.input.value ? "Choose a passphrase." : pass.input.value !== again.input.value ? "The passphrases don't match." : ""
@@ -231,7 +231,12 @@ export class Setup {
       if (problem) refuse(problem.startsWith("Choose") ? pass.input : again.input)
       return !problem
     }
-    for (const f of [pass.input, again.input]) f.addEventListener("input", () => f.classList.remove("invalid"))
+    // Typing again takes the complaint away, as the unlock form does.
+    for (const f of [pass.input, again.input])
+      f.addEventListener("input", () => {
+        f.classList.remove("invalid")
+        error.hidden = true
+      })
     return { pass: pass.input, again: again.input, error, fields: [pass.wrap, again.wrap], valid }
   }
 
@@ -276,6 +281,10 @@ export class Setup {
   private create(): View {
     const name = field("Vault name", { value: "personal", maxlength: "64", pattern: "[a-z][a-z0-9_\\-]{0,63}", "aria-describedby": "name-hint" })
     const p = this.passphrases()
+    name.input.addEventListener("input", () => {
+      name.input.classList.remove("invalid")
+      p.error.hidden = true
+    })
     const label = h("span", { class: "roll-label" }, "Create vault")
     label.dataset.text = "Create vault"
     const submit = h("button", { class: "btn primary wide", type: "submit" }, label)
@@ -322,13 +331,19 @@ export function unlockView(app: App): View {
     clearTimeout(timer)
     const seconds = Math.ceil((until - Date.now()) / 1000)
     submit.disabled = seconds > 0
-    if (seconds <= 0) { error.textContent = "You can try your passphrase again."; return }
+    // Over: no longer an error. The red goes and the line clears; it's said rather than shown.
+    if (seconds <= 0) {
+      error.hidden = true
+      input.classList.remove("invalid")
+      app.announce("You can try your passphrase again.")
+      return
+    }
     error.hidden = false
     error.textContent = `Too many wrong passphrases. Try again in ${seconds} s.`
     timer = setTimeout(() => backoff(until), 250)
   }
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
-  const error = h("p", { class: "error", role: "alert" })
+  const error = h("p", { class: "error reserve", role: "alert" })
   error.hidden = true
   const label = h("span", { class: "roll-label" }, "Unlock")
   label.dataset.text = "Unlock"
@@ -410,7 +425,7 @@ function reauthText(reauth: Reauth): { title: string; why: string; act: string; 
 export function reauthView(app: App, reauth: Reauth): View {
   const text = reauthText(reauth)
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
-  const error = h("p", { class: "error", role: "alert" })
+  const error = h("p", { class: "error reserve", role: "alert" })
   error.hidden = true
   const label = h("span", { class: "roll-label" }, text.act)
   label.dataset.text = text.act
