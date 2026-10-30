@@ -348,7 +348,7 @@ function retarget(duration: number) {
 function position() {
   if (!host) return
   // A pill's field re-rendered by the page as it filled: the pill moves to the box now in its place.
-  if (anchor instanceof HTMLInputElement && !anchor.isConnected && mode === "pill" && anchorOwner) anchor = successor({ el: anchor, role: "username", owner: anchorOwner }) ?? anchor
+  if (anchor instanceof HTMLInputElement && !anchor.isConnected && mode === "pill" && anchorOwner) anchor = successor({ el: anchor, owner: anchorOwner }) ?? anchor
   if ((anchor && !anchor.isConnected) || !host.isConnected) return closeMenu()
   const to = targetRect()
   if (!to) return closeMenu()

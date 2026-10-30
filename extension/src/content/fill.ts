@@ -331,20 +331,25 @@ export function placeBoxes(boxes: Box[], offset: { x: number; y: number }, clip:
 // ---- Writing ------------------------------------------------------------------
 
 /**
- * The input a page's framework put in the place of `f.el` while this fill
- * was writing (some re-render a form on every input event, with new
- * elements): under the same parent, in the same form, with the same id,
- * name, type and autocomplete, and the only one there. It still has to pass
- * every check a field does before anything is written into it.
+ * The input a page's framework put in the place of `f.el` while a fill was
+ * writing (some re-render a form on every input event, with new elements):
+ * under the same parent, in the same form, with the same id, name, type and
+ * autocomplete, the only one there, and (given `was`, the field's box when
+ * the fill began) covering at least half of where the field was. It still
+ * has to pass every check a field does before anything is written into it.
  */
-export function successor(f: Field): HTMLInputElement | null {
+export function successor(f: Pick<Field, "el" | "owner">, was?: DOMRect): HTMLInputElement | null {
   const { el, owner } = f
   if (el.isConnected || !owner.parent?.isConnected || (!el.id && !el.name)) return null
   const same = Array.from(owner.parent.childNodes).filter(
     (c): c is HTMLInputElement =>
       c instanceof HTMLInputElement && c.id === el.id && c.name === el.name && c.type === el.type && c.getAttribute("autocomplete") === el.getAttribute("autocomplete") && (c.form ?? c.closest("form")) === owner.form,
   )
-  return same.length === 1 ? same[0] : null
+  if (same.length !== 1) return null
+  if (!was) return same[0]
+  const r = same[0].getBoundingClientRect()
+  const overlap = Math.max(0, Math.min(r.right, was.right) - Math.max(r.left, was.left)) * Math.max(0, Math.min(r.bottom, was.bottom) - Math.max(r.top, was.top))
+  return was.width * was.height > 0 && overlap >= 0.5 * was.width * was.height ? same[0] : null
 }
 
 /**
@@ -386,12 +391,17 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
   const filled: FieldRole[] = []
   let last: HTMLInputElement | undefined
   const written: HTMLInputElement[] = []
-  // A single field that one of this fill's own writes replaced is checked, and
-  // written, as its successor (see successor); only one that was in the page
-  // when the fill began.
-  const present = new Set(fields.filter((f) => f.el.isConnected).map((f) => f.el))
+  // A single field (not a box of a group) that one of this fill's own
+  // writes replaced is checked, and written, as its successor (see
+  // successor): it was in the page when the last write began and is gone
+  // now. Pages re-render after the write returns (a microtask, a batched
+  // update), so it's the last write's start that's compared, at the field's
+  // turn. Its successor has to sit where the field was when the fill began.
+  const single = (f: Field) => !f.split && f.role !== "new-password"
+  const was = new Map(fields.filter((f) => f.el.isConnected && single(f)).map((f) => [f.el, f.el.getBoundingClientRect()]))
+  let liveAtLastWrite = new Set<HTMLInputElement>()
   const now = (f: Field): Field => {
-    const next = !f.el.isConnected && present.has(f.el) && written.length ? successor(f) : null
+    const next = !f.el.isConnected && single(f) && liveAtLastWrite.has(f.el) ? successor(f, was.get(f.el)) : null
     return next ? { ...f, el: next } : f
   }
   const checkField = check
@@ -403,7 +413,9 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
     const f = group.length === 1 ? now(field) : field
     const all = group.length === 1 ? [f] : group
     const ok = (el: HTMLInputElement) => all.every(inPlace) && checkField(el)
-    if (!(ok(f.el) && setInputValue(f.el, value, ok))) return false
+    if (!ok(f.el)) return false
+    liveAtLastWrite = new Set([...was.keys()].filter((el) => el.isConnected))
+    if (!setInputValue(f.el, value, ok)) return false
     written.push(f.el)
     return true
   }

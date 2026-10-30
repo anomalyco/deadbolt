@@ -192,6 +192,54 @@ describe("fillFields", () => {
     expect((document.getElementById("p") as HTMLInputElement).value).toBe("")
   })
 
+  test("a successor that's hidden or covered, or somewhere else, takes nothing", async () => {
+    const setup = () => {
+      document.body.innerHTML = `<form><div id="box"><input id="u" name="u"><input id="p" name="p" type="password"></div></form>`
+      const [u, p] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
+      const next = { el: null as HTMLInputElement | null }
+      // The username's input event re-renders the password box.
+      u.addEventListener("input", () => {
+        const fresh = document.createElement("input")
+        Object.assign(fresh, { id: "p", name: "p", type: "password" })
+        p.replaceWith(fresh)
+        next.el = fresh
+      })
+      return { u, p, next }
+    }
+    const fill = (u: HTMLInputElement, p: HTMLInputElement, check: (el: HTMLInputElement) => boolean) => fillFields([field(u, "username"), field(p, "password")], { username: "kit", password: "secret" }, check)
+    const cover = document.createElement("section")
+    let hit: () => Element | null = () => null
+    const before = document.elementFromPoint
+    document.elementFromPoint = (() => hit()) as typeof document.elementFromPoint
+    try {
+      // Shown and on top: it takes the password, through the same checks.
+      let { u, p, next } = setup()
+      hit = () => next.el
+      expect((await fill(u, p, (el) => el === u || fillable(el))).filled).toEqual(["username", "password"])
+      expect(next.el?.value).toBe("secret")
+      // Covered: what's under its middle is something else.
+      ;({ u, p, next } = setup())
+      hit = () => cover
+      expect((await fill(u, p, (el) => el === u || fillable(el))).filled).toEqual(["username"])
+      expect(next.el?.value).toBe("")
+      // Hidden by style.
+      ;({ u, p, next } = setup())
+      hit = () => next.el
+      u.addEventListener("input", () => next.el!.setAttribute("style", "opacity:0"))
+      expect((await fill(u, p, (el) => el === u || fillable(el))).filled).toEqual(["username"])
+      expect(next.el?.value).toBe("")
+      // Somewhere else: its box doesn't cover where the field was.
+      ;({ u, p, next } = setup())
+      u.addEventListener("input", () => {
+        next.el!.getBoundingClientRect = () => ({ x: 0, y: 500, left: 0, top: 500, right: 240, bottom: 532, width: 240, height: 32, toJSON() {} }) as DOMRect
+      })
+      expect((await fill(u, p, () => true)).filled).toEqual(["username"])
+      expect(next.el?.value).toBe("")
+    } finally {
+      document.elementFromPoint = before
+    }
+  })
+
   test("a generated password goes into every new-password box, or none", async () => {
     document.body.innerHTML = `<form><input id="c" type="password"><input id="n1" type="password"><input id="n2" type="password"></form>`
     const [c, n1, n2] = ["c", "n1", "n2"].map((id) => document.getElementById(id) as HTMLInputElement)
