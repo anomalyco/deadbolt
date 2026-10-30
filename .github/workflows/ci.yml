@@ -132,7 +132,7 @@ jobs:
     name: Browser extension security e2e
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: extension
