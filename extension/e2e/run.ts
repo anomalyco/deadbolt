@@ -761,6 +761,11 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
+      // A CSS zoom on <html> (some sites scale themselves this way), or on a modal dialog.
+      case "/zoomed":
+        return url.searchParams.has("dialog")
+          ? html("Sign in to Acme", `<style>dialog{zoom:0.8;border:0;border-radius:14px;padding:24px;width:360px}</style><dialog id="d">${loginForm("/home")}</dialog><script>document.getElementById("d").showModal()</script>`)
+          : html("Sign in to Acme", `<style>html{zoom:1.25}</style>${loginForm("/home")}`)
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
         return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
@@ -2437,6 +2442,33 @@ async function viewportResize() {
   } catch (err) {
     check(false, `viewport resize threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "viewport resize")
+  } finally {
+    await close(run)
+  }
+}
+
+/** On a page with a CSS zoom above the menu's host, the menu still sits under the field at its own size, and fills. */
+async function pageZoom() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    for (const path of ["/zoomed", "/zoomed?dialog"]) {
+      await page.goto(`${site}${path}`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `page zoom ${path}`)
+        continue
+      }
+      const [m, f, row] = await Promise.all([menu.frameElement().then((e) => e.boundingBox()), page.locator("#email").boundingBox(), menu.locator("button.row").first().boundingBox()])
+      const placed = !!m && !!f && Math.abs(m.x - f.x) < 2 && Math.abs(m.y - (f.y + f.height + 6)) < 2 && Math.abs(m.width - Math.max(f.width, 240)) < 2
+      check(placed && !!row && Math.abs(row.height - 46) < 2, `on ${path} the menu sits under the field at its own size (menu ${JSON.stringify(m)}, field ${JSON.stringify(f)}, row ${row?.height})`)
+      await menu.locator("button.row").first().click()
+      const filled = await until(`a pick on ${path} fills`, async () => (await page.inputValue("#password")) !== "", 4000)
+      check(!!filled, `and a pick there fills (${filled ? "" : await footText(menu)})`)
+    }
+  } catch (err) {
+    check(false, `page zoom threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "page zoom")
   } finally {
     await close(run)
   }
@@ -4286,6 +4318,7 @@ const once: Record<string, () => Promise<void>> = {
   coveredMenu,
   topLayer,
   viewportResize,
+  pageZoom,
   occlusionSweep,
   midFill,
   coveredPill,
@@ -4308,6 +4341,7 @@ const cost: Record<string, number> = {
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
+  pageZoom: 5,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
 const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])

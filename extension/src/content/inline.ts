@@ -352,6 +352,11 @@ function position() {
   written = at
   host.style.cssText = important({
     all: "initial",
+    // Undoes a CSS zoom the page put on an element the host is in (<html>,
+    // or the field's dialog): zoom multiplies down the tree, top layer or
+    // not, so the place and size written here, which are in the viewport's
+    // pixels, would be scaled and land elsewhere, and the list with them.
+    zoom: String(1 / zoomAround(host)),
     position: "fixed",
     inset: "auto",
     top: `${at.top}px`,
@@ -378,6 +383,13 @@ function position() {
   // read as a cover): only a surface still in use goes back on top.
   if (!closing && !held && covered(host)) raise()
   if (host) raf = requestAnimationFrame(position)
+}
+
+/** The CSS zoom in effect where `el` is mounted, from the page's elements above it. */
+function zoomAround(el: Element): number {
+  const parent = el.parentNode instanceof ShadowRoot ? el.parentNode.host : el.parentElement
+  const zoom = (parent as (Element & { currentCSSZoom?: number }) | null)?.currentCSSZoom
+  return typeof zoom === "number" && zoom > 0 && Number.isFinite(zoom) ? zoom : 1
 }
 
 /**
