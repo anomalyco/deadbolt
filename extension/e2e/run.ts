@@ -8,7 +8,8 @@
 //   bun run e2e [--standalone] [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
 //
 // `--video <dir>` records the `film` run (the menu, a fill, a sign-in and
-// the save offer in the page) to <dir>/deadbolt-surface.webm.
+// the save offer in the page) to <dir>/deadbolt-surface.webm, and
+// `signUpStep` to <dir>/session-signup.webm.
 //
 // `--dist <dir>` uses an e2e build already made there (scripts/build.ts
 // --e2e <dir>) instead of building, so parallel shards share one build.
@@ -827,6 +828,37 @@ const server = Bun.serve({
           `<h1>Sign in to Acme</h1><form method="post" action="/signin/password">
             <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
             <button type="submit">Continue</button></form>`,
+        )
+      // Log in or sign up by address, as Dropbox does: Continue goes to `to`.
+      // An address the site doesn't know gets a sign-up form ("signup": one
+      // password box marked new-password beside name boxes, which the detector
+      // takes for a login; "signup-plain": a new password and its confirmation),
+      // a known one its password step ("password").
+      case "/susi":
+        return html(
+          "Log in or sign up to Acme",
+          `<h1>Log in or sign up</h1><form method="post" action="/susi/${(url.searchParams.get("to") ?? "password").replace(/[^a-z-]/g, "")}">
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username">
+            <button type="submit">Continue</button></form>`,
+        )
+      case "/susi/signup":
+        return html(
+          "Log in or sign up to Acme",
+          `<h1>Sign up for Acme</h1><form method="post" action="/home" novalidate>
+            <label for="email">Email</label><input id="email" name="email" type="email" autocomplete="username" value="kit@acme.test">
+            <label for="fname">First name</label><input id="fname" name="fname" autocomplete="given-name">
+            <label for="lname">Last name</label><input id="lname" name="lname" autocomplete="family-name">
+            <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="new-password">
+            <button type="submit">Agree and sign up</button></form>`,
+        )
+      case "/susi/signup-plain":
+        return html("Create your Acme account", signupForm("/home"))
+      case "/susi/password":
+        return html(
+          "Enter your password",
+          `<h1>Enter your password</h1><form method="post" action="/home">
+            <label for="password">Password</label><input id="password" name="password" type="password" autocomplete="current-password">
+            <button type="submit">Sign in</button></form>`,
         )
       case "/signin/password":
         return html(
@@ -2662,6 +2694,55 @@ async function topLayer() {
  * narrows the password step's menu to its login; one no login has (a failed
  * sign-in that came back with it) brings no menu at all.
  */
+/**
+ * A sign-in session fills sign-in steps only. Continue with an address the
+ * site doesn't know and it may answer with a sign-up form: the saved password
+ * never goes into its new-password box, whether the detector calls it a
+ * sign-up or (one box marked new-password beside name boxes, as Dropbox's)
+ * a login. A known address's password step still fills.
+ */
+async function signUpStep() {
+  const run = await launch(video ? { record: video, scale: 1 } : {})
+  const page = await run.context.newPage()
+  try {
+    for (const to of ["signup", "signup-plain", "password"]) {
+      await page.goto(`${site}/susi?to=${to}`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `susi ${to}`)
+        continue
+      }
+      await menu.locator("button.row", { hasText: "kit@acme.test" }).click()
+      await until("the address fills", async () => (await page.inputValue("#email")) === "kit@acme.test")
+      await until("the pill goes", () => !extensionFrame(page, "menu.html"), 6000)
+      const before = await fillCount(run)
+      await page.click("button[type=submit]")
+      await page.waitForURL(`**/susi/${to}`)
+      if (to === "password") {
+        const filled = await until("the password step fills", async () => (await page.inputValue("#password")) === "correct horse")
+        check(!!filled, "a known address's password step still fills from the session")
+        await shot(page, "session-password-step")
+      } else {
+        await formFound(page)
+        await Bun.sleep(2500)
+        const box = to === "signup" ? "#password" : "#new"
+        const value = await page.inputValue(box)
+        check(value === "" && (await fillCount(run)) === before, `the sign-up an unknown address gets (${to}) takes no saved password (${JSON.stringify(value)}, ${(await fillCount(run)) - before} fills)`)
+        await shot(page, `session-${to}`)
+      }
+    }
+  } catch (err) {
+    check(false, `sign-up step threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "sign-up step")
+  } finally {
+    const recording = video ? await page.video()?.path().catch(() => null) : null
+    const blank = video ? await Promise.all(run.context.pages().filter((p) => p !== page).map((p) => p.video()?.path().catch(() => null))) : []
+    await close(run)
+    if (recording) await rename(recording, join(video!, "session-signup.webm")).catch(() => {})
+    for (const path of blank) if (path) await rm(path, { force: true })
+  }
+}
+
 async function signInSessions() {
   const run = await launch()
   const page = await run.context.newPage()
@@ -4397,6 +4478,7 @@ const once: Record<string, () => Promise<void>> = {
   googleAccount,
   corner,
   signInSessions,
+  signUpStep,
   frameLogins,
   conditionalHeld,
   rateLimited,
@@ -4424,7 +4506,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 // rough run times in seconds (per scheme; unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
+  detection: 108, occlusionSweep: 55, signInSessions: 52, signUpStep: 14, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
