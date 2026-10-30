@@ -347,31 +347,42 @@ not running without sending hello, which would start the agent again.
   and nothing may paint over it there. Hit tests skip `pointer-events:
   none` and `inert` elements, so for that one synchronous check every
   element of the page and its shadow roots is made to take part: a
-  stylesheet first in each root with its rules in a cascade layer declared
-  before any of the page's (whose `!important` beats the page's own, in a
-  layer, on `:host` or not), `inert` lifted, and an inline `!important`
-  on anything over the point that still lets clicks through; all of it is
-  put back before the check returns. Each element then stacked above the
-  field's centre, and each one inside a shadow host there, must draw
-  nothing: no opaque background colour or image, backdrop filter, inset
-  shadow, border at that point, glyphs of its own text over the point,
-  opaque `::before`/`::after`, graphic, form control or SVG shape, unless
-  it's faded out. The field's own label counts like anything else (a
-  floating label's text beside the centre is fine). An ancestor listed
-  above the field draws over it through a pseudo-element, or, when the
-  field sits under it by a negative z-index, through its background too. A
+  stylesheet with its rules in a cascade layer declared before any of the
+  page's (whose `!important` beats the page's own, in a layer, on `:host`
+  or not), `inert` lifted, and an inline `!important` on anything over the
+  point that still lets clicks through; all of it is put back before the
+  check returns. No node is added where the page's selectors could see it
+  (`:first-child`, `* + *` and `:empty` would match differently and move
+  things): the probe's sheet is adopted, first in a root with no sheets of
+  its own, else last with its layer declared at the top of the root's
+  first sheet (`@layer deadbolt-probe;`, deleted again). Only when that
+  first sheet is another origin's does a style element go first instead,
+  the document's in `<html>`; if the page's CSP refuses it, it isn't tried
+  again on that page, and every element's `::before` and `::after` that
+  still lets clicks through and draws counts as a cover. Each element then
+  stacked above the field's centre, and each one inside a shadow host
+  there, must draw nothing: no opaque background colour or image, backdrop
+  filter, inset shadow, border at that point, glyphs of its own text over
+  the point (drawn by their fill, a stroke or a text-shadow), opaque
+  `::before`/`::after`, graphic, form control or SVG shape, unless it's
+  faded out. The field's own label counts like anything else (a floating
+  label's text beside the centre is fine). An ancestor listed above the
+  field draws over it through a pseudo-element, or, when the field sits
+  under it by a negative z-index, through its background too. A
   transparent outline that lets clicks through (Material's) doesn't hide
   it. Paint the browser never hit-tests is looked for across the whole
   page: an outline reaching the centre (the field's own and its ancestors'
   too, since outlines draw over content), and, from anything but the field
   and its ancestors, an outer box-shadow's solid part, a text-shadow, a
-  `drop-shadow()` filter or a border image outset whose reach covers it.
-  Anything over the point that still can't be hit and draws counts as a
-  cover, as does a page with 5,000 shadow roots or more. On a login page
-  of 1,000 to 2,000 elements the check takes under 10 ms; on a 16,000
-  element page about 100 ms. Known gaps: an SVG filter that moves content
-  elsewhere (`feOffset`) on an unrelated element, and a `::before` or
-  `::after` held at `pointer-events: none` by a running transition. An
+  `drop-shadow()` filter, a border image outset or a `-webkit-box-reflect`
+  mirror whose reach covers it, and any SVG `url()` filter at all (it can
+  flood or move paint anywhere). Anything over the point that still can't
+  be hit and draws counts as a cover, as does a page with 5,000 shadow
+  roots or more. On a login page of 1,000 to 2,000 elements the check
+  takes under 10 ms; on a 16,000 element page about 100 ms, so the check
+  before submitting a sign-in Deadbolt filled leaves it out (the fields
+  passed it as they were written). Known gap: a `::before` or `::after`
+  held at `pointer-events: none` by a running transition (issue #167). An
   Intersection Observer v2 reading isn't required for top-page fields: it
   counts any overlap (a floating label, an icon in the box), opacity or
   filter as hidden, and read 19 of 53 visible, uncovered sign-in fields on

@@ -190,6 +190,17 @@ const HIDDEN: Record<string, string> = {
   "outline-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;outline:400px solid #f4f4f5")),
   // Not hidden: Dark Reader's filter mode on the whole page.
   "dark-reader": hiddenForm(passwordField, `<style>html { filter: invert(1) hue-rotate(180deg) !important }</style>`),
+  // Transparent glyphs drawn by an opaque text-shadow, in a box or a ::after.
+  "text-shadow-cover": hiddenForm(coverField(`pointer-events:none;overflow:hidden;font:120px/38px sans-serif;color:transparent;text-shadow:0 0 0 #f4f4f5;white-space:nowrap`).replace("></div></div>", ">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</div></div>")),
+  "text-shadow-after-cover": hiddenForm(`<div class="tsa" style="position:relative">${passwordField}</div>`, `<style>.tsa::after { content: "\\2588\\2588\\2588\\2588\\2588\\2588"; position: absolute; inset: -2px; overflow: hidden; white-space: nowrap; font: 120px/38px sans-serif; color: transparent; text-shadow: 0 0 0 #f4f4f5; pointer-events: none }</style>`),
+  // A strict CSP (served with it, see /hidden/), and an ancestor's ::after cover held at pointer-events:none by !important in a layer.
+  "csp-layer-pseudo-cover": hiddenForm(`<div class="lpa" style="position:relative">${passwordField}</div>`, `<style nonce="e2e">@layer page { .lpa::after { content: ""; position: absolute; inset: -2px; background: #f4f4f5; pointer-events: none !important } }</style>`),
+  // Not hidden: the field below a web component whose adopted styles space every element after the first (\`* + *\`).
+  "shadow-owl": hiddenForm(`<div id="owl"></div>${passwordField}`, `<script>const r = document.getElementById("owl").attachShadow({ mode: "open" }); const s = new CSSStyleSheet(); s.replaceSync("* + * { margin-top: 300px }"); r.adoptedStyleSheets = [s]; r.innerHTML = "<p>Your password</p>"</script>`),
+  // The mirror image of a box below it, drawn over it by -webkit-box-reflect.
+  "reflect-cover": hiddenForm(coverField("inset:auto;left:-2px;right:-2px;top:calc(100% + 6px);height:calc(100% + 4px);background:#f4f4f5;-webkit-box-reflect:above 8px")),
+  // A 1 px box whose SVG filter floods a region over the field.
+  "svg-url-filter-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;filter:url(#flood)"), `<svg width="0" height="0" style="position:absolute"><filter id="flood" filterUnits="userSpaceOnUse" x="-20" y="-20" width="600" height="100"><feFlood flood-color="#f4f4f5"/></filter></svg>`),
 }
 
 /** The password field with its own label over it, 2 px bigger each way. */
@@ -1109,7 +1120,10 @@ const server = Bun.serve({
     if (url.pathname.startsWith("/detect-frame/") && DETECT_FRAMES[url.pathname.slice(14)]) return html("Acme", DETECT_FRAMES[url.pathname.slice(14)])
     // The site's own login page in a frame, on pages with no form of their own.
     if (url.pathname.startsWith("/framed/") && FRAMED[url.pathname.slice(8)]) return html("Acme", `<h1>Acme</h1>${FRAMED[url.pathname.slice(8)]}`)
-    if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) return html("Sign in to Acme", HIDDEN[url.pathname.slice(8)])
+    if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) {
+      const name = url.pathname.slice(8)
+      return html("Sign in to Acme", HIDDEN[name], name.startsWith("csp-") ? { "content-security-policy": "style-src-elem 'nonce-e2e'" } : {})
+    }
     if (url.pathname.startsWith("/overlay/") && url.pathname.slice(9) in OVERLAY) return html("Sign in to Acme", loginForm("/home") + OVERLAY[url.pathname.slice(9)])
     if (url.pathname.startsWith("/beaten/") && url.pathname.slice(8) in BEATEN) return html("Sign in to Acme", loginForm("/home") + BEATEN[url.pathname.slice(8)])
     if (url.pathname.startsWith("/top/") && url.pathname.slice(5) in TOP) return html("Sign in to Acme", TOP[url.pathname.slice(5)])
@@ -2208,7 +2222,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader") check(password === "correct horse", `a visible password field fills (${name})`)
+      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader" || name === "shadow-owl") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 

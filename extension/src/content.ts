@@ -193,11 +193,13 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     // Check each specific hint before the surrounding copy. Oversized context
     // is unknown, not permission to truncate away a delivery warning.
     const deliveredCode = codePrompts.some((text) => text.length > 12000 || /\b(?:sms|text(?:ed| message)?|e-?mail|phone|mobile|inbox|sent|messages?|deliver(?:ed|y)?|call|voice|whatsapp|push|notifications?|approve)\b|@|[•*]{2,}|\+\d/i.test(text))
+    // The fields passed the full check, paint included, as each was written;
+    // this one is about submitting, so it leaves the costly paint check out.
     const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
       (kind === "login" || kind === "mfa") && button instanceof HTMLElement && isVisible(button) &&
       !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
       form instanceof HTMLFormElement && fields.length > 0 &&
-      !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el)) &&
+      !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el, null, false)) &&
       !deliveredCode &&
       new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
     respond(!!safe)
