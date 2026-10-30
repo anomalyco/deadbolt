@@ -494,8 +494,10 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
     assert!(err.contains("no vault named nope"), "{err}");
     let err = a.fail(&["pair", "DBPAIRAAAA"]);
     assert!(err.contains("invalid pairing code"), "{err}");
-    // Several vaults and no terminal to choose on: name one.
     let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp"]);
+    assert!(err.contains("update both devices"), "{err}");
+    // Several vaults and no terminal to choose on: name one.
+    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp", "zoo"]);
     assert!(err.contains("several vaults (personal, work)"), "{err}");
 }
 
