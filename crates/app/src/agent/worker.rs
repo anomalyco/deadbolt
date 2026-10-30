@@ -271,6 +271,8 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             field,
         } => crate::activity::report(paths, action, item, title, field).await,
         Job::Agents { seq, revoke } => crate::agents::run(paths, seq, revoke).await,
+        Job::Trash { seq, restore } => crate::trash::run(paths, seq, restore).await,
+        Job::TrashItem { id, seq } => crate::trash::item(paths, id, seq).await,
         Job::Create {
             kind,
             name,

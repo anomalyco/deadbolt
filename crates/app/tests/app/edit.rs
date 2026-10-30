@@ -1,10 +1,12 @@
 //! Adding, changing and deleting items, headless: the vault scene with a
 //! scripted agent, so each test sees the jobs the app sends and answers them
 //! as the agent would. `agent.rs` runs the same against a real agent;
-//! `delete` covers conflicts, deletion, menus and 1Password sync, and
-//! `secrets` covers secret fields, concealed copies and kept multi-line keys.
+//! `delete` covers conflicts, deletion, menus and 1Password sync, `restore`
+//! covers Recently Deleted, and `secrets` covers secret fields, concealed
+//! copies and kept multi-line keys.
 
 mod delete;
+mod restore;
 mod secrets;
 
 use std::sync::mpsc::{Receiver, Sender};

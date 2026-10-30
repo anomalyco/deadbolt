@@ -1,7 +1,7 @@
 //! The vault's keyboard: everything without a mouse. The search has the keys
 //! first; ⇥ moves into the item's fields and back out, ⌘K opens the actions
-//! for the item, ? lists every shortcut, ⌘, has Settings, and Esc backs out
-//! of each. `SHORTCUTS` is the map the ? sheet and Settings show.
+//! for the item, ? lists every shortcut, ⌘, has Settings, ⇧⌘⌫ Recently
+//! Deleted, and Esc backs out of each. `SHORTCUTS` is the map the ? sheet and Settings show.
 
 use deadbolt_client::protocol::FieldInfo;
 use rune::{Key, KeyEvent, Tx};
@@ -24,6 +24,7 @@ pub const SHORTCUTS: &[(&[&str], &str)] = &[
     (&["⌃", "⇥"], "Its type, while new"),
     (&["⌘", "E"], "Edit"),
     (&["⌘", "⌫"], "Delete"),
+    (&["⇧", "⌘", "⌫"], "Recently deleted"),
     (&["⌘", ","], "Settings"),
     (&["⌘", "L"], "Lock"),
     (&["⇧", "⌘", "Space"], "Quick panel"),
@@ -132,7 +133,11 @@ impl App {
             }
             return Some(true);
         }
-        if self.settings_open {
+        if is_trash_shortcut(ev) {
+            self.toggle_trash();
+            return Some(true);
+        }
+        if self.settings_open || self.trash.open {
             return None;
         }
         // The form and the import view have keys of their own.
@@ -348,6 +353,7 @@ impl App {
         }
         self.cancel_delete();
         self.import.hover = false;
+        self.trash.forget();
         self.settings_open = true;
         self.nav = Nav::default();
         self.search.focused = false;
@@ -388,7 +394,7 @@ impl App {
             return None;
         }
         let installing = self.installing();
-        if !self.settings_open && !installing {
+        if !self.settings_open && !installing && !self.trash.open {
             return None;
         }
         // Import Passwords… leaves either for the import view, as the menu
@@ -402,6 +408,9 @@ impl App {
         }
         if self.settings_open {
             return Some(self.settings_key(ev, tx));
+        }
+        if self.trash.open {
+            return Some(self.trash_key(ev, tx));
         }
         match ev.key {
             Key::Escape => {
@@ -443,6 +452,11 @@ impl App {
             _ => false,
         }
     }
+}
+
+/// ⇧⌘⌫: Recently Deleted.
+pub(crate) fn is_trash_shortcut(ev: &KeyEvent) -> bool {
+    ev.key == Key::Backspace && ev.mods.cmd && ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl
 }
 
 fn is_question(ev: &KeyEvent) -> bool {

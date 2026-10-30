@@ -1,7 +1,8 @@
 //! The open vault, Seer's shape: the list is the sidebar, with the search
 //! under the traffic lights, two-line rows led by the item's kind and a foot
 //! of who's here, Settings and Lock. The item is a page in the inset card
-//! (`page`); ⌘, swaps it for Settings while the sidebar stays.
+//! (`page`); ⌘, swaps it for Settings, and ⇧⌘⌫ for Recently Deleted
+//! (`trash`), while the sidebar stays.
 //!
 //! Motion: none for a selection. A search replaces the list at once, and any
 //! new selection (search, arrows, a click) moves the highlight to its row
@@ -20,7 +21,7 @@ use rune_kit::shell::{SplitView, Toolbar};
 use rune_kit::{IconButton, IconButtonVariant, Keybind, Kit, TextInput};
 
 use crate::model::App;
-use crate::view::theme::{SLIDERS, kind_icon};
+use crate::view::theme::{SLIDERS, TRASH, kind_icon};
 use crate::view::{LIST_EDGE, device_name, instant, scroll_col, tnum, vault_name};
 
 pub(crate) use crate::view::theme::{FACT, glyph_tile, kind_name};
@@ -42,12 +43,14 @@ pub(crate) fn fact(item: &ItemInfo) -> String {
 pub fn view(s: &App, k: &Kit, inset: f32, reduced_motion: bool, layer: &mut Vec<El>) -> El {
     let main = if s.settings_open {
         crate::settings::page(s, k)
+    } else if s.trash.open {
+        crate::trash::page(s, k)
     } else {
         page::pane(s, k, layer)
     }
     .transition(instant());
     let mut toolbar = Toolbar::new();
-    if !s.settings_open {
+    if !s.settings_open && !s.trash.open {
         toolbar = toolbar.trailing(page::toolbar(s, k).transition(instant()));
     }
     layer.extend(crate::palette::view(s, k).map(|card| over("palette-over", card, 72.0)));
@@ -204,7 +207,9 @@ fn rows_of(s: &App, k: &Kit, visible: &[usize]) -> El {
             let Some(item) = items.get(i).and_then(|&at| s.items.get(at)) else {
                 return el();
             };
-            let on = !s.settings_open && s.selected.as_deref() == Some(item.id.as_str());
+            let on = !s.settings_open
+                && !s.trash.open
+                && s.selected.as_deref() == Some(item.id.as_str());
             let jump = if i < 9 && on { i + 1 } else { 0 };
             rune::memo(
                 format!("item-{}", item.id),
@@ -340,6 +345,7 @@ impl App {
         if self.settings_open {
             self.close_settings();
         }
+        self.trash.forget();
         // Focus somewhere else (nothing, Lock) comes back to the search.
         self.search.focused = true;
         if !self.import.showing() && !was_editing {
@@ -383,6 +389,26 @@ fn foot(s: &App, k: &Kit) -> El {
     } else {
         settings
     };
+    let trash = IconButton::new(&TRASH)
+        .variant(IconButtonVariant::GhostMuted)
+        .label("Recently Deleted")
+        .help("Recently Deleted")
+        .shortcut("⇧⌘⌫")
+        .on_press_tx(|s: &mut App, tx| {
+            tx.instant();
+            s.toggle_trash();
+        })
+        .build(k)
+        .key("trash-trigger");
+    let trash = if s.trash.open {
+        row()
+            .key("trash-on")
+            .radius(6.0)
+            .fill(k.c.pressed)
+            .child(trash)
+    } else {
+        trash
+    };
     row()
         .key("foot")
         .w_full()
@@ -413,6 +439,7 @@ fn foot(s: &App, k: &Kit) -> El {
                 ),
         )
         .children(crate::panel::window::entry(s, k))
+        .child(trash)
         .child(settings)
         .child(
             IconButton::new(k.glyph.lock)
