@@ -103,12 +103,23 @@ export function labelText(el: FormControl): string {
   return parts.filter(Boolean).join(" ").slice(0, 300)
 }
 
+/**
+ * A password box, or a text box the page masks with CSS
+ * (`-webkit-text-security`) to keep the browser's own password handling away.
+ */
+export function masked(el: HTMLInputElement): boolean {
+  if (el.type === "password") return true
+  if (el.type !== "text") return false
+  const security = getComputedStyle(el).getPropertyValue("-webkit-text-security")
+  return !!security && security !== "none"
+}
+
 function factsFor(el: HTMLInputElement): FieldFacts {
   const code = [el.id, el.name, el.getAttribute("class"), el.getAttribute("data-testid"), el.getAttribute("data-test")]
     .filter((v): v is string => typeof v === "string" && v.length > 0)
     .join(" ")
   return {
-    type: (el.getAttribute("type") || "text").toLowerCase(),
+    type: masked(el) ? "password" : (el.getAttribute("type") || "text").toLowerCase(),
     autocomplete: (el.getAttribute("autocomplete") || "").toLowerCase().split(/\s+/).filter(Boolean),
     display: words(labelText(el)),
     code: squash(words(code.slice(0, 300))),
