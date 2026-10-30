@@ -5,7 +5,7 @@
 // real browser profile or vault: each run uses a fresh profile directory with
 // the fake host's manifest in it.
 //
-//   bun run e2e [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
+//   bun run e2e [--standalone] [--stills <dir>] [--video <dir>] [--only <scenario>,<scenario>] [--shard <i>/<n>] [--list] [--dist <dir>]
 //
 // `--video <dir>` records the `film` run (the menu, a fill, a sign-in and
 // the save offer in the page) to <dir>/deadbolt-surface.webm.
@@ -17,6 +17,16 @@
 // swaps, opaque origins, value swaps, navigation during a fill and the
 // back/forward cache.
 //
+// `--standalone` runs the same scenarios against the browser-only device
+// (bg/standalone.ts, a `--standalone` e2e build) and its real wasm vault
+// instead of the fake host: each profile creates a vault through the
+// extension's own page and saves the fake host's logins, identities and
+// card into it (seedVault), and the host log is what the service worker
+// sent the vault. The fake host's other knobs have counterparts there (a
+// locked vault, one never set up, slow or rate-limited answers from the
+// worker's side); what only a native agent does (Touch ID, passkeys) is
+// skipped, by name.
+//
 // `--deadbolt <path to the deadbolt binary>` adds the passkey run, which
 // needs a real agent to sign: it makes a throwaway store (fast KDF, local
 // network only) in the run's temporary directory, runs that binary as the
@@ -26,9 +36,11 @@
 
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
 import { chromium, type BrowserContext, type Frame, type Page, type Worker } from "playwright-core"
+import { createHmac } from "node:crypto"
 import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
+import { VAULT_REQUEST } from "../src/bg/vault-messages"
 
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const root = join(import.meta.dir, "..")
@@ -37,10 +49,11 @@ const arg = (name: string) => {
   return i > 0 ? process.argv[i + 1] : undefined
 }
 // An e2e build of its own (DEADBOLT_E2E: provider pages on .test hosts), never dist/.
+const standalone = process.argv.includes("--standalone")
 const prebuilt = arg("--dist")
 const dist = prebuilt ?? (await mkdtemp(join(tmpdir(), "deadbolt-e2e-dist-")))
 if (!prebuilt) {
-  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist, "--native"], { stdout: "inherit", stderr: "inherit" })
+  const built = Bun.spawnSync(["bun", join(root, "scripts", "build.ts"), "--e2e", dist, standalone ? "--standalone" : "--native"], { stdout: "inherit", stderr: "inherit" })
   if (!built.success) throw new Error("the e2e build failed")
 }
 const stills = arg("--stills")
@@ -955,7 +968,7 @@ interface LaunchOptions {
 async function launch(options: LaunchOptions = {}): Promise<Run> {
   const dir = await mkdtemp(join(tmpdir(), "deadbolt-e2e-"))
   const log = join(dir, "host.log")
-  if (options.host !== false) {
+  if (options.host !== false && !standalone) {
     await mkdir(join(dir, "NativeMessagingHosts"))
     await writeFile(
       join(dir, "NativeMessagingHosts", "pw.deadbolt.browser.json"),
@@ -1029,7 +1042,90 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
   })
   const run = { context, worker, log, dir }
   runs.set(context, run)
+  if (standalone) await seedVault(run, options)
   return run
+}
+
+// ---- The standalone device ------------------------------------------------------
+
+/** The one-time password the seeded Acme login has, and its codes (RFC 6238, SHA-1, 30 s, 6 digits). */
+const TOTP_SECRET = "JBSWY3DPEHPK3PXP"
+function totpAt(seconds: number): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567"
+  let bits = ""
+  for (const c of TOTP_SECRET) bits += alphabet.indexOf(c).toString(2).padStart(5, "0")
+  const key = Buffer.from(bits.match(/.{8}/g)!.map((b) => parseInt(b, 2)))
+  const counter = Buffer.alloc(8)
+  counter.writeBigUInt64BE(BigInt(Math.floor(seconds / 30)))
+  const mac = createHmac("sha1", key).update(counter).digest()
+  const at = mac[mac.length - 1] & 0xf
+  return String((mac.readUInt32BE(at) & 0x7fffffff) % 1_000_000).padStart(6, "0")
+}
+/** Whether `code` is the Acme login's one-time code: the fake host's fixed one, or the vault's current (or just-ended) one. */
+const isCode = (code: string) => (standalone ? [totpAt(Date.now() / 1000), totpAt(Date.now() / 1000 - 30)].includes(code) : code === "492039")
+
+const SEED_PASSPHRASE = "e2e standalone synthetic passphrase"
+
+/**
+ * Puts the fake host's data in the profile's own vault: created through
+ * device.html as a person would (the real KDF), then the logins (on every
+ * test site, as the fake host lists them everywhere), the two identities
+ * and the card, with the fake host's values. `status: "locked"` locks it
+ * after; `host: false` leaves it never set up. Before any page asks, the
+ * service worker's messages to the vault are logged (the host log), and
+ * `fillDelay` and `rateLimit` act on them as the fake host would.
+ */
+async function seedVault(run: Run, options: LaunchOptions) {
+  await run.worker.evaluate(
+    ({ type, delay, limited }) => {
+      const log: unknown[] = []
+      ;(globalThis as unknown as { __vaultLog: unknown[] }).__vaultLog = log
+      const send = chrome.runtime.sendMessage.bind(chrome.runtime) as (...args: unknown[]) => Promise<unknown>
+      ;(chrome.runtime as unknown as { sendMessage: unknown }).sendMessage = (...args: unknown[]) => {
+        const m = args[0] as { type?: string; body?: Record<string, unknown> }
+        const kind = String(m?.body?.type ?? "")
+        if (m?.type !== type || kind.startsWith("device-")) return send(...args)
+        log.push(JSON.parse(JSON.stringify(m.body)))
+        if (limited.includes(kind)) return Promise.resolve({ reply: { type: "error", code: "rate_limited", message: "too many requests; try again in a moment" } })
+        if (delay && (kind === "fill" || kind === "fill-form")) return new Promise((r) => setTimeout(r, delay * 1000)).then(() => send(...args))
+        return send(...args)
+      }
+    },
+    { type: VAULT_REQUEST, delay: options.fillDelay ?? 0, limited: (options.rateLimit ?? "").split(",").filter(Boolean) },
+  )
+  if (options.host === false) return
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`chrome-extension://${ID}/device.html`)
+    const ask = async (command: Record<string, unknown>) => {
+      const r = (await page.evaluate((command) => chrome.runtime.sendMessage({ type: "db:device", command }), command)) as { ok: boolean; message?: string; reply?: Record<string, unknown> }
+      if (!r?.ok) throw new Error(`seeding the vault: ${command.type}: ${r?.message}`)
+      return r.reply!
+    }
+    await ask({ type: "device-create", passphrase: SEED_PASSPHRASE, name: "personal" })
+    const port = server.port
+    const sites = [`http://localhost:${port}`, `http://www.acme.test:${port}`, `http://accounts.acme.test:${port}`, `http://appstoreconnect.apple.test:${port}`, `http://www.schwab.test:${port}`]
+    const urls = (list: string[]) => list.map((value, i) => (i ? { name: `url-${i + 1}`, value, type: "url" } : { name: "url", value }))
+    const login = async (name: string, fields: Array<{ name: string; value: string; type?: string }>) => String((await ask({ type: "device-item-save", kind: "login", name, fields })).ref)
+    if (options.google) {
+      // Also for acme.test, where the same page must narrow nothing (googleAccount).
+      for (const u of ["ryan@gmail.com", "ryan@anoma.ly", "kit@gmail.com"]) await login("Google", [...urls([`http://accounts.google.test:${port}`, `http://www.acme.test:${port}`]), { name: "username", value: u }, { name: "password", value: "google password" }])
+    } else {
+      await login("Acme", [...urls(sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
+      await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
+      if (options.signIn) {
+        const google = await login("Google", [...urls([`http://accounts.google.test:${port}`]), { name: "username", value: "kit@gmail.com" }, { name: "password", value: "google password" }])
+        await login("Acme", [...urls(sites), { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: google.split(":")[1] }])
+      }
+    }
+    const item = (kind: string, name: string, values: Record<string, string>) => ask({ type: "device-item-save", kind, name, fields: Object.entries(values).map(([name, value]) => ({ name, value })) })
+    await item("identity", "Home", { "given-name": "Kit", "family-name": "Langton", email: "kit@acme.test", phone: "+14155550123", organization: "Acme", "address-line1": "123 Main St", "address-line2": "Apt 4", city: "Brooklyn", region: "NY", "postal-code": "11201", country: "US", birthday: "1990-07-04" })
+    await item("identity", "Work", { "given-name": "Kit", "family-name": "Langton", "address-line1": "1 Market St", city: "San Francisco", region: "CA", "postal-code": "94105", country: "US" })
+    await item("card", "Personal Visa", { number: "4242424242424242", cvv: "123", expiry: "2028-08", cardholder: "Kit Langton", brand: "Visa" })
+    if (options.status === "locked") await ask({ type: "device-lock" })
+  } finally {
+    await page.close()
+  }
 }
 
 const runs = new Map<BrowserContext, Run>()
@@ -1040,6 +1136,7 @@ async function close(run: Run) {
 }
 
 async function hostLog(run: Run): Promise<Array<Record<string, unknown>>> {
+  if (standalone) return run.worker.evaluate(() => (globalThis as unknown as { __vaultLog?: Array<Record<string, unknown>> }).__vaultLog ?? []).catch(() => [])
   const text = await readFile(run.log, "utf8").catch(() => "")
   return text
     .split("\n")
@@ -1137,6 +1234,10 @@ async function popup(run: Run, tabPrefix: string, name?: string): Promise<Page> 
   return page
 }
 
+/** The popup's rows for the page's logins, and their Fill when it's the primary button: the native popup's, or the vault's (src/vault). */
+const POPUP_TITLE = standalone ? ".vrow.here .title" : ".account-title"
+const POPUP_FILL_PRIMARY = standalone ? ".vrow button.fill.primary" : ".account button.primary"
+
 /** The toolbar badge for the tab showing `prefix`. */
 const badge = (run: Run, prefix = site) =>
   run.worker.evaluate(async (prefix) => {
@@ -1205,7 +1306,7 @@ async function fillAndTotp(scheme: Scheme) {
       check(!!(await until("the pill goes", () => !extensionFrame(page, "menu.html"), 5000)), "and goes by itself")
       await page.click("button[type=submit]")
       await page.waitForURL("**/mfa")
-      const code = await until("one-time code fills on the next page", async () => (await page.inputValue("#code")) === "492039")
+      const code = await until("one-time code fills on the next page", async () => isCode(await page.inputValue("#code")))
       check(!!code, "TOTP filled on the code page")
     }
 
@@ -1228,8 +1329,9 @@ async function fillAndTotp(scheme: Scheme) {
     check(JSON.stringify(fills.map((r) => r.want)) === JSON.stringify([["username", "password"], ["totp"]]), "fills ask only for the fields on each page")
 
     const p = await popup(run, site, `popup-ready-${scheme}`)
-    check((await p.locator(".account-title").allTextContents()).join(",") === "Acme,Acme admin", "popup lists the site's logins")
-    check(!(await p.locator("button", { hasText: /copy password/i }).count()), "popup offers no password copy")
+    check((await p.locator(POPUP_TITLE).allTextContents()).join(",") === "Acme,Acme admin", "popup lists the site's logins")
+    // The standalone popup is the vault itself, which copies a password when asked (docs/extension-device.md).
+    if (!standalone) check(!(await p.locator("button", { hasText: /copy password/i }).count()), "popup offers no password copy")
   } catch (err) {
     check(false, `fill scenario threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "fill")
@@ -1302,7 +1404,7 @@ async function savePrompt(scheme: Scheme) {
       check(!(await hostLog(run)).some((r) => r.type === "save"), "nothing saved before the click")
       const { p, title } = await offerIn(run, `offer-save-${scheme}`)
       check(title === "Save login for localhost?", `the popup asks to save (${title})`)
-      check((await p.locator(".account button.primary").count()) === 0, "with an offer showing, no Fill button is primary")
+      check((await p.locator(POPUP_FILL_PRIMARY).count()) === 0, "with an offer showing, no Fill button is primary")
       await p.click(".offer button.primary")
       await until("save sent after the click", async () => (await hostLog(run)).some((r) => r.type === "save"))
       const save = (await hostLog(run)).find((r) => r.type === "save") as { entry?: Record<string, string>; origin?: string }
@@ -1806,16 +1908,23 @@ async function locked(scheme: Scheme) {
     await page.click("#email")
     const menu = await until("locked menu", async () => {
       const f: Frame | null = extensionFrame(page, "menu.html")
-      return f && (await f.locator(".notice").count()) > 0 ? f : null
+      return f && (await f.locator(standalone ? ".row" : ".notice").count()) > 0 ? f : null
     })
     if (menu) {
-      check(((await menu.locator(".title").textContent()) ?? "").includes("locked"), "menu says Deadbolt is locked")
+      // The browser-only vault's menu offers to unlock it in its own page.
+      if (standalone) check(((await menu.locator(".title").textContent()) ?? "") === "Unlock Deadbolt", "menu offers to unlock Deadbolt")
+      else check(((await menu.locator(".title").textContent()) ?? "").includes("locked"), "menu says Deadbolt is locked")
       await Bun.sleep(400)
       await shotAround(page, `menu-locked-${scheme}`, menu, "#email")
     }
     const p = await popup(run, site, `popup-locked-${scheme}`)
-    check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
-    check(!(await p.locator("input[type=password]").count()), "popup never asks for the passphrase")
+    if (standalone) {
+      // The browser-only vault unlocks in its own popup.
+      check((await p.locator("input[type=password]").count()) === 1 && (await p.locator("button", { hasText: "Unlock" }).count()) > 0, "popup asks for the passphrase to unlock")
+    } else {
+      check(((await p.locator("h2").textContent()) ?? "") === "Unlock Deadbolt", "popup says Unlock Deadbolt")
+      check(!(await p.locator("input[type=password]").count()), "popup never asks for the passphrase")
+    }
   } catch (err) {
     check(false, `locked threw: ${(err as Error).message.split("\n")[0]}`)
   } finally {
@@ -1829,7 +1938,8 @@ async function notInstalled(scheme: Scheme) {
     const page = await run.context.newPage()
     await page.goto(`${site}/login`)
     const p = await popup(run, site, `popup-not-installed-${scheme}`)
-    check(((await p.locator(".command code").textContent()) ?? "") === "deadbolt browser install", "popup shows the install command")
+    if (standalone) check((await p.locator("button", { hasText: /pair with an existing device/i }).count()) > 0, "a vault never set up offers to pair or create one")
+    else check(((await p.locator(".command code").textContent()) ?? "") === "deadbolt browser install", "popup shows the install command")
   } catch (err) {
     check(false, `not installed threw: ${(err as Error).message.split("\n")[0]}`)
   } finally {
@@ -2466,7 +2576,7 @@ async function signInSessions() {
     await page.waitForURL("**/flow/nav/next")
     const code = await until("the code boxes fill", async () => {
       const digits = await Promise.all([1, 2, 3, 4, 5, 6].map((i) => page.inputValue(`#d${i}`)))
-      return digits.join("") === "492039"
+      return isCode(digits.join(""))
     })
     check(!!code, "the code step's split boxes fill with the current code")
     check(!!(await pillSays("Code filled")), "and its pill says Code filled")
@@ -3584,7 +3694,9 @@ async function formsSurface(scheme: Scheme) {
     const cards = await formsMenu(run, page, "#cc", "/forms/card-single")
     if (cards) {
       check((await cards.locator(".row .title").first().textContent()) === "Visa ••4242 · 08/28", "a card field lists cards as brand, last digits and expiry")
-      check((await footText(cards)) === "Deadbolt may ask for Touch ID.", "and says Touch ID may be asked")
+      // The browser-only vault has no Touch ID: Comfortable fills on the pick (Strict's passphrase is e2e/standalone.ts's).
+      if (standalone) check((await footText(cards)) === "", "and asks for nothing more under Comfortable")
+      else check((await footText(cards)) === "Deadbolt may ask for Touch ID.", "and says Touch ID may be asked")
       await shotAround(page, `forms-card-${scheme}`, cards, "#cc")
       check((await pickRow(cards, "Visa")) === "ok", "picking a card says Filled")
       const got = await values(page, ["cc", "exp", "cvc", "holder"])
@@ -3888,13 +4000,15 @@ const cost: Record<string, number> = {
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12,
 }
+/** What only a native agent does: no standalone counterpart yet (Touch ID; passkeys are their own work). */
+const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])
 const units = [
   ...(["light", "dark"] as const).flatMap((scheme) =>
     Object.entries(scenarios).map(([name, run]) => ({ key: name, name: `${name} (${scheme})`, run: () => run(scheme) })),
   ),
   ...Object.entries(once).map(([name, run]) => ({ key: name, name, run })),
   // The recording runs only when asked for.
-].filter((u) => (!picked || picked.includes(u.key)) && (u.key !== "film" || video))
+].filter((u) => (!picked || picked.includes(u.key)) && (u.key !== "film" || video) && !(standalone && NATIVE_ONLY.has(u.key)))
 const [part, parts] = (arg("--shard") ?? "1/1").split("/").map(Number)
 if (!(parts >= 1 && part >= 1 && part <= parts)) throw new Error("--shard wants <i>/<n> with 1 <= i <= n")
 const load = Array<number>(parts).fill(0)
