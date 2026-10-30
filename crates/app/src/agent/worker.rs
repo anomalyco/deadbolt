@@ -275,6 +275,16 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         Job::Agents { seq, revoke } => crate::agents::run(paths, seq, revoke).await,
         Job::Trash { seq, restore } => crate::trash::run(paths, seq, restore).await,
         Job::TrashItem { id, seq } => crate::trash::item(paths, id, seq).await,
+        Job::Health { seq, online } => crate::health::load(paths, seq, online).await,
+        Job::HealthIgnore {
+            id,
+            kind,
+            ignored,
+            seq,
+        } => crate::health::set_ignored(paths, id, kind, ignored, seq).await,
+        Job::BreachChecksSet { enabled, seq } => {
+            crate::health::set_breach_checks(paths, enabled, seq).await
+        }
         Job::Create {
             kind,
             name,
@@ -353,9 +363,14 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         Job::Generate {
             length,
             symbols,
+            url,
             seq,
         } => {
-            let command = Command::Generate { length, symbols };
+            let command = Command::Generate {
+                length,
+                symbols,
+                url,
+            };
             let result = call(paths, command, |r| match r {
                 Reply::Password { password } => Some(password),
                 _ => None,

@@ -3,7 +3,8 @@
 use serde::{Deserialize, Serialize};
 
 pub use deadbolt_core::health::{
-    Finding, FindingKind, HealthCounts, HealthPeer, ItemHealth, RiskLevel, WeakReason,
+    Finding, FindingKind, HealthCounts, HealthPeer, ItemHealth, PassphraseStrength, RiskLevel,
+    WeakReason, audited_password_field, passphrase_strength,
 };
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

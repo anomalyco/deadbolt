@@ -103,6 +103,7 @@ impl App {
         if self.settings_open {
             self.close_settings();
         }
+        self.close_security();
         self.trash.forget();
         self.trash.open = true;
         self.nav = crate::keys::Nav::default();

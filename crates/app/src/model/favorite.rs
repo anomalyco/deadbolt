@@ -103,6 +103,7 @@ impl App {
         tx.instant();
         self.close_settings();
         self.close_trash();
+        self.close_security();
         self.nav.field = None;
         self.sidebar.set_open(true);
         if self.search.text.trim().eq_ignore_ascii_case(&token) {

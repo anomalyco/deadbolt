@@ -50,7 +50,9 @@ impl App {
                     tx.instant();
                 }
                 self.edit_item_landed(&item);
+                let landed_id = item.id.clone();
                 self.set_detail(Some(item));
+                self.finish_pending_fix(&landed_id);
                 // A Show pressed on the cached page before its values landed
                 // reveals the secret only now.
                 if was_unloaded

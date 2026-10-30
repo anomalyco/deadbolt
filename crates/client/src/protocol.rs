@@ -56,7 +56,8 @@ pub use caller::{
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
 };
 pub use health::{
-    Finding, FindingKind, HealthCounts, HealthPeer, HealthReport, ItemHealth, RiskLevel, WeakReason,
+    Finding, FindingKind, HealthCounts, HealthPeer, HealthReport, ItemHealth, PassphraseStrength,
+    RiskLevel, WeakReason, audited_password_field, passphrase_strength,
 };
 pub use reference::{Reference, SCHEME};
 pub use reports::{

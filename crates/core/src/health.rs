@@ -84,7 +84,7 @@ impl FindingKind {
 }
 
 /// Severity tint for sidebar row dots and item banners.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum RiskLevel {
     Caution,
