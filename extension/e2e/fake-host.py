@@ -100,14 +100,34 @@ def refusal(req):
     return "weak" if max(hi, lo) * math.log2(len(set(alphabet))) < 60 else None
 
 
+CLASSES = {"digit": string.digits, "upper": string.ascii_uppercase, "lower": string.ascii_lowercase, "special": "-~!@#$%^&*_+=`|(){}[:;\"'<>,.?]/"}
+
+
+def required(rules):
+    """The character sets passwordrules' `required:` entries ask one of each of: named classes and [custom] sets, as the agent reads them."""
+    needs = []
+    for part in rules.split(";"):
+        name, _, value = part.partition(":")
+        if name.strip() != "required":
+            continue
+        chars = ""
+        for token in value.split(","):
+            token = token.strip()
+            chars += token[1:-1] if token.startswith("[") and token.endswith("]") else CLASSES.get(token, "")
+        if chars:
+            needs.append(chars)
+    return needs
+
+
 def generate(req):
     if refusal(req):
         return refusal(req)
     hi = min(req.get("maxLength") or 20, 20)
     lo = req.get("minLength") or 0
-    alphabet = req.get("allowed") or DEFAULT_ALPHABET
     rules = req.get("rules") or ""
-    needs = [c for k, c in (("digit", string.digits), ("upper", string.ascii_uppercase), ("lower", string.ascii_lowercase)) if f"required: {k}" in rules]
+    needs = required(rules)
+    # With required classes and no `allowed:`, a password uses only those, as the agent's does.
+    alphabet = req.get("allowed") or ("".join(needs) if needs and "allowed:" not in rules else DEFAULT_ALPHABET)
     while True:
         password = "".join(secrets.choice(alphabet) for _ in range(max(hi, lo)))
         if all(any(ch in cls for ch in password) for cls in needs):

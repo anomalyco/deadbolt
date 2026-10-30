@@ -4314,7 +4314,7 @@ const once: Record<string, () => Promise<void>> = {
   formsTouchId,
   learnAndNever,
 }
-const gauntletRun = gauntletScenarios<Run>({ site, port: server.port!, launch, close, check, until, settled, hostLog, isCode, diagnose, video })
+const gauntletRun = gauntletScenarios<Run>({ site, port: server.port!, launch, close, check, settled, hostLog, isCode, diagnose, video })
 Object.assign(once, gauntletRun.scenarios)
 const groups: Record<string, string[]> = { gauntlet: Object.keys(gauntletRun.scenarios), forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
