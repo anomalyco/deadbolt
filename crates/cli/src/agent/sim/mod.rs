@@ -63,6 +63,7 @@ impl Device {
             },
         )
         .unwrap();
+        let health = super::health::State::new(&store);
         let state = Arc::new(Mutex::new(Some(Loaded {
             store,
             secret,
@@ -71,6 +72,7 @@ impl Device {
             vaults: Default::default(),
             unavailable: Default::default(),
             changes: Default::default(),
+            health,
         })));
         let member_state = state.clone();
         let gate = MembershipGate::new(Arc::new(move |peer: &PeerId| {

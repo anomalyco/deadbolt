@@ -214,10 +214,11 @@ pub fn save(s: &mut Loaded, save: Save) -> Result<(LoginRef, bool)> {
     }
     if let Some(login) = save.login {
         let (vault, item) = find(s, login, &site)?;
+        let today = crate::config::today_utc();
         s.update(vault, |v, secret| {
             Ok(v.write(
                 secret,
-                vec![autofill::password_update(item.id, save.password.expose())],
+                autofill::password_update_at(item.id, save.password.expose(), &today),
             )?)
         })?;
         return Ok((login_ref(&vault, &item.id), false));

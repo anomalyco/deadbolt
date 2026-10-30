@@ -39,6 +39,7 @@
 //! status request reads the same to every agent.
 
 mod caller;
+mod health;
 mod reference;
 mod reports;
 #[cfg(test)]
@@ -53,6 +54,9 @@ use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 pub use caller::{
     ActivityEntry, ActivityItem, Ancestor, AppAction, CallerClass, CallerInfo, Check, Claim,
     Outcome, Signature, Tier, UNVERIFIED_LINUX,
+};
+pub use health::{
+    Finding, FindingKind, HealthCounts, HealthPeer, HealthReport, ItemHealth, RiskLevel, WeakReason,
 };
 pub use reference::{Reference, SCHEME};
 pub use reports::{
@@ -253,10 +257,13 @@ pub enum Command {
         apply: bool,
     },
     /// A new random password of `length` characters (8 to 256): letters and
-    /// digits, and symbols if `symbols`. Needs no unlock; replies `password`.
+    /// digits, and symbols if `symbols`, honoring `url`'s vendored site rules
+    /// when given. Needs no unlock; replies `password`.
     Generate {
         length: usize,
         symbols: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        url: Option<String>,
     },
     /// Mirrors 1Password into `vault` with the 1Password CLI (`op`), which
     /// the agent runs: from every vault of `account` (`op`'s default
@@ -612,6 +619,29 @@ pub enum Command {
         exclude: Vec<String>,
         verify: Verify,
         interactive: bool,
+    },
+    /// Password health findings and summary counts for `vault` (`None` uses the
+    /// default vault; `Some("*")` includes every unlocked vault), never values
+    /// or hashes. With `online`, runs a Have I Been Pwned range check first.
+    /// Refused to AI callers. Replies `health`.
+    Health {
+        vault: Option<String>,
+        #[serde(default)]
+        online: bool,
+    },
+    /// Ignores (`ignored = true`) or restores (`false`) `kind` on the item
+    /// matching `query` in `vault`, syncing the dismissal across devices.
+    /// Refused to AI callers. Replies `health`.
+    HealthIgnore {
+        vault: Option<String>,
+        query: Vec<String>,
+        kind: FindingKind,
+        ignored: bool,
+    },
+    /// Enables or disables opt-in Have I Been Pwned breach checks in
+    /// `config.toml`. Refused to AI callers. Replies `done`.
+    BreachChecksSet {
+        enabled: bool,
     },
 }
 
@@ -1098,6 +1128,8 @@ pub enum Change {
     },
     /// New Activity entries were recorded.
     Activity,
+    /// Password health findings or breach-check state changed.
+    Health,
     /// Changes were dropped because the watcher fell behind. Fetch everything.
     Resync,
     /// The agent is stopping, which locks the store. The stream ends.
@@ -1334,6 +1366,9 @@ pub enum Reply {
     },
     SecretGrants {
         grants: Vec<SecretGrantInfo>,
+    },
+    Health {
+        report: HealthReport,
     },
     AgentLogins {
         /// The page's site: its registrable domain.

@@ -636,6 +636,7 @@ mod tests {
         .unwrap();
         let (mut source, genesis) = Vault::create(&secret, "test").unwrap();
         let id = source.id();
+        let health = crate::agent::health::State::new(&store);
         let mut loaded = Loaded {
             store,
             id: secret.device_id(),
@@ -646,6 +647,7 @@ mod tests {
                 .collect(),
             unavailable: Default::default(),
             changes: Default::default(),
+            health,
         };
         let (_, entry) = source
             .create_item(

@@ -463,9 +463,14 @@ pub async fn run(
             let mut fields = assignments(&fields, Some(&kind))?;
             fill_required(&kind, &mut fields)?;
             if kind == "login" && !fields.iter().any(|f| f.name == "password") {
+                let url = fields
+                    .iter()
+                    .find(|f| f.name == "url")
+                    .map(|f| f.value.clone());
                 let command = Command::Generate {
                     length,
                     symbols: !no_symbols,
+                    url,
                 };
                 let Reply::Password { password } =
                     crate::request(paths, command, from_stdin).await?

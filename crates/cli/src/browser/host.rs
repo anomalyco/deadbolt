@@ -1144,9 +1144,11 @@ fn changed(change: &Change) -> Option<&'static str> {
         Change::Unlocked => Some("unlocked"),
         Change::Items { .. } | Change::Vaults | Change::Resync => Some("items"),
         Change::Stopping => Some("stopped"),
-        Change::Watching | Change::Devices { .. } | Change::Activity | Change::Activate { .. } => {
-            None
-        }
+        Change::Watching
+        | Change::Devices { .. }
+        | Change::Activity
+        | Change::Health
+        | Change::Activate { .. } => None,
     }
 }
 
