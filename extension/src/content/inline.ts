@@ -441,7 +441,9 @@ function position() {
 /** The intended size, not a rect the page may have restyled; only the menu gets it. */
 function tellGeometry() {
   if (!port || !written) return
-  const geometry = { width: Math.round(written.width), height: Math.round(written.height), visible: scaleVisible }
+  // Keep fractional width: rounding it before multiplying by DPR would
+  // inflate the physical-pixel tolerance on high-density displays.
+  const geometry = { width: written.width, height: Math.round(written.height), dpr: devicePixelRatio, visible: scaleVisible }
   const key = JSON.stringify(geometry)
   if (key === lastGeometry) return
   lastGeometry = key

@@ -62,7 +62,7 @@ let pressedAt = -Infinity
 const dwell = new Dwell(500)
 watchVisibility(dwell)
 /** The intended viewport and the parent's post-layout scale verdict, over its private channel. */
-let geometry: { width: number; height: number; visible: boolean } | null = null
+let geometry: { width: number; height: number; dpr: number; visible: boolean } | null = null
 let pressedScale = false
 
 // A page's ResizeObserver on a deeper element can change the host after
@@ -70,12 +70,15 @@ let pressedScale = false
 // document is outside that loop. Its physical/CSS ratio changes as Chromium
 // syncs the restored layout and the scaled paint, even when IO v2 stays true.
 let paintedScale = 0
+let paintedPixels = 0
 let scaleChangedAt = -Infinity
 const readScale: ResizeObserverCallback = (entries) => {
+  // Each observer watches only documentElement, so its batch has at most this one entry.
   const e = entries[0]
   const css = e?.contentBoxSize[0]?.inlineSize
   const pixels = e?.devicePixelContentBoxSize[0]?.inlineSize
   if (!css || !pixels) return
+  paintedPixels = pixels
   const scale = pixels / css
   // One physical pixel of rounding isn't a change in rendered scale.
   if (paintedScale && Math.abs(scale - paintedScale) > 1 / css) {
@@ -93,8 +96,13 @@ for (const box of ["content-box", "device-pixel-content-box"] as const)
 function scaleMatches(): boolean {
   // innerWidth/Height round to integral CSS px. Never replace the parent's
   // painted verdict with click-time layout, which a page can have restored.
+  // The absolute physical width also refuses a steady scaled paint: it
+  // doesn't depend on the child seeing the restored/scaled alternation.
+  // Two device pixels allow for the measured physical box snapping to pixels.
   // Keep a scale change a "covered" refusal, not an invitation to pick again.
-  return !!geometry?.visible && paintedScale > 0 && performance.now() - scaleChangedAt >= dwell.ms && Math.abs(innerWidth - geometry.width) <= 2 && Math.abs(innerHeight - geometry.height) <= 2
+  return !!geometry?.visible && paintedScale > 0 && performance.now() - scaleChangedAt >= dwell.ms &&
+    Math.abs(innerWidth - geometry.width) <= 2 && Math.abs(innerHeight - geometry.height) <= 2 &&
+    Math.abs(paintedPixels - geometry.width * geometry.dpr) <= 2
 }
 
 async function confirmScale(at: number): Promise<boolean> {

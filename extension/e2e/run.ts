@@ -865,7 +865,7 @@ const server = Bun.serve({
         if (url.searchParams.get("static") === "dialog") return html("Sign in to Acme", `<style>html{zoom:1.25}dialog{zoom:0.6;border:0;padding:24px;width:360px}</style><dialog id="d">${loginForm("/home")}</dialog><script>document.getElementById("d").showModal()</script>`)
         const late = url.searchParams.get("late")
         const zoom = url.searchParams.get("zoom") === "1.5" ? 1.5 : 0.5
-        const style = url.searchParams.has("static") ? `<style>html{zoom:${url.searchParams.get("static") === "small" ? "0.8" : "1.25"}}</style>` : ""
+        const style = url.searchParams.has("fractional") ? "<style>main{max-width:313.5px}</style>" : url.searchParams.has("static") ? `<style>html{zoom:${url.searchParams.get("static") === "small" ? "0.8" : "1.25"}}</style>` : ""
         return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" ? "html" : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
       }
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
@@ -1135,7 +1135,9 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     viewport: { width: 900, height: 640 },
     deviceScaleFactor: options.scale ?? 2,
     // *.acme.test is one site on this machine: two origins of it for the sign-in session runs; *.apple.test for Apple's sign-in frame.
-    args: [`--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1", ...(options.secure ? [`--unsafely-treat-insecure-origin-as-secure=${options.secure.join(",")}`] : [])],
+    // CDP DPR emulation alone does not change ResizeObserver device pixels
+    // or an extension OOPIF's DPR. Scale the renderer too, as a real display does.
+    args: [`--force-device-scale-factor=${options.scale ?? 2}`, `--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1", ...(options.secure ? [`--unsafely-treat-insecure-origin-as-secure=${options.secure.join(",")}`] : [])],
     ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
@@ -2572,20 +2574,22 @@ async function coveredMenu() {
 }
 
 /** The scale painted after our positioning, not only the restored layout at a pick, must be safe. */
-async function menuScale() {
-  const run = await launch({ scale: 1 })
+async function menuScale(scale = 1) {
+  const run = await launch({ scale })
   const page = await run.context.newPage()
   try {
-    for (const query of ["", "?static", "?static=small", "?static=dialog"]) {
+    for (const query of scale > 1.5 ? ["?fractional"] : ["", "?static", "?static=small", "?static=dialog", "?fractional"]) {
       await page.goto(`${site}/menu-scale${query}`)
       const menu = await menuOn(page)
       if (!menu) continue
       const row = await menu.locator("button.row").first().boundingBox()
-      check(!!row && Math.abs(row.height - 46) < 2, `on ${query || "normal"}, the menu keeps its own row height`)
+      check(Math.abs(await menu.evaluate(() => devicePixelRatio) - scale) < 0.001, `the menu runs at real DPR ${scale}`)
+      check(!!row && Math.abs(row.height - 46) < 2, `on ${query || "normal"} at DPR ${scale}, the menu keeps its own row height`)
       await menu.locator("button.row").first().click()
       const filled = await until("the normal/zoomed page fills", async () => (await page.inputValue("#password")) === "correct horse", 4000)
-      check(!!filled, `normal/static zoom ${query || "none"} still fills (${filled ? "" : await footText(menu)})`)
+      check(!!filled, `normal/static zoom ${query || "none"} at DPR ${scale} still fills (${filled ? "" : await footText(menu)})`)
     }
+    if (scale !== 1) return
     // The downscale also exercises IO v2's incidental OOPIF intersection
     // flapping. The upscale is essential: IO stays visible and the old
     // guard actually fills, so this isn't just testing an existing refusal.
@@ -4777,7 +4781,9 @@ const once: Record<string, () => Promise<void>> = {
   securityPage,
   keyboardEntry,
   coveredMenu,
-  menuScale,
+  menuScale: async () => {
+    for (const scale of [1, 1.25, 1.5, 2.5, 3]) await menuScale(scale)
+  },
   topLayer,
   viewportResize,
   menuReveal,
@@ -4808,7 +4814,7 @@ const cost: Record<string, number> = {
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
-  menuReveal: 4, menuScale: 65,
+  menuReveal: 4, menuScale: 100,
   pageZoom: 5,
   pageDismiss: 5,
   escInDialog: 4,
