@@ -41,7 +41,7 @@ export function showRing(target: Element, label: string) {
   const pill = document.createElement("div")
   const radius = Math.max(10, (parseFloat(getComputedStyle(target).borderTopLeftRadius) || 0) + 4)
   ring.style.cssText = `position:fixed;box-sizing:border-box;border:2px solid ${BRAND};border-radius:${radius}px;box-shadow:0 0 0 4px rgb(240 46 41 / ${dark ? 30 : 18}%);pointer-events:none;`
-  pill.style.cssText = `position:fixed;display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 8px;border-radius:12px;font:500 12px/16px -apple-system,BlinkMacSystemFont,"Geist",system-ui,sans-serif;white-space:nowrap;pointer-events:none;${dark ? "background:#161616;color:#fafafa;box-shadow:0 0 0 0.5px rgb(255 255 255 / 14%),0 4px 12px rgb(0 0 0 / 50%);" : "background:#fff;color:#161616;box-shadow:0 0 0 0.5px rgb(0 0 0 / 12%),0 4px 12px rgb(0 0 0 / 12%);"}`
+  pill.style.cssText = `position:fixed;display:flex;align-items:center;gap:6px;height:24px;padding:0 10px 0 8px;border-radius:12px;font:500 12px/16px "Inter",-apple-system,BlinkMacSystemFont,system-ui,sans-serif;white-space:nowrap;pointer-events:none;${dark ? "background:#161616;color:#fafafa;box-shadow:0 0 0 0.5px rgb(255 255 255 / 14%),0 4px 12px rgb(0 0 0 / 50%);" : "background:#fff;color:#161616;box-shadow:0 0 0 0.5px rgb(0 0 0 / 12%),0 4px 12px rgb(0 0 0 / 12%);"}`
   pill.innerHTML = KEYHOLE
   pill.append(document.createTextNode(label))
   root.append(ring, pill)
