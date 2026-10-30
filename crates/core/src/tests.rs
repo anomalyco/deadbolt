@@ -1853,3 +1853,123 @@ fn an_items_files_are_capped_together_when_written() {
         assert!(crate::item::files_size(fields.values()) > MAX_FILE);
     }
 }
+
+#[test]
+fn membership_entry_limit_bounds_commit_and_apply() {
+    let mut a = Dev::create();
+    let mut b = a.invite();
+    let mut last = a.vault.entries().into_iter().last().unwrap().clone();
+    for _ in 2..MAX_MEMBERSHIP_ENTRIES {
+        last = a.vault.rename(&a.secret, "flood").unwrap();
+    }
+    let heads = a.vault.heads();
+    let error = Error::MembershipLimit {
+        max: MAX_MEMBERSHIP_ENTRIES,
+    };
+    let consent = b.secret.join_consent(&a.vault.id(), &a.id());
+    for op in [
+        MembershipOp::Rename {
+            name: "overflow".into(),
+        },
+        MembershipOp::Add {
+            device: b.id(),
+            consent,
+        },
+        MembershipOp::Remove {
+            device: b.id(),
+            last_seen_seq: None,
+        },
+    ] {
+        let payload = Payload::Membership(op);
+        let overflow = Entry::sign(
+            &a.secret,
+            a.vault.id(),
+            MAX_MEMBERSHIP_ENTRIES,
+            [last.hash()],
+            payload.clone(),
+        );
+        assert_eq!(a.vault.apply(overflow), Err(error.clone()));
+        assert_eq!(a.vault.commit(&a.secret, payload), Err(error.clone()));
+    }
+    // Replays at the boundary are still idempotent and rejections change no heads.
+    assert_eq!(a.vault.apply(last), Ok(false));
+    assert_eq!(a.vault.heads(), heads);
+    assert!(a.vault.is_member(&b.id()));
+    a.login("data still works");
+    for _ in 0..MAX_MEMBERSHIP_ENTRIES {
+        a.write(vec![]);
+    }
+    assert_eq!(
+        a.vault.heads().get(&LogId {
+            author: a.id(),
+            log: Log::Data
+        }),
+        Some(MAX_MEMBERSHIP_ENTRIES)
+    );
+    b.vault.rename(&b.secret, "independent").unwrap();
+    sync_both(&mut a, &mut b);
+    assert_eq!(a.vault.heads(), b.vault.heads());
+    let loaded = Vault::load(a.vault.entries().into_iter().cloned()).unwrap();
+    assert_eq!(loaded.heads(), a.vault.heads());
+    // The same key has a separate budget in another vault.
+    let (mut other, _) = Vault::create(&a.secret, "other").unwrap();
+    other.rename(&a.secret, "allowed").unwrap();
+}
+
+#[test]
+fn membership_entry_limit_is_independent_of_arrival_order_and_forks() {
+    let mut a = Dev::create();
+    let mut b = a.invite();
+    for _ in 2..MAX_MEMBERSHIP_ENTRIES - 1 {
+        a.vault.rename(&a.secret, "flood").unwrap();
+    }
+    let mut fork = a.vault.clone();
+    let left = a.vault.rename(&a.secret, "left").unwrap();
+    let right = fork.rename(&a.secret, "right").unwrap();
+    // A fork never gets an extra slot. Existing first-seen fork rejection is
+    // unchanged; the cap does not pretend to reconcile equivocated histories.
+    assert_eq!(
+        a.vault.apply(right.clone()),
+        Err(Error::Fork {
+            seq: MAX_MEMBERSHIP_ENTRIES - 1
+        })
+    );
+    assert_eq!(
+        fork.apply(left.clone()),
+        Err(Error::Fork {
+            seq: MAX_MEMBERSHIP_ENTRIES - 1
+        })
+    );
+    for parent in [left.hash(), right.hash()] {
+        let overflow = Entry::sign(
+            &a.secret,
+            a.vault.id(),
+            MAX_MEMBERSHIP_ENTRIES,
+            [parent],
+            Payload::Membership(MembershipOp::Rename {
+                name: "overflow".into(),
+            }),
+        );
+        for vault in [&mut a.vault, &mut fork, &mut b.vault] {
+            assert_eq!(
+                vault.apply(overflow.clone()),
+                Err(Error::MembershipLimit {
+                    max: MAX_MEMBERSHIP_ENTRIES
+                })
+            );
+        }
+    }
+    let concurrent = b.vault.rename(&b.secret, "independent").unwrap();
+    let mut before = b.vault.clone();
+    let mut after = a.vault.clone();
+    for entry in a.vault.entries() {
+        before.apply(entry.clone()).unwrap();
+    }
+    after.apply(concurrent).unwrap();
+    assert_eq!(before.heads(), after.heads());
+    assert_eq!(before.name(), after.name());
+    assert_eq!(
+        before.members().collect::<Vec<_>>(),
+        after.members().collect::<Vec<_>>()
+    );
+}

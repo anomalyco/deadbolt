@@ -20,6 +20,12 @@ pub const CREATE_BATCH_BYTES: usize = 1024 * 1024;
 /// sent to another device.
 pub const MAX_ENTRY_LEN: usize = 16 * 1024 * 1024 - 1;
 
+/// Maximum membership entries per author per vault, including the creator's
+/// genesis. Membership is re-resolved on every insert; bounding each author's
+/// contiguous log limits the history a single member can make us resolve.
+/// Data entries have a separate sequence and do not consume this budget.
+pub const MAX_MEMBERSHIP_ENTRIES: u64 = 1000;
+
 const _: () = assert!(CREATE_BATCH_BYTES * 8 < MAX_ENTRY_LEN);
 
 /// Per log, the highest seq in an entry's causal past (inclusive).
@@ -251,6 +257,14 @@ impl Vault {
         if self.nodes.contains_key(&entry.hash()) {
             return Ok(false);
         }
+        // Sequence numbers are contiguous and every entry must depend on its
+        // predecessor below. Unlike an arrival counter, this bound is intrinsic
+        // to the signed chain, even for concurrent authors or rejected forks.
+        if entry.log() == Log::Membership && entry.seq() >= MAX_MEMBERSHIP_ENTRIES {
+            return Err(Error::MembershipLimit {
+                max: MAX_MEMBERSHIP_ENTRIES,
+            });
+        }
         let log_id = entry.log_id();
         let next = self.next_seq(log_id);
         if entry.seq() > next {
@@ -338,6 +352,11 @@ impl Vault {
             author,
             log: payload.log(),
         };
+        if log_id.log == Log::Membership && self.next_seq(log_id) >= MAX_MEMBERSHIP_ENTRIES {
+            return Err(Error::MembershipLimit {
+                max: MAX_MEMBERSHIP_ENTRIES,
+            });
+        }
         if let Payload::Data(ops) = &payload {
             for op in ops {
                 data::check(&self.items, op)?;

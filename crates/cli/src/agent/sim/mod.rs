@@ -8,7 +8,8 @@ use super::{
 };
 use anyhow::{Context, Result, ensure};
 use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, Hash, Log, MembershipOp, Payload, Vault, VaultId,
+    DeviceId, DeviceSecret, Entry, Hash, Log, LogId, MAX_MEMBERSHIP_ENTRIES, MembershipOp, Payload,
+    Vault, VaultId,
 };
 use deadbolt_net::{
     Blob, HandlerError, Inviter, Joiner, MembershipGate, PairingCode, PairingContext,
@@ -266,6 +267,8 @@ enum Action {
     Startup(usize),
     WriteFailure(usize),
     RevokeDuringSync(usize, u64, usize),
+    /// Raw signed membership entries, including a suffix beyond the author cap.
+    MembershipFlood(usize, usize),
 }
 
 struct World {
@@ -494,6 +497,95 @@ impl World {
         })
     }
 
+    fn membership_flood(&mut self, author: usize, receiver: usize) -> Result<()> {
+        if author == receiver || !self.can_write(author) || !self.can_write(receiver) {
+            return Ok(());
+        }
+        let author_id = DeviceId::from_bytes(self.devices[author].id);
+        let log = LogId {
+            author: author_id,
+            log: Log::Membership,
+        };
+        let (vault, consent) = self.devices[receiver].with(|s| {
+            Ok((
+                s.vault(&self.vault).clone(),
+                s.secret.join_consent(&self.vault, &author_id),
+            ))
+        })?;
+        if !vault.is_member(&author_id) {
+            return Ok(());
+        }
+        // Reusing an admission consent is valid: the cap must bound even these
+        // redundant Adds, not just membership operations that change the set.
+        // Start at the receiver's frontier, so a repeated flood probes the
+        // exhausted budget rather than accidentally replaying an earlier batch.
+        let entries = self.devices[author].with(|s| {
+            let start = vault.heads().get(&log).map_or(0, |seq| seq + 1);
+            let mut deps: Vec<_> = vault
+                .entries()
+                .into_iter()
+                .filter(|e| e.log() == Log::Membership)
+                .map(Entry::hash)
+                .collect();
+            let mut entries = Vec::new();
+            for seq in start..MAX_MEMBERSHIP_ENTRIES * 2 {
+                let entry = Entry::sign(
+                    &s.secret,
+                    self.vault,
+                    seq,
+                    deps,
+                    Payload::Membership(MembershipOp::Add {
+                        device: DeviceId::from_bytes(self.devices[receiver].id),
+                        consent,
+                    }),
+                );
+                deps = vec![entry.hash()];
+                entries.push(entry);
+            }
+            Ok(entries)
+        })?;
+        let mut slowest = std::time::Duration::ZERO;
+        for batch in entries.chunks(64) {
+            let blobs: Vec<_> = batch.iter().map(Entry::encode).collect();
+            for blob in &blobs {
+                self.digest.update(blob);
+            }
+            self.devices[receiver].with(|s| {
+                let start = std::time::Instant::now();
+                let added = sync::receive(s, &author_id, blobs, true)?;
+                let elapsed = start.elapsed();
+                slowest = slowest.max(elapsed);
+                // A generous regression watchdog, not a simulated deadline:
+                // wall time never affects entry generation or delivery order.
+                ensure!(
+                    elapsed < std::time::Duration::from_secs(5),
+                    "membership flood batch took {elapsed:?}"
+                );
+                let expected = batch
+                    .iter()
+                    .filter(|entry| entry.seq() < MAX_MEMBERSHIP_ENTRIES)
+                    .count();
+                ensure!(
+                    added == expected,
+                    "membership flood accepted {added}, expected {expected}"
+                );
+                let last = batch.last().unwrap().seq().min(MAX_MEMBERSHIP_ENTRIES - 1);
+                ensure!(
+                    s.vault(&self.vault).heads().get(&log) == Some(last),
+                    "membership cap head mismatch"
+                );
+                Ok(())
+            })?;
+        }
+        if std::env::var_os("DEADBOLT_SIM_TIMING").is_some() {
+            eprintln!(
+                "membership flood: {} entries, slowest 64-entry batch {slowest:?}",
+                entries.len()
+            );
+        }
+        Ok(())
+    }
+
     fn startup(&mut self, i: usize) -> Result<()> {
         if !self.devices[i].open() || self.devices[i].ready.load(Ordering::SeqCst) {
             return Ok(());
@@ -517,6 +609,7 @@ impl World {
     fn step(&mut self, action: &Action) -> Result<()> {
         match *action {
             Action::Pair(i) => self.pair(i)?,
+            Action::MembershipFlood(a, b) => self.membership_flood(a, b)?,
             Action::Partition(a, b) => {
                 self.blocked.insert((a.min(b), a.max(b)));
             }
@@ -646,6 +739,11 @@ impl World {
             if d.open() {
                 d.with(|s| {
                     for v in s.vaults.values() {
+                        ensure!(
+                            v.heads().iter().all(|(log, seq)| log.log != Log::Membership
+                                || seq < MAX_MEMBERSHIP_ENTRIES),
+                            "membership author exceeded entry cap"
+                        );
                         for e in v.entries() {
                             all.insert(e.hash(), e.clone());
                         }
@@ -867,6 +965,21 @@ fn shrink(mut actions: Vec<Action>, mut fails: impl FnMut(&[Action]) -> bool) ->
         width /= 2;
     }
     actions
+}
+
+#[test]
+fn membership_flood_is_bounded_durable_and_replayable() {
+    for (author, receiver) in [(0, 1), (1, 0)] {
+        let actions = [
+            Action::Pair(1),
+            Action::MembershipFlood(author, receiver),
+            Action::Crash(receiver),
+            Action::MembershipFlood(author, receiver),
+            Action::Startup(receiver),
+            Action::Add(receiver, 42),
+        ];
+        assert_eq!(replay(&actions).unwrap(), replay(&actions).unwrap());
+    }
 }
 
 #[test]
