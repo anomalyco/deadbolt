@@ -39,12 +39,14 @@ pub const DEFAULT_MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
 /// Default for how many inbound sync connections one peer may hold open at once.
 pub const DEFAULT_MAX_INBOUND_PER_PEER: usize = 2;
 
-/// Default for how many inbound connections, from handshake to the end of their sync
-/// sessions, the node serves at once from everyone together.
+/// Default for how many authenticated inbound sync connections the node serves at once.
 pub const DEFAULT_MAX_INBOUND: usize = 32;
 
 /// How long an inbound connection may take to finish its handshake (and the gate).
-const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Separate from authenticated sync slots: an unidentified peer cannot consume those.
+const MAX_INBOUND_HANDSHAKES: usize = 256;
 
 /// Which relay servers the node uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,13 +76,14 @@ pub struct NodeConfig {
     pub portmapper: bool,
     /// Maximum size of a single frame accepted from a peer.
     pub max_frame_len: usize,
-    /// How long a sync session a peer opened may take before its connection is closed.
+    /// How long an inbound sync connection may wait for a stream, and how long each
+    /// session may take, before the connection is closed. Each gets its own deadline.
     pub inbound_sync_timeout: Duration,
     /// How many inbound sync connections one peer may hold at once; more are closed as
     /// busy. Connections this node dialed don't count.
     pub max_inbound_per_peer: usize,
-    /// How many inbound connections (handshaking, or serving sync) the node takes at once
-    /// from everyone; more are refused before their handshake.
+    /// How many authenticated inbound sync connections the node serves at once; more
+    /// are closed as busy after membership admission. Handshakes have a separate cap.
     pub max_inbound: usize,
     /// Where a new device publishes its pairing record.
     pub rendezvous: Rendezvous,
@@ -334,7 +337,7 @@ impl Node {
                 // handshake); report that precisely.
                 self.inner.gate.check_dial(&peer.id)?;
                 if refused(&err) {
-                    // The peer is at its inbound limit: it is there, just busy.
+                    // The peer or its QUIC stack refused admission: retry, not unreachable.
                     return Err(Error::Rejected(BUSY_REASON.into()));
                 }
                 return Err(Error::Connect(err.to_string()));
@@ -378,7 +381,8 @@ impl Node {
 const BUSY_REASON: &str = "too many connections";
 
 /// Whether the peer refused the connection before its handshake (QUIC
-/// `CONNECTION_REFUSED`), which deadbolt peers do only at their inbound limit.
+/// `CONNECTION_REFUSED`). Either our handshake cap or the transport itself can
+/// cause this; it does not prove which limit the peer reached.
 fn refused(err: &ConnectError) -> bool {
     let source = match err {
         ConnectError::Connecting {
@@ -414,9 +418,10 @@ async fn accept_loop(
         per_peer,
         total,
     } = limits;
-    // One permit per inbound connection, held from before its handshake until it has
-    // been served, so neither handshakes nor sessions pile up without bound.
-    let permits = Arc::new(Semaphore::new(total));
+    // Reserve sync capacity for authenticated members, independently of unfinished
+    // handshakes. Pairing has its own bounds after handoff.
+    let handshakes = Arc::new(Semaphore::new(MAX_INBOUND_HANDSHAKES));
+    let syncs = Arc::new(Semaphore::new(total));
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -432,15 +437,15 @@ async fn accept_loop(
                     }
                     continue;
                 }
-                let Ok(permit) = permits.clone().try_acquire_owned() else {
-                    debug!("refusing inbound connection: {total} already open");
+                let Ok(handshake) = handshakes.clone().try_acquire_owned() else {
+                    debug!("refusing inbound connection: handshake limit reached");
                     incoming.refuse();
                     continue;
                 };
                 let gate = gate.clone();
                 let handler = handler.clone();
+                let syncs = syncs.clone();
                 tasks.spawn(async move {
-                    let _permit = permit;
                     // The gate hook runs inside this await; a rejected peer never gets here.
                     let conn = match n0_future::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
                         Ok(Ok(conn)) => conn,
@@ -453,8 +458,13 @@ async fn accept_loop(
                             return;
                         }
                     };
+                    drop(handshake);
                     match conn.alpn() {
                         SYNC_ALPN => {
+                            let Ok(_permit) = syncs.try_acquire_owned() else {
+                                conn.close(close::BUSY, BUSY_REASON.as_bytes());
+                                return;
+                            };
                             let peer = *conn.remote_id().as_bytes();
                             let Some(_slot) = gate.claim_inbound(peer, per_peer) else {
                                 debug!(peer = %fmt_id(&peer), "refusing sync connection: too many open");
@@ -841,6 +851,30 @@ pub(crate) mod tests {
             Error::MembershipRejected(r) if r == "not a member"
         ));
         assert!(a.connected_peers().is_empty());
+    }
+
+    /// QUIC itself can refuse a handshake, independently of our established sync
+    /// cap. Keep the typed mapping that makes startup retry rather than skip it.
+    #[tokio::test]
+    async fn transport_refusal_is_reported_as_busy() {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![SYNC_ALPN.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let client = node(|_: &PeerId| true).await;
+        let addr = PeerAddr::from_endpoint_addr(&server.addr());
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(client.connect(addr), async {
+                server.accept().await.unwrap().refuse();
+            })
+        })
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(Error::Rejected(r)) if r == BUSY_REASON));
+        server.close().await;
+        client.shutdown().await;
     }
 
     #[tokio::test]

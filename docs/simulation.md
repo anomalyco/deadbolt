@@ -111,10 +111,10 @@ invitations. Membership entries flow while the barrier is closed.
 A startup round completes when each current member either completed its exchange
 or was unreachable during the dial. A remote membership-gate refusal also completes
 contact. Dial errors and dial timeouts are unreachable, except a peer refusing the
-dial at its inbound connection limit (QUIC `CONNECTION_REFUSED` before TLS, reported
-as `Rejected`), which interrupts the round. Other errors or timeouts after
-connecting, including the per-member `BUSY` close, interrupt the round and require
-a retry. Members learned during
+dial at its handshake admission or transport limit (QUIC `CONNECTION_REFUSED`
+before TLS, reported as `Rejected`), which interrupts the round. Other errors or
+timeouts after connecting, including a global or per-member established-sync
+`BUSY` close, interrupt the round and require a retry. Members learned during
 a round must also be attempted. Retries
 wait one second and share a total 30-second budget (`2 * SYNC_TIMEOUT`), including
 time spent connecting and exchanging entries. A device with no peers is ready
@@ -129,3 +129,15 @@ proof that membership is current. Removals learned before the deadline are
 applied and enforced before data resumes. Paused-time unit tests cover dial versus
 exchange failures, retries and the total deadline; simulations cover offline
 writes and a fast removed peer answering before an honest peer's removal.
+
+The real transport, not the stream simulator, separately bounds 256 handshakes
+(5 seconds each) and 32 authenticated inbound sync connections (two per member).
+Address validation via QUIC Retry precedes the handshake budget; only a completed,
+membership-admitted handshake may claim a sync slot. Pairing transfers to its own
+bounds. Idle waits for the first or next stream expire after 60 seconds by default,
+independently of the session timeout, closing the connection and releasing its
+slots. Real-connection net tests stall TLS after Retry, verify member sync still
+works, and exercise idle closure followed by a new successful sync. CLI and browser
+background rounds dial fresh connections; callers reusing `SyncConnection` must
+redial after closure. The caps do not guarantee availability under handshake or
+network saturation, nor prevent a member from continually reconnecting.
