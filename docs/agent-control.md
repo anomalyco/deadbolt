@@ -6,6 +6,26 @@ commands (`deadbolt run`, `inject`, `read`, with standing grants for AIs;
 both below) are. How AI agents (OpenCode sessions and the like) may use
 Deadbolt, carefully. Questions for Kit are at the end.
 
+**What is enforced today** (until `policy::decide`, build order 3; #111).
+The socket admits only this user. Beyond that, a caller that looks like an
+AI (an AI host among its parents, or a claimed `OPENCODE_SESSION_ID`; a
+hint, so it only ever refuses):
+
+- sees a value (`item-get`, so `get` and `show`, and `item-code`) only with
+  Touch ID raised by the agent each time, as `deadbolt read`; without Touch
+  ID it is `forbidden` (exit 4);
+- is refused the Never tier outright: `setup`, `unlock`,
+  `unlock-biometric`, `touch-id-set`, `vault-create`, `vault-rename`,
+  `vault-default`, `device-remove`, `join`, `pair`, `item-remove`, `import`
+  and `sync-one-password`;
+- gets values from `resolve` and agent sign-ins only as their sections
+  below say.
+
+Not yet: everyone else, Kit's terminal and an AI that started a terminal
+outside its own tree included, gets everything while unlocked. Site
+commands (`site-fill` and the rest) are open to any process that runs
+`deadbolt browser-host`, until browser pairing.
+
 Words: **the agent** is Deadbolt's background agent (`deadbolt agent`), as
 everywhere else in these docs. **An AI** is an AI agent calling Deadbolt.
 **A caller** is any process on the control socket that isn't Deadbolt.app or

@@ -622,7 +622,7 @@ impl Agent {
                     Command::Resolve { refs, purpose } => {
                         self.resolve(&caller, &refs, purpose, conv).await
                     }
-                    command => self.clone().dispatch(command, conv).await,
+                    command => self.clone().dispatch(&caller, command, conv).await,
                 },
             };
         if let Ok(Reply::Status(status)) = &mut result {
