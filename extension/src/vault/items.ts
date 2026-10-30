@@ -213,6 +213,7 @@ export function itemDetailView(app: App, ref: string): View {
 
   const line = (f: ItemField): Node[] => {
     const label = fieldLabel(f.name)
+    const card = detail?.kind === "card"
     const wrap = (value: Node, ...actions: Node[]) => h("div", { class: "line" }, h("span", { class: "line-label" }, label), h("span", { class: `value${f.type === "note" ? " lines" : ""}` }, value), h("span", { class: "line-actions" }, ...actions))
     const out: Node[] = []
     if (f.type === "file") {
@@ -222,11 +223,14 @@ export function itemDetailView(app: App, ref: string): View {
       const eye = iconButton(glyph(value !== undefined ? "eyeOff" : "eye"), value !== undefined ? `Hide ${label}` : `Show ${label}`, () => void act(f.name, "show"))
       const copy = iconButton(icon("copy"), `Copy ${label}`, (b) => void act(f.name, "copy", undefined, b))
       copy.dataset.copy = f.name
-      out.push(wrap(value !== undefined ? h("span", { class: "mono secret" }, value) : h("span", { class: "dots" }, "••••••••••••"), eye, copy))
+      // A card number reads in fours, as it's printed; Copy still gives the digits alone.
+      const read = value !== undefined && card && f.name === "number" ? cardNumber(value) : value
+      out.push(wrap(read !== undefined ? h("span", { class: "mono secret" }, read) : h("span", { class: "dots" }, "••••••••••••"), eye, copy))
     } else if (f.type === "otp") {
       return out
     } else {
-      const value = f.value ?? ""
+      // A card's expiry as cards and checkouts write it (MM/YY), as its summary says it.
+      const value = card && f.name === "expiry" ? cardExpiry(f.value ?? "") : (f.value ?? "")
       const actions: Node[] = [iconButton(icon("copy"), `Copy ${label}`, (b) => void copied(b, value, say, `Copied the ${label.toLowerCase()}`))]
       if (f.type === "url" && /^https?:\/\//.test(value)) actions.push(iconButton(glyph("open"), "Open", () => void chrome.tabs.create({ url: value })))
       out.push(wrap(h("span", {}, value), ...actions))
@@ -425,4 +429,13 @@ export function itemEditView(app: App, kind: string, ref?: string): View {
     app.go({ name: "item", ref: typeof r.reply.ref === "string" ? r.reply.ref : (ref ?? "") }, ref ? -1 : 1)
   })
   return { el: form, focus: () => name.focus(), leave: () => rows.forEach((r) => (r.el.value = "")) }
+}
+
+/** A card number in groups of four: "4242 4242 4242 4242". */
+export const cardNumber = (digits: string) => digits.replace(/\s+/g, "").replace(/(.{4})(?=.)/g, "$1 ")
+
+/** A stored "2028-08" expiry as "08/28"; anything else as it is. */
+export function cardExpiry(value: string): string {
+  const m = /^(\d{4})-(\d{2})$/.exec(value.trim())
+  return m ? `${m[2]}/${m[1].slice(2)}` : value
 }
