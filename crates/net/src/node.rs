@@ -10,8 +10,8 @@ use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey,
     address_lookup::{PkarrPublisher, PkarrResolver},
     endpoint::{
-        AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, Side,
-        WeakConnectionHandle, presets,
+        AfterHandshakeOutcome, BeforeConnectOutcome, ConnectError, ConnectingError, Connection,
+        ConnectionError, EndpointHooks, Side, TransportErrorCode, WeakConnectionHandle, presets,
     },
 };
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
@@ -333,6 +333,10 @@ impl Node {
                 // The gate may have changed while connecting (checked again after the
                 // handshake); report that precisely.
                 self.inner.gate.check_dial(&peer.id)?;
+                if refused(&err) {
+                    // The peer is at its inbound limit: it is there, just busy.
+                    return Err(Error::Rejected(BUSY_REASON.into()));
+                }
                 return Err(Error::Connect(err.to_string()));
             }
         };
@@ -370,6 +374,27 @@ impl Node {
     }
 }
 
+/// Why a sync connection over a peer's inbound limits was turned away.
+const BUSY_REASON: &str = "too many connections";
+
+/// Whether the peer refused the connection before its handshake (QUIC
+/// `CONNECTION_REFUSED`), which deadbolt peers do only at their inbound limit.
+fn refused(err: &ConnectError) -> bool {
+    let source = match err {
+        ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        }
+        | ConnectError::Connection { source, .. } => source,
+        _ => return false,
+    };
+    matches!(
+        source,
+        ConnectionError::ConnectionClosed(close)
+            if close.error_code == TransportErrorCode::CONNECTION_REFUSED
+    )
+}
+
 struct Limits {
     max_frame_len: usize,
     session_timeout: Duration,
@@ -397,6 +422,16 @@ async fn accept_loop(
         tokio::select! {
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
+                // Make the sender prove it receives at its source address (QUIC Retry)
+                // before it can hold a permit, so spoofed Initials can't fill them.
+                // Over a relay the relay already vouches for the sender; there it only
+                // costs a round trip.
+                if !incoming.remote_addr_validated() {
+                    if let Err(err) = incoming.retry() {
+                        err.into_incoming().refuse();
+                    }
+                    continue;
+                }
                 let Ok(permit) = permits.clone().try_acquire_owned() else {
                     debug!("refusing inbound connection: {total} already open");
                     incoming.refuse();
@@ -423,7 +458,7 @@ async fn accept_loop(
                             let peer = *conn.remote_id().as_bytes();
                             let Some(_slot) = gate.claim_inbound(peer, per_peer) else {
                                 debug!(peer = %fmt_id(&peer), "refusing sync connection: too many open");
-                                conn.close(close::BUSY, b"too many connections");
+                                conn.close(close::BUSY, BUSY_REASON.as_bytes());
                                 return;
                             };
                             serve_sync(conn, handler, max_frame_len, session_timeout).await;

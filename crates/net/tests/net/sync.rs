@@ -365,8 +365,12 @@ async fn inbound_connections_in_total_are_bounded() {
         held.push(conn);
     }
 
+    // Refused before its handshake, yet reported as busy, not as unreachable.
     let result = within(c.node.connect(b.node.addr())).await;
-    assert!(matches!(&result, Err(Error::Connect(_))), "{result:?}");
+    assert!(
+        matches!(&result, Err(Error::Rejected(r)) if r == "too many connections"),
+        "{result:?}"
+    );
 
     held.remove(0).close();
     sync_once_released(&c, &b).await;

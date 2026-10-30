@@ -110,8 +110,11 @@ invitations. Membership entries flow while the barrier is closed.
 
 A startup round completes when each current member either completed its exchange
 or was unreachable during the dial. A remote membership-gate refusal also completes
-contact. Dial errors and dial timeouts are unreachable; other errors or timeouts
-after connecting interrupt the round and require a retry. Members learned during
+contact. Dial errors and dial timeouts are unreachable, except a peer refusing the
+dial at its inbound connection limit (QUIC `CONNECTION_REFUSED` before TLS, reported
+as `Rejected`), which interrupts the round. Other errors or timeouts after
+connecting, including the per-member `BUSY` close, interrupt the round and require
+a retry. Members learned during
 a round must also be attempted. Retries
 wait one second and share a total 30-second budget (`2 * SYNC_TIMEOUT`), including
 time spent connecting and exchanging entries. A device with no peers is ready
