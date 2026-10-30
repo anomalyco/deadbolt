@@ -168,7 +168,7 @@ Include upstream license files and commit/date stamps in `crates/core/data/healt
 
 ### Protocol and caller policy
 
-Put health wire types in `crates/client/src/protocol/health.rs` (keeping `protocol.rs` below its 1,500-line ceiling, protocol v21):
+Put health wire types in `crates/client/src/protocol/health.rs` (since protocol v22):
 
 - `Command::Health { vault: Option<String>, online: bool }` -> `Reply::Health { report: HealthReport }`.
 - `Command::HealthIgnore { vault: Option<String>, query: Vec<String>, kind: FindingKind, ignored: bool }` -> `Reply::Health { report: HealthReport }`.
