@@ -139,6 +139,14 @@ const HIDDEN: Record<string, string> = {
   "ring-room": hiddenForm(`<div style="clip-path:inset(-8px round 6px)">${passwordField}</div>`),
   // Not hidden: a field positioned past a 0 px tall scrolling box, which doesn't hold it (Intercom's sign-in).
   "escaped-row": hiddenForm(`<div style="position:relative;height:40px"><div style="height:0;overflow:auto">${passwordField.replace("<input", '<input style="position:absolute;top:0;left:0;width:300px;height:38px"')}</div></div>`),
+  // Each of the next three shows an 18 px band across the middle of the 38 px
+  // field: its centre shows, so the hit test alone passes, but under half of it does.
+  // Hidden: an inset(0) clip-path on a wrapper the field overflows.
+  "inset-sliver": hiddenForm(`<div style="clip-path:inset(0);height:18px">${passwordField.replace("<input", '<input style="margin-top:-10px"')}</div>`),
+  // Hidden: a scrolling box that holds the field by an individual translate (Tailwind v4 writes them).
+  "held-by-translate": hiddenForm(`<div style="position:relative;height:40px"><div style="translate:0 0;height:18px;overflow:hidden">${passwordField.replace("<input", '<input style="position:absolute;top:-10px;left:0;width:300px;height:38px"')}</div></div>`),
+  // Hidden: paint containment clips like overflow.
+  "contain-paint-sliver": hiddenForm(`<div style="contain:paint;height:18px">${passwordField.replace("<input", '<input style="margin-top:-10px"')}</div>`),
   // Hidden: the same, but the 0 px box holds it.
   "zero-height-held": hiddenForm(`<div style="position:relative;height:40px"><div style="position:relative;height:0;overflow:auto">${passwordField.replace("<input", '<input style="position:absolute;top:0;left:0;width:300px;height:38px"')}</div></div>`),
   "zero-height": hiddenForm(`<div style="height:0;overflow:hidden">${passwordField}</div>`),

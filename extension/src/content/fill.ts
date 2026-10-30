@@ -117,37 +117,67 @@ function filterOpacity(filter: string): number {
   return factor
 }
 
+/** Whether a box with this style is drawn transformed: its client rect is then only a bounding box. */
+function transformed(style: CSSStyleDeclaration): boolean {
+  return ["transform", "translate", "rotate", "scale", "offset-path"].some((p) => (style.getPropertyValue(p) || "none") !== "none")
+}
+
+/** A length of a clip-path inset() in CSS pixels, a percentage taken of `of`; NaN for anything else (calc(), em...). */
+function insetLength(v: string, of: number): number {
+  const m = /^(-?[\d.]+)(px|%)?$/.exec(v)
+  if (!m || (m[2] === undefined && Number(m[1]) !== 0)) return NaN
+  return m[2] === "%" ? (Number(m[1]) / 100) * of : Number(m[1])
+}
+
 /**
- * A clip-path that cuts nothing off: an inset() of zero or less on every
- * side. Design systems put one on a field's wrapper to leave room for its
- * focus ring (Stripe's sign-in: `inset(-8px)`). Any other shape counts as a
- * clip.
+ * Whether `node`'s clip-path leaves all of `field` showing: an inset()
+ * whose rectangle, resolved against `node`'s border box (percentages of its
+ * size), contains the field's box to within half a pixel, with any rounded
+ * corners no larger than the room the field leaves inside it. Design systems
+ * put one on a field's wrapper to leave its focus ring room (Stripe's
+ * sign-in: `inset(-8px)`). Anything else counts as hiding the field: another
+ * shape, a value it can't resolve, or a transform on `node` or between it and
+ * the field (`transformedBetween`), which makes client rects bounding boxes.
  */
-export function clipsNothing(clipPath: string): boolean {
+export function insetKeepsField(node: Element, clipPath: string, field: Element, transformedBetween: boolean): boolean {
   const m = /^inset\((.*)\)$/.exec(clipPath.trim())
-  if (!m) return false
-  const sides = m[1].split(/\s+round\s+/)[0].trim().split(/\s+/)
-  return sides.length <= 4 && sides.every((v) => /^(-[\d.]+(px|%)|0(px|%)?)$/.test(v))
+  if (!m || transformedBetween) return false
+  const [sidesText, roundText] = m[1].split(/\s+round\s+/)
+  const sides = sidesText.trim().split(/\s+/)
+  if (!sides.length || sides.length > 4) return false
+  const [t, r = t, b = t, l = r] = sides
+  const a = node.getBoundingClientRect()
+  const top = insetLength(t, a.height), right = insetLength(r, a.width), bottom = insetLength(b, a.height), left = insetLength(l, a.width)
+  if ([top, right, bottom, left].some(Number.isNaN)) return false
+  const f = field.getBoundingClientRect()
+  const room = Math.min(f.left - (a.left + left), f.top - (a.top + top), a.right - right - f.right, a.bottom - bottom - f.bottom)
+  if (room < -0.5) return false
+  if (roundText === undefined) return true
+  const radii = roundText.trim().split(/[\s/]+/).map((v) => insetLength(v, Math.max(a.width, a.height)))
+  return radii.every((v) => !Number.isNaN(v) && v <= Math.max(room, 0))
 }
 
 /**
  * Style anywhere up the rendered tree that hides the element: opacity
- * (multiplied, filters too), display, content-visibility, or a clip (but
- * not a clip-path that cuts nothing off). No depth limit: every shadow host
- * and slot counts.
+ * (multiplied, filters too), display, content-visibility, or a clip (a
+ * clip-path counts unless it is an inset that leaves the whole field
+ * showing, see insetKeepsField). No depth limit: every shadow host and slot
+ * counts.
  */
 export function hiddenByStyle(el: Element): boolean {
   const own = getComputedStyle(el)
   if (own.visibility === "hidden" || own.visibility === "collapse") return true
   let opacity = 1
+  let bent = false
   for (let node: Element | null | undefined = el; node; ) {
     const style = getComputedStyle(node)
     if (style.display === "none" || style.getPropertyValue("content-visibility") === "hidden") return true
     opacity *= cssNumber(style.opacity) * filterOpacity(style.getPropertyValue("filter"))
     if (opacity < 0.1) return true
+    bent ||= transformed(style)
     const clipPath = style.getPropertyValue("clip-path")
     const clip = style.getPropertyValue("clip")
-    if ((clipPath && clipPath !== "none" && !clipsNothing(clipPath)) || (clip && clip !== "auto")) return true
+    if ((clipPath && clipPath !== "none" && !insetKeepsField(node, clipPath, el, bent)) || (clip && clip !== "auto")) return true
     const next = renderedParent(node)
     if (next === undefined) return true
     node = next
@@ -156,20 +186,20 @@ export function hiddenByStyle(el: Element): boolean {
 }
 
 /**
- * Whether a box with this style is the containing block of absolutely
- * positioned boxes inside it: positioned, or anything that makes one (a
- * transform, a filter, containment). Errs towards yes: a yes keeps its
- * overflow counting as a clip.
+ * Whether a box with this style is the containing block of fixed boxes inside
+ * it (and so of absolutely positioned ones too): a transform of any kind
+ * (transform, translate, rotate, scale, offset-path), perspective, a filter,
+ * containment, or a will-change for one of them. Errs towards yes: a yes
+ * keeps its overflow counting as a clip.
  */
-function holdsAbsolute(style: CSSStyleDeclaration): boolean {
+function holdsFixed(style: CSSStyleDeclaration): boolean {
   return (
-    style.position !== "static" ||
-    style.transform !== "none" ||
+    transformed(style) ||
     style.getPropertyValue("perspective") !== "none" ||
     style.filter !== "none" ||
     (style.getPropertyValue("backdrop-filter") || "none") !== "none" ||
     /paint|layout|strict|content/.test(style.getPropertyValue("contain")) ||
-    /transform|perspective|filter/.test(style.getPropertyValue("will-change")) ||
+    /transform|translate|rotate|scale|offset-path|perspective|filter|contain/.test(style.getPropertyValue("will-change")) ||
     (style.getPropertyValue("container-type") || "normal") !== "normal" ||
     style.getPropertyValue("content-visibility") === "auto"
   )
@@ -178,32 +208,34 @@ function holdsAbsolute(style: CSSStyleDeclaration): boolean {
 /**
  * The part of the element that's on screen: its box cut by every scrolling or
  * clipping ancestor and (`viewport`) the viewport, if at least MIN_SIDE each
- * way. A fixed element escapes the ancestors above it, and an absolutely
- * positioned one the ancestors between it and its containing block (an
- * overflow box those don't hold doesn't clip it: Intercom's sign-in sits in
- * a 0 px tall scrolling row); a box with no box of its own (`display:
- * contents`, inline) clips nothing; the root's overflow belongs to the
- * viewport. What is cut off can't be hit either: the field's check also
- * hit-tests the middle of what's left (see onTop).
+ * way. An absolutely positioned element escapes the ancestors between it and
+ * its containing block (an overflow box that doesn't hold it doesn't clip it:
+ * Intercom's sign-in sits in a 0 px tall scrolling row), and a fixed one
+ * every ancestor up to one that holds fixed boxes (a transformed one, say);
+ * paint containment clips like overflow; a box with no box of its own
+ * (`display: contents`, inline) clips nothing; the root's overflow belongs to
+ * the viewport. The field's check also hit-tests the centre of what's left
+ * (see onTop), and only the centre.
  */
 export function clippedBox(el: Element, viewport = true): Box | null {
   const r = el.getBoundingClientRect()
   let box: Box = { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
   const own = getComputedStyle(el)
-  let fixed = own.position === "fixed"
-  let escaping = own.position === "absolute"
-  for (let node = renderedParent(el); node && !fixed; node = renderedParent(node)) {
+  let escape: "none" | "absolute" | "fixed" = own.position === "fixed" ? "fixed" : own.position === "absolute" ? "absolute" : "none"
+  for (let node = renderedParent(el); node; node = renderedParent(node)) {
     if (node === document.documentElement || node === document.body) break
     const style = getComputedStyle(node)
-    const holds = holdsAbsolute(style)
-    const clips = (style.overflowX !== "visible" || style.overflowY !== "visible") && style.display !== "contents" && style.display !== "inline"
-    if (clips && (holds || !escaping)) {
+    const fixedHolder = holdsFixed(style)
+    const holds = escape === "fixed" ? fixedHolder : fixedHolder || style.position !== "static"
+    const boxed = style.display !== "contents" && style.display !== "inline"
+    const clips = boxed && (style.overflowX !== "visible" || style.overflowY !== "visible" || /paint|strict|content/.test(style.getPropertyValue("contain")))
+    if (clips && (escape === "none" || holds)) {
       const a = node.getBoundingClientRect()
       box = { left: Math.max(box.left, a.left), top: Math.max(box.top, a.top), right: Math.min(box.right, a.right), bottom: Math.min(box.bottom, a.bottom) }
     }
-    if (holds) escaping = false
-    if (style.position === "absolute") escaping = true
-    if (style.position === "fixed") fixed = true
+    if (holds) escape = "none"
+    if (style.position === "absolute") escape = "absolute"
+    if (style.position === "fixed") escape = "fixed"
   }
   if (viewport) box = { left: Math.max(box.left, 0), top: Math.max(box.top, 0), right: Math.min(box.right, innerWidth), bottom: Math.min(box.bottom, innerHeight) }
   return box.right - box.left < MIN_SIDE || box.bottom - box.top < MIN_SIDE ? null : box
