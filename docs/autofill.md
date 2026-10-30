@@ -274,7 +274,15 @@ not running without sending hello, which would start the agent again.
   parent it was found in, enabled, editable, and visible through every
   ancestor up to the top of the page, across shadow roots (display,
   visibility, opacity, clip, size, on screen, not covered). Split one-time
-  code boxes fill only as one whole group within one form.
+  code boxes fill only as one whole group within one form. One exception
+  to "the field it was found as": some pages re-render their form on every
+  input event, with new elements. When a write of the fill itself took a
+  field away, the one box the page put in its place (under the same
+  parent, in the same form, with the same id, name, type and autocomplete)
+  takes its value instead, after every check above; a look-alike anywhere
+  else, or two of them, takes nothing, and nothing is ever written into a
+  box that wasn't there when the fill began unless one of its own writes
+  replaced it. The pill on such a field follows its successor.
 - **Sign-in sessions.** Many sign-ins take more than one step: the
   username on its own, then the password, sometimes a code. Picking a login
   on any step starts a session in that tab, bound to the login, the tab and

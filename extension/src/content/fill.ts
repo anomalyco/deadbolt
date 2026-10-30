@@ -255,6 +255,23 @@ export function placeBoxes(boxes: Box[], offset: { x: number; y: number }, clip:
 // ---- Writing ------------------------------------------------------------------
 
 /**
+ * The input a page's framework put in the place of `f.el` while this fill
+ * was writing (some re-render a form on every input event, with new
+ * elements): under the same parent, in the same form, with the same id,
+ * name, type and autocomplete, and the only one there. It still has to pass
+ * every check a field does before anything is written into it.
+ */
+export function successor(f: Field): HTMLInputElement | null {
+  const { el, owner } = f
+  if (el.isConnected || !owner.parent?.isConnected || (!el.id && !el.name)) return null
+  const same = Array.from(owner.parent.childNodes).filter(
+    (c): c is HTMLInputElement =>
+      c instanceof HTMLInputElement && c.id === el.id && c.name === el.name && c.type === el.type && c.getAttribute("autocomplete") === el.getAttribute("autocomplete") && (c.form ?? c.closest("form")) === owner.form,
+  )
+  return same.length === 1 ? same[0] : null
+}
+
+/**
  * Focuses the field, then checks it once more right before the value goes in:
  * the page's focus and key handlers run in between and could move or hide it.
  */
@@ -278,12 +295,30 @@ export function setInputValue(el: HTMLInputElement, value: string, guard: (el: H
  * as many boxes as digits, all in the same form and all fillable, and none
  * moved before each digit goes in.
  */
-export async function fillFields(fields: Field[], values: FillValues, check: (el: HTMLInputElement) => boolean = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement }> {
+export async function fillFields(fields: Field[], values: FillValues, check: (el: HTMLInputElement) => boolean = fillable): Promise<{ filled: FieldRole[]; last?: HTMLInputElement; written: HTMLInputElement[] }> {
   const filled: FieldRole[] = []
   let last: HTMLInputElement | undefined
-  const write = (f: Field, value: string, group: Field[] = [f]) => {
-    const ok = (el: HTMLInputElement) => group.every(inPlace) && check(el)
-    return ok(f.el) && setInputValue(f.el, value, ok)
+  const written: HTMLInputElement[] = []
+  // A single field that one of this fill's own writes replaced is checked, and
+  // written, as its successor (see successor); only one that was in the page
+  // when the fill began.
+  const present = new Set(fields.filter((f) => f.el.isConnected).map((f) => f.el))
+  const now = (f: Field): Field => {
+    const next = !f.el.isConnected && present.has(f.el) && written.length ? successor(f) : null
+    return next ? { ...f, el: next } : f
+  }
+  const checkField = check
+  check = (el) => {
+    const f = fields.find((x) => x.el === el)
+    return checkField(f ? now(f).el : el)
+  }
+  const write = (field: Field, value: string, group: Field[] = [field]) => {
+    const f = group.length === 1 ? now(field) : field
+    const all = group.length === 1 ? [f] : group
+    const ok = (el: HTMLInputElement) => all.every(inPlace) && checkField(el)
+    if (!(ok(f.el) && setInputValue(f.el, value, ok))) return false
+    written.push(f.el)
+    return true
   }
   // A beat between fields for pages that react to each one. None after the
   // last: the ack has to leave before a page that submits on fill navigates.
@@ -340,5 +375,5 @@ export async function fillFields(fields: Field[], values: FillValues, check: (el
       }
     }
   }
-  return { filled, last }
+  return { filled, last: written.at(-1) ?? last, written }
 }

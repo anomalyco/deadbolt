@@ -161,6 +161,37 @@ describe("fillFields", () => {
     expect(p.value).toBe("")
   })
 
+  test("a page that re-renders its inputs on each input event: the same box in the same place takes the next value", async () => {
+    document.body.innerHTML = `<form><div id="box"></div><div id="elsewhere"></div></form>`
+    const box = document.getElementById("box")!
+    const state = { u: "", p: "" }
+    const render = () => {
+      box.innerHTML = `<input id="u" name="u" autocomplete="username"><input id="p" name="p" type="password" autocomplete="current-password">`
+      for (const [id, key] of [["u", "u"], ["p", "p"]] as const) {
+        const el = document.getElementById(id) as HTMLInputElement
+        el.value = state[key]
+        el.addEventListener("input", () => {
+          state[key] = el.value
+          render()
+        })
+      }
+    }
+    render()
+    const [u, p] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
+    const { filled } = await fillFields([field(u, "username"), field(p, "password")], { username: "kit", password: "secret" }, () => true)
+    expect(filled).toEqual(["username", "password"])
+    expect(state).toEqual({ u: "kit", p: "secret" })
+    // A look-alike somewhere else in the form is no successor.
+    document.body.innerHTML = `<form><div id="box"><input id="u" name="u"><input id="p" name="p" type="password"></div><div id="elsewhere"></div></form>`
+    const [u2, p2] = ["u", "p"].map((id) => document.getElementById(id) as HTMLInputElement)
+    u2.addEventListener("input", () => {
+      p2.remove()
+      document.getElementById("elsewhere")!.innerHTML = `<input id="p" name="p" type="password">`
+    })
+    expect((await fillFields([field(u2, "username"), field(p2, "password")], { username: "kit", password: "secret" }, () => true)).filled).toEqual(["username"])
+    expect((document.getElementById("p") as HTMLInputElement).value).toBe("")
+  })
+
   test("a generated password goes into every new-password box, or none", async () => {
     document.body.innerHTML = `<form><input id="c" type="password"><input id="n1" type="password"><input id="n2" type="password"></form>`
     const [c, n1, n2] = ["c", "n1", "n2"].map((id) => document.getElementById(id) as HTMLInputElement)
