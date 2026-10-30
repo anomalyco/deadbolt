@@ -20,6 +20,22 @@ size, same site as the top page all the way up, `sandbox` on the way, the
 detector's kind and roles) and fails unless each has a frame login the
 inline menu serves. `--all` lists the frames of every crawled page instead.
 
+`bun corpus/sweep.ts` is the real-site sweep: the extension itself (an e2e
+build, native with `e2e/fake-host.py` or `--standalone` with a throwaway
+vault) on the pages in `corpus/sweep-sites.txt` (about 330 sign-ins: banks,
+email, dev tools, shopping, SaaS, streaming, government, the crawl's reached
+pages and its hard list). On each page it checks what a person gets: whether
+a frame reports a login form, whether clicking the field opens the menu with
+logins (top page or a same-site frame), whether picking the made-up login
+fills the right fields and nothing else, and on identifier-first sign-ins,
+step 2: it presses Continue with the reserved address `step2.ts` uses and
+checks the password box is filled by the sign-in session or a second pick.
+It never submits a password. `--report` writes `sweep.md` (rates, failures
+ranked by pattern, every failing page with a screenshot); add `--against
+<earlier out dir>` for before and after. Other flags: `--urls`, `--dist`
+(an existing e2e build), `--out`, `--concurrency 6`, `--timeout`, `--only
+<substring>`, `--retry`, `--no-step2`.
+
 `bun corpus/learned.ts` reports on "Learn this site" logs instead
 (`--dir`, default `~/.local/state/deadbolt/learn`; `--out file.md`): every
 field the user typed into while signing in by hand, with the role their typing
