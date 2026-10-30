@@ -33,6 +33,11 @@ const highlightEl = document.getElementById("highlight")!
 const foot = document.getElementById("foot")!
 /** The site, small, over a list of two or more. */
 const caption = document.getElementById("caption")!
+/**
+ * What a screen reader says as it happens: "Filled", "Saved", why a pick
+ * didn't go ahead. Inside this frame like the rest, so the page hears none of it.
+ */
+const live = document.getElementById("live")!
 let accounts: Row[] = []
 /**
  * The logins' site icons, with "Site icons in the fill menu" on (see
@@ -158,7 +163,8 @@ function row(item: Row, i: number): HTMLElement {
         : [loginTile(item.account, i), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
   const r = h(
     "button",
-    { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", "aria-selected": String(i === active) },
+    // Rows aren't tab stops: the list is, and says which row is active (see listbox).
+    { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", id: `row-${i}`, tabindex: "-1", "aria-selected": String(i === active) },
     bare ? null : tile,
     h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)),
   )
@@ -233,24 +239,50 @@ function unlockRow(): HTMLElement {
     avatar("", icon("lock")),
     h("span", { class: "text" }, h("span", { class: "title" }, "Unlock Deadbolt"), h("span", { class: "sub" }, "Opens Deadbolt in a new tab")),
   )
-  r.addEventListener("click", async (e) => {
-    if (!e.isTrusted || e.detail === 0 || busy) return
-    if (!dwell.settled(pressedAt)) return say(dwell.visible ? "Click again in a moment." : "This menu is covered.")
-    busy = true
-    try {
-      if (!(await confirmPick(dwell, pressedAt))) return say("This menu is covered.")
-      await send<boolean>({ type: "db:menu-unlock", token })
-    } finally {
-      busy = false
-    }
-  })
+  // A pointer's click; Enter goes through the keydown handler, which checks Entry first.
+  r.addEventListener("click", (e) => e.isTrusted && e.detail > 0 && void unlock())
   return r
+}
+
+/** The unlock row, pressed: it waits for the menu to have been visible and still, as a pick does. */
+async function unlock() {
+  if (busy) return
+  if (!dwell.settled(pressedAt)) return say(dwell.visible ? "Click again in a moment." : "This menu is covered.")
+  busy = true
+  try {
+    if (!(await confirmPick(dwell, pressedAt))) return say("This menu is covered.")
+    await send<boolean>({ type: "db:menu-unlock", token })
+  } finally {
+    busy = false
+  }
+}
+
+/** Says `text` to a screen reader, once, politely. */
+function announce(text: string) {
+  live.textContent = ""
+  if (text) setTimeout(() => (live.textContent = text), 50)
+}
+
+/**
+ * The rows as a listbox named `label` (null: not a list, a notice or the
+ * unlock row). The list itself takes focus, so Tab lands on it, and points
+ * at the active row (aria-activedescendant), as the highlight shows it.
+ */
+function listbox(label: string | null) {
+  if (label) {
+    rowsEl.setAttribute("role", "listbox")
+    rowsEl.setAttribute("aria-label", label)
+    rowsEl.tabIndex = 0
+  } else {
+    for (const a of ["role", "aria-label", "aria-activedescendant", "tabindex"]) rowsEl.removeAttribute(a)
+  }
 }
 
 /** Says something under the list, or (empty) nothing at all. */
 function say(text: string) {
   foot.textContent = text
   foot.hidden = !text
+  announce(text)
 }
 
 function setCaption(site: string) {
@@ -276,6 +308,8 @@ function highlight(slide = true) {
   })
   const el = rows[active]
   highlightEl.hidden = !el
+  if (el && rowsEl.getAttribute("role") === "listbox") rowsEl.setAttribute("aria-activedescendant", el.id)
+  else rowsEl.removeAttribute("aria-activedescendant")
   if (!el) return
   // Layout positions, not what's on screen: rows may be sliding.
   const y = rowsEl.offsetTop + el.offsetTop
@@ -399,6 +433,7 @@ function narrow(text: string) {
 
 function showStatus(status: Status) {
   accounts = []
+  listbox(null)
   highlightEl.hidden = true
   if (status.state === "locked" && !native) {
     rowsEl.replaceChildren(unlockRow())
@@ -443,6 +478,7 @@ async function pick(i: number) {
   for (const el of Array.from(rowsEl.querySelectorAll(".avatar.busy"))) el.classList.add("spinning")
   const passkey = "passkey" in a
   const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, passkey || universal ? "Signing in…" : "Filling…")
+  announce(passkey || universal ? "Signing in…" : "Filling…")
   const ref = "identity" in a ? a.identity.ref : "card" in a ? a.card.ref : passkey ? a.passkey.ref : "account" in a ? a.account.ref : ""
   const reply = await send<PickReply>("generate" in a ? { type: "db:menu-generate", token } : { type: "db:menu-pick", token, ref })
   busy = false
@@ -450,10 +486,12 @@ async function pick(i: number) {
     // A passkey's sign-in closes the surface from the background once it's through.
     if (passkey) return
     settle(label, universal ? "Continuing sign-in" : "Filled", true)
+    announce(universal ? "Continuing sign-in" : "Filled")
     return void setTimeout(() => done(), FILLED_STAYS_MS + 450)
   }
   const message = reply?.message || "Couldn't fill. Try again."
   say(message)
+  announce(`Couldn't fill. ${message}`)
   label.title = message
   settle(label, "Couldn't fill", false)
   setTimeout(() => done(), FAILED_STAYS_MS)
@@ -541,7 +579,7 @@ function whenWide(width: number | null, go: () => void) {
  */
 function fold(persist: HTMLElement | null, text: string, persistIsLabel = false, lead?: HTMLElement): HTMLElement {
   mode = "pill"
-  const pill = h("div", { class: "pill waiting", role: "status" })
+  const pill = h("div", { class: "pill waiting" })
   const label = persistIsLabel && persist ? h("span", { class: "pill-label" }) : h("span", { class: "pill-label" }, text)
   label.dataset.text = persistIsLabel && persist ? (persist.dataset.text ?? text) : text
   const mark = h("span", { class: "pill-mark", "aria-hidden": "true" }, icon("check"))
@@ -648,14 +686,33 @@ addEventListener("pointerdown", (e) => {
   const press = entry.pressed()
   if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && entry.confirmed(press))
 }, true)
-addEventListener("focus", (e) => void (e.isTrusted && e.target === window && entry.focused(performance.now())))
+addEventListener("focus", (e) => {
+  if (e.target !== window) return
+  if (e.isTrusted) entry.focused(performance.now())
+  // Focus that came in with the keyboard (↓ in the field, or Tab) goes to the
+  // list, so a screen reader reads it and its active row; a click keeps the
+  // focus it gives the row it lands on.
+  setTimeout(() => {
+    if (document.hasFocus() && document.activeElement === document.body && rowsEl.getAttribute("role") === "listbox" && mode === "accounts") rowsEl.focus({ preventScroll: true })
+  }, 0)
+})
 addEventListener("blur", (e) => void (e.target === window && entry.blurred()))
 
 document.addEventListener("keydown", (e) => {
   if (e.isTrusted) pressedAt = e.timeStamp
   if (e.key === "Escape") return void send({ type: "db:menu-dismiss", token })
   if (mode === "save") return
+  // Tab leaves the list as Escape does: focus goes back to the field, never on into the end of the page.
+  if (e.key === "Tab" && mode === "accounts") {
+    e.preventDefault()
+    return void send({ type: "db:menu-dismiss", token })
+  }
   if (e.key === "Enter" || e.key === " ") e.preventDefault()
+  // The locked menu's one row: Enter opens Deadbolt to unlock, once the user came in with ↓.
+  if (e.key === "Enter" && mode === "accounts" && !accounts.length && rowsEl.querySelector("button.row")) {
+    if (!entry.entered) return say("Press ↓ in the field to choose.")
+    return void unlock()
+  }
   const rows = visible()
   if (!rows.length || mode !== "accounts") return
   const at = Math.max(0, rows.indexOf(active))
@@ -694,11 +751,13 @@ function show(reply: MenuLoadReply) {
   continueAs = reply.kind === "accounts" && reply.continueAs === true && !reply.passkeys?.length
   active = Math.min(active, Math.max(accounts.length - 1, 0))
   if (!accounts.length) {
+    listbox(null)
     highlightEl.hidden = true
     rowsEl.replaceChildren(notice(icon("keyhole"), "No logins here", `Nothing saved for ${reply.site}`))
     setCaption("")
     return say("")
   }
+  listbox(reply.kind === "generate" ? "Passwords" : "Logins")
   siteIcons = reply.kind === "accounts" ? (reply.icons ?? null) : null
   bare = reply.kind === "accounts" && !siteIcons
   rowsEl.classList.toggle("bare", bare)
@@ -759,11 +818,13 @@ function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
   continueAs = false
   active = Math.min(active, Math.max(accounts.length - 1, 0))
   if (!accounts.length) {
+    listbox(null)
     highlightEl.hidden = true
     rowsEl.replaceChildren(notice(icon(reply.form === "card" ? "card" : "keyhole"), reply.form === "card" ? "No cards saved" : "No addresses saved", "Add one in Deadbolt"))
     setCaption("")
     return say("")
   }
+  listbox(reply.form === "card" ? "Cards" : "Addresses")
   bare = false
   rowsEl.classList.remove("bare")
   rowsEl.replaceChildren(...accounts.map(row))
@@ -788,8 +849,9 @@ function showNotice(notice: Extract<MenuLoadReply, { kind: "notice" }>) {
   for (const el of Array.from(surface.children) as HTMLElement[]) el.hidden = true
   const label = h("span", { class: "pill-label" }, notice.label)
   label.dataset.text = notice.label
-  const pill = h("div", { class: "pill ok", role: "status" }, avatar(notice.title), label, h("span", { class: "pill-mark", "aria-hidden": "true" }, icon("check")))
+  const pill = h("div", { class: "pill ok" }, avatar(notice.title), label, h("span", { class: "pill-mark", "aria-hidden": "true" }, icon("check")))
   document.body.append(pill)
+  announce(notice.label)
   report()
   setTimeout(() => done(), FILLED_STAYS_MS + 600)
 }
@@ -821,7 +883,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   mode = "save"
   document.body.classList.add("save")
   document.body.dataset.offer = offerState
-  const status = h("p", { class: "offer-status", role: "status" })
+  const status = h("p", { class: "offer-status" })
   const saveLabel = h("span", { class: "roll-label" }, "Save")
   saveLabel.dataset.text = "Save"
   const save = h("button", { class: "btn primary", type: "button" }, saveLabel)
@@ -845,6 +907,8 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   )
   const dot = h("button", { class: "dot", type: "button", "aria-label": offer.update ? "Update password?" : "Save login?" }, svg(ICONS.deadbolt))
   surface.replaceChildren(section, dot)
+  section.inert = offerState === "dot"
+  dot.inert = offerState !== "dot"
 
   // The compact pill: the top row, from the mark (with the row's padding) to the corner.
   const compactWidth = () => Math.ceil(section.getBoundingClientRect().right - mark.getBoundingClientRect().left + 12)
@@ -867,6 +931,9 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     offerState = next
     document.body.dataset.offer = next
     if (fromDot) reopenedAt = performance.now()
+    // Only what shows takes focus: the dot alone, or the pill alone.
+    section.inert = next === "dot"
+    dot.inert = next !== "dot"
     port?.postMessage({ type: "db:radius", radius: next === "open" ? 12 : next === "dot" ? DOT / 2 : ROW / 2 })
     // The pill and the dot cross-fade (inside the frame): the dwell counts
     // from when that's over, as after a move.
@@ -919,7 +986,11 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   dot.addEventListener("pointermove", approach)
   dot.addEventListener("pointerleave", () => (pointer.inside = false))
   dot.addEventListener("click", (e) => e.isTrusted && shape("compact"))
-  dot.addEventListener("focus", () => shape("compact"))
+  // Tabbed onto, the dot is the pill again, and focus moves onto its Save (the dot leaves the tab order).
+  dot.addEventListener("focus", () => {
+    shape("compact")
+    save.focus({ preventScroll: true })
+  })
   away = () => {
     pointerAway = true
     if (pointer.inside || offerState === "open") depart()
@@ -965,11 +1036,16 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
   const say = (text: string) => {
     status.hidden = !text
     if (text) rollLabel(status, text)
+    announce(text)
   }
   say("")
+  // It shows in the corner, away from where the user is: a screen reader hears it came.
+  announce(`${offer.update ? "Update password" : "Save login"} for ${offer.site}? Deadbolt's offer is at the end of the page, and in the toolbar button.`)
   const answer = async (choice: OfferChoice, e: MouseEvent) => {
-    // Real presses only; Enter or Space only once the user came into the surface themselves.
-    if (!e.isTrusted || busy || offerState === "dot" || (e.detail === 0 && !entry.entered)) return
+    // Real presses only.
+    if (!e.isTrusted || busy || offerState === "dot") return
+    // Enter or Space count only once the user came into the surface themselves (see Entry): say where else to answer.
+    if (e.detail === 0 && !entry.entered) return say("Click to answer here, or answer in Deadbolt's toolbar button.")
     if (!dwell.settled(pressedAt)) {
       relax()
       shape("open")
@@ -999,6 +1075,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
       // for a new login and an update alike, so the pill is the same either way.
       return void setTimeout(() => {
         settle(label, "Saved", true)
+        announce("Saved")
         setTimeout(() => done(true), FILLED_STAYS_MS + 450)
       }, 380)
     }
