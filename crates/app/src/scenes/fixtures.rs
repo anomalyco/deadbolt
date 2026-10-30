@@ -158,7 +158,7 @@ pub(super) fn vault_info(name: &str) -> VaultInfo {
 
 /// A pairing code as `deadbolt join` shows it.
 pub(super) fn fixture_pairing_code() -> String {
-    "violin-garden-tiger-lamp".into()
+    "violin-garden-tiger-lamp-zoo".into()
 }
 
 /// The device that pairs this one in the join scenes.

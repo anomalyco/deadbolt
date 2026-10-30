@@ -261,7 +261,7 @@ try {
           const chunk = await reader.read()
           if (chunk.done) throw new Error("CLI join ended before its code")
           text += new TextDecoder().decode(chunk.value)
-          const code = /Code: ([a-z]+(?:-[a-z]+){3})/.exec(text)?.[1]
+          const code = /Code: ([a-z]+(?:-[a-z]+){4})/.exec(text)?.[1]
           if (code) return code
         }
       })(),

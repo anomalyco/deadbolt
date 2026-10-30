@@ -284,7 +284,7 @@ fn start_join(new: &Device, device_name: &str) -> (Child, mpsc::Receiver<String>
         .strip_prefix("Code: ")
         .expect("a code line")
         .to_string();
-    assert_eq!(code.split('-').count(), 4, "{code}");
+    assert_eq!(code.split('-').count(), 5, "{code}");
     (child, rx, code)
 }
 
@@ -490,12 +490,14 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
     // Joining another vault on an existing device.
     pair(&a, &b, "beta", Some("personal"));
     assert_eq!(b.run(&["vault", "ls"]).lines().count(), 2);
-    let err = a.fail(&["pair", "violin-garden-tiger-lamp", "--vault", "nope"]);
+    let err = a.fail(&["pair", "violin-garden-tiger-lamp-zoo", "--vault", "nope"]);
     assert!(err.contains("no vault named nope"), "{err}");
     let err = a.fail(&["pair", "DBPAIRAAAA"]);
     assert!(err.contains("invalid pairing code"), "{err}");
-    // Several vaults and no terminal to choose on: name one.
     let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp"]);
+    assert!(err.contains("update both devices"), "{err}");
+    // Several vaults and no terminal to choose on: name one.
+    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp", "zoo"]);
     assert!(err.contains("several vaults (personal, work)"), "{err}");
 }
 
@@ -510,7 +512,7 @@ fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
     c.run(&["init", "--device-name", "gamma"]);
     let (child, _rx, code) = start_join(&b, "beta");
 
-    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp"]);
+    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp-zoo"]);
     wrong.env("DEADBOLT_TEST_PAIR_FIND_SECS", "1");
     let out = c.output(&mut wrong);
     assert!(!out.status.success());

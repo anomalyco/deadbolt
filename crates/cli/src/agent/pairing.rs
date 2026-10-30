@@ -540,7 +540,7 @@ mod tests {
     }
 
     fn code() -> PairingCode {
-        "violin-garden-tiger-lamp".parse().unwrap()
+        "violin-garden-tiger-lamp-zoo".parse().unwrap()
     }
 
     /// Runs the pairing exchange over an in-memory stream.

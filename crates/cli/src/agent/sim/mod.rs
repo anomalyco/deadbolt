@@ -343,7 +343,7 @@ impl World {
             vault: self.vault,
         };
         // Fixed code and scalar seeds: the PAKE replays byte for byte.
-        let code = PairingCode::from_str("violin-garden-tiger-lamp")?;
+        let code = PairingCode::from_str("violin-garden-tiger-lamp-zoo")?;
         let dial = PairingStream::new(
             self.devices[0].id,
             self.devices[to].id,

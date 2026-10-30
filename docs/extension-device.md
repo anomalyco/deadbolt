@@ -202,7 +202,7 @@ addresses so id-based relay lookup remains available. The PAKE, TLS-exporter
 binding, one-guess/single-use code, signatures and connection membership hooks are
 unchanged.
 
-The proof invites a CLI started with `deadbolt join`, accepting its four-word code
+The proof invites a CLI started with `deadbolt join`, accepting its five-word code
 in the extension's device page. Rust checks the new device's vault/inviter-bound
 consent, commits its signed Add before sending the welcome, and sends the existing
 CLI application's versioned envelopes and signed entries. Sync uses the same

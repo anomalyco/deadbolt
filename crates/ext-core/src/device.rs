@@ -1081,7 +1081,7 @@ fn plain(error: &Error) -> String {
             "That code is this browser's own. Enter the code the other device shows.".into()
         }
         Error::Net(Net::InvalidCode(_)) => {
-            "That isn't a pairing code. It's four words, like apple-river-stone-lamp.".into()
+            "That isn't a pairing code. It's five words, like apple-river-stone-lamp-zoo. Update both devices if you have an older four-word code.".into()
         }
         Error::Net(Net::PairingCancelled) => "The pairing was cancelled.".into(),
         Error::Net(Net::Remote(message)) => format!("The other device refused: {message}"),

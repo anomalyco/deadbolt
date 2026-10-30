@@ -686,7 +686,7 @@ mod tests {
     /// passphrase and so needs an agent check these tests don't install.
     fn join() -> Command {
         Command::Pair {
-            code: "violin-garden-tiger-lamp".into(),
+            code: "violin-garden-tiger-lamp-zoo".into(),
             vault: None,
         }
     }
