@@ -13,6 +13,7 @@ import { NEVER_KEY } from "../bg/save"
 import { ago, button, glyph, iconButton, para, refuse, toolbar } from "./kit"
 import { enroll, enrollment } from "./biometric"
 import { aboutSection } from "./about"
+import { appearanceRows } from "../ui/appearance"
 
 function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
   const now = Date.now() / 1000
@@ -357,6 +358,7 @@ export function settingsView(app: App): View {
         clearing,
       ),
     ),
+    h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")), ...appearanceRows(app.icons, (m) => app.announce(m)), h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks.")),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Saving")), neverRows(app)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Learning logs")), learnRows(app)),
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Vault name")), h("div", { class: "reauth-row" }, name, rename), nameHint),

@@ -118,58 +118,6 @@ export function hostOf(url: string): string {
   }
 }
 
-/** A login's site as Chrome's favicon cache has it, or nothing (Chrome's generic globe) so the letter avatar stays. */
-let generic: Promise<string | null> | null = null
-const icons = new Map<string, Promise<string | null>>()
-
-function faviconUrl(page: string) {
-  const u = new URL(chrome.runtime.getURL("/_favicon/"))
-  u.searchParams.set("pageUrl", page)
-  u.searchParams.set("size", "32")
-  return u.toString()
-}
-
-function pixels(page: string): Promise<string | null> {
-  return new Promise((resolve) => {
-    const img = new Image()
-    img.onload = () => {
-      try {
-        const c = document.createElement("canvas")
-        c.width = c.height = 32
-        c.getContext("2d")!.drawImage(img, 0, 0, 32, 32)
-        resolve(c.toDataURL())
-      } catch {
-        resolve(null)
-      }
-    }
-    img.onerror = () => resolve(null)
-    img.src = faviconUrl(page)
-  })
-}
-
-/** Puts the site's favicon in `avatar` once it's known not to be the generic one. */
-export function favicon(avatar: HTMLElement, url: string) {
-  if (!chrome.runtime?.getURL || !url) return
-  let origin: string
-  try {
-    origin = new URL(url.includes("://") ? url : `https://${url}`).origin
-  } catch {
-    return
-  }
-  let p = icons.get(origin)
-  if (!p) {
-    generic ??= pixels("https://deadbolt.invalid/")
-    p = Promise.all([pixels(origin), generic]).then(([mine, globe]) => (mine && mine !== globe ? mine : null))
-    icons.set(origin, p)
-  }
-  void p.then((data) => {
-    if (!data || !avatar.isConnected) return
-    avatar.classList.add("favicon")
-    avatar.style.removeProperty("--hue")
-    avatar.replaceChildren(h("img", { src: data, alt: "" }))
-  })
-}
-
 /**
  * The menu's one highlight, which slides between a list's rows instead of
  * each row lighting up: under the pointer at once, and springing to the row

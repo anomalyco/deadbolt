@@ -13,6 +13,7 @@ import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
+import { SiteIcons } from "./bg/site-icons"
 import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
 import type { DeviceReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
@@ -25,6 +26,7 @@ const signInWith = new SignInWith(host)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
 const learner = new Learner(host)
 const forms = new Forms(host)
+const siteIcons = new SiteIcons(host)
 /**
  * The device.html tab the inline menu's locked row opened. Memory only, like
  * Autofill's return target: a restarted worker returns nowhere. A later click
@@ -36,7 +38,10 @@ let openingUnlock: Promise<void> | null = null
 saver.signedIn = (tabId, site) => {
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
+  void siteIcons.used(tabId, site)
 }
+// After a fill (or a sign-in, above), the site's own icon, kept for the rows (bg/site-icons.ts).
+autofill.filled = (tabId, site) => void siteIcons.used(tabId, site)
 passkeys.listen()
 
 function title(status: Status): string {

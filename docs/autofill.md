@@ -549,6 +549,142 @@ not running without sending hello, which would start the agent again.
   toolbar popup or the inline menu, and hands anything Deadbolt can't do back
   to the browser (see Passkeys).
 
+## Site icons
+
+Login rows can show their site's icon. Two switches, under Appearance in the
+standalone build's Settings and behind the gear in the native popup's footer,
+saved in `chrome.storage.local` (`siteIconsMenu`, `siteIconsVault`) and
+followed live by every open page:
+
+- **Site icons in the fill menu**, off by default. Every login in the inline
+  menu is for the page's own site, so its icon would only repeat. Off, a
+  login row is its title and username, left-aligned; on, it has its icon
+  tile. Rows stay 46 px either way (`MENU_ROW`). Passkey and "Sign in with …"
+  rows in a login list lose their glyph tile with it, so the list stays
+  aligned; the generated-password row and address and card menus keep theirs.
+- **Site icons in the vault**, on by default: the popup's rows, and the
+  standalone vault's list and a login's detail. Off, they show the letter.
+
+Turning both off deletes the kept icons and stops keeping more.
+
+### Where icons come from
+
+Deadbolt never sends a request for an icon. Fetching one for every saved
+login, from the sites or an icon service, would tell those servers which
+sites the vault has accounts on, and even fetching a site's own icon when its
+page loads would tell that site (and any server the page names) "this
+visitor has a saved login here". The first source that has one wins:
+
+1. **The site's own SVG**, read only after Deadbolt filled a login on the
+   site (a pick in the menu or the popup) or saw a sign-in there go through,
+   in a top page on https or a local dev host, outside incognito, while
+   unlocked and a switch is on. The background asks that exact document
+   (`db:site-icon`, by `documentId`) for its `<link rel="icon"
+   type="image/svg+xml">`, else its `mask-icon` (one colour, with its
+   `color`), from an inline `data:` URL or the page's own origin. The content
+   script reads it with `mode: "same-origin"`, `credentials: "omit"`, no
+   referrer and `cache: "only-if-cached"`: only what the browser already
+   loaded for the page, never the network. An icon on another origin (a CDN,
+   as GitHub's and Linear's are) or not in the cache is skipped. It stops
+   reading past 32 KiB and sanitizes what it read (below). The page's own
+   script could still notice the cache read, but only after the fill or
+   sign-in, when the site already knows this visitor has an account there;
+   a page load alone reads nothing. The background decides which host the
+   icon is for from the browser's record of the top document, never the
+   page's word, and keeps it under that exact host only (less a leading
+   `www.`), so a blog on one subdomain of a shared host can't set the icon of
+   another subdomain's login, or of the parent domain's. Each is read again
+   after 30 days; a page with no cached SVG icon isn't asked again for 6
+   hours. Those hosts, and those whose icon a menu already revealed, are kept
+   in `chrome.storage.session` as salted SHA-256 hashes, not by name.
+2. **A bundled Simple Icons subset** (`static/site-icons/simple-icons.json`):
+   the brand mark and colour of 511 popular domains, loaded the first time a
+   tile needs it. See below.
+3. **Chrome's favicon cache**, `chrome-extension://<id>/_favicon/?pageUrl=…&size=64`
+   (the `favicon` permission), local and only for sites the browser has
+   shown. It loads in the inline menu's frame too (checked headless: the
+   frame, loaded from its dynamic web-accessible URL, still has the
+   extension's origin). Chrome's generic globe counts as none. A raster at most half the
+   drawn size scales by whole pixels without smoothing, so a 16 px icon stays
+   crisp.
+4. **The letter tile.**
+
+Kept SVG icons are in the extension's own IndexedDB (`deadbolt-site-icons`),
+at most 400, oldest out first. Content scripts can read
+`chrome.storage.local` but not the extension's IndexedDB, so a page (or a
+compromised renderer) can't list which sites have saved logins from their
+icons. They aren't encrypted: someone who can read the browser profile can
+see which sites have icons, as they can see its history and favicon
+database. The inline menu, an extension frame inside a web page, doesn't
+open the store itself: the background includes the kept icons for its
+logins' hosts in `menu-load`.
+
+### Simple Icons
+
+[Simple Icons](https://simpleicons.org) (CC0 data, the `simple-icons`
+devDependency, pinned) has about 3,500 brand marks: 4.6 MB of path data,
+2 MB gzipped, too much to add to every install for a 28 px tile.
+`bun scripts/simple-icons.ts` keeps the brands whose own domain (their
+`source` URL's registrable domain, when its name is the brand's slug) ranks
+highest on a pinned [Tranco](https://tranco-list.eu) list (`PYK6J`), the top
+500, plus a hand map for big sites whose source is elsewhere (google.com,
+facebook.com, twitter.com and the like): 511 domains, 697 KB, 303 KB
+gzipped. A host matches its own entry or its nearest parent's
+(`accounts.google.com` is `google.com`'s); private suffixes are never in the
+map, so `someone.vercel.app` isn't Vercel. Regenerate it when bumping
+`simple-icons`.
+
+Simple Icons' disclaimer applies: the marks are trademarks of their owners,
+shown only to identify the site a login is for, which implies no
+endorsement, and some icons carry licences of their own (see the
+`simple-icons` package's `DISCLAIMER.md` and each icon's `license` entry).
+
+### Drawing them safely
+
+Untrusted SVG never runs in an extension page. It's sanitized twice, in the
+content script before it's sent and again before it's drawn, by
+`ui/svg-safe.ts`: the markup is parsed (no DOCTYPE or entities at all) and
+rebuilt into fresh elements from an allowlist of shapes, groups, gradients,
+clips and masks, with geometry and paint attributes only. Scripts,
+`foreignObject`, `style`, `image`, `use`, text, event handlers, namespaced
+attributes (`xlink:href`) and any `url()` other than `url(#id)` are dropped.
+The result is then only ever an `<img>` from a `blob:` URL of the page,
+drawn into a canvas: an SVG image can't run script or load anything, so the
+sanitizer is the second wall, not the only one. None of the sources taints
+the canvas (`_favicon/` is the extension's own origin, a blob: is the page's,
+checked in headless Chromium), so the reveal can read its pixels.
+
+### The reveal
+
+A tile shows its letter at once. When the icon resolves it dithers in, in
+about 320 ms: a Bayer 8×8 threshold, one cell per CSS pixel, sweeps from 0
+to 1, so the icon arrives in a crisp dot pattern, first in the tile's own
+ink (the Rune palette's one tone), then in its own colours, while the
+letter dithers out under it. A one-colour icon that would vanish into the
+tile (GitHub's black mark on the dark theme) is drawn in the tile's ink.
+Reduced motion: no reveal, the icon just appears. A list's rows reveal one
+after another, 28 ms apart (the first nine). It runs once per resolve: the
+first time a page shows a site's icon in its list or a login's detail, and
+in the inline menu the first time this browser session; repaints, searches
+and later menus just show it.
+
+In the menu, the reveal never touches the pick checks: it only redraws a
+canvas inside a row, so nothing moves, resizes or fades (the
+`IntersectionObserver` v2 reading stays visible, and `dwell.moved` isn't
+called), and the menu opens and is pickable exactly as without icons. An
+icon that isn't ready within 250 ms of the list showing just appears, and a
+press stops a reveal where it is and shows the icon at rest, as nothing in
+the frame may animate while `confirmPick` checks the press.
+
+### Tracing rasters
+
+A quick colour-quantize-then-trace of 64 px favicons (k-means to four
+colours, marching squares on each colour's mask) was tried against the plain
+raster at the menu's and the list's sizes (GitHub's, Vercel's and a generic
+globe, 64 px from `_favicon/`). At 17–26 px the traced icon is no sharper,
+its edges come out lumpier, and it's 90–175 KB of path per icon, so rasters
+stay rasters: the dither works on pixels anyway.
+
 ## Learning a site
 
 When Deadbolt misses a site's form, the popup's **Learn this site** records

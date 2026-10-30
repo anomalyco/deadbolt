@@ -808,15 +808,6 @@ main.vault.popup {
   border-radius: var(--radius-md);
 }
 
-.avatar.favicon {
-  background: var(--layer-02);
-}
-
-.avatar.favicon img {
-  width: 16px;
-  height: 16px;
-}
-
 .site-none {
   font-size: 12px;
   color: var(--faint);
@@ -889,11 +880,6 @@ main.vault.popup {
   height: 44px;
   border-radius: var(--radius-xl);
   font-size: 18px;
-}
-
-.detail-head .avatar.favicon img {
-  width: 22px;
-  height: 22px;
 }
 
 .detail-head .text {
@@ -1266,84 +1252,6 @@ main.vault.popup {
 }
 
 /* A setting that's on or off: the row is its label, the switch at its end. */
-.switch-row {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 0 -12px;
-  padding: 10px 12px;
-  border-radius: var(--radius-xl);
-  cursor: pointer;
-  transition: background-color 120ms ease-out;
-}
-
-.switch-row:hover,
-.switch-row:has(input:focus-visible) {
-  background: var(--layer-02);
-}
-
-.switch-row .text {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  flex: 1;
-  min-width: 0;
-}
-
-.switch-row .title {
-  font-size: 13px;
-  font-weight: var(--weight-medium);
-}
-
-.switch-row .sub {
-  font-size: 12px;
-  line-height: 18px;
-  letter-spacing: 0;
-  color: var(--muted);
-  text-wrap: pretty;
-}
-
-/* rune-kit's Switch, Mini (NSSwitch's measure): a 36x16 capsule, layer_04
-   off and the accent on, each with its sheen and inset elevation, and a 21x14
-   pill knob. */
-.vault input[role="switch"] {
-  appearance: none;
-  flex-shrink: 0;
-  position: relative;
-  width: 36px;
-  height: 16px;
-  margin: 0;
-  border-radius: 999px;
-  background: var(--layer-04) linear-gradient(#ffffff00, #ffffff33);
-  box-shadow: var(--elevation-switch-off);
-  cursor: pointer;
-  transition: background-color var(--control) var(--settle);
-}
-
-.vault input[role="switch"]::after {
-  content: "";
-  position: absolute;
-  top: 1px;
-  left: 1px;
-  width: 21px;
-  height: 14px;
-  border-radius: 7px;
-  background: var(--knob) linear-gradient(#ffffff, #ffffff00);
-  box-shadow: var(--elevation-elements), inset 0 0 0 0.5px #ffffff;
-  transition:
-    transform var(--control) var(--settle),
-    width var(--control) var(--settle);
-}
-
-.vault input[role="switch"]:checked {
-  background: var(--accent) linear-gradient(#ffffff00, #ffffff1a);
-  box-shadow: var(--elevation-switch-on);
-}
-
-.vault input[role="switch"]:checked::after {
-  transform: translateX(13px);
-}
-
 /* Notes and other values that span lines: kept as written, never cut off. */
 .line .value.lines {
   white-space: pre-wrap;

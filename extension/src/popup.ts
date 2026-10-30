@@ -12,6 +12,10 @@ import { passkeyCard } from "./ui/passkey"
 import { learnLine, learningCard, savingOffLine } from "./ui/site-notes"
 import { mountVault } from "./vault/app"
 import { animateTo, reducedMotion, ROLL_CSS, timing } from "./ui/motion"
+import { appearanceRows } from "./ui/appearance"
+import { iconSettings, onIconSettings, type IconSettings } from "./ui/icon-store"
+import { siteTile } from "./ui/site-icon"
+import { glyph } from "./vault/kit"
 
 declare const DEADBOLT_NATIVE: boolean | undefined
 /** Native builds use `deadbolt browser-host`; `--standalone` uses the browser-only device on device.html. */
@@ -22,6 +26,33 @@ if (native) document.head.append(h("style", {}, ROLL_CSS))
 let tabId: number | undefined
 let rendered = ""
 let learningShown = false
+/** Where rows show site icons; the popup's settings change them. */
+let icons: IconSettings = { menu: false, vault: true }
+/** The settings show in place of the site's logins. */
+let settingsOpen = false
+/** A login's tile: its site's icon, dithered in the first time this popup shows it, or its letter (see ui/site-icon.ts). */
+function tileFor(a: Account, index: number): HTMLElement {
+  const url = a.urls.find(Boolean) ?? ""
+  if (!icons.vault || !url) return monogram(a.title)
+  return siteTile(a.title, url, { reveal: true, once: url, delay: Math.min(index, 8) * 28 })
+}
+
+/** The popup's settings: Appearance, and a way back. */
+function settingsBody(): HTMLElement {
+  const done = h("button", { class: "btn", type: "button" }, "Done")
+  done.addEventListener("click", () => {
+    settingsOpen = false
+    void render(true)
+  })
+  return h(
+    "section",
+    { class: "site settings" },
+    h("div", { class: "section-head" }, h("span", { class: "label" }, "Appearance")),
+    ...appearanceRows(icons, () => {}),
+    h("p", { class: "hint" }, "Well-known sites' marks come from Simple Icons, bundled; they're their owners' trademarks."),
+    h("div", { class: "buttons" }, done),
+  )
+}
 
 function send<T>(message: ToBackground): Promise<T | null> {
   return chrome.runtime.sendMessage(message).catch(() => null) as Promise<T | null>
@@ -137,7 +168,7 @@ function openButton(primary: boolean, label = "Open Deadbolt"): HTMLElement {
   return b
 }
 
-function accountRow(a: Account, first: boolean): HTMLElement {
+function accountRow(a: Account, first: boolean, index = 0): HTMLElement {
   const fill = h("button", { class: `btn${first ? " primary" : ""}`, type: "button" }, "Fill")
   const copy = h(
     "button",
@@ -158,7 +189,7 @@ function accountRow(a: Account, first: boolean): HTMLElement {
   const row = h(
     "div",
     { class: "account" },
-    monogram(a.title),
+    tileFor(a, index),
     h("div", { class: "account-text" }, h("div", { class: "account-title" }, a.title), h("div", { class: "account-sub" }, sub)),
     copy,
     fillable ? fill : null,
@@ -207,10 +238,20 @@ function siteBody(reply: PopupReply): HTMLElement {
     "section",
     { class: "site" },
     h("div", { class: "section-head" }, h("span", { class: "label" }, "Logins"), h("span", { class: "mono muted" }, site)),
-    h("div", { class: "list" }, ...reply.accounts.map((a, i) => accountRow(a, i === 0 && !reply.offer))),
+    h("div", { class: "list" }, ...reply.accounts.map((a, i) => accountRow(a, i === 0 && !reply.offer, i))),
     error,
     h("p", { class: "note" }, icon("lock"), h("span", {}, "Deadbolt never copies passwords: any app can read the clipboard. Fill puts them straight into the page.")),
   )
+}
+
+/** Opens and closes the popup's settings. */
+function settingsButton(): HTMLElement {
+  const b = h("button", { class: `icon-button${settingsOpen ? " on" : ""}`, type: "button", title: "Settings", "aria-label": "Settings", "aria-pressed": String(settingsOpen) }, glyph("gear"))
+  b.addEventListener("click", () => {
+    settingsOpen = !settingsOpen
+    void render(true)
+  })
+  return b
 }
 
 /** A lock button for the browser-only Deadbolt, which has no app to lock it from. */
@@ -233,10 +274,10 @@ async function render(changed = false) {
 
 function paint(reply: PopupReply | null, changed: boolean) {
   const status: Status = reply?.status ?? { state: "disconnected", message: "The extension's background worker didn't answer." }
-  const body = statusBody(status) ?? (reply ? siteBody(reply) : null)
+  const body = settingsOpen ? settingsBody() : (statusBody(status) ?? (reply ? siteBody(reply) : null))
 
   // Status pushes re-render; skip it when nothing visible changed.
-  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff, reply?.learning])
+  const key = JSON.stringify([status, reply?.site, reply?.accounts, reply?.unfillable, reply?.error, reply?.offer, reply?.passkey, reply?.savingOff, reply?.learning, settingsOpen, icons.vault])
   learningShown = !!reply?.learning
   if (key === rendered && !changed) return
   const first = rendered === ""
@@ -251,7 +292,9 @@ function paint(reply: PopupReply | null, changed: boolean) {
   const body2 = h(
       "div",
       { class: "body" },
-      ...(reply?.passkey
+      ...(settingsOpen
+        ? [body]
+        : reply?.passkey
         ? [
             // Touch ID, or the page, takes it from here.
             passkeyCard(reply.passkey, tabId, { chosen: () => window.close(), ended: () => void render(true) }),
@@ -268,7 +311,7 @@ function paint(reply: PopupReply | null, changed: boolean) {
   root.replaceChildren(
     h("header", { class: "top" }, h("span", { class: "logo" }, svg(ICONS.deadbolt)), h("span", { class: "brand" }, "Deadbolt"), pill(status)),
     body2,
-    h("footer", { class: "bottom" }, open ?? h("span"), status.state === "ready" ? (native ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : lockButton()) : null),
+    h("footer", { class: "bottom" }, open ?? h("span"), h("span", { class: "bottom-end" }, status.state === "ready" ? (native ? h("span", { class: "mono faint" }, status.version.split("+")[0]) : lockButton()) : null, native ? settingsButton() : null)),
   )
   // The first paint is at rest. After that, a whole new state is softened:
   // the old one blurs, shrinks and fades out over the new one as it comes in,
@@ -287,6 +330,11 @@ function paint(reply: PopupReply | null, changed: boolean) {
 }
 
 if (native) {
+  // The settings, here or in another popup, show at once.
+  onIconSettings((now) => {
+    icons = now
+    void render()
+  })
   chrome.runtime.onMessage.addListener((message: StatusChanged) => {
     if (message?.type === "db:status") void render()
   })
@@ -298,7 +346,10 @@ if (native) {
 
   // A vault that's slow to answer shows that it's connecting, never an empty popup.
   const slow = setTimeout(() => rendered === "" && paint({ status: { state: "connecting" }, accounts: [] }, false), 300)
-  void render().finally(() => clearTimeout(slow))
+  void iconSettings()
+    .then((now) => (icons = now))
+    .then(() => render())
+    .finally(() => clearTimeout(slow))
 } else {
   // The browser-only Deadbolt has no app: the popup is the vault itself (src/vault).
   mountVault(root, "popup")

@@ -12,6 +12,7 @@ import { CLIPBOARD_PERMISSIONS, record } from "../bg/clipboard"
 import { account, type Account } from "../protocol"
 import { h, icon, ICONS, svg } from "../ui/dom"
 import { ROLL_CSS } from "../ui/motion"
+import { iconSettings, onIconSettings, type IconSettings } from "../ui/icon-store"
 import { passkeyCard } from "../ui/passkey"
 import { ago, button, enter, glyph, iconButton, ONLINE_SECS, run as send } from "./kit"
 import { itemDetailView, itemEditView, kindsView } from "./items"
@@ -75,6 +76,8 @@ export class App {
   reauth: Reauth | null = null
   /** The search, kept across views. */
   query = ""
+  /** Where rows show site icons (Settings, Appearance). */
+  icons: IconSettings = { menu: false, vault: true }
   private route: Route = { name: "list" }
   private view: View | null = null
   private shell = ""
@@ -408,11 +411,16 @@ export class App {
       // popup or another tab did), so it leaves the fill waiting.
       if (this.reauth && document.visibilityState === "visible") void this.ask({ type: "device-reauth-cancel", id: this.reauth.id })
     })
+    // Turning site icons on or off shows at once in a list or a login.
+    onIconSettings((icons) => {
+      this.icons = icons
+      if (this.shell === "ready" && (this.route.name === "list" || this.route.name === "item")) this.show(0, false)
+    })
     // While the tab is learning, its step count follows along, as in the native popup.
     if (this.surface === "popup") setInterval(() => this.site?.learning && void this.refreshSite(), 1000)
     // A vault slow to answer shows that it's starting, never an empty frame.
     const slow = setTimeout(() => this.shell === "" && this.render(), 250)
-    void this.run({ type: "device-status" }).then(async () => {
+    void Promise.all([this.run({ type: "device-status" }), iconSettings().then((icons) => (this.icons = icons))]).then(async () => {
       clearTimeout(slow)
       if (this.status.state === "not-set-up") await this.setup.check()
       if (this.status.state === "locked") await this.loadPreset()

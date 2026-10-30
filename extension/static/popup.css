@@ -271,6 +271,34 @@ main {
   border-top: 1px solid var(--border-weak);
 }
 
+.bottom-end {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bottom-end .icon-button.on {
+  background: var(--pressed);
+}
+
+/* The native popup's settings, in place of the site's logins. */
+.site.settings {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.site.settings .switch-row {
+  margin: 0 -10px;
+  padding: 10px;
+}
+
+.site.settings .buttons {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 10px;
+}
+
 /* A save or update offer, above the site's logins. */
 .offer {
   display: flex;

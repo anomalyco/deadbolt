@@ -15,6 +15,8 @@ import { provider as providerOf } from "./signin"
 import type { Account, FormCard, FormIdentity } from "./protocol"
 import { avatar, confirmPick, Dwell, Entry, h, icon, ICONS, svg, watchVisibility } from "./ui/dom"
 import { animateTo, reducedMotion, rollLabel, ROLL_CSS, spring, Spring, timing, type SpringState } from "./ui/motion"
+import { iconKey, onIconSettings, type StoredIcon } from "./ui/icon-store"
+import { siteTile } from "./ui/site-icon"
 
 /** A row: a login to fill, a passkey the page's sign-in is waiting for, a "Sign in with …" login, or a generated password. */
 type Row = { passkey: MenuPasskey } | { account: Account } | { provider: Account } | { generate: true } | { identity: FormIdentity } | { card: FormCard }
@@ -32,6 +34,16 @@ const foot = document.getElementById("foot")!
 /** The site, small, over a list of two or more. */
 const caption = document.getElementById("caption")!
 let accounts: Row[] = []
+/**
+ * The logins' site icons, with "Site icons in the fill menu" on (see
+ * MenuLoadReply); null with it off, and the logins' rows show only their
+ * title and username (every login here is the page's own site's).
+ */
+let siteIcons: Record<string, StoredIcon | null> | null = null
+/** Whether this list's rows go without a tile: a login list with icons off. */
+let bare = false
+/** A site icon resolving after this long since the list showed just appears: the user may be about to pick. */
+const REVEAL_WITHIN_MS = 250
 let focused: FieldRole = "username"
 /** The site signs in username first and has one login: its row says "Continue as …". */
 let continueAs = false
@@ -138,12 +150,12 @@ function row(item: Row, i: number): HTMLElement {
         ? // "Sign in with Google · kit@gmail.com": the provider's mark and name, then the account it uses.
           [providerMark(item.provider.signIn!.provider), `Sign in with ${providerOf(item.provider.signIn!.provider).name}`, item.provider.signIn!.account || item.provider.title]
         : continueAs && item.account.username
-        ? [avatar(item.account.title), `Continue as ${item.account.username}`, item.account.title]
-        : [avatar(item.account.title), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
+        ? [loginTile(item.account, i), `Continue as ${item.account.username}`, item.account.title]
+        : [loginTile(item.account, i), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
   const r = h(
     "button",
     { class: `row${i === active ? " active" : ""}`, type: "button", role: "option", "aria-selected": String(i === active) },
-    tile,
+    bare ? null : tile,
     h("span", { class: "text" }, h("span", { class: "title" }, title), h("span", { class: "sub" }, sub)),
   )
   // A pointer's click only: Enter or Space on a focused row clicks it too (detail 0).
@@ -163,6 +175,34 @@ function row(item: Row, i: number): HTMLElement {
     highlight(false)
   })
   return r
+}
+
+/** When the list last showed, and which sites' icons may still reveal in it (see revealable). */
+let listedAt = 0
+let revealable = new Set<string>()
+
+/**
+ * A login's tile with its site's icon (see ui/site-icon.ts). The icon
+ * dithers in only the first time this browser session a menu shows it, and
+ * only if it's ready within moments of the list showing; it never moves
+ * anything, and a press stops it at once: nothing in the frame may animate
+ * while a press is checked (see press).
+ */
+function loginTile(account: Account, i: number): HTMLElement {
+  const url = account.urls.find(Boolean) ?? ""
+  let key = ""
+  try {
+    key = url ? iconKey(new URL(url.includes("://") ? url : `https://${url}`).hostname) : ""
+  } catch {}
+  const reveal = revealable.has(key)
+  return siteTile(account.title, url, {
+    reveal,
+    once: key,
+    delay: Math.min(i, 6) * 30,
+    stored: siteIcons?.[key] ?? null,
+    revealBy: listedAt + REVEAL_WITHIN_MS,
+    stop: () => document.body.classList.contains("held") || busy,
+  })
 }
 
 /** A provider's mark: its initial on its own tint (Deadbolt draws no third-party logos). */
@@ -652,6 +692,11 @@ function show(reply: MenuLoadReply) {
     setCaption("")
     return say("")
   }
+  siteIcons = reply.kind === "accounts" ? (reply.icons ?? null) : null
+  bare = reply.kind === "accounts" && !siteIcons
+  rowsEl.classList.toggle("bare", bare)
+  revealable = new Set(reply.kind === "accounts" ? (reply.reveal ?? []) : [])
+  listedAt = performance.now()
   rowsEl.replaceChildren(...accounts.map(row))
   // No site over logins: they're only ever the page's own site's (or a same-site frame's), which the page shows.
   setCaption("")
@@ -687,6 +732,8 @@ function showForms(reply: Extract<MenuLoadReply, { kind: "forms" }>) {
     setCaption("")
     return say("")
   }
+  bare = false
+  rowsEl.classList.remove("bare")
   rowsEl.replaceChildren(...accounts.map(row))
   // Where a pick goes, always: a payment provider's frames on the site, or the site itself.
   setCaption(reply.into ? `Into ${reply.into} on ${reply.site}` : `On ${reply.site}`)
@@ -996,6 +1043,9 @@ addEventListener("message", (e: MessageEvent<{ type?: unknown; token?: unknown }
   if (!token && e.data?.type === "db:menu-token" && typeof e.data.token === "string") void claim(e.data.token, e.origin, e.ports[0])
 })
 if (window.parent !== window) window.parent.postMessage({ type: "db:menu-ready" }, "*")
+
+// Turning site icons on or off shows in the open menu at once.
+onIconSettings(() => void load())
 
 // Unlocking in the app, or a sync, updates the open menu in place.
 chrome.runtime.onMessage.addListener((message: StatusChanged) => {

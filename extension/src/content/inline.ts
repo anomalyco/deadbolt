@@ -36,6 +36,7 @@ import { findAccountTile, findProviderButton, type Field, type FormControl } fro
 import { approvedForms, approveForms, fillCheck, fillForm, onScreen, takeApproved, type FormsState } from "./formfill"
 import { sectionFields, type FormField } from "./forms"
 import { hideRing, showRing } from "./ring"
+import { readPageIcon } from "./site-icon"
 import { isAccountPage, pageAccountOf, provider } from "../signin"
 import { fillable, fillFields, ownValue, visibleBox } from "./fill"
 import { fieldRules, fitsPattern, keptGenerated, rememberGenerated } from "./generate"
@@ -1135,6 +1136,10 @@ export function initMenu(page: PageState) {
       case "db:chooser":
         if (isTop) pointAtTile(String(message.account))
         return void respond(true)
+      case "db:site-icon":
+        if (!isTop) return void respond(null)
+        readPageIcon().then(respond, () => respond(null))
+        return true
     }
   })
 }
