@@ -7,6 +7,7 @@
 // click, Escape, the target scrolling away, or after a few seconds.
 
 import { reducedMotion, timing } from "../ui/motion"
+import { markOwnHost } from "./shadow"
 
 const STAYS_MS = 10_000
 const BRAND = "#f02e29"
@@ -36,6 +37,7 @@ export function showRing(target: Element, label: string) {
 
   host = document.createElement("div")
   host.style.cssText = "all:initial;position:fixed;inset:0;pointer-events:none;z-index:2147483647;display:block;"
+  markOwnHost(host)
   const root = host.attachShadow({ mode: "closed" })
   const ring = document.createElement("div")
   const pill = document.createElement("div")
