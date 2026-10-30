@@ -185,7 +185,7 @@ fn title(k: &Kit, key: &str, glyph: &'static Icon, label: &str) -> El {
 
 /// The list beside the selected item.
 fn vault(s: &App, k: &Kit) -> El {
-    let visible = s.visible();
+    let visible = s.visible_at();
     row()
         .key("split")
         .w_full()

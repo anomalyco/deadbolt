@@ -706,7 +706,8 @@ async function fillCard(page: Page, device: Page, passphrases: string[] = []) {
   // As a person would, scroll the card block into view first: fields out of view take nothing.
   await page.locator("#cc-number").evaluate((el) => el.scrollIntoView({ block: "center" }))
   const menu = await menuOn(page, "#cc-number", "4242")
-  const hint = menu.getByText("Deadbolt asks for your passphrase first.", { exact: true })
+  // The live region repeats this for screen readers; check the visible menu hint.
+  const hint = menu.locator("#foot").filter({ hasText: /^Deadbolt asks for your passphrase first\.$/ })
   check(await hint.isVisible() === (passphrases.length > 0), "the card menu explains passphrase reauthentication only under Strict")
   await pick(menu, "4242")
   const nothing = async () => await page.inputValue("#cc-number") === "" && await page.inputValue("#cc-csc") === ""
@@ -1483,7 +1484,7 @@ async function biometricUnlock(device: Page, worker: Worker) {
   } })
   await device.bringToFront()
   await device.getByRole("button", { name: "Settings", exact: true }).click()
-  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByRole("button", { name: "Set up Touch ID", exact: true }).click()
   await device.getByLabel("Passphrase for Touch ID").fill("wrong enrollment passphrase")
   await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
   await device.getByText("That passphrase isn't right.", { exact: true }).waitFor()
@@ -1573,7 +1574,7 @@ async function biometricUnlock(device: Page, worker: Worker) {
     hasUserVerification: true, isUserVerified: true, automaticPresenceSimulation: true, hasPrf: false,
   } })
   await device.getByRole("button", { name: "Settings", exact: true }).click()
-  await device.getByRole("button", { name: "Unlock with Touch ID", exact: true }).click()
+  await device.getByRole("button", { name: "Set up Touch ID", exact: true }).click()
   await device.getByLabel("Passphrase for Touch ID").fill(passphrase)
   await device.getByRole("button", { name: "Enable Touch ID", exact: true }).click()
   await device.getByText(/This authenticator doesn't support PRF unlock/).waitFor()

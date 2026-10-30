@@ -47,6 +47,13 @@ describe("login forms", () => {
     expect(roles()).toEqual(["password"])
   })
 
+  test("one box for an email or a phone number is an identifier, not a phone box", () => {
+    page(`<form><label for="a">Email or Phone Number</label><input id="a" name="account"><label for="p">Password</label><input id="p" type="password"><button>Sign in</button></form>`)
+    expect(roles()).toEqual(["username", "password"])
+    page(`<form><label for="a">Mobile number</label><input id="a" type="tel" name="phone"><button>Continue</button></form>`, "/signin")
+    expect(roles()).toEqual(["phone"])
+  })
+
   test("hidden fields are ignored", () => {
     page(`
       <form>
@@ -117,6 +124,50 @@ describe("other forms", () => {
     )
     expect(scanPage().kind).toBe("mfa")
     expect(roles()).toEqual(["otp"])
+  })
+
+  test("a code sent by text or email is the user's: a code step with nothing to fill", () => {
+    for (const lede of ["We sent a 6-digit code to your phone ending in 0123.", "Check your email: we emailed you a code.", "Didn't get it? Resend"]) {
+      page(
+        `<h1>Verify it's you</h1><p>${lede}</p><form><label for="c">Verification code</label><input id="c" name="otp" autocomplete="one-time-code" inputmode="numeric"><button>Verify</button></form>`,
+        "/mfa",
+      )
+      const result = scanPage()
+      expect(result.kind).toBe("mfa")
+      expect(result.fields).toEqual([])
+    }
+    // Split boxes too.
+    page(`<h1>Check your phone</h1><p>We texted a code to •••• 0123.</p><form>${'<input maxlength="1" inputmode="numeric">'.repeat(6)}<button>Verify</button></form>`, "/2fa")
+    expect(scanPage().fields).toEqual([])
+  })
+
+  test("an authenticator's code wins over a code the page could also send", () => {
+    page(
+      `<h1>Two-step verification</h1><p>Enter the code from your authenticator app.</p><form><label for="c">Code</label><input id="c" autocomplete="one-time-code"><button>Verify</button></form><a href="#">Send a code by text message instead</a>`,
+      "/mfa",
+    )
+    expect(roles()).toEqual(["otp"])
+  })
+
+  test("a backup or recovery code is the user's", () => {
+    page(`<h1>Two-step verification</h1><p>Enter the code from your authenticator app.</p><form><label for="c">Backup code</label><input id="c" autocomplete="one-time-code" maxlength="8"><button>Verify</button></form>`, "/mfa")
+    expect(roles()).toEqual([])
+    page(`<h1>Use a recovery code</h1><form><label for="c">Code</label><input id="c" autocomplete="one-time-code"><button>Verify</button></form>`, "/mfa")
+    expect(roles()).toEqual([])
+  })
+
+  test("security questions are answers, not logins, masked or not", () => {
+    page(
+      `<h1>Answer your security questions</h1><form><label for="a">What was the name of your first pet?</label><input id="a" name="q1">
+      <label for="b">On what street did you grow up?</label><input id="b" name="q2" type="password"><button>Continue</button></form>`,
+      "/login/challenge",
+    )
+    expect(roles()).toEqual([])
+    page(`<form><label for="a">Security answer</label><input id="a" type="password" name="answer"><button>Continue</button></form>`, "/login/challenge")
+    expect(roles()).toEqual([])
+    // A question that names a login field is still one.
+    page(`<form><label for="u">What's your username?</label><input id="u" name="u"><label for="p">Password</label><input id="p" type="password"><button>Sign in</button></form>`, "/login")
+    expect(roles()).toEqual(["username", "password"])
   })
 
   test("a search box is nothing", () => {

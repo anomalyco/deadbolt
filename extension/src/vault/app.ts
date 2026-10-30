@@ -114,10 +114,13 @@ export class App {
 
   /** Back in the list from an item: its row takes focus again, not the search. */
   returnTo: string | null = null
+  /** Where the list was scrolled when an item opened from it, to come back to the same place. */
+  private listScroll = 0
 
   /** Shows `route`, coming in from the side it's going: 1 deeper, -1 back. */
   go(route: Route, dir: -1 | 0 | 1 = 1) {
     const from = this.route
+    if (from.name === "list" && this.view) this.listScroll = this.view.el.scrollTop
     this.returnTo = route.name === "list" && "ref" in from && from.ref ? from.ref : null
     this.route = route
     this.show(dir)
@@ -129,6 +132,8 @@ export class App {
     const view = this.build()
     this.view = view
     this.stage.replaceChildren(view.el)
+    // Back in the list: scrolled where it was, before its row takes focus.
+    if (dir === -1 && this.route.name === "list" && this.status.state === "ready") view.el.scrollTop = this.listScroll
     if (animate) enter(view.el, dir)
     view.focus?.()
     this.paintChrome()

@@ -188,7 +188,7 @@ export async function probeFrames(page: Page, code: string, clock: Clock): Promi
 const runProbe = (frame: Frame, code: string) =>
   frame.evaluate(`${code}\n;globalThis.__deadboltCorpus.run()`) as Promise<FrameProbe>
 
-const loginish = (frames: FrameProbe[], url: string, title: string) => {
+export const loginish = (frames: FrameProbe[], url: string, title: string) => {
   const inputs = frames.flatMap((f) => f.inputs.filter((i) => i.visible))
   if (inputs.some((i) => i.type === "password")) return true
   // The detector's word counts only with a field behind it: a "Sign in with Google" button frame has none.

@@ -73,14 +73,28 @@ export function sameSiteChain(chain: URL[]): boolean {
 const MAX_TITLE = 128
 const MAX_URL_BYTES = 2048
 
+/** What sites put between a page's own words and their name: "Sign in · GitHub", "Log in | Linear". */
+const TITLE_SEPARATOR = /\s+[|·•–—-]\s+/
+/** A page's action around a name: "Sign in to Acme", "Create your account", "Amazon Sign-In". */
+const ACTION_BEFORE = /^(?:(?:sign|log)[ -]?(?:in|on|up)|login|register|create (?:an |your |a new )?account|welcome(?: back)?)\b(?:\s+(?:to|with|for|on|at))?\s*/i
+const ACTION_AFTER = /\s+(?:(?:sign|log)[ -]?(?:in|on|up)|login)$/i
+
 /**
- * A new login's name: the page title with runs of spaces and control
- * characters made one space, trimmed and capped at 128 characters, as the
- * agent wants it. Without one, the site.
+ * A new login's name, from the title of the page it was saved on: the part
+ * that names the site ("GitHub" of "Sign in to GitHub · GitHub", "Acme" of
+ * "Create your account · Acme"), without the page's action around it, with
+ * runs of spaces and control characters made one space, trimmed and capped
+ * at 128 characters, as the agent wants it. Without one, the site.
  */
 export function saveTitle(raw: unknown, site: string): string {
   const clean = typeof raw === "string" ? raw.replace(/[\s\p{Cc}]+/gu, " ").trim() : ""
-  const title = Array.from(clean).slice(0, MAX_TITLE).join("").trim()
+  const parts = clean.split(TITLE_SEPARATOR).map((p) => p.trim()).filter(Boolean)
+  // The part with the site's name in it (the shortest, so "GitHub" over "Sign in to GitHub"), else the last part.
+  const label = site.split(".")[0]?.toLowerCase() ?? ""
+  const named = label ? parts.filter((p) => p.toLowerCase().includes(label)) : []
+  const pick = named.length ? named.reduce((a, b) => (b.length < a.length ? b : a)) : (parts.at(-1) ?? "")
+  const name = pick.replace(ACTION_BEFORE, "").replace(ACTION_AFTER, "").trim()
+  const title = Array.from(name).slice(0, MAX_TITLE).join("").trim()
   return title || site
 }
 
