@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use crate::data::{self, Item, ItemState, Version};
+use crate::data::{self, Deleted, Item, ItemState, Version};
 use crate::encoding::{Reader, Writer};
 use crate::entry::{
     DataOp, Entry, Log, LogId, MembershipOp, Payload, consent_message, data_entry_len, valid_name,
@@ -491,6 +491,23 @@ impl Vault {
             .map(|(id, state)| state.item(*id))
             .filter(|item| !item.deleted)
             .collect()
+    }
+
+    /// Deleted items, newest first: by when they were deleted, then those
+    /// that don't say when, by id.
+    pub fn deleted(&self) -> Vec<Deleted> {
+        let mut deleted: Vec<Deleted> = self
+            .items
+            .iter()
+            .map(|(id, state)| (state.item(*id), state))
+            .filter(|(item, _)| item.deleted)
+            .map(|(item, state)| Deleted {
+                at: state.deleted_at(),
+                item,
+            })
+            .collect();
+        deleted.sort_by(|a, b| b.at.cmp(&a.at).then(a.item.id.cmp(&b.item.id)));
+        deleted
     }
 
     /// Every change to an item in causal order, with whether it is current.

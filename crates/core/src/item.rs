@@ -1161,7 +1161,7 @@ pub(crate) fn check_change(kind: &str, change: &Change) -> Result<(), ItemError>
         }
         Change::Name(Some(name)) if !valid_item_name(name) => Err(ItemError::InvalidItemName),
         Change::Source(Some(source)) if !valid_source(source) => Err(ItemError::InvalidSource),
-        Change::Name(_) | Change::Delete | Change::Source(_) => Ok(()),
+        Change::Name(_) | Change::Delete { .. } | Change::Source(_) | Change::Restore => Ok(()),
     }
 }
 
