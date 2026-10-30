@@ -305,7 +305,12 @@ not running without sending hello, which would start the agent again.
   - a password field gets the password (and the username, if its box is
     there beside the password and empty);
   - a one-time-code field, split boxes included, gets the current code, if
-    the login has one;
+    the login has one, and only an authenticator's code: a box for a code
+    the site sent (its label or the page says text message, SMS, email,
+    "we sent", Resend), or for a backup or recovery code, is the user's to
+    fill. The field's own label decides first, then the page, where an
+    authenticator app named anywhere wins. Such a box gets no menu and no
+    fill, and its page still counts as a code step of the sign-in;
   - a username box on its own, empty, is "Not you? Use a different
     account": the session ends.
   Only a sign-in step fills: a password goes only into a login form's
@@ -344,6 +349,10 @@ not running without sending hello, which would start the agent again.
   fills still on their way. The session is kept in the extension's session
   storage, so a service worker restart doesn't drop a step; it holds the
   login's ref, the site, what it filled and when, never a value.
+- **Security questions.** A field whose label is a question that names no
+  login field ("What was your first pet's name?"), or that says answer,
+  security question or memorable word, is never a login field, even masked:
+  no menu, and no session fills it.
 - **Signing in by hand.** On a password or code field, the username the
   sign-in is for narrows the menu: the form's own username box, if the user
   typed what's in it (or Deadbolt filled it), or else the one the user

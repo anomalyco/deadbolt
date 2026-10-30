@@ -364,8 +364,13 @@ const DETECT: Record<string, Detect> = {
     expect: { quiet: true, signingIn: false, not: ["otp"] },
   },
   "split-code": {
-    body: `<h1>Check your email</h1><p>We sent a code to k***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
+    body: `<h1>Two-step verification</h1><p>Enter the code from your authenticator app.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
     expect: { kind: "mfa", has: ["otp"] },
+  },
+  // A code the site emailed is the user's to type: a code step, with nothing in it to fill.
+  "sent-split-code": {
+    body: `<h1>Check your email</h1><p>We sent a code to k***@acme.test.</p><form>${Array.from({ length: 6 }, (_, i) => `<input maxlength="1" inputmode="numeric" name="d${i}" style="width:32px;display:inline-block">`).join("")}<button>Verify</button></form>`,
+    expect: { kind: "mfa", not: ["otp"] },
   },
   // Sign-in buttons on a page with no form: it's still a sign-in page.
   "provider-github": { body: provider("Continue with GitHub"), expect: { quiet: true, signingIn: true } },
