@@ -8,7 +8,7 @@
 // still checks the field is shown through every host up the tree. Deadbolt's
 // own closed roots (its menu and rings) are left out.
 
-const MAX_ROOTS = 200
+export const MAX_ROOTS = 200
 
 /** Hosts of Deadbolt's own closed roots, never walked. */
 const own = new WeakSet<Element>()
@@ -16,6 +16,11 @@ const own = new WeakSet<Element>()
 /** Marks a host whose shadow root is Deadbolt's own. */
 export function markOwnHost(host: Element) {
   own.add(host)
+}
+
+/** Whether the element hosts one of Deadbolt's own closed roots. */
+export function isOwnHost(el: Element): boolean {
+  return own.has(el)
 }
 
 /** The element's shadow root, open or closed, unless it's Deadbolt's own. */

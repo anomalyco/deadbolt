@@ -9,7 +9,7 @@
 
 import { IDENTIFIER_ROLES, phoneLike, type Box, type FieldRole, type FillValues } from "../messages"
 import { inPlace, type Field, type FormControl } from "./detect"
-import { eventTarget, shadowRootOf } from "./shadow"
+import { MAX_ROOTS, eventTarget, isOwnHost, openRoots, shadowRootOf } from "./shadow"
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 
@@ -107,6 +107,28 @@ function filterOpacity(filter: string): number {
   return factor
 }
 
+/** The largest blur a field may be drawn with and still count as readable, in CSS pixels. */
+const MAX_BLUR_PX = 1
+
+/**
+ * Whether a filter can make what's under it unreadable: anything but none,
+ * opacity() (counted with opacity) and a blur of at most MAX_BLUR_PX. A heavy
+ * blur, brightness(0), an SVG url() filter and anything else count; fails
+ * closed on what it doesn't know.
+ */
+export function obscuringFilter(filter: string): boolean {
+  if (!filter || filter === "none") return false
+  const rest = filter
+    .replace(/opacity\(\s*[\d.]+%?\s*\)/g, "")
+    .replace(/blur\(\s*([\d.]+)px\s*\)/g, (m, px: string) => (Number(px) <= MAX_BLUR_PX ? "" : m))
+  return rest.trim() !== ""
+}
+
+/** Whether a box with this style is painted through a mask: any mask image or mask border, which can make it transparent. */
+function masked(style: CSSStyleDeclaration): boolean {
+  return ["mask-image", "-webkit-mask-image", "mask-border-source", "-webkit-mask-box-image-source"].some((p) => (style.getPropertyValue(p) || "none") !== "none")
+}
+
 /** Whether a box with this style is drawn transformed: its client rect is then only a bounding box. */
 function transformed(style: CSSStyleDeclaration): boolean {
   return ["transform", "translate", "rotate", "scale", "offset-path"].some((p) => (style.getPropertyValue(p) || "none") !== "none")
@@ -149,10 +171,10 @@ export function insetKeepsField(node: Element, clipPath: string, field: Element,
 
 /**
  * Style anywhere up the rendered tree that hides the element: opacity
- * (multiplied, filters too), display, content-visibility, or a clip (a
- * clip-path counts unless it is an inset that leaves the whole field
- * showing, see insetKeepsField). No depth limit: every shadow host and slot
- * counts.
+ * (multiplied, filters too), display, content-visibility, a mask, a filter
+ * that can obscure it (see obscuringFilter), or a clip (a clip-path counts
+ * unless it is an inset that leaves the whole field showing, see
+ * insetKeepsField). No depth limit: every shadow host and slot counts.
  */
 export function hiddenByStyle(el: Element): boolean {
   const own = getComputedStyle(el)
@@ -164,6 +186,7 @@ export function hiddenByStyle(el: Element): boolean {
     if (style.display === "none" || style.getPropertyValue("content-visibility") === "hidden") return true
     opacity *= cssNumber(style.opacity) * filterOpacity(style.getPropertyValue("filter"))
     if (opacity < 0.1) return true
+    if (masked(style) || obscuringFilter(style.getPropertyValue("filter"))) return true
     bent ||= transformed(style)
     const clipPath = style.getPropertyValue("clip-path")
     const clip = style.getPropertyValue("clip")
@@ -253,8 +276,9 @@ export function visibleBox(el: Element): Box | null {
 }
 
 /**
- * What the user would hit in the middle of the visible part is the field.
- * `ours`, Deadbolt's own menu, doesn't count as covering it.
+ * What the user would hit in the middle of the visible part is the field,
+ * and nothing that lets clicks through paints over it there (see
+ * paintedOver). `ours`, Deadbolt's own menu, doesn't count as covering it.
  */
 export function onTop(el: FormControl, box: Box, ours?: Element | null): boolean {
   const root = el.getRootNode() as Document | ShadowRoot
@@ -262,7 +286,160 @@ export function onTop(el: FormControl, box: Box, ours?: Element | null): boolean
   const y = (box.top + box.bottom) / 2
   const hit = ours ? root.elementsFromPoint?.(x, y).find((h) => h !== ours) : root.elementFromPoint?.(x, y)
   if (!hit) return false
-  return hit === el || el.contains(hit) || (hit.closest("label") as HTMLLabelElement | null)?.control === el
+  const labelOf = (h: Element) => (h.closest("label") as HTMLLabelElement | null)?.control === el
+  if (hit !== el && !el.contains(hit) && !labelOf(hit)) return false
+  return !paintedOver(el, root, x, y, ours, labelOf)
+}
+
+/** Every element takes part in hit tests, whatever the page's styles say: adopted only for the length of one synchronous check. */
+let probeSheet: CSSStyleSheet | null = null
+const PROBE_CSS = `*, *::before, *::after { pointer-events: auto !important; interactivity: auto !important }
+::backdrop { pointer-events: auto !important }`
+
+/** The alpha of a computed colour; 1 (fails closed) for one it can't read. */
+function alpha(color: string): number {
+  if (!color || color === "transparent") return 0
+  const legacy = /^rgba\([^,]+,[^,]+,[^,]+,\s*([\d.]+)\s*\)$/.exec(color)
+  if (legacy) return Number(legacy[1])
+  const slash = /\/\s*([\d.]+)(%?)\s*\)$/.exec(color)
+  if (slash) return Number(slash[1]) / (slash[2] ? 100 : 1)
+  return 1
+}
+
+const GRAPHIC = new Set(["IMG", "VIDEO", "CANVAS", "IFRAME", "EMBED", "OBJECT", "INPUT", "TEXTAREA", "SELECT", "BUTTON", "METER", "PROGRESS"])
+
+/**
+ * Whether a box with this style paints over what's under it at the point
+ * (x, y) inside its border box: a background colour that isn't (nearly)
+ * transparent, a background image, a backdrop filter, an inset shadow, or a
+ * border the point is on. Its text doesn't count.
+ */
+function opaqueStyle(style: CSSStyleDeclaration, at?: { r: DOMRect; x: number; y: number }): boolean {
+  if (alpha(style.backgroundColor) >= 0.1 || (style.backgroundImage || "none") !== "none") return true
+  if ((style.getPropertyValue("backdrop-filter") || "none") !== "none" || /\binset\b/.test(style.boxShadow || "")) return true
+  if ((style.getPropertyValue("border-image-source") || "none") !== "none") return true
+  const sides = (["top", "right", "bottom", "left"] as const).map((s) => ({
+    width: parseFloat(style.getPropertyValue(`border-${s}-width`)) || 0,
+    shown: !/none|hidden/.test(style.getPropertyValue(`border-${s}-style`)) && alpha(style.getPropertyValue(`border-${s}-color`)) >= 0.1,
+  }))
+  if (!sides.some((s) => s.width > 0 && s.shown)) return false
+  // Without the point (a pseudo-element's box is unknown), any border counts.
+  if (!at || transformed(style)) return true
+  const { r, x, y } = at
+  const [t, ri, b, l] = sides.map((s) => (s.shown ? s.width : 0))
+  return y < r.top + t || x > r.right - ri || y > r.bottom - b || x < r.left + l
+}
+
+/**
+ * Whether the element, hit at (x, y), draws anything there: it isn't
+ * (nearly) faded out, and it's a graphic or form control, an SVG shape, or
+ * it or its ::before or ::after has opaque style (see opaqueStyle).
+ */
+function paints(h: Element, x: number, y: number): boolean {
+  const own = getComputedStyle(h)
+  if (own.visibility === "hidden" || own.visibility === "collapse") return false
+  let opacity = 1
+  for (let node: Element | null | undefined = h; node; node = renderedParent(node)) {
+    const style = getComputedStyle(node)
+    opacity *= cssNumber(style.opacity) * filterOpacity(style.getPropertyValue("filter"))
+    if (opacity < 0.1) return false
+  }
+  if (GRAPHIC.has(h.tagName) || h instanceof SVGElement) return true
+  return opaqueStyle(own, { r: h.getBoundingClientRect(), x, y }) || pseudoPaints(h)
+}
+
+/** Whether the element's ::before or ::after draws anything opaque (an image, or opaque style). Its box is unknown, so anywhere counts. */
+function pseudoPaints(h: Element): boolean {
+  return ["::before", "::after"].some((p) => {
+    const s = getComputedStyle(h, p)
+    const content = s.getPropertyValue("content")
+    return content !== "none" && content !== "normal" && s.display !== "none" && (/url\(|image\(|gradient\(/.test(content) || opaqueStyle(s))
+  })
+}
+
+/**
+ * Whether something the page lets clicks through (`pointer-events: none`,
+ * `inert`) paints over the field at (x, y). Hit tests skip such elements,
+ * so for one synchronous check every element in the document and its shadow
+ * roots is made to take part (a stylesheet adopted into each root, inline
+ * `!important` pointer-events and `inert` lifted), and each element the
+ * browser then stacks above the field must draw nothing there (see paints).
+ * Inside a shadow host above it, so must each element of its root. The
+ * field's own label and Deadbolt's own surfaces don't count. Fails closed:
+ * no hit testing, a page with more shadow roots than are walked, or a field
+ * the test doesn't find means covered.
+ */
+function paintedOver(el: Element, root: Document | ShadowRoot, x: number, y: number, ours: Element | null | undefined, labelOf: (h: Element) => boolean): boolean {
+  if (typeof root.elementsFromPoint !== "function" || typeof CSSStyleSheet === "undefined") return true
+  const roots = openRoots()
+  if (roots.length >= MAX_ROOTS) return true
+  if (!probeSheet) {
+    probeSheet = new CSSStyleSheet()
+    probeSheet.replaceSync(PROBE_CSS)
+  }
+  const sheet = probeSheet
+  const undo: Array<() => void> = []
+  try {
+    for (const r of roots) {
+      const before = r.adoptedStyleSheets
+      r.adoptedStyleSheets = [...before, sheet]
+      undo.push(() => (r.adoptedStyleSheets = r.adoptedStyleSheets.filter((s) => s !== sheet)))
+      for (const e of Array.from(r.querySelectorAll<HTMLElement>('[inert], [style*="pointer-events" i], [style*="interactivity" i]'))) {
+        const inert = e.getAttribute("inert")
+        if (inert !== null) {
+          e.removeAttribute("inert")
+          undo.push(() => e.setAttribute("inert", inert))
+        }
+        for (const p of ["pointer-events", "interactivity"]) {
+          if (!e.style || e.style.getPropertyPriority(p) !== "important") continue
+          const value = e.style.getPropertyValue(p)
+          e.style.setProperty(p, "auto", "important")
+          undo.push(() => e.style.setProperty(p, value, "important"))
+        }
+      }
+    }
+    const skip = (h: Element) => h === ours || (!!ours && ours.contains(h)) || isOwnHost(h)
+    // `stop` is the field, in the list of what's at the point in its own
+    // root; null for the list inside a shadow host above it, of which only
+    // that root's elements count (the rest are in the outer list).
+    const above = (list: Element[], stop: Element | null, scope: Document | ShadowRoot): boolean => {
+      for (const h of list) {
+        if (h === stop) return false
+        if ((!stop && h.getRootNode() !== scope) || skip(h) || el.contains(h)) continue
+        // An ancestor of the field is listed above it only for a pseudo-element.
+        if (holds(h, el)) {
+          if (pseudoPaints(h)) return true
+          continue
+        }
+        if (labelOf(h)) {
+          if (opaqueLabel(h)) return true
+          continue
+        }
+        const inner = shadowRootOf(h)
+        if (inner && above(inner.elementsFromPoint(x, y), null, inner)) return true
+        if (paints(h, x, y)) return true
+      }
+      // The field itself never came up: fail closed.
+      return stop !== null
+    }
+    return above(root.elementsFromPoint(x, y), el, root)
+  } catch {
+    return true
+  } finally {
+    for (const f of undo.reverse()) f()
+  }
+}
+
+/** Whether `h` is `el` or an ancestor of it, across shadow roots. */
+function holds(h: Node, el: Node): boolean {
+  for (let n: Node | null = el; n; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) if (n === h) return true
+  return false
+}
+
+/** The field's own label may sit over it (a floating label), so long as it doesn't hide it: no opaque background. */
+function opaqueLabel(h: Element): boolean {
+  const s = getComputedStyle(h)
+  return alpha(s.backgroundColor) >= 0.1 || (s.backgroundImage || "none") !== "none" || (s.getPropertyValue("backdrop-filter") || "none") !== "none"
 }
 
 /**

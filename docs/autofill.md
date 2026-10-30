@@ -333,8 +333,28 @@ not running without sending hello, which would start the agent again.
   containment clips like overflow; and a scrolling or clipping box clips
   only what it holds (an absolutely positioned field escapes a box between
   it and its containing block, Intercom's sign-in; a fixed one every box up
-  to a transformed or contained one). The centre of what shows is
-  hit-tested too, and only the centre. Split one-time
+  to a transformed or contained one). A mask anywhere up the tree (any
+  `mask-image`, `-webkit-mask` or mask border) hides the field, and so
+  does any filter but `opacity()` and a blur of at most 1 px (a heavy
+  blur, `brightness(0)`, an SVG filter). The centre of what shows is
+  hit-tested too, and only the centre: what the user would click there
+  must be the field or its label, and nothing that lets clicks through may
+  paint over it. Hit tests skip `pointer-events: none` and `inert`
+  elements, so for that one synchronous check every element of the page
+  and its shadow roots is made to take part (a stylesheet adopted into
+  each root, inline `!important` pointer-events and `inert` lifted, all
+  put back before the check returns); each element then stacked above the
+  field's centre, and each one inside a shadow host there, must draw
+  nothing: no opaque background colour or image, backdrop filter, inset
+  shadow, border at that point, opaque `::before`/`::after`, graphic, form
+  control or SVG shape, unless it's faded out. The field's own label may
+  sit over it (a floating label) unless it has an opaque background. A
+  transparent outline that lets clicks through (Material's) doesn't hide
+  it. Text, outer shadows and outlines aren't counted. A page with more
+  shadow roots than are walked counts as covering. These checks run when
+  the fields are approved and again right before each write, after the
+  page's focus and keydown handlers have run, for a successor input too.
+  Split one-time
   code boxes fill only as one whole group within one form. One exception
   to "the field it was found as": some pages re-render their form on every
   input event, with new elements. When a single field (never a box of a

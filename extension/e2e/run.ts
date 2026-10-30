@@ -160,6 +160,24 @@ const HIDDEN: Record<string, string> = {
   offscreen: hiddenForm(`<div style="position:absolute;left:-2000px;width:300px">${passwordField}</div>`),
   // Visible until Deadbolt focuses it to write.
   "hide-on-focus": hiddenForm(`<div id="w">${passwordField}</div>`, `<script>document.getElementById("password").addEventListener("focus", () => document.getElementById("w").style.opacity = "0")</script>`),
+  opacity: hiddenForm(passwordField.replace("<input", '<input style="opacity:0"')),
+  // Painted transparent through a mask, or blurred past reading.
+  mask: hiddenForm(passwordField.replace("<input", '<input style="mask-image:linear-gradient(transparent,transparent)"')),
+  blur: hiddenForm(passwordField.replace("<input", '<input style="filter:blur(80px)"')),
+  "mask-on-focus": hiddenForm(passwordField, `<script>const p = document.getElementById("password"); p.addEventListener("focus", () => p.style.maskImage = "linear-gradient(transparent,transparent)")</script>`),
+  // An opaque sheet over it that lets clicks through, so hit tests find the field.
+  "click-through-cover": hiddenForm(coverField("background:#f4f4f5;pointer-events:none")),
+  // The same, made inert, in a closed shadow root, or drawn by a pseudo-element.
+  "inert-cover": hiddenForm(coverField("background:#f4f4f5", "inert")),
+  "shadow-cover": hiddenForm(`<div style="position:relative">${passwordField}<span id="c" style="position:absolute;inset:-2px;pointer-events:none"></span></div>`, `<script>document.getElementById("c").attachShadow({ mode: "closed" }).innerHTML = '<div style="position:absolute;inset:0;background:#f4f4f5;pointer-events:none"></div>'</script>`),
+  "pseudo-cover": hiddenForm(`<style>.pc { position: relative } .pc::after { content: ""; position: absolute; inset: -2px; background: #f4f4f5; pointer-events: none }</style><div class="pc">${passwordField}</div>`),
+  // Not hidden: a transparent outline over it that lets clicks through (Material's notched outline).
+  outline: hiddenForm(coverField("border:1px solid #888;border-radius:4px;pointer-events:none")),
+}
+
+/** The password field with a box over it, 2 px bigger each way. */
+function coverField(style: string, attrs = "") {
+  return `<div style="position:relative">${passwordField}<div ${attrs} style="position:absolute;inset:-2px;z-index:1;${style}"></div></div>`
 }
 
 // Ways a page can try to get a click into a menu the user can't see properly.
@@ -2163,7 +2181,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible" || name === "ring-room" || name === "escaped-row") check(password === "correct horse", `a visible password field fills (${name})`)
+      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 
