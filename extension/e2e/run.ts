@@ -135,6 +135,12 @@ const HIDDEN: Record<string, string> = {
   "shadow-host": hiddenForm(`<div id="h" style="opacity:0"></div>`, `<script>document.getElementById("h").attachShadow({ mode: "open" }).innerHTML = '${passwordField}'</script>`),
   "closed-slot": hiddenForm(`<div id="h">${passwordField}</div>`, `<script>document.getElementById("h").attachShadow({ mode: "closed" }).innerHTML = '<div style="opacity:0.02"><slot></slot></div>'</script>`),
   clipped: hiddenForm(`<div style="clip-path:inset(50%)">${passwordField}</div>`),
+  // Not hidden: a clip-path that only leaves room for a focus ring (Stripe's sign-in).
+  "ring-room": hiddenForm(`<div style="clip-path:inset(-8px round 6px)">${passwordField}</div>`),
+  // Not hidden: a field positioned past a 0 px tall scrolling box, which doesn't hold it (Intercom's sign-in).
+  "escaped-row": hiddenForm(`<div style="position:relative;height:40px"><div style="height:0;overflow:auto">${passwordField.replace("<input", '<input style="position:absolute;top:0;left:0;width:300px;height:38px"')}</div></div>`),
+  // Hidden: the same, but the 0 px box holds it.
+  "zero-height-held": hiddenForm(`<div style="position:relative;height:40px"><div style="position:relative;height:0;overflow:auto">${passwordField.replace("<input", '<input style="position:absolute;top:0;left:0;width:300px;height:38px"')}</div></div>`),
   "zero-height": hiddenForm(`<div style="height:0;overflow:hidden">${passwordField}</div>`),
   offscreen: hiddenForm(`<div style="position:absolute;left:-2000px;width:300px">${passwordField}</div>`),
   // Visible until Deadbolt focuses it to write.
@@ -2016,7 +2022,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible") check(password === "correct horse", "a visible password field fills")
+      if (name === "visible" || name === "ring-room" || name === "escaped-row") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 

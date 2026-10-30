@@ -238,7 +238,13 @@ not running without sending hello, which would start the agent again.
   each digit of a split code: it must still be in the form and under the
   parent it was found in, enabled, editable, and visible through every
   ancestor up to the top of the page, across shadow roots (display,
-  visibility, opacity, clip, size, on screen, not covered). Split one-time
+  visibility, opacity, clip, size, on screen, not covered). Clips follow
+  CSS: a clip-path inset by zero or less on every side cuts nothing (design
+  systems leave a focus ring room that way; Stripe's sign-in), and a
+  scrolling or clipping box clips only what it holds (an absolutely
+  positioned field escapes a box between it and its containing block;
+  Intercom's sign-in), so neither hides a field. The middle of what shows
+  is hit-tested too. Split one-time
   code boxes fill only as one whole group within one form.
 - **Sign-in sessions.** Many sign-ins take more than one step: the
   username on its own, then the password, sometimes a code. Picking a login
