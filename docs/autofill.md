@@ -369,6 +369,10 @@ not running without sending hello, which would start the agent again.
   hand, and the field opens no menu, unless they press ↓ or click it again.
   So a failed sign-in that comes back with an unknown username doesn't
   offer the whole list on its password field.
+- **Passwords masked with CSS.** A text box the page masks with
+  `-webkit-text-security` (to keep the browser's own password handling
+  away) is a password box like any other: it gets the password, and the
+  learning log keeps no shape of what's typed in it.
 - **A provider's own password step.** Google's password page already names
   the account it's for (it remembered it, so the user typed nothing): a chip
   carrying `data-profile-identifier`, and a hidden `identifier` box in the
