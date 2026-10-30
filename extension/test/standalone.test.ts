@@ -560,6 +560,31 @@ describe("wrong passphrases", () => {
     expect(await again.device({ type: "device-unlock", passphrase: "wrong" })).toMatchObject({ ok: false, code: "wrong_passphrase" })
   })
 
+  test("sent together, they back off after three as one after another do", async () => {
+    setSystemTime(new Date("2026-10-29T12:00:00Z"))
+    vault = "locked"
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const unlocks = () => requests().filter((b) => b.type === "device-unlock").length
+    const replies = await Promise.all(Array.from({ length: 8 }, () => backend.device({ type: "device-unlock", passphrase: "wrong" })))
+    const codes = replies.map((r) => (r.ok ? "ok" : r.code))
+    expect(codes.slice(0, 3)).toEqual(["wrong_passphrase", "wrong_passphrase", "wrong_passphrase"])
+    expect(codes.slice(3)).toEqual(Array(5).fill("backoff"))
+    expect(unlocks()).toBe(3)
+    // Counted and kept before the next check could start.
+    expect(fake.session["deadbolt.passphraseTries"]).toMatchObject({ fails: 3 })
+  })
+
+  test("so do Touch ID's checks sent together", async () => {
+    setSystemTime(new Date("2026-10-29T12:00:00Z"))
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const checks = () => requests().filter((b) => b.type === "device-biometric-check").length
+    const replies = await Promise.all(Array.from({ length: 4 }, () => backend.device({ type: "device-biometric-check", passphrase: "wrong" })))
+    expect(replies.map((r) => (r.ok ? "ok" : r.code))).toEqual(["wrong_passphrase", "wrong_passphrase", "wrong_passphrase", "backoff"])
+    expect(checks()).toBe(3)
+  })
+
   test("Strict's passphrase for a password counts too", async () => {
     fake.local["deadbolt.lockPreset"] = "strict"
     const backend = new StandaloneBackend()
@@ -696,6 +721,20 @@ describe("a fill waiting on the passphrase", () => {
     const again = await backend.device({ type: "device-reauth-confirm", id: r!.id, passphrase: "right" })
     expect(!again.ok && again.code).toBe("expired")
     expect(requests().filter((b) => b.type === "fill-form")).toHaveLength(2)
+  })
+
+  test("wrong passphrases sent for it together back off after three", async () => {
+    setSystemTime(new Date("2026-10-29T12:00:00Z"))
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    void backend.reauth(body, ask, new AbortController().signal).catch(() => {})
+    await settle()
+    const r = await waiting(backend)
+    const replies = await Promise.all(Array.from({ length: 4 }, () => backend.device({ type: "device-reauth-confirm", id: r!.id, passphrase: "wrong" })))
+    expect(replies.map((x) => (x.ok ? "ok" : x.code))).toEqual(["wrong_passphrase", "wrong_passphrase", "wrong_passphrase", "backoff"])
+    expect(requests().filter((b) => b.type === "fill-form")).toHaveLength(3)
+    // Still waiting for the right one.
+    expect(await waiting(backend)).toEqual(r)
   })
 
   /** Chrome's windows and Deadbolt's open pages, as this test has them; returns what the background did to tabs and windows, in order. */

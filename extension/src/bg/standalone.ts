@@ -60,6 +60,9 @@ const FREE_TRIES = 3
 const MAX_WAIT_MS = 60_000
 /** How long to refuse after `fails` wrong passphrases in a row. */
 export const backoff = (fails: number) => (fails < FREE_TRIES ? 0 : Math.min(MAX_WAIT_MS, 1000 * 2 ** (fails - FREE_TRIES)))
+/** Passphrase checks running or waiting their turn at once (see oneCheck); more are refused. */
+const MAX_CHECKS = 4
+const tooMany = (wait: number) => `Too many wrong passphrases. Try again in ${Math.ceil(wait / 1000)} s.`
 
 /**
  * What this device does today, as the vault's hello names it. Anything else
@@ -195,6 +198,9 @@ export class StandaloneBackend implements VaultBackend {
   private lastSync = 0
   preset: LockPreset = DEFAULT_PRESET
   private tries = { fails: 0, until: 0 }
+  /** The passphrase check running, if any, settled once it's counted; and how many are running or waiting (see oneCheck). */
+  private checkTurn: Promise<void> = Promise.resolve()
+  private checksWaiting = 0
   private copied: Copied | null = null
   /** At most one fill waits on the passphrase; a newer one replaces it. */
   private pending: Pending | null = null
@@ -406,7 +412,7 @@ export class StandaloneBackend implements VaultBackend {
     if (checks) {
       await this.loaded
       const wait = this.tries.until - Date.now()
-      if (wait > 0) return fail(`Too many wrong passphrases. Try again in ${Math.ceil(wait / 1000)} s.`, "backoff")
+      if (wait > 0) return fail(tooMany(wait), "backoff")
     }
     if (command.type === "device-reauth-confirm") return this.confirm(command.id, command.prf ? { prf: command.prf } : { passphrase: command.passphrase! }, started)
     if (command.type === "device-status") {
@@ -431,7 +437,17 @@ export class StandaloneBackend implements VaultBackend {
     let raw: Record<string, unknown>
     const operation = this.epoch
     try {
-      raw = await this.raw(body, SLOW_MS[command.type] ?? TIMEOUT_MS)
+      const run = () => this.raw(body, SLOW_MS[command.type] ?? TIMEOUT_MS)
+      if (checks) {
+        // Counted before the next check may start, whatever happened meanwhile.
+        const checked = await this.oneCheck(async () => {
+          const r = await run()
+          await this.tried(r.type === "error" && r.code === "wrong_passphrase" ? "wrong" : r.type === "error" ? "other" : "right")
+          return r
+        })
+        if (!checked.ran) return fail(checked.message, "backoff")
+        raw = checked.value
+      } else raw = await run()
     } catch (err) {
       return fail((err as Error).message)
     }
@@ -442,7 +458,6 @@ export class StandaloneBackend implements VaultBackend {
       return fail("Deadbolt locked or its lock policy changed. Try again.", "locked")
     }
     const ms = Date.now() - started
-    if (checks) await this.tried(raw.type === "error" && raw.code === "wrong_passphrase" ? "wrong" : raw.type === "error" ? "other" : "right")
     if (raw.type === "error") {
       await this.hello()
       return fail(typeof raw.message === "string" && raw.message ? raw.message : "Deadbolt couldn't do that.", typeof raw.code === "string" ? raw.code : undefined)
@@ -653,11 +668,18 @@ export class StandaloneBackend implements VaultBackend {
   private async confirmAfter(p: Pending, passphrase: string, started: number): Promise<DeviceReply> {
     if (this.pending !== p) return { ok: false, message: EXPIRED, code: "expired", status: this.status }
     const wait = this.tries.until - Date.now()
-    if (wait > 0) return { ok: false, message: `Too many wrong passphrases. Try again in ${Math.ceil(wait / 1000)} s.`, code: "backoff", status: this.status }
+    if (wait > 0) return { ok: false, message: tooMany(wait), code: "backoff", status: this.status }
     return this.confirmOnce(p, { passphrase }, started)
   }
 
+  /** Answers the waiting fill with `proof`; a passphrase is checked in its turn (see oneCheck). */
   private async confirmOnce(p: Pending, proof: UnlockProof, started: number): Promise<DeviceReply> {
+    if (typeof proof.passphrase !== "string") return this.confirmChecked(p, proof, started)
+    const checked = await this.oneCheck(() => this.confirmChecked(p, proof, started))
+    return checked.ran ? checked.value : { ok: false, message: checked.message, code: "backoff", status: this.status }
+  }
+
+  private async confirmChecked(p: Pending, proof: UnlockProof, started: number): Promise<DeviceReply> {
     const fail = (message: string, code?: string): DeviceReply => ({ ok: false, message, status: this.status, ...(code ? { code } : {}) })
     let raw: Record<string, unknown>
     // The KDF may outlast the time left to answer: the fill waits on it, not the clock.
@@ -695,6 +717,31 @@ export class StandaloneBackend implements VaultBackend {
     }
     p.settle({ reply: reply as ReauthReply })
     return { ok: true, reply: { type: "device-reauth-confirm", ok: true }, ms: Date.now() - started, status: this.status }
+  }
+
+  /**
+   * Runs one passphrase check at a time, in the order they came: each waits
+   * for the one before it to finish and be counted (`check` calls tried),
+   * then looks at the backoff again, so checks sent together can't all start
+   * before the first wrong answer sets it. At most MAX_CHECKS run or wait at
+   * once; more are refused, as is one that finds a backoff in its turn.
+   */
+  private async oneCheck<T>(check: () => Promise<T>): Promise<{ ran: true; value: T } | { ran: false; message: string }> {
+    if (this.checksWaiting >= MAX_CHECKS) return { ran: false, message: "Too many passphrases at once. Try again in a moment." }
+    this.checksWaiting++
+    const before = this.checkTurn
+    let done!: () => void
+    this.checkTurn = new Promise((resolve) => (done = resolve))
+    try {
+      await before
+      await this.loaded
+      const wait = this.tries.until - Date.now()
+      if (wait > 0) return { ran: false, message: tooMany(wait) }
+      return { ran: true, value: await check() }
+    } finally {
+      this.checksWaiting--
+      done()
+    }
   }
 
   /** Counts a passphrase check: wrong ones back off, a right one starts over, anything else leaves it. */
