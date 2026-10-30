@@ -189,6 +189,8 @@ let placementChangedAt = -Infinity
 let placementAncestors: Node[] = []
 /** Paint-time evidence (see watchPaint): the host was last drawn where it was written. */
 let paintObserver: IntersectionObserver | null = null
+/** The host and the written rect the paint observer was made for. */
+let paintFor: { box: HTMLElement; at: Rect } | null = null
 let paintKey = ""
 let paintSeen = true
 /** Whether the scale observer has given a verdict yet: a later return to "visible" is a move back. */
@@ -445,18 +447,19 @@ function placementSafe(): boolean {
 
 /**
  * Where the host was painted, from the browser's own intersection pass, which
- * runs after every script in the frame: an observer whose root is the written
- * rect ± 2 px. Whatever draws the host elsewhere (a late restyle, an
- * ancestor's transform, a way not listed here) leaves part of it outside,
- * and a pick waits until it's back and has sat still again. Remade whenever
- * the written rect or the viewport changes, so following a scrolled or
- * reflowed field isn't taken for a displacement.
+ * runs after every script in the frame. The observer's root is the written
+ * rect ± 2 px, so the host leaving it or coming back triggers an entry; each
+ * entry is then judged by the host's own rect in it against the written
+ * rect. Whatever draws the host elsewhere (a late restyle, an ancestor's
+ * transform, a way not listed here) fails that, and a pick waits until it's
+ * back and has sat still again. Remade whenever the written rect or the
+ * viewport changes, so following a scrolled or reflowed field isn't taken
+ * for a displacement; a viewport the page changed after our frame (a
+ * scrollbar) only moves the trigger, not the judgement.
  */
 function watchPaint() {
   if (!host || !written || held || closing) {
-    paintObserver?.disconnect()
-    paintObserver = null
-    paintKey = ""
+    stopPaint()
     return
   }
   const view = document.scrollingElement ?? document.documentElement
@@ -465,28 +468,42 @@ function watchPaint() {
   const w = written
   const key = [w.left, w.top, w.width, w.height, vw, vh].map((n) => Math.round(n * 4)).join()
   if (key === paintKey) return
+  stopPaint()
   paintKey = key
-  paintObserver?.disconnect()
   const box = host
   const root = { left: w.left - 2, top: w.top - 2, right: w.left + w.width + 2, bottom: w.top + w.height + 2 }
   const margin = [root.top, vw - root.right, vh - root.bottom, root.left].map((n) => `${-n}px`).join(" ")
-  paintObserver = new IntersectionObserver(
-    (entries, observer) => {
-      const e = entries.at(-1)
-      if (observer !== paintObserver || host !== box || !e || held || closing) return
-      const b = e.rootBounds
-      // Not the viewport this was worked out for (a scrollbar came or went):
-      // no evidence either way; the next frame remakes it.
-      if (!b || (["left", "top", "right", "bottom"] as const).some((k) => Math.abs(b[k] - root[k]) > 1)) return void (paintKey = "")
-      const seen = e.intersectionRatio >= 0.999
-      if (seen === paintSeen) return
-      paintSeen = seen
-      // Drawn elsewhere, or back in place: either way it moved, and waits again.
-      placementChanged()
-    },
-    { root: document, rootMargin: margin, threshold: 1 },
-  )
-  paintObserver.observe(box)
+  const observer = new IntersectionObserver((entries) => observer === paintObserver && judgePaint(entries), { root: document, rootMargin: margin, threshold: 1 })
+  paintObserver = observer
+  paintFor = { box, at: { ...w } }
+  observer.observe(box)
+}
+
+/** Judges what the old observer still holds, then drops it. */
+function stopPaint() {
+  if (paintObserver) judgePaint(paintObserver.takeRecords())
+  paintObserver?.disconnect()
+  paintObserver = null
+  paintFor = null
+  paintKey = ""
+}
+
+/**
+ * Every entry is evidence, not just the last: a page can hold its
+ * notifications back until a later frame has put the host back, so one
+ * delivery may carry a displaced paint and then a good one. Any entry drawn
+ * elsewhere restarts the wait; the last one says whether it's in place now.
+ */
+function judgePaint(entries: IntersectionObserverEntry[]) {
+  if (!entries.length || !paintFor || host !== paintFor.box || held || closing) return
+  const at = paintFor.at
+  const near = (a: number, b: number) => Math.abs(a - b) <= 2
+  const verdicts = entries.map(({ boundingClientRect: r }) => near(r.left, at.left) && near(r.top, at.top) && near(r.width, at.width) && near(r.height, at.height))
+  const seen = verdicts[verdicts.length - 1]
+  const moved = verdicts.includes(false) || seen !== paintSeen
+  paintSeen = seen
+  // Drawn elsewhere, or back in place: either way it moved, and waits again.
+  if (moved) placementChanged()
 }
 
 /**
@@ -851,6 +868,7 @@ export function closeMenu(refocus = false, dismissed = false) {
   placementChangedAt = -Infinity
   paintObserver?.disconnect()
   paintObserver = null
+  paintFor = null
   paintKey = ""
   paintSeen = true
   lastToggle = null
