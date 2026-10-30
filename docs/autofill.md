@@ -199,7 +199,12 @@ not running without sending hello, which would start the agent again.
   so it has nothing to time a cover or a fade by, and a field that redraws
   on blur (a floating label dropping back, an outlined border thinning: the
   real-site sweep found this on Google, Microsoft, Reddit, Chase and others)
-  can't move the menu under the press and cancel the pick.
+  can't move the menu under the press and cancel the pick. So a habit of
+  clicking a row and then pressing ⏎ sends that ⏎ to the page's field while
+  the pill says "Filling…" (it can submit the form there). A press that
+  passed its checks but picked nothing (a right click, a press dragged off
+  its row) leaves no ⏎ allowed: focus that comes in later without the
+  user's ↓, by Tab for one, starts with none.
 - **Keyboard picks.** ⏎ picks only after the user's own ↓ in the field
   moved focus into the menu, or, with focus already there, a real press
   inside the menu passed the same visibility checks as a pick. A press the

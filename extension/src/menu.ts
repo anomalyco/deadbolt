@@ -676,10 +676,15 @@ function settle(label: HTMLElement, text: string, ok: boolean) {
 
 addEventListener("pointerdown", (e) => {
   if (!e.isTrusted) return
-  pressedAt = e.timeStamp
-  // The keyboard may pick after a press only if the press itself would have.
+  // Any press ends what the keyboard was allowed; only the main button's can earn it back.
   const press = entry.pressed()
-  if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && entry.confirmed(press))
+  if ((e as PointerEvent).button !== 0) return
+  pressedAt = e.timeStamp
+  // The keyboard may pick after a press only if the press itself would have,
+  // and only with focus still in the menu: a press takes none (see below), so
+  // one that ended in no pick (dragged off its row, on the caption) leaves
+  // nothing for a later Tab in to pick with.
+  if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && document.hasFocus() && entry.confirmed(press))
 }, true)
 // A press leaves focus where it was, in the page's field. Taking it would
 // tell the page the moment of the press (its field blurs), and many fields

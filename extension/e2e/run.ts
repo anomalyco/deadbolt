@@ -2380,6 +2380,37 @@ async function coveredMenu() {
         )
       }
     }
+    // A press that passed its checks but ended in no pick (a right click,
+    // a press dragged off its row) leaves no focus in the menu: a later Tab
+    // into it doesn't let ⏎ pick.
+    for (const how of ["right-click", "drag-out"]) {
+      await page.goto(`${site}/login?next=home`)
+      const menu = await menuOn(page)
+      if (!menu) {
+        await diagnose(run, page, `press then Tab: ${how}`)
+        continue
+      }
+      // Everything after the field leaves the tab order, so Tab goes to the menu.
+      await page.evaluate(() => document.querySelectorAll("input:not(#email), button").forEach((el) => el.setAttribute("tabindex", "-1")))
+      const before = await fillCount(run)
+      const row = menu.locator("button.row").first()
+      if (how === "right-click") await row.click({ button: "right" })
+      else {
+        const b = (await (await menu.frameElement()).boundingBox())!
+        await page.mouse.move(b.x + b.width / 2, b.y + 20)
+        await page.mouse.down()
+        await page.mouse.move(b.x + b.width / 2, b.y - 150, { steps: 4 })
+        await page.mouse.up()
+      }
+      // Past the press's 400 ms check.
+      await Bun.sleep(900)
+      await page.focus("#email")
+      await page.keyboard.press("Tab")
+      const inMenu = await menu.evaluate(() => document.hasFocus()).catch(() => false)
+      await page.keyboard.press("Enter")
+      await Bun.sleep(1500)
+      check(inMenu && (await page.inputValue("#password")) === "" && (await fillCount(run)) === before, `after a ${how} in the menu, Tab then ⏎ fills nothing (${inMenu ? "" : "Tab didn't reach the menu; "}${await footText(menu)})`)
+    }
     for (const name of Object.keys(BEATEN)) {
       await page.goto(`${site}/beaten/${name}`)
       // From the last field, so a sheet over the menu covers no field.
