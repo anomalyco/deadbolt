@@ -1,5 +1,6 @@
 //! End-to-end tests: each device is a separate set of directories with its
-//! own agent process, networking over localhost only.
+//! own agent process, networking over localhost only except the opt-in ignored
+//! standalone browser sync test, which requires public relays.
 
 // The agent reads the test switches these set (`DEADBOLT_NET`,
 // `DEADBOLT_KDF`, `DEADBOLT_TEST_*`) only in a debug build.
@@ -14,6 +15,86 @@ use std::time::{Duration, Instant};
 
 const BIN: &str = env!("CARGO_BIN_EXE_deadbolt");
 const PASSPHRASE: &str = "correct horse";
+
+/// The browser has no history API. Reopen its actual encrypted OPFS snapshots
+/// in shared Rust rather than add a privileged test command to the extension.
+/// Run with DEADBOLT_STANDALONE_DIST pointing to a standalone e2e build:
+/// cargo test -p deadbolt-cli --test cli standalone_sync_retains_conflict_history -- --ignored --nocapture
+#[test]
+#[ignore = "requires Bun, headless Chromium, public relays and DEADBOLT_STANDALONE_DIST"]
+fn standalone_sync_retains_conflict_history() {
+    use deadbolt_core::{Change, Entry, Vault, VersionStatus};
+    use std::collections::BTreeMap;
+
+    let dist = std::env::var_os("DEADBOLT_STANDALONE_DIST").unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let snapshots = directory.path().join("snapshots");
+    let mut run = Command::new("bun")
+        .current_dir(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../extension"))
+        .args(["e2e/sync.ts", "--deadbolt", BIN, "--dist"])
+        .arg(dist)
+        .arg("--snapshots")
+        .arg(&snapshots)
+        .stdin(Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(wait(&mut run, Duration::from_secs(10 * 60)).success());
+
+    let mut previous = None;
+    for (name, passphrase) in [
+        ("a", "synthetic browser sync fixture"),
+        ("b", "synthetic browser sync fixture"),
+        ("cli", "synthetic cli sync fixture"),
+    ] {
+        let store = deadbolt_store::unlock(&snapshots.join(name), passphrase.as_bytes()).unwrap();
+        let entries: Vec<_> = store
+            .iter_all()
+            .unwrap()
+            .map(|bytes| Entry::decode(&bytes.unwrap()).unwrap())
+            .collect();
+        let vault = Vault::load(entries).unwrap();
+        let items = vault.items();
+        let item = items
+            .iter()
+            .find(|item| item.name.as_deref() == Some("Shared"))
+            .unwrap();
+        let history: BTreeMap<_, _> = vault
+            .history(&item.id)
+            .into_iter()
+            .filter_map(|version| match version.change {
+                Change::Set { field, value } if field == "password" => {
+                    Some((value.value.clone(), (version.status, version.author)))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(history.len(), 3, "{name}: original and both edits survive");
+        assert_eq!(history["synthetic-original"].0, VersionStatus::Superseded);
+        let winner = &item.fields["password"].value;
+        assert!(["synthetic-concurrent-a", "synthetic-concurrent-b"].contains(&winner.as_str()));
+        for value in ["synthetic-concurrent-a", "synthetic-concurrent-b"] {
+            assert_eq!(
+                history[value].0,
+                if value == winner {
+                    VersionStatus::Current
+                } else {
+                    VersionStatus::Conflicted
+                }
+            );
+        }
+        assert_ne!(
+            history["synthetic-concurrent-a"].1,
+            history["synthetic-concurrent-b"].1
+        );
+        if let Some(previous) = &previous {
+            assert_eq!(
+                &history, previous,
+                "{name}: replicas retain identical history"
+            );
+        }
+        previous = Some(history);
+    }
+}
 
 struct Device {
     dir: tempfile::TempDir,
