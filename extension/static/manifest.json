@@ -47,8 +47,9 @@
         "menu.css",
         "menu.js",
         "theme.css",
-        "fonts/Geist-Variable.woff2",
-        "fonts/GeistMono-Variable.woff2"
+        "fonts/Inter-Variable.woff2",
+        "fonts/IBMPlexMono-Regular.woff2",
+        "fonts/IBMPlexMono-Medium.woff2"
       ],
       "matches": ["http://*/*", "https://*/*"],
       "use_dynamic_url": true
