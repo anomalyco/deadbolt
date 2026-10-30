@@ -596,8 +596,9 @@ stays away and a sign-in session's later steps fill nothing.
   what the page controls: input names, ids, autocomplete and inputmode, the
   form's action host, iframe hosts and paths, the frame's path and query
   parameter names) has email addresses, runs of four or more digits and the
-  values typed into the frame's non-password fields replaced (`<email>`,
-  `<n>`, `<typed>`), since a step 2 often names the account.
+  values typed into the frame's fields replaced (`<email>`, `<n>`,
+  `<typed>`), since a step 2 often names the account and a page can echo a
+  password into a label or the title.
 - **The log** is `~/.local/state/deadbolt/learn/<session>.jsonl` (beside the
   agent's log), one `start` line, then `step` lines, then an `end` line with
   its reason. The native host writes it (see `learn` under Host messages);
