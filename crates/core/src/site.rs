@@ -37,6 +37,38 @@ impl Site {
         Ok(Self { domain })
     }
 
+    /// The site and canonical origin of a bare domain identifier (such as
+    /// macOS `ASCredentialServiceIdentifierTypeDomain`), if Deadbolt fills
+    /// logins there. Returns `(site, origin_for_ranking)`.
+    pub fn from_domain(domain: &str) -> Result<(Self, String), &'static str> {
+        let raw = domain.trim();
+        if raw.is_empty()
+            || raw.chars().any(|c| {
+                c.is_whitespace() || c.is_control() || matches!(c, '/' | '?' | '#' | '@' | ':')
+            })
+        {
+            return Err("Not a valid domain");
+        }
+        let parsed = Url::parse(&format!("https://{raw}")).map_err(|_| "Not a valid domain")?;
+        let host = host_of(&parsed).ok_or("Not a valid domain")?;
+        let bare = host.strip_suffix('.').unwrap_or(&host);
+        if is_dotted_quad(bare) {
+            return Ok((
+                Self {
+                    domain: bare.to_string(),
+                },
+                format!("https://{bare}"),
+            ));
+        }
+        let reg = registrable_domain(bare);
+        if !valid_domain(&reg) || !valid_domain(bare) {
+            return Err("The domain is not a site of its own");
+        }
+        let local = bare == "localhost" || bare.ends_with(".localhost") || bare.ends_with(".test");
+        let scheme = if local { "http" } else { "https" };
+        Ok((Self { domain: reg }, format!("{scheme}://{bare}")))
+    }
+
     /// Whether any of `urls` belongs to this site.
     pub fn matches<'a>(&self, urls: impl IntoIterator<Item = &'a str>) -> bool {
         urls.into_iter().any(|url| self.matches_url(url))
@@ -179,6 +211,45 @@ fn valid_domain(domain: &str) -> bool {
     }
     let probe = format!("x.{domain}");
     registrable_domain(&probe) != probe
+}
+
+/// Normalized domain identifiers for `ASCredentialIdentityStore` from a
+/// login's saved URLs, in order without duplicates. Public suffixes, single
+/// labels other than `localhost`, IPv6 addresses and malformed URLs are
+/// skipped.
+pub fn login_domains<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {
+    let mut out = Vec::new();
+    for url in urls {
+        let Some(host) = url_host(url) else {
+            continue;
+        };
+        let bare = host.strip_suffix('.').unwrap_or(&host);
+        let ok =
+            is_dotted_quad(bare) || (valid_domain(&registrable_domain(bare)) && valid_domain(bare));
+        if ok && !out.iter().any(|d| d == bare) {
+            out.push(bare.to_string());
+        }
+    }
+    out
+}
+
+/// Validates a standalone relying party id (such as macOS
+/// `ASPasskeyCredentialRequestParameters.relyingPartyIdentifier`, where the
+/// OS already checked the requesting app or frame origin): lowercase domain,
+/// never an IP address or a public suffix.
+pub fn valid_rp_id(rp_id: &str) -> Result<String, &'static str> {
+    if rp_id.is_empty() {
+        return Err("the relying party id is empty");
+    }
+    let rp_id = rp_id.to_ascii_lowercase();
+    if is_dotted_quad(&rp_id) || rp_id.contains(':') {
+        return Err("an IP address has no relying party id");
+    }
+    let site = registrable_domain(&rp_id);
+    if !valid_domain(&site) || !valid_domain(&rp_id) {
+        return Err("not a valid relying party id");
+    }
+    Ok(rp_id)
 }
 
 /// The relying party id a page at `origin` may use for a passkey: `rp_id`
@@ -583,5 +654,78 @@ mod tests {
                 "{origin} {rp:?} must be refused"
             );
         }
+    }
+
+    #[test]
+    fn bare_domains_and_relying_party_ids_validate_strictly() {
+        let (site, origin) = Site::from_domain("M.Example.COM.").unwrap();
+        assert_eq!(
+            (site.domain.as_str(), origin.as_str()),
+            ("example.com", "https://m.example.com")
+        );
+        let (de, de_origin) = Site::from_domain("bücher.de").unwrap();
+        assert_eq!(
+            (de.domain.as_str(), de_origin.as_str()),
+            ("xn--bcher-kva.de", "https://xn--bcher-kva.de")
+        );
+        let (local, local_origin) = Site::from_domain("localhost").unwrap();
+        assert_eq!(
+            (local.domain.as_str(), local_origin.as_str()),
+            ("localhost", "http://localhost")
+        );
+        let (ip, ip_origin) = Site::from_domain("192.168.1.10").unwrap();
+        assert_eq!(
+            (ip.domain.as_str(), ip_origin.as_str()),
+            ("192.168.1.10", "https://192.168.1.10")
+        );
+
+        for bad in [
+            "",
+            "github.io",
+            "co.uk",
+            "com",
+            "intranet",
+            "https://github.com",
+            "github.com:443",
+            "github.com/login",
+            "user@github.com",
+            ".github.com",
+            "exa mple.com",
+        ] {
+            assert!(Site::from_domain(bad).is_err(), "{bad:?} must fail");
+        }
+
+        assert_eq!(valid_rp_id("GitHub.com").as_deref(), Ok("github.com"));
+        assert_eq!(
+            valid_rp_id("alice.github.io").as_deref(),
+            Ok("alice.github.io")
+        );
+        assert_eq!(valid_rp_id("localhost").as_deref(), Ok("localhost"));
+        for bad in [
+            "",
+            "github.io",
+            "co.uk",
+            "192.168.1.10",
+            "::1",
+            "github.com.",
+            "https://github.com",
+            "github.com:443",
+            "gíthub.com",
+        ] {
+            assert!(valid_rp_id(bad).is_err(), "{bad:?} must fail");
+        }
+
+        assert_eq!(
+            login_domains([
+                "https://Gist.GitHub.com/login",
+                "github.com",
+                "https://gist.github.com:8443/other",
+                "https://bücher.de/shop",
+                "https://github.io",
+                "http://[::1]:8080",
+                "not a url",
+            ]),
+            ["gist.github.com", "github.com", "xn--bcher-kva.de"]
+        );
     }
 }

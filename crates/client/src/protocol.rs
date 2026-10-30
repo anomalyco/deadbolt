@@ -53,10 +53,13 @@ pub use caller::{
 };
 pub use reference::{Reference, SCHEME};
 
-pub const PROTOCOL_VERSION: u32 = 20;
+pub const PROTOCOL_VERSION: u32 = 21;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
+
+/// The longest line the agent reads on the macOS AutoFill App Group socket.
+pub const MAX_AUTOFILL_LINE: usize = 64 * 1024;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Request {
@@ -530,6 +533,61 @@ pub enum Command {
     /// Every secret grant, expired ones too; replies `secret-grants`.
     /// `agent-grant-remove` removes them.
     SecretGrantList,
+    /// macOS AutoFill (`docs/macos-autofill.md`): lock and Touch ID status
+    /// plus `identities_hash` (when unlocked) so the extension knows whether
+    /// `ASCredentialIdentityStore` needs a sync. Doesn't count as use for the
+    /// idle lock.
+    AutofillStatus,
+    /// macOS AutoFill: every login, passkey and one-time-code identity for
+    /// `ASCredentialIdentityStore`, without secrets, and `identities_hash`.
+    /// Doesn't count as use for the idle lock.
+    AutofillIdentities,
+    /// macOS AutoFill: the logins (and passkeys when `rp_id` is set) a picker
+    /// sheet may show for `services` (most specific first; empty for an
+    /// unassociated native app). Doesn't count as use for the idle lock.
+    AutofillList {
+        services: Vec<AutofillService>,
+        #[serde(default)]
+        rp_id: Option<String>,
+        #[serde(default)]
+        allowed_credentials: Vec<String>,
+        #[serde(default)]
+        for_otp: bool,
+    },
+    /// macOS AutoFill: the values `want` names of `login` for `service`
+    /// (`None` only when the user picked manually for an unassociated app).
+    /// With `interactive` false (`provideCredentialWithoutUserInteraction`),
+    /// never raises Touch ID and fails `locked` or `interaction-required`
+    /// when user interaction is needed.
+    AutofillFill {
+        service: Option<AutofillService>,
+        login: LoginRef,
+        want: Vec<Fill>,
+        interactive: bool,
+    },
+    /// macOS AutoFill: signs the 32-byte `client_data_hash` (base64url) with
+    /// `passkey` for `rp_id`. With `interactive` true while locked and Touch
+    /// ID ready, one Touch ID tap both unlocks the store and sets `UV = 1`.
+    AutofillPasskeyGet {
+        rp_id: String,
+        passkey: LoginRef,
+        client_data_hash: String,
+        verify: Verify,
+        interactive: bool,
+    },
+    /// macOS AutoFill: registers an ES256 passkey in the default vault for
+    /// `rp_id` with the 32-byte `client_data_hash` (base64url).
+    AutofillPasskeyCreate {
+        rp_id: String,
+        client_data_hash: String,
+        user_id: String,
+        user_name: String,
+        #[serde(default)]
+        user_display_name: String,
+        exclude: Vec<String>,
+        verify: Verify,
+        interactive: bool,
+    },
 }
 
 impl Command {
@@ -545,6 +603,58 @@ impl Command {
             _ => false,
         }
     }
+}
+
+/// How macOS `AuthenticationServices` names the service asking for a fill
+/// (`ASCredentialServiceIdentifier`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutofillService {
+    pub identifier: String,
+    pub kind: AutofillServiceKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AutofillServiceKind {
+    Domain,
+    Url,
+    /// `ASCredentialServiceIdentifierTypeApp` (macOS 26.2+): an app bundle id
+    /// with no web domain of its own.
+    App,
+}
+
+/// One `ASPasswordCredentialIdentity` entry for `ASCredentialIdentityStore`.
+/// Never carries a password or vault/item title.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasswordIdentity {
+    pub domain: String,
+    pub username: String,
+    pub record_id: String,
+    pub rank: i64,
+}
+
+/// One `ASPasskeyCredentialIdentity` entry for `ASCredentialIdentityStore`.
+/// Never carries the private key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PasskeyIdentity {
+    pub rp_id: String,
+    pub username: String,
+    /// Base64url.
+    pub credential_id: String,
+    /// Base64url.
+    pub user_handle: String,
+    pub record_id: String,
+    pub rank: i64,
+}
+
+/// One `ASOneTimeCodeCredentialIdentity` entry (macOS 15+) for
+/// `ASCredentialIdentityStore`. Never carries the OTP seed or code.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OneTimeCodeIdentity {
+    pub domain: String,
+    pub label: String,
+    pub record_id: String,
+    pub rank: i64,
 }
 
 /// What resolved secrets are for: a command's environment (`deadbolt
@@ -1001,6 +1111,11 @@ pub enum ErrorCode {
     /// Several passkeys could sign: the error lists them, and the client
     /// asks again naming one.
     ChoosePasskey,
+    /// Silent AutoFill (`interactive: false`) needs user interaction (Touch ID
+    /// for passkey `UV`, or confirmation on an unassociated app).
+    InteractionRequired,
+    /// The user or closing sheet cancelled an interactive prompt.
+    Cancelled,
     Failed,
 }
 
@@ -1200,6 +1315,51 @@ pub enum Reply {
         logins: Vec<AgentLogin>,
         /// The passkeys for the page its grants let it sign in with.
         passkeys: Vec<AgentPasskey>,
+    },
+    AutofillStatus {
+        initialized: bool,
+        unlocked: bool,
+        touch_id_ready: bool,
+        touch_id_reset: bool,
+        can_verify: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        identities_hash: Option<String>,
+    },
+    AutofillIdentities {
+        identities_hash: String,
+        passwords: Vec<PasswordIdentity>,
+        passkeys: Vec<PasskeyIdentity>,
+        one_time_codes: Vec<OneTimeCodeIdentity>,
+    },
+    AutofillList {
+        logins: Vec<SiteLogin>,
+        passkeys: Vec<SitePasskey>,
+        unassociated: bool,
+        can_verify: bool,
+        identities_hash: String,
+    },
+    AutofillFill {
+        values: SiteValues,
+        identities_hash: String,
+    },
+    AutofillPasskeyCreated {
+        passkey: LoginRef,
+        credential_id: String,
+        client_data_hash: String,
+        attestation_object: String,
+        authenticator_data: String,
+        public_key: String,
+        verified: bool,
+        identities_hash: String,
+    },
+    AutofillPasskeyAssertion {
+        credential_id: String,
+        client_data_hash: String,
+        authenticator_data: String,
+        signature: String,
+        user_handle: String,
+        verified: bool,
+        identities_hash: String,
     },
 }
 

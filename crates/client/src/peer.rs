@@ -242,6 +242,17 @@ pub fn team() -> Option<&'static str> {
 pub const AGENT_ID: &str = "deadbolt";
 /// The signing identifier of Deadbolt.app, its bundle identifier.
 pub const APP_ID: &str = "pw.deadbolt.app";
+/// The signing identifier of Deadbolt's macOS AutoFill extension
+/// (`Contents/PlugIns/DeadboltAutoFill.appex`), its bundle identifier.
+pub const AUTOFILL_ID: &str = "pw.deadbolt.app.autofill";
+/// The suffix of Deadbolt's macOS App Group (`<TEAM_ID>.pw.deadbolt`).
+pub const APP_GROUP_SUFFIX: &str = "pw.deadbolt";
+
+/// The macOS App Group shared with `DeadboltAutoFill.appex`, when this build
+/// knows its Apple team (`DEADBOLT_TEAM_ID`).
+pub fn app_group() -> Option<String> {
+    team().map(|t| format!("{t}.{APP_GROUP_SUFFIX}"))
+}
 
 /// Checks that `socket`'s peer is the agent at `expected` (this client's own
 /// binary, or its bundle's helper), before a passphrase goes to it.

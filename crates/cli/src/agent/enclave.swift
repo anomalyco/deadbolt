@@ -9,6 +9,7 @@
 //   deadbolt-enclave status
 //   deadbolt-enclave seal
 //   deadbolt-enclave unseal [--non-interactive] [--reason <text>]
+//   deadbolt-enclave group-container <group-id> <agent-exe>
 //   deadbolt-enclave identify          (identify.swift)
 //
 // Exit codes:
@@ -187,6 +188,107 @@ private func runStatus() -> Never {
     let bio = enclave && currentBiometryState().hash != nil
     let out = "enclave=\(enclave ? 1 : 0)\nbiometrics=\(bio ? 1 : 0)\n"
     FileHandle.standardOutput.write(Data(out.utf8))
+    exit(ExitCode.ok.rawValue)
+}
+
+private func isValidGroupIdentifier(_ group: String) -> String? {
+    guard group.utf8.count > 11, group.utf8.count <= 128 else {
+        return nil
+    }
+    let bytes = Array(group.utf8)
+    guard bytes[10] == UInt8(ascii: ".") else {
+        return nil
+    }
+    let team = String(decoding: bytes[0 ..< 10], as: UTF8.self)
+    let isTeam = team.utf8.allSatisfy { b in
+        (UInt8(ascii: "0") ... UInt8(ascii: "9")).contains(b)
+            || (UInt8(ascii: "A") ... UInt8(ascii: "Z")).contains(b)
+            || (UInt8(ascii: "a") ... UInt8(ascii: "z")).contains(b)
+    }
+    guard isTeam else {
+        return nil
+    }
+    let rest = bytes[11...]
+    let ok = rest.allSatisfy { b in
+        b > 0x20 && b < 0x7f && b != UInt8(ascii: "/")
+    }
+    return ok ? team : nil
+}
+
+private func staticCodeHasGroup(_ code: SecStaticCode, team: String, group: String, dynamic: Bool) -> Bool {
+    var req: SecRequirement?
+    let reqText = "anchor apple generic and certificate leaf[subject.OU] = \"\(team)\""
+    guard SecRequirementCreateWithString(reqText as CFString, [], &req) == errSecSuccess,
+          let req
+    else {
+        return false
+    }
+    if dynamic {
+        let dynCode = unsafeBitCast(code, to: SecCode.self)
+        guard SecCodeCheckValidity(dynCode, [], req) == errSecSuccess else {
+            return false
+        }
+    } else {
+        let checkFlags = SecCSFlags(rawValue: kSecCSDoNotValidateExecutable | kSecCSDoNotValidateResources)
+        guard SecStaticCodeCheckValidity(code, checkFlags, req) == errSecSuccess else {
+            return false
+        }
+    }
+    var flags = SecCSFlags(rawValue: kSecCSSigningInformation)
+    if dynamic {
+        flags.insert(SecCSFlags(rawValue: kSecCSDynamicInformation))
+    }
+    var info: CFDictionary?
+    guard SecCodeCopySigningInformation(code, flags, &info) == errSecSuccess,
+          let dict = info as? [String: Any],
+          let signingTeam = dict[kSecCodeInfoTeamIdentifier as String] as? String,
+          signingTeam == team,
+          let entitlements = dict[kSecCodeInfoEntitlementsDict as String] as? [String: Any],
+          let groups = entitlements["com.apple.security.application-groups"] as? [String]
+    else {
+        return false
+    }
+    let wildcard = "\(team).*"
+    return groups.contains(group) || groups.contains(wildcard)
+}
+
+/// Resolves the shared macOS App Group container via `containermanagerd`, only
+/// after confirming that both this helper and `agentPath` are signed by `team`
+/// with `com.apple.security.application-groups` covering `group`. An unentitled
+/// process never calls `containerURL`, which on macOS 15+ would raise a TCC
+/// prompt.
+private func runGroupContainer(group: String, agentPath: String) -> Never {
+    guard let team = isValidGroupIdentifier(group) else {
+        fail(.invalidInput, "invalid App Group identifier: \(group)")
+    }
+    var me: SecCode?
+    guard SecCodeCopySelf([], &me) == errSecSuccess,
+          let me,
+          staticCodeHasGroup(unsafeBitCast(me, to: SecStaticCode.self), team: team, group: group, dynamic: true)
+    else {
+        fail(.unavailable, "helper is not signed with App Group \(group)")
+    }
+    #if arch(arm64)
+    let arch = 0x0100_000c
+    #else
+    let arch = 0x0100_0007
+    #endif
+    var agentCode: SecStaticCode?
+    let attrs = [kSecCodeAttributeArchitecture: NSNumber(value: arch)] as CFDictionary
+    guard SecStaticCodeCreateWithPathAndAttributes(
+        URL(fileURLWithPath: agentPath) as CFURL, [], attrs, &agentCode
+    ) == errSecSuccess,
+          let agentCode,
+          staticCodeHasGroup(agentCode, team: team, group: group, dynamic: false)
+    else {
+        fail(.unavailable, "agent is not signed with App Group \(group)")
+    }
+    guard let url = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: group),
+          !url.path.isEmpty
+    else {
+        fail(.unavailable, "App Group container \(group) is unavailable")
+    }
+    FileHandle.standardOutput.write(Data((url.path + "\n").utf8))
     exit(ExitCode.ok.rawValue)
 }
 
@@ -417,6 +519,11 @@ private enum EnclaveHelper {
                 fail(.usage, "identify takes no arguments")
             }
             runIdentify()
+        case "group-container":
+            guard args.count == 3 else {
+                fail(.usage, "usage: deadbolt-enclave group-container <group-id> <agent-exe>")
+            }
+            runGroupContainer(group: args[1], agentPath: args[2])
         case "unseal":
             var nonInteractive = false
             var requireBiometry = true
