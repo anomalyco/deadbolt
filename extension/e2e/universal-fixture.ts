@@ -1,7 +1,17 @@
 // Deliberately separate from the forms gauntlet. Synthetic accounts only.
+import { createHmac } from "node:crypto"
 export const USER = "universal@example.test"
 export const PASSWORD = "synthetic-universal-password-83219"
 export const OTP = "JBSWY3DPEHPK3PXP"
+
+function currentCode(at: number): string {
+  const counter = Buffer.alloc(8)
+  counter.writeBigUInt64BE(BigInt(Math.floor(at / 30_000)))
+  // The fixture's public synthetic base32 seed above, decoded.
+  const digest = createHmac("sha1", Buffer.from("48656c6c6f21deadbeef", "hex")).update(counter).digest()
+  const offset = digest[digest.length - 1] & 15
+  return String((digest.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, "0")
+}
 
 const email = '<label>Email<input id="email" name="email" type="email" autocomplete="username"></label>'
 const password = '<label>Password<input id="password" name="password" type="password" autocomplete="current-password"></label>'
@@ -26,7 +36,7 @@ export async function universalFixture(req: Request): Promise<Response> {
       if (data) return data.get("password") === PASSWORD ? redirect("/code") : html("<h1>Incorrect password</h1>")
       return html(`<h1>Enter your password</h1>${form("/password", password, "Sign in")}`)
     case "/code":
-      if (data) return /^\d{6}$/.test(String(data.get("code"))) ? redirect("/dashboard") : html("<h1>Incorrect code</h1>")
+      if (data) return [currentCode(Date.now()), currentCode(Date.now() - 30_000)].includes(String(data.get("code"))) ? redirect("/dashboard") : html("<h1>Incorrect code</h1>")
       return html(`<h1>Two-factor authentication</h1>${form("/code", code, "Verify")}`)
     case "/dashboard": return html(`<h1>Your dashboard</h1><p>Signed in as ${USER}</p><a href="/logout">Sign out</a><hr><small>Connect another service</small><button>Sign in with Google</button>`)
     case "/email": return html(`<h1>Workspace</h1><p>${USER}</p><a href="/login">Sign in</a>`)
