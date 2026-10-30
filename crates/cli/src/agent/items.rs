@@ -223,6 +223,15 @@ fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     Listing::new(vault).info(&item, false, false)
 }
 
+/// "personal › GitHub": the one item `query` finds, without its values,
+/// to name it in a Touch ID prompt.
+pub fn named(s: &Loaded, vault: Option<&str>, query: &[String], deleted: bool) -> Result<String> {
+    let vault = s.vault(&s.resolve(vault)?);
+    let listing = Listing::pick(vault, deleted);
+    let item = listing.find(query)?;
+    Ok(format!("{} › {}", vault.name(), label(item)))
+}
+
 /// One item with its values; one-time password secrets only with `otp`,
 /// and the contents only of the file fields `files` names. With `deleted`,
 /// one of the deleted items instead.
