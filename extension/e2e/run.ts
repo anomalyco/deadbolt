@@ -94,6 +94,29 @@ const PROBE = () => {
   window.addEventListener("blur", () => probe.blurs++)
 }
 
+/**
+ * The event the test sends a page the moment it presses in the menu. The page
+ * itself can't tell (a press leaves focus in its field, so it gets no blur),
+ * so this plays a page that knows anyway: the worst case.
+ */
+const PRESSED_EVENT = "e2e-pressed"
+const PRESSED = JSON.stringify(PRESSED_EVENT)
+
+/** Presses at (x, y) in the menu as a person does, telling the page the moment the button goes down (see PRESSED). */
+async function pressAt(page: Page, x: number, y: number) {
+  await page.mouse.move(x, y)
+  await page.mouse.down()
+  await page.evaluate((type) => dispatchEvent(new Event(type)), PRESSED_EVENT)
+  await Bun.sleep(30)
+  await page.mouse.up()
+}
+
+/** pressAt the middle of the menu's first row. */
+async function pressRow(page: Page, menu: Frame) {
+  const box = await menu.locator("button.row").first().boundingBox()
+  if (box) await pressAt(page, box.x + box.width / 2, box.y + box.height / 2)
+}
+
 /** The page sees the menu's host element arrive (a popover); these pages misuse that. */
 const onMenu = (js: string) => `<script>
   new MutationObserver((records) => {
@@ -149,13 +172,14 @@ const OVERLAY: Record<string, string> = {
   // A near-opaque sheet over everything in the top layer, letting clicks
   // through to the menu, in a shadow root: Deadbolt can't see it go up.
   cover: topCover("shadow", false),
-  // Fade it out the moment the click starts (focus moves into the menu), so a
-  // visibility reading taken before the click is stale.
-  "on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0", "window.pressed")}`,
+  // Fade it out the moment the click starts, so a visibility reading taken
+  // before the click is stale. A page can't see a press in the menu (focus
+  // stays in its field), so the test tells it, the worst case (see pressRow).
+  "on-press": `<script>addEventListener(${PRESSED}, () => (window.pressed = true))</script>${restyle("opacity", "0", "window.pressed")}`,
   // The reverse: keep it all but see-through over a decoy (still taking
   // clicks, which a fully transparent frame doesn't) and show it the moment
   // the press lands, so a reading taken after the click finds it visible.
-  "reveal-on-press": `<script>addEventListener("blur", () => (window.pressed = true))</script>${restyle("opacity", "0.02", "!window.pressed")}`,
+  "reveal-on-press": `<script>addEventListener(${PRESSED}, () => (window.pressed = true))</script>${restyle("opacity", "0.02", "!window.pressed")}`,
   // Shown a moment before the press instead (as the pointer nears it), so
   // nothing changes after the press: the test calls reveal() 250 ms before.
   "reveal-before-press": `<script>window.reveal = () => (window.revealed = true)</script>${restyle("opacity", "0.02", "!window.revealed")}`,
@@ -199,7 +223,7 @@ const FRAMED: Record<string, string> = {
 }
 
 // Covers everything (letting clicks through) for `ms`, starting `after` ms
-// past the press into the menu (the page's blur), or right away with cover().
+// past the press into the menu (which the test tells the page, see pressRow), or right away with cover().
 // The cover is a popover in a shadow root, over the menu in the top layer.
 const SWEEP = `<script>
   const cover = (ms) => {
@@ -214,8 +238,8 @@ const SWEEP = `<script>
     setTimeout(() => h.remove(), ms)
   }
   window.cover = cover
-  window.coverAfterPress = (after, ms) => addEventListener("blur", () => (after ? setTimeout(() => cover(ms), after) : cover(ms)), { once: true })
-  addEventListener("blur", () => (window.__press = performance.now()))
+  window.coverAfterPress = (after, ms) => addEventListener(${PRESSED}, () => (after ? setTimeout(() => cover(ms), after) : cover(ms)), { once: true })
+  addEventListener(${PRESSED}, () => (window.__press = performance.now()))
 </script>`
 
 const PASSKEY_PAGE = `<h1>Sign in to Acme</h1>
@@ -760,6 +784,14 @@ const server = Bun.serve({
         return html("Sign in to Acme", loginForm(url.searchParams.get("to") ?? "/home"))
       case "/outcome/welcome":
         return html("Acme", `<header><span>${(url.searchParams.get("u") ?? "").replace(/[<>&"]/g, "")}</span> <button type="button">Sign out</button></header><h1>Dashboard</h1>`)
+      // Restyles the email field when it loses focus, as floating-label and
+      // validate-on-blur forms do (Google, Microsoft, Netflix, Chase): it shrinks and an error line pushes the form down.
+      case "/blur-restyle":
+        return html("Sign in to Acme", `<style>#email.blurred{height:30px;margin-top:14px}</style>${loginForm("/home")}<script>
+          const email = document.getElementById("email")
+          email.addEventListener("blur", () => { if (email.value) return; email.classList.add("blurred"); if (!document.getElementById("err")) email.insertAdjacentHTML("afterend", '<p id="err" style="color:#b91c1c;margin:4px 0">Enter your email.</p>') })
+          email.addEventListener("focus", () => { email.classList.remove("blurred"); document.getElementById("err")?.remove() })
+        </script>`)
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
         return html("Sign in to Acme", `<style>html,body{height:100%}body{display:flex;align-items:center;justify-content:center}main{margin:0}</style>${loginForm("/home")}`)
@@ -2290,7 +2322,6 @@ async function occlusionSweep() {
           await diagnose(run, page, "sweep")
           break
         }
-        // Focus back in the page, so the press moves it into the menu and the page sees blur.
         await page.focus("#email")
         await page.evaluate(() => {
           const w = window as unknown as { __shown?: number; __press?: number }
@@ -2301,7 +2332,7 @@ async function occlusionSweep() {
           await page.evaluate((ms) => (window as unknown as { cover: (ms: number) => void }).cover(ms), ms)
           await Bun.sleep(-offset)
         } else await page.evaluate(([after, ms]) => (window as unknown as { coverAfterPress: (a: number, ms: number) => void }).coverAfterPress(after, ms), [offset, ms])
-        await page.mouse.click(at.x, at.y)
+        await pressAt(page, at.x, at.y)
         await Bun.sleep(1500)
         const real = await page.evaluate(() => {
           const w = window as unknown as { __shown?: number; __press?: number }
@@ -2340,7 +2371,7 @@ async function coveredMenu() {
         await page.evaluate(() => (window as unknown as { reveal: () => void }).reveal())
         await Bun.sleep(250)
       }
-      await menu.locator("button.row").first().click({ force: true })
+      await pressRow(page, menu)
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
       if (name === "none") check(password === "correct horse", `an uncovered menu fills (${password ? "" : await footText(menu)})`)
@@ -2348,15 +2379,10 @@ async function coveredMenu() {
         check(password === "" && (await fillCount(run)) === before, `a menu made ${name} fills nothing and asks the host for nothing`)
         const foot = await footText(menu)
         check(foot.includes("covered") || (name.startsWith("reveal") && foot.includes("in a moment")), `and says it's covered (${foot})`)
-        // The refused press put focus in the menu, which by now has been in
-        // plain view for a while: the user's next Enter there must not pick.
-        const focused = await menu.evaluate(() => document.hasFocus())
-        await page.keyboard.press("Enter")
-        await Bun.sleep(1500)
-        check(
-          focused && (await page.inputValue("#password")) === "" && (await fillCount(run)) === before,
-          `and a later Enter in the menu ${focused ? "" : "(not focused!) "}fills nothing either (${await footText(menu)})`,
-        )
+        // The refused press left focus in the page (see menu.ts): the
+        // user's next Enter can't reach the menu, which by now has been in
+        // plain view for a while.
+        check(!(await menu.evaluate(() => document.hasFocus())) && (await page.evaluate(() => document.activeElement?.id)) === "email", "and the press left focus in the field, so a later Enter can't pick")
       }
     }
     for (const name of Object.keys(BEATEN)) {
@@ -2433,6 +2459,31 @@ async function viewportResize() {
   } catch (err) {
     check(false, `viewport resize threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "viewport resize")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * A press in the menu leaves focus in the page's field (see menu.ts): on a
+ * page that restyles the field when it blurs, the menu doesn't move under the
+ * press, so the pick isn't refused.
+ */
+async function blurRestyle() {
+  const run = await launch()
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/blur-restyle`)
+    const menu = await menuOn(page)
+    if (!menu) return void (await diagnose(run, page, "blur restyle"))
+    // A person's press: the button stays down a moment.
+    await menu.locator("button.row").first().click({ delay: 80 })
+    const filled = await until("a pick on a field that restyles on blur fills", async () => (await page.inputValue("#password")) !== "", 4000)
+    check(!!filled, `a pick on a field the page restyles on blur fills (${filled ? "" : await footText(menu)})`)
+    check(await page.evaluate(() => !document.getElementById("err") && document.activeElement?.tagName === "INPUT"), "and focus stayed in the form through the press")
+  } catch (err) {
+    check(false, `blur restyle threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "blur restyle")
   } finally {
     await close(run)
   }
@@ -4066,6 +4117,7 @@ const once: Record<string, () => Promise<void>> = {
   coveredMenu,
   topLayer,
   viewportResize,
+  blurRestyle,
   occlusionSweep,
   midFill,
   coveredPill,
@@ -4086,7 +4138,7 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 const cost: Record<string, number> = {
   detection: 108, occlusionSweep: 55, signInSessions: 52, frameLogins: 25, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
-  coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
+  coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, blurRestyle: 4, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */

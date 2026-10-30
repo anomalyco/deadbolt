@@ -189,9 +189,16 @@ not running without sending hello, which would start the agent again.
   avatar's ring is still, the save offer's bar is stepped frame by frame,
   never animated), and after narrowing's row animations the half second
   starts again, as after a move.
+- **Focus.** A press inside the list leaves focus in the page's field, as
+  the browser's own autofill does (its `mousedown` is cancelled; the offer
+  keeps the default). Taking focus would blur the field between the press
+  and the click, and many sites react to that: a floating label drops, the
+  field shrinks, an error line pushes the form down. The menu follows the
+  field, so it moved under the press and the pick was refused, or the form
+  changed and the fill wrote nothing. Nothing about the checks changes.
 - **Keyboard picks.** ⏎ picks only after the user's own ↓ in the field
-  moved focus into the menu, or a real press inside the menu put it there
-  and passed the same visibility checks as a pick. A press the menu refused
+  moved focus into the menu, or (in a menu that already has focus) a real
+  press inside it passed the same visibility checks as a pick. A press the menu refused
   lets no later ⏎ pick either. Focus that got into the menu any other way, such as by Tab from a field
   the page made last in the tab order or by a script, doesn't count, and
   leaving the menu ends it even if focus comes back. Such a menu says "Press

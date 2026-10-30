@@ -643,6 +643,14 @@ addEventListener("pointerdown", (e) => {
   const press = entry.pressed()
   if (dwell.settled(e.timeStamp)) void confirmPick(dwell, e.timeStamp).then((ok) => ok && entry.confirmed(press))
 }, true)
+// A press in the list leaves focus in the page's field, as the browser's own
+// autofill does. Taking it would blur the field first, and many sites react
+// to that between the press and the click: a floating label drops (Google,
+// Microsoft), a field shrinks, an error line pushes the form down (Netflix,
+// Chase). The menu, which follows the field, moves under the press, and the
+// pick is refused, or the form changes and the fill writes nothing. The
+// offer keeps the default: it's in the corner, not on a field.
+addEventListener("mousedown", (e) => void (e.isTrusted && mode !== "save" && e.preventDefault()), true)
 addEventListener("focus", (e) => void (e.isTrusted && e.target === window && entry.focused(performance.now())))
 addEventListener("blur", (e) => void (e.target === window && entry.blurred()))
 
