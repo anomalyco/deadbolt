@@ -3,7 +3,7 @@
 // Requires n0 relay WebSockets and HTTPS pkarr rendezvous on both devices.
 // Only disposable profiles/stores and synthetic data; never builds or edits dist.
 import { chromium, type BrowserContext, type Page } from "playwright-core"
-import { mkdtemp, rm } from "node:fs/promises"
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import type { DeviceCommand, DeviceReply, ItemSummary, VaultDevice } from "../src/messages"
@@ -12,6 +12,8 @@ const arg = (name: string) => { const i = process.argv.indexOf(name); return i <
 if (!arg("--deadbolt") || !arg("--dist")) throw new Error("Usage: bun e2e/sync.ts --deadbolt <debug CLI> --dist <standalone e2e build>")
 const deadbolt = resolve(arg("--deadbolt")!)
 const dist = resolve(arg("--dist")!)
+/** The opt-in Rust integration test reopens these encrypted copies to inspect history. */
+const snapshots = arg("--snapshots") ? resolve(arg("--snapshots")!) : undefined
 const root = await mkdtemp(join(tmpdir(), "db-ext-sync-"))
 const passphrase = "synthetic browser sync fixture"
 const env = {
@@ -116,6 +118,37 @@ async function finish(page: Page) {
 }
 async function has(page: Page, title: string) { return (await items(page)).some(i => i.title === title) }
 
+/** Capture durable replicas after locking; no plaintext or keys leave the browser. */
+async function snapshot(a: Page, b: Page) {
+  if (!snapshots) return
+  await mkdir(snapshots) // Refuse an existing directory rather than overwrite anything.
+  await cli("lock")
+  for (const [name, page] of [["a", a], ["b", b]] as const) {
+    await request(page, { type: "device-lock" })
+    let bytes: number[] | undefined
+    await until(`${name}: OPFS readable after lock for history snapshot`, async () => {
+      bytes = await page.evaluate(async () => {
+        try {
+          const root = await navigator.storage.getDirectory()
+          const handle = await root.getFileHandle("vault.redb")
+          return Array.from(new Uint8Array(await (await handle.getFile()).arrayBuffer()))
+        } catch (error) {
+          if (error instanceof DOMException && ["NoModificationAllowedError", "NotReadableError"].includes(error.name)) return undefined
+          throw error
+        }
+      })
+      return !!bytes?.length
+    })
+    await mkdir(join(snapshots, name))
+    await writeFile(join(snapshots, name, "store.redb"), Uint8Array.from(bytes!), { mode: 0o600, flag: "wx" })
+  }
+  await mkdir(join(snapshots, "cli"))
+  await copyFile(join(root, "vault", "store.redb"), join(snapshots, "cli", "store.redb"))
+  await cli("unlock")
+  await Promise.all([unlock(a), unlock(b)])
+  check(true, "encrypted snapshots preserve all three converged replicas for history verification")
+}
+
 try {
   // Distinguish actual unreachable-service behavior from the live prerequisite.
   let b = await launch("b", true)
@@ -190,7 +223,8 @@ try {
   })
   check(true, "both browsers and CLI converge on one concurrent value after reconnect")
   check(await cli("get", "Shared", "-f", "username") === "original", "concurrent password edits preserve untouched fields")
-  console.log("GAP: history retention is not asserted: DeviceCommand and the CLI expose no item-history API")
+  await snapshot(a.page, b.page)
+  if (!snapshots) console.log("NOTE: run the ignored standalone_sync_retains_conflict_history Rust test to verify history from encrypted snapshots")
 
   // The peer returns while the browser is locked. Unlock starts background sync;
   // don't use an explicit sync here to hide a missing wakeup.
