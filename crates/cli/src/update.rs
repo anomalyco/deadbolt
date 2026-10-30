@@ -24,7 +24,7 @@ use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use url::Url;
 
-use crate::config::ExtensionBuild;
+use crate::config::{ExtensionBuild, ExtensionDir};
 use crate::paths::Paths;
 
 /// Where the release service lives.
@@ -615,8 +615,9 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
             }
         }
     }
+    let extensions = crate::config::Config::load(&paths.config)?.extensions;
     available |= extension(
-        paths,
+        &extensions,
         &service,
         &state,
         channel,
@@ -1370,13 +1371,14 @@ fn extension_build(dir: &Path) -> Option<ExtensionBuild> {
     }
 }
 
-/// Checks, and unless `check` updates, the extension directory registered
-/// with `deadbolt browser install --extension-dir`, with the build it was
-/// registered for (`browser switch` changes it). True when an update is
-/// available.
+/// Checks, and unless `check` updates, the extension directories `dirs`
+/// (registered with `deadbolt browser install --extension-dir`), each with
+/// the build it was registered for (`browser switch` changes it). True when
+/// an update is available for any of them. One directory failing doesn't
+/// stop the others.
 #[expect(clippy::too_many_arguments, reason = "two call sites, all distinct")]
 async fn extension(
-    paths: &Paths,
+    dirs: &[ExtensionDir],
     service: &Service,
     state: &Path,
     channel: &str,
@@ -1385,19 +1387,56 @@ async fn extension(
     check: bool,
     allow_rollback: bool,
 ) -> Result<bool> {
-    let config = crate::config::Config::load(&paths.config)?;
-    let build = config.extension_build.unwrap_or_default();
-    let link = format!("{SERVICE}deadbolt/extension/{channel}/{}", build.target());
-    let Some(dir) = config.extension_dir else {
+    if dirs.is_empty() {
         if !check {
             println!(
-                "Browser extension: {link} (or register an unpacked copy with \
-                 `deadbolt browser install --extension-dir <dir>` to update it here)"
+                "Browser extension: {SERVICE}deadbolt/extension/{channel}/{} (or register \
+                 an unpacked copy with `deadbolt browser install --extension-dir <dir>` to \
+                 update it here)",
+                ExtensionBuild::Native.target()
             );
         }
         return Ok(false);
+    }
+    let Some((url, text)) = service.manifest("extension", channel).await? else {
+        println!("Browser extension: no {channel} release yet");
+        return Ok(false);
     };
-    if !extension_dir_ok(&dir) {
+    check_sequence(state, "extension", channel, sequence(&text), allow_rollback)?;
+    let mut available = false;
+    let mut failed = None;
+    for entry in dirs {
+        match extension_dir(entry, service, &url, &text, channel, bucket, built, check).await {
+            Ok(found) => available |= found,
+            Err(error) if dirs.len() > 1 => {
+                eprintln!("{}: {error:#}", entry.dir.display());
+                failed.get_or_insert(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    match failed {
+        Some(error) => Err(error.context("updating the browser extensions")),
+        None => Ok(available),
+    }
+}
+
+/// [`extension`] for one directory, with the channel's manifest `text` from
+/// `url`.
+#[expect(clippy::too_many_arguments, reason = "one call site, all distinct")]
+async fn extension_dir(
+    entry: &ExtensionDir,
+    service: &Service,
+    url: &Url,
+    text: &str,
+    channel: &str,
+    bucket: u8,
+    built: Option<&str>,
+    check: bool,
+) -> Result<bool> {
+    let ExtensionDir { dir, build } = entry;
+    let build = *build;
+    if !extension_dir_ok(dir) {
         bail!(
             "{} holds files deadbolt didn't install there (or isn't an absolute path); \
              register an empty directory with `deadbolt browser install --extension-dir <dir>`",
@@ -1407,11 +1446,11 @@ async fn extension(
     // The other build in the directory (a switch) is replaced by this
     // channel's release whatever its version, and the user asked for it, so
     // no rollout holds it back.
-    let switching = extension_build(&dir).is_some_and(|installed| installed != build);
+    let switching = extension_build(dir).is_some_and(|installed| installed != build);
     let current = if switching {
         String::new()
     } else {
-        extension_version(&dir).unwrap_or_default()
+        extension_version(dir).unwrap_or_default()
     };
     let running = Running {
         version: &current,
@@ -1420,15 +1459,10 @@ async fn extension(
         bucket: if switching { 0 } else { bucket },
         channel: built,
     };
-    let Some((url, text)) = service.manifest("extension", channel).await? else {
-        println!("Browser extension: no {channel} release yet");
-        return Ok(false);
-    };
-    let decision = decide("extension", channel, &text, &running);
+    let decision = decide("extension", channel, text, &running);
     if let Decision::Reject(reason) = decision {
         bail!("{url} is not a usable extension manifest ({reason})");
     }
-    check_sequence(state, "extension", channel, sequence(&text), allow_rollback)?;
     let what = match build {
         ExtensionBuild::Native => "Browser extension",
         ExtensionBuild::Standalone => "Standalone browser extension",
@@ -1440,8 +1474,8 @@ async fn extension(
             if check {
                 println!("{what} {version} is available in {}", dir.display());
             } else {
-                refuse_foreign_root(dir.parent().unwrap_or(&dir))?;
-                update_extension(service, &url, &target, &dir).await?;
+                refuse_foreign_root(dir.parent().unwrap_or(dir))?;
+                update_extension(service, url, &target, dir).await?;
                 println!(
                     "Updated the {} in {} to {version}; \
                      reload Deadbolt in chrome://extensions",
@@ -1452,7 +1486,7 @@ async fn extension(
             Ok(true)
         }
         Decision::None("up_to_date") => {
-            println!("{what} {current} is up to date");
+            println!("{what} {current} is up to date in {}", dir.display());
             Ok(false)
         }
         Decision::None("no_target") => {
@@ -1463,11 +1497,13 @@ async fn extension(
     }
 }
 
-/// `deadbolt browser switch`: registers `build` for the extension directory
-/// and puts the channel's release of it there now.
+/// `deadbolt browser switch`: registers `build` for one extension directory
+/// (`dir`, or the only one registered) and puts the channel's release of it
+/// there now.
 pub async fn switch_extension(
     paths: &Paths,
     build: ExtensionBuild,
+    dir: Option<&Path>,
     channel: Option<&str>,
 ) -> Result<()> {
     let built = build_channel();
@@ -1478,8 +1514,26 @@ pub async fn switch_extension(
         );
     };
     let config = crate::config::Config::load(&paths.config)?;
-    let Some(dir) = config.extension_dir else {
-        bail!(
+    let dir = match (dir, config.extensions.as_slice()) {
+        (Some(dir), _) => {
+            let dir = crate::browser::extension_path(dir)?;
+            if config.extension(&dir).is_none() {
+                bail!(
+                    "{} isn't a registered extension directory; run `deadbolt browser \
+                     install {}--extension-dir {}` first",
+                    dir.display(),
+                    if build == ExtensionBuild::Standalone {
+                        "--standalone "
+                    } else {
+                        ""
+                    },
+                    dir.display()
+                );
+            }
+            dir
+        }
+        (None, [only]) => only.dir.clone(),
+        (None, []) => bail!(
             "no unpacked extension is registered here; run `deadbolt browser install \
              {}--extension-dir <dir>` with a new or empty directory first",
             if build == ExtensionBuild::Standalone {
@@ -1487,7 +1541,16 @@ pub async fn switch_extension(
             } else {
                 ""
             }
-        );
+        ),
+        (None, several) => bail!(
+            "several extension directories are registered; pick one with \
+             --extension-dir:\n{}",
+            several
+                .iter()
+                .map(|e| format!("  {} ({})", e.dir.display(), e.build.name()))
+                .collect::<Vec<_>>()
+                .join("\n")
+        ),
     };
     crate::config::set_extension_dir(&paths.config, &dir, build)?;
     let service = Service::new(built)?;
@@ -1498,7 +1561,14 @@ pub async fn switch_extension(
         .unwrap_or_default();
     let bucket = rollout_bucket(&state);
     extension(
-        paths, &service, &state, channel, bucket, built, false, false,
+        &[ExtensionDir { dir, build }],
+        &service,
+        &state,
+        channel,
+        bucket,
+        built,
+        false,
+        false,
     )
     .await?;
     Ok(())

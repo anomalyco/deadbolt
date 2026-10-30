@@ -230,8 +230,7 @@ pub fn install(
 /// it must not exist yet, be empty, or already hold Deadbolt's extension, as
 /// updating replaces everything in it.
 fn register_extension_dir(dir: &Path, build: ExtensionBuild, config: &Path) -> Result<()> {
-    let dir = std::path::absolute(dir).with_context(|| format!("finding {}", dir.display()))?;
-    let dir = dir.canonicalize().unwrap_or(dir);
+    let dir = extension_path(dir)?;
     if !crate::update::extension_dir_ok(&dir) {
         bail!(
             "{} holds files deadbolt update didn't install; \
@@ -245,6 +244,40 @@ fn register_extension_dir(dir: &Path, build: ExtensionBuild, config: &Path) -> R
          fetch it, then load it unpacked from there (chrome://extensions, \
          Developer mode, Load unpacked)",
         build.name(),
+        dir.display()
+    );
+    Ok(())
+}
+
+/// `dir` as an extension directory is registered: absolute, with links
+/// resolved (its parent's when it doesn't exist yet), so it's the same path
+/// before `deadbolt update` creates it and after.
+pub fn extension_path(dir: &Path) -> Result<PathBuf> {
+    let dir = std::path::absolute(dir).with_context(|| format!("finding {}", dir.display()))?;
+    if let Ok(path) = dir.canonicalize() {
+        return Ok(path);
+    }
+    let resolved = dir
+        .parent()
+        .zip(dir.file_name())
+        .and_then(|(parent, name)| Some(parent.canonicalize().ok()?.join(name)));
+    Ok(resolved.unwrap_or(dir))
+}
+
+/// Stops `deadbolt update` keeping the unpacked extension in `dir` current,
+/// leaving its files and the host's manifests alone.
+pub fn unregister_extension_dir(dir: &Path, config: &Path) -> Result<()> {
+    let dir = extension_path(dir)?;
+    if !crate::config::remove_extension_dir(config, &dir)? {
+        bail!(
+            "{} isn't a registered extension directory (`deadbolt browser install \
+             --extension-dir <dir>` registers one)",
+            dir.display()
+        );
+    }
+    println!(
+        "`deadbolt update` no longer keeps {} current; remove Deadbolt loaded from \
+         there in chrome://extensions, then delete the directory, if you're done with it",
         dir.display()
     );
     Ok(())

@@ -191,9 +191,14 @@ channel's current release isn't the build it runs, a rollback included.
 - **Root:** as euid 0, `update` only changes an install in a root-owned
   directory with a root-owned `HOME`.
 - **Extension:** `deadbolt browser install [--standalone] --extension-dir <dir>`
-  records an absolute path (`extension_dir` in `config.toml`) and the build it
-  gets (`extension_build`, `native` or `standalone`); the directory must be new
-  or empty. `update` compares its `manifest.json` `version_name` with the
+  records an absolute path and the build it gets (`native` or `standalone`) as
+  an `[[extensions]]` entry in `config.toml`; the directory must be new or
+  empty. Several can be registered (say the native build for one profile and
+  the standalone one for another); registering one again changes its build,
+  and `deadbolt browser uninstall --extension-dir <dir>` unregisters it,
+  leaving its files. An older config's single `extension_dir` and
+  `extension_build` are read as one entry and rewritten the next time the
+  config changes. For each directory, `update` compares its `manifest.json` `version_name` with the
   `extension` manifest and replaces the directory from that build's zip
   (`chromium`, or `chromium-standalone`)
   (regular files and directories only, at most 64 MiB and 4096 entries,
@@ -201,8 +206,9 @@ channel's current release isn't the build it runs, a rollback included.
   with the names it installed. It never replaces a directory holding anything
   else. Then it says to reload Deadbolt in `chrome://extensions`. Without a
   registered directory it prints the channel's download link.
-  `deadbolt browser switch --standalone|--native [--channel]` changes the
-  registered build and fetches it at once: a directory holding the other build
+  `deadbolt browser switch --standalone|--native [--channel] [--extension-dir <dir>]`
+  changes one directory's build (the only one, or `<dir>` when there are
+  several) and fetches it at once: a directory holding the other build
   (told apart by its manifest's `nativeMessaging` or `offscreen` permission)
   takes the channel's release whatever its version, with no rollout hold,
   since the user asked. Both builds have the same id, so reloading the
