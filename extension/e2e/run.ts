@@ -948,6 +948,8 @@ interface LaunchOptions {
   scheme?: "light" | "dark"
   rateLimit?: string
   fillDelay?: number
+  /** Seconds the vault holds each list of logins (a slow menu load). */
+  listDelay?: number
   /** Playwright turns the back/forward cache off; keep it on. */
   bfcache?: boolean
   /** Runs the deadbolt binary as the host, with this environment. */
@@ -1001,6 +1003,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_LOG: log,
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
+      DEADBOLT_FAKE_LIST_DELAY: String(options.listDelay ?? 0),
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
       DEADBOLT_FAKE_TOUCHID: options.touchId ?? "",
@@ -1081,7 +1084,7 @@ const SEED_PASSPHRASE = "e2e standalone synthetic passphrase"
  */
 async function seedVault(run: Run, options: LaunchOptions) {
   await run.worker.evaluate(
-    ({ type, delay, limited }) => {
+    ({ type, delay, listDelay, limited }) => {
       const log: unknown[] = []
       ;(globalThis as unknown as { __vaultLog: unknown[] }).__vaultLog = log
       const send = chrome.runtime.sendMessage.bind(chrome.runtime) as (...args: unknown[]) => Promise<unknown>
@@ -1092,10 +1095,11 @@ async function seedVault(run: Run, options: LaunchOptions) {
         log.push(JSON.parse(JSON.stringify(m.body)))
         if (limited.includes(kind)) return Promise.resolve({ reply: { type: "error", code: "rate_limited", message: "too many requests; try again in a moment" } })
         if (delay && (kind === "fill" || kind === "fill-form")) return new Promise((r) => setTimeout(r, delay * 1000)).then(() => send(...args))
+        if (listDelay && kind === "list") return new Promise((r) => setTimeout(r, listDelay * 1000)).then(() => send(...args))
         return send(...args)
       }
     },
-    { type: VAULT_REQUEST, delay: options.fillDelay ?? 0, limited: (options.rateLimit ?? "").split(",").filter(Boolean) },
+    { type: VAULT_REQUEST, delay: options.fillDelay ?? 0, listDelay: options.listDelay ?? 0, limited: (options.rateLimit ?? "").split(",").filter(Boolean) },
   )
   if (options.host === false) return
   const page = await run.context.newPage()
@@ -2437,6 +2441,41 @@ async function viewportResize() {
   } catch (err) {
     check(false, `viewport resize threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "viewport resize")
+  } finally {
+    await close(run)
+  }
+}
+
+/**
+ * The menu grows in only once its frame has its rows (see openMenu): never a
+ * blank box (its shadow, a ghost) with the rows popping in half faded.
+ */
+async function menuReveal() {
+  // A slow list: the frame is up a while before it has rows to show.
+  const run = await launch({ listDelay: 0.3 })
+  const page = await run.context.newPage()
+  try {
+    await page.goto(`${site}/outcome/login`)
+    await formFound(page)
+    const loaded = page.waitForEvent("framenavigated", (f) => f.url().includes("/menu.html"))
+    await page.click("#email")
+    const menu = await loaded
+    const seen: string[] = []
+    const end = Date.now() + 1500
+    while (Date.now() < end) {
+      const [opacity, rows] = await Promise.all([
+        menu.frameElement().then((el) => el.evaluate((e) => Number(getComputedStyle(e as Element).opacity))).catch(() => -1),
+        menu.locator("button.row").count().catch(() => -1),
+      ])
+      if (opacity >= 0 && rows >= 0) seen.push(`${rows ? "rows" : "blank"}@${opacity.toFixed(2)}`)
+      if (rows && opacity === 1) break
+    }
+    const ghost = seen.filter((s) => s.startsWith("blank") && !s.endsWith("@0.00"))
+    check(ghost.length === 0 && seen.some((s) => s.startsWith("rows")), `the menu shows nothing until it has its rows (${seen.filter((s, i) => s !== seen[i - 1]).join(" ")})`)
+    check(!!(await until("the revealed menu takes a pick", async () => (await menu.locator("button.row").count()) > 0)), "and then lists its logins")
+  } catch (err) {
+    check(false, `menu reveal threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "menu reveal")
   } finally {
     await close(run)
   }
@@ -4286,6 +4325,7 @@ const once: Record<string, () => Promise<void>> = {
   coveredMenu,
   topLayer,
   viewportResize,
+  menuReveal,
   occlusionSweep,
   midFill,
   coveredPill,
@@ -4308,6 +4348,7 @@ const cost: Record<string, number> = {
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
+  menuReveal: 4,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
 const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])
