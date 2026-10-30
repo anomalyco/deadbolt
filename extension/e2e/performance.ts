@@ -215,7 +215,7 @@ try {
   for (let n = 0; n < runs; n++) {
     await rpc(page, { type: "device-lock" })
     // Status starts the replacement worker without unlocking it. Profile its
-    // whole unlock, retaining named wasm stacks for KDF/integrity attribution.
+    // whole unlock. Release wasm profiles retain stripped function indices.
     await rpc(page, { type: "device-status" })
     const stop = n === 0 ? await cdp.profile("/vault-worker.js") : null
     const t = performance.now()
