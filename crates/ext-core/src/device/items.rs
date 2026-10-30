@@ -9,19 +9,15 @@ use std::cell::Cell;
 
 use deadbolt_core::item::{FieldType, file_parts, file_size};
 use deadbolt_core::listing::{self, detail, input_field, label, searchable};
+use deadbolt_core::passkeys::private;
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{DataOp, Item, Vault, schema, schemas};
 use serde_json::{Value, json};
 
 use super::{
-    Error, Loaded, PRESET, Result, account, item_ref, origin, reauthenticate, reference,
-    request_sync, state, text, unix_time,
+    Error, Loaded, PRESET, Result, account, check_passphrase, item_ref, origin, reauthenticate,
+    reference, request_sync, state, text, unix_time,
 };
-
-/// A field whose value never leaves the vault: a passkey's private key.
-fn private(item: &Item, name: &str) -> bool {
-    item.kind == "passkey" && name == "private-key"
-}
 
 /// Whether the vault page can change items of this type. A passkey is made
 /// by a site through the browser; it can only be deleted here.
@@ -264,7 +260,11 @@ pub(super) fn save(body: &Value) -> Result<Value> {
 }
 
 /// `device-item-delete`: deletes the item, on every device once synced.
-pub(super) fn delete(body: &Value) -> Result<Value> {
+pub(super) fn delete(body: &mut Value) -> Result<Value> {
+    // The general item page can delete passkeys too. Keep the same Strict
+    // consent rule as passkey Settings, based on the stored kind, never input.
+    let passkey = state().with(|s| Ok(find(s, body)?.kind == "passkey"))?;
+    check_passphrase(body, passkey && PRESET.with(Cell::get).reauth())?;
     state().with(|s| {
         let item = find(s, body)?;
         let mut staged = s.vault.clone();

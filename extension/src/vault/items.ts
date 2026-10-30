@@ -91,9 +91,30 @@ export function kindsView(app: App): View {
   return { el, focus: () => el.querySelector<HTMLElement>(".vrow-main")?.focus() }
 }
 
-/** Delete, after a second press: on every device, once synced. */
+/**
+ * Delete, after a second press: on every device, once synced. Strict asks
+ * for the passphrase to delete a passkey: the vault answers
+ * `passphrase_needed`, and the passphrase is asked for under the button.
+ */
 export function deleteButton(app: App, ref: string, what: string): HTMLButtonElement {
   let armed = false
+  let asking: HTMLFormElement | null = null
+  /** Deletes it; what went wrong, or null (deleted, or the passphrase is asked for). */
+  const remove = async (passphrase?: string): Promise<string | null> => {
+    const r = await app.run(passphrase ? { type: "device-item-delete", ref, passphrase } : { type: "device-item-delete", ref })
+    if (!r.ok) {
+      if (r.code === "passphrase_needed" && !passphrase) {
+        asking ??= reauthForm("Delete", (p) => remove(p))
+        ;(b.parentElement ?? b).after(asking)
+        return null
+      }
+      return r.message
+    }
+    await app.refresh()
+    app.announce(`Deleted ${what}.`)
+    app.go({ name: "list" }, -1)
+    return null
+  }
   const b = button("btn", [glyph("trash"), "Delete"], async () => {
     if (!armed) {
       armed = true
@@ -107,14 +128,9 @@ export function deleteButton(app: App, ref: string, what: string): HTMLButtonEle
       return
     }
     b.disabled = true
-    const r = await app.run({ type: "device-item-delete", ref })
-    if (!r.ok) {
-      b.disabled = false
-      return app.announce(r.message)
-    }
-    await app.refresh()
-    app.announce(`Deleted ${what}.`)
-    app.go({ name: "list" }, -1)
+    const failed = await remove()
+    b.disabled = false
+    if (failed) app.announce(failed)
   })
   b.setAttribute("aria-label", `Delete ${what}`)
   return b

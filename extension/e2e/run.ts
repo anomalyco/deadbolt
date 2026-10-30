@@ -24,8 +24,8 @@
 // card into it (seedVault), and the host log is what the service worker
 // sent the vault. The fake host's other knobs have counterparts there (a
 // locked vault, one never set up, slow or rate-limited answers from the
-// worker's side); what only a native agent does (Touch ID, passkeys) is
-// skipped, by name.
+// worker's side). Native-agent passkey and Touch ID scenarios are skipped
+// by name; e2e/standalone.ts covers real standalone passkeys and Strict reauth.
 //
 // `--deadbolt <path to the deadbolt binary>` adds the passkey run, which
 // needs a real agent to sign: it makes a throwaway store (fast KDF, local
@@ -4089,7 +4089,7 @@ const cost: Record<string, number> = {
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15,
 }
-/** What only a native agent does: no standalone counterpart yet (Touch ID; passkeys are their own work). */
+/** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
 const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])
 const units = [
   ...(["light", "dark"] as const).flatMap((scheme) =>

@@ -383,23 +383,36 @@ export function unlockView(app: App): View {
   return { el: form, focus: () => input.focus(), leave: () => clearTimeout(timer) }
 }
 
+/** What a request waiting on the passphrase says: its heading, why, and its button (and that button busy). */
+function reauthText(reauth: Reauth): { title: string; why: string; act: string; busy: string } {
+  switch (reauth.kind) {
+    case "passkey-get":
+      return { title: `Sign in to ${reauth.site}`, why: `Strict: enter your passphrase to sign in as ${reauth.title} with a passkey on `, act: "Sign in", busy: "Signing in…" }
+    case "passkey-create":
+      return { title: `Save a passkey for ${reauth.site}`, why: `Strict: enter your passphrase to save a passkey for ${reauth.title} on `, act: "Save", busy: "Saving…" }
+    default:
+      return { title: `Fill ${reauth.title}`, why: "Strict: enter your passphrase to fill this card on ", act: "Fill", busy: "Filling…" }
+  }
+}
+
 /**
- * A page's fill waiting on the passphrase (a card's number or code under
- * Strict): asked here, in Deadbolt's own popup or page, never in the page
- * being filled. The passphrase goes to the background in one message, for
- * that one fill.
+ * A page's request waiting on the passphrase under Strict (a card's number or
+ * code to fill, or a passkey sign-in or save): asked here, in Deadbolt's own
+ * popup or page, never in the page asking. The passphrase goes to the
+ * background in one message, for that one request.
  */
 export function reauthView(app: App, reauth: Reauth): View {
+  const text = reauthText(reauth)
   const input = h("input", { class: "input", type: "password", autocomplete: "current-password", "aria-label": "Passphrase", placeholder: "Passphrase", spellcheck: "false" })
   const error = h("p", { class: "error", role: "alert" })
   error.hidden = true
-  const label = h("span", { class: "roll-label" }, "Fill")
-  label.dataset.text = "Fill"
+  const label = h("span", { class: "roll-label" }, text.act)
+  label.dataset.text = text.act
   const submit = h("button", { class: "btn primary wide", type: "submit" }, label)
   const form = h(
     "form",
     { class: "view center unlock", novalidate: "" },
-    h("div", { class: "state" }, h("span", { class: "state-icon" }, icon("lock")), h("h2", {}, `Fill ${reauth.title}`), para("Strict: enter your passphrase to fill this card on ", h("span", { class: "mono" }, reauth.site), ".")),
+    h("div", { class: "state" }, h("span", { class: "state-icon" }, icon("lock")), h("h2", {}, text.title), para(text.why, h("span", { class: "mono" }, reauth.site), ".")),
     input,
     error,
     h("div", { class: "buttons stack" }, submit, button("link", "Cancel", () => void app.reauthCancel(reauth))),
@@ -420,19 +433,21 @@ export function reauthView(app: App, reauth: Reauth): View {
       input.focus()
     } finally { b.disabled = false }
   })
-  void enrollment(app).then((t) => { if (t && form.isConnected) { form.insertBefore(touch, input); touch.focus() } })
+  // Touch ID may fill a card (no kind is a card); a passkey always takes the passphrase.
+  const card = (reauth.kind ?? "card") === "card"
+  if (card) void enrollment(app).then((t) => { if (t && form.isConnected) { form.insertBefore(touch, input); touch.focus() } })
   form.addEventListener("submit", async (e) => {
     e.preventDefault()
     if (!input.value) return refuse(input)
     submit.disabled = true
-    rollLabel(label, "Filling…")
+    rollLabel(label, text.busy)
     const passphrase = input.value
     input.value = ""
     const r = await app.run({ type: "device-reauth-confirm", id: reauth.id, passphrase })
     if (r.ok) return app.reauthDone()
     submit.disabled = false
-    rollLabel(label, "Fill")
-    // Wrong, or too many wrong: the fill waits for another try. Anything else ended it.
+    rollLabel(label, text.act)
+    // Wrong, or too many wrong: the request waits for another try. Anything else ended it.
     if (r.code !== "wrong_passphrase" && r.code !== "backoff") return app.reauthDone(r.message)
     error.textContent = r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.message
     error.hidden = false

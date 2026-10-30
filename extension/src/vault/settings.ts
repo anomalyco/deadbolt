@@ -1,10 +1,10 @@
-// Settings: the vault's devices (pair another, remove one), the lock preset,
-// the sites Deadbolt never offers to save, the learning logs and the vault's
-// name.
+// Settings: the vault's devices (pair another, remove one), its passkeys
+// (delete one), the lock preset, sites never offered to save, learning logs
+// and the vault's name.
 
 import { describePreset, PRESETS, VAULT_NAME } from "../device-rules"
-import type { LockPreset, VaultDevice } from "../messages"
-import { h } from "../ui/dom"
+import type { DevicePasskey, LockPreset, VaultDevice } from "../messages"
+import { h, icon } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { CLIPBOARD_PERMISSIONS } from "../bg/clipboard"
@@ -52,6 +52,67 @@ function deviceRow(app: App, d: VaultDevice, repaint: () => void): HTMLElement {
       )
       no.focus()
     }
+  }
+  return row
+}
+
+/**
+ * A passkey: its account and site, and Delete (asked first). Its key never
+ * leaves the vault. Strict asks for the passphrase to delete one, as the
+ * vault itself does (device-delete answers `passphrase_needed` without it).
+ */
+function passkeyRow(app: App, k: DevicePasskey, repaint: () => void): HTMLElement {
+  const name = k.username || "Passkey"
+  const created = k.created ? new Date(k.created) : null
+  const when = created && !Number.isNaN(created.getTime()) ? `Added ${created.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })}` : ""
+  const row = h(
+    "div",
+    { class: "vrow device" },
+    h("span", { class: "tile" }, icon("passkey")),
+    h("span", { class: "text" }, h("span", { class: "title" }, name), h("span", { class: "sub" }, [k.rpId, when].filter(Boolean).join(" · "))),
+    h("span", { class: "vrow-actions" }, iconButton(glyph("trash"), `Delete passkey ${name} for ${k.rpId}`, () => askDelete(app.preset === "strict"))),
+  )
+  const askDelete = (strict: boolean) => {
+    const no = button("btn", "Cancel", () => {
+      row.classList.remove("confirming")
+      repaint()
+    })
+    const label = h("span", { class: "roll-label" }, "Delete")
+    label.dataset.text = "Delete"
+    const passphrase = strict ? h("input", { class: "input", type: "password", autocomplete: "current-password", placeholder: "Passphrase", "aria-label": "Passphrase", spellcheck: "false" }) : null
+    const yes = button("btn danger", label, async (b) => {
+      const value = passphrase?.value ?? ""
+      if (passphrase && !value) return refuse(passphrase)
+      b.disabled = true
+      if (passphrase) passphrase.value = ""
+      rollLabel(label, "Deleting…")
+      const r = await app.run(value ? { type: "device-delete", ref: k.ref, passphrase: value } : { type: "device-delete", ref: k.ref })
+      if (!r.ok) {
+        // The vault holds Strict even if this page didn't know: ask for the passphrase and try again.
+        if (r.code === "passphrase_needed" && !passphrase) return askDelete(true)
+        b.disabled = false
+        rollLabel(label, "Delete")
+        app.announce(r.message)
+        row.querySelector(".confirm-text")!.textContent = r.code === "wrong_passphrase" ? "That passphrase isn't right." : r.message
+        if (passphrase) {
+          refuse(passphrase)
+          passphrase.focus()
+        }
+        return
+      }
+      await app.refresh()
+      app.announce(`Deleted the passkey for ${k.rpId}.`)
+    })
+    passphrase?.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") yes.click()
+    })
+    const why = strict ? `Strict: enter your passphrase to delete it. You can't sign in to ${k.rpId} as ${name} with it again, on any device.` : `You can't sign in to ${k.rpId} as ${name} with it again, on any device.`
+    row.classList.add("confirming")
+    row.replaceChildren(
+      h("span", { class: "text" }, h("span", { class: "title" }, `Delete passkey for ${k.rpId}?`), h("span", { class: "sub confirm-text" }, why), passphrase),
+      h("span", { class: "vrow-actions shown" }, no, yes),
+    )
+    ;(passphrase ?? no).focus()
   }
   return row
 }
@@ -229,10 +290,11 @@ export function settingsView(app: App): View {
           // Strict clears copied passwords if Chrome allows it: ask now, from this click.
           const asking = info.reauth && !(await app.clears()) ? app.askClearing() : null
           const r = await app.run({ type: "device-preset", preset: p })
-          if (r.ok) app.preset = p
+          // What the vault answered, which keeps the preset it holds when the change didn't reach it.
+          if (r.ok && typeof r.reply.preset === "string") app.preset = r.reply.preset as LockPreset
           if (asking) clearing.checked = await asking
           paintPresets()
-          app.announce(`${info.name}.`)
+          app.announce(r.ok ? `${PRESETS[app.preset].name}.` : r.message)
         })
         return h("label", { class: `preset${p === app.preset ? " on" : ""}` }, input, h("span", { class: "text" }, h("span", { class: "title" }, info.name, p === "comfortable" ? h("span", { class: "faint" }, " · default") : null), h("span", { class: "sub" }, describePreset(p))))
       }),
@@ -248,7 +310,26 @@ export function settingsView(app: App): View {
     app.announce(clearing.checked ? "Copied passwords clear after 30 seconds." : "Copied passwords stay until you copy something else.")
   })
 
+  // Passkeys, once the vault has listed them.
+  const passkeys = h("div", { class: "rows" })
+  const passkeysGroup = h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Passkeys")), passkeys)
+  let passkeyRows = new Map<string, HTMLElement>()
+
   const paint = () => {
+    passkeysGroup.hidden = app.passkeys === null
+    // Refreshes can arrive while typing or awaiting the KDF. Keep that item's
+    // confirmation in place, but remove it if the item disappeared from sync.
+    passkeyRows = new Map((app.passkeys ?? []).map((k) => {
+      const previous = passkeyRows.get(k.ref)
+      return [k.ref, previous?.classList.contains("confirming") ? previous : passkeyRow(app, k, paint)]
+    }))
+    const rows = passkeyRows.size ? [...passkeyRows.values()] : [h("p", { class: "hint" }, "No passkeys yet. A site that offers one asks to save it in Deadbolt.")]
+    for (const child of [...passkeys.children]) {
+      if (!rows.includes(child as HTMLElement)) child.remove()
+    }
+    rows.forEach((row, i) => {
+      if (passkeys.children[i] !== row) passkeys.insertBefore(row, passkeys.children[i] ?? null)
+    })
     // This browser first, then the others by name.
     const sorted = [...(app.devices ?? [])].sort((a, b) => Number(b.current) - Number(a.current) || a.name.localeCompare(b.name))
     devices.replaceChildren(...sorted.map((d) => deviceRow(app, d, paint)))
@@ -263,6 +344,7 @@ export function settingsView(app: App): View {
     toolbar("Settings", () => app.go({ name: "list" }, -1)),
     biometrics,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Devices")), devices, pairArea),
+    passkeysGroup,
     h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, "Lock")), presets, h("p", { class: "hint" }, "Every preset locks when the browser quits.")),
     h(
       "section",

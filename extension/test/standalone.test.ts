@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, setSystemTime, test } from "bun:test"
 import { CLIPBOARD_ALARM, COPIED_KEY, digest, holds, record } from "../src/bg/clipboard"
-import { backoff, deviceCommand, deviceName, fromVaultPage, StandaloneBackend } from "../src/bg/standalone"
+import { backoff, deviceCommand, deviceName, fromVaultPage, reauthTitle, StandaloneBackend } from "../src/bg/standalone"
 import { VAULT_CHANGED, VAULT_CLIPBOARD, VAULT_LOCK, VAULT_REQUEST, type VaultClipboard, type VaultRequest } from "../src/bg/vault-messages"
 import { ID, installChrome, pageSender, POPUP_URL, settle, type FakeChrome } from "./chrome"
 
@@ -145,6 +145,17 @@ describe("the vault's worker lost", () => {
 })
 
 describe("device page commands", () => {
+  test("keeps the passkeys capability when the worker advertises its ceremonies", async () => {
+    const base = fake.runtimeAnswer
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "hello") return { reply: { type: "hello", protocol: 3, version: "test", status: "ready", capabilities: ["list", "passkeys", "learn"] } }
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(backend.capabilities).toEqual(["list", "passkeys", "learn"])
+  })
   test("only this extension's own device.html and popup may send them", () => {
     expect(fromVaultPage({ id: ID, url: DEVICE_URL })).toBe(true)
     expect(fromVaultPage({ id: ID, url: `${DEVICE_URL}?from=popup#unlock`, tab: { id: 3 } as chrome.tabs.Tab, frameId: 0 })).toBe(true)
@@ -188,6 +199,9 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-sync", wait: "yes" })).toEqual({ type: "device-sync" })
     expect(deviceCommand({ type: "device-item", ref: "v:i", origin: "x" })).toEqual({ type: "device-item", ref: "v:i" })
     expect(deviceCommand({ type: "device-item" })).toBeNull()
+    expect(deviceCommand({ type: "device-delete", ref: "v:i", extra: 1 })).toEqual({ type: "device-delete", ref: "v:i" })
+    expect(deviceCommand({ type: "device-delete", ref: "v:i", passphrase: "p" })).toEqual({ type: "device-delete", ref: "v:i", passphrase: "p" })
+    expect(deviceCommand({ type: "device-delete", ref: "v:i", passphrase: "" })).toBeNull()
     expect(deviceCommand({ type: "device-secret", ref: "v:i" })).toEqual({ type: "device-secret", ref: "v:i" })
     expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "" })).toBeNull()
     expect(deviceCommand({ type: "device-secret", ref: "v:i", passphrase: "p" })).toEqual({ type: "device-secret", ref: "v:i", passphrase: "p" })
@@ -206,6 +220,8 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-item-save", ref: "v:i", fields: [{ name: "Bad Name", value: "x" }] })).toBeNull()
     expect(deviceCommand({ type: "device-item-save", fields: [] })).toBeNull()
     expect(deviceCommand({ type: "device-item-delete", ref: "v:i" })).toEqual({ type: "device-item-delete", ref: "v:i" })
+    expect(deviceCommand({ type: "device-item-delete", ref: "v:i", passphrase: "p" })).toEqual({ type: "device-item-delete", ref: "v:i", passphrase: "p" })
+    expect(deviceCommand({ type: "device-item-delete", ref: "v:i", passphrase: "" })).toBeNull()
     expect(deviceCommand({ type: "device-remove", id })).toEqual({ type: "device-remove", id })
     expect(deviceCommand({ type: "device-remove", id: "AB".repeat(32) })).toBeNull()
     expect(deviceCommand({ type: "device-remove", id: "ab" })).toBeNull()
@@ -496,6 +512,23 @@ describe("lock preset in the worker", () => {
     await backend.device({ type: "device-preset", preset: "relaxed" })
     expect(requests().filter((b) => b.type === "device-preset")).toEqual([{ type: "device-preset", preset: "relaxed" }])
   })
+
+  test("a change the unlocked worker refuses keeps the preset it holds", async () => {
+    fake.local["deadbolt.lockPreset"] = "strict"
+    const base = fake.runtimeAnswer!
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "device-preset") return { error: "the worker is gone" }
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    expect(await backend.device({ type: "device-preset", preset: "relaxed" })).toMatchObject({ ok: false })
+    expect(fake.local["deadbolt.lockPreset"]).toBe("strict")
+    expect(await backend.asksPassphrase()).toBe(true)
+    const settings = await backend.device({ type: "device-settings" })
+    expect(settings.ok && settings.reply.preset).toBe("strict")
+  })
 })
 
 describe("wrong passphrases", () => {
@@ -562,6 +595,85 @@ describe("a fill waiting on the passphrase", () => {
     const r = await backend.device({ type: "device-reauth" })
     return r.ok ? (r.reply.reauth as { id: string; title: string; site: string } | null) : null
   }
+
+  test("a passkey cancelled during its slow passphrase check never spends its authorization", async () => {
+    const base = fake.runtimeAnswer!
+    let release!: (value: unknown) => void
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-authorize") return new Promise((resolve) => (release = resolve))
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const body = { type: "passkey-create" as const, origin: "https://shop.test", challenge: "AQ".repeat(16), user: { id: "AQ", name: "Alice" }, exclude: [], userVerification: "preferred" as const }
+    const controller = new AbortController()
+    const ceremony = backend.reauth(body, ask, controller.signal)
+    const ended = ceremony.catch((error: unknown) => error)
+    const id = (await waiting(backend))!.id
+    const confirm = backend.device({ type: "device-reauth-confirm", id, passphrase: "slow" })
+    await settle()
+    controller.abort()
+    expect(await ended).toMatchObject({ code: "cancelled" })
+    release({ reply: { type: "passkey-authorized", token: "one-use" } })
+    expect(await confirm).toMatchObject({ ok: false, code: "expired" })
+    expect(requests().filter((r) => r.type === "passkey-finish")).toHaveLength(0)
+    expect(requests().find((r) => r.type === "passkey-authorize")).toMatchObject({ ceremony: body })
+  })
+
+  test("a live passkey spends its authorization once and returns no UV", async () => {
+    const base = fake.runtimeAnswer!
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-authorize") return { reply: { type: "passkey-authorized", token: "one-use" } }
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-finish") return { reply: { type: "passkey-assertion", credentialId: "AQ", clientDataJSON: "AQ", authenticatorData: "AQ", signature: "AQ", userHandle: "AQ", verified: false } }
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const body = { type: "passkey-get" as const, origin: "https://shop.test", ref: `${"a".repeat(64)}:${"1".repeat(32)}`, challenge: "AQ".repeat(16), userVerification: "preferred" as const }
+    const ceremony = backend.reauth(body, ask, new AbortController().signal)
+    const id = (await waiting(backend))!.id
+    expect(await backend.device({ type: "device-reauth-confirm", id, prf: "ab".repeat(32) })).toMatchObject({ ok: false, code: "passphrase_needed" })
+    expect((await waiting(backend))!.id).toBe(id)
+    expect(requests().filter((r) => r.type === "passkey-authorize")).toHaveLength(0)
+    const answers = await Promise.all([backend.device({ type: "device-reauth-confirm", id, passphrase: "right" }), backend.device({ type: "device-reauth-confirm", id, passphrase: "right" })])
+    expect(answers.every((answer) => answer.ok)).toBe(true)
+    expect(await ceremony).toMatchObject({ type: "passkey-assertion", verified: false })
+    expect(await backend.device({ type: "device-reauth-confirm", id, passphrase: "right" })).toMatchObject({ ok: false, code: "expired" })
+    expect(requests().filter((r) => r.type === "passkey-finish")).toEqual([{ type: "passkey-finish", token: "one-use" }])
+    expect(requests().filter((r) => r.type === "passkey-authorize")).toHaveLength(1)
+  })
+
+  test("a different passphrase sent meanwhile waits for the first check, then runs on its own", async () => {
+    const base = fake.runtimeAnswer!
+    fake.runtimeAnswer = (message) => {
+      const m = message as VaultRequest
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-authorize")
+        return m.body.passphrase === "wrong" ? { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } } : { reply: { type: "passkey-authorized", token: "one-use" } }
+      if (m.type === VAULT_REQUEST && m.body.type === "passkey-finish") return { reply: { type: "passkey-assertion", credentialId: "AQ", clientDataJSON: "AQ", authenticatorData: "AQ", signature: "AQ", userHandle: "AQ", verified: false } }
+      return base(message)
+    }
+    const backend = new StandaloneBackend()
+    await backend.connect()
+    const body = { type: "passkey-get" as const, origin: "https://shop.test", ref: `${"a".repeat(64)}:${"1".repeat(32)}`, challenge: "AQ".repeat(16), userVerification: "preferred" as const }
+    const ceremony = backend.reauth(body, { tabId: 1, title: "\u202eevil\u0007 " + "x".repeat(80), site: "shop.test" }, new AbortController().signal)
+    const r = (await waiting(backend))!
+    expect(r.title).toBe(`evil ${"x".repeat(59)}`)
+    const [wrong, right] = await Promise.all([backend.device({ type: "device-reauth-confirm", id: r.id, passphrase: "wrong" }), backend.device({ type: "device-reauth-confirm", id: r.id, passphrase: "right" })])
+    expect(wrong).toMatchObject({ ok: false, code: "wrong_passphrase" })
+    expect(right.ok).toBe(true)
+    expect(await ceremony).toMatchObject({ type: "passkey-assertion" })
+    expect(requests().filter((b) => b.type === "passkey-authorize").map((b) => b.passphrase)).toEqual(["wrong", "right"])
+    expect(requests().filter((b) => b.type === "passkey-finish")).toHaveLength(1)
+  })
+
+  test("its title is the page's text without controls or bidi overrides, at most 64 characters", () => {
+    expect(reauthTitle("  al\u200eice\u2066\u0000  ", "Passkey")).toBe("alice")
+    expect(reauthTitle("\u202e\u0085 ", "Passkey")).toBe("Passkey")
+    expect(Array.from(reauthTitle("😀".repeat(70), "Passkey"))).toHaveLength(64)
+    expect(reauthTitle("😀".repeat(70), "Passkey")).toBe("😀".repeat(64))
+  })
 
   test("is asked in the popup, runs once with the passphrase, and keeps none of it", async () => {
     const backend = new StandaloneBackend()

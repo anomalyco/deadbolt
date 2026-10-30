@@ -3,8 +3,9 @@
 The extension is its own Deadbolt device: a fresh Ed25519 `DeviceSecret`, a
 membership entry and an encrypted vault replica. A CLI on the same computer is
 another peer, not a required helper. The standalone build supports daily login
-autofill, save/update offers, password generation and identity/card filling.
-Passkeys and the other limitations below still use the browser's own fallback;
+autofill, save/update offers, password generation, identity/card filling and
+ES256 passkey registration and sign-in. Unsupported WebAuthn ceremonies and the
+other limitations below still use the browser's own fallback;
 there is no silent fallback to a native host.
 
 ## Architecture
@@ -29,6 +30,59 @@ The device supports a single vault, login create/update/list/fill, save/update
 offers after sign-in, generated passwords, identity/card fills, passphrase
 lock/unlock, joining an existing vault or inviting a CLI device, and bidirectional
 sync. Unsupported operations fail rather than silently delegating to a native host.
+
+### Passkeys
+
+The native agent and standalone worker call `deadbolt-core::passkeys` and
+`deadbolt-core::webauthn`: shared RP/origin validation, exclusion checks,
+registration fields and new-item planning, ES256 signing, canonical CBOR,
+client data and authenticator flags. A synced passkey has the same item schema
+and PKCS#8 key on either device. Sign counters remain zero (as native requires
+for multi-device passkeys); backup eligible/backed-up flags remain set.
+
+The existing page bridge, same-origin ancestor and Permissions Policy checks,
+toolbar confirmation/account chooser and conditional inline-menu visibility
+checks apply to signed ceremonies. Same-site cross-origin login frames may hold
+conditional requests for login autofill only; they never sign cross-origin
+assertions. A page cannot supply its own trusted origin or consent.
+Standalone advertises `passkeys`; registration commits the encrypted item before
+returning attestation and wakes sync. Registering the same user handle creates a
+new item, keeping the old credential intact: the site might reject or never
+receive the new registration. Only `excludeCredentials` identifies duplicates;
+exclusions are checked again immediately before the write. There is no automatic
+retirement after signing, since producing an assertion does not prove the site
+accepted it. Delete unwanted credentials explicitly in Settings.
+Assertions re-read the selected account after consent. Settings lists only site,
+account and creation date and can delete a passkey; the signed tombstone syncs
+to CLI/app peers. Strict deletion requires the local passphrase, enforced in
+Rust for both Settings and the general item-detail delete command, even if the
+UI is bypassed. Native item deletion likewise asks for Touch ID
+when enrolled and enabled; without it, native retains its explicit-delete rule.
+No management or ceremony response contains the private key.
+
+Strict asks for the local passphrase on every preferred-verification ceremony,
+where native with Touch ID would prompt. `discouraged` skips reauthentication as
+native does. Comfortable/Relaxed use the native Touch-ID-off rule: the explicit
+popup/menu pick supplies user presence. A passphrase is **not** represented as
+Touch ID: `canVerify` and the UV flag stay false. Required-UV ceremonies fall
+back to the browser, and the Rust adapter independently refuses them.
+
+The existing passphrase prompt/backoff is shared with card fills. Cancellation,
+navigation, replacement and lock end the waiting request. A slow passphrase
+check produces only a short-lived one-shot authorization bound to that exact
+ceremony, not a registration or signature; the background spends it only while
+the request is still live. As native, cancellation after the final write was
+sent can leave a saved passkey whose reply the page never received; it can be
+deleted in Settings. One Strict prompt waits at a time across tabs; a newer
+prompt cancels the older one, as for standalone card fills. Worker loss
+discards authorizations. Overlapping passkey confirmations are keyed by a
+prompt-salted SHA-256 hash of the passphrase: duplicates of the current check
+share its answer, while different inputs wait and are checked separately only
+if the request still waits and no backoff applies. Standalone also
+uses the host's ceremony token bucket (10 then one/second) and four-in-flight
+limit. Listing passkeys does not keep the vault unlocked. Page-provided reauth
+titles strip control and bidi characters and are capped at 64 Unicode characters;
+stored account labels use the same filtering with a 256-character limit.
 
 ### Shared autofill rules
 
@@ -288,6 +342,10 @@ explicit pick is enough), rather than claiming biometric reauthentication.
 Opt-in **Unlock with Touch ID** uses a platform WebAuthn passkey with PRF. Strict
 reveals/copies and card fills accept a new PRF assertion or the passphrase. Rust
 checks the actual PRF key against the enrolled store slot, never a JS boolean.
+Website-passkey ceremonies and passkey deletion remain passphrase-only under
+Strict. The unlock factor does not change `canVerify=false` or UV=false for
+website passkeys, and Rust refuses PRF-only consent through either delete API
+or a ceremony. These are separate from the extension-origin unlock passkey.
 The UI remembers the successful unlock method, keeps passphrase fallback visible,
 submits on Enter, and shows the backoff countdown. The locked inline row opens
 the device page; unlock returns to the requesting document and reopens its menu,
@@ -394,13 +452,13 @@ scenario named.
 
 | Request | Standalone | Notes |
 | --- | --- | --- |
-| `hello` | Same | Capabilities: `list fill check save generate forms learn` (no `passkeys`) |
+| `hello` | Same | Capabilities: `list fill check save generate forms passkeys learn` |
 | `list` | Same | Shared `deadbolt-core::site` rules and ranking; `signIn` with the linked account |
 | `fill` (`username`, `password`, `totp`) | Same | Current TOTP from core |
 | `generate`, `generate-check`, `generate-keep`, `generate-drop` | Same | Shared page-rule planning and candidate lifetime |
 | `check`, `save` | Same | Shared login check and password-only update |
-| `forms`, `fill-form` | Same, except Touch ID | Strict asks for the passphrase in Deadbolt's own popup instead |
-| `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Missing | The browser's own passkey flow runs; separate work |
+| `forms`, `fill-form` | Shared form rules | Strict asks for the passphrase or an enrolled platform PRF assertion |
+| `passkey-list`, `passkey-create`, `passkey-get`, `passkey-cancel` | Shared ceremony rules, without biometric UV | Strict uses passphrase reauthentication; required UV uses the browser |
 | `learn` | Same, kept in the browser | See "Learning logs" below |
 | Rate limits | Same | The host's token buckets, in the service worker |
 
@@ -420,10 +478,10 @@ scenario named.
 | Clickjacking, occlusion, bfcache, navigation checks | Same | the `security` group, `midFill`, `coveredPill`, `corner` |
 | Toolbar popup: this site's logins and Fill, fill errors, the offer | Same (the vault's own popup) | `fillAndTotp`, `rateLimited`, `securityPage`, `savePrompt` |
 | Locked and not set up | The menu and popup offer to unlock or set up here | `locked`, `notInstalled` |
+| Passkeys | Registration, assertions, account selection, conditional UI, sync and deletion | `e2e/standalone.ts`; native adapter covered by `passkeys` |
 | "Learn this site" (#65), in the popup | Same | `learnAndNever` |
 | "Never for this site", and "Saving is off… Turn on" in the popup | Same; Settings also lists every such site | `learnAndNever` |
-| Passkeys | Missing (separate work) | `passkeys` is native only |
-| Touch ID for card numbers | Strict passphrase instead | `formsTouchId` is native only; e2e/standalone.ts covers Strict |
+| Touch ID for card numbers | Strict passphrase or enrolled PRF | `formsTouchId` is native only; e2e/standalone.ts covers Strict and PRF |
 
 ### Vault features of the native app
 
@@ -431,7 +489,7 @@ scenario named.
 | --- | --- |
 | Every item type: view, search, copy, add, edit, delete | Same (#97); item links (billing identity, sign-in account) kept, not edited |
 | Devices, pairing, sync, rename | Same |
-| Lock presets, idle and screen lock | Same; Touch ID unlock is separate work |
+| Lock presets, idle and screen lock | Same; optional platform PRF unlock with passphrase fallback |
 | Several vaults, switching | Missing: one vault per browser |
 | Import from other password managers | Missing: import on a native device and sync |
 | Export | Neither build has one |
@@ -468,8 +526,10 @@ Scenarios check the same things, except where the builds differ on purpose:
 - its menu offers to unlock;
 - cards ask for nothing more under Comfortable.
 
-`passkeys` and `formsTouchId` are skipped. CI runs it in four shards
-(`extension-standalone-e2e`).
+The native-agent `passkeys` and `formsTouchId` scenarios are skipped in this
+parity harness. Real standalone passkey ceremonies and Strict reauthentication
+are covered separately by `e2e/standalone.ts`, including offline smoke in CI.
+CI runs the parity harness in four shards (`extension-standalone-e2e`).
 
 ## Verification
 
@@ -507,6 +567,25 @@ vault persists and starts locked. It also fills a login saved for `acme.test` on
 and generated passwords on signup and password-change forms. Submit flows use
 trusted localhost: HTTP `.test` pages lack Web Crypto, so the shared content
 script cannot track typed password values there.
+
+Every run also uses a localhost WebAuthn page and the real popup/menu to
+register, sign in modally and conditionally, and choose an account. An
+independent WebAuthn server verifier checks ES256 signatures, origin, RP,
+AAGUID, backup flags, zero counters and UV=false. A virtual browser authenticator
+checks required-UV fallback. Strict checks wrong/right passphrases for both
+registration and assertion and skips reauth for discouraged UV. Settings
+deletion exercises Cancel and Delete and removes that account from subsequent
+choosers; locking and restarting preserve the remaining passkeys and tombstones.
+Re-registering the same user handle preserves both keys, each verified against
+its own public key. Direct worker checks refuse Strict deletion without the
+passphrase or with a wrong one, and preserve other credentials on deletion.
+Settings and general item-detail deletion both exercise Strict's wrong/right
+passphrase flow. The general item detail and secret endpoints also refuse the
+passkey's private key, even after reauthentication.
+The online runs additionally sign with a browser-created passkey through the
+CLI's real browser host, register a CLI passkey and sign with it in the browser,
+and verify that deletion reaches the CLI. These use the same signed log and
+passkey schema as app devices; no separate passkey sync protocol is introduced.
 
 The full run adds a real CLI over n0's public relays, so it stays out of CI. It
 pairs a CLI started with `deadbolt join`, checks the browser's login reached it and
@@ -634,7 +713,7 @@ name "this Mac" grants nothing: it only changes the wording.
 3. Validate real platform providers in Chrome and Helium on macOS; evaluate
    capped wasm-worker crash recovery from offscreen memory only (not built).
 4. Stronger browser-lifetime guarantees and Comfortable biometric card policy.
-5. Finish passkeys and learning; harden
+5. Harden
    packaging/update/CSP permissions, measure wasm size/unlock across devices, and
    decide native-path retirement.
 
@@ -642,18 +721,10 @@ name "this Mac" grants nothing: it only changes the wording.
 
 - One vault per browser device; no automatic migration from the native build.
   "On this Mac" is known only for a copy the CLI keeps, not by asking the host.
-- No website passkey registration/assertion capability (unlock passkeys are separate).
-  WebAuthn falls back to the browser. A headless check with an unlocked standalone
-  vault verified browser-owned ES256 resident-key registration and assertion with
-  required user verification, no advertised passkey capability and no native
-  messaging. Standalone passkey storage is a separate extraction across
-  `cli/src/webauthn.rs` (ES256/CBOR/client data), `agent/passkeys.rs` (RP and
-  exclusion checks, listing, signing and mutation planning) and the browser host's
-  ceremony adapter. Move the pure crypto and validation into core, then add
-  wasm storage/consent/cancellation adapters, registration and assertion e2e,
-  and durable-save/exclusion-race checks. Initially report `canVerify=false` and
-  UV=false, handing required-UV ceremonies to the browser; passphrase card
-  reauthentication must not silently claim native Touch ID verification.
+- No website-passkey UV provider. Required-UV WebAuthn ceremonies
+  use the browser, not a false claim that the local passphrase performed Touch ID.
+  As native, passkeys are ES256 with `none` attestation only, with no editing,
+  import/export, PRF or largeBlob support.
 - No standalone Activity log.
 - No automatic save/update offers for identities or cards. Item-to-item links
   (a card's billing identity, a login's sign-in account) are kept but not

@@ -448,12 +448,15 @@ export type HookReply = { credential: Record<string, string> } | { fallback: tru
 
 /**
  * What the popup asks about a page's passkey call. `verify`: Deadbolt asks
- * for Touch ID before it signs.
+ * for Touch ID before it signs. `passphrase`: the browser-only Deadbolt asks
+ * for the passphrase next (Strict, unless the site discourages verification),
+ * as a Reauth the popup shows before it closes.
  */
 export type PasskeyPrompt = {
   id: string
   rpId: string
   verify: boolean
+  passphrase?: boolean
 } & (
   | { kind: "get"; passkeys: Array<{ ref: string; vault: string; username?: string; created?: string }> }
   /** `registered`: the site already has one of its excluded passkeys in Deadbolt. */
@@ -523,7 +526,7 @@ export type DeviceCommand =
    */
   | { type: "device-item-save"; ref?: string; kind?: string; name?: string; fields: ItemInput[]; remove?: string[] }
   /** Deletes an item, on every device once synced. */
-  | { type: "device-item-delete"; ref: string }
+  | { type: "device-item-delete"; ref: string; passphrase?: string }
   /** Removes another device from the vault. */
   | { type: "device-remove"; id: string }
   /** Renames the vault. */
@@ -547,15 +550,38 @@ export type DeviceCommand =
   | ({ type: "device-reauth-confirm"; id: string } & UnlockProof)
   /** The user turned fill `id` down: nothing is filled. */
   | { type: "device-reauth-cancel"; id: string }
+  /** The vault's passkeys, never their keys: `{ type: "device-passkeys", passkeys: DevicePasskey[] }`. */
+  | { type: "device-passkeys" }
+  /**
+   * Deletes passkey `ref` from the vault (passkeys only for now); the delete
+   * syncs to the other devices. Strict asks for the passphrase every time,
+   * as device-secret does: without it the vault answers `passphrase_needed`.
+   */
+  | { type: "device-delete"; ref: string; passphrase?: string }
   | { type: "list"; origin: string }
   | { type: "save"; origin: string; entry: { title: string; url: string; username: string; password: string } }
 
-/** A fill waiting on the passphrase (a card's number or code under Strict), as Deadbolt's own pages ask for it. */
+/**
+ * A request waiting on the passphrase under Strict, as Deadbolt's own pages
+ * ask for it: a card's number or code to fill (`kind` "card", the default),
+ * or a passkey sign-in ("passkey-get") or registration ("passkey-create").
+ */
 export interface Reauth {
   id: string
-  /** "Visa •••• 4242". */
+  kind?: "card" | "passkey-get" | "passkey-create"
+  /** "Visa •••• 4242"; for a passkey, its username (or "Passkey"). */
   title: string
   site: string
+}
+
+/** A passkey in the vault, as device-passkeys lists it: never its private key. `created`: ISO date. */
+export interface DevicePasskey {
+  ref: string
+  vault: string
+  rpId: string
+  credentialId: string
+  username?: string
+  created?: string
 }
 
 /** Broadcast to Deadbolt's own pages when a fill starts or stops waiting on the passphrase: they ask device-reauth. */
