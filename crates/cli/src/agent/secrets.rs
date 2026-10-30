@@ -294,10 +294,17 @@ fn uncovered<'a>(
         .collect())
 }
 
-/// What an AI may never do, as the Never tier says (docs/agent-control.md,
-/// "Tiers"): `None` for anything else.
-fn never(command: &Command) -> Option<&'static str> {
+/// What an AI may never do: the Never tier (docs/agent-control.md,
+/// "Tiers"), and the browser's fills and saves, which are the browser
+/// host's alone (any same-user process can send them, so an AI is refused
+/// them here until browser pairing). `None` for anything else.
+fn refused(command: &Command) -> Option<&'static str> {
     Some(match command {
+        Command::SiteFill { .. } => "fill a site's login",
+        Command::SiteSave { login: Some(_), .. } => "change a saved login",
+        Command::FormFill { .. } => "fill a form",
+        Command::PasskeyGet { .. } => "sign in with a passkey",
+        Command::PasskeyCreate { .. } => "save a passkey",
         Command::Setup { .. } => "set Deadbolt up",
         Command::Unlock { .. } | Command::UnlockBiometric { .. } => "unlock Deadbolt",
         Command::TouchIdSet { .. } => "turn Touch ID unlock on or off",
@@ -390,8 +397,10 @@ impl Agent {
     /// The stop-gap for a caller that looks like an AI (#111), until
     /// `policy::decide` (docs/agent-control.md, build order 3): a value it
     /// would be shown (`item-get`, `item-code`) asks for Touch ID every
-    /// time, as `resolve … read` does, and the Never tier is refused. Other
-    /// callers, the app, the browser host and AutoFill pass unchanged.
+    /// time, as `resolve … read` does, and the Never tier and the browser's
+    /// fills and saves are refused. Other callers, the app, the browser host
+    /// and AutoFill pass unchanged, and so do agent clients' sign-ins
+    /// (`agent-fill` and the rest), which their token authenticates.
     pub(super) async fn ai_gate(
         &self,
         caller: &CallerInfo,
@@ -410,10 +419,13 @@ impl Agent {
             } => (vault, query, *deleted, ""),
             Command::ItemCode { vault, query } => (vault, query, false, "the one-time code of "),
             command => {
-                return match never(command) {
+                return match refused(command) {
                     Some(what) => Err(fail(
                         ErrorCode::Forbidden,
-                        format!("an AI agent can't {what}: run it yourself, in a terminal"),
+                        format!(
+                            "an AI agent can't {what}. {}.",
+                            caller::not_from_here(caller)
+                        ),
                     )),
                     None => Ok(()),
                 };
@@ -423,17 +435,39 @@ impl Agent {
         // Locked, or a query that finds nothing, fails before anyone is
         // asked anything.
         let item = self.with(|s| items::named(s, vault.as_deref(), query, deleted))?;
+        let reason = format!("show {what}{item} to an AI agent");
+        self.ai_touch_id(caller, conv, &reason).await
+    }
+
+    /// Touch ID for an AI's read, raised by the agent with its own
+    /// `reason`. Off, not set up, cancelled or denied, the read is
+    /// `forbidden`, saying why and where to go instead.
+    async fn ai_touch_id(
+        &self,
+        caller: &CallerInfo,
+        conv: &Conversation,
+        reason: &str,
+    ) -> Result<()> {
         if !self.can_verify() {
             return Err(fail(
                 ErrorCode::Forbidden,
-                "an AI agent can see a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` instead",
+                format!(
+                    "an AI agent can see a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` with a grant instead. {}.",
+                    caller::not_from_here(caller)
+                ),
             ));
         }
-        let reason = format!("show {what}{item} to an AI agent");
         // Waiting on the finger mustn't let the idle lock fire.
         let _busy = self.busy();
-        self.verify_user(conv, Verify::Required, &reason).await?;
-        Ok(())
+        match self.verify_user(conv, Verify::Required, reason).await {
+            Ok(_) => Ok(()),
+            // Locked while waiting, say, stays what it is.
+            Err(error) if error.downcast_ref::<AgentError>().is_some() => Err(error),
+            Err(error) => Err(fail(
+                ErrorCode::Forbidden,
+                format!("{error:#}: the value wasn't shown to the AI agent"),
+            )),
+        }
     }
 
     /// Answers `resolve`: the values `refs` name, if `caller` may have them
@@ -497,19 +531,9 @@ impl Agent {
         if ai {
             match purpose {
                 Purpose::Read => {
-                    if !self.can_verify() {
-                        return Err(fail(
-                            ErrorCode::Forbidden,
-                            "an AI agent can read a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` instead",
-                        ));
-                    }
                     let names: Vec<String> = found.iter().map(named).collect();
                     let reason = format!("show {} to an AI agent", names.join(", "));
-                    {
-                        // Waiting on the finger mustn't let the idle lock fire.
-                        let _busy = self.busy();
-                        self.verify_user(conv, Verify::Required, &reason).await?;
-                    }
+                    self.ai_touch_id(caller, conv, &reason).await?;
                     // A one-time code may have moved on during the prompt.
                     found = self.with(|s| lookup(s))?;
                 }
@@ -535,6 +559,9 @@ impl Agent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+
+    use super::super::biometric;
     use crate::protocol::FieldInput;
 
     const NOW: u64 = 1_800_000_000;
@@ -773,6 +800,153 @@ mod tests {
                     .is_ok()
             );
         }
+    }
+
+    /// A caller under OpenCode, by its parents.
+    fn under_opencode(class: CallerClass) -> CallerInfo {
+        let mut info = CallerInfo::unverified("OpenCode › zsh › deadbolt");
+        info.class = class;
+        info.ancestry = vec![crate::protocol::Ancestor {
+            pid: 7,
+            name: "opencode".into(),
+            path: Some("/opt/bin/opencode".into()),
+        }];
+        info
+    }
+
+    /// The browser's fills and saves are refused to an AI caller, saying
+    /// why and where to go; the real browser host (macOS: by signature) and
+    /// an agent client's sign-ins (by token) are not this gate's to refuse.
+    #[tokio::test]
+    async fn the_gate_refuses_an_ai_the_browsers_fills_and_saves() {
+        use crate::protocol::{ClientAuth, Fill, LoginRef, PagePassword};
+        let f = super::super::passkeys::tests::agent::unlocked().await;
+        let (conv, _closed) = super::super::passkeys::tests::agent::conversation();
+        let login = LoginRef {
+            vault: "personal".into(),
+            item: "0000".into(),
+        };
+        let origin = || "https://github.com".to_string();
+        let save = |login: Option<LoginRef>| Command::SiteSave {
+            origin: origin(),
+            login,
+            title: "GitHub".into(),
+            url: origin(),
+            username: "kit".into(),
+            password: PagePassword::Typed(Secret::new("pwned-pwned")),
+        };
+        let refused = [
+            Command::SiteFill {
+                origin: origin(),
+                login: login.clone(),
+                want: vec![Fill::Password],
+            },
+            save(Some(login.clone())),
+            Command::FormFill {
+                origin: origin(),
+                item: login.clone(),
+                fields: vec!["number".into()],
+            },
+            Command::PasskeyGet {
+                origin: origin(),
+                rp_id: None,
+                passkey: login.clone(),
+                challenge: "AAAA".into(),
+                verify: Verify::Preferred,
+            },
+            Command::PasskeyCreate {
+                origin: origin(),
+                rp_id: None,
+                challenge: "AAAA".into(),
+                user_id: "AAAA".into(),
+                user_name: "kit".into(),
+                user_display_name: String::new(),
+                exclude: Vec::new(),
+                verify: Verify::Preferred,
+            },
+        ];
+        let ai = under_opencode(CallerClass::Caller);
+        for command in &refused {
+            let error = f.agent.ai_gate(&ai, command, &conv).await.unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::Forbidden), "{command:?}");
+            let message = error.to_string();
+            assert!(
+                message.contains("This shell runs under OpenCode (OpenCode › zsh › deadbolt)")
+                    && message.contains("see `deadbolt whoami`"),
+                "{message}"
+            );
+        }
+        let open = [
+            save(None),
+            Command::SiteLogins { origin: origin() },
+            Command::AgentFill {
+                client: ClientAuth {
+                    id: "c".into(),
+                    token: Secret::new("t"),
+                },
+                origin: origin(),
+                login: login.clone(),
+                want: vec![Fill::Password],
+            },
+        ];
+        for command in &open {
+            assert!(
+                f.agent.ai_gate(&ai, command, &conv).await.is_ok(),
+                "{command:?}"
+            );
+        }
+        let host = under_opencode(CallerClass::BrowserHost);
+        let person = CallerInfo::unverified("zsh › deadbolt");
+        for command in &refused {
+            assert!(f.agent.ai_gate(&host, command, &conv).await.is_ok());
+            assert!(f.agent.ai_gate(&person, command, &conv).await.is_ok());
+        }
+    }
+
+    /// Touch ID cancelled or denied refuses an AI's read (exit 4, refused
+    /// in Activity), from the gate and from `resolve … read` alike.
+    #[tokio::test]
+    async fn a_cancelled_touch_id_refuses_an_ais_read() {
+        let f = super::super::passkeys::tests::agent::unlocked().await;
+        let (conv, _closed) = super::super::passkeys::tests::agent::conversation();
+        f.agent
+            .with(|s| {
+                new(s, "login", "GitHub", &[("token", "t0k3n")]);
+                Ok(())
+            })
+            .unwrap();
+        let ai = under_opencode(CallerClass::Caller);
+        let get = Command::ItemGet {
+            vault: None,
+            query: vec!["GitHub".into()],
+            otp: false,
+            files: Vec::new(),
+            deleted: false,
+        };
+        let refs = ["deadbolt://GitHub/token".to_string()];
+        // Cancelled, and refused (a lockout, say).
+        for cancelled in [true, false] {
+            *f.agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_| {
+                Err(if cancelled {
+                    biometric::UnlockError::Cancelled
+                } else {
+                    biometric::UnlockError::Unavailable("biometry is locked out".into())
+                })
+            }));
+            let error = f.agent.ai_gate(&ai, &get, &conv).await.unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::Forbidden), "{error:#}");
+            let error = f
+                .agent
+                .resolve(&ai, &refs, Purpose::Read, &conv)
+                .await
+                .unwrap_err();
+            assert_eq!(code(&error), Some(ErrorCode::Forbidden), "{error:#}");
+            assert!(!format!("{error:#}").contains("t0k3n"));
+        }
+        // A finger lets it through.
+        let key = f.key;
+        *f.agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_| Ok(Zeroizing::new(key))));
+        assert!(f.agent.ai_gate(&ai, &get, &conv).await.is_ok());
     }
 
     #[test]

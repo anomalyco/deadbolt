@@ -784,8 +784,20 @@ mod tests {
 
     const SECRET: &str = "correct-horse-battery-staple";
 
+    /// Takes the peer on `server` (this test process) as a person's
+    /// terminal would be: the tests may run under an AI host such as
+    /// OpenCode, among the process's parents, which the agent refuses
+    /// what these tests ask.
+    fn as_a_person(agent: &Agent, server: &UnixStream) {
+        let peer = deadbolt_client::peer::Peer::of(server).unwrap();
+        let mut info = agent.callers.identify(Ok(peer), None);
+        info.ancestry.clear();
+        agent.callers.cache_for_test(peer, info);
+    }
+
     async fn ask(agent: &Arc<Agent>, command: Command) -> Message {
         let (server, mut client) = UnixStream::pair().unwrap();
+        as_a_person(agent, &server);
         let mut line = serde_json::to_vec(&Request {
             v: PROTOCOL_VERSION,
             claimed: None,
@@ -1188,6 +1200,7 @@ mod tests {
         })
         .unwrap();
         line.push(b'\n');
+        as_a_person(&agent, &server);
         let handled = tokio::spawn(agent.clone().handle(server, MAX_LINE));
         client.write_all(&line).await.unwrap();
         let mut reply = String::new();
@@ -1211,6 +1224,7 @@ mod tests {
         line.push(b'\n');
         let (mut read, mut write) = client.into_split();
         write.write_all(&line).await.unwrap();
+        as_a_person(&agent, &server);
         let handled = tokio::spawn(agent.clone().handle(server, MAX_LINE));
         // The reply has started, and stalls on a client that reads no more.
         let mut first = [0u8; 1];
