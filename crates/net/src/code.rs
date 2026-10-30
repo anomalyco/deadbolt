@@ -3,7 +3,7 @@
 
 use std::{fmt, str::FromStr, sync::OnceLock};
 
-use argon2::{Algorithm, Argon2, Params, Version};
+use argon2::{Algorithm, Argon2, Block, Params, Version};
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{Error, Result};
@@ -71,9 +71,17 @@ impl PairingCode {
             .map_err(|e| Error::InvalidCode(format!("argon2 parameters: {e}")))?;
         let mut salt = LOOKUP_SALT.to_vec();
         salt.extend_from_slice(&bucket.to_be_bytes());
+        // Allocated here (rather than by argon2) so the working memory, which
+        // holds code-derived state, is wiped when dropped, as the store's KDF does.
+        let mut memory = Zeroizing::new(vec![Block::new(); params.block_count()]);
         let mut seed = Zeroizing::new([0u8; 32]);
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-            .hash_password_into(self.text().as_bytes(), &salt, seed.as_mut())
+            .hash_password_into_with_memory(
+                self.text().as_bytes(),
+                &salt,
+                seed.as_mut(),
+                memory.as_mut_slice(),
+            )
             .map_err(|e| Error::InvalidCode(format!("argon2: {e}")))?;
         Ok(seed)
     }

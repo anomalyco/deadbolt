@@ -23,15 +23,15 @@ use deadbolt_core::{FieldType, Item, VaultId};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use super::items::{Listing, label};
+use super::items::{self, Listing, label};
 use super::session::{self, Loaded, get_json, set_json};
 use super::{Agent, Conversation, ErrorCode, caller, fail};
 use crate::browser::host::Bucket;
 use crate::client::AgentError;
 use crate::items::line;
 use crate::protocol::{
-    CallerClass, CallerInfo, Purpose, Reference, Reply, ResolvedSecret, Secret, SecretGrantInfo,
-    Verify,
+    CallerClass, CallerInfo, Command, Purpose, Reference, Reply, ResolvedSecret, Secret,
+    SecretGrantInfo, Verify,
 };
 
 const META_GRANTS: &str = "cli/secret-grants";
@@ -294,6 +294,26 @@ fn uncovered<'a>(
         .collect())
 }
 
+/// What an AI may never do, as the Never tier says (docs/agent-control.md,
+/// "Tiers"): `None` for anything else.
+fn never(command: &Command) -> Option<&'static str> {
+    Some(match command {
+        Command::Setup { .. } => "set Deadbolt up",
+        Command::Unlock { .. } | Command::UnlockBiometric { .. } => "unlock Deadbolt",
+        Command::TouchIdSet { .. } => "turn Touch ID unlock on or off",
+        Command::VaultCreate { .. } => "create a vault",
+        Command::VaultRename { .. } => "rename a vault",
+        Command::VaultDefault { .. } => "change the default vault",
+        Command::DeviceRemove { .. } => "remove a device",
+        Command::Join { .. } => "join a vault",
+        Command::Pair { .. } => "pair a device",
+        Command::ItemRemove { .. } => "delete an item",
+        Command::Import { .. } => "import items",
+        Command::SyncOnePassword { .. } => "sync from 1Password",
+        _ => return None,
+    })
+}
+
 /// "personal › GitHub › token".
 fn named(found: &Found) -> String {
     format!(
@@ -364,6 +384,55 @@ impl Agent {
                 "too many references resolved by AI agents; try again shortly",
             ));
         }
+        Ok(())
+    }
+
+    /// The stop-gap for a caller that looks like an AI (#111), until
+    /// `policy::decide` (docs/agent-control.md, build order 3): a value it
+    /// would be shown (`item-get`, `item-code`) asks for Touch ID every
+    /// time, as `resolve … read` does, and the Never tier is refused. Other
+    /// callers, the app, the browser host and AutoFill pass unchanged.
+    pub(super) async fn ai_gate(
+        &self,
+        caller: &CallerInfo,
+        command: &Command,
+        conv: &Conversation,
+    ) -> Result<()> {
+        if caller.class != CallerClass::Caller || !caller::is_ai(caller) {
+            return Ok(());
+        }
+        let (vault, query, deleted, what) = match command {
+            Command::ItemGet {
+                vault,
+                query,
+                deleted,
+                ..
+            } => (vault, query, *deleted, ""),
+            Command::ItemCode { vault, query } => (vault, query, false, "the one-time code of "),
+            command => {
+                return match never(command) {
+                    Some(what) => Err(fail(
+                        ErrorCode::Forbidden,
+                        format!("an AI agent can't {what}: run it yourself, in a terminal"),
+                    )),
+                    None => Ok(()),
+                };
+            }
+        };
+        self.ai_rate(caller)?;
+        // Locked, or a query that finds nothing, fails before anyone is
+        // asked anything.
+        let item = self.with(|s| items::named(s, vault.as_deref(), query, deleted))?;
+        if !self.can_verify() {
+            return Err(fail(
+                ErrorCode::Forbidden,
+                "an AI agent can see a value only with Touch ID each time, which is off or not set up here: use `deadbolt run` or `deadbolt inject` instead",
+            ));
+        }
+        let reason = format!("show {what}{item} to an AI agent");
+        // Waiting on the finger mustn't let the idle lock fire.
+        let _busy = self.busy();
+        self.verify_user(conv, Verify::Required, &reason).await?;
         Ok(())
     }
 

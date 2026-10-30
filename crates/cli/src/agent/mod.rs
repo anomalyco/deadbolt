@@ -50,7 +50,8 @@ use crate::client::{AgentError, protocol, version};
 use crate::config::Config;
 use crate::paths::Paths;
 use crate::protocol::{
-    Answer, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request, Status,
+    Answer, CallerInfo, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request,
+    Status,
 };
 use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
@@ -722,13 +723,17 @@ mod tests {
         let (conv, _client, _closed) = conversation();
         let syncing = {
             let agent = agent.clone();
-            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+            tokio::spawn(async move { agent.dispatch(&caller::nobody(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
 
         // One at a time.
         let (conv, _client, _closed) = conversation();
-        let error = agent.clone().dispatch(sync_op(), &conv).await.unwrap_err();
+        let error = agent
+            .clone()
+            .dispatch(&caller::nobody(), sync_op(), &conv)
+            .await
+            .unwrap_err();
         assert_eq!(
             error.to_string(),
             "already syncing from 1Password: try again when it finishes"
@@ -756,7 +761,7 @@ mod tests {
         let (conv, _client, closed) = conversation();
         let syncing = {
             let agent = agent.clone();
-            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+            tokio::spawn(async move { agent.dispatch(&caller::nobody(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
         closed.send_replace(true);
@@ -1463,10 +1468,16 @@ impl Agent {
         sent
     }
 
-    async fn dispatch(self: Arc<Self>, command: Command, conv: &Conversation) -> Result<Reply> {
+    async fn dispatch(
+        self: Arc<Self>,
+        caller: &CallerInfo,
+        command: Command,
+        conv: &Conversation,
+    ) -> Result<Reply> {
         if matches!(command, Command::Status | Command::Stop) {
             return self.run(command, conv).await;
         }
+        self.ai_gate(caller, &command, conv).await?;
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.

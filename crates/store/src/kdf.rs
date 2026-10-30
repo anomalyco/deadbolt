@@ -29,14 +29,14 @@ impl KdfParams {
     };
 
     // Upper bounds on parameters, checked at creation and on every header read,
-    // so a tampered header cannot make unlock allocate more than 1 GiB or run for
-    // more than about the time of 4 GiB of passes (seconds, not hours). They leave
-    // 16x headroom in memory and 21x in work over `DEFAULT`.
-    const MAX_M_COST_KIB: u32 = 1024 * 1024;
-    const MAX_T_COST: u32 = 64;
+    // so a tampered header cannot make unlock allocate more than 256 MiB or run
+    // for more than about the time of 1.5 GiB of passes (a few seconds). They
+    // leave 4x headroom in memory, 8x in passes and 8x in work over `DEFAULT`.
+    const MAX_M_COST_KIB: u32 = 4 * Self::DEFAULT.m_cost_kib;
+    const MAX_T_COST: u32 = 8 * Self::DEFAULT.t_cost;
     const MAX_P_COST: u32 = 64;
     /// Memory times passes, in KiB.
-    const MAX_WORK_KIB: u64 = 4 * 1024 * 1024;
+    const MAX_WORK_KIB: u64 = 8 * Self::DEFAULT.m_cost_kib as u64 * Self::DEFAULT.t_cost as u64;
 
     fn argon2_params(&self) -> Result<Params> {
         if self.m_cost_kib > Self::MAX_M_COST_KIB
