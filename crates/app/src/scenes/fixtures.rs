@@ -244,6 +244,13 @@ pub(super) fn import_preview(report: ImportReport) -> import::Preview {
 }
 
 fn fixture_item(id: &str, kind: &str, label: &str, detail: Option<&str>) -> ItemInfo {
+    let (favorite, tags): (bool, &[&str]) = match label {
+        "github.com" if kind == "login" => (true, &["dev", "work/aws"]),
+        "Cloudflare" => (true, &["work/infra"]),
+        "Hetzner" => (false, &["work/infra"]),
+        "Linear" => (false, &["work"]),
+        _ => (false, &[]),
+    };
     ItemInfo {
         id: format!("{id}0000000000000000000000000000000000000000000000000000000000"),
         short: id[..4].into(),
@@ -252,6 +259,8 @@ fn fixture_item(id: &str, kind: &str, label: &str, detail: Option<&str>) -> Item
         detail: detail.map(Into::into),
         fields: Vec::new(),
         source: None,
+        favorite,
+        tags: tags.iter().map(|t| (*t).to_owned()).collect(),
     }
 }
 
@@ -262,7 +271,7 @@ pub(super) fn vault(s: &mut App) {
         .iter()
         .map(|&(id, kind, label, detail)| fixture_item(id, kind, label, detail))
         .collect();
-    s.items.sort_by_key(|i| i.label.to_lowercase());
+    crate::model::sort_items(&mut s.items);
     s.loaded = true;
     s.search.focused = true;
     s.selected = s
@@ -306,6 +315,8 @@ fn many_item(i: usize) -> ItemInfo {
         detail: Some(format!("user{i}@anoma.ly")),
         fields: Vec::new(),
         source: None,
+        favorite: false,
+        tags: Vec::new(),
     }
 }
 
@@ -360,7 +371,7 @@ pub(super) fn kind_scene(s: &mut App, kind: &str) {
     ] {
         s.items.push(fixture_item(id, item_kind, label, detail));
     }
-    s.items.sort_by_key(|i| i.label.to_lowercase());
+    crate::model::sort_items(&mut s.items);
     s.selected = s
         .items
         .iter()

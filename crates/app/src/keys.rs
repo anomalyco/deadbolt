@@ -23,6 +23,7 @@ pub const SHORTCUTS: &[(&[&str], &str)] = &[
     (&["⌘", "N"], "New item"),
     (&["⌃", "⇥"], "Its type, while new"),
     (&["⌘", "E"], "Edit"),
+    (&["⌘", "D"], "Favorite"),
     (&["⌘", "⌫"], "Delete"),
     (&["⌘", ","], "Settings"),
     (&["⌘", "L"], "Lock"),
@@ -38,6 +39,9 @@ pub struct Nav {
     pub field: Option<usize>,
     /// ⌘K's actions are open, on this row.
     pub palette: Option<usize>,
+    /// ⌘K's `Filter by tag…` sub-view is open, on `tag_row`.
+    pub palette_tags: bool,
+    pub tag_row: usize,
     /// The ? sheet shows.
     pub sheet: bool,
     /// The Settings row the keys are on.
@@ -107,6 +111,9 @@ impl App {
             return None;
         }
         if self.nav.palette.is_some() {
+            if self.nav.palette_tags {
+                return Some(self.palette_tags_key(ev, tx));
+            }
             self.palette_key(ev, tx);
             return Some(true);
         }
@@ -142,6 +149,10 @@ impl App {
         }
         if chord(ev, 'k') {
             self.open_palette();
+            return Some(true);
+        }
+        if chord(ev, 'd') {
+            self.toggle_favorite(tx);
             return Some(true);
         }
         if is_question(ev) && (!self.typing() || self.search.text.is_empty()) {
@@ -225,6 +236,10 @@ impl App {
                 return None;
             }
             _ => {
+                if chord(ev, 'd') {
+                    self.toggle_favorite(tx);
+                    return Some(true);
+                }
                 if chord(ev, 'n')
                     || chord(ev, 'e')
                     || crate::import::is_shortcut(ev)

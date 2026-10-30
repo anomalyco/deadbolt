@@ -11,6 +11,7 @@
 //! Locking, or the agent stopping, wipes the form wherever it was.
 
 mod form;
+pub mod tags;
 mod types;
 pub mod view;
 
@@ -186,6 +187,9 @@ impl App {
             return;
         }
         let mut next = Form::new(kind, "", None);
+        next.favorite = form.favorite;
+        std::mem::swap(&mut next.tags, &mut form.tags);
+        std::mem::swap(&mut next.tag_input, &mut form.tag_input);
         std::mem::swap(&mut next.name, &mut form.name);
         for input in &mut next.fields {
             let Some(old) = form.fields.iter_mut().find(|f| f.name == input.name) else {
@@ -201,7 +205,10 @@ impl App {
                 input.edit.set_secure(true);
             }
         }
-        if !next.name.focused && !next.fields.iter().any(|f| f.edit.focused) {
+        if !next.name.focused
+            && !next.tag_input.focused
+            && !next.fields.iter().any(|f| f.edit.focused)
+        {
             next.name.focused = true;
         }
         *form = next;
@@ -293,6 +300,26 @@ impl App {
                 input.unwrap_lines();
             }
         }
+        // Commit any tag still sitting in `Add tag` before diffing.
+        if !form
+            .tag_input
+            .text
+            .trim()
+            .trim_start_matches('#')
+            .is_empty()
+        {
+            let raw = form.tag_input.text.clone();
+            match tags::push_clean_tag(&mut form.tags, &raw) {
+                Ok(_) => {
+                    form.tag_input.clear();
+                    form.tag_active = None;
+                }
+                Err(problem) => {
+                    form.problem = Some(problem);
+                    return;
+                }
+            }
+        }
         let mut changes = match form.changes() {
             Ok(changes) => changes,
             Err(problem) => {
@@ -319,12 +346,17 @@ impl App {
                 name: changes.name.take(),
                 fields,
                 unset: std::mem::take(&mut changes.unset),
+                favorite: changes.favorite,
+                add_tags: std::mem::take(&mut changes.add_tags),
+                remove_tags: std::mem::take(&mut changes.remove_tags),
                 seq,
             },
             None => Job::Create {
                 kind: form.kind.clone(),
                 name: changes.name.take().filter(|n| !n.is_empty()),
                 fields,
+                favorite: changes.favorite.unwrap_or(false),
+                tags: std::mem::take(&mut changes.add_tags),
                 seq,
             },
         };
@@ -416,6 +448,7 @@ impl App {
         // Show and Hide are pressed to edit on: focus goes back to the field.
         self.search.focused = false;
         form.name.focused = false;
+        form.tag_input.focused = false;
         for (i, input) in form.fields.iter_mut().enumerate() {
             input.edit.focused = i == field;
         }
@@ -684,13 +717,9 @@ impl App {
                 self.forget_pages();
                 match self.items.iter_mut().find(|i| i.id == id) {
                     Some(listed) => *listed = item,
-                    None => {
-                        let at = self.items.partition_point(|i| {
-                            (i.label.to_lowercase(), &i.id) < (item.label.to_lowercase(), &item.id)
-                        });
-                        self.items.insert(at, item);
-                    }
+                    None => self.items.push(item),
                 }
+                crate::model::sort_items(&mut self.items);
                 // A search that would hide it gives way.
                 if !self.visible().iter().any(|i| i.id == id) {
                     self.search.clear();
@@ -799,6 +828,7 @@ impl App {
             }
             match ev.key {
                 _ if chord('t') => self.toggle_types(),
+                _ if chord('d') => self.toggle_form_favorite(),
                 Key::Escape => self.cancel_edit(),
                 Key::Tab if ev.mods.ctrl && !ev.mods.cmd && !ev.mods.alt => {
                     self.step_kind(if ev.mods.shift { -1 } else { 1 });
@@ -900,6 +930,7 @@ impl App {
             // A one-line value in a text area: ⏎ saves rather than breaking it.
             (Key::Enter, Field::Wrapped) => self.save(),
             _ if ev.is_command('s') && plain => self.save(),
+            _ if ev.is_command('d') && plain => self.toggle_form_favorite(),
             _ if ev.is_command('n') && plain => self.new_item(),
             _ if ev.is_command('t') && plain => self.toggle_types(),
             _ => return false,

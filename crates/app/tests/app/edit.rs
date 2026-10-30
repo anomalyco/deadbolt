@@ -202,6 +202,7 @@ impl Rig {
                 name,
                 fields,
                 seq,
+                ..
             }) => (
                 seq,
                 kind,
@@ -223,6 +224,7 @@ impl Rig {
                 fields,
                 unset,
                 seq,
+                ..
             }) => (
                 seq,
                 id,
@@ -319,6 +321,8 @@ pub(super) fn info(id: &str, kind: &str, label: &str) -> ItemInfo {
         detail: None,
         fields: Vec::new(),
         source: None,
+        favorite: false,
+        tags: Vec::new(),
     }
 }
 

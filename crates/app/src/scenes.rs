@@ -494,6 +494,11 @@ pub(crate) const SCENES: &[Scene] = &[
         vault(s);
         s.open_palette();
     }),
+    // ⌘K › Filter by tag….
+    ("palette-tags", |s| {
+        vault(s);
+        s.open_tag_palette();
+    }),
     // ?: every shortcut.
     ("sheet", |s| {
         vault(s);
