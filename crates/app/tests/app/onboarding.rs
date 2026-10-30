@@ -241,6 +241,65 @@ fn enter_in_name_fields_keeps_a_single_focused_field_and_submits_when_ready() {
     assert_eq!(rt.state.onboarding.step, Step::Working(Flow::Create));
 }
 
+/// The computer's name is looked up off the main thread: a form opened
+/// before it lands keeps the placeholder, then fills in place, and a name
+/// the person typed meanwhile stays theirs.
+#[test]
+fn the_device_name_arrives_later_without_moving_the_field() {
+    // A fresh welcome screen: no name yet, and it lands `at` seconds in.
+    let fresh = |at: f64| {
+        let mut rt = runtime("welcome", true);
+        rt.update(move |s, _| {
+            s.onboarding.device = rune::TextEdit::new("");
+            s.onboarding.worker =
+                Worker::scripted(vec![(at, Progress::DeviceName("Kit's Mac".into()))]);
+        });
+        rt
+    };
+    let rect = |rt: &Runtime<App>| find(rt, "device-input").expect("the device field").rect;
+
+    let mut rt = fresh(0.5);
+    rt.update(|s, _| s.choose(Flow::Create));
+    settle(&mut rt, 0.2);
+    assert_eq!(rt.state.onboarding.device.text, "", "nothing yet");
+    let before = rect(&rt);
+    settle(&mut rt, 0.5);
+    assert_eq!(rt.state.onboarding.device.text, "Kit's Mac");
+    assert_eq!(rect(&rt), before, "the field holds still");
+
+    let mut rt = fresh(0.5);
+    rt.update(|s, _| s.choose(Flow::Join));
+    rt.update(|s, _| {
+        s.onboarding.blur();
+        s.onboarding.device.focused = true;
+    });
+    rt.frame(FRAME);
+    type_text(&mut rt, "Work laptop");
+    settle(&mut rt, 0.5);
+    assert_eq!(rt.state.onboarding.device.text, "Work laptop");
+
+    // Typed, then cleared: still theirs.
+    let mut rt = fresh(0.5);
+    rt.update(|s, _| s.choose(Flow::Create));
+    rt.update(|s, _| {
+        s.onboarding.blur();
+        s.onboarding.device.focused = true;
+    });
+    rt.frame(FRAME);
+    type_text(&mut rt, "x");
+    rt.key(key(Key::Backspace));
+    settle(&mut rt, 0.5);
+    assert_eq!(rt.state.onboarding.device.text, "");
+
+    // Landed while the welcome screen showed: the form opens with it.
+    let mut rt = fresh(0.0);
+    settle(&mut rt, 0.1);
+    assert_eq!(rt.state.onboarding.step, Step::Welcome);
+    rt.update(|s, _| s.choose(Flow::Create));
+    rt.frame(FRAME);
+    assert_eq!(rt.state.onboarding.device.text, "Kit's Mac");
+}
+
 /// ⇧⌘Space in a field opens the quick panel; it never types a space, not
 /// into a plain field and not, unseen, into a passphrase.
 #[test]

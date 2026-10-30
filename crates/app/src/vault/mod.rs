@@ -10,6 +10,10 @@
 
 pub mod page;
 
+use std::borrow::Cow;
+use std::hash::{Hash, Hasher};
+use std::rc::Rc;
+
 use deadbolt_client::protocol::{ItemInfo, noun};
 use rune::{El, GrowthSpec, Transition, col, el, icon, row, text};
 use rune_kit::shell::{SplitView, Toolbar};
@@ -76,7 +80,7 @@ fn over(key: &str, card: El, top: f32) -> El {
 }
 
 fn sidebar(s: &App, k: &Kit) -> El {
-    let visible = s.visible();
+    let visible = s.visible_at();
     col()
         .key("side")
         .w_full()
@@ -116,7 +120,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
 }
 
 /// Scrollable virtualized item list shared by the vault sidebar and the quick panel.
-pub(crate) fn item_list(s: &App, k: &Kit, visible: &[&ItemInfo]) -> El {
+pub(crate) fn item_list(s: &App, k: &Kit, visible: &[usize]) -> El {
     scroll_col("list")
         .scroll_margin(LIST_EDGE)
         .child(rows_of(s, k, visible))
@@ -147,9 +151,10 @@ fn search(s: &App, k: &Kit) -> El {
         .child(input.build(k).key("search").label("Search items"))
 }
 
-/// The visible items as virtualized rows, or why there are none.
-fn rows_of(s: &App, k: &Kit, visible: &[&ItemInfo]) -> El {
-    let mut rows = col()
+/// The visible items (positions in `s.items`) as virtual rows, or why there
+/// are none. Only the rows in the scroll window are built.
+fn rows_of(s: &App, k: &Kit, visible: &[usize]) -> El {
+    let rows = col()
         .key("rows")
         .role("listbox")
         .label("Items")
@@ -160,13 +165,12 @@ fn rows_of(s: &App, k: &Kit, visible: &[&ItemInfo]) -> El {
         .growth(GrowthSpec {
             spring: rune::tok::motion::REFLOW,
             edge: rune::edge::NO_MASK,
-        })
-        .virtualize(ROW_H);
+        });
     if !s.loaded {
-        return rows;
+        return rows.virtualize(ROW_H);
     }
     if s.items.is_empty() {
-        return rows.child(empty(
+        return rows.virtualize(ROW_H).child(empty(
             k,
             "empty",
             "No items yet",
@@ -174,28 +178,53 @@ fn rows_of(s: &App, k: &Kit, visible: &[&ItemInfo]) -> El {
         ));
     }
     if visible.is_empty() {
-        return rows.child(empty(
+        return rows.virtualize(ROW_H).child(empty(
             k,
             "no-match",
             "No matches",
             &format!("Nothing matches “{}”.", s.search.text.trim()),
         ));
     }
-    let at = s
-        .selected
-        .as_deref()
-        .and_then(|id| visible.iter().position(|i| i.id == id))
-        .filter(|_| !s.settings_open);
-    for (i, item) in visible.iter().enumerate() {
-        let on = at == Some(i);
-        let jump = if i < 9 && on { i + 1 } else { 0 };
-        rows = rows.child(rune::memo(
-            format!("item-{}", item.id),
-            (&item.label, &item.detail, &item.kind, on, jump),
-            || list_row(k, item, i, on),
-        ));
+    // The keys change only when the visible ids do (a search, a sync, a sort).
+    let version = Ids(visible.iter().map(|&at| s.items[at].id.as_str()));
+    let keys: Rc<[usize]> = visible.into();
+    let items = keys.clone();
+    let k = Rc::new(k.clone());
+    rows.virtual_rows(
+        keys.len(),
+        ROW_H,
+        move |s: &App, i| {
+            let id = keys
+                .get(i)
+                .and_then(|&at| s.items.get(at))
+                .map(|item| &item.id);
+            id.map_or(Cow::Borrowed(""), |id| format!("item-{id}").into())
+        },
+        move |s: &App, i| {
+            let Some(item) = items.get(i).and_then(|&at| s.items.get(at)) else {
+                return el();
+            };
+            let on = !s.settings_open && s.selected.as_deref() == Some(item.id.as_str());
+            let jump = if i < 9 && on { i + 1 } else { 0 };
+            rune::memo(
+                format!("item-{}", item.id),
+                (&item.label, &item.detail, &item.kind, on, jump),
+                || list_row(&k, item, i, on),
+            )
+        },
+    )
+    .virtual_rows_version(version)
+}
+
+/// Hashes the visible ids in order, for `virtual_rows_version`.
+struct Ids<'a, I: Iterator<Item = &'a str> + Clone>(I);
+
+impl<'a, I: Iterator<Item = &'a str> + Clone> Hash for Ids<'a, I> {
+    fn hash<H: Hasher>(&self, h: &mut H) {
+        for id in self.0.clone() {
+            id.hash(h);
+        }
     }
-    rows
 }
 
 fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {

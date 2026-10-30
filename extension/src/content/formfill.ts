@@ -52,8 +52,8 @@ const MIN_IDENTITY = { width: 40, height: 16 }
  * doesn't count). An address goes only into fields the user can see now;
  * a page that tucks a field away gets nothing in it.
  */
-export function onScreen(el: FormControl, ours?: Element | null): boolean {
-  if (!el.isConnected || el.disabled || ("readOnly" in el && el.readOnly)) return false
+export function onScreen(el: FormControl, ours?: Element | null, disabledSelect = false): boolean {
+  if (!el.isConnected || (el.disabled && !(disabledSelect && el instanceof HTMLSelectElement)) || ("readOnly" in el && el.readOnly)) return false
   const r = el.getBoundingClientRect()
   if (r.width < MIN_IDENTITY.width || r.height < MIN_IDENTITY.height || hiddenByStyle(el)) return false
   const box = clippedBox(el)
@@ -63,6 +63,20 @@ export function onScreen(el: FormControl, ours?: Element | null): boolean {
 
 /** The check a field of `kind` gets before it's approved and again before it's written. */
 export const fillCheck = (kind: FormKind, ours?: Element | null) => (el: FormControl) => (kind === "identity" ? onScreen(el, ours) : fillable(el, ours))
+
+/**
+ * The check at approval: as fillCheck, except that an address select the
+ * page has disabled until an earlier field is chosen (a state list waiting
+ * for its country) is approved to wait for it. It's written only once the
+ * page enables it, after the full check again (see fillForm).
+ */
+const approveCheck = (kind: FormKind, ours?: Element | null) => (el: FormControl) => (kind === "identity" ? onScreen(el, ours, true) : fillable(el, ours))
+
+/** A select with nothing to choose yet: disabled, or only placeholder options (no value). */
+const unloaded = (el: FormControl) => el instanceof HTMLSelectElement && (el.disabled || !Array.from(el.options).some((o) => o.value))
+
+/** How long a select waits for its options after the rest of the fill (a country's states loading). */
+const DEPENDENT_WAIT_MS = 2500
 
 /**
  * Fills one section's fields from `values`: each field gets what its role
@@ -77,6 +91,7 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
   const ordered = [...fields].sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
   const ok = (group: FormField[]) => (el: FormControl) => group.every(formFieldInPlace) && check(el)
   const done = new Set<FormField>()
+  const later: FormField[] = []
   for (const f of ordered) {
     if (done.has(f)) continue
     if (f.role === "cc-number" && f.split) {
@@ -95,11 +110,29 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
       continue
     }
     done.add(f)
+    // A select that has nothing to choose yet waits for the fields before it (its country) to load it.
+    if (unloaded(f.el)) {
+      later.push(f)
+      continue
+    }
     const value = valueFor(f.role, f.el, values)
     if (value === undefined || value === "" || !ok([f])(f.el)) continue
     if (!(f.el instanceof HTMLSelectElement) && (await typedByUser(f.el, f.el.value))) continue
     // A beat between fields for pages that react to each one (a country that redraws the region list).
     if (filled.length) await sleep(30)
+    if (setFormValue(f.el, value, ok([f]))) {
+      filled.push(f.role)
+      last = f.el
+    }
+  }
+  // Selects the page fills in once an earlier choice is made: only after
+  // this fill wrote something, for a moment, each one once it has its
+  // option, through the full check.
+  const until = Date.now() + DEPENDENT_WAIT_MS
+  for (const f of filled.length ? later : []) {
+    let value: string | undefined
+    while (Date.now() < until && (unloaded(f.el) || (value = valueFor(f.role, f.el, values)) === undefined)) await sleep(100)
+    if (!value || !ok([f])(f.el)) continue
     if (setFormValue(f.el, value, ok([f]))) {
       filled.push(f.role)
       last = f.el
@@ -112,7 +145,7 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
 export async function approveForms(state: FormsState, form: number, kind: FormKind, section: string | undefined, measure: boolean, ours?: Element | null): Promise<FormsApproved | null> {
   state.rescan()
   if (state.form() !== form) return null
-  const fields = sectionFields(state.fields(), section, kind).filter((f) => fillCheck(kind, ours)(f.el))
+  const fields = sectionFields(state.fields(), section, kind).filter((f) => approveCheck(kind, ours)(f.el))
   if (!fields.length) return null
   const boxes = measure ? await ownBoxes(fields) : undefined
   if (boxes === null || state.form() !== form) return null

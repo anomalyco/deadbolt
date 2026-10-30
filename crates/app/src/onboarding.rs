@@ -119,6 +119,11 @@ pub struct Onboarding {
     /// How many of `moment::PHASES` have passed.
     pub phase: usize,
     pub worker: Worker,
+    /// What this computer calls itself (`default_device_name`), once the
+    /// lookup off the main thread lands.
+    pub suggested_device: Option<String>,
+    /// The person edited the device name: a late suggestion leaves it alone.
+    pub device_edited: bool,
     /// The person cancelled the join.
     cancelled: bool,
     /// The running request set this device up (it wasn't before).
@@ -145,6 +150,8 @@ impl Onboarding {
             done_at: None,
             phase: 0,
             worker,
+            suggested_device: None,
+            device_edited: false,
             cancelled: false,
             set_up_now: false,
         }
@@ -156,8 +163,26 @@ impl Onboarding {
         let worker = std::mem::replace(&mut self.worker, Worker::offline());
         *self = Onboarding {
             device_ready,
+            suggested_device: self.suggested_device.take(),
             ..Onboarding::new(worker)
         };
+    }
+
+    /// Fills the device name with the suggestion, unless there's none yet,
+    /// no device to name, or the person has written their own.
+    fn suggest_device(&mut self) {
+        if !self.needs_device()
+            || self.device_edited
+            || !self.device.text.is_empty()
+            || !matches!(self.step, Step::Create | Step::Join)
+        {
+            return;
+        }
+        if let Some(name) = &self.suggested_device {
+            let focused = self.device.focused;
+            self.device = TextEdit::new(name.clone());
+            self.device.focused = focused;
+        }
     }
 
     /// A cancelled join waits for a device setup already under way.
@@ -303,7 +328,8 @@ pub fn strength(passphrase: &str) -> Strength {
 }
 
 /// What this computer calls itself: the name people gave it on macOS
-/// ("Kit's Mac Studio"), else the host name without `.local`.
+/// ("Kit's Mac Studio"), else the host name without `.local`. Runs
+/// `scutil`, so only off the main thread (`Worker::name_device`).
 pub fn default_device_name() -> String {
     #[cfg(target_os = "macos")]
     if let Ok(out) = std::process::Command::new("/usr/sbin/scutil")
@@ -336,6 +362,9 @@ impl App {
             return;
         }
         self.reset_onboarding(device_ready);
+        if !device_ready && self.onboarding.suggested_device.is_none() {
+            self.onboarding.worker.name_device();
+        }
     }
 
     /// Onboarding from scratch, leaving nothing of the last attempt behind.
@@ -356,10 +385,8 @@ impl App {
         let o = &mut self.onboarding;
         o.notice = None;
         o.attempted = false;
-        if o.device.text.is_empty() && o.needs_device() {
-            o.device = TextEdit::new(default_device_name());
-        }
         o.step = flow.step();
+        o.suggest_device();
         o.blur();
         if o.needs_device() {
             o.passphrase.focused = true;
@@ -537,6 +564,10 @@ impl App {
                 if o.plan.contains(&stage) {
                     o.stage = Some(stage);
                 }
+            }
+            Progress::DeviceName(name) => {
+                o.suggested_device = Some(name);
+                o.suggest_device();
             }
             // Not inferred from `device_ready`: a status refresh may already have set it.
             Progress::DeviceReady { set_up } => {
