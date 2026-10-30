@@ -97,9 +97,11 @@ let anchorOwner: FieldOwner | null = null
 let unlockAnchor: FormControl | null = null
 /**
  * For a field in a frame below: where it showed in this page when the menu
- * opened, and the page's scroll then. The menu follows the page's scrolling.
+ * opened, the page's scroll then, and the frame element it shows in (if
+ * this page has it) and where that was. The menu follows the frame element
+ * as the page moves it (scrolling, or a reflow), else the page's scrolling.
  */
-let anchorBox: { box: Box; x: number; y: number } | null = null
+let anchorBox: { box: Box; x: number; y: number; frame: { el: Element; left: number; top: number } | null } | null = null
 let token: string | null = null
 /** Handed to the menu with its token; only this script can say "the user pressed ↓" over it. */
 let port: MessagePort | null = null
@@ -138,11 +140,26 @@ function framedGone(tell: boolean, dismissed = false) {
   if (tell) void send({ type: "db:menu-away", ...(dismissed ? { dismissed } : {}) })
 }
 
-/** In a frame: a scroll that moved the field the menu is for. The top page's menu can't follow it, so it goes. */
+/**
+ * In a frame: a scroll, or the frame's own layout changing (it was resized,
+ * say), that moved the field the menu is for in this frame. The top page's
+ * menu can't follow it, so it goes.
+ */
 function onFrameScroll() {
   if (!framedFor || !framedAt) return
   const r = framedFor.getBoundingClientRect()
   if (Math.abs(r.left - framedAt.left) > 2 || Math.abs(r.top - framedAt.top) > 2) framedGone(true)
+}
+
+let framedRaf = 0
+/** In a frame: checks every frame, for as long as the top page's menu is for a field here, that the field hasn't moved (see onFrameScroll). */
+function watchFramed() {
+  cancelAnimationFrame(framedRaf)
+  const tick = () => {
+    onFrameScroll()
+    if (framedFor) framedRaf = requestAnimationFrame(tick)
+  }
+  framedRaf = requestAnimationFrame(tick)
 }
 /**
  * Fields whose typing narrowed the menu to nothing (or that the user typed a
@@ -166,8 +183,34 @@ let lastRect = ""
 /** Where a frame's field is in this page now (see anchorBox). */
 function boxNow(): DOMRect | null {
   if (!anchorBox) return null
-  const { box, x, y } = anchorBox
-  return new DOMRect(box.left - (scrollX - x), box.top - (scrollY - y), box.right - box.left, box.bottom - box.top)
+  const { box, x, y, frame } = anchorBox
+  let dx = x - scrollX
+  let dy = y - scrollY
+  if (frame) {
+    // The frame is gone: so is the field.
+    if (!frame.el.isConnected) return null
+    const f = frame.el.getBoundingClientRect()
+    dx = f.left - frame.left
+    dy = f.top - frame.top
+  }
+  return new DOMRect(box.left + dx, box.top + dy, box.right - box.left, box.bottom - box.top)
+}
+
+/**
+ * The frame element of this page a frame's field at `box` shows in: the
+ * smallest one around it. Not one in a shadow root; then the menu follows
+ * the page's scrolling only.
+ */
+function frameAround(box: Box): { el: Element; left: number; top: number } | null {
+  let best: { el: Element; left: number; top: number } | null = null
+  let area = Infinity
+  for (const el of Array.from(document.querySelectorAll("iframe, frame"))) {
+    const r = el.getBoundingClientRect()
+    if (r.left > box.left + 1 || r.top > box.top + 1 || r.right < box.right - 1 || r.bottom < box.bottom - 1 || r.width * r.height >= area) continue
+    area = r.width * r.height
+    best = { el, left: r.left, top: r.top }
+  }
+  return best
 }
 
 /**
@@ -418,7 +461,7 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   closeMenu()
   anchor = el
   anchorOwner = el instanceof HTMLInputElement ? ownerOf(el) : null
-  anchorBox = at ? { box: at, x: scrollX, y: scrollY } : null
+  anchorBox = at ? { box: at, x: scrollX, y: scrollY, frame: frameAround(at) } : null
   token = t
   mode = as
   closing = false
@@ -745,6 +788,7 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
       framedFor = el
       const r = el.getBoundingClientRect()
       framedAt = { left: r.left, top: r.top }
+      watchFramed()
     }
     else if (reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
   })().finally(() => (querying = null))
