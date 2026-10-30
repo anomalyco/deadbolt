@@ -2466,6 +2466,8 @@ async function pageDismiss() {
     await until("the page moves focus to <body>", () => page.evaluate(() => document.activeElement === document.body))
     await page.keyboard.press("Escape")
     check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "Esc puts it away after the page moved focus off the field")
+    await page.click("#email")
+    check(!!(await until("the menu comes back", async () => (await extensionFrame(page, "menu.html")?.locator("button.row").count()) ?? 0, 4000)), "and a click on the field opens it again")
   } catch (err) {
     check(false, `page dismiss threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "page dismiss")

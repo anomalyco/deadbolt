@@ -852,8 +852,12 @@ function onKeyDown(event: KeyboardEvent) {
   }
   // Esc also when the page moved focus off the field onto nothing (Zoom's
   // sign-in leaves it on <body>): the user is still answering this menu.
+  // The field isn't focused, so clicking it again is a fresh focus that
+  // opens the menu: it isn't marked dismissed.
+  // Like Esc in the field, it answers the menu only: the page doesn't also get it.
   if (event.key === "Escape" && mode === "accounts" && (target === document.body || target === document.documentElement)) {
-    dismissedFor = anchor
+    event.preventDefault()
+    event.stopPropagation()
     return closeMenu(false, true)
   }
   if (target !== anchor || mode !== "accounts") return
