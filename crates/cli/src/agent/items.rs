@@ -142,6 +142,16 @@ impl Listing {
     /// one-time password secrets unless `with_otp` too. Files come as their
     /// names alone.
     pub(super) fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
+        self.info_with(item, with_fields, with_otp, true)
+    }
+
+    pub(super) fn info_with(
+        &self,
+        item: &Item,
+        with_fields: bool,
+        with_otp: bool,
+        with_ssh_private: bool,
+    ) -> ItemInfo {
         let id = item.id.to_string();
         let mut fields = Vec::new();
         if with_fields {
@@ -165,6 +175,12 @@ impl Listing {
                     kind: item.fields[name].kind.to_string(),
                     value: match item.fields[name].kind {
                         FieldType::Otp if !with_otp => String::new(),
+                        _ if !with_ssh_private
+                            && item.kind == "ssh"
+                            && matches!(name, "private-key" | "passphrase") =>
+                        {
+                            String::new()
+                        }
                         FieldType::File => {
                             deadbolt_core::item::file_parts(&item.fields[name].value)
                                 .0
@@ -286,12 +302,13 @@ pub fn get(
     vault: Option<&str>,
     query: &[String],
     otp: bool,
+    ssh_private: bool,
     files: &[String],
     deleted: bool,
 ) -> Result<ItemInfo> {
     let listing = Listing::pick(s.vault(&s.resolve(vault)?), deleted);
     let item = listing.find(query)?;
-    let mut info = listing.info(item, true, otp);
+    let mut info = listing.info_with(item, true, otp, ssh_private);
     if !files.is_empty() {
         let named = |f: &&mut FieldInfo| f.kind == "file" && files.contains(&f.name);
         for field in info.fields.iter_mut().filter(named) {
@@ -409,7 +426,10 @@ pub fn create_with(
     tags: Vec<String>,
 ) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
-    let fields = fields(kind, None, inputs)?;
+    let mut fields = fields(kind, None, inputs)?;
+    if kind == "ssh" {
+        derive_ssh_create(&mut fields);
+    }
     let tags = clean_tags(tags)?;
     let stamp = deadbolt_core::health::audited_password_field(kind)
         .is_some_and(|pw| fields.iter().any(|(n, _)| n == pw));
@@ -423,6 +443,37 @@ pub fn create_with(
         Ok((id, entry))
     })?;
     Ok(info(s, vault, &id))
+}
+
+fn derive_ssh_create(fields: &mut Vec<(String, Field)>) {
+    let get = |name: &str| {
+        fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, f)| f.value.as_str())
+    };
+    let Some(private_key) = get("private-key") else {
+        return;
+    };
+    let Some((public_key, fingerprint, file_comment)) =
+        super::ssh::keys::derive_fields(private_key, get("passphrase"), get("comment"))
+    else {
+        return;
+    };
+    if !fields.iter().any(|(n, _)| n == "public-key") {
+        fields.push(("public-key".into(), Field::new(FieldType::Text, public_key)));
+    }
+    if !fields.iter().any(|(n, _)| n == "fingerprint") {
+        fields.push((
+            "fingerprint".into(),
+            Field::new(FieldType::Text, fingerprint),
+        ));
+    }
+    if !fields.iter().any(|(n, _)| n == "comment")
+        && let Some(comment) = file_comment
+    {
+        fields.push(("comment".into(), Field::new(FieldType::Text, comment)));
+    }
 }
 
 /// What makes two items the same to an import: a login's URL host,
@@ -754,11 +805,54 @@ pub fn set_with(
         }
     });
     let mut ops: Vec<DataOp> = set
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|(name, field)| DataOp::set(item.id, name, field))
         .collect();
     if let Some(date) = pw_changed {
         ops.push(DataOp::password_changed(item.id, date));
+    }
+    // When an SSH item's private key (or passphrase/comment) changes, keep
+    // derived `public-key` and `fingerprint` in sync unless set explicitly.
+    if item.kind == "ssh"
+        && (set
+            .iter()
+            .any(|(n, _)| matches!(n.as_str(), "private-key" | "passphrase" | "comment"))
+            || unset
+                .iter()
+                .any(|n| matches!(n.as_str(), "passphrase" | "comment")))
+    {
+        let merged = |name: &str| -> Option<&str> {
+            if unset.iter().any(|u| u == name) {
+                return None;
+            }
+            set.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, f)| f.value.as_str())
+                .or_else(|| item.fields.get(name).map(|f| f.value.as_str()))
+        };
+        if let Some(private_key) = merged("private-key")
+            && let Some((public_key, fingerprint, _)) = super::ssh::keys::derive_fields(
+                private_key,
+                merged("passphrase"),
+                merged("comment"),
+            )
+        {
+            if !seen.contains("public-key") {
+                ops.push(DataOp::set(
+                    item.id,
+                    "public-key",
+                    Field::new(FieldType::Text, public_key),
+                ));
+            }
+            if !seen.contains("fingerprint") {
+                ops.push(DataOp::set(
+                    item.id,
+                    "fingerprint",
+                    Field::new(FieldType::Text, fingerprint),
+                ));
+            }
+        }
     }
     // A field already gone (removed on another device) has nothing left to
     // remove, but the name must still be one the item could have.
