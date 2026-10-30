@@ -36,7 +36,7 @@ beforeEach(() => {
       case "device-secret":
         // The vault's own check: "wrong" is a wrong passphrase.
         if (m.body.passphrase === "wrong") return { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } }
-        if (m.body.type === "device-secret") return { reply: { type: "device-secret", password: "pw" } }
+        if (m.body.type === "device-secret") return { reply: { type: "device-secret", value: "pw" } }
       // falls through
       case "device-create":
       case "device-join-finish":
@@ -56,8 +56,8 @@ beforeEach(() => {
         // Touch ID enrollment checks the passphrase first, without opening anything.
         if (m.body.passphrase === "wrong") return { reply: { type: "error", code: "wrong_passphrase", message: "That passphrase isn't right." } }
         return { reply: { type: m.body.type, ok: true } }
-      case "device-logins":
-        return { reply: { type: "device-logins", accounts: [] } }
+      case "device-items":
+        return { reply: { type: "device-items", items: [] } }
       case "device-join-start":
         return { reply: { type: "device-join-start", code: "4821-tidy-otter", phase: "waiting" } }
       case "device-join-status":
@@ -139,7 +139,7 @@ describe("device page commands", () => {
   test("are rebuilt from their known fields only", () => {
     expect(deviceCommand({ type: "device-unlock", passphrase: "p", deviceName: "Evil", extra: 1 })).toEqual({ type: "device-unlock", passphrase: "p" })
     expect(deviceCommand({ type: "device-create", passphrase: "", name: "personal" })).toBeNull()
-    expect(deviceCommand({ type: "device-logins", origin: "x" })).toEqual({ type: "device-logins" })
+    expect(deviceCommand({ type: "device-items", origin: "x" })).toEqual({ type: "device-items" })
     expect(deviceCommand({ type: "device-devices" })).toEqual({ type: "device-devices" })
     expect(deviceCommand({ type: "list", origin: "https://a.test/path" })).toBeNull()
     expect(deviceCommand({ type: "fill", origin: "https://a.test", ref: "r" })).toBeNull()
@@ -173,6 +173,16 @@ describe("device page commands", () => {
     expect(deviceCommand({ type: "device-save", ref: "v:i", entry })).toEqual({ type: "device-save", ref: "v:i", entry })
     expect(deviceCommand({ type: "device-save", ref: "", entry })).toBeNull()
     expect(deviceCommand({ type: "device-save", entry: { ...entry, password: 7 } })).toBeNull()
+    expect(deviceCommand({ type: "device-save", entry: { ...entry, otp: "JBSWY3DP", notes: "" } })).toEqual({ type: "device-save", entry: { ...entry, otp: "JBSWY3DP", notes: "" } })
+    expect(deviceCommand({ type: "device-secret", ref: "v:i", field: "private-key" })).toEqual({ type: "device-secret", ref: "v:i", field: "private-key" })
+    expect(deviceCommand({ type: "device-secret", ref: "v:i", field: "private-key", prf: "ab".repeat(32) })).toEqual({ type: "device-secret", ref: "v:i", field: "private-key", prf: "ab".repeat(32) })
+    expect(deviceCommand({ type: "device-secret", ref: "v:i", field: "../x" })).toBeNull()
+    const fields = [{ name: "credential", value: "sk_test", extra: 1 }]
+    expect(deviceCommand({ type: "device-item-save", kind: "api", name: "Stripe", fields })).toEqual({ type: "device-item-save", kind: "api", name: "Stripe", fields: [{ name: "credential", value: "sk_test" }] })
+    expect(deviceCommand({ type: "device-item-save", ref: "v:i", fields: [], remove: ["notes"] })).toEqual({ type: "device-item-save", ref: "v:i", fields: [], remove: ["notes"] })
+    expect(deviceCommand({ type: "device-item-save", ref: "v:i", fields: [{ name: "Bad Name", value: "x" }] })).toBeNull()
+    expect(deviceCommand({ type: "device-item-save", fields: [] })).toBeNull()
+    expect(deviceCommand({ type: "device-item-delete", ref: "v:i" })).toEqual({ type: "device-item-delete", ref: "v:i" })
     expect(deviceCommand({ type: "device-remove", id })).toEqual({ type: "device-remove", id })
     expect(deviceCommand({ type: "device-remove", id: "AB".repeat(32) })).toBeNull()
     expect(deviceCommand({ type: "device-remove", id: "ab" })).toBeNull()
@@ -275,7 +285,7 @@ describe("device page commands", () => {
   test("the page reading the vault isn't use, so an open page doesn't keep it unlocked", async () => {
     const backend = new StandaloneBackend()
     await backend.connect()
-    await backend.device({ type: "device-logins" })
+    await backend.device({ type: "device-items" })
     await backend.device({ type: "device-devices" })
     await backend.device({ type: "device-status" })
     await settle()

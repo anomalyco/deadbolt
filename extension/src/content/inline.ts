@@ -54,7 +54,8 @@ export interface PageState {
   formsForm(): number
 }
 
-export const MENU_ROW = 44
+/** A row's height: the app's list rows (menu.css .row). */
+export const MENU_ROW = 46
 /** The list's 6px padding, top and bottom. */
 const MENU_CHROME = 12
 /** The caption over an identity or card list: where a pick goes. Login lists have none. */
@@ -67,13 +68,13 @@ const MENU_MARGIN = 4
 const SAVE_INSET = 12
 /** The offer's compact pill, before its frame says its size. */
 const SAVE_GUESS = { width: 220, height: 36 }
-const RADIUS = 14
+const RADIUS = 12
 const light = () => !matchMedia("(prefers-color-scheme: dark)").matches
-/** A hairline, then soft layers: close and crisp, wide and faint. */
+/** Rune's floating elevation (theme.json v2-elevation-floating), as the app's quick panel: a hairline and two soft layers. */
 const SHADOW = () =>
   light()
-    ? "0 0 0 0.5px rgb(0 0 0 / 12%), 0 1px 2px rgb(0 0 0 / 5%), 0 6px 14px -4px rgb(0 0 0 / 8%), 0 22px 44px -14px rgb(0 0 0 / 16%)"
-    : "0 0 0 0.5px rgb(255 255 255 / 14%), 0 1px 2px rgb(0 0 0 / 40%), 0 6px 14px -4px rgb(0 0 0 / 45%), 0 22px 44px -14px rgb(0 0 0 / 60%)"
+    ? "0 0 0 0.5px #0000001f, 0 4px 8px #00000014, 0 8px 16px #0000000a"
+    : "0 0 0 0.5px #ffffff29, 0 -0.5px 0 #ffffff0f, 0 4px 8px #0000004d, 0 8px 16px #0000004d"
 /** How many times one menu goes back on top of the top layer before it gives up and closes. */
 export const MAX_RAISES = 3
 /** Where the menu checks that a click there would land on it, as fractions of its box. */

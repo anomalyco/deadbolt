@@ -10,7 +10,7 @@
 // offscreen owner locks the vault; no trusted page can read a retained key.
 
 import { DEFAULT_PRESET, isPreset, PRESETS, VAULT_NAME } from "../device-rules"
-import type { DeviceCommand, DeviceReply, LockPreset, Reauth, ReauthChanged, Status, UnlockProof } from "../messages"
+import type { DeviceCommand, DeviceReply, ItemInput, LockPreset, Reauth, ReauthChanged, Status, UnlockProof } from "../messages"
 import { parseReply, PROTOCOL, REPLY_TYPE, type Change, type FillFormReply, type ReplyFor, type RequestBody } from "../protocol"
 import { cancelled, HostError, type Listener, type ReauthAsk, type SendOptions, type VaultBackend } from "./backend"
 import { CLEAR_AFTER_MS, CLIPBOARD_ALARM, CLIPBOARD_PERMISSIONS, COPIED_KEY, isCopied, type Copied } from "./clipboard"
@@ -117,7 +117,9 @@ const PAGE_READS = new Set<string>([
   "device-lock",
   "device-logins",
   "device-devices",
-  // A login's details, which an open detail asks again for every new one-time code.
+  "device-items",
+  "device-kinds",
+  // An item's details, which an open detail asks again for every new one-time code.
   "device-item",
   "list",
   "device-join-status",
@@ -133,7 +135,7 @@ const PAGE_READS = new Set<string>([
  * nothing is persisted and hello stays not-set-up, so starting and polling
  * one don't ask it again.
  */
-const QUIET = new Set<string>(["device-logins", "device-devices", "device-item", "device-secret", "device-generate", "device-join-start", "device-join-status"])
+const QUIET = new Set<string>(["device-items", "device-kinds", "device-devices", "device-item", "device-secret", "device-generate", "device-join-start", "device-join-status"])
 /** Commands that name this browser to the vault's other devices. */
 const NAMED = new Set<string>(["device-create", "device-unlock", "device-join-start", "device-join-finish"])
 /** Commands that open the vault: the worker is told the lock preset with them, and keeps Strict itself. */
@@ -749,6 +751,8 @@ export function fromVaultPage(sender: chrome.runtime.MessageSender): boolean {
 
 const text = (v: unknown, max: number): v is string => typeof v === "string" && v.length <= max
 const prf = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{64}$/.test(v)
+/** A field's name as the core takes it: lowercase letters, digits, `-` and `_`, starting with a letter. */
+const fieldName = (v: unknown): v is string => typeof v === "string" && /^[a-z][a-z0-9_-]{0,63}$/.test(v)
 const reauthId = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{32}$/.test(v)
 const origin = (v: unknown): v is string => {
   if (!text(v, 2048)) return false
@@ -767,7 +771,8 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
   switch (c.type) {
     case "device-status":
     case "device-lock":
-    case "device-logins":
+    case "device-items":
+    case "device-kinds":
     case "device-devices":
     case "device-settings":
     case "device-biometric-info":
@@ -777,18 +782,46 @@ export function deviceCommand(raw: unknown): DeviceCommand | null {
       return c.wait === true ? { type: "device-sync", wait: true } : { type: "device-sync" }
     case "device-item":
       return text(c.ref, 200) && c.ref ? { type: "device-item", ref: c.ref } : null
-    case "device-secret":
+    case "device-secret": {
       if (!text(c.ref, 200) || !c.ref) return null
-      if (prf(c.prf)) return { type: "device-secret", ref: c.ref, prf: c.prf }
-      if (c.passphrase === undefined) return { type: "device-secret", ref: c.ref }
-      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-secret", ref: c.ref, passphrase: c.passphrase } : null
+      if (c.field !== undefined && !fieldName(c.field)) return null
+      const field = c.field === undefined ? {} : { field: c.field as string }
+      if (prf(c.prf)) return { type: "device-secret", ref: c.ref, ...field, prf: c.prf }
+      if (c.passphrase === undefined) return { type: "device-secret", ref: c.ref, ...field }
+      return text(c.passphrase, 1024) && c.passphrase ? { type: "device-secret", ref: c.ref, ...field, passphrase: c.passphrase } : null
+    }
     case "device-save": {
       const e = c.entry as Record<string, unknown> | undefined
       if (!e || !text(e.title, 500) || !text(e.url, 2048) || !text(e.username, 500) || !text(e.password, 4096)) return null
-      const entry = { title: e.title, url: e.url, username: e.username, password: e.password }
+      if ((e.otp !== undefined && !text(e.otp, 4096)) || (e.notes !== undefined && !text(e.notes, 65_536))) return null
+      const entry = {
+        title: e.title,
+        url: e.url,
+        username: e.username,
+        password: e.password,
+        ...(e.otp === undefined ? {} : { otp: e.otp as string }),
+        ...(e.notes === undefined ? {} : { notes: e.notes as string }),
+      }
       if (c.ref === undefined) return { type: "device-save", entry }
       return text(c.ref, 200) && c.ref ? { type: "device-save", ref: c.ref, entry } : null
     }
+    case "device-item-save": {
+      if (!Array.isArray(c.fields) || c.fields.length > 64) return null
+      const fields: ItemInput[] = []
+      for (const f of c.fields as Array<Record<string, unknown>>) {
+        // A document's file is at most 10 MiB, 4/3 of that in base64.
+        if (typeof f !== "object" || f === null || !fieldName(f.name) || !text(f.value, 14 << 20)) return null
+        if (f.type !== undefined && !(text(f.type, 32) && /^[a-z]+$/.test(f.type))) return null
+        fields.push({ name: f.name as string, value: f.value, ...(f.type === undefined ? {} : { type: f.type as string }) })
+      }
+      const remove = c.remove === undefined ? undefined : Array.isArray(c.remove) && c.remove.length <= 64 && c.remove.every(fieldName) ? (c.remove as string[]) : null
+      if (remove === null || (c.name !== undefined && !text(c.name, 500))) return null
+      const rest = { fields, ...(remove ? { remove } : {}), ...(c.name === undefined ? {} : { name: c.name as string }) }
+      if (c.ref !== undefined) return text(c.ref, 200) && c.ref ? { type: "device-item-save", ref: c.ref, ...rest } : null
+      return text(c.kind, 32) && /^[a-z-]+$/.test(c.kind) ? { type: "device-item-save", kind: c.kind, ...rest } : null
+    }
+    case "device-item-delete":
+      return text(c.ref, 200) && c.ref ? { type: "device-item-delete", ref: c.ref } : null
     case "device-remove":
       return typeof c.id === "string" && /^[0-9a-f]{64}$/.test(c.id) ? { type: "device-remove", id: c.id } : null
     case "device-rename":

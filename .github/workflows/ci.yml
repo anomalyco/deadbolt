@@ -89,6 +89,42 @@ jobs:
       - run: bunx playwright-core install --with-deps chromium
       - run: bun e2e/standalone.ts --smoke
 
+  # The native e2e scenarios again, against the browser-only device and its
+  # real wasm vault instead of the fake host (`e2e/run.ts --standalone`): the
+  # parity test between the two builds. Four slices, as the native run.
+  extension-standalone-e2e:
+    name: Browser extension standalone e2e (shard ${{ matrix.shard }}/4)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    defaults:
+      run:
+        shell: bash
+        working-directory: extension
+    steps:
+      - uses: actions/checkout@v6
+      - uses: Swatinem/rust-cache@v2
+      - run: rustup target add wasm32-unknown-unknown --toolchain stable
+      - run: cargo install wasm-bindgen-cli --version "$(sed -n 's/^wasm-bindgen = "=\(.*\)"$/\1/p' ../crates/ext-core/Cargo.toml)" --locked
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+      - run: bunx playwright-core install --with-deps chromium
+      - run: |
+          mkdir -p e2e-out
+          bun e2e/run.ts --standalone --shard ${{ matrix.shard }}/4 --stills e2e-out/stills 2>&1 | tee e2e-out/run.log
+      - if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: standalone-e2e-shard-${{ matrix.shard }}
+          path: extension/e2e-out
+          if-no-files-found: ignore
+
   # Hidden and covered fields, form swaps, opaque origins, value swaps,
   # navigating mid-fill and the back/forward cache, in headless Chromium with
   # the fake host (extension/e2e): the fast gate before the full run below.

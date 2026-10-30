@@ -788,7 +788,7 @@ function showOffer(offer: Extract<MenuLoadReply, { kind: "offer" }>) {
     offerState = next
     document.body.dataset.offer = next
     if (fromDot) reopenedAt = performance.now()
-    port?.postMessage({ type: "db:radius", radius: next === "open" ? 14 : next === "dot" ? DOT / 2 : ROW / 2 })
+    port?.postMessage({ type: "db:radius", radius: next === "open" ? 12 : next === "dot" ? DOT / 2 : ROW / 2 })
     // The pill and the dot cross-fade (inside the frame): the dwell counts
     // from when that's over, as after a move.
     if (fromDot || next === "dot") {

@@ -1,4 +1,4 @@
-/* The toolbar popup. */
+/* The toolbar popup, drawn as the app's quick panel (theme.css). */
 
 body {
   width: 360px;
@@ -15,7 +15,7 @@ main {
   gap: 8px;
   height: 48px;
   padding: 0 14px;
-  border-bottom: 1px solid var(--border-muted);
+  border-bottom: 1px solid var(--border-weak);
 }
 
 .top .logo {
@@ -25,8 +25,8 @@ main {
 
 .brand {
   flex: 1;
-  font-weight: 600;
-  font-size: 14px;
+  font-weight: var(--weight-strong);
+  font-size: 15px;
 }
 
 .pill {
@@ -39,7 +39,8 @@ main {
   background: var(--layer-02);
   color: var(--muted);
   font-size: 11px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
+  letter-spacing: var(--tracking-small);
 }
 
 .pill::before {
@@ -104,18 +105,20 @@ main {
 
 .state h2 {
   margin: 2px 0 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: var(--weight-strong);
 }
 
+/* The app's mark tile over a screen's title: 36, layer_02, an 8px radius. */
 .state-icon {
-  width: 34px;
-  height: 34px;
-  border-radius: 9px;
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-lg);
   display: grid;
   place-items: center;
   background: var(--layer-02);
-  color: var(--muted);
+  color: var(--icon);
 }
 
 .state-icon svg {
@@ -133,7 +136,7 @@ main {
   gap: 6px;
   width: 100%;
   padding: 4px 4px 4px 10px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
 }
@@ -153,8 +156,13 @@ main {
   margin-bottom: 6px;
 }
 
+/* Its aside (a host, a count): the app's `small`, faint, in tabular figures. */
 .section-head .mono {
+  font-family: var(--sans);
   font-size: 11px;
+  line-height: 12px;
+  letter-spacing: var(--tracking-small);
+  color: var(--faint);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -173,9 +181,9 @@ main {
   display: flex;
   align-items: center;
   gap: 10px;
-  min-height: 48px;
-  padding: 0 8px;
-  border-radius: 10px;
+  min-height: 46px;
+  padding: 0 6px 0 10px;
+  border-radius: var(--radius-lg);
   transition: background-color 100ms ease-out;
 }
 
@@ -200,22 +208,21 @@ main {
 
 .account-title {
   font-size: 13px;
-  line-height: 16px;
-  font-weight: 500;
+  line-height: 20px;
   color: var(--text);
 }
 
 .account-sub {
   margin-top: 1px;
-  font-size: 12px;
-  line-height: 16px;
-  font-weight: 400;
-  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 14px;
+  letter-spacing: 0;
+  color: var(--faint);
 }
 
 .empty {
   padding: 14px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--layer-01);
   color: var(--muted);
   font-size: 12px;
@@ -229,7 +236,9 @@ main {
   display: flex;
   gap: 7px;
   margin-top: 10px;
-  font-size: 11px;
+  font-size: 11.5px;
+  line-height: 16px;
+  letter-spacing: 0;
   color: var(--faint);
 }
 
@@ -243,7 +252,7 @@ main {
 .open-help {
   margin-top: 12px;
   padding: 10px 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-lg);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
   animation: settle-in 200ms var(--settle);
@@ -259,7 +268,7 @@ main {
   justify-content: space-between;
   height: 40px;
   padding: 0 14px;
-  border-top: 1px solid var(--border-muted);
+  border-top: 1px solid var(--border-weak);
 }
 
 /* A save or update offer, above the site's logins. */
@@ -280,15 +289,16 @@ main {
 
 .offer h2 {
   margin: 0;
-  font-size: 14px;
-  font-weight: 600;
+  font-size: 15px;
+  line-height: 20px;
+  font-weight: var(--weight-strong);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .offer .box {
-  border-radius: 9px;
+  border-radius: var(--radius-xl);
   background: var(--layer-01);
   box-shadow: inset 0 0 0 1px var(--border-muted);
 }
@@ -312,7 +322,7 @@ main {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
 }
 
 .offer .dots {
@@ -348,7 +358,7 @@ main {
   align-items: center;
   gap: 10px;
   height: 32px;
-  font-weight: 500;
+  font-weight: var(--weight-medium);
   animation: settle-in 220ms var(--settle);
 }
 

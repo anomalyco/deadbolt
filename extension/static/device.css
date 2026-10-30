@@ -1,15 +1,9 @@
 /* device.html: the browser-only Deadbolt in a tab. The popup's views
-   (vault.css) in a wider frame, drawn like the inline menu's surface: one
-   object, a 14px radius, a hairline and a soft layered shadow. */
+   (vault.css) in a wider frame, drawn as the app's window: the inset card
+   (bg_base, Rune's raised elevation) on the deep window background. */
 
 html {
-  background: var(--layer-01);
-}
-
-@media (prefers-color-scheme: dark) {
-  html {
-    background: #0e0e0e;
-  }
+  background: var(--bg-deep);
 }
 
 body {
@@ -25,22 +19,10 @@ main.vault.page {
   width: 460px;
   height: min(720px, calc(100vh - 80px));
   min-height: 520px;
-  border-radius: 14px;
+  border-radius: 12px;
   background: var(--bg);
-  box-shadow:
-    0 0 0 1px var(--border),
-    0 1px 2px #0000000a,
-    0 8px 24px -6px #00000014,
-    0 24px 48px -12px #0000000f;
+  box-shadow: var(--elevation-raised);
   overflow: hidden;
-}
-
-@media (prefers-color-scheme: dark) {
-  main.vault.page {
-    box-shadow:
-      0 0 0 1px var(--border),
-      0 24px 48px -12px #00000080;
-  }
 }
 
 .page .top {
