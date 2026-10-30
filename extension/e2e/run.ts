@@ -32,6 +32,10 @@
 // network only) in the run's temporary directory, runs that binary as the
 // host, and checks each credential with @simplewebauthn/server.
 //
+// `--only gauntlet` runs the Gauntlet (e2e/gauntlet): a page per sign-in,
+// MFA and form pattern, mounted under /gauntlet, and what Deadbolt should do
+// on each (e2e/gauntlet/scenarios.ts). GAUNTLET_PAGES=<slug>,… runs some.
+//
 // Needs Playwright's Chromium (`bunx playwright-core install chromium`).
 
 import { generateAuthenticationOptions, generateRegistrationOptions, verifyAuthenticationResponse, verifyRegistrationResponse, type WebAuthnCredential } from "@simplewebauthn/server"
@@ -41,6 +45,8 @@ import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os"
 import { join, resolve } from "node:path"
 import { VAULT_REQUEST } from "../src/bg/vault-messages"
+import { gauntlet } from "./gauntlet/site"
+import { gauntletAccounts, gauntletScenarios } from "./gauntlet/scenarios"
 
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const root = join(import.meta.dir, "..")
@@ -588,11 +594,23 @@ const changeForm = `<h1>Change your password</h1><form method="post" action="/ho
   <label for="confirm">Confirm new password</label><input id="confirm" name="confirm" type="password" autocomplete="new-password">
   <button type="submit">Change password</button></form>`
 
+// The Gauntlet (e2e/gauntlet): a page per sign-in, MFA and form pattern, under /gauntlet on every test host.
+let gauntletSite: ReturnType<typeof gauntlet> | undefined
 const server = Bun.serve({
   port: 0,
   hostname: "127.0.0.1",
   async fetch(req): Promise<Response> {
     const url = new URL(req.url)
+    if (url.pathname === "/gauntlet" || url.pathname.startsWith("/gauntlet/")) {
+      gauntletSite ??= gauntlet({
+        base: "/gauntlet",
+        accounts: gauntletAccounts(TOTP_SECRET),
+        fixedCodes: standalone ? [] : ["492039"],
+        sameSiteOrigin: (u) => (u.hostname.endsWith(".acme.test") ? `http://accounts.acme.test:${u.port}` : null),
+        crossSiteOrigin: (u) => `http://pay.evilpay.test:${u.port}`,
+      })
+      return (await gauntletSite(req)) ?? new Response("not found", { status: 404 })
+    }
     // Where the sign-in outcome forms post (see signInOutcomes). The email
     // posted is shown back where a real site would show the account.
     if (req.method === "POST") {
@@ -4076,7 +4094,9 @@ const once: Record<string, () => Promise<void>> = {
   formsTouchId,
   learnAndNever,
 }
-const groups: Record<string, string[]> = { forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
+const gauntletRun = gauntletScenarios<Run>({ site, port: server.port!, launch, close, check, until, settled, hostLog, isCode, diagnose, video })
+Object.assign(once, gauntletRun.scenarios)
+const groups: Record<string, string[]> = { gauntlet: Object.keys(gauntletRun.scenarios), forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
@@ -4088,6 +4108,7 @@ const cost: Record<string, number> = {
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15,
+  ...gauntletRun.cost,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */
 const NATIVE_ONLY = new Set(["passkeys", "formsTouchId"])
