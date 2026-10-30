@@ -173,6 +173,33 @@ const HIDDEN: Record<string, string> = {
   "pseudo-cover": hiddenForm(`<style>.pc { position: relative } .pc::after { content: ""; position: absolute; inset: -2px; background: #f4f4f5; pointer-events: none }</style><div class="pc">${passwordField}</div>`),
   // Not hidden: a transparent outline over it that lets clicks through (Material's notched outline).
   outline: hiddenForm(coverField("border:1px solid #888;border-radius:4px;pointer-events:none")),
+  // A cover whose pointer-events:none is !important in a cascade layer, or on a shadow host's :host (in a layer too).
+  "layer-cover": hiddenForm(coverField("background:#f4f4f5", 'class="lc"'), `<style>@layer page { .lc { pointer-events: none !important } }</style>`),
+  "host-cover": hiddenForm(hostCover(":host { pointer-events: none !important }")),
+  "host-layer-cover": hiddenForm(hostCover("@layer page { :host { pointer-events: none !important } }")),
+  // The field's own label over it, holding an opaque image or drawn as a thick border.
+  "label-image": hiddenForm(labelCover("", `<img alt="" style="display:block;width:100%;height:100%" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100%25' height='100%25' fill='%23f4f4f5'/%3E%3C/svg%3E">`)),
+  "label-border": hiddenForm(labelCover("box-sizing:border-box;border:40px solid #f4f4f5")),
+  // Under its wrapper's background by a negative z-index, everything above it letting clicks through.
+  "negative-z": hiddenForm(`<div style="background:#f4f4f5">${passwordField.replace("<input", '<input style="position:relative;z-index:-1"')}</div>`, `<style>body, form, form div { pointer-events: none } #email, #password, button { pointer-events: auto }</style>`),
+  // Blended into the page: white on white.
+  "blend-mode": hiddenForm(passwordField.replace("<input", '<input style="mix-blend-mode:screen"')),
+  // Paint hit tests never see: glyphs that let clicks through, a box-shadow's spread and a wide outline from a 1 px box.
+  "text-cover": hiddenForm(coverField("pointer-events:none;overflow:hidden;font:120px/38px sans-serif;color:#f4f4f5;white-space:nowrap").replace("></div></div>", ">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</div></div>")),
+  "shadow-spread-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;box-shadow:0 0 0 400px #f4f4f5")),
+  "outline-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;outline:400px solid #f4f4f5")),
+  // Not hidden: Dark Reader's filter mode on the whole page.
+  "dark-reader": hiddenForm(passwordField, `<style>html { filter: invert(1) hue-rotate(180deg) !important }</style>`),
+}
+
+/** The password field with its own label over it, 2 px bigger each way. */
+function labelCover(style: string, inside = "") {
+  return `<div style="position:relative">${passwordField}<label for="password" style="position:absolute;inset:-2px;z-index:1;${style}">${inside}</label></div>`
+}
+
+/** The password field with a shadow host over it whose :host draws an opaque box, styled by `rule` too. */
+function hostCover(rule: string) {
+  return `<div style="position:relative">${passwordField}<span class="hc"></span></div><script>document.querySelector(".hc").attachShadow({ mode: "closed" }).innerHTML = '<style>:host { position: absolute; inset: -2px; z-index: 1; display: block; background: #f4f4f5 } ${rule}</style>'</script>`
 }
 
 /** The password field with a box over it, 2 px bigger each way. */
@@ -2181,7 +2208,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline") check(password === "correct horse", `a visible password field fills (${name})`)
+      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 

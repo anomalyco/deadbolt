@@ -335,23 +335,47 @@ not running without sending hello, which would start the agent again.
   it and its containing block, Intercom's sign-in; a fixed one every box up
   to a transformed or contained one). A mask anywhere up the tree (any
   `mask-image`, `-webkit-mask` or mask border) hides the field, and so
-  does any filter but `opacity()` and a blur of at most 1 px (a heavy
-  blur, `brightness(0)`, an SVG filter). The centre of what shows is
-  hit-tested too, and only the centre: what the user would click there
-  must be the field or its label, and nothing that lets clicks through may
-  paint over it. Hit tests skip `pointer-events: none` and `inert`
-  elements, so for that one synchronous check every element of the page
-  and its shadow roots is made to take part (a stylesheet adopted into
-  each root, inline `!important` pointer-events and `inert` lifted, all
-  put back before the check returns); each element then stacked above the
+  does a blend mode other than `normal` and a filter that can make it
+  unreadable: a blur over 1 px, `brightness()` under 0.2 or over 5,
+  `contrast()` under 0.2 or over 5, `invert()` near half, an SVG `url()`
+  filter or any function not known to be safe. Filters that keep a page
+  readable are fine: `opacity()` (counted with opacity), `drop-shadow()`,
+  `hue-rotate()`, `saturate()`, `sepia()`, `grayscale()` and `invert()`
+  (Dark Reader's filter mode puts `invert(1) hue-rotate(180deg)` on
+  `<html>`). The centre of what shows is hit-tested too, and only the
+  centre: what the user would click there must be the field or its label,
+  and nothing may paint over it there. Hit tests skip `pointer-events:
+  none` and `inert` elements, so for that one synchronous check every
+  element of the page and its shadow roots is made to take part: a
+  stylesheet first in each root with its rules in a cascade layer declared
+  before any of the page's (whose `!important` beats the page's own, in a
+  layer, on `:host` or not), `inert` lifted, and an inline `!important`
+  on anything over the point that still lets clicks through; all of it is
+  put back before the check returns. Each element then stacked above the
   field's centre, and each one inside a shadow host there, must draw
   nothing: no opaque background colour or image, backdrop filter, inset
-  shadow, border at that point, opaque `::before`/`::after`, graphic, form
-  control or SVG shape, unless it's faded out. The field's own label may
-  sit over it (a floating label) unless it has an opaque background. A
+  shadow, border at that point, glyphs of its own text over the point,
+  opaque `::before`/`::after`, graphic, form control or SVG shape, unless
+  it's faded out. The field's own label counts like anything else (a
+  floating label's text beside the centre is fine). An ancestor listed
+  above the field draws over it through a pseudo-element, or, when the
+  field sits under it by a negative z-index, through its background too. A
   transparent outline that lets clicks through (Material's) doesn't hide
-  it. Text, outer shadows and outlines aren't counted. A page with more
-  shadow roots than are walked counts as covering. These checks run when
+  it. Paint the browser never hit-tests is looked for across the whole
+  page: an outline reaching the centre (the field's own and its ancestors'
+  too, since outlines draw over content), and, from anything but the field
+  and its ancestors, an outer box-shadow's solid part, a text-shadow, a
+  `drop-shadow()` filter or a border image outset whose reach covers it.
+  Anything over the point that still can't be hit and draws counts as a
+  cover, as does a page with 5,000 shadow roots or more. On a login page
+  of 1,000 to 2,000 elements the check takes under 10 ms; on a 16,000
+  element page about 100 ms. Known gaps: an SVG filter that moves content
+  elsewhere (`feOffset`) on an unrelated element, and a `::before` or
+  `::after` held at `pointer-events: none` by a running transition. An
+  Intersection Observer v2 reading isn't required for top-page fields: it
+  counts any overlap (a floating label, an icon in the box), opacity or
+  filter as hidden, and read 19 of 53 visible, uncovered sign-in fields on
+  real sites as not visible (Google, Stripe, Chase, Facebook). These checks run when
   the fields are approved and again right before each write, after the
   page's focus and keydown handlers have run, for a successor input too.
   Split one-time
