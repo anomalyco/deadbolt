@@ -1058,6 +1058,17 @@ main.vault.popup {
   gap: 14px;
 }
 
+/* Save and Cancel stay in reach at the foot of a long form, over the fields scrolling under them. */
+.edit > .buttons.end {
+  position: sticky;
+  bottom: -16px;
+  z-index: 1;
+  margin: 0 -14px -16px;
+  padding: 10px 14px 12px;
+  background: var(--bg);
+  border-top: 1px solid var(--border-weak);
+}
+
 .generator {
   display: flex;
   flex-direction: column;
