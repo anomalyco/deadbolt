@@ -1278,10 +1278,10 @@ async function fillAndTotp(scheme: Scheme) {
       check((await menu.locator(".row .title").allTextContents()).join(",") === "Acme,Acme admin", "menu lists the site's logins by title")
       check((await menu.locator(".row .sub").first().textContent()) === "kit@acme.test", "menu rows show the username")
       const fonts = await menu.evaluate(async () => {
-        await Promise.all([document.fonts.load('13px "Geist"'), document.fonts.load('12px "Geist Mono"')]).catch(() => {})
+        await Promise.all([document.fonts.load('13px "Inter"'), document.fonts.load('12px "IBM Plex Mono"')]).catch(() => {})
         return [...document.fonts].map((f) => `${f.family}:${f.status}`).join(" ")
       })
-      check(!fonts.includes("error") && fonts.includes("loaded"), `Geist fonts load in the menu (${fonts})`)
+      check(!fonts.includes("error") && fonts.includes("loaded"), `Inter and IBM Plex Mono load in the menu (${fonts})`)
       await Bun.sleep(500)
       await shotAround(page, `menu-${scheme}`, menu, "#email")
       // The frame is exactly the surface: no transparent strip of it over the page.
