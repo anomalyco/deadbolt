@@ -94,6 +94,11 @@ body {
   cursor: default;
 }
 
+/* "Site icons in the fill menu" off: a login's row is its title and username. */
+.rows.bare .row {
+  padding: 0 12px;
+}
+
 .row[hidden] {
   display: none;
 }

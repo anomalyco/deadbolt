@@ -8,9 +8,10 @@ import type { Account } from "../protocol"
 import { avatar, h, icon } from "../ui/dom"
 import { offerCard } from "../ui/offer"
 import { rollLabel } from "../ui/motion"
+import { siteTile } from "../ui/site-icon"
 import type { App, View } from "./app"
 import { deleteButton, kindAvatar, kindName, secretOf } from "./items"
-import { button, copied, favicon, field, glyph, hostOf, iconButton, para, refuse, slidingHighlight, toolbar } from "./kit"
+import { button, copied, field, glyph, hostOf, iconButton, para, refuse, slidingHighlight, toolbar } from "./kit"
 
 const url = (a: Account) => a.urls.find(Boolean) ?? ""
 
@@ -21,10 +22,15 @@ function openSite(link: string) {
   void chrome.tabs.create({ url: u })
 }
 
-function avatarFor(title: string, link: string): HTMLElement {
-  const a = avatar(title)
-  favicon(a, link)
-  return a
+/**
+ * A login's tile: its site's icon with "Site icons in the vault" on (see
+ * ui/site-icon.ts), else its letter. The icon dithers in the first time
+ * this page shows it in `scope`, the list's rows one after another
+ * (`index`); a repaint (a search, a sync) just shows it.
+ */
+function avatarFor(app: App, title: string, link: string, scope: "list" | "detail", index = 0): HTMLElement {
+  if (!app.icons.vault || !link) return avatar(title)
+  return siteTile(title, link, { reveal: true, once: `${scope}:${hostOf(link)}`, delay: Math.min(index, 8) * 28 })
 }
 
 /** A password to copy or reveal: Strict asks for the passphrase first, in the login's own view. */
@@ -39,9 +45,9 @@ async function copySecret(app: App, b: HTMLElement, value: string) {
   else app.announce("Couldn't copy.")
 }
 
-function row(app: App, a: Account, fill: boolean): HTMLElement {
+function row(app: App, a: Account, fill: boolean, index = 0): HTMLElement {
   const link = url(a)
-  const main = button("vrow-main", [avatarFor(a.title, link), h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
+  const main = button("vrow-main", [avatarFor(app, a.title, link, "list", index), h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
     app.go({ name: "item", ref: a.ref }),
   )
   main.setAttribute("aria-label", `${a.title}${a.username ? `, ${a.username}` : ""}`)
@@ -117,7 +123,7 @@ export function listView(app: App): View {
   const section = (label: string, aside: string | null, items: ItemSummary[], fill: boolean) => {
     const rows = h("div", { class: "rows" })
     slidingHighlight(rows)
-    rows.append(...items.map((a) => (a.kind === "login" ? row(app, a as Account, fill) : itemRow(app, a))))
+    rows.append(...items.map((a, i) => (a.kind === "login" ? row(app, a as Account, fill, i) : itemRow(app, a))))
     return h("section", { class: "group" }, h("div", { class: "section-head" }, h("span", { class: "label" }, label), aside ? h("span", { class: "mono muted" }, aside) : null), rows)
   }
 
@@ -346,7 +352,7 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     if (notes) lines.push(h("div", { class: "line" }, h("span", { class: "line-label" }, "Notes"), h("span", { class: "value lines" }, notes), h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy notes", (b) => void copied(b, notes, say, "Copied the notes")))))
     el.replaceChildren(
       toolbar("", () => app.go({ name: "list" }, -1), button("btn", "Edit", () => app.go({ name: "edit", ref, kind: "login" }))),
-      h("div", { class: "detail-head" }, avatarFor(d.title, d.url ?? ""), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"))),
+      h("div", { class: "detail-head" }, avatarFor(app, d.title, d.url ?? "", "detail"), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"))),
       h("div", { class: "box" }, ...lines),
       h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
     )

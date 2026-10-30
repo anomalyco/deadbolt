@@ -314,9 +314,12 @@ permissions, asked for together: by the "Clear copied passwords after 30 seconds
 switch in Settings, when the user chooses Strict, and once on the first copy under
 Strict. Without them nothing is cleared, and nothing is cleared blindly.
 
-The `favicon` permission, for site icons in the list from Chrome's own cache, adds
-no warning to this manifest: alone it says "Read the icons of the websites you
-visit", which the content scripts' all-sites access already covers.
+The `favicon` permission, for site icons from Chrome's own cache, adds no
+warning to either build's manifest (measured with
+`chrome.management.getPermissionWarningsByManifest`): alone it says "Read the
+icons of the websites you visit", which the content scripts' all-sites access
+already covers, so both builds ask for it. Where site icons come from and how
+they're drawn safely is in [autofill.md](autofill.md#site-icons).
 
 ## Verification
 

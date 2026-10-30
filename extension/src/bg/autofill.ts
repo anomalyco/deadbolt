@@ -12,6 +12,7 @@ import { HostError, type VaultBackend } from "./backend"
 import { isAccountPage, pageAccountOf } from "../signin"
 import type { SignInWith } from "./signinwith"
 import { siteOf } from "./site"
+import { iconKey, iconSettings, storedIcon, type StoredIcon } from "../ui/icon-store"
 
 const TOKEN_TTL_MS = 2 * 60_000
 const LIST_TTL_MS = 30_000
@@ -361,7 +362,9 @@ export class Autofill {
       const accounts = menuAccounts(reply.accounts, t.focused).filter((a) => !t.only || t.only.includes(a.ref))
       // One login on a site that asks for the username first: "Continue as …".
       const flow = IDENTIFIER_ROLES.includes(t.focused) && accounts.length === 1 ? await flowFor(siteOf(new URL(t.origin).hostname) ?? "") : undefined
-      return { kind: "accounts", site: reply.site, accounts, focused: t.focused, ...(passkeys?.length ? { passkeys } : {}), ...(flow?.identifierFirst ? { continueAs: true } : {}) }
+      const icons = (await iconSettings()).menu ? await menuIcons(accounts) : undefined
+      const reveal = icons ? await firstReveals(Object.keys(icons)) : []
+      return { kind: "accounts", site: reply.site, accounts, focused: t.focused, ...(passkeys?.length ? { passkeys } : {}), ...(flow?.identifierFirst ? { continueAs: true } : {}), ...(icons ? { icons, reveal } : {}) }
     } catch {
       return { kind: "status", status: this.host.status }
     }
@@ -895,6 +898,33 @@ function siteOfUrl(url: string | undefined): string | null {
   } catch {
     return null
   }
+}
+
+/** The kept site icons for the hosts of `accounts`' first URLs, for the menu (see MenuLoadReply). */
+async function menuIcons(accounts: Account[]): Promise<Record<string, StoredIcon | null>> {
+  const hosts = new Set<string>()
+  for (const a of accounts) {
+    try {
+      const u = a.urls.find(Boolean)
+      if (u) hosts.add(iconKey(new URL(u.includes("://") ? u : `https://${u}`).hostname))
+    } catch {}
+  }
+  const icons: Record<string, StoredIcon | null> = {}
+  for (const h of hosts) icons[h] = (await storedIcon(h)) ?? null
+  return icons
+}
+
+/** chrome.storage.session: hosts whose icon a menu already dithered in this browser session. */
+const REVEALED_KEY = "siteIconsRevealed"
+
+/** Which of `hosts` no menu has revealed this browser session; they count as revealed from now. */
+async function firstReveals(hosts: string[]): Promise<string[]> {
+  if (!hosts.length) return []
+  const got = (await chrome.storage.session.get(REVEALED_KEY).catch(() => ({}))) as Record<string, unknown>
+  const seen = Array.isArray(got[REVEALED_KEY]) ? (got[REVEALED_KEY] as string[]) : []
+  const fresh = hosts.filter((h) => !seen.includes(h))
+  if (fresh.length) await chrome.storage.session.set({ [REVEALED_KEY]: [...fresh, ...seen].slice(0, 300) }).catch(() => {})
+  return fresh
 }
 
 /** Whether saved URL `url` names exactly the host (and scheme, and port if it has one) of `origin`. */

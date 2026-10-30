@@ -13,6 +13,7 @@ import { Learner } from "./bg/learn"
 import { Passkeys } from "./bg/passkeys"
 import { Saver } from "./bg/save"
 import { SignInWith } from "./bg/signinwith"
+import { SiteIcons } from "./bg/site-icons"
 import { DEVICE_PAGE, deviceCommand, fromVaultPage, StandaloneBackend } from "./bg/standalone"
 import type { DeviceReply, PopupReply, Status, StatusChanged, ToBackground } from "./messages"
 
@@ -25,6 +26,7 @@ const signInWith = new SignInWith(host)
 const autofill = new Autofill(host, passkeys, (tabId, site) => saver.username(tabId, site), signInWith)
 const learner = new Learner(host)
 const forms = new Forms(host)
+const siteIcons = new SiteIcons(host)
 saver.signedIn = (tabId, site) => {
   void autofill.learnFlow(tabId, site)
   void learner.signedIn(tabId, site)
@@ -179,6 +181,8 @@ chrome.webNavigation.onCommitted.addListener((d) => {
   }
 })
 // A sign-in with a provider: its popup follows it, and its pages get told the account to point at.
+// A page on a site with a saved login: its own SVG icon, kept for the rows (bg/site-icons.ts).
+chrome.webNavigation.onCompleted.addListener((d) => void siteIcons.completed(d))
 chrome.webNavigation.onCreatedNavigationTarget.addListener((d) => signInWith.opened(d.sourceTabId, d.tabId))
 chrome.webNavigation.onDOMContentLoaded.addListener((d) => void signInWith.loaded(d))
 chrome.webNavigation.onHistoryStateUpdated.addListener((d) => void signInWith.loaded(d))

@@ -5,6 +5,7 @@
 // content script after the user submitted a login form.
 
 import type { LearnSession, LearnStep } from "./learn"
+import type { StoredIcon } from "./ui/icon-store"
 import type { Account, Change, FieldRules, FormCard, FormField as HostField, FormIdentity, FormKind, HostStatus } from "./protocol"
 
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
@@ -283,6 +284,8 @@ export type ToContent =
   | { type: "db:frame-announce"; nonce: string }
   /** To every frame of a tab: the learning session it joins, or null when it ends. */
   | { type: "db:learn"; session: LearnSession | null }
+  /** To a top page on a site with a saved login: its own SVG icon, sanitized, or null (see content/site-icon.ts). */
+  | { type: "db:site-icon" }
 
 /**
  * What the top page shows after a sign-in was submitted, as the content
@@ -372,7 +375,13 @@ export interface QueryReply {
 export type MenuLoadReply =
   /** `passkeys`: for a sign-in waiting on a passkey pick (conditional mediation). */
   /** `continueAs`: the site signs in identifier first and has one login: say "Continue as …". */
-  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean }
+  /**
+   * `icons`: with "Site icons in the fill menu" on, the site icons kept for
+   * the logins' hosts (null: none kept), from the background, which alone
+   * opens the icon store from here (see ui/icon-store.ts). Off, rows show no icon.
+   * `reveal`: those hosts whose icon no menu has dithered in yet this browser session.
+   */
+  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
   | { kind: "generate"; site: string }
   /**
    * An identity or card field's menu: the identities or cards to pick from.
