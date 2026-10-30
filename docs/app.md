@@ -52,7 +52,8 @@ Search first. The search field has focus while unlocked, and a click on a row gi
 | ⇥ | into the item's fields, on the first; ↑↓ move between them, ↵ copies the one you're on, Space shows or hides it, ⇥ or esc goes back to the search |
 | esc | clear the search; in a field, an overlay or Settings, back out of it |
 | ⌘F | focus the search with its text selected (and show a hidden list) |
-| ⌘K | the item's actions (see Screens) |
+| ⌘D | favorite or unfavorite the selected item (or toggle favorite in an open form) |
+| ⌘K | the item's actions, plus `Filter by tag…` when tags exist (see Screens) |
 | ? | every shortcut |
 | ⌘, | Settings |
 | ⇧⌘⌫ | Recently Deleted (again closes it); ↵ opens an item, ⌘R restores it |

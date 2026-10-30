@@ -179,6 +179,16 @@ glyph!(
     "deadbolt-import",
     r#"<path d="M8 2.25v7.5M4.75 6.5 8 9.75l3.25-3.25" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/><path d="M2.25 10.5v1.75c0 .69.56 1.25 1.25 1.25h9c.69 0 1.25-.56 1.25-1.25V10.5" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
 );
+glyph!(
+    pub STAR,
+    "deadbolt-star",
+    r#"<path d="m8 2.35 1.65 3.34 3.69.54-2.67 2.6.63 3.68L8 10.77l-3.3 1.74.63-3.68-2.67-2.6 3.69-.54z" stroke="currentColor" stroke-width="1.25" stroke-linecap="round" stroke-linejoin="round"/>"#
+);
+glyph!(
+    pub STAR_FILL,
+    "deadbolt-star-fill",
+    r#"<path d="m8 2.35 1.65 3.34 3.69.54-2.67 2.6.63 3.68L8 10.77l-3.3 1.74.63-3.68-2.67-2.6 3.69-.54z" fill="currentColor" stroke="currentColor" stroke-width="1.0" stroke-linejoin="round"/>"#
+);
 
 pub(crate) fn kind_icon(kind: &str) -> &'static Icon {
     match kind {

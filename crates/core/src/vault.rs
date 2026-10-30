@@ -357,6 +357,7 @@ impl Vault {
                 data::check(&self.items, op)?;
             }
             data::check_files(&self.items, ops)?;
+            data::check_tags(&self.items, ops)?;
         }
         let tips = match log_id.log {
             Log::Membership => &self.membership_tips,
@@ -438,6 +439,21 @@ impl Vault {
         fields: impl IntoIterator<Item = (String, Field)>,
     ) -> Result<(ItemId, Entry), Error> {
         let entry = self.write(secret, vec![DataOp::create(kind, name, fields)])?;
+        Ok((ItemId::of_create(&entry.hash(), 0), entry))
+    }
+
+    /// Creates an item with initial `favorite` and `tags`, returning its id.
+    pub fn create_item_with(
+        &mut self,
+        secret: &DeviceSecret,
+        kind: impl Into<String>,
+        name: Option<String>,
+        fields: impl IntoIterator<Item = (String, Field)>,
+        favorite: bool,
+        tags: impl IntoIterator<Item = String>,
+    ) -> Result<(ItemId, Entry), Error> {
+        let op = DataOp::create_with(kind, name, fields, None, favorite, tags);
+        let entry = self.write(secret, vec![op])?;
         Ok((ItemId::of_create(&entry.hash(), 0), entry))
     }
 

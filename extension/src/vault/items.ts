@@ -9,6 +9,7 @@ import { avatar, h, icon } from "../ui/dom"
 import { rollLabel } from "../ui/motion"
 import type { App, View } from "./app"
 import { button, copied, glyph, iconButton, keepFocus, refuse, slidingHighlight, toolbar } from "./kit"
+import { metaEditor, starButton, tagChips } from "./tags"
 
 /** Names the agent and the app give fields, where its own name doesn't read well. */
 const LABELS: Record<string, string> = {
@@ -269,12 +270,17 @@ export function itemDetailView(app: App, ref: string): View {
         if (left <= 0) void load()
       }, 250)
     }
-    const actions: Node[] = []
+    const actions: Node[] = [
+      starButton(app, d, (fav) => {
+        d.favorite = fav
+        paint()
+      }),
+    ]
     if (d.editable) actions.push(button("btn", "Edit", () => app.go({ name: "edit", ref, kind: d.kind })))
     keepFocus(el, () =>
       el.replaceChildren(
         toolbar("", () => app.go({ name: "list" }, -1), ...actions),
-        h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")))),
+        h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")), tagChips(app, d.tags))),
         lines.length ? h("div", { class: "box" }, ...lines) : h("p", { class: "muted" }, "Nothing saved in it yet."),
         h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
       ),
@@ -344,13 +350,16 @@ export function itemEditView(app: App, kind: string, ref?: string): View {
   const back = () => (ref ? app.go({ name: "item", ref }, -1) : app.go({ name: "list" }, -1))
   const nameId = `f-${Math.random().toString(36).slice(2, 9)}`
   const name = h("input", { class: "input", id: nameId, autocomplete: "off", spellcheck: "false", maxlength: "128", placeholder: kindName(app, kind) })
+  const existingSummary = ref ? app.items?.find((i) => i.ref === ref) : undefined
+  const meta = metaEditor(app, !!existingSummary?.favorite, existingSummary?.tags ?? [])
   const fieldsBox = h("div", { class: "fields" })
   const form = h(
     "form",
     { class: "view edit", novalidate: "" },
-    toolbar(ref ? `Edit ${noun(app, kind)}` : `New ${noun(app, kind)}`, back),
+    toolbar(ref ? `Edit ${noun(app, kind)}` : `New ${noun(app, kind)}`, back, meta.favBtn),
     h("div", { class: "field" }, h("label", { for: nameId }, "Name"), name),
     fieldsBox,
+    meta.tagsWrap,
     error,
     h("div", { class: "buttons end" }, button("btn", "Cancel", back), save),
   )
@@ -386,7 +395,10 @@ export function itemEditView(app: App, kind: string, ref?: string): View {
       }
       fieldsBox.append(h("div", { class: "field" }, h("label", { for: id }, fieldLabel(f.name)), el))
     }
-    if (d) name.value = d.name ?? ""
+    if (d) {
+      name.value = d.name ?? ""
+      meta.setMeta(!!d.favorite, d.tags ?? [])
+    }
   }
 
   if (ref) {
@@ -414,10 +426,16 @@ export function itemEditView(app: App, kind: string, ref?: string): View {
       }
       if (value !== r.was) fields.push({ name: r.name, value })
     }
+    const chosenMeta = meta.read()
+    if (chosenMeta.error) return fail(chosenMeta.error, meta.input)
     if (!ref && !fields.length && !name.value.trim()) return fail("Give it a name or fill in a field.", name)
     save.disabled = true
     rollLabel(label, "Saving…")
-    const r = await app.run(ref ? { type: "device-item-save", ref, name: name.value.trim(), fields, remove } : { type: "device-item-save", kind, name: name.value.trim(), fields })
+    const r = await app.run(
+      ref
+        ? { type: "device-item-save", ref, name: name.value.trim(), fields, remove, favorite: chosenMeta.favorite, tags: chosenMeta.tags }
+        : { type: "device-item-save", kind, name: name.value.trim(), fields, favorite: chosenMeta.favorite, tags: chosenMeta.tags },
+    )
     if (!r.ok) {
       save.disabled = false
       rollLabel(label, "Save")
