@@ -117,6 +117,8 @@ enum Error {
     #[error(transparent)]
     Store(#[from] deadbolt_store::Error),
     #[error(transparent)]
+    History(#[from] crate::history::Error),
+    #[error(transparent)]
     Core(#[from] deadbolt_core::Error),
     #[error(transparent)]
     Decode(#[from] deadbolt_core::DecodeError),
@@ -151,11 +153,7 @@ struct Loaded {
 
 impl Loaded {
     fn open(store: Unlocked) -> Result<Self> {
-        let entries = store
-            .iter_all()?
-            .map(|bytes| Ok(Entry::decode(&bytes?)?))
-            .collect::<Result<Vec<_>>>()?;
-        let vault = Vault::load(entries)?;
+        let vault = crate::history::load(&store)?;
         let peers = store
             .meta_get("extension/peers")?
             .and_then(|bytes| serde_json::from_slice(&bytes).ok())
@@ -370,8 +368,9 @@ async fn start(store: Unlocked, device_name: Option<&str>) -> Result<()> {
 }
 
 /// Startup has the same membership-first barrier and bounded best-effort
-/// deadline as the CLI. A dial failure counts as unreachable; an exchange
-/// failure does not. Members learned in a round must also be contacted.
+/// deadline as the CLI. A dial failure counts as unreachable, except a peer
+/// refusing it at its inbound limit; an exchange failure does not. Members
+/// learned in a round must also be contacted.
 async fn sync_round() -> Result<()> {
     let node = node()?;
     let state = state();
@@ -408,6 +407,7 @@ async fn sync_round() -> Result<()> {
                         Ok(Err(_)) | Err(_) => {}
                     }
                 }
+                Ok(Err(deadbolt_net::Error::Rejected(_))) => {}
                 Ok(Err(_)) | Err(_) => {
                     attempts.insert(id);
                 }
@@ -710,6 +710,12 @@ fn edit_login(body: &Value) -> Result<Value> {
     let title = policy::login_title(text(input, "title")?).map_err(Error::Protocol)?;
     let password = text(input, "password")?;
     let username = text(input, "username")?.trim();
+    let favorite = match input.get("favorite") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err(Error::Protocol("favorite is true or false")),
+    };
+    let tags = items::parse_tags(input.get("tags"))?;
     let reply = state().with(|s| {
         // The core keeps no empty field: a login without a username has none.
         let mut fields = vec![("url".to_owned(), Field::new(FieldType::Url, &url))];
@@ -756,13 +762,21 @@ fn edit_login(body: &Value) -> Result<Value> {
                     .into_iter()
                     .map(|(name, value)| DataOp::set(id, name, value)),
             );
+            ops.extend(items::tag_ops(&item, favorite, tags.as_deref()));
             staged.write(&s.secret, ops)?;
             (id, false)
         } else {
             if password.is_empty() {
                 return Err(Error::Protocol("A new login needs a password"));
             }
-            let (id, _) = staged.create_item(&s.secret, "login", Some(title.into()), fields)?;
+            let (id, _) = staged.create_item_with(
+                &s.secret,
+                "login",
+                Some(title.into()),
+                fields,
+                favorite.unwrap_or(false),
+                tags.unwrap_or_default(),
+            )?;
             (id, true)
         };
         s.commit(staged)?;
@@ -1038,6 +1052,8 @@ fn plain(error: &Error) -> String {
         | Error::NotFound
         | Error::Protocol(_) => error.to_string(),
         Error::Generation(_) | Error::Passkey(_) => error.to_string(),
+        Error::History(crate::history::Error::Unavailable { .. } | crate::history::Error::VaultCount(_)) => error.to_string(),
+        Error::History(_) => STORAGE.into(),
         Error::Item(error) | Error::Core(deadbolt_core::Error::Item(error)) => {
             sentence(&error.to_string())
         }
@@ -1047,6 +1063,7 @@ fn plain(error: &Error) -> String {
                 .into()
         }
         Error::Store(_) | Error::Decode(_) | Error::Json(_) => STORAGE.into(),
+        Error::Core(deadbolt_core::Error::MembershipLimit { .. }) => error.to_string(),
         Error::Core(_) | Error::Application(_) => {
             "Deadbolt couldn't make that change to the vault.".into()
         }
@@ -1067,7 +1084,7 @@ fn plain(error: &Error) -> String {
             "That code is this browser's own. Enter the code the other device shows.".into()
         }
         Error::Net(Net::InvalidCode(_)) => {
-            "That isn't a pairing code. It's four words, like apple-river-stone-lamp.".into()
+            "That isn't a pairing code. It's five words, like apple-river-stone-lamp-zoo. Update both devices if you have an older four-word code.".into()
         }
         Error::Net(Net::PairingCancelled) => "The pairing was cancelled.".into(),
         Error::Net(Net::Remote(message)) => format!("The other device refused: {message}"),

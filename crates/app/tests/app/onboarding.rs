@@ -87,8 +87,8 @@ fn every_state_renders_in_both_appearances() {
             "code",
             &[
                 "Pair from your other device",
-                "violin garden tiger lamp",
-                "deadbolt pair violin-garden-tiger-lamp",
+                "violin garden tiger lamp zoo",
+                "deadbolt pair violin-garden-tiger-lamp-zoo",
                 "Copy command",
                 "On a device with your vault, run:",
             ],
@@ -479,7 +479,7 @@ fn code_copied() -> (Runtime<App>, MemoryClipboard) {
     rt.frame(FRAME);
     assert_eq!(
         board(&clipboard).as_deref(),
-        Some("deadbolt pair violin-garden-tiger-lamp"),
+        Some("deadbolt pair violin-garden-tiger-lamp-zoo"),
         "the whole command is on the clipboard"
     );
     (rt, clipboard)

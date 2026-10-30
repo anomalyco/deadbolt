@@ -336,6 +336,8 @@ fn the_clipboard_clears_itself_unless_something_else_was_copied() {
             value: "pw".into(),
         }],
         source: None,
+        favorite: false,
+        tags: Vec::new(),
         deleted_at: None,
     });
     rt.frame(0.0);
@@ -447,7 +449,7 @@ fn pair_from(rt: &mut Runtime<App>, inviter: &Device, form: bool) -> std::proces
     until(rt, "the code", |s| s.onboarding.code.is_some());
     assert!(shows(rt, "Pair from your other device"));
     let code = rt.state.onboarding.code.as_ref().unwrap().clone();
-    assert_eq!(code.split('-').count(), 4, "{}", code.as_str());
+    assert_eq!(code.split('-').count(), 5, "{}", code.as_str());
     assert!(shows(rt, &format!("deadbolt pair {}", code.as_str())));
     inviter.spawn(&["pair", &code])
 }

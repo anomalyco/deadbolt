@@ -9,6 +9,10 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["health"]
+health = ["dep:zxcvbn"]
+
 [dependencies]
 blake3 = { version = "1.8", features = ["zeroize"] }
 data-encoding = "2.11.1"
@@ -24,6 +28,7 @@ p256 = { version = "0.14", features = ["ecdsa", "pkcs8", "getrandom"] }
 url = "2.5.8"
 thiserror = "2.0"
 zeroize = "1.9"
+zxcvbn = { version = "3.1.1", default-features = false, optional = true }
 
 [dev-dependencies]
 proptest = "1.9"

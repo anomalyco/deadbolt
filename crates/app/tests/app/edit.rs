@@ -204,6 +204,7 @@ impl Rig {
                 name,
                 fields,
                 seq,
+                ..
             }) => (
                 seq,
                 kind,
@@ -225,6 +226,7 @@ impl Rig {
                 fields,
                 unset,
                 seq,
+                ..
             }) => (
                 seq,
                 id,
@@ -321,6 +323,8 @@ pub(super) fn info(id: &str, kind: &str, label: &str) -> ItemInfo {
         detail: None,
         fields: Vec::new(),
         source: None,
+        favorite: false,
+        tags: Vec::new(),
         deleted_at: None,
     }
 }
@@ -364,6 +368,7 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
             Job::Generate {
                 length: 24,
                 symbols: true,
+                url: None,
                 seq,
             },
         ] => *seq,
@@ -392,6 +397,7 @@ fn cmd_n_opens_a_new_login_with_a_generated_password() {
                 length,
                 symbols,
                 seq,
+                ..
             } => Some((length, symbols, seq)),
             _ => None,
         })

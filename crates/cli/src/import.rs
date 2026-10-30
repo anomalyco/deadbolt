@@ -12,6 +12,7 @@ mod bitwarden;
 mod csv;
 pub mod onepassword;
 pub mod op;
+pub mod tags;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -31,18 +32,25 @@ pub struct Imported {
     pub kind: &'static str,
     pub name: Option<String>,
     pub fields: BTreeMap<String, Field>,
+    pub favorite: bool,
+    pub tags: BTreeSet<String>,
     /// Where it came from, for an export that says (1Password's).
     pub source: Option<Source>,
-    /// For a login that signs in with another (`sign-in-with`), the
-    /// 1Password item that one is, by vault and item id as in its source id
-    /// ([`onepassword::source_key`]). The agent links it at import, as
-    /// `sign-in-account`, once that item is here.
     pub sign_in_link: Option<(String, String)>,
+    /// UTC date (`YYYY-MM-DD`) the password was last changed in the export, if
+    /// known.
+    pub password_changed: Option<String>,
 }
 
 impl Imported {
     pub fn digest(&self) -> String {
-        digest(self.kind, self.name.as_deref(), &self.fields)
+        digest(
+            self.kind,
+            self.name.as_deref(),
+            &self.fields,
+            self.favorite,
+            &self.tags,
+        )
     }
 }
 
@@ -74,6 +82,10 @@ pub struct MirrorVersion {
     /// sync removes those 1Password no longer has, and keeps the rest,
     /// which are the item's own.
     pub fields: BTreeSet<String>,
+    /// For an item taken over, the case-folded tags 1Password last wrote:
+    /// a later sync removes those 1Password deleted and leaves Deadbolt-only
+    /// tags untouched.
+    pub tags: BTreeSet<String>,
 }
 
 impl MirrorVersion {
@@ -83,17 +95,27 @@ impl MirrorVersion {
     }
 
     /// `updated:digest`, then `:import`, or `:adopted:` and the fields'
-    /// names joined by commas, unless a sync added it.
+    /// names joined by commas (followed optionally by `:` and unpadded
+    /// base64url folded tags joined by commas), unless a sync added it.
     pub fn parse(version: &str) -> Option<Self> {
         let mut parts = version.split(':');
         let updated = parts.next()?.parse().ok()?;
         let digest = parts.next()?.to_string();
         let mut fields = BTreeSet::new();
+        let mut tags = BTreeSet::new();
         let origin = match parts.next() {
             None => Origin::Sync,
             Some("adopted") => {
                 let names = parts.next()?;
                 fields.extend(names.split(',').filter(|n| !n.is_empty()).map(String::from));
+                if let Some(encoded_tags) = parts.next() {
+                    for part in encoded_tags.split(',').filter(|s| !s.is_empty()) {
+                        let bytes = data_encoding::BASE64URL_NOPAD
+                            .decode(part.as_bytes())
+                            .ok()?;
+                        tags.insert(String::from_utf8(bytes).ok()?);
+                    }
+                }
                 Origin::Adopted
             }
             Some("import") => Origin::Import,
@@ -104,6 +126,7 @@ impl MirrorVersion {
             digest,
             origin,
             fields,
+            tags,
         })
     }
 }
@@ -115,7 +138,16 @@ impl std::fmt::Display for MirrorVersion {
             Origin::Sync => Ok(()),
             Origin::Adopted => {
                 let names: Vec<&str> = self.fields.iter().map(String::as_str).collect();
-                write!(f, ":adopted:{}", names.join(","))
+                write!(f, ":adopted:{}", names.join(","))?;
+                if !self.tags.is_empty() {
+                    let encoded: Vec<String> = self
+                        .tags
+                        .iter()
+                        .map(|t| data_encoding::BASE64URL_NOPAD.encode(t.as_bytes()))
+                        .collect();
+                    write!(f, ":{}", encoded.join(","))?;
+                }
+                Ok(())
             }
             Origin::Import => f.write_str(":import"),
         }
@@ -123,18 +155,29 @@ impl std::fmt::Display for MirrorVersion {
 }
 
 /// The digest part of a [`MirrorVersion`].
-pub fn digest(kind: &str, name: Option<&str>, fields: &BTreeMap<String, Field>) -> String {
-    let mut h = blake3::Hasher::new_derive_key("deadbolt 2026-10-26 mirror digest v1");
-    let mut put = |s: &str| {
+pub fn digest(
+    kind: &str,
+    name: Option<&str>,
+    fields: &BTreeMap<String, Field>,
+    favorite: bool,
+    tags: &BTreeSet<String>,
+) -> String {
+    let mut h = blake3::Hasher::new_derive_key("deadbolt 2026-10-30 mirror digest v2");
+    fn put(h: &mut blake3::Hasher, s: &str) {
         h.update(&(s.len() as u64).to_le_bytes());
         h.update(s.as_bytes());
-    };
-    put(kind);
-    put(name.unwrap_or_default());
+    }
+    put(&mut h, kind);
+    put(&mut h, name.unwrap_or_default());
     for (field, value) in fields {
-        put(field);
-        put(value.kind.as_str());
-        put(&value.value);
+        put(&mut h, field);
+        put(&mut h, value.kind.as_str());
+        put(&mut h, &value.value);
+    }
+    h.update(&[u8::from(favorite)]);
+    h.update(&(tags.len() as u64).to_le_bytes());
+    for tag in tags {
+        put(&mut h, tag);
     }
     h.finalize().to_hex()[..32].to_string()
 }
@@ -233,10 +276,6 @@ const INVALID: Reason = (
     "item that could not be imported",
     "items that could not be imported",
 );
-const FOLDER: Reason = ("folder", "folders");
-const COLLECTION: Reason = ("collection", "collections");
-const FAVORITE: Reason = ("favorite", "favorites");
-const TAG: Reason = ("tag", "tags");
 const ATTACHMENT: Reason = ("attachment", "attachments");
 const MISSING_ATTACHMENT: Reason = (
     "attachment missing from the export",
@@ -677,8 +716,11 @@ impl Builder {
             kind,
             name,
             fields: self.fields,
+            favorite: false,
+            tags: BTreeSet::new(),
             source: None,
             sign_in_link: None,
+            password_changed: None,
         })
     }
 }

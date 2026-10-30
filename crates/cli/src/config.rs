@@ -113,6 +113,8 @@ pub struct Config {
     pub lock_on_sleep: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub touch_id: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub breach_checks: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<ExtensionDir>,
     /// The single directory older configs registered, moved into
@@ -204,11 +206,40 @@ impl Config {
     pub fn touch_id(&self) -> bool {
         self.touch_id.unwrap_or(false)
     }
+
+    /// Whether opt-in Have I Been Pwned breach checks are enabled in `config.toml`.
+    pub fn breach_checks(&self) -> bool {
+        self.breach_checks.unwrap_or(false)
+    }
 }
 
 /// Updates `touch_id` in `path` (`config.toml`), preserving other settings.
 pub fn set_touch_id(path: &Path, enabled: bool) -> Result<()> {
     change(path, |cfg| cfg.touch_id = Some(enabled))
+}
+
+/// Updates `breach_checks` in `path` (`config.toml`), preserving other settings.
+pub fn set_breach_checks(path: &Path, enabled: bool) -> Result<()> {
+    change(path, |cfg| cfg.breach_checks = Some(enabled))
+}
+
+/// Today's UTC date as `YYYY-MM-DD`.
+pub fn today_utc() -> String {
+    utc_date(now())
+}
+
+/// `secs` (since the Unix epoch) as a UTC `YYYY-MM-DD` date.
+pub fn utc_date(secs: u64) -> String {
+    let z = (secs / 86_400) as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// Records an extension directory `deadbolt update` keeps current, and which

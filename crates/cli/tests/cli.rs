@@ -284,7 +284,7 @@ fn start_join(new: &Device, device_name: &str) -> (Child, mpsc::Receiver<String>
         .strip_prefix("Code: ")
         .expect("a code line")
         .to_string();
-    assert_eq!(code.split('-').count(), 4, "{code}");
+    assert_eq!(code.split('-').count(), 5, "{code}");
     (child, rx, code)
 }
 
@@ -490,12 +490,14 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
     // Joining another vault on an existing device.
     pair(&a, &b, "beta", Some("personal"));
     assert_eq!(b.run(&["vault", "ls"]).lines().count(), 2);
-    let err = a.fail(&["pair", "violin-garden-tiger-lamp", "--vault", "nope"]);
+    let err = a.fail(&["pair", "violin-garden-tiger-lamp-zoo", "--vault", "nope"]);
     assert!(err.contains("no vault named nope"), "{err}");
     let err = a.fail(&["pair", "DBPAIRAAAA"]);
     assert!(err.contains("invalid pairing code"), "{err}");
-    // Several vaults and no terminal to choose on: name one.
     let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp"]);
+    assert!(err.contains("update both devices"), "{err}");
+    // Several vaults and no terminal to choose on: name one.
+    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp", "zoo"]);
     assert!(err.contains("several vaults (personal, work)"), "{err}");
 }
 
@@ -510,7 +512,7 @@ fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
     c.run(&["init", "--device-name", "gamma"]);
     let (child, _rx, code) = start_join(&b, "beta");
 
-    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp"]);
+    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp-zoo"]);
     wrong.env("DEADBOLT_TEST_PAIR_FIND_SECS", "1");
     let out = c.output(&mut wrong);
     assert!(!out.status.success());
@@ -1444,6 +1446,80 @@ fn ai_agents_use_secrets_only_with_a_grant() {
     );
 }
 
+/// Until `policy::decide` (#111): an AI sees a value only with Touch ID
+/// each time, as `deadbolt read` does, and never runs the Never tier.
+#[test]
+fn ai_agents_read_values_only_with_touch_id_and_never_administer() {
+    let a = Device::new();
+    a.run(&["init"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "GitHub",
+            &format!("token={TOKEN}"),
+            &format!("otp={OTP_SECRET}"),
+        ],
+    );
+    let refused = |out: &Output, says: &str| {
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(out.status.code(), Some(4), "{err}");
+        assert!(err.contains(says), "{err}");
+        assert!(!err.contains(TOKEN) && out.stdout.is_empty(), "{err}");
+    };
+    // No Touch ID here: values are refused, the item named or not.
+    refused(&as_ai(&a, &["get", "GitHub"]), "Touch ID");
+    refused(&as_ai(&a, &["show", "--reveal", "GitHub"]), "Touch ID");
+    refused(&as_ai(&a, &["code", "GitHub"]), "Touch ID");
+    // A claimed caller name alone isn't an AI.
+    let out = a.output(
+        a.cmd(&["get", "GitHub"])
+            .env("DEADBOLT_CALLER", "an AI")
+            .env_remove("OPENCODE_SESSION_ID"),
+    );
+    assert!(out.status.success());
+
+    for (args, says) in [
+        (&["init", "work"][..], "can't create a vault"),
+        (
+            &["vault", "rename", "personal", "mine"],
+            "can't rename a vault",
+        ),
+        (
+            &["vault", "default", "personal"],
+            "can't change the default vault",
+        ),
+        (&["devices", "remove", "gamma"], "can't remove a device"),
+        (&["rm", "GitHub"], "can't delete an item"),
+        (&["touch-id", "off"], "can't turn Touch ID"),
+    ] {
+        refused(&as_ai(&a, args), says);
+    }
+    // Nothing changed, and the user can still do all of it.
+    assert_eq!(a.run(&["vault", "ls"]).lines().count(), 1);
+    assert_eq!(a.run(&["init", "work"]), "created vault work\n");
+    assert!(a.run(&["ls"]).contains("GitHub"));
+    // Listing stays open to AIs: no values.
+    let ls = as_ai(&a, &["ls"]);
+    assert!(ls.status.success());
+    assert!(String::from_utf8_lossy(&ls.stdout).contains("GitHub"));
+
+    let raw = a.run(&["activity", "--json"]);
+    assert!(!raw.contains(TOKEN), "{raw}");
+    let entries = activity(&a);
+    let refused_as = |command: &str| {
+        entries.iter().any(|e| {
+            e["command"] == command
+                && e["outcome"] == "refused"
+                && e["caller"]["claimed"]["opencode_session"] == "ses_test"
+        })
+    };
+    for command in ["item-get", "item-code", "vault-create", "item-remove"] {
+        assert!(refused_as(command), "{command}: {raw}");
+    }
+}
+
 #[test]
 fn shares_an_agent_of_another_build() {
     let a = Device::new();
@@ -1975,7 +2051,7 @@ fn import() {
     };
 
     let summary = "4 from Bitwarden (logins 2, cards 1, secure notes 1)\n\
-        dropped: 1 favorite, 1 folder, 1 item's password history\n";
+        dropped: 1 item's password history\n";
     let output = a.try_run(&["import", "--dry-run", file.to_str().unwrap()]);
     assert!(output.status.success());
     no_secrets(&output);
@@ -2020,6 +2096,13 @@ fn import() {
             .any(|s| show.contains(s)),
         "{show}"
     );
+    assert!(
+        show.contains("favorite       yes\n") && show.contains("tags           Work\n"),
+        "{show}"
+    );
+    assert_eq!(a.run(&["tags"]), "Work\t1\n");
+    assert!(a.run(&["items", "--favorites"]).contains("\tGitHub\tdax\n"));
+    assert!(a.run(&["ls", "--tag", "work"]).contains("\tGitHub\tdax\n"));
 
     // Importing again changes nothing.
     let output = a.try_run(&["import", file.to_str().unwrap()]);
@@ -2268,13 +2351,16 @@ fn watch_prints_changes_as_json_lines() {
             }
         }
     });
-    // Each command here is also an Activity entry; those come in between.
+    // Each command here is also an Activity entry, and item/unlock changes
+    // refresh the background health memo; those come in between.
     let next = || -> serde_json::Value {
         loop {
             let line = rx.recv_timeout(Duration::from_secs(30)).expect("a change");
             let change: serde_json::Value =
                 serde_json::from_str(&line).unwrap_or_else(|e| panic!("{line:?} is not JSON: {e}"));
-            if change != serde_json::json!({"change": "activity"}) {
+            if change != serde_json::json!({"change": "activity"})
+                && change != serde_json::json!({"change": "health"})
+            {
                 return change;
             }
         }
@@ -4639,3 +4725,74 @@ fn import_1pux_with_files() {
         "{again}"
     );
 }
+
+#[test]
+fn favorites_and_tags() {
+    let a = Device::new();
+    a.run(&["init", "--device-name", "alpha"]);
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "Alpha",
+            "username=personal",
+            "password=pw-a",
+            "-t",
+            "personal",
+        ],
+    );
+    new(
+        &a,
+        &[
+            "login",
+            "--name",
+            "Zeta",
+            "username=ops",
+            "password=pw-z",
+            "--favorite",
+            "-t",
+            "Work/AWS",
+            "-t",
+            "Tax 2026",
+        ],
+    );
+
+    // Favorites rank first in `ls` and `items`.
+    let ls = a.run(&["items"]);
+    let labels: Vec<&str> = ls.lines().map(|l| l.split('\t').nth(1).unwrap()).collect();
+    assert_eq!(labels, ["Zeta", "Alpha"]);
+
+    // Hierarchical tag queries and `deadbolt tags` counts.
+    assert_eq!(
+        a.run(&["tags"]),
+        "personal\t1\nTax 2026\t1\nWork\t1\nWork/AWS\t1\n"
+    );
+    assert!(a.run(&["ls", "#work"]).contains("\tZeta\tops\n"));
+    assert!(!a.run(&["ls", "#work"]).contains("Alpha"));
+    assert!(a.run(&["ls", "#tax-2026"]).contains("\tZeta\tops\n"));
+    assert!(a.run(&["ls", "is:favorite"]).contains("\tZeta\tops\n"));
+
+    // Updating favorite and tags in place, and syncing to a paired device.
+    let b = Device::new();
+    pair(&a, &b, "beta", None);
+    a.run(&[
+        "set",
+        "zeta",
+        "--no-favorite",
+        "--tag",
+        "prod",
+        "--untag",
+        "work/aws",
+    ]);
+    a.run(&["set", "alpha", "--favorite"]);
+    eventually("b to converge on favorite and tags", || {
+        b.run(&["sync"]);
+        let items = b.run(&["items"]);
+        let names: Vec<&str> = items.lines().filter_map(|l| l.split('\t').nth(1)).collect();
+        names == ["Alpha", "Zeta"] && b.run(&["tags"]) == "personal\t1\nprod\t1\nTax 2026\t1\n"
+    });
+}
+
+#[path = "cli/health.rs"]
+mod health;

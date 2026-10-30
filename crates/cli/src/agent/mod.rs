@@ -9,6 +9,7 @@ mod forms;
 mod generate;
 mod grants;
 mod guesses;
+mod health;
 mod items;
 mod macos_autofill;
 mod mirror;
@@ -50,7 +51,8 @@ use crate::client::{AgentError, protocol, version};
 use crate::config::Config;
 use crate::paths::Paths;
 use crate::protocol::{
-    Answer, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request, Status,
+    Answer, CallerInfo, Change, Command, ErrorCode, Event, MAX_LINE, Message, Reply, Request,
+    Status,
 };
 use session::{Loaded, Session, clean_name};
 use system::SystemEvent;
@@ -326,7 +328,11 @@ mod tests {
                 let mut request = serde_json::to_vec(&Request {
                     v: PROTOCOL_VERSION,
                     claimed: None,
-                    command: Command::Generate { length, symbols },
+                    command: Command::Generate {
+                        length,
+                        symbols,
+                        url: None,
+                    },
                 })
                 .unwrap();
                 request.push(b'\n');
@@ -577,6 +583,8 @@ mod tests {
                 kind: "login".into(),
                 name: Some("offline-login".into()),
                 fields: fields(),
+                favorite: false,
+                tags: Vec::new(),
             },
             Command::ItemGet {
                 vault: None,
@@ -590,6 +598,8 @@ mod tests {
                 query: vec![],
                 kind: None,
                 deleted: false,
+                tags: Vec::new(),
+                favorites: false,
             },
             Command::ItemSet {
                 vault: None,
@@ -597,6 +607,9 @@ mod tests {
                 fields: fields(),
                 name: None,
                 unset: Vec::new(),
+                favorite: None,
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
             },
             Command::ItemUnset {
                 vault: None,
@@ -722,13 +735,17 @@ mod tests {
         let (conv, _client, _closed) = conversation();
         let syncing = {
             let agent = agent.clone();
-            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+            tokio::spawn(async move { agent.dispatch(&caller::nobody(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
 
         // One at a time.
         let (conv, _client, _closed) = conversation();
-        let error = agent.clone().dispatch(sync_op(), &conv).await.unwrap_err();
+        let error = agent
+            .clone()
+            .dispatch(&caller::nobody(), sync_op(), &conv)
+            .await
+            .unwrap_err();
         assert_eq!(
             error.to_string(),
             "already syncing from 1Password: try again when it finishes"
@@ -756,7 +773,7 @@ mod tests {
         let (conv, _client, closed) = conversation();
         let syncing = {
             let agent = agent.clone();
-            tokio::spawn(async move { agent.dispatch(sync_op(), &conv).await })
+            tokio::spawn(async move { agent.dispatch(&caller::nobody(), sync_op(), &conv).await })
         };
         let pid = started(&pid).await;
         closed.send_replace(true);
@@ -1463,10 +1480,16 @@ impl Agent {
         sent
     }
 
-    async fn dispatch(self: Arc<Self>, command: Command, conv: &Conversation) -> Result<Reply> {
+    async fn dispatch(
+        self: Arc<Self>,
+        caller: &CallerInfo,
+        command: Command,
+        conv: &Conversation,
+    ) -> Result<Reply> {
         if matches!(command, Command::Status | Command::Stop) {
             return self.run(command, conv).await;
         }
+        self.ai_gate(caller, &command, conv).await?;
         // A one-time code isn't use: a client showing one asks every period,
         // which would otherwise hold the vault open for as long as it shows.
         // Nor is a browser looking at a page: it asks for every page loaded.
@@ -1668,23 +1691,56 @@ impl Agent {
                 query,
                 kind,
                 deleted,
+                tags,
+                favorites,
             } => Ok(Reply::Items {
-                items: self
-                    .with(|s| items::list(s, vault.as_deref(), &query, kind.as_deref(), deleted))?,
+                items: self.with(|s| {
+                    items::list_filtered(
+                        s,
+                        vault.as_deref(),
+                        &query,
+                        kind.as_deref(),
+                        deleted,
+                        &tags,
+                        favorites,
+                    )
+                })?,
+            }),
+            Command::TagList { vault } => Ok(Reply::Tags {
+                tags: self.with(|s| items::tags(s, vault.as_deref()))?,
             }),
             Command::ItemNew {
                 vault,
                 kind,
                 name,
                 fields,
-            } => self.item_write(|s| items::create(s, vault.as_deref(), &kind, name, fields)),
+                favorite,
+                tags,
+            } => self.item_write(|s| {
+                items::create_with(s, vault.as_deref(), &kind, name, fields, favorite, tags)
+            }),
             Command::ItemSet {
                 vault,
                 query,
                 fields,
                 name,
                 unset,
-            } => self.item_write(|s| items::set(s, vault.as_deref(), &query, fields, name, &unset)),
+                favorite,
+                add_tags,
+                remove_tags,
+            } => self.item_write(|s| {
+                items::set_with(
+                    s,
+                    vault.as_deref(),
+                    &query,
+                    fields,
+                    name,
+                    &unset,
+                    favorite,
+                    &add_tags,
+                    &remove_tags,
+                )
+            }),
             Command::ItemUnset {
                 vault,
                 query,
@@ -1773,8 +1829,16 @@ impl Agent {
             Command::SendShow { id } => self.send_show(&id).await,
             Command::SendRevoke { id } => self.send_revoke(&id).await,
             Command::SendWait { id } => self.send_wait(&id, conv).await,
-            Command::Generate { length, symbols } => Ok(Reply::Password {
-                password: deadbolt_core::password::generate(length, symbols)?,
+            Command::Generate {
+                length,
+                symbols,
+                url,
+            } => Ok(Reply::Password {
+                password: deadbolt_core::site_password::generate_for_url(
+                    url.as_deref(),
+                    length,
+                    symbols,
+                )?,
             }),
             Command::SiteLogins { origin } => {
                 let (site, logins) = self.with(|s| autofill::list(s, &origin))?;
@@ -1868,8 +1932,11 @@ impl Agent {
             Command::AgentClientAdd { .. }
             | Command::AgentGrantSet { .. }
             | Command::SecretGrantSet { .. }
-            | Command::Resolve { .. } => {
-                bail!("pairing, grants and references are answered with the caller")
+            | Command::Resolve { .. }
+            | Command::Health { .. }
+            | Command::HealthIgnore { .. }
+            | Command::BreachChecksSet { .. } => {
+                bail!("pairing, grants, references and health are answered with the caller")
             }
             Command::AgentClientList => Ok(Reply::AgentClients {
                 clients: self.with(|s| grants::list_clients(s))?,
@@ -2031,7 +2098,9 @@ impl Agent {
         if closed > 0 {
             info!(closed, "closed sync connections to removed devices");
         }
-        if !session.vaults.is_empty() && !session.vaults.values().any(|v| v.is_member(&session.id))
+        if session.unavailable.is_empty()
+            && !session.vaults.is_empty()
+            && !session.vaults.values().any(|v| v.is_member(&session.id))
         {
             drop(session.store.clear_biometric());
             self.biometric_was_enrolled.store(false, Ordering::SeqCst);
@@ -2785,6 +2854,9 @@ impl Agent {
         self.set_timeout(timeout_secs)?;
         self.with(|s| {
             s.sync_task = Some(AbortOnDrop(tokio::spawn(sync::run(self.clone()))));
+            s.health_task = Some(AbortOnDrop(tokio::spawn(health::run_background(
+                self.clone(),
+            ))));
             Ok(())
         })?;
         info!(device = %id, "unlocked");
@@ -2813,6 +2885,7 @@ impl Agent {
         *self.idle.lock().unwrap_or_else(|e| e.into_inner()) = Idle::default();
         if let Some(mut session) = session {
             self.watchers.locked();
+            session.health_task.take();
             session.sync_task.take();
             session.node.shutdown().await;
             drop(session);

@@ -61,6 +61,7 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::ItemGet { .. } => (T::Read, "item-get"),
         C::ItemCode { .. } => (T::Read, "item-code"),
         C::ItemList { .. } => (T::Look, "item-list"),
+        C::TagList { .. } => (T::Look, "tag-list"),
         // Adding a field or editing a plain one will be Add (build order 6).
         C::ItemSet { .. } => (T::Write, "item-set"),
         C::ItemUnset { .. } => (T::Write, "item-unset"),
@@ -115,6 +116,9 @@ pub fn describe(command: &Command) -> (Tier, &'static str) {
         C::AutofillFill { .. } => (T::Browser, "autofill-fill"),
         C::AutofillPasskeyGet { .. } => (T::Browser, "autofill-passkey-get"),
         C::AutofillPasskeyCreate { .. } => (T::Browser, "autofill-passkey-create"),
+        C::Health { .. } => (T::Look, "health"),
+        C::HealthIgnore { .. } => (T::Write, "health-ignore"),
+        C::BreachChecksSet { .. } => (T::Never, "breach-checks-set"),
     }
 }
 
@@ -242,20 +246,32 @@ pub fn draft(command: &Command, class: CallerClass) -> Option<Draft> {
             query,
             fields,
             unset,
+            favorite,
+            add_tags,
+            remove_tags,
             ..
-        } => (
-            named(vault, query),
-            fields
+        } => {
+            let mut names: Vec<String> = fields
                 .iter()
                 .map(|f| f.name.clone())
                 .chain(unset.iter().cloned())
-                .collect(),
-        ),
+                .collect();
+            if favorite.is_some() {
+                names.push("favorite".into());
+            }
+            if !add_tags.is_empty() || !remove_tags.is_empty() {
+                names.push("tags".into());
+            }
+            (named(vault, query), names)
+        }
         Command::ItemUnset {
             vault,
             query,
             field,
         } => (named(vault, query), vec![field.clone()]),
+        Command::HealthIgnore {
+            vault, query, kind, ..
+        } => (named(vault, query), vec![kind.as_str().into()]),
         Command::SiteFill {
             origin,
             login: target,
@@ -622,7 +638,12 @@ impl Agent {
                     Command::Resolve { refs, purpose } => {
                         self.resolve(&caller, &refs, purpose, conv).await
                     }
-                    command => self.clone().dispatch(command, conv).await,
+                    command @ (Command::Health { .. }
+                    | Command::HealthIgnore { .. }
+                    | Command::BreachChecksSet { .. }) => {
+                        self.health_command(&caller, command).await
+                    }
+                    command => self.clone().dispatch(&caller, command, conv).await,
                 },
             };
         if let Ok(Reply::Status(status)) = &mut result {
@@ -821,6 +842,8 @@ mod tests {
                         value: SECRET.into(),
                     },
                 ],
+                favorite: false,
+                tags: Vec::new(),
             },
         )
         .await;
@@ -1159,6 +1182,8 @@ mod tests {
                     kind: None,
                     value: big.clone(),
                 }],
+                favorite: false,
+                tags: Vec::new(),
             },
         })
         .unwrap();
@@ -1246,6 +1271,8 @@ mod tests {
             query: Vec::new(),
             kind: None,
             deleted: false,
+            tags: Vec::new(),
+            favorites: false,
         };
         for _ in 0..ledger::PER_ANCHOR + 40 {
             let listed = ask(&agent, list()).await;

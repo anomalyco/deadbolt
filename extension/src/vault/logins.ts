@@ -14,6 +14,7 @@ import type { App, View } from "./app"
 import { enrollment, verify } from "./biometric"
 import { deleteButton, kindAvatar, kindName, secretOf } from "./items"
 import { button, copied, field, glyph, hostOf, iconButton, keepFocus, para, refuse, slidingHighlight, toolbar } from "./kit"
+import { matchesSearch, metaEditor, starBadge, starButton, tagChips } from "./tags"
 
 const url = (a: Account) => a.urls.find(Boolean) ?? ""
 
@@ -54,9 +55,9 @@ async function copySecret(app: App, b: HTMLElement, value: string) {
 }
 
 /** A login's row. `fill`: the popup's site, with Fill; `failed` shows why a fill didn't happen. */
-function row(app: App, a: Account, fill: boolean, tile: HTMLElement, failed: (message: string) => void): HTMLElement {
+function row(app: App, a: Account & { favorite?: boolean }, fill: boolean, tile: HTMLElement, failed: (message: string) => void): HTMLElement {
   const link = url(a)
-  const main = button("vrow-main", [tile, h("span", { class: "text" }, h("span", { class: "title" }, a.title), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
+  const main = button("vrow-main", [tile, h("span", { class: "text" }, h("span", { class: "title-line" }, h("span", { class: "title" }, a.title), starBadge(a.favorite)), h("span", { class: "sub" }, a.username || hostOf(link) || "No username"))], () =>
     app.go({ name: "item", ref: a.ref }),
   )
   main.dataset.ref = a.ref
@@ -93,7 +94,7 @@ function row(app: App, a: Account, fill: boolean, tile: HTMLElement, failed: (me
 
 /** Another type's row: its tile, label and detail, and a copy of the field it's for. */
 function itemRow(app: App, item: ItemSummary): HTMLElement {
-  const main = button("vrow-main", [kindAvatar(item), h("span", { class: "text" }, h("span", { class: "title" }, item.title), h("span", { class: "sub" }, item.detail ? `${kindName(app, item.kind)} · ${item.detail}` : kindName(app, item.kind)))], () =>
+  const main = button("vrow-main", [kindAvatar(item), h("span", { class: "text" }, h("span", { class: "title-line" }, h("span", { class: "title" }, item.title), starBadge(item.favorite)), h("span", { class: "sub" }, item.detail ? `${kindName(app, item.kind)} · ${item.detail}` : kindName(app, item.kind)))], () =>
     app.go({ name: "item", ref: item.ref, kind: item.kind }),
   )
   main.dataset.ref = item.ref
@@ -117,12 +118,6 @@ function itemRow(app: App, item: ItemSummary): HTMLElement {
     actions.append(copy)
   }
   return h("div", { class: "vrow" }, main, actions)
-}
-
-/** Every query word is in the item's title or its search words (never a secret), or a login's username or site. */
-const matches = (a: ItemSummary, q: string) => {
-  const texts = [a.title, a.username ?? "", ...a.urls.map(hostOf), ...a.search].map((s) => s.toLowerCase())
-  return q.split(/\s+/).filter(Boolean).every((w) => texts.some((s) => s.includes(w)))
 }
 
 export function listView(app: App): View {
@@ -224,8 +219,9 @@ export function listView(app: App): View {
     } else {
       const here = new Set((app.site?.accounts ?? []).map((a) => a.ref))
       const site = all.filter((a) => here.has(a.ref))
+      const anyTagged = all.some((a) => (a.tags?.length ?? 0) > 0)
       if (q) {
-        const found = [...site, ...all.filter((a) => !here.has(a.ref))].filter((a) => matches(a, q))
+        const found = [...site, ...all.filter((a) => !here.has(a.ref))].filter((a) => matchesSearch(a, app.query, anyTagged))
         parts.push(found.length ? section("Results", String(found.length), found, false) : h("div", { class: "empty" }, `Nothing matches “${app.query.trim()}”.`))
       } else {
         if (site.length) parts.push(section("This site", app.site!.host, site, true), fillError)
@@ -450,8 +446,16 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     if (notes) lines.push(h("div", { class: "line" }, h("span", { class: "line-label" }, "Notes"), h("span", { class: "value lines" }, notes), h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy notes", (b) => void copied(b, notes, say, "Copied the notes")))))
     keepFocus(el, () =>
       el.replaceChildren(
-        toolbar("", () => app.go({ name: "list" }, -1), button("btn", "Edit", () => app.go({ name: "edit", ref, kind: "login" }))),
-        h("div", { class: "detail-head" }, avatarFor(app, d.title, d.url ?? "", "detail"), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"))),
+        toolbar(
+          "",
+          () => app.go({ name: "list" }, -1),
+          starButton(app, d, (fav) => {
+            d.favorite = fav
+            paint()
+          }),
+          button("btn", "Edit", () => app.go({ name: "edit", ref, kind: "login" })),
+        ),
+        h("div", { class: "detail-head" }, avatarFor(app, d.title, d.url ?? "", "detail"), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"), tagChips(app, d.tags))),
         h("div", { class: "box" }, ...lines),
         h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
       ),
@@ -543,6 +547,8 @@ export function editView(app: App, ref?: string): View {
     if (!generator.hidden) void regenerate()
   }
 
+  const existingSummary = ref ? app.items?.find((a) => a.ref === ref) : undefined
+  const meta = metaEditor(app, !!existingSummary?.favorite, existingSummary?.tags ?? [])
   const error = h("p", { class: "error", role: "alert" })
   error.hidden = true
   const label = h("span", { class: "roll-label" }, "Save")
@@ -552,13 +558,14 @@ export function editView(app: App, ref?: string): View {
   const form = h(
     "form",
     { class: "view edit", novalidate: "" },
-    toolbar(ref ? "Edit login" : "New login", cancel),
+    toolbar(ref ? "Edit login" : "New login", cancel, meta.favBtn),
     title.wrap,
     site.wrap,
     user.wrap,
     pass.wrap,
     generator,
     otp.wrap,
+    meta.tagsWrap,
     h("div", { class: "field" }, h("label", { for: notesId }, "Notes"), notes),
     error,
     h("div", { class: "buttons end" }, button("btn", "Cancel", cancel), save),
@@ -584,6 +591,7 @@ export function editView(app: App, ref?: string): View {
       if (!user.input.value) user.input.value = d.username ?? ""
       savedNotes = d.fields.find((f) => f.name === "notes")?.value ?? ""
       if (!notes.value) notes.value = savedNotes
+      meta.setMeta(!!d.favorite, d.tags ?? [])
       hadOtp = d.fields.some((f) => f.type === "otp")
       removeOtp.hidden = !hadOtp || dropOtp
       if (!dropOtp) otp.input.placeholder = hadOtp ? "Unchanged" : "Secret or otpauth:// link"
@@ -602,6 +610,8 @@ export function editView(app: App, ref?: string): View {
       return fail("Enter the site's address, like https://example.com.", site.input)
     }
     if (!ref && !pass.input.value) return fail("Enter a password, or generate one.", pass.input)
+    const chosenMeta = meta.read()
+    if (chosenMeta.error) return fail(chosenMeta.error, meta.input)
     save.disabled = true
     rollLabel(label, "Saving…")
     const typedOtp = otp.input.value.trim()
@@ -610,6 +620,8 @@ export function editView(app: App, ref?: string): View {
       url: origin,
       username: user.input.value.trim(),
       password: pass.input.value,
+      favorite: chosenMeta.favorite,
+      tags: chosenMeta.tags,
       // Only what changed: empty removes, absent keeps.
       ...(typedOtp ? { otp: typedOtp } : dropOtp ? { otp: "" } : {}),
       ...(notes.value !== savedNotes ? { notes: notes.value } : {}),

@@ -60,11 +60,12 @@ pub fn login_title(item: &Item) -> String {
     })
 }
 
-/// Closest site match, then most recently filled, title and username.
+/// Closest site match, then starred, then most recently filled, title and username.
 /// Callers break remaining ties by vault and item reference.
 #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Rank {
     closeness: Closeness,
+    favorite: Reverse<bool>,
     used: Reverse<u64>,
     title: String,
     username: Option<String>,
@@ -76,6 +77,7 @@ pub fn rank(origin: &str, item: &Item, used: u64) -> Rank {
             .filter_map(|url| closeness(origin, url))
             .min()
             .unwrap_or(Closeness::Site),
+        favorite: Reverse(item.favorite),
         used: Reverse(used),
         title: login_title(item).to_lowercase(),
         username: value(item, "username").map(str::to_owned),
@@ -85,6 +87,15 @@ pub fn rank(origin: &str, item: &Item, used: u64) -> Rank {
 /// A submitted page may update only the saved password, never other fields.
 pub fn password_update(id: ItemId, password: &str) -> DataOp {
     DataOp::set(id, "password", Field::new(FieldType::Secret, password))
+}
+
+/// Updates a login's saved password and records `date` (`YYYY-MM-DD`) as when
+/// it changed.
+pub fn password_update_at(id: ItemId, password: &str, date: &str) -> Vec<DataOp> {
+    vec![
+        password_update(id, password),
+        DataOp::password_changed(id, Some(date.into())),
+    ]
 }
 
 pub fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {

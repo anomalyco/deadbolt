@@ -50,7 +50,9 @@ impl App {
                     tx.instant();
                 }
                 self.edit_item_landed(&item);
+                let landed_id = item.id.clone();
                 self.set_detail(Some(item));
+                self.finish_pending_fix(&landed_id);
                 // A Show pressed on the cached page before its values landed
                 // reveals the secret only now.
                 if was_unloaded
@@ -130,16 +132,38 @@ impl App {
 
     /// [`App::visible`] as positions in `items`.
     pub fn visible_at(&self) -> Vec<usize> {
-        let words: Vec<String> = self
-            .search
-            .text
-            .split_whitespace()
-            .map(str::to_lowercase)
-            .collect();
+        use deadbolt_core::tag::{Query, fold_tag, item_has_tag};
+
+        let q = Query::parse(&self.search.text);
+        let any_tagged = self.items.iter().any(|i| !i.tags.is_empty());
+        let trailing_tag = !self.search.text.ends_with(char::is_whitespace)
+            && self
+                .search
+                .text
+                .split_whitespace()
+                .last()
+                .is_some_and(|w| w.starts_with('#'));
         self.items
             .iter()
             .enumerate()
             .filter(|(_, item)| {
+                if q.favorite && !item.favorite {
+                    return false;
+                }
+                if q.any_tag && any_tagged && item.tags.is_empty() {
+                    return false;
+                }
+                for (ti, tag_filter) in q.tags.iter().enumerate() {
+                    let is_typing = trailing_tag && ti + 1 == q.tags.len();
+                    let matched = item_has_tag(item.tags.iter().map(String::as_str), tag_filter)
+                        || (is_typing && {
+                            let prefix = fold_tag(tag_filter);
+                            item.tags.iter().any(|t| fold_tag(t).starts_with(&prefix))
+                        });
+                    if !matched {
+                        return false;
+                    }
+                }
                 let hay = [
                     Some(item.label.as_str()),
                     item.detail.as_deref(),
@@ -147,9 +171,10 @@ impl App {
                     Some(noun(&item.kind, 1)),
                     Some(item.short.as_str()),
                 ];
-                words
-                    .iter()
-                    .all(|w| hay.iter().flatten().any(|h| contains_folded(h, w)))
+                q.words.iter().all(|w| {
+                    hay.iter().flatten().any(|h| contains_folded(h, w))
+                        || item.tags.iter().any(|t| contains_folded(t, w))
+                })
             })
             .map(|(at, _)| at)
             .collect()

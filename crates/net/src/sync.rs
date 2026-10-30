@@ -16,6 +16,7 @@
 //! entries before the data that depends on them is the [`SyncHandler`]'s job.
 //!
 //! An inbound session must finish within [`crate::NodeConfig::inbound_sync_timeout`].
+//! The same timeout independently bounds idle waits for the first or next stream.
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
@@ -33,6 +34,7 @@ use crate::{
 /// Default for how long a session a peer opened may take, from accepting its stream to
 /// our `RESULT`, before the connection is closed ([`crate::NodeConfig`]). Generous: the
 /// CLI gives up on a session it opened after 15 seconds, including the dial.
+/// Also bounds each idle wait for the first or next stream, independently.
 pub const INBOUND_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Application side of the sync protocol. Heads and entries are opaque bytes.
@@ -124,7 +126,8 @@ pub struct SyncOutcome {
 /// An open sync connection to a member, created by [`crate::Node::connect`].
 ///
 /// The connection stays open until dropped, [`SyncConnection::close`]d, or closed by the
-/// gate ([`crate::Node::enforce_membership`]).
+/// gate ([`crate::Node::enforce_membership`]), or the responder closes it after its
+/// idle deadline. Dial again after closure to start another session.
 pub struct SyncConnection {
     conn: Connection,
     handler: Arc<dyn DynSyncHandler>,
@@ -204,7 +207,16 @@ pub(crate) async fn serve_sync(
     timeout: Duration,
 ) {
     let peer = *conn.remote_id().as_bytes();
-    while let Ok((mut send, mut recv)) = conn.accept_bi().await {
+    loop {
+        let (mut send, mut recv) = match n0_future::time::timeout(timeout, conn.accept_bi()).await {
+            Ok(Ok(streams)) => streams,
+            Ok(Err(_)) => break,
+            Err(_) => {
+                conn.close(close::DONE, b"idle timeout");
+                debug!(peer = %fmt_id(&peer), "idle sync connection closed");
+                break;
+            }
+        };
         let session = run_session(&*handler, peer, &mut send, &mut recv, max_frame_len, false);
         match n0_future::time::timeout(timeout, session).await {
             Ok(Ok(outcome)) => debug!(peer = %fmt_id(&peer), ?outcome, "served sync session"),

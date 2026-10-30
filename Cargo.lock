@@ -327,6 +327,15 @@ checksum = "2af50177e190e07a26ab74f8b1efbfe2ef87da2116221318cb1c2e82baf7de06"
 
 [[package]]
 name = "bit-set"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08807e080ed7f9d5433fa9b275196cfc35414f66a0c79d864dc51a0d825231a3"
+dependencies = [
+ "bit-vec 0.8.0",
+]
+
+[[package]]
+name = "bit-set"
 version = "0.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "09ec2f926cc3060f09db9ebc5b52823d85268d24bb917e472c0c4bea35780a7d"
@@ -342,6 +351,12 @@ checksum = "56d87354e4229f54a44f7bf2435906a4656dba36026ab6eaca629a2c436a691c"
 dependencies = [
  "bit-vec 0.10.1",
 ]
+
+[[package]]
+name = "bit-vec"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 
 [[package]]
 name = "bit-vec"
@@ -572,8 +587,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link",
 ]
 
@@ -990,6 +1007,7 @@ version = "0.0.0"
 dependencies = [
  "blake3",
  "deadbolt-client",
+ "deadbolt-core",
  "rune",
  "rune-kit",
  "rune-theme-opencode",
@@ -1088,6 +1106,7 @@ dependencies = [
  "thiserror 2.0.21",
  "url",
  "zeroize",
+ "zxcvbn",
 ]
 
 [[package]]
@@ -1354,6 +1373,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "either"
+version = "1.19.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0e9c71c2167ca323c882b99918929403426e2373ea17242ff5653e0d5e1058be"
+
+[[package]]
 name = "elliptic-curve"
 version = "0.14.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1446,6 +1471,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1a05365e3b1c6d1650318537c7460c6923f1abdd272ad6842baa2b509957a06"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.18.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e1e1dacd0d2082dfcf1351c4bdd566bbe89a2b263235a2b50058f1e130a47277"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -2487,6 +2523,15 @@ name = "is_terminal_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
+name = "itertools"
+version = "0.14.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
+dependencies = [
+ "either",
+]
 
 [[package]]
 name = "itoa"
@@ -3731,7 +3776,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7d8fae84b431384b68627d0f9b3b1245fcf9f46f6c0e3dc902e9dce64edd1967"
 dependencies = [
  "libc",
- "windows-sys 0.45.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -4388,6 +4433,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4547,7 +4604,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd#6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd"
+source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
 dependencies = [
  "arboard",
  "blake3",
@@ -4613,7 +4670,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd#6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd"
+source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
 dependencies = [
  "rune",
  "rune-motion",
@@ -4623,12 +4680,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd#6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd"
+source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd#6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd"
+source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
 dependencies = [
  "wgpu",
 ]
@@ -4636,7 +4693,7 @@ dependencies = [
 [[package]]
 name = "rune-theme-opencode"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd#6cb5e7df99d3b81919b2da81d8a4244a6bb47bcd"
+source = "git+https://github.com/anomalyco/rune?rev=506f5421220de1ed5f5a9c69b608278d160fe711#506f5421220de1ed5f5a9c69b608278d160fe711"
 dependencies = [
  "rune",
  "rune-kit",
@@ -7236,4 +7293,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
 dependencies = [
  "zune-core",
+]
+
+[[package]]
+name = "zxcvbn"
+version = "3.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9eaee90f4a795d1eb4ba6c51e1c1721d4784d550e8efa7b2600f29c867365e0"
+dependencies = [
+ "chrono",
+ "fancy-regex",
+ "itertools",
+ "lazy_static",
+ "regex",
+ "time",
+ "wasm-bindgen",
+ "web-sys",
 ]

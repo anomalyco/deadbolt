@@ -232,6 +232,8 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 query: Vec::new(),
                 kind: None,
                 deleted: false,
+                tags: Vec::new(),
+                favorites: false,
             };
             let result = call(paths, command, |r| match r {
                 Reply::Items { items } => Some(items),
@@ -273,10 +275,22 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         Job::Agents { seq, revoke } => crate::agents::run(paths, seq, revoke).await,
         Job::Trash { seq, restore } => crate::trash::run(paths, seq, restore).await,
         Job::TrashItem { id, seq } => crate::trash::item(paths, id, seq).await,
+        Job::Health { seq, online } => crate::health::load(paths, seq, online).await,
+        Job::HealthIgnore {
+            id,
+            kind,
+            ignored,
+            seq,
+        } => crate::health::set_ignored(paths, id, kind, ignored, seq).await,
+        Job::BreachChecksSet { enabled, seq } => {
+            crate::health::set_breach_checks(paths, enabled, seq).await
+        }
         Job::Create {
             kind,
             name,
             fields,
+            favorite,
+            tags,
             seq,
         } => {
             let command = Command::ItemNew {
@@ -284,6 +298,8 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 kind,
                 name,
                 fields,
+                favorite,
+                tags,
             };
             Done::Saved {
                 seq,
@@ -295,6 +311,9 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
             name,
             fields,
             unset,
+            favorite,
+            add_tags,
+            remove_tags,
             seq,
         } => {
             let command = Command::ItemSet {
@@ -303,8 +322,27 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
                 fields,
                 name,
                 unset,
+                favorite,
+                add_tags,
+                remove_tags,
             };
             Done::Saved {
+                seq,
+                result: item(paths, command).await,
+            }
+        }
+        Job::Favorite { id, favorite, seq } => {
+            let command = Command::ItemSet {
+                vault: None,
+                query: vec![id],
+                fields: Vec::new(),
+                name: None,
+                unset: Vec::new(),
+                favorite: Some(favorite),
+                add_tags: Vec::new(),
+                remove_tags: Vec::new(),
+            };
+            Done::Favorited {
                 seq,
                 result: item(paths, command).await,
             }
@@ -325,9 +363,14 @@ async fn run(paths: &Paths, launch: &Launch, job: Job) -> Done {
         Job::Generate {
             length,
             symbols,
+            url,
             seq,
         } => {
-            let command = Command::Generate { length, symbols };
+            let command = Command::Generate {
+                length,
+                symbols,
+                url,
+            };
             let result = call(paths, command, |r| match r {
                 Reply::Password { password } => Some(password),
                 _ => None,

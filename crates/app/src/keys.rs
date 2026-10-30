@@ -23,8 +23,10 @@ pub const SHORTCUTS: &[(&[&str], &str)] = &[
     (&["⌘", "N"], "New item"),
     (&["⌃", "⇥"], "Its type, while new"),
     (&["⌘", "E"], "Edit"),
+    (&["⌘", "D"], "Favorite"),
     (&["⌘", "⌫"], "Delete"),
     (&["⇧", "⌘", "⌫"], "Recently deleted"),
+    (&["⇧", "⌘", "H"], "Security"),
     (&["⌘", ","], "Settings"),
     (&["⌘", "L"], "Lock"),
     (&["⇧", "⌘", "Space"], "Quick panel"),
@@ -39,6 +41,9 @@ pub struct Nav {
     pub field: Option<usize>,
     /// ⌘K's actions are open, on this row.
     pub palette: Option<usize>,
+    /// ⌘K's `Filter by tag…` sub-view is open, on `tag_row`.
+    pub palette_tags: bool,
+    pub tag_row: usize,
     /// The ? sheet shows.
     pub sheet: bool,
     /// The Settings row the keys are on.
@@ -108,6 +113,9 @@ impl App {
             return None;
         }
         if self.nav.palette.is_some() {
+            if self.nav.palette_tags {
+                return Some(self.palette_tags_key(ev, tx));
+            }
             self.palette_key(ev, tx);
             return Some(true);
         }
@@ -137,6 +145,11 @@ impl App {
             self.toggle_trash();
             return Some(true);
         }
+        if crate::health::is_shortcut(ev) && !self.hotkey.recorder.is_recording() {
+            tx.instant();
+            self.toggle_security();
+            return Some(true);
+        }
         if self.settings_open || self.trash.open {
             return None;
         }
@@ -149,9 +162,16 @@ impl App {
             self.open_palette();
             return Some(true);
         }
+        if chord(ev, 'd') {
+            self.toggle_favorite(tx);
+            return Some(true);
+        }
         if is_question(ev) && (!self.typing() || self.search.text.is_empty()) {
             self.nav.sheet = true;
             return Some(true);
+        }
+        if self.security_open() {
+            return None;
         }
         if let Key::Command(c @ '1'..='9') = ev.key
             && ev.mods.cmd
@@ -230,6 +250,10 @@ impl App {
                 return None;
             }
             _ => {
+                if chord(ev, 'd') {
+                    self.toggle_favorite(tx);
+                    return Some(true);
+                }
                 if chord(ev, 'n')
                     || chord(ev, 'e')
                     || crate::import::is_shortcut(ev)
@@ -352,6 +376,7 @@ impl App {
             return;
         }
         self.cancel_delete();
+        self.close_security();
         self.import.hover = false;
         self.trash.forget();
         self.settings_open = true;
@@ -394,7 +419,7 @@ impl App {
             return None;
         }
         let installing = self.installing();
-        if !self.settings_open && !installing && !self.trash.open {
+        if !self.settings_open && !installing && !self.trash.open && !self.security_open() {
             return None;
         }
         // Import Passwords… leaves either for the import view, as the menu
@@ -411,6 +436,9 @@ impl App {
         }
         if self.trash.open {
             return Some(self.trash_key(ev, tx));
+        }
+        if self.security_open() {
+            return Some(self.security_key(ev, tx));
         }
         match ev.key {
             Key::Escape => {
@@ -465,6 +493,10 @@ fn is_question(ev: &KeyEvent) -> bool {
 
 pub(crate) fn is_letter(ev: &KeyEvent, letter: &str) -> bool {
     matches!(&ev.key, Key::Text(t) if t == letter) && plain(ev)
+}
+
+pub(crate) fn safe_web_url(value: &str) -> Option<String> {
+    web_address(value.trim(), true)
 }
 
 /// `value` as an address the browser may open, `https://` added when it has

@@ -87,17 +87,18 @@ pub(super) fn list_for_picker(
                 }
                 let key = format!("{}:{}", login.login.vault, login.login.item);
                 let used = filled.get(&key).copied().unwrap_or(0);
-                all.push((used, login));
+                all.push((used, item.favorite, login));
             }
         }
-        all.sort_by(|(ua, a), (ub, b)| {
+        all.sort_by(|(ua, fa, a), (ub, fb, b)| {
             Reverse(*ua)
                 .cmp(&Reverse(*ub))
+                .then_with(|| Reverse(*fa).cmp(&Reverse(*fb)))
                 .then_with(|| a.title.to_lowercase().cmp(&b.title.to_lowercase()))
                 .then_with(|| a.username.cmp(&b.username))
                 .then_with(|| (&a.login.vault, &a.login.item).cmp(&(&b.login.vault, &b.login.item)))
         });
-        (all.into_iter().map(|(_, l)| l).collect(), true)
+        (all.into_iter().map(|(_, _, l)| l).collect(), true)
     } else {
         let mut resolved = Vec::new();
         let mut first_err = None;

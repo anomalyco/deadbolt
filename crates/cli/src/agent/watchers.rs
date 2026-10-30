@@ -62,6 +62,8 @@ struct Pending {
     devices: BTreeSet<VaultId>,
     /// New Activity entries were stored.
     activity: bool,
+    /// Password health memo or breach-check state changed.
+    health: bool,
     resync: bool,
     stopping: bool,
     /// Another launch asked for the window, with the latest token.
@@ -74,6 +76,7 @@ impl Pending {
             || self.unlocked
             || self.vaults
             || self.activity
+            || self.health
             || self.resync
             || self.stopping)
             && self.items.is_empty()
@@ -117,6 +120,9 @@ impl Pending {
             }));
             if pending.activity {
                 out.push(Change::Activity);
+            }
+            if pending.health {
+                out.push(Change::Health);
             }
         }
         if let Some(token) = pending.activate {
@@ -193,6 +199,10 @@ impl Watchers {
 
     pub fn activity(&self) {
         self.publish(|p| p.activity = true);
+    }
+
+    pub fn health(&self) {
+        self.publish(|p| p.health = true);
     }
 
     /// Asks the most recent app watcher to bring its window forward, true

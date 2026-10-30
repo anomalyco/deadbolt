@@ -45,6 +45,12 @@ pub enum ItemCommand {
         /// Generate a password of letters and digits only.
         #[arg(long)]
         no_symbols: bool,
+        /// Star this item so it sorts first.
+        #[arg(long)]
+        favorite: bool,
+        /// Tag this item (`work`, `work/aws`); repeat for more.
+        #[arg(short, long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
     },
     /// Print one field's raw value. Default: login, database, server or
     /// Wi-Fi password, card or ID number, note body, SSH private key,
@@ -77,6 +83,7 @@ pub enum ItemCommand {
     },
     /// List items: short id, label, and what tells it apart (username,
     /// card expiry, SSH key comment, identity email, a document's size, ...).
+    #[command(visible_alias = "items")]
     Ls {
         #[arg(value_name = "QUERY")]
         query: Vec<String>,
@@ -87,18 +94,39 @@ pub enum ItemCommand {
         /// deleted.
         #[arg(long)]
         deleted: bool,
+        /// Only items with this tag (or a nested child like `work/aws`); repeat to require all.
+        #[arg(short, long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Only starred items.
+        #[arg(long)]
+        favorites: bool,
     },
-    /// Set fields and/or the name. Arguments containing `=` are
-    /// assignments, the others are the query.
+    /// List tags in the vault and how many items carry each.
+    Tags,
+    /// Set fields, the name, favorite state or tags. Arguments containing `=`
+    /// are assignments, the others are the query.
     ///
     /// Example: deadbolt set github dax password=- url=github.com
     ///          deadbolt set github recovery:file=./codes.pdf
+    ///          deadbolt set github --favorite --tag work/aws
     Set {
         #[arg(required = true, value_name = "QUERY|FIELD=VALUE")]
         args: Vec<String>,
         /// Set the name; an empty name clears it.
         #[arg(long)]
         name: Option<String>,
+        /// Star this item.
+        #[arg(long, conflicts_with = "no_favorite")]
+        favorite: bool,
+        /// Unstar this item.
+        #[arg(long)]
+        no_favorite: bool,
+        /// Add a tag (`work`, `work/aws`); repeat for more.
+        #[arg(short, long = "tag", value_name = "TAG")]
+        tags: Vec<String>,
+        /// Remove a tag; repeat for more.
+        #[arg(long = "untag", value_name = "TAG")]
+        untags: Vec<String>,
     },
     /// Remove a field that is not required.
     Unset {
@@ -259,6 +287,12 @@ fn show(item: &ItemInfo, reveal: bool, code: Option<String>, account: Option<Str
         ("label", item.label.clone()),
         ("id", item.short.clone()),
     ];
+    if item.favorite {
+        rows.push(("favorite", "yes".into()));
+    }
+    if !item.tags.is_empty() {
+        rows.push(("tags", item.tags.join(", ")));
+    }
     let mut code = code;
     let sign_in = item.kind == "login";
     for (i, field) in item.fields.iter().enumerate() {
@@ -396,6 +430,8 @@ async fn sign_in_account(
         query: vec![id.clone()],
         kind: None,
         deleted: false,
+        tags: Vec::new(),
+        favorites: false,
     };
     let Ok(Reply::Items { items }) = crate::request(paths, command, from_stdin).await else {
         return None;
@@ -421,13 +457,20 @@ pub async fn run(
             name,
             length,
             no_symbols,
+            favorite,
+            tags,
         } => {
             let mut fields = assignments(&fields, Some(&kind))?;
             fill_required(&kind, &mut fields)?;
             if kind == "login" && !fields.iter().any(|f| f.name == "password") {
+                let url = fields
+                    .iter()
+                    .find(|f| f.name == "url")
+                    .map(|f| f.value.clone());
                 let command = Command::Generate {
                     length,
                     symbols: !no_symbols,
+                    url,
                 };
                 let Reply::Password { password } =
                     crate::request(paths, command, from_stdin).await?
@@ -445,6 +488,8 @@ pub async fn run(
                 kind,
                 name,
                 fields,
+                favorite,
+                tags,
             };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
@@ -505,12 +550,16 @@ pub async fn run(
             query,
             kind,
             deleted,
+            tags,
+            favorites,
         } => {
             let command = Command::ItemList {
                 vault,
                 query,
                 kind,
                 deleted,
+                tags,
+                favorites,
             };
             let Reply::Items { items } = crate::request(paths, command, from_stdin).await? else {
                 bail!("unexpected reply");
@@ -523,26 +572,60 @@ pub async fn run(
                 }
             }
         }
-        ItemCommand::Set { args, name } => {
+        ItemCommand::Tags => {
+            let command = Command::TagList { vault };
+            let Reply::Tags { tags } = crate::request(paths, command, from_stdin).await? else {
+                bail!("unexpected reply");
+            };
+            for entry in &tags {
+                println!("{}\t{}", entry.tag, entry.count);
+            }
+        }
+        ItemCommand::Set {
+            args,
+            name,
+            favorite,
+            no_favorite,
+            tags,
+            untags,
+        } => {
             let (assigns, query): (Vec<&String>, Vec<&String>) =
                 args.iter().partition(|a| a.contains('='));
             if query.is_empty() {
                 bail!("set needs a query to find the item");
             }
-            if assigns.is_empty() && name.is_none() {
-                bail!("nothing to change: give field=value assignments or --name");
+            let favorite = match (favorite, no_favorite) {
+                (true, _) => Some(true),
+                (_, true) => Some(false),
+                _ => None,
+            };
+            if assigns.is_empty()
+                && name.is_none()
+                && favorite.is_none()
+                && tags.is_empty()
+                && untags.is_empty()
+            {
+                bail!(
+                    "nothing to change: give field=value assignments, --name, --favorite or --tag"
+                );
             }
             let query: Vec<String> = query.into_iter().cloned().collect();
             // The item's type says which fields take a file's path.
-            let list = Command::ItemList {
-                vault: vault.clone(),
-                query: query.clone(),
-                kind: None,
-                deleted: false,
-            };
-            let kind = match crate::request(paths, list, from_stdin).await? {
-                Reply::Items { items } if items.len() == 1 => Some(items[0].kind.clone()),
-                _ => None,
+            let kind = if assigns.is_empty() {
+                None
+            } else {
+                let list = Command::ItemList {
+                    vault: vault.clone(),
+                    query: query.clone(),
+                    kind: None,
+                    deleted: false,
+                    tags: Vec::new(),
+                    favorites: false,
+                };
+                match crate::request(paths, list, from_stdin).await? {
+                    Reply::Items { items } if items.len() == 1 => Some(items[0].kind.clone()),
+                    _ => None,
+                }
             };
             let command = Command::ItemSet {
                 vault,
@@ -550,6 +633,9 @@ pub async fn run(
                 fields: assignments(assigns, kind.as_deref())?,
                 name,
                 unset: Vec::new(),
+                favorite,
+                add_tags: tags,
+                remove_tags: untags,
             };
             println!("{}", item(paths, command, from_stdin).await?.short);
         }
@@ -609,6 +695,8 @@ mod tests {
             })
             .collect(),
             source: None,
+            favorite: false,
+            tags: Vec::new(),
             deleted_at: None,
         };
         let cases = [

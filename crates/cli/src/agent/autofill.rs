@@ -214,10 +214,11 @@ pub fn save(s: &mut Loaded, save: Save) -> Result<(LoginRef, bool)> {
     }
     if let Some(login) = save.login {
         let (vault, item) = find(s, login, &site)?;
+        let today = crate::config::today_utc();
         s.update(vault, |v, secret| {
             Ok(v.write(
                 secret,
-                vec![autofill::password_update(item.id, save.password.expose())],
+                autofill::password_update_at(item.id, save.password.expose(), &today),
             )?)
         })?;
         return Ok((login_ref(&vault, &item.id), false));
@@ -569,9 +570,13 @@ mod tests {
         assert_eq!(super::save(&mut s, update).unwrap(), (saved.clone(), false));
         let (_, mut after) = find(&s, &saved, &page).unwrap();
         assert_eq!(value(&after, "password"), Some("replacement"));
+        assert!(after.password_changed.is_some());
+        assert_ne!(after.password_entry, before.password_entry);
         after
             .fields
             .insert("password".into(), before.fields["password"].clone());
+        after.password_entry = before.password_entry;
+        after.password_changed = before.password_changed.clone();
         assert_eq!(after, before);
     }
 

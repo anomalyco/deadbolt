@@ -138,6 +138,10 @@ where
     let deadline = tokio::time::Instant::now() + SYNC_TIMEOUT;
     let conn = match tokio::time::timeout_at(deadline, connect).await {
         Ok(Ok(conn)) => conn,
+        // A peer at its inbound limit refuses the dial: it is there, so retry it.
+        Ok(Err(error @ deadbolt_net::Error::Rejected(_))) => {
+            return (Attempt::Interrupted, Err(error.to_string()));
+        }
         Ok(Err(error)) => return (Attempt::Unreachable, Err(error.to_string())),
         Err(_) => return (Attempt::Unreachable, Err("dial timed out".into())),
     };
@@ -339,6 +343,12 @@ mod tests {
         )
         .await;
         assert_eq!(dial_timeout.0, Attempt::Unreachable);
+        let busy_dial = attempt(
+            async { Err::<(), _>(deadbolt_net::Error::Rejected("too many connections".into())) },
+            |_| async { Ok(outcome()) },
+        )
+        .await;
+        assert_eq!(busy_dial.0, Attempt::Interrupted);
         let failed_exchange = attempt(async { Ok(()) }, |_| async {
             Err(deadbolt_net::Error::Closed("broken stream".into()))
         })
@@ -636,6 +646,7 @@ mod tests {
         .unwrap();
         let (mut source, genesis) = Vault::create(&secret, "test").unwrap();
         let id = source.id();
+        let health = crate::agent::health::State::new(&store);
         let mut loaded = Loaded {
             store,
             id: secret.device_id(),
@@ -644,7 +655,9 @@ mod tests {
             vaults: [(id, Vault::from_genesis(genesis).unwrap())]
                 .into_iter()
                 .collect(),
+            unavailable: Default::default(),
             changes: Default::default(),
+            health,
         };
         let (_, entry) = source
             .create_item(

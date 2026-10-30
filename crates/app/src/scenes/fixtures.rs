@@ -1,7 +1,8 @@
 //! Synthetic vault, item and loopback-agent fixtures shared across scenes.
 
 use deadbolt_client::protocol::{
-    Code, DeviceInfo, FieldInfo, ImportReport, ImportSource, ItemInfo, Status, Tally, VaultInfo,
+    Code, DeviceInfo, FieldInfo, Finding, HealthCounts, HealthPeer, HealthReport, ImportReport,
+    ImportSource, ItemHealth, ItemInfo, RiskLevel, Status, Tally, VaultInfo, WeakReason,
 };
 use rune::Tx;
 
@@ -153,12 +154,13 @@ pub(super) fn vault_info(name: &str) -> VaultInfo {
         default: true,
         members: 1,
         member: true,
+        error: None,
     }
 }
 
 /// A pairing code as `deadbolt join` shows it.
 pub(super) fn fixture_pairing_code() -> String {
-    "violin-garden-tiger-lamp".into()
+    "violin-garden-tiger-lamp-zoo".into()
 }
 
 /// The device that pairs this one in the join scenes.
@@ -196,6 +198,7 @@ pub(super) fn status(unlocked: bool) -> Status {
             default: true,
             members: 2,
             member: true,
+            error: None,
         }],
         peers_online: 1,
         peers: 1,
@@ -244,6 +247,13 @@ pub(super) fn import_preview(report: ImportReport) -> import::Preview {
 }
 
 fn fixture_item(id: &str, kind: &str, label: &str, detail: Option<&str>) -> ItemInfo {
+    let (favorite, tags): (bool, &[&str]) = match label {
+        "github.com" if kind == "login" => (true, &["dev", "work/aws"]),
+        "Cloudflare" => (true, &["work/infra"]),
+        "Hetzner" => (false, &["work/infra"]),
+        "Linear" => (false, &["work"]),
+        _ => (false, &[]),
+    };
     ItemInfo {
         id: format!("{id}0000000000000000000000000000000000000000000000000000000000"),
         short: id[..4].into(),
@@ -252,6 +262,8 @@ fn fixture_item(id: &str, kind: &str, label: &str, detail: Option<&str>) -> Item
         detail: detail.map(Into::into),
         fields: Vec::new(),
         source: None,
+        favorite,
+        tags: tags.iter().map(|t| (*t).to_owned()).collect(),
         deleted_at: None,
     }
 }
@@ -263,7 +275,7 @@ pub(super) fn vault(s: &mut App) {
         .iter()
         .map(|&(id, kind, label, detail)| fixture_item(id, kind, label, detail))
         .collect();
-    s.items.sort_by_key(|i| i.label.to_lowercase());
+    crate::model::sort_items(&mut s.items);
     s.loaded = true;
     s.search.focused = true;
     s.selected = s
@@ -376,6 +388,8 @@ fn many_item(i: usize) -> ItemInfo {
         detail: Some(format!("user{i}@anoma.ly")),
         fields: Vec::new(),
         source: None,
+        favorite: false,
+        tags: Vec::new(),
         deleted_at: None,
     }
 }
@@ -431,7 +445,7 @@ pub(super) fn kind_scene(s: &mut App, kind: &str) {
     ] {
         s.items.push(fixture_item(id, item_kind, label, detail));
     }
-    s.items.sort_by_key(|i| i.label.to_lowercase());
+    crate::model::sort_items(&mut s.items);
     s.selected = s
         .items
         .iter()
@@ -587,4 +601,135 @@ fn fixture_code() -> Code {
         valid_until: 2_000_000_010,
         remaining_ms: 18_000,
     }
+}
+
+pub(super) fn vault_with_health(s: &mut App) {
+    vault(s);
+    let full_id =
+        |short: &str| format!("{short}0000000000000000000000000000000000000000000000000000000000");
+    let github = full_id("3f9a1c");
+    let linear = full_id("7b20e4");
+    let cloudflare = full_id("f5c312");
+    let hetzner = full_id("09ad7e");
+    let gitlab = full_id("e01b9d");
+
+    let items = vec![
+        ItemHealth {
+            vault: "v1".into(),
+            vault_name: "personal".into(),
+            id: github,
+            kind: "login".into(),
+            label: "github.com".into(),
+            detail: Some("dax".into()),
+            site_url: Some("https://github.com".into()),
+            change_url: Some("https://github.com/settings/security".into()),
+            password_changed: Some("2024-03-14".into()),
+            risk: Some(RiskLevel::Danger),
+            findings: vec![Finding::Breached { count: 14_203 }],
+            ignored: Vec::new(),
+        },
+        ItemHealth {
+            vault: "v1".into(),
+            vault_name: "personal".into(),
+            id: linear.clone(),
+            kind: "login".into(),
+            label: "Linear".into(),
+            detail: Some("dax@anoma.ly".into()),
+            site_url: Some("https://linear.app".into()),
+            change_url: None,
+            password_changed: Some("2025-11-02".into()),
+            risk: Some(RiskLevel::Danger),
+            findings: vec![
+                Finding::Reused {
+                    count: 2,
+                    others: vec![HealthPeer {
+                        vault: "v1".into(),
+                        vault_name: "personal".into(),
+                        id: cloudflare.clone(),
+                        label: "Cloudflare".into(),
+                        detail: Some("dax@anoma.ly".into()),
+                    }],
+                },
+                Finding::MissingTwoFactor {
+                    doc_url: Some("https://linear.app/docs/account-security".into()),
+                },
+            ],
+            ignored: Vec::new(),
+        },
+        ItemHealth {
+            vault: "v1".into(),
+            vault_name: "personal".into(),
+            id: cloudflare,
+            kind: "login".into(),
+            label: "Cloudflare".into(),
+            detail: Some("dax@anoma.ly".into()),
+            site_url: Some("https://cloudflare.com".into()),
+            change_url: Some("https://dash.cloudflare.com/profile/authentication".into()),
+            password_changed: None,
+            risk: Some(RiskLevel::Danger),
+            findings: vec![Finding::Reused {
+                count: 2,
+                others: vec![HealthPeer {
+                    vault: "v1".into(),
+                    vault_name: "personal".into(),
+                    id: linear,
+                    label: "Linear".into(),
+                    detail: Some("dax@anoma.ly".into()),
+                }],
+            }],
+            ignored: Vec::new(),
+        },
+        ItemHealth {
+            vault: "v1".into(),
+            vault_name: "personal".into(),
+            id: hetzner,
+            kind: "login".into(),
+            label: "Hetzner".into(),
+            detail: Some("billing@anoma.ly".into()),
+            site_url: Some("https://console.hetzner.cloud".into()),
+            change_url: None,
+            password_changed: None,
+            risk: Some(RiskLevel::Caution),
+            findings: vec![Finding::Weak {
+                score: 1,
+                reason: WeakReason::Common,
+            }],
+            ignored: Vec::new(),
+        },
+        ItemHealth {
+            vault: "v1".into(),
+            vault_name: "personal".into(),
+            id: gitlab,
+            kind: "login".into(),
+            label: "gitlab.com".into(),
+            detail: Some("dax".into()),
+            site_url: Some("https://gitlab.com".into()),
+            change_url: Some("https://gitlab.com/-/profile/password/edit".into()),
+            password_changed: None,
+            risk: None,
+            findings: vec![Finding::PasskeyAvailable {
+                passwordless: true,
+                mfa: true,
+                doc_url: Some("https://docs.gitlab.com".into()),
+            }],
+            ignored: Vec::new(),
+        },
+    ];
+
+    s.health.report = Some(HealthReport {
+        vault: Some("v1".into()),
+        counts: HealthCounts {
+            risk_items: 4,
+            breached: 1,
+            site_breach: 0,
+            reused: 2,
+            weak: 1,
+            missing_two_factor: 1,
+            passkeys_available: 1,
+            ignored: 0,
+        },
+        items,
+        breach_checks_enabled: true,
+        breach_last_checked: Some(2_000_000_000),
+    });
 }

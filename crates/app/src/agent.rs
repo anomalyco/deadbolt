@@ -17,8 +17,8 @@ use std::sync::{Arc, Mutex};
 
 use deadbolt_client::export::ExportError;
 use deadbolt_client::protocol::{
-    ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, ImportReport, ItemInfo,
-    MirrorReport, Status,
+    ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, FindingKind, HealthReport,
+    ImportReport, ItemInfo, MirrorReport, Status,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -90,15 +90,26 @@ pub enum Job {
         kind: String,
         name: Option<String>,
         fields: Vec<FieldInput>,
+        favorite: bool,
+        tags: Vec<String>,
         seq: u64,
     },
-    /// Changes an item in one entry: sets `fields`, removes `unset` and
-    /// renames it (`Some("")` clears the name).
+    /// Changes an item in one entry: sets `fields`, removes `unset`, updates
+    /// `favorite` / tags, and renames it (`Some("")` clears the name).
     Save {
         id: String,
         name: Option<String>,
         fields: Vec<FieldInput>,
         unset: Vec<String>,
+        favorite: Option<bool>,
+        add_tags: Vec<String>,
+        remove_tags: Vec<String>,
+        seq: u64,
+    },
+    /// Stars or unstars an item in place (`⌘D`).
+    Favorite {
+        id: String,
+        favorite: bool,
         seq: u64,
     },
     Remove {
@@ -116,6 +127,24 @@ pub enum Job {
     Generate {
         length: usize,
         symbols: bool,
+        url: Option<String>,
+        seq: u64,
+    },
+    /// Password health findings and counts (`health::Health`).
+    Health {
+        seq: u64,
+        online: bool,
+    },
+    /// Silences or restores a finding on `id`.
+    HealthIgnore {
+        id: String,
+        kind: FindingKind,
+        ignored: bool,
+        seq: u64,
+    },
+    /// Turns Have I Been Pwned breach checks on or off in `config.toml`.
+    BreachChecksSet {
+        enabled: bool,
         seq: u64,
     },
     /// The newest Activity entries (`activity::Activity`).
@@ -195,6 +224,10 @@ pub enum Done {
         seq: u64,
         result: Result<ItemInfo, Failure>,
     },
+    Favorited {
+        seq: u64,
+        result: Result<ItemInfo, Failure>,
+    },
     Removed {
         seq: u64,
         result: Result<ItemInfo, Failure>,
@@ -220,6 +253,15 @@ pub enum Done {
     TrashItem {
         seq: u64,
         result: Result<Values, Failure>,
+    },
+    Health {
+        seq: u64,
+        result: Result<HealthReport, Failure>,
+    },
+    BreachChecksSet {
+        seq: u64,
+        enabled: bool,
+        result: Result<(), Failure>,
     },
     /// A report went, or didn't: nothing waits on it.
     Reported,
@@ -253,7 +295,9 @@ impl Values {
             detail: self.0.detail.take(),
             fields: std::mem::take(&mut self.0.fields),
             source: self.0.source.take(),
-            deleted_at: None,
+            favorite: self.0.favorite,
+            tags: std::mem::take(&mut self.0.tags),
+            deleted_at: self.0.deleted_at,
         };
         (item, self.1.take())
     }
@@ -436,6 +480,10 @@ pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
             _ => None,
         })
         .max();
+    let keep_health = newest_at(&|j| match j {
+        Job::Health { seq, online } => Some((*seq, *online)),
+        _ => None,
+    });
     let mut i = 0;
     queue.retain(|item| {
         let at = i;
@@ -445,6 +493,7 @@ pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
             Job::List { .. } => keep_list == Some(at),
             Job::Code { .. } => keep_code == Some(at),
             Job::Peek { batch, .. } => newest_batch.is_none_or(|n| *batch >= n),
+            Job::Health { online: false, .. } => keep_health == Some(at),
             _ => true,
         }
     });
@@ -454,7 +503,7 @@ pub fn prune<T>(queue: &mut VecDeque<T>, job: impl Fn(&T) -> &Job) {
 fn pick<'a>(jobs: impl Iterator<Item = &'a Job>) -> Option<usize> {
     let rank = |j: &Job| match j {
         Job::Peek { .. } => 1,
-        Job::Get { cached: true, .. } => 2,
+        Job::Get { cached: true, .. } | Job::Health { online: false, .. } => 2,
         _ => 0,
     };
     jobs.enumerate()

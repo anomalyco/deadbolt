@@ -8,6 +8,7 @@ pub mod binary;
 pub mod cache;
 pub mod edit;
 mod enclave;
+pub mod health;
 pub mod import;
 pub mod install;
 pub mod keys;

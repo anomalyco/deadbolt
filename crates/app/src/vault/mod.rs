@@ -21,7 +21,7 @@ use rune_kit::shell::{SplitView, Toolbar};
 use rune_kit::{IconButton, IconButtonVariant, Keybind, Kit, TextInput};
 
 use crate::model::App;
-use crate::view::theme::{SLIDERS, TRASH, kind_icon};
+use crate::view::theme::{SLIDERS, STAR_FILL, TRASH, kind_icon};
 use crate::view::{LIST_EDGE, device_name, instant, scroll_col, tnum, vault_name};
 
 pub(crate) use crate::view::theme::{FACT, glyph_tile, kind_name};
@@ -45,12 +45,14 @@ pub fn view(s: &App, k: &Kit, inset: f32, reduced_motion: bool, layer: &mut Vec<
         crate::settings::page(s, k)
     } else if s.trash.open {
         crate::trash::page(s, k)
+    } else if s.security_open() {
+        crate::health::view::page(s, k)
     } else {
         page::pane(s, k, layer)
     }
     .transition(instant());
     let mut toolbar = Toolbar::new();
-    if !s.settings_open && !s.trash.open {
+    if !s.settings_open && !s.trash.open && !s.security_open() {
         toolbar = toolbar.trailing(page::toolbar(s, k).transition(instant()));
     }
     layer.extend(crate::palette::view(s, k).map(|card| over("palette-over", card, 72.0)));
@@ -111,6 +113,7 @@ fn sidebar(s: &App, k: &Kit) -> El {
                         .grow(1.0)
                         .truncate(),
                 )
+                .children(crate::health::view::vault_head_badge(s, k))
                 .children(s.loaded.then(|| {
                     text(visible.len().to_string())
                         .key("count")
@@ -209,12 +212,22 @@ fn rows_of(s: &App, k: &Kit, visible: &[usize]) -> El {
             };
             let on = !s.settings_open
                 && !s.trash.open
+                && !s.security_open()
                 && s.selected.as_deref() == Some(item.id.as_str());
             let jump = if i < 9 && on { i + 1 } else { 0 };
+            let risk = s.health.risk_for(&item.id);
             rune::memo(
                 format!("item-{}", item.id),
-                (&item.label, &item.detail, &item.kind, on, jump),
-                || list_row(&k, item, i, on),
+                (
+                    &item.label,
+                    &item.detail,
+                    &item.kind,
+                    item.favorite,
+                    on,
+                    jump,
+                    risk,
+                ),
+                || list_row(&k, item, i, on, risk),
             )
         },
     )
@@ -254,21 +267,41 @@ fn empty(k: &Kit, key: &str, title: &str, body: &str) -> El {
 /// Row `i`: the kind's glyph, the label over the detail, and ⌘1–⌘9 on the
 /// selected one of the first nine. Rows take no focus: the keys stay with
 /// the search, and a press selects while the search keeps focus.
-fn list_row(k: &Kit, item: &ItemInfo, i: usize, on: bool) -> El {
+fn list_row(
+    k: &Kit,
+    item: &ItemInfo,
+    i: usize,
+    on: bool,
+    risk: Option<deadbolt_client::protocol::RiskLevel>,
+) -> El {
     let id = item.id.clone();
+    let label = text(item.label.clone())
+        .key("label")
+        .font(k.ty.ui)
+        .color(if on { k.c.text_strong } else { k.c.text_base })
+        .truncate();
+    let top = if item.favorite {
+        row()
+            .key("title-row")
+            .w_full()
+            .gap(5.0)
+            .center_y()
+            .child(label.shrink().min_w(0.0))
+            .child(icon(&STAR_FILL, 11.0).key("star").color(if on {
+                k.c.icon_base
+            } else {
+                k.c.icon_muted
+            }))
+    } else {
+        label
+    };
     let lines = col()
         .key("lines")
         .gap(1.0)
         .grow(1.0)
         .shrink()
         .min_w(0.0)
-        .child(
-            text(item.label.clone())
-                .key("label")
-                .font(k.ty.ui)
-                .color(if on { k.c.text_strong } else { k.c.text_base })
-                .truncate(),
-        )
+        .child(top)
         .child(
             text(fact(item))
                 .key("subtitle")
@@ -305,6 +338,7 @@ fn list_row(k: &Kit, item: &ItemInfo, i: usize, on: bool) -> El {
             k.c.icon_muted
         }))
         .child(lines)
+        .children(crate::health::view::row_dot(k, risk))
         .children((i < 9 && on).then(|| {
             text(format!("⌘{}", i + 1))
                 .key("jump")
@@ -346,6 +380,9 @@ impl App {
             self.close_settings();
         }
         self.trash.forget();
+        if self.security_open() {
+            self.close_security();
+        }
         // Focus somewhere else (nothing, Lock) comes back to the search.
         self.search.focused = true;
         if !self.import.showing() && !was_editing {

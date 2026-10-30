@@ -470,6 +470,12 @@ not running without sending hello, which would start the agent again.
   one. A username step on its own is never judged as a sign-in (only a
   password is), so it neither waits for the page to settle nor counts as a
   failure.
+- **Sites saving is off for** are the one site memory kept by name: "Never
+  for this site" adds the site to `neverSave` in local storage. Settings ›
+  Saving lists them, each with Turn on, and a salted hash can't be shown
+  back as a name. Nothing else in the extension knows those sites (they are
+  ones the user chose not to save), so the list is plaintext, readable by
+  whoever can read the browser profile. It names no usernames or values.
 - **Frames.** Every frame runs the content script, but only frames on the same
   site as the top page get logins, and sandboxed frames get none. Some sites
   sign in only in a frame of their own: appstoreconnect.apple.com has no

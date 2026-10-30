@@ -9,6 +9,7 @@ mod caller;
 mod client;
 mod config;
 mod desktop;
+mod health;
 mod import;
 mod items;
 mod prompt;
@@ -87,7 +88,7 @@ enum Commands {
     /// Add the device showing a code from `deadbolt join` to a vault (the
     /// default vault, or --vault).
     Pair {
-        /// The code, such as violin-garden-tiger-lamp.
+        /// The code, such as violin-garden-tiger-lamp-zoo.
         #[arg(required = true, num_args = 1.., value_name = "CODE")]
         code: Vec<String>,
     },
@@ -245,6 +246,9 @@ enum Commands {
     Send(send::SendArgs),
     /// List, show or revoke sends.
     Sends(send::SendsArgs),
+    /// Audit saved passwords for weak, reused, and breached credentials, and
+    /// sites supporting authenticator codes or passkeys.
+    Health(health::HealthArgs),
     /// Open the desktop app, or bring the running one forward (bare
     /// `deadbolt` does too when started from an app launcher rather than a
     /// terminal; DEADBOLT_NO_UI=1 stops that).
@@ -542,6 +546,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
         Commands::Run(args) => return secrets::run(&paths, args, from_stdin).await,
         Commands::Inject(args) => secrets::inject(&paths, args, from_stdin).await?,
         Commands::Read(args) => secrets::read(&paths, args, from_stdin).await?,
+        Commands::Health(args) => return health::run(&paths, vault, from_stdin, args).await,
         Commands::App => app::open(&paths).await?,
         Commands::Desktop(DesktopCommand::Install) => desktop::install()?,
         Commands::Desktop(DesktopCommand::Uninstall) => desktop::uninstall()?,
@@ -1005,17 +1010,20 @@ fn presence(device: &DeviceInfo) -> String {
 }
 
 fn vault_line(vault: &VaultInfo) -> String {
-    let mut line = format!(
-        "{}\t{}\t{} device{}",
-        vault.name,
-        short(&vault.id),
-        vault.members,
-        if vault.members == 1 { "" } else { "s" }
-    );
+    let mut line = format!("{}\t{}", vault.name, short(&vault.id));
+    if vault.error.is_none() {
+        line.push_str(&format!(
+            "\t{} device{}",
+            vault.members,
+            if vault.members == 1 { "" } else { "s" }
+        ));
+    }
     if vault.default {
         line.push_str("\tdefault");
     }
-    if !vault.member {
+    if let Some(error) = &vault.error {
+        line.push_str(&format!("\tunavailable: {error}"));
+    } else if !vault.member {
         line.push_str("\tremoved");
     }
     line

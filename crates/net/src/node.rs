@@ -10,8 +10,8 @@ use iroh::{
     Endpoint, EndpointAddr, PublicKey, RelayMode, RelayUrl, SecretKey,
     address_lookup::{PkarrPublisher, PkarrResolver},
     endpoint::{
-        AfterHandshakeOutcome, BeforeConnectOutcome, Connection, EndpointHooks, Side,
-        WeakConnectionHandle, presets,
+        AfterHandshakeOutcome, BeforeConnectOutcome, ConnectError, ConnectingError, Connection,
+        ConnectionError, EndpointHooks, Side, TransportErrorCode, WeakConnectionHandle, presets,
     },
 };
 #[cfg(not(all(target_family = "wasm", target_os = "unknown")))]
@@ -20,7 +20,7 @@ use n0_future::{
     task::{JoinHandle, JoinSet},
     time::Instant,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{Semaphore, mpsc};
 use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
@@ -35,6 +35,18 @@ use crate::{
 
 /// Default maximum size of one frame (one heads blob or one entry).
 pub const DEFAULT_MAX_FRAME_LEN: usize = 16 * 1024 * 1024;
+
+/// Default for how many inbound sync connections one peer may hold open at once.
+pub const DEFAULT_MAX_INBOUND_PER_PEER: usize = 2;
+
+/// Default for how many authenticated inbound sync connections the node serves at once.
+pub const DEFAULT_MAX_INBOUND: usize = 32;
+
+/// How long an inbound connection may take to finish its handshake (and the gate).
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Separate from authenticated sync slots: an unidentified peer cannot consume those.
+const MAX_INBOUND_HANDSHAKES: usize = 256;
 
 /// Which relay servers the node uses.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,8 +76,15 @@ pub struct NodeConfig {
     pub portmapper: bool,
     /// Maximum size of a single frame accepted from a peer.
     pub max_frame_len: usize,
-    /// How long a sync session a peer opened may take before its connection is closed.
+    /// How long an inbound sync connection may wait for a stream, and how long each
+    /// session may take, before the connection is closed. Each gets its own deadline.
     pub inbound_sync_timeout: Duration,
+    /// How many inbound sync connections one peer may hold at once; more are closed as
+    /// busy. Connections this node dialed don't count.
+    pub max_inbound_per_peer: usize,
+    /// How many authenticated inbound sync connections the node serves at once; more
+    /// are closed as busy after membership admission. Handshakes have a separate cap.
+    pub max_inbound: usize,
     /// Where a new device publishes its pairing record.
     pub rendezvous: Rendezvous,
 }
@@ -81,6 +100,8 @@ impl NodeConfig {
             portmapper: true,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
+            max_inbound_per_peer: DEFAULT_MAX_INBOUND_PER_PEER,
+            max_inbound: DEFAULT_MAX_INBOUND,
             rendezvous: Rendezvous::N0,
         }
     }
@@ -98,6 +119,8 @@ impl NodeConfig {
             portmapper: false,
             max_frame_len: DEFAULT_MAX_FRAME_LEN,
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
+            max_inbound_per_peer: DEFAULT_MAX_INBOUND_PER_PEER,
+            max_inbound: DEFAULT_MAX_INBOUND,
             rendezvous: Rendezvous::Dir(std::env::temp_dir().join("deadbolt-rendezvous")),
         }
     }
@@ -113,6 +136,8 @@ impl fmt::Debug for NodeConfig {
             .field("portmapper", &self.portmapper)
             .field("max_frame_len", &self.max_frame_len)
             .field("inbound_sync_timeout", &self.inbound_sync_timeout)
+            .field("max_inbound_per_peer", &self.max_inbound_per_peer)
+            .field("max_inbound", &self.max_inbound)
             .field("rendezvous", &self.rendezvous)
             .finish()
     }
@@ -261,8 +286,12 @@ impl Node {
             endpoint.clone(),
             gate.clone(),
             handler.clone(),
-            config.max_frame_len,
-            config.inbound_sync_timeout,
+            Limits {
+                max_frame_len: config.max_frame_len,
+                session_timeout: config.inbound_sync_timeout,
+                per_peer: config.max_inbound_per_peer,
+                total: config.max_inbound,
+            },
         )));
         Ok(Self {
             inner: Arc::new(Inner {
@@ -307,6 +336,10 @@ impl Node {
                 // The gate may have changed while connecting (checked again after the
                 // handshake); report that precisely.
                 self.inner.gate.check_dial(&peer.id)?;
+                if refused(&err) {
+                    // The peer or its QUIC stack refused admission: retry, not unreachable.
+                    return Err(Error::Rejected(BUSY_REASON.into()));
+                }
                 return Err(Error::Connect(err.to_string()));
             }
         };
@@ -344,31 +377,100 @@ impl Node {
     }
 }
 
+/// Why a sync connection over a peer's inbound limits was turned away.
+const BUSY_REASON: &str = "too many connections";
+
+/// Whether the peer refused the connection before its handshake (QUIC
+/// `CONNECTION_REFUSED`). Either our handshake cap or the transport itself can
+/// cause this; it does not prove which limit the peer reached.
+fn refused(err: &ConnectError) -> bool {
+    let source = match err {
+        ConnectError::Connecting {
+            source: ConnectingError::ConnectionError { source, .. },
+            ..
+        }
+        | ConnectError::Connection { source, .. } => source,
+        _ => return false,
+    };
+    matches!(
+        source,
+        ConnectionError::ConnectionClosed(close)
+            if close.error_code == TransportErrorCode::CONNECTION_REFUSED
+    )
+}
+
+struct Limits {
+    max_frame_len: usize,
+    session_timeout: Duration,
+    per_peer: usize,
+    total: usize,
+}
+
 async fn accept_loop(
     endpoint: Endpoint,
     gate: Arc<Gate>,
     handler: Arc<dyn DynSyncHandler>,
-    max_frame_len: usize,
-    session_timeout: Duration,
+    limits: Limits,
 ) {
+    let Limits {
+        max_frame_len,
+        session_timeout,
+        per_peer,
+        total,
+    } = limits;
+    // Reserve sync capacity for authenticated members, independently of unfinished
+    // handshakes. Pairing has its own bounds after handoff.
+    let handshakes = Arc::new(Semaphore::new(MAX_INBOUND_HANDSHAKES));
+    let syncs = Arc::new(Semaphore::new(total));
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
             incoming = endpoint.accept() => {
                 let Some(incoming) = incoming else { break };
+                // Make the sender prove it receives at its source address (QUIC Retry)
+                // before it can hold a permit, so spoofed Initials can't fill them.
+                // Over a relay the relay already vouches for the sender; there it only
+                // costs a round trip.
+                if !incoming.remote_addr_validated() {
+                    if let Err(err) = incoming.retry() {
+                        err.into_incoming().refuse();
+                    }
+                    continue;
+                }
+                let Ok(handshake) = handshakes.clone().try_acquire_owned() else {
+                    debug!("refusing inbound connection: handshake limit reached");
+                    incoming.refuse();
+                    continue;
+                };
                 let gate = gate.clone();
                 let handler = handler.clone();
+                let syncs = syncs.clone();
                 tasks.spawn(async move {
                     // The gate hook runs inside this await; a rejected peer never gets here.
-                    let conn = match incoming.await {
-                        Ok(conn) => conn,
-                        Err(err) => {
+                    let conn = match n0_future::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
+                        Ok(Ok(conn)) => conn,
+                        Ok(Err(err)) => {
                             debug!("incoming connection failed: {err}");
                             return;
                         }
+                        Err(_) => {
+                            debug!("incoming connection timed out in its handshake");
+                            return;
+                        }
                     };
+                    drop(handshake);
                     match conn.alpn() {
                         SYNC_ALPN => {
+                            let Ok(_permit) = syncs.try_acquire_owned() else {
+                                conn.close(close::BUSY, BUSY_REASON.as_bytes());
+                                return;
+                            };
+                            let peer = *conn.remote_id().as_bytes();
+                            let Some(_slot) = gate.claim_inbound(peer, per_peer) else {
+                                debug!(peer = %fmt_id(&peer), "refusing sync connection: too many open");
+                                conn.close(close::BUSY, BUSY_REASON.as_bytes());
+                                return;
+                            };
                             serve_sync(conn, handler, max_frame_len, session_timeout).await;
                         }
                         PAIR_ALPN => gate.route_pairing(conn),
@@ -377,6 +479,24 @@ async fn accept_loop(
                 });
             }
             Some(_) = tasks.join_next(), if !tasks.is_empty() => {}
+        }
+    }
+}
+
+/// One inbound sync connection counted against its peer's limit, released on drop.
+struct InboundSlot {
+    gate: Arc<Gate>,
+    peer: PeerId,
+}
+
+impl Drop for InboundSlot {
+    fn drop(&mut self) {
+        let mut st = self.gate.lock();
+        if let Some(n) = st.inbound.get_mut(&self.peer) {
+            *n -= 1;
+            if *n == 0 {
+                st.inbound.remove(&self.peer);
+            }
         }
     }
 }
@@ -415,6 +535,8 @@ impl PairingSlot {
 #[derive(Default)]
 struct GateState {
     conns: HashMap<PeerId, Vec<Tracked>>,
+    /// Inbound sync connections being served, per peer ([`InboundSlot`]).
+    inbound: HashMap<PeerId, usize>,
     pairing: Option<PairingSlot>,
     next_slot: u64,
     /// The last code was used (or burnt by a wrong guess), and no new one opened since:
@@ -549,6 +671,21 @@ impl Gate {
             .filter(|(_, list)| list.iter().any(|t| t.kind == ConnKind::Sync))
             .map(|(peer, _)| *peer)
             .collect()
+    }
+
+    /// Counts one more inbound sync connection from `peer`, unless it already has `max`.
+    fn claim_inbound(self: &Arc<Self>, peer: PeerId, max: usize) -> Option<InboundSlot> {
+        let mut st = self.lock();
+        let n = st.inbound.get(&peer).copied().unwrap_or(0);
+        if n >= max {
+            return None;
+        }
+        st.inbound.insert(peer, n + 1);
+        drop(st);
+        Some(InboundSlot {
+            gate: self.clone(),
+            peer,
+        })
     }
 
     pub(crate) fn open_pairing(&self, expires_at: Instant, tx: mpsc::Sender<Connection>) -> u64 {
@@ -714,6 +851,30 @@ pub(crate) mod tests {
             Error::MembershipRejected(r) if r == "not a member"
         ));
         assert!(a.connected_peers().is_empty());
+    }
+
+    /// QUIC itself can refuse a handshake, independently of our established sync
+    /// cap. Keep the typed mapping that makes startup retry rather than skip it.
+    #[tokio::test]
+    async fn transport_refusal_is_reported_as_busy() {
+        let server = Endpoint::builder(presets::Minimal)
+            .alpns(vec![SYNC_ALPN.to_vec()])
+            .relay_mode(RelayMode::Disabled)
+            .bind()
+            .await
+            .unwrap();
+        let client = node(|_: &PeerId| true).await;
+        let addr = PeerAddr::from_endpoint_addr(&server.addr());
+        let (result, ()) = tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(client.connect(addr), async {
+                server.accept().await.unwrap().refuse();
+            })
+        })
+        .await
+        .unwrap();
+        assert!(matches!(result, Err(Error::Rejected(r)) if r == BUSY_REASON));
+        server.close().await;
+        client.shutdown().await;
     }
 
     #[tokio::test]

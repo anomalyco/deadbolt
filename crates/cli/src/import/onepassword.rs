@@ -20,9 +20,9 @@ use serde_json::Value;
 
 use super::{
     ARCHIVED, ATTACHMENT, BAD_BIRTHDAY, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, BAD_VALUE,
-    BIG_ATTACHMENT, BIG_FILE, Builder, FAVORITE, Imported, LINKED_FIELD, MISSING_ATTACHMENT,
-    MISSING_FILE, MirrorVersion, NO_NUMBER, NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY, Summary, TAG,
-    UNKNOWN_TYPE, address, array, field_name, item_name, month, number, scalar, text,
+    BIG_ATTACHMENT, BIG_FILE, Builder, Imported, LINKED_FIELD, MISSING_ATTACHMENT, MISSING_FILE,
+    MirrorVersion, NO_NUMBER, NO_PRIVATE_KEY, Origin, PASSWORD_HISTORY, Summary, UNKNOWN_TYPE,
+    address, array, field_name, item_name, month, number, scalar, tags, text,
 };
 use crate::items::with_scheme;
 use crate::protocol::{ExportFile, ImportSource, sign_in_provider};
@@ -778,7 +778,7 @@ pub(super) fn item(item: &Value, files: Files, summary: &mut Summary) -> Option<
         return None;
     }
     let category = text(item, "categoryUuid").unwrap_or_default();
-    let mapped = match category.as_str() {
+    let mut mapped = match category.as_str() {
         "001" | "005" => login(item, files, summary),
         "002" => card(item, files, summary),
         "004" => identity(item, files, summary),
@@ -794,11 +794,25 @@ pub(super) fn item(item: &Value, files: Files, summary: &mut Summary) -> Option<
         },
     }?;
     let details = item.get("details").unwrap_or(&Value::Null);
-    if number(item, "favIndex").is_some_and(|i| i > 0) {
-        summary.drop_some(FAVORITE, 1);
-    }
+    let overview = item.get("overview").unwrap_or(&Value::Null);
+    mapped.favorite = number(item, "favIndex").is_some_and(|i| i > 0);
+    mapped.tags = tags::collect(array(overview, "tags").iter().filter_map(scalar));
     if !array(details, "passwordHistory").is_empty() {
         summary.drop_some(PASSWORD_HISTORY, 1);
+    }
+    let mut mapped = mapped;
+    if let Some(pw_field) = deadbolt_core::health::audited_password_field(mapped.kind)
+        && mapped.fields.contains_key(pw_field)
+    {
+        let hist_max = array(details, "passwordHistory")
+            .iter()
+            .filter_map(|h| number(h, "time"))
+            .max();
+        mapped.password_changed = hist_max
+            .or_else(|| number(item, "updatedAt"))
+            .filter(|&secs| secs > 0)
+            .map(date)
+            .filter(|d| deadbolt_core::item::valid_date(d));
     }
     summary.add(&mapped);
     Some(mapped)
@@ -836,7 +850,6 @@ pub fn export(export: &Value, files: &[ExportFile]) -> Result<(Vec<Imported>, Su
         bail!("not a 1Password export: no \"accounts\" list");
     };
     let mut summary = Summary::new(ImportSource::OnePassword);
-    let mut tags = BTreeSet::new();
     let mut out = Vec::new();
     for account in accounts {
         // The user's id in the account, not the account's (`op account
@@ -851,14 +864,13 @@ pub fn export(export: &Value, files: &[ExportFile]) -> Result<(Vec<Imported>, Su
                 let Some(mut mapped) = item(entry, files, &mut summary) else {
                     continue;
                 };
-                let overview = entry.get("overview").unwrap_or(&Value::Null);
-                tags.extend(array(overview, "tags").iter().filter_map(scalar));
                 if let (Some(vault_id), Some(item_id)) = (&vault_id, text(entry, "uuid")) {
                     let version = MirrorVersion {
                         updated: number(entry, "updatedAt").unwrap_or(0),
                         digest: mapped.digest(),
                         origin: Origin::Import,
                         fields: BTreeSet::new(),
+                        tags: BTreeSet::new(),
                     };
                     let source = source(&user_id, vault_id, &item_id, &version);
                     mapped.source = valid_source(&source).then_some(source);
@@ -868,7 +880,6 @@ pub fn export(export: &Value, files: &[ExportFile]) -> Result<(Vec<Imported>, Su
             }
         }
     }
-    summary.drop_some(TAG, tags.len());
     Ok((out, summary))
 }
 
@@ -1328,6 +1339,11 @@ pub(crate) mod tests {
                 ("number", "secret", "op-passport-X123"),
             ]
         );
+        assert!(github.favorite);
+        assert_eq!(github.tags, BTreeSet::from(["dev".into(), "work".into()]));
+        assert!(!items[1].favorite);
+        assert_eq!(items[1].tags, BTreeSet::from(["home".into()]));
+        assert!(items[3].favorite);
         assert_eq!(
             lines(&report),
             [
@@ -1337,7 +1353,7 @@ pub(crate) mod tests {
                 "skipped 1 document whose file is missing from the export",
                 "skipped 1 item of unknown type",
                 "warning: 1 invalid email address kept as text",
-                "dropped: 1 attachment missing from the export, 2 favorites, 1 item's password history, 1 linked field, 3 tags",
+                "dropped: 1 attachment missing from the export, 1 item's password history, 1 linked field",
             ]
         );
     }

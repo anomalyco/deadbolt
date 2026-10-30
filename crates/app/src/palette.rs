@@ -2,6 +2,8 @@
 //! page. ↑↓ move, ↵ runs, Esc or ⌘K again closes. The quick panel's has only
 //! what it can do: copy, open and go to Deadbolt.
 
+pub mod tags;
+
 use rune::{Color, El, Key, KeyEvent, Tx, col, el, row, text};
 use rune_kit::{Keybind, Kit};
 
@@ -15,9 +17,12 @@ pub enum Action {
     Code,
     Show,
     Open,
+    Favorite,
     Edit,
     Delete,
+    FilterTag,
     New,
+    Security,
     Import,
     Trash,
     Settings,
@@ -34,9 +39,12 @@ impl Action {
             Action::Code => "code",
             Action::Show => "show",
             Action::Open => "open",
+            Action::Favorite => "favorite",
             Action::Edit => "edit",
             Action::Delete => "delete",
+            Action::FilterTag => "filter-tag",
             Action::New => "new",
+            Action::Security => "security",
             Action::Import => "import",
             Action::Trash => "trash",
             Action::Settings => "settings",
@@ -52,9 +60,12 @@ impl Action {
             Action::Code => &["⌥", "↵"],
             Action::Show => &[],
             Action::Open => &["O"],
+            Action::Favorite => &["⌘", "D"],
             Action::Edit => &["⌘", "E"],
             Action::Delete => &["⌘", "⌫"],
+            Action::FilterTag => &[],
             Action::New => &["⌘", "N"],
+            Action::Security => &["⇧", "⌘", "H"],
             Action::Import => &["⇧", "⌘", "I"],
             Action::Trash => &["⇧", "⌘", "⌫"],
             Action::Settings => &["⌘", ","],
@@ -99,11 +110,18 @@ pub fn actions(s: &App) -> Vec<Action> {
         list.push(Action::Window);
         return list;
     }
+    if item.is_some() {
+        list.push(Action::Favorite);
+    }
     if item.is_some_and(|i| crate::edit::editable(&i.kind)) && s.detail.is_some() {
         list.push(Action::Edit);
     }
+    if s.items.iter().any(|i| !i.tags.is_empty()) {
+        list.push(Action::FilterTag);
+    }
     list.extend([
         Action::New,
+        Action::Security,
         Action::Import,
         Action::Trash,
         Action::Settings,
@@ -138,9 +156,22 @@ pub fn label(s: &App, a: Action) -> String {
             }
             None => "Open website".into(),
         },
+        Action::Favorite => {
+            if s.selected_item().is_some_and(|i| i.favorite) {
+                "Unfavorite".into()
+            } else {
+                "Favorite".into()
+            }
+        }
         Action::Edit => "Edit".into(),
         Action::Delete => "Delete…".into(),
+        Action::FilterTag => "Filter by tag…".into(),
         Action::New => "New item".into(),
+        Action::Security => match s.health.risk_count() {
+            0 => "Security".into(),
+            1 => "Security (1 risk)".into(),
+            n => format!("Security ({n} risks)"),
+        },
         Action::Import => "Import passwords…".into(),
         Action::Trash => "Recently deleted".into(),
         Action::Settings => "Settings".into(),
@@ -155,11 +186,17 @@ impl App {
             return;
         }
         self.nav.palette = Some(0);
+        self.nav.palette_tags = false;
         self.nav.sheet = false;
+        self.tag_filter.clear();
+        self.tag_filter.focused = false;
     }
 
     pub fn close_palette(&mut self) {
         self.nav.palette = None;
+        self.nav.palette_tags = false;
+        self.tag_filter.clear();
+        self.tag_filter.focused = false;
     }
 
     /// Keys while ⌘K's actions are open; they take every key.
@@ -183,8 +220,12 @@ impl App {
         }
     }
 
-    /// Runs an action and closes the palette.
+    /// Runs an action and closes the palette (or opens `Filter by tag…`).
     pub fn run(&mut self, a: Action, tx: &mut Tx) {
+        if a == Action::FilterTag {
+            self.open_tag_palette();
+            return;
+        }
         self.close_palette();
         match a {
             Action::Copy => self.copy_selected(self.primary_field(), tx),
@@ -196,10 +237,19 @@ impl App {
                 }
             }
             Action::Open => self.open_site(tx),
+            Action::Favorite => self.toggle_favorite(tx),
             Action::Edit => self.edit_selected(),
             Action::Delete => self.ask_delete(),
-            Action::New => self.new_item(),
-            Action::Import => self.show_import(),
+            Action::FilterTag => {}
+            Action::New => {
+                self.close_security();
+                self.new_item();
+            }
+            Action::Security => self.open_security(),
+            Action::Import => {
+                self.close_security();
+                self.show_import();
+            }
             Action::Trash => self.open_trash(),
             Action::Settings => self.open_settings(),
             Action::Lock => self.lock(),
@@ -222,8 +272,10 @@ fn shortcut_action(ev: &KeyEvent) -> Option<Action> {
             Some(Action::Delete)
         }
         _ if chord(ev, 'o') || is_letter(ev, "o") => Some(Action::Open),
+        _ if chord(ev, 'd') => Some(Action::Favorite),
         _ if chord(ev, 'e') => Some(Action::Edit),
         _ if chord(ev, 'n') => Some(Action::New),
+        _ if crate::health::is_shortcut(ev) => Some(Action::Security),
         _ if crate::import::is_shortcut(ev) => Some(Action::Import),
         _ if chord(ev, ',') => Some(Action::Settings),
         _ if chord(ev, 'l') => Some(Action::Lock),
@@ -234,12 +286,18 @@ fn shortcut_action(ev: &KeyEvent) -> Option<Action> {
 /// The card, over whatever has the window.
 pub fn view(s: &App, k: &Kit) -> Option<El> {
     let at = s.nav.palette?;
+    if s.nav.palette_tags {
+        return Some(tags::view(s, k));
+    }
     let list = actions(s);
+    let first_window = list
+        .iter()
+        .position(|a| matches!(a, Action::FilterTag | Action::New));
     let item = s.selected_item().map(|i| i.label.clone());
     let mut rows = col().key("actions-rows").w_full().gap(1.0).px(6.0).pb(6.0);
     for (i, a) in list.iter().enumerate() {
         // The window's actions stand apart from the item's.
-        let apart = i > 0 && *a == Action::New;
+        let apart = i > 0 && Some(i) == first_window;
         if apart {
             rows = rows.child(
                 el().key("actions-rule")

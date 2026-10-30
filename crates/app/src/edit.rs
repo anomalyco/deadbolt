@@ -10,7 +10,9 @@
 //! is chosen or it's removed.
 //! Locking, or the agent stopping, wipes the form wherever it was.
 
+mod fix;
 mod form;
+pub mod tags;
 mod types;
 pub mod view;
 
@@ -121,6 +123,7 @@ impl App {
             && self.panel.is_none()
             && !self.settings_open
             && !self.trash.open
+            && !self.security_open()
             && !self.installing()
             && !self.import.showing()
             && !self.drop_hovering()
@@ -187,6 +190,9 @@ impl App {
             return;
         }
         let mut next = Form::new(kind, "", None);
+        next.favorite = form.favorite;
+        std::mem::swap(&mut next.tags, &mut form.tags);
+        std::mem::swap(&mut next.tag_input, &mut form.tag_input);
         std::mem::swap(&mut next.name, &mut form.name);
         for input in &mut next.fields {
             let Some(old) = form.fields.iter_mut().find(|f| f.name == input.name) else {
@@ -202,7 +208,10 @@ impl App {
                 input.edit.set_secure(true);
             }
         }
-        if !next.name.focused && !next.fields.iter().any(|f| f.edit.focused) {
+        if !next.name.focused
+            && !next.tag_input.focused
+            && !next.fields.iter().any(|f| f.edit.focused)
+        {
             next.name.focused = true;
         }
         *form = next;
@@ -294,6 +303,26 @@ impl App {
                 input.unwrap_lines();
             }
         }
+        // Commit any tag still sitting in `Add tag` before diffing.
+        if !form
+            .tag_input
+            .text
+            .trim()
+            .trim_start_matches('#')
+            .is_empty()
+        {
+            let raw = form.tag_input.text.clone();
+            match tags::push_clean_tag(&mut form.tags, &raw) {
+                Ok(_) => {
+                    form.tag_input.clear();
+                    form.tag_active = None;
+                }
+                Err(problem) => {
+                    form.problem = Some(problem);
+                    return;
+                }
+            }
+        }
         let mut changes = match form.changes() {
             Ok(changes) => changes,
             Err(problem) => {
@@ -320,12 +349,17 @@ impl App {
                 name: changes.name.take(),
                 fields,
                 unset: std::mem::take(&mut changes.unset),
+                favorite: changes.favorite,
+                add_tags: std::mem::take(&mut changes.add_tags),
+                remove_tags: std::mem::take(&mut changes.remove_tags),
                 seq,
             },
             None => Job::Create {
                 kind: form.kind.clone(),
                 name: changes.name.take().filter(|n| !n.is_empty()),
                 fields,
+                favorite: changes.favorite.unwrap_or(false),
+                tags: std::mem::take(&mut changes.add_tags),
                 seq,
             },
         };
@@ -417,6 +451,7 @@ impl App {
         // Show and Hide are pressed to edit on: focus goes back to the field.
         self.search.focused = false;
         form.name.focused = false;
+        form.tag_input.focused = false;
         for (i, input) in form.fields.iter_mut().enumerate() {
             input.edit.focused = i == field;
         }
@@ -531,9 +566,11 @@ impl App {
         };
         self.edit.generations += 1;
         form.generating = Some(self.edit.generations);
+        let url = form.site_url();
         self.agent.send(Job::Generate {
             length: self.edit.length,
             symbols: self.edit.symbols,
+            url,
             seq: self.edit.generations,
         });
     }
@@ -571,13 +608,23 @@ impl App {
         let Some(at) = form.generates() else { return };
         match result {
             Ok(mut password) => {
+                let copy_once = std::mem::replace(&mut form.copy_generated_once, false);
+                let saved = form
+                    .base
+                    .as_ref()
+                    .map(|b| (b.0.id.clone(), b.0.label.clone()));
                 let input = &mut form.fields[at];
-                input.edit.replace_text(std::mem::take(&mut *password));
+                let field_name = input.name.clone();
+                let generated_text = std::mem::take(&mut *password);
+                input.edit.replace_text(generated_text.clone());
                 // A password the person didn't type shows, so they see what they got.
                 input.edit.set_revealed(true);
                 form.generated += 1;
-                if form.problem_for("password").is_some() {
+                if form.problem_for(&field_name).is_some() {
                     form.problem = None;
+                }
+                if copy_once {
+                    self.copy_value(saved, field_name, generated_text, tx);
                 }
             }
             Err(failure) if failure.locked() => self.on_locked(tx),
@@ -685,13 +732,9 @@ impl App {
                 self.forget_pages();
                 match self.items.iter_mut().find(|i| i.id == id) {
                     Some(listed) => *listed = item,
-                    None => {
-                        let at = self.items.partition_point(|i| {
-                            (i.label.to_lowercase(), &i.id) < (item.label.to_lowercase(), &item.id)
-                        });
-                        self.items.insert(at, item);
-                    }
+                    None => self.items.push(item),
                 }
+                crate::model::sort_items(&mut self.items);
                 // A search that would hide it gives way.
                 if !self.visible().iter().any(|i| i.id == id) {
                     self.search.clear();
@@ -800,6 +843,11 @@ impl App {
             }
             match ev.key {
                 _ if chord('t') => self.toggle_types(),
+                _ if chord('d') => self.toggle_form_favorite(),
+                _ if fix::is_copy_current_shortcut(ev) => {
+                    self.copy_base_password(tx);
+                }
+                _ if chord('o') => self.open_fix_site(tx),
                 Key::Escape => self.cancel_edit(),
                 Key::Tab if ev.mods.ctrl && !ev.mods.cmd && !ev.mods.alt => {
                     self.step_kind(if ev.mods.shift { -1 } else { 1 });
@@ -883,8 +931,16 @@ impl App {
     /// than leaving the field, ⌘S and ⌘⏎ save. Enter with other modifiers
     /// does nothing in a one-line field (it would submit); a text area keeps
     /// them for its lines. True when handled.
-    pub fn form_key(&mut self, ev: &KeyEvent, field: Field) -> bool {
+    pub fn form_key(&mut self, ev: &KeyEvent, field: Field, tx: &mut Tx) -> bool {
+        if fix::is_copy_current_shortcut(ev) {
+            self.copy_base_password(tx);
+            return true;
+        }
         let plain = !ev.mods.shift && !ev.mods.alt && !ev.mods.ctrl;
+        if ev.is_command('o') && plain {
+            self.open_fix_site(tx);
+            return true;
+        }
         let cmd_enter = ev.mods.cmd && plain;
         match (&ev.key, field) {
             (Key::Escape, _) => self.cancel_edit(),
@@ -901,6 +957,7 @@ impl App {
             // A one-line value in a text area: ⏎ saves rather than breaking it.
             (Key::Enter, Field::Wrapped) => self.save(),
             _ if ev.is_command('s') && plain => self.save(),
+            _ if ev.is_command('d') && plain => self.toggle_form_favorite(),
             _ if ev.is_command('n') && plain => self.new_item(),
             _ if ev.is_command('t') && plain => self.toggle_types(),
             _ => return false,

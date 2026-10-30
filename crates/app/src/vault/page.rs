@@ -136,37 +136,72 @@ fn page(s: &App, k: &Kit, item: &ItemInfo, full: Option<&ItemInfo>) -> Vec<El> {
     if let Some(source) = &item.source {
         sub = format!("{sub} · From {source}");
     }
+    if let Some(changed) = s.health.password_changed_for(&item.id) {
+        sub = format!(
+            "{sub} · Changed {}",
+            crate::health::view::human_date(changed)
+        );
+    }
+    let tags_source = full.map_or(&item.tags, |f| &f.tags);
+    let mut titles = col()
+        .key("titles")
+        .gap(2.0)
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .child(
+            text(item.label.clone())
+                .key("title")
+                .font(TITLE)
+                .color(k.c.text_strong)
+                .truncate_fade(),
+        )
+        .child(
+            text(sub)
+                .key("kind")
+                .font(k.ty.text_small)
+                .color(k.c.text_muted),
+        );
+    if !tags_source.is_empty() {
+        let mut chips = row().key("tags").w_full().flex_wrap().gap(6.0).mt(6.0);
+        for tag in tags_source {
+            let chosen = tag.clone();
+            chips = chips.child(
+                row()
+                    .key(format!("tag-{tag}"))
+                    .role("button")
+                    .label(format!("Filter by #{tag}"))
+                    .h(22.0)
+                    .px(8.0)
+                    .center_y()
+                    .radius(6.0)
+                    .continuous_corners()
+                    .fill(k.c.layer_02)
+                    .hover(k.c.hover)
+                    .hover_motion(Anim::INSTANT, Anim::INSTANT)
+                    .on_press_tx(move |s: &mut App, tx| s.filter_by_tag(&chosen, tx))
+                    .child(
+                        text(format!("#{tag}"))
+                            .font(k.ty.small)
+                            .color(k.c.text_muted),
+                    ),
+            );
+        }
+        titles = titles.child(chips);
+    }
     let head = row()
         .key("head")
         .w_full()
         .gap(14.0)
-        .center_y()
+        .items_start()
         .pb(24.0)
-        .child(crate::vault::glyph_tile(k, &item.kind, 44.0, 11.0))
-        .child(
-            col()
-                .key("titles")
-                .gap(2.0)
-                .grow(1.0)
-                .shrink()
-                .min_w(0.0)
-                .child(
-                    text(item.label.clone())
-                        .key("title")
-                        .font(TITLE)
-                        .color(k.c.text_strong)
-                        .truncate_fade(),
-                )
-                .child(
-                    text(sub)
-                        .key("kind")
-                        .font(k.ty.text_small)
-                        .color(k.c.text_muted),
-                ),
-        );
+        .child(crate::vault::glyph_tile(k, &item.kind, 44.0, 11.0).mt(2.0))
+        .child(titles);
     let mut out = vec![head];
     if let Some(delete) = s.edit.delete.as_ref().filter(|d| d.id == item.id) {
         out.push(crate::edit::view::confirm(k, delete).mb(20.0));
+    } else if let Some(callout) = crate::health::view::item_callout(s, k, &item.id) {
+        out.push(callout);
     }
     let mut fields = col().key("fields").w_full().gap(2.0);
     if let Some(full) = full {
@@ -471,7 +506,12 @@ fn notice(s: &App, k: &Kit) -> Option<El> {
 }
 
 fn agent_notice(s: &App, k: &Kit) -> Option<El> {
-    let n = s.notice.as_ref().filter(|_| s.selected_item().is_some())?;
+    // With no list (it failed to load) there's nothing else on the page to
+    // say why, so the notice shows then too.
+    let n = s
+        .notice
+        .as_ref()
+        .filter(|_| s.selected_item().is_some() || !s.loaded)?;
     Some(
         text(n.clone())
             .key("agent-notice")

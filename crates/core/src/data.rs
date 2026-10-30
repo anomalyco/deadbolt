@@ -12,11 +12,12 @@
 //! one; the rest of the entry still applies. An edit only counts if the
 //! item's `Create` is in its causal past.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::entry::{Change, DataOp, LogId, Payload, Source};
 use crate::id::{DeviceId, Hash, ItemId};
 use crate::item::{self, Field, ItemError};
+use crate::tag;
 use crate::vault::Node;
 
 /// An item's current state.
@@ -30,6 +31,16 @@ pub struct Item {
     pub fields: BTreeMap<String, Field>,
     /// Where the item is mirrored from; `None` for the user's own.
     pub source: Option<Source>,
+    /// Whether the item is starred so clients rank it first.
+    pub favorite: bool,
+    /// Organizational tags (`work`, `work/aws`).
+    pub tags: BTreeSet<String>,
+    /// The entry that wrote the winning `password` (or `passphrase`) field.
+    pub password_entry: Option<Hash>,
+    /// UTC date (`YYYY-MM-DD`) the item's password last changed, if recorded.
+    pub password_changed: Option<String>,
+    /// Ignored health findings (`kind` -> entry hash, or `[0; 32]` item-wide).
+    pub ignored: BTreeMap<String, Hash>,
     /// Tombstone. Fields are kept so the item can be restored.
     pub deleted: bool,
 }
@@ -134,6 +145,11 @@ pub(crate) struct ItemState {
     created: Write<()>,
     name: Vec<Write<Option<String>>>,
     source: Vec<Write<Option<Source>>>,
+    favorite: Vec<Write<bool>>,
+    /// Per case-folded tag: `Some(spelling)` is an add, `None` a remove.
+    tags: BTreeMap<String, Vec<Write<Option<String>>>>,
+    password_changed: Vec<Write<Option<String>>>,
+    ignored: BTreeMap<String, Vec<Write<Option<Hash>>>>,
     fields: BTreeMap<String, Vec<Write<Option<Field>>>>,
     /// Deletes, and every other change (which brings the item back).
     alive: Vec<Write<Life>>,
@@ -168,12 +184,46 @@ impl ItemState {
                 Some((name.clone(), value))
             })
             .collect();
+        let tags = self
+            .tags
+            .values()
+            .filter_map(|frontier| {
+                // Add-wins Observed-Remove Set: any live add beats a concurrent
+                // remove; the highest `(entry, index)` add chooses display case.
+                frontier
+                    .iter()
+                    .filter_map(|w| Some((w.at, w.value.as_ref()?)))
+                    .max_by_key(|(at, _)| *at)
+                    .map(|(_, t)| t.clone())
+            })
+            .collect();
+        let pw_field = if self.kind == "ssh" {
+            "passphrase"
+        } else {
+            "password"
+        };
+        let password_entry = self
+            .fields
+            .get(pw_field)
+            .and_then(|frontier| winner(frontier))
+            .filter(|w| w.value.is_some())
+            .map(|w| w.at.entry);
+        let ignored = self
+            .ignored
+            .iter()
+            .filter_map(|(kind, frontier)| Some((kind.clone(), winner(frontier)?.value?)))
+            .collect();
         Item {
             id,
             kind: self.kind.clone(),
             name: winner(&self.name).and_then(|w| w.value.clone()),
             fields,
             source: winner(&self.source).and_then(|w| w.value.clone()),
+            favorite: winner(&self.favorite).is_some_and(|w| w.value),
+            tags,
+            password_entry,
+            password_changed: winner(&self.password_changed).and_then(|w| w.value.clone()),
+            ignored,
             deleted: self.deleted(),
         }
     }
@@ -203,6 +253,20 @@ impl ItemState {
             }
             Change::Name(_) => of(&self.name, record.at),
             Change::Source(_) => of(&self.source, record.at),
+            Change::Favorite(_) => of(&self.favorite, record.at),
+            Change::TagAdd(t) => {
+                let frontier = &self.tags[&tag::fold_tag(t)];
+                let live = frontier.iter().any(|w| w.at == record.at);
+                (live, live)
+            }
+            Change::TagRemove(t) => {
+                let frontier = &self.tags[&tag::fold_tag(t)];
+                let live = frontier.iter().any(|w| w.at == record.at);
+                let present = frontier.iter().any(|w| w.value.is_some());
+                (live, live && !present)
+            }
+            Change::Ignore { kind, .. } => of(&self.ignored[kind], record.at),
+            Change::PasswordChanged(_) => of(&self.password_changed, record.at),
             Change::Delete { .. } => {
                 let live = self.alive.iter().any(|w| w.at == record.at);
                 (live, live && self.deleted())
@@ -241,6 +305,26 @@ impl ItemState {
             }
             Change::Name(name) => write(&mut self.name, node, at, name.clone()),
             Change::Source(source) => write(&mut self.source, node, at, source.clone()),
+            Change::Favorite(fav) => write(&mut self.favorite, node, at, *fav),
+            Change::TagAdd(t) => {
+                let frontier = self.tags.entry(tag::fold_tag(t)).or_default();
+                write(frontier, node, at, Some(t.clone()));
+            }
+            Change::TagRemove(t) => {
+                let frontier = self.tags.entry(tag::fold_tag(t)).or_default();
+                write(frontier, node, at, None);
+            }
+            Change::Ignore { kind, at: target } => {
+                write(
+                    self.ignored.entry(kind.clone()).or_default(),
+                    node,
+                    at,
+                    *target,
+                );
+            }
+            Change::PasswordChanged(date) => {
+                write(&mut self.password_changed, node, at, date.clone());
+            }
             Change::Delete { .. } | Change::Restore => {}
         }
         let life = match change {
@@ -259,7 +343,9 @@ pub(crate) fn check(items: &BTreeMap<ItemId, ItemState>, op: &DataOp) -> Result<
             name,
             fields,
             source,
-        } => item::check_create(kind, name.as_deref(), fields, source.as_ref()),
+            tags,
+            ..
+        } => item::check_create_with(kind, name.as_deref(), fields, source.as_ref(), tags),
         DataOp::Edit { item, change } => {
             let state = items.get(item).ok_or(ItemError::NoSuchItem)?;
             item::check_change(&state.kind, change)
@@ -315,6 +401,51 @@ pub(crate) fn check_files(
     Ok(())
 }
 
+/// The tag-count rule for a new local entry: an item whose tag set grows in
+/// this entry holds at most [`tag::MAX_TAGS`] tags once applied. Only local
+/// writes enforce this cap so `apply` remains order-independent across
+/// concurrent additions on different devices.
+pub(crate) fn check_tags(
+    items: &BTreeMap<ItemId, ItemState>,
+    ops: &[DataOp],
+) -> Result<(), ItemError> {
+    let mut after: BTreeMap<ItemId, (BTreeSet<String>, bool)> = BTreeMap::new();
+    for op in ops {
+        let DataOp::Edit { item, change } = op else {
+            continue;
+        };
+        let Some(state) = items.get(item) else {
+            continue;
+        };
+        let (tags, grew) = after.entry(*item).or_insert_with(|| {
+            let folded = state
+                .item(*item)
+                .tags
+                .iter()
+                .map(|t| tag::fold_tag(t))
+                .collect();
+            (folded, false)
+        });
+        match change {
+            Change::TagAdd(t) => {
+                if tags.insert(tag::fold_tag(t)) {
+                    *grew = true;
+                }
+            }
+            Change::TagRemove(t) => {
+                tags.remove(&tag::fold_tag(t));
+            }
+            _ => {}
+        }
+    }
+    for (tags, grew) in after.values() {
+        if *grew && tags.len() > tag::MAX_TAGS {
+            return Err(ItemError::TooManyTags);
+        }
+    }
+    Ok(())
+}
+
 /// Applies a data entry, in causal order, to the item states. Invalid ops
 /// are skipped.
 pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
@@ -332,8 +463,12 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                 name,
                 fields,
                 source,
+                favorite,
+                tags,
             } => {
-                if item::check_create(kind, name.as_deref(), fields, source.as_ref()).is_err() {
+                if item::check_create_with(kind, name.as_deref(), fields, source.as_ref(), tags)
+                    .is_err()
+                {
                     continue;
                 }
                 let id = ItemId::of_create(&node.entry.hash(), index);
@@ -342,6 +477,10 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                     created: Write::new(node, at, ()),
                     name: Vec::new(),
                     source: Vec::new(),
+                    favorite: Vec::new(),
+                    tags: BTreeMap::new(),
+                    password_changed: Vec::new(),
+                    ignored: BTreeMap::new(),
                     fields: BTreeMap::new(),
                     alive: Vec::new(),
                     history: Vec::new(),
@@ -356,6 +495,12 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                 }
                 if source.is_some() {
                     state.change(node, at, &Change::Source(source.clone()));
+                }
+                if *favorite {
+                    state.change(node, at, &Change::Favorite(true));
+                }
+                for tag in tags {
+                    state.change(node, at, &Change::TagAdd(tag.clone()));
                 }
                 items.entry(id).or_insert(state);
             }

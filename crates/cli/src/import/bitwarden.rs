@@ -6,10 +6,9 @@ use deadbolt_core::FieldType;
 use serde_json::Value;
 
 use super::{
-    ATTACHMENT, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, BANK_ACCOUNT, Builder, COLLECTION,
-    DRIVERS_LICENSE, FAVORITE, FOLDER, Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSKEYS,
-    PASSPORT, PASSWORD_HISTORY, Summary, UNKNOWN_TYPE, array, field_name, item_name, month, number,
-    text,
+    ATTACHMENT, BAD_CVV, BAD_EMAIL, BAD_EXPIRY, BAD_OTP, BANK_ACCOUNT, Builder, DRIVERS_LICENSE,
+    Imported, LINKED_FIELD, NO_NUMBER, NO_PRIVATE_KEY, PASSKEYS, PASSPORT, PASSWORD_HISTORY,
+    Summary, UNKNOWN_TYPE, array, field_name, item_name, month, number, scalar, tags, text,
 };
 use crate::protocol::ImportSource;
 
@@ -56,7 +55,14 @@ fn login(item: &Value, summary: &mut Summary) -> Option<Imported> {
         summary.drop_some(PASSKEYS, 1);
     }
     b.custom_fields(item, summary);
-    b.finish("login", item_name(text(item, "name")), summary)
+    let mut mapped = b.finish("login", item_name(text(item, "name")), summary)?;
+    if mapped.fields.contains_key("password") {
+        mapped.password_changed = text(login, "passwordRevisionDate")
+            .or_else(|| text(item, "revisionDate"))
+            .and_then(|ts| ts.get(..10).map(str::to_owned))
+            .filter(|d| deadbolt_core::item::valid_date(d));
+    }
+    Some(mapped)
 }
 
 fn card(item: &Value, summary: &mut Summary) -> Option<Imported> {
@@ -146,9 +152,9 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
     let Some(items) = export.get("items").and_then(Value::as_array) else {
         bail!("not a Bitwarden JSON export: no \"items\" list");
     };
+    let folders = tags::id_map(array(export, "folders"));
+    let collections = tags::id_map(array(export, "collections"));
     let mut summary = Summary::new(ImportSource::Bitwarden);
-    summary.drop_some(FOLDER, array(export, "folders").len());
-    summary.drop_some(COLLECTION, array(export, "collections").len());
     let mut out = Vec::new();
     for item in items {
         let mapped = match number(item, "type") {
@@ -167,12 +173,16 @@ pub fn export(export: &Value) -> Result<(Vec<Imported>, Summary)> {
                 continue;
             }
         };
-        let Some(mapped) = mapped else {
+        let Some(mut mapped) = mapped else {
             continue;
         };
-        if item.get("favorite").and_then(Value::as_bool) == Some(true) {
-            summary.drop_some(FAVORITE, 1);
-        }
+        mapped.favorite = item.get("favorite").and_then(Value::as_bool) == Some(true);
+        let folder_tag = text(item, "folderId").and_then(|id| folders.get(&id).cloned());
+        let collection_tags = array(item, "collectionIds")
+            .iter()
+            .filter_map(scalar)
+            .filter_map(|id| collections.get(&id).cloned());
+        mapped.tags = tags::collect(folder_tag.into_iter().chain(collection_tags));
         summary.drop_some(ATTACHMENT, array(item, "attachments").len());
         if !array(item, "passwordHistory").is_empty() {
             summary.drop_some(PASSWORD_HISTORY, 1);
@@ -449,6 +459,10 @@ mod tests {
                 ("identity", 2)
             ]
         );
+        assert!(github.favorite);
+        assert_eq!(github.tags, ["Work".to_string()].into());
+        assert!(!items[3].favorite);
+        assert_eq!(items[3].tags, ["Finance".to_string()].into());
         assert_eq!(
             lines(&summary),
             [
@@ -458,7 +472,7 @@ mod tests {
                 "skipped 1 empty item",
                 "warning: 1 URL that is not an absolute URL kept as text",
                 "warning: 1 invalid card code (cvv) kept as an extra field",
-                "dropped: 1 favorite, 2 folders, 1 item's password history, 1 linked field",
+                "dropped: 1 item's password history, 1 linked field",
             ]
         );
     }

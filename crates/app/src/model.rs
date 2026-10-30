@@ -3,6 +3,7 @@
 //! `keys.rs` hold each capability's transitions.
 
 mod copy;
+mod favorite;
 mod otp;
 mod selection;
 mod unlock;
@@ -11,6 +12,7 @@ mod unlock;
 mod tests;
 
 pub use copy::{BAR_W, CLEAR_AFTER, Copy};
+pub use favorite::{sort_items, tag_token};
 pub use otp::{CODE_BAR, CODE_SLACK, Otp, group_code, has_code};
 pub use selection::HOLD;
 
@@ -63,6 +65,8 @@ pub struct App {
     /// Why enabling or disabling Touch ID failed, shown in Settings.
     pub touch_id_error: Option<String>,
     pub search: TextEdit,
+    /// Filter inside `⌘K`'s tag picker (`palette::tags`).
+    pub tag_filter: TextEdit,
     pub items: Vec<ItemInfo>,
     pub loaded: bool,
     pub selected: Option<String>,
@@ -89,6 +93,7 @@ pub struct App {
     pub agents: crate::agents::Agents,
     /// Recently Deleted, in the item's place (⇧⌘⌫).
     pub trash: crate::trash::Trash,
+    pub health: crate::health::Health,
     /// Adding, changing or deleting an item.
     pub edit: crate::edit::Edit,
     /// The list's pane in the vault's shell: its width and whether it shows.
@@ -106,6 +111,8 @@ pub struct App {
     generation: u64,
     /// Tells the current `Job::Get` from older ones; also bumped on forgetting.
     seq: u64,
+    /// Tells the newest `Job::Favorite` from older ones.
+    fav_seq: u64,
     /// A copy waiting for its item's values: (seq, field).
     pending_copy: Option<(u64, String)>,
 }
@@ -132,6 +139,7 @@ impl App {
             touch_id_busy: false,
             touch_id_error: None,
             search: TextEdit::new(""),
+            tag_filter: TextEdit::new(""),
             items: Vec::new(),
             loaded: false,
             selected: None,
@@ -149,6 +157,7 @@ impl App {
             activity: crate::activity::Activity::default(),
             agents: crate::agents::Agents::default(),
             trash: crate::trash::Trash::default(),
+            health: crate::health::Health::default(),
             edit: crate::edit::Edit::default(),
             // Narrow enough to leave the toolbar its search field and Lock at
             // the window's smallest.
@@ -159,6 +168,7 @@ impl App {
             clock: 0.0,
             generation: 0,
             seq: 0,
+            fav_seq: 0,
             pending_copy: None,
         }
     }
@@ -183,16 +193,17 @@ impl App {
             installer.stamp_copy(now, tx);
             changed |= installer.poll(now);
         }
-        // The install page, Settings and Recently Deleted belong to the
-        // vault; leaving it closes them.
+        // The install page, Settings, Recently Deleted and Security belong to
+        // the vault; leaving it closes them.
         if self.screen != Screen::Vault
-            && (self.installing() || self.settings_open || self.trash.open)
+            && (self.installing() || self.settings_open || self.trash.open || self.security_open())
         {
             if let Some(installer) = &mut self.installer {
                 installer.open = false;
             }
             self.close_settings();
             self.trash.forget();
+            self.close_security();
             changed = true;
         }
         changed |= self.poll_panel(now, tx);
@@ -253,6 +264,7 @@ impl App {
             } => self.on_imported(seq, applied, result, tx),
             Done::Mirrored { seq, result } => self.on_mirrored(seq, result, tx),
             Done::Saved { seq, result } => self.on_saved(seq, result, tx),
+            Done::Favorited { seq, result } => self.on_favorited(seq, result, tx),
             Done::Removed { seq, result } => self.on_removed(seq, result, tx),
             Done::Generated { seq, result } => self.on_generated(seq, result, tx),
             Done::FileSaved(result) => match result {
@@ -264,6 +276,12 @@ impl App {
             Done::Agents { seq, result } => self.on_agents(seq, result, tx),
             Done::Trash { seq, result } => self.on_trash(seq, result, tx),
             Done::TrashItem { seq, result } => self.on_trash_item(seq, result, tx),
+            Done::Health { seq, result } => self.on_health(seq, result, tx),
+            Done::BreachChecksSet {
+                seq,
+                enabled,
+                result,
+            } => self.on_breach_checks_set(seq, enabled, result, tx),
             Done::Reported => {}
             Done::Changed(change) => self.on_change(change, tx),
             Done::WatchLost => self.on_agent_gone(tx),
@@ -301,6 +319,7 @@ impl App {
                 self.on_activity_changed();
                 self.on_agents_changed();
             }
+            Change::Health => self.request_health(false),
             Change::Items { vault } if self.shows(&vault) => {
                 self.refresh();
                 self.on_trash_changed();
@@ -370,6 +389,9 @@ impl App {
         let before = self.selected.clone();
         self.items = items;
         self.loaded = true;
+        if self.panel.is_none() {
+            self.request_health(false);
+        }
         self.edit_items_landed();
         self.keep_selection_visible();
         if before.is_some() && self.selected != before {
@@ -523,12 +545,17 @@ impl App {
     pub(crate) fn forget_items(&mut self) {
         self.generation += 1;
         self.seq += 1;
+        self.fav_seq += 1;
         self.set_detail(None);
         self.forget_pages();
+        for item in &mut self.items {
+            forget(item);
+        }
         self.items.clear();
         self.loaded = false;
         self.selected = None;
         self.search = TextEdit::new("");
+        self.tag_filter = TextEdit::new("");
         self.nav = crate::keys::Nav::default();
         self.pending_copy = None;
         self.notice = None;
@@ -538,6 +565,7 @@ impl App {
         self.activity.forget();
         self.agents.forget();
         self.trash.forget();
+        self.health.forget();
     }
 
     /// Replaces the shown values, wiping the old ones. Revealed fields stay
@@ -584,10 +612,13 @@ impl App {
     }
 }
 
-/// Wipes an item's values.
+/// Wipes an item's values and tags.
 pub fn forget(item: &mut ItemInfo) {
     for FieldInfo { value, .. } in &mut item.fields {
         value.zeroize();
+    }
+    for tag in &mut item.tags {
+        tag.zeroize();
     }
 }
 

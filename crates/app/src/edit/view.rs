@@ -15,7 +15,7 @@ use rune_kit::{
 
 use super::{Conflict, Delete, Field, Form, Input, LENGTHS, editable, type_matches};
 use crate::model::{App, title_case};
-use crate::view::theme::{PLUS, REGENERATE, TRASH, kind_icon, kind_name};
+use crate::view::theme::{PLUS, REGENERATE, STAR, STAR_FILL, TRASH, kind_icon, kind_name};
 use crate::view::{Notice, Severity};
 use crate::view::{replace, reveal_button, scroll_col};
 
@@ -32,8 +32,16 @@ const FADE: Spring = Spring::new(0.2, 0.0);
 /// The detail pane while a form is open.
 pub fn form(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
     let mut fields = col().key("fields").w_full().gap(14.0);
+    let mut tags_placed = false;
     for i in 0..f.fields.len() {
+        if !tags_placed && f.kind != "note" && f.fields[i].name == "notes" {
+            fields = fields.child(super::tags::field(s, k, f, layer));
+            tags_placed = true;
+        }
         fields = fields.child(field(s, k, f, i));
+    }
+    if !tags_placed {
+        fields = fields.child(super::tags::field(s, k, f, layer));
     }
     let form = col()
         .key("form")
@@ -73,19 +81,40 @@ fn head(s: &App, k: &Kit, f: &Form, layer: &mut Vec<El>) -> El {
         .width(None)
         .invalid(invalid)
         .on_edit(|s: &mut App| s.name_mut())
-        .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line))
+        .on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Line, tx))
         .on_change(|s: &mut App, _| s.form_changed())
         .on_submit(|s: &mut App, _| s.save());
     let name = quiet(k, name.build(k), &f.name, invalid)
         .key("name")
-        .label("Name");
+        .label("Name")
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0);
+    let fav_label = if f.favorite { "Unfavorite" } else { "Favorite" };
+    let star = IconButton::new(if f.favorite { &STAR_FILL } else { &STAR })
+        .variant(IconButtonVariant::GhostMuted)
+        .label(fav_label)
+        .help(fav_label)
+        .shortcut("⌘D")
+        .disabled(f.saving)
+        .on_press(|s: &mut App| s.toggle_form_favorite())
+        .build(k)
+        .key("form-favorite");
     let mut head = col().key("head").w_full().gap(8.0);
     if f.is_new() {
         // Spaced from the name as the fields are from each other.
         head = head.child(type_row(s, k, f, layer).mb(6.0));
     }
-    head.child(name)
-        .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
+    head.child(
+        row()
+            .key("name-row")
+            .w_full()
+            .gap(6.0)
+            .center_y()
+            .child(name)
+            .child(star),
+    )
+    .children(f.problem_for("name").map(|p| problem(k, "name-problem", p)))
 }
 
 /// The New Item form's type: one row with the type's icon, name and a
@@ -395,7 +424,8 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                             .invalid(invalid)
                             .on_edit(move |s: &mut App| s.input_mut(i))
                             .on_key(move |s: &mut App, ev, tx| {
-                                s.form_key(ev, Field::SecretLines) || s.copy_secret_input(i, ev, tx)
+                                s.form_key(ev, Field::SecretLines, tx)
+                                    || s.copy_secret_input(i, ev, tx)
                             })
                             .on_change(|s: &mut App, _| s.form_changed())
                             .on_submit(|s: &mut App, _| s.save())
@@ -417,12 +447,12 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         let area = if input.lines {
             // Rune submits a plain ⏎ in a text area; here it breaks the line.
             area.auto_grow(2, 6)
-                .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Lines))
+                .on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Lines, tx))
                 .on_change(|s: &mut App, _| s.form_changed())
                 .on_submit(move |s: &mut App, _| s.break_line(i))
         } else {
             area.auto_grow(1, 4)
-                .on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Wrapped))
+                .on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Wrapped, tx))
                 .on_change(move |s: &mut App, _| s.wrapped_changed(i))
         };
         quiet(k, area.build(k), &input.edit, invalid).label(named.clone())
@@ -437,12 +467,12 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         if input.secret() {
             t = t
                 .on_key(move |s: &mut App, ev, tx| {
-                    s.form_key(ev, Field::Line) || s.copy_secret_input(i, ev, tx)
+                    s.form_key(ev, Field::Line, tx) || s.copy_secret_input(i, ev, tx)
                 })
                 .text_style(k.ty.mono)
                 .trailing(secret_actions(k, input, i, generates, f.saving));
         } else {
-            t = t.on_key(|s: &mut App, ev, _| s.form_key(ev, Field::Line));
+            t = t.on_key(|s: &mut App, ev, tx| s.form_key(ev, Field::Line, tx));
         }
         let built = quiet(k, t.build(k), &input.edit, invalid).label(named.clone());
         if generates {
@@ -464,8 +494,11 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         .gap(6.0)
         .child(control);
     // An edit keeps its password until asked for a new one; then the controls show.
-    if generates && (f.is_new() || f.generated > 0) {
+    if generates && (f.is_new() || f.fixing || f.generated > 0) {
         value = value.child(generator(s, k, f.saving));
+        if f.has_base_password() {
+            value = value.child(fix_actions(s, k, f));
+        }
     }
     if let Some(p) = problem_text {
         value = value.child(problem(k, "problem", p));
@@ -486,7 +519,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
 
 /// A focused field keeps a neutral edge instead of the kit's blue ring;
 /// the caret says where typing goes.
-fn quiet(k: &Kit, field: El, edit: &rune::TextEdit, invalid: bool) -> El {
+pub(super) fn quiet(k: &Kit, field: El, edit: &rune::TextEdit, invalid: bool) -> El {
     if edit.focused && !invalid {
         field.outline(1.0, 0.0, k.c.border_strong)
     } else {
@@ -569,6 +602,42 @@ fn generator(s: &App, k: &Kit, saving: bool) -> El {
         )
 }
 
+fn fix_actions(s: &App, k: &Kit, f: &Form) -> El {
+    let mut bar = row()
+        .key("fix-actions")
+        .w_full()
+        .ml(-8.0)
+        .gap(4.0)
+        .center_y();
+    bar = bar.child(
+        Button::new("Copy current password")
+            .variant(ButtonVariant::GhostMuted)
+            .control_size(ControlSize::Small)
+            .disabled(f.saving)
+            .help("Copy current password")
+            .shortcut("⇧⌘C")
+            .on_press_tx(|s: &mut App, tx| {
+                s.copy_base_password(tx);
+            })
+            .build(k)
+            .key("copy-current"),
+    );
+    if let Some(site_label) = s.fix_site_label(f) {
+        bar = bar.child(
+            Button::new(site_label)
+                .variant(ButtonVariant::GhostMuted)
+                .control_size(ControlSize::Small)
+                .disabled(f.saving)
+                .help("Open change-password page")
+                .shortcut("⌘O")
+                .on_press_tx(|s: &mut App, tx| s.open_fix_site(tx))
+                .build(k)
+                .key("open-fix-site"),
+        );
+    }
+    bar
+}
+
 /// Every segment disabled, which also drops their presses (Rune's
 /// `SegmentedControl` has no `disabled` of its own).
 fn disable(mut control: SegmentedControl, segments: usize, disabled: bool) -> SegmentedControl {
@@ -580,7 +649,7 @@ fn disable(mut control: SegmentedControl, segments: usize, disabled: bool) -> Se
     control
 }
 
-fn problem(k: &Kit, key: &str, message: &str) -> El {
+pub(super) fn problem(k: &Kit, key: &str, message: &str) -> El {
     text(message.to_owned())
         .key(key)
         .role("alert")
@@ -640,7 +709,18 @@ fn foot(k: &Kit, f: &Form) -> El {
 /// While its confirm shows, the delete button is the confirm.
 pub fn item_actions(s: &App, k: &Kit) -> El {
     let ready = s.detail.is_some();
-    let mut actions = row().key("item-actions").gap(4.0).center_y();
+    let fav = s.selected_item().is_some_and(|i| i.favorite);
+    let fav_label = if fav { "Unfavorite" } else { "Favorite" };
+    let mut actions = row().key("item-actions").gap(4.0).center_y().child(
+        IconButton::new(if fav { &STAR_FILL } else { &STAR })
+            .variant(IconButtonVariant::GhostMuted)
+            .label(fav_label)
+            .help(fav_label)
+            .shortcut("⌘D")
+            .on_press_tx(|s: &mut App, tx| s.toggle_favorite(tx))
+            .build(k)
+            .key("favorite"),
+    );
     if s.edit.delete.is_none() {
         actions = actions.child(
             IconButton::new(&TRASH)
