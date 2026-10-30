@@ -14,6 +14,8 @@ const runs = Number(arg("--runs") ?? 5)
 const sizes = (arg("--sizes") ?? "50,500,2000").split(",").map(Number)
 if (!Number.isInteger(runs) || runs < 1) throw new Error("--runs must be a positive integer")
 if (!sizes.every((n, i) => Number.isInteger(n) && n > (sizes[i - 1] ?? 0))) throw new Error("--sizes must be positive, ascending integers")
+const manifest = JSON.parse(await readFile(join(dist, "manifest.json"), "utf8"))
+if (manifest.permissions?.includes("nativeMessaging") || !manifest.permissions?.includes("offscreen")) throw new Error("--dist must be a standalone build; native-host builds are forbidden")
 const root = await mkdtemp(join(tmpdir(), "db-perf-"))
 const ID = "jhocodkhpifjndffenppfmdkmiolngal"
 const base = `chrome-extension://${ID}`
