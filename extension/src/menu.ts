@@ -55,6 +55,8 @@ let continueAs = false
 let active = 0
 let busy = false
 let mode: SurfaceMode = "accounts"
+let universal = false
+let universalExpanded = false
 /** When the user last pressed a key or pointer in the menu: what a pick is judged at. */
 let pressedAt = -Infinity
 const dwell = new Dwell(500)
@@ -122,7 +124,7 @@ function report(grow = 0) {
   const pill = document.querySelector<HTMLElement>(".pill")
   // The pill hugs its content: it is the whole pill, padding included.
   const offer = mode === "save" ? offerSize() : null
-  const width = mode === "pill" && pill ? Math.ceil(pill.getBoundingClientRect().width + grow) : offer ? offer.width : undefined
+  const width = mode === "pill" && pill ? Math.ceil(pill.getBoundingClientRect().width + grow) : offer ? offer.width : universal ? 320 : undefined
   const key = `${mode}:${height}:${width}`
   if (key === reported) return
   reported = key
@@ -154,6 +156,8 @@ function row(item: Row, i: number): HTMLElement {
       : "provider" in item
         ? // "Sign in with Google · kit@gmail.com": the provider's mark and name, then the account it uses.
           [providerMark(item.provider.signIn!.provider), `Sign in with ${providerOf(item.provider.signIn!.provider).name}`, item.provider.signIn!.account || item.provider.title]
+        : universal
+        ? [loginTile(item.account, i), `Sign in${item.account.username ? ` as ${item.account.username}` : ` to ${item.account.title}`}`, "Fills and submits this sign-in"]
         : continueAs && item.account.username
         ? [loginTile(item.account, i), `Continue as ${item.account.username}`, item.account.title]
         : [loginTile(item.account, i), item.account.title, focused === "otp" ? "Fill the current code" : item.account.username || "No username"]
@@ -453,6 +457,7 @@ function showStatus(status: Status) {
  * the check.
  */
 async function pick(i: number) {
+  if (universal && accounts.length > 1 && !universalExpanded) return expandUniversal()
   const a = accounts[i]
   if (!a || busy || mode !== "accounts" || !matches(a, query)) return
   if (!dwell.settled(pressedAt)) {
@@ -472,16 +477,16 @@ async function pick(i: number) {
   highlightEl.classList.remove("pressing")
   for (const el of Array.from(rowsEl.querySelectorAll(".avatar.busy"))) el.classList.add("spinning")
   const passkey = "passkey" in a
-  const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, passkey ? "Signing in…" : "Filling…")
-  announce(passkey ? "Signing in…" : "Filling…")
+  const label = fold(rowsEl.querySelectorAll<HTMLElement>("button.row")[i]?.querySelector<HTMLElement>(".avatar") ?? null, passkey || universal ? "Signing in…" : "Filling…")
+  announce(passkey || universal ? "Signing in…" : "Filling…")
   const ref = "identity" in a ? a.identity.ref : "card" in a ? a.card.ref : passkey ? a.passkey.ref : "account" in a ? a.account.ref : ""
   const reply = await send<PickReply>("generate" in a ? { type: "db:menu-generate", token } : { type: "db:menu-pick", token, ref })
   busy = false
   if (reply?.ok) {
     // A passkey's sign-in closes the surface from the background once it's through.
     if (passkey) return
-    settle(label, "Filled", true)
-    announce("Filled")
+    settle(label, universal ? "Continuing sign-in" : "Filled", true)
+    announce(universal ? "Continuing sign-in" : "Filled")
     return void setTimeout(() => done(), FILLED_STAYS_MS + 450)
   }
   const message = reply?.message || "Couldn't fill. Try again."
@@ -729,6 +734,8 @@ function show(reply: MenuLoadReply) {
   if (mode !== "accounts") return
   if (reply.kind === "status") return showStatus(reply.status)
   if (reply.kind === "forms") return showForms(reply)
+  universal = reply.kind === "accounts" && reply.universal === true
+  surface.classList.toggle("universal", universal)
   // A new-password box offers one row, a generated password; otherwise the logins.
   // A "Sign in with …" login shows as that; one with a password too gets its fill row first.
   accounts =
@@ -765,7 +772,32 @@ function show(reply: MenuLoadReply) {
   const left = visible()
   if (left.length && !left.includes(active)) active = left[0]
   highlight(false)
+  if (universal) showUniversal()
   if (query) port?.postMessage({ type: "db:matches", count: left.length })
+}
+
+function expandUniversal() {
+  universalExpanded = true
+  surface.classList.add("expanded")
+  rowsEl.replaceChildren(...accounts.map(row))
+  highlight(false)
+  report()
+}
+
+function showUniversal() {
+  if (accounts.length > 1 && !universalExpanded) {
+    const choose = h("button", { class: "row", type: "button" }, h("span", { class: "title" }, "Sign in with Deadbolt"))
+    choose.addEventListener("click", (e) => { if (e.isTrusted) expandUniversal() })
+    rowsEl.replaceChildren(choose)
+    highlightEl.hidden = true
+  }
+  surface.querySelector(".signin-dismiss")?.remove()
+  const dismiss = h("button", { class: "signin-dismiss", type: "button", title: "Not now for this site (30 minutes)", "aria-label": "Not now for this site" }, "×")
+  dismiss.addEventListener("click", async (e) => {
+    if (!e.isTrusted || (e.detail === 0 && !entry.entered) || busy || !dwell.settled(pressedAt)) return
+    if (await confirmPick(dwell, pressedAt)) await send({ type: "db:menu-dismiss", token })
+  })
+  surface.append(dismiss)
 }
 
 // ---- Addresses and cards ------------------------------------------------------------

@@ -11,8 +11,8 @@ import type { Account, Change, FieldRules, FormCard, FormField as HostField, For
 export type FieldRole = "username" | "email" | "phone" | "password" | "new-password" | "otp" | "captcha"
 export type SurfaceKind = "login" | "signup" | "change-password" | "reset" | "mfa"
 /** What Deadbolt's in-page surface shows: the account list, a pill on a field or at the top right, or the save offer. */
-export type SurfaceMode = "accounts" | "pill" | "save"
-export const SURFACE_MODES: SurfaceMode[] = ["accounts", "pill", "save"]
+export type SurfaceMode = "accounts" | "pill" | "save" | "signin"
+export const SURFACE_MODES: SurfaceMode[] = ["accounts", "pill", "save", "signin"]
 
 /** Roles the inline menu opens on; on a new-password box, only in sign-up and change-password forms. */
 export const MENU_ROLES: FieldRole[] = ["username", "email", "phone", "password", "otp", "new-password"]
@@ -188,6 +188,9 @@ export type ToBackground =
   | { type: "db:menu-resize"; token: string; height: number; width?: number; mode?: SurfaceMode }
   /** The save offer in the page was answered. "later" only puts the surface away: the toolbar keeps the offer. */
   | { type: "db:surface-choose"; token: string; choice: OfferChoice }
+  | { type: "db:signin-check" }
+  | { type: "db:signin-signout" }
+  | { type: "db:signin-stop" }
   // popup
   | { type: "db:popup-load"; tabId: number }
   | { type: "db:popup-fill"; tabId: number; ref: string }
@@ -219,7 +222,7 @@ export type ToContent =
    * agent once the page has it. `notice`: a sign-in session's step filled
    * without a pick shows a pill on the field, with this token for its frame.
    */
-  | { type: "db:fill"; values: FillValues; form: number; approval: string; generated?: string; notice?: string }
+  | { type: "db:fill"; values: FillValues; form: number; approval: string; generated?: string; notice?: string; automatic?: true }
   /** The agent kept the generated password filled under this id: a submit names it by id from now on. */
   | { type: "db:generated"; generated: string }
   /**
@@ -274,6 +277,10 @@ export type ToContent =
   | { type: "db:menu-gone" }
   /** Open the save offer in the page, with this token for its frame (see bg/save.ts). */
   | { type: "db:surface"; token: string }
+  | { type: "db:signin-offer"; token: string }
+  | { type: "db:auth-probe"; fresh?: boolean }
+  | { type: "db:signin-go"; action: string }
+  | { type: "db:signin-submit"; form: number }
   // Can the user see a frame's form? (see shownInPage)
   /**
    * To the frame above: where those boxes show in it, through the element
@@ -383,7 +390,7 @@ export type MenuLoadReply =
    * opens the icon store from here (see ui/icon-store.ts). Off, rows show no icon.
    * `reveal`: those hosts whose icon no menu has dithered in yet this browser session.
    */
-  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
+  | { kind: "accounts"; site: string; accounts: Account[]; focused: FieldRole; passkeys?: MenuPasskey[]; continueAs?: boolean; universal?: boolean; icons?: Record<string, StoredIcon | null>; reveal?: string[] }
   | { kind: "generate"; site: string }
   /**
    * An identity or card field's menu: the identities or cards to pick from.

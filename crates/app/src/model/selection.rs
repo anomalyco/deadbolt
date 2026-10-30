@@ -122,6 +122,14 @@ impl App {
     /// the detail (username, expiry, SSH key comment, identity email), the
     /// type ("ssh", "SSH key") or the short id.
     pub fn visible(&self) -> Vec<&ItemInfo> {
+        self.visible_at()
+            .into_iter()
+            .map(|at| &self.items[at])
+            .collect()
+    }
+
+    /// [`App::visible`] as positions in `items`.
+    pub fn visible_at(&self) -> Vec<usize> {
         let words: Vec<String> = self
             .search
             .text
@@ -130,7 +138,8 @@ impl App {
             .collect();
         self.items
             .iter()
-            .filter(|item| {
+            .enumerate()
+            .filter(|(_, item)| {
                 let hay = [
                     Some(item.label.as_str()),
                     item.detail.as_deref(),
@@ -142,6 +151,7 @@ impl App {
                     .iter()
                     .all(|w| hay.iter().flatten().any(|h| contains_folded(h, w)))
             })
+            .map(|(at, _)| at)
             .collect()
     }
 
