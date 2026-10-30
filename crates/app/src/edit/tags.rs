@@ -228,12 +228,13 @@ impl App {
             if plain && matches!(ev.key, Key::Enter | Key::Tab) {
                 return self.commit_tag_input();
             }
-            if plain && ev.key == Key::Escape && !found.is_empty() {
-                if let Some(form) = self.edit.form.as_mut()
-                    && form.tag_active.take().is_some()
-                {
-                    return true;
-                }
+            if plain
+                && ev.key == Key::Escape
+                && !found.is_empty()
+                && let Some(form) = self.edit.form.as_mut()
+                && form.tag_active.take().is_some()
+            {
+                return true;
             }
         }
         self.form_key(ev, Field::Line)

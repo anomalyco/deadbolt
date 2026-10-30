@@ -153,10 +153,9 @@ where
         for tag in item_tags {
             for (prefix, exact) in ancestors(tag).map(|p| (p, p.len() == tag.len())) {
                 let key = fold_tag(prefix);
-                let entry =
-                    counts
-                        .entry(key.clone())
-                        .or_insert_with(|| (prefix.to_string(), 0, exact));
+                let entry = counts
+                    .entry(key.clone())
+                    .or_insert_with(|| (prefix.to_string(), 0, exact));
                 if exact && !entry.2 {
                     entry.0 = prefix.to_string();
                     entry.2 = true;
@@ -229,8 +228,8 @@ impl Query {
             if trimmed.is_empty() {
                 continue;
             }
-            if trimmed.starts_with('#') {
-                let inner = trimmed[1..].trim().trim_matches('"');
+            if let Some(rest) = trimmed.strip_prefix('#') {
+                let inner = rest.trim().trim_matches('"');
                 out.push_tag(inner);
             } else {
                 out.push_token(trimmed);

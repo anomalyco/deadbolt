@@ -293,9 +293,7 @@ fn enforces_tag_limits_and_ranks_favorites_first_in_autofill_and_forms() {
     let r_plain = autofill::rank("https://acme.com", &a.vault.item(&plain_login).unwrap(), 99);
     let r_fav = autofill::rank("https://acme.com", &a.vault.item(&fav_login).unwrap(), 0);
     assert!(r_fav < r_plain, "favorite outranks recent non-favorite");
-    assert!(
-        listing::searchable(&a.vault.item(&fav_login).unwrap()).contains(&"work".to_string())
-    );
+    assert!(listing::searchable(&a.vault.item(&fav_login).unwrap()).contains(&"work".to_string()));
 
     // Forms: favorite card comes ahead of alphabetically earlier card.
     a.vault
@@ -303,7 +301,10 @@ fn enforces_tag_limits_and_ranks_favorites_first_in_autofill_and_forms() {
             &a.secret,
             "card",
             Some("Amex".into()),
-            [("number".into(), Field::new(FieldType::Secret, "378282246310005"))],
+            [(
+                "number".into(),
+                Field::new(FieldType::Secret, "378282246310005"),
+            )],
         )
         .unwrap();
     a.vault
@@ -311,7 +312,10 @@ fn enforces_tag_limits_and_ranks_favorites_first_in_autofill_and_forms() {
             &a.secret,
             "card",
             Some("Visa".into()),
-            [("number".into(), Field::new(FieldType::Secret, "4242424242424242"))],
+            [(
+                "number".into(),
+                Field::new(FieldType::Secret, "4242424242424242"),
+            )],
             true,
             [],
         )

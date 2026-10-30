@@ -10,6 +10,7 @@ use std::cell::Cell;
 use deadbolt_core::item::{FieldType, file_parts, file_size};
 use deadbolt_core::listing::{self, detail, input_field, label, searchable};
 use deadbolt_core::passkeys::private;
+use deadbolt_core::tag::{MAX_TAGS, fold_tag, normalize_tag};
 use deadbolt_core::totp::Totp;
 use deadbolt_core::{DataOp, Item, Vault, schema, schemas};
 use serde_json::{Value, json};
@@ -54,12 +55,56 @@ fn summary(item: &Item, vault: &Vault) -> Value {
         row["detail"] = json!(detail);
     }
     row["search"] = json!(searchable(item));
+    row["favorite"] = json!(item.favorite);
+    row["tags"] = json!(item.tags.iter().collect::<Vec<_>>());
     if let Some(primary) = listing::primary_field(&item.kind)
         .filter(|f| item.fields.contains_key(*f) && !private(item, f))
     {
         row["primary"] = json!(primary);
     }
     row
+}
+
+pub(super) fn parse_tags(raw: Option<&Value>) -> Result<Option<Vec<String>>> {
+    let Some(raw) = raw else {
+        return Ok(None);
+    };
+    let list = raw.as_array().ok_or(Error::Protocol("tags is a list"))?;
+    let mut seen = std::collections::BTreeMap::new();
+    for entry in list {
+        let s = entry.as_str().ok_or(Error::Protocol("tags are text"))?;
+        let clean = normalize_tag(s).ok_or(Error::Protocol(
+            "A tag is 1 to 128 characters, with non-empty / parts",
+        ))?;
+        seen.insert(fold_tag(&clean), clean);
+    }
+    if seen.len() > MAX_TAGS {
+        return Err(Error::Protocol("An item can have at most 64 tags"));
+    }
+    Ok(Some(seen.into_values().collect()))
+}
+
+pub(super) fn tag_ops(item: &Item, favorite: Option<bool>, tags: Option<&[String]>) -> Vec<DataOp> {
+    let mut ops = Vec::new();
+    if let Some(fav) = favorite
+        && item.favorite != fav
+    {
+        ops.push(DataOp::favorite(item.id, fav));
+    }
+    if let Some(tags) = tags {
+        for tag in tags {
+            if !item.tags.contains(tag) {
+                ops.push(DataOp::tag_add(item.id, tag.clone()));
+            }
+        }
+        for existing in &item.tags {
+            let ef = fold_tag(existing);
+            if !tags.iter().any(|t| fold_tag(t) == ef) {
+                ops.push(DataOp::tag_remove(item.id, existing.clone()));
+            }
+        }
+    }
+    ops
 }
 
 /// `device-items`: every item but deleted ones.
@@ -215,11 +260,23 @@ pub(super) fn save(body: &Value) -> Result<Value> {
             })
             .collect::<Result<_>>()?,
     };
+    let favorite = match body.get("favorite") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(b)) => Some(*b),
+        Some(_) => return Err(Error::Protocol("favorite is true or false")),
+    };
+    let tags = parse_tags(body.get("tags"))?;
     let reply = state().with(|s| {
         let mut staged = s.vault.clone();
         let (id, created) = if body.get("ref").is_some() {
             let item = find(s, body)?;
-            if !editable(&item.kind) {
+            let meta_only = name.is_none()
+                && remove.is_empty()
+                && body
+                    .get("fields")
+                    .and_then(Value::as_array)
+                    .is_none_or(Vec::is_empty);
+            if !editable(&item.kind) && !meta_only {
                 return Err(Error::Protocol(
                     "This kind of item can't be changed here; delete it instead",
                 ));
@@ -238,6 +295,7 @@ pub(super) fn save(body: &Value) -> Result<Value> {
             if let Some(name) = name {
                 ops.push(DataOp::name(item.id, Some(name).filter(|n| !n.is_empty())));
             }
+            ops.extend(tag_ops(&item, favorite, tags.as_deref()));
             if !ops.is_empty() {
                 staged.write(&s.secret, ops)?;
             }
@@ -248,8 +306,14 @@ pub(super) fn save(body: &Value) -> Result<Value> {
                 return Err(Error::Protocol("Deadbolt can't add that kind of item"));
             }
             let fields = inputs(kind, None, body)?;
-            let (id, _) =
-                staged.create_item(&s.secret, kind, name.filter(|n| !n.is_empty()), fields)?;
+            let (id, _) = staged.create_item_with(
+                &s.secret,
+                kind,
+                name.filter(|n| !n.is_empty()),
+                fields,
+                favorite.unwrap_or(false),
+                tags.unwrap_or_default(),
+            )?;
             (id, true)
         };
         s.commit(staged)?;

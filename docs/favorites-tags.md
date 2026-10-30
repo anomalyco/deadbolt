@@ -93,9 +93,9 @@ change  = 0x00 name:str field      Set
         | 0x02 opt_str             Name
         | 0x03                     Delete
         | 0x04 opt_source          Source
-        | 0x05 fav:u8              Favorite (0x00 false | 0x01 true)
-        | 0x06 tag:str             TagAdd
-        | 0x07 tag:str             TagRemove
+        | 0x07 fav:u8              Favorite (0x00 false | 0x01 true; 0x05..=0x06 reserved for delete/restore)
+        | 0x08 tag:str             TagAdd
+        | 0x09 tag:str             TagRemove
 ```
 
 Canonical decoding (`Entry::decode`) enforces one valid encoding per entry:
@@ -316,13 +316,13 @@ New code goes into focused capability modules with **no `mod.rs`**, keeping touc
 | `crates/core/src/tag.rs` *(new)* | 0 -> ~180 | Tag normalization, `valid_tag`, `/` hierarchy matching, `Query` (`#tag`, `#"…"`, `is:favorite`), `tag_counts` |
 | `crates/core/src/tag_tests.rs` *(new)* | 0 -> ~260 | Unit, CRDT convergence, canonical wire, and `proptest` order-independence suites (`core/src/tests.rs` is already 1,699 lines and is not grown) |
 | `crates/core/src/item.rs` | 1,203 / 1,203 | Only add `InvalidTag` / `TooManyTags` variants and 6-line calls to `crate::tag` in `check_create` / `check_change` |
-| `crates/core/src/entry.rs` | 600 / 769 | Add `Create` tag `0x03` and `Change::{Favorite, TagAdd, TagRemove}` (`0x05..=0x07`); move inline `mod tests` to `entry_tests.rs` so `entry.rs` stays ~650 lines |
+| `crates/core/src/entry.rs` | 600 / 769 | Add `Create` tag `0x03` and `Change::{Favorite, TagAdd, TagRemove}` (`0x07..=0x09`); move inline `mod tests` to `entry_tests.rs` so `entry.rs` stays ~650 lines |
 | `crates/core/src/data.rs` | 337 / 337 | Add `favorite` and `tags` frontiers on `ItemState` and `check_tags` (~410 lines) |
 | `crates/core/src/autofill.rs`, `forms.rs` | 144, 250 | 3-line `favorite` rank key in each |
-| `crates/client/src/protocol/items.rs` *(new, pure move first)* | 0 -> ~440 | Move item, import, and mirror structs out of `protocol.rs` (1,650 non-test lines -> ~1,230) and inline tests into `protocol_tests.rs`; then add `favorite`, `tags`, `TagCount` |
-| `crates/cli/src/import/tags.rs` *(new)* | 0 -> ~80 | Rename `import/mod.rs` -> `import.rs` (pure move, no `mod.rs`), then add shared tag/folder cleanup for `onepassword.rs` (874 non-test lines), `bitwarden.rs`, `csv.rs`, and `op.rs` |
-| `crates/cli/src/agent/items.rs` | 592 / 1,317 | Split inline `mod tests` (725 lines) to `agent/items_tests.rs`; add tag/favorite list, filter, and set logic (~660 non-test lines) |
-| `crates/app/src/vault.rs` | 427 / 427 | Rename `vault/mod.rs` -> `vault.rs` (pure move, no `mod.rs`); add 12 pt star glyph on favorite rows (~445 lines) |
+| `crates/client/src/protocol/reports.rs`, `protocol/tests.rs` | 0 -> ~670 | Extract import/mirror report structs and protocol tests out of `protocol.rs`; add `favorite`, `tags`, `TagCount` |
+| `crates/cli/src/import/tags.rs` *(new)* | 0 -> ~40 | Rename `import/mod.rs` -> `import.rs` (no `mod.rs`), then add shared tag/folder cleanup for `onepassword.rs`, `bitwarden.rs`, `csv.rs`, and `op.rs` |
+| `crates/cli/src/agent/items.rs` | 592 / 1,317 | Split inline `mod tests` to `agent/items_tests.rs`; add tag/favorite list, filter, and set logic (~765 lines) |
+| `crates/app/src/vault/mod.rs` | 427 / 427 | Add quiet star glyph on favorite rows (~441 lines; kept in `vault/mod.rs` to avoid rename conflict with `recently-deleted`) |
 | `crates/app/src/model/favorite.rs` *(new)* | 0 -> ~90 | `App::toggle_favorite`, optimistic list resort, `App::filter_by_tag` (keeps `model.rs` at 650 lines and `edit.rs` at 909 lines untouched by star logic) |
 | `crates/app/src/edit/tags.rs` *(new)* | 0 -> ~220 | Tag chip editor, input, and existing-tag autocomplete `Popover` (keeps `edit/view.rs` at ~755 lines and `edit.rs` from growing) |
 | `crates/app/src/palette/tags.rs` *(new)* | 0 -> ~140 | `Filter by tag…` view inside `⌘K` (`palette.rs` + `palette/tags.rs`, no `mod.rs`) |

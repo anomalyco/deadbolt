@@ -104,7 +104,9 @@ fn rows(s: &super::Loaded, rp: Option<&str>) -> Vec<Value> {
                 && rp.is_none_or(|rp| passkeys::matches(item, rp))
         })
         .collect();
-    items.sort_by(|a, b| (value(a, "username"), a.id).cmp(&(value(b, "username"), b.id)));
+    items.sort_by(|a, b| {
+        (!a.favorite, value(a, "username"), a.id).cmp(&(!b.favorite, value(b, "username"), b.id))
+    });
     items.iter().map(|item| metadata(item, s)).collect()
 }
 
