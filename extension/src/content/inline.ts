@@ -183,6 +183,18 @@ let lastRect = ""
 let lastGeometry = ""
 let scaleVisible = false
 let scaleObserver: ResizeObserver | null = null
+let placementObserver: MutationObserver | null = null
+let placementVersion = 0
+let placementChangedAt = -Infinity
+let placementAncestors: Node[] = []
+/** Paint-time evidence (see watchPaint): the host was last drawn where it was written. */
+let paintObserver: IntersectionObserver | null = null
+let paintKey = ""
+let paintSeen = true
+/** Whether the scale observer has given a verdict yet: a later return to "visible" is a move back. */
+let scaleKnown = false
+/** The last host toggle handled: its own listener and the window's both hear it. */
+let lastToggle: Event | null = null
 /** Where a frame's field is in this page now (see anchorBox). */
 function boxNow(): DOMRect | null {
   if (!anchorBox) return null
@@ -391,11 +403,119 @@ function retarget(duration: number) {
   lastTarget = to
 }
 
+/** Never let a restoring write erase evidence of a late page restyle. */
+function placementChanged() {
+  placementVersion++
+  placementChangedAt = performance.now()
+  tellMoved()
+  tellGeometry()
+}
+
+function placed(): boolean {
+  if (!host || !written) return false
+  const r = host.getBoundingClientRect()
+  return (["left", "top", "width", "height"] as const).every((k) => Math.abs(r[k] - written![k]) <= 2)
+}
+
+function placementChanges(records: MutationRecord[]) {
+  if (!host || !records.length) return
+  const changed = records.some((r) => r.target === host || [...r.addedNodes, ...r.removedNodes].some((n) => within(host, n)))
+  // Ancestor transforms don't move a top-layer box, but inherited zoom can.
+  // Read it in the mutation microtask, before a later task can restore it;
+  // unrelated theme/scroll-lock classes mustn't keep a dialog menu unsettled.
+  const zoom = (host as HTMLElement & { currentCSSZoom?: number }).currentCSSZoom
+  if (changed || (!held && (!placed() || typeof zoom !== "number" || Math.abs(zoom - 1) >= 0.001))) placementChanged()
+}
+
+/** Watch only the rendered ancestry, not unrelated style churn in the page. */
+function watchPlacement() {
+  if (!host || !placementObserver) return
+  const ancestors: Node[] = []
+  for (let n: Node | null = host; n; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) ancestors.push(n)
+  if (ancestors.length === placementAncestors.length && ancestors.every((n, i) => n === placementAncestors[i])) return
+  placementChanges(placementObserver.takeRecords())
+  placementObserver.disconnect()
+  placementAncestors = ancestors
+  for (const n of ancestors) placementObserver.observe(n, { attributes: true, attributeFilter: ["style", "class"], childList: true })
+}
+
+function placementSafe(): boolean {
+  return performance.now() - placementChangedAt >= 500
+}
+
+/**
+ * Where the host was painted, from the browser's own intersection pass, which
+ * runs after every script in the frame: an observer whose root is the written
+ * rect ± 2 px. Whatever draws the host elsewhere (a late restyle, an
+ * ancestor's transform, a way not listed here) leaves part of it outside,
+ * and a pick waits until it's back and has sat still again. Remade whenever
+ * the written rect or the viewport changes, so following a scrolled or
+ * reflowed field isn't taken for a displacement.
+ */
+function watchPaint() {
+  if (!host || !written || held || closing) {
+    paintObserver?.disconnect()
+    paintObserver = null
+    paintKey = ""
+    return
+  }
+  const view = document.scrollingElement ?? document.documentElement
+  const vw = view.clientWidth
+  const vh = view.clientHeight
+  const w = written
+  const key = [w.left, w.top, w.width, w.height, vw, vh].map((n) => Math.round(n * 4)).join()
+  if (key === paintKey) return
+  paintKey = key
+  paintObserver?.disconnect()
+  const box = host
+  const root = { left: w.left - 2, top: w.top - 2, right: w.left + w.width + 2, bottom: w.top + w.height + 2 }
+  const margin = [root.top, vw - root.right, vh - root.bottom, root.left].map((n) => `${-n}px`).join(" ")
+  paintObserver = new IntersectionObserver(
+    (entries, observer) => {
+      const e = entries.at(-1)
+      if (observer !== paintObserver || host !== box || !e || held || closing) return
+      const b = e.rootBounds
+      // Not the viewport this was worked out for (a scrollbar came or went):
+      // no evidence either way; the next frame remakes it.
+      if (!b || (["left", "top", "right", "bottom"] as const).some((k) => Math.abs(b[k] - root[k]) > 1)) return void (paintKey = "")
+      const seen = e.intersectionRatio >= 0.999
+      if (seen === paintSeen) return
+      paintSeen = seen
+      // Drawn elsewhere, or back in place: either way it moved, and waits again.
+      placementChanged()
+    },
+    { root: document, rootMargin: margin, threshold: 1 },
+  )
+  paintObserver.observe(box)
+}
+
+/**
+ * The host hidden by the page, or by the browser for a modal dialog or full
+ * screen: that counts as a raise like any other, and a move. Heard on the
+ * host and, from document_start, on the window in the capture phase, before
+ * any listener a page can add there, so the page can't stop it reaching here.
+ */
+function onHostToggle(e: Event) {
+  const box = host
+  if (!box || e.target !== box || !e.isTrusted || e === lastToggle || raising || held || (e as ToggleEvent).newState !== "closed") return
+  lastToggle = e
+  // `toggle` comes a task later: if a raise already put it back, nothing to do.
+  if (e.type === "toggle" && box.matches(":popover-open")) return
+  queueMicrotask(() => {
+    if (host !== box) return
+    raise()
+    if (host === box) placementChanged()
+  })
+}
+
 function position() {
   if (!host) return
   // A pill's field re-rendered by the page as it filled: the pill moves to the box now in its place.
   if (anchor instanceof HTMLInputElement && !anchor.isConnected && mode === "pill" && anchorOwner) anchor = successor({ el: anchor, owner: anchorOwner }) ?? anchor
-  if ((anchor && !anchor.isConnected) || !host.isConnected) return closeMenu()
+  if ((anchor && !anchor.isConnected) || !host.isConnected || (!held && !host.matches(":popover-open"))) return closeMenu()
+  placementChanges(placementObserver?.takeRecords() ?? [])
+  watchPlacement()
+  if (written && !held && !placed()) placementChanged()
   const to = targetRect()
   if (!to) return closeMenu()
   lastTarget = to
@@ -420,6 +540,18 @@ function position() {
     "z-index": "2147483647",
     ...(closing ? { "pointer-events": "none" } : {}),
   })
+  // Only this synchronous style assignment is ours. Do not discard additional
+  // records: a page may upgrade the random host to a custom element and run
+  // an attributeChangedCallback synchronously inside the assignment.
+  const own = placementObserver?.takeRecords() ?? []
+  if (own.length !== 1 || own[0].target !== host || own[0].attributeName !== "style") placementChanges(own)
+  watchPaint()
+  // Publish recovery once, not every sub-pixel step of a size spring. The
+  // resize observer publishes actual size changes as before.
+  if (placementChangedAt !== -Infinity && placementSafe()) {
+    placementChangedAt = -Infinity
+    tellGeometry()
+  }
   // The menu only takes a pick once it has sat still for a moment (see
   // Dwell). From inside its frame it can't tell it was moved, so say so: the
   // page can restyle the host, and the field it follows can move.
@@ -443,7 +575,7 @@ function tellGeometry() {
   if (!port || !written) return
   // Keep fractional width: rounding it before multiplying by DPR would
   // inflate the physical-pixel tolerance on high-density displays.
-  const geometry = { width: written.width, height: Math.round(written.height), dpr: devicePixelRatio, visible: scaleVisible }
+  const geometry = { width: written.width, height: Math.round(written.height), dpr: devicePixelRatio, visible: scaleVisible && placementSafe() && paintSeen, version: placementVersion }
   const key = JSON.stringify(geometry)
   if (key === lastGeometry) return
   lastGeometry = key
@@ -511,11 +643,16 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   box.setAttribute("popover", "manual")
   // Hidden by the page, or by the browser for a modal dialog or full screen:
   // that counts as a raise like any other.
-  box.addEventListener("beforetoggle", (e) => {
-    if (e.isTrusted && (e as ToggleEvent).newState === "closed" && !raising) queueMicrotask(() => host === box && raise())
-  })
+  box.addEventListener("beforetoggle", onHostToggle)
   markOwnHost(box)
   const root = box.attachShadow({ mode: "closed" })
+  // A closed popover isn't drawn, whatever its inline display says:
+  // important declarations from a shadow tree beat the light tree's, inline
+  // ones included. Out of the top layer the host would be an ordinary fixed
+  // box, which an ancestor's transform can move (see watchPaint).
+  const sheet = new CSSStyleSheet()
+  sheet.replaceSync(":host(:not(:popover-open)) { display: none !important }")
+  root.adoptedStyleSheets = [sheet]
   frame = document.createElement("iframe")
   // No token in the URL: the menu asks for it (see onMenuReady).
   frame.src = chrome.runtime.getURL("menu.html")
@@ -526,6 +663,8 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   root.append(frame)
   ;((el && modalAround(el)) ?? document.documentElement).append(box)
   show(box)
+  placementObserver = new MutationObserver(placementChanges)
+  watchPlacement()
   position()
   // ResizeObserver runs after all rAF callbacks, including a page's later
   // restyle. Observe physical pixels so zoom alone triggers it. Keep this
@@ -538,9 +677,14 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     const r = box.getBoundingClientRect()
     const zoom = (box as HTMLElement & { currentCSSZoom?: number }).currentCSSZoom
     const matches = (a: number, b: number) => Math.abs(a - b) <= 2
+    const was = scaleVisible
     scaleVisible =
       typeof zoom === "number" && Math.abs(zoom - 1) < 0.001 &&
       matches(r.left, written.left) && matches(r.top, written.top) && matches(r.width, written.width) && matches(r.height, written.height)
+    // Back to its own size after a scaled paint: that's a move too (the
+    // menu doesn't restart its wait for "visible" coming back alone).
+    if (scaleKnown && !was && scaleVisible) placementChanged()
+    scaleKnown = true
     tellGeometry()
   })
   scaleObserver.observe(box, { box: "device-pixel-content-box" })
@@ -700,9 +844,20 @@ export const menuHost = (): HTMLElement | null => host
 
 export function closeMenu(refocus = false, dismissed = false) {
   cancelAnimationFrame(raf)
+  placementObserver?.disconnect()
+  placementObserver = null
+  placementAncestors = []
+  placementVersion = 0
+  placementChangedAt = -Infinity
+  paintObserver?.disconnect()
+  paintObserver = null
+  paintKey = ""
+  paintSeen = true
+  lastToggle = null
   scaleObserver?.disconnect()
   scaleObserver = null
   scaleVisible = false
+  scaleKnown = false
   reveal = null
   clearTimeout(revealTimer)
   if (token) void send({ type: "db:menu-close", token, dismissed })
@@ -1139,7 +1294,14 @@ function roundTo(radius: number) {
 let typedSinceOpen = false
 
 /** The frame, over the private channel: its pill or offer is done, or how many rows match what was typed. */
-function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown }>) {
+function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown; version?: unknown; check?: unknown }>) {
+  if (e.data?.type === "db:menu-check") {
+    placementChanges(placementObserver?.takeRecords() ?? [])
+    // Do not call position(): check the page's layout, not a restored one.
+    const ok = !!host?.matches(":popover-open") && e.data.version === placementVersion && placementSafe() && scaleVisible && paintSeen && placed()
+    port?.postMessage({ type: "db:menu-checked", check: e.data.check, ok })
+    return
+  }
   if (e.data?.type === "db:surface-done") return leave(e.data.travel === true)
   // The offer changing shape (pill, card, dot): its corners follow its frame's size.
   if (e.data?.type === "db:radius" && mode === "save" && frame && typeof e.data.radius === "number") return roundTo(Math.min(Math.max(e.data.radius, 0), 20))
@@ -1224,6 +1386,9 @@ function onFullscreen() {
 
 export function initMenu(page: PageState) {
   state = page
+  // Before any page script: see onHostToggle.
+  window.addEventListener("beforetoggle", onHostToggle, true)
+  window.addEventListener("toggle", onHostToggle, true)
   if (isTop) {
     document.addEventListener("beforetoggle", onBeforeToggle, true)
     addEventListener("resize", onResize, true)

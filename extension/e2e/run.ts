@@ -197,8 +197,13 @@ const BEATEN: Record<string, string> = {
 }
 
 /** Restyle after our rAF, or from a deeper ResizeObserver that defers the host's observer. */
-const lateZoom = (where: "host" | "html", zoom: number, observer: boolean, compensate: boolean) => onMenu(`
+const lateZoom = (where: "host" | "html" | "attr", zoom: number, observer: boolean, compensate: boolean) => onMenu(`
   const target = ${where === "host" ? "host" : "document.documentElement"}
+  if (${where === "attr"}) {
+    const rule = document.createElement("style")
+    rule.textContent = "html[data-late-zoom] { zoom: ${zoom} }"
+    document.head.append(rule)
+  }
   const trigger = document.createElement("i")
   const wrapper = document.createElement("div")
   wrapper.style.cssText = "position:fixed;left:-10000px;top:0"
@@ -219,10 +224,12 @@ const lateZoom = (where: "host" | "html", zoom: number, observer: boolean, compe
       host.style.setProperty("width", (parseFloat(host.style.width) / ${zoom}) + "px", "important")
       host.style.setProperty("height", (parseFloat(host.style.height) / ${zoom}) + "px", "important")
     }
-    target.style.setProperty("zoom", "${zoom}", "important")
+    if (${where === "attr"}) target.dataset.lateZoom = ""
+    else target.style.setProperty("zoom", "${zoom}", "important")
     window.zoomPaints = (window.zoomPaints || 0) + 1
     setTimeout(() => {
-      target.style.removeProperty("zoom")
+      if (${where === "attr"}) delete target.dataset.lateZoom
+      else target.style.removeProperty("zoom")
       host.style.cssText = css
       // Register in the task, after Deadbolt registered its next rAF.
       requestAnimationFrame(loop)
@@ -866,7 +873,7 @@ const server = Bun.serve({
         const late = url.searchParams.get("late")
         const zoom = url.searchParams.get("zoom") === "1.5" ? 1.5 : 0.5
         const style = url.searchParams.has("fractional") ? "<style>main{max-width:313.5px}</style>" : url.searchParams.has("static") ? `<style>html{zoom:${url.searchParams.get("static") === "small" ? "0.8" : "1.25"}}</style>` : ""
-        return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" ? "html" : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
+        return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" || late === "attr" ? late : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
       }
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
@@ -1101,6 +1108,8 @@ interface LaunchOptions {
   scale?: number
   /** The browser prefers reduced motion. */
   reducedMotion?: boolean
+  /** Give the first fake account an exact origin for universal sign-in. */
+  universal?: boolean
   /** The fake host adds "Sign in with Google" logins. */
   signIn?: boolean
   /** The fake host lists three Google logins instead of its own. */
@@ -1147,6 +1156,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
       DEADBOLT_FAKE_LIST_DELAY: String(options.listDelay ?? 0),
+      DEADBOLT_FAKE_ORIGIN: options.universal ? site : "",
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
       DEADBOLT_FAKE_TOUCHID: options.touchId ?? "",
@@ -2593,7 +2603,7 @@ async function menuScale(scale = 1) {
     // The downscale also exercises IO v2's incidental OOPIF intersection
     // flapping. The upscale is essential: IO stays visible and the old
     // guard actually fills, so this isn't just testing an existing refusal.
-    for (const query of ["?late=host", "?late=html", "?late=host&zoom=1.5", "?late=html&zoom=1.5", "?late=host&zoom=1.5&observer", "?late=html&zoom=1.5&observer", "?late=host&comp", "?late=html&zoom=1.5&comp", "?late=host&comp&observer", "?late=html&zoom=1.5&comp&observer"]) {
+    for (const query of ["?late=host", "?late=html", "?late=host&zoom=1.5", "?late=html&zoom=1.5", "?late=host&zoom=1.5&observer", "?late=html&zoom=1.5&observer", "?late=host&comp", "?late=html&zoom=1.5&comp", "?late=host&comp&observer", "?late=html&zoom=1.5&comp&observer", "?late=attr&zoom=1.5", "?late=attr&zoom=1.5&comp"]) {
       for (const how of ["pointer", "keyboard"]) {
         await page.goto(`${site}/menu-scale${query}`)
         const menu = await menuOn(page)
@@ -2621,6 +2631,223 @@ async function menuScale(scale = 1) {
   } catch (err) {
     check(false, `menu scale threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "menu scale")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Late page-world restyles: the user's click on a decoy must not authorize the surface. */
+async function menuPosition(scale = 1) {
+  const run = await launch({ scale, universal: true })
+  const page = await run.context.newPage()
+  try {
+    // Real browser zoom, not CDP page-scale emulation. The normal pick must
+    // work at each display scale; reset zoom before the attack matrix below.
+    for (const zoom of [1, 1.25]) {
+      await page.goto(`${site}/login`)
+      await run.worker.evaluate(async ({ origin, zoom }) => {
+        for (const tab of await chrome.tabs.query({})) {
+          if (tab.id === undefined) continue
+          const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 })
+          if (frame?.url.startsWith(origin)) return chrome.tabs.setZoom(tab.id, zoom)
+        }
+        throw new Error("no fixture tab")
+      }, { origin: site, zoom })
+      const menu = await menuOn(page)
+      if (!menu) throw new Error("no normal menu")
+      check(Math.abs(await menu.evaluate(() => devicePixelRatio) - scale * zoom) < 0.01, `browser zoom ${zoom} at display DPR ${scale} reaches the frame`)
+      if (zoom === 1) {
+        await page.evaluate(() => {
+          const churn = () => {
+            document.documentElement.classList.toggle("page-scrolling")
+            requestAnimationFrame(churn)
+          }
+          requestAnimationFrame(churn)
+        })
+        await Bun.sleep(200)
+      }
+      await menu.locator("button.row").first().click()
+      check(!!await until("normal zoomed pick fills", async () => await page.inputValue("#password") === "correct horse", 4000), `normal pick works at browser zoom ${zoom}, display DPR ${scale}`)
+    }
+    await run.worker.evaluate(async (origin) => {
+      for (const tab of await chrome.tabs.query({})) {
+        if (tab.id === undefined) continue
+        const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 })
+        if (frame?.url.startsWith(origin)) return chrome.tabs.setZoom(tab.id, 1)
+      }
+    }, site)
+    for (const surface of ["menu", "save", "signin"] as const) {
+      const kinds = surface === "menu" && scale === 1
+        ? ["left", "translate", "scale", "left-task", "translate-task", "scale-task", "hidden-task", "left-observer", "translate-observer", "scale-observer", "left-keyboard", "translate-keyboard", "scale-keyboard"]
+        : ["left", "translate", "scale", "hidden-task"]
+      for (const kind of kinds) {
+        await run.worker.evaluate(async (on) => {
+          await chrome.storage.local.set({ offerToSignIn: on })
+          const all = await chrome.storage.session.get(null)
+          await chrome.storage.session.remove(Object.keys(all).filter((k) => k.startsWith("signin-memory:") || k.startsWith("session:") || k === "opened:localhost"))
+        }, surface === "signin")
+        let menu: Frame | null
+        if (surface === "save") {
+          await signIn(run, page, "/outcome/login?to=/auth/complete", `position-${kind}@acme.test`, "synthetic position password")
+          menu = await saveSurface(page)
+        } else {
+          await page.goto(`${site}/login`)
+          menu = surface === "menu" ? await menuOn(page) : await until("universal sign-in offer", async () => {
+            const f = extensionFrame(page, "menu.html")
+            return f && await f.locator(".universal").count() ? f : null
+          })
+          if (surface === "signin" && menu && (await menu.locator("button.row").first().textContent())?.includes("Sign in with Deadbolt")) {
+            await menu.locator("button.row").first().click()
+          }
+        }
+        if (!menu) { check(false, `${surface} opens for ${kind}`); continue }
+        await settled(menu)
+        await Bun.sleep(700)
+        check(Math.abs(await menu.evaluate(() => devicePixelRatio) - scale) < 0.001, `${surface} ${kind}: real DPR ${scale}`)
+        const selector = surface === "save" ? ".offer-row .btn.primary" : "button.row"
+        // Only the test sees the row. The hostile code below sees the public host,
+        // never its closed root, frame, token, or extension messages.
+        const target = await menu.locator(selector).first().boundingBox()
+        if (!target) throw new Error("no target for displacement")
+        const frame = await frameBox(menu)
+        const factor = kind.startsWith("scale") ? 1.25 : 1
+        const restore = kind.endsWith("task") || kind.endsWith("observer")
+        // Restored variants overlap the original row. After their burst,
+        // prove refusal of a real press, not a click outside the frame.
+        // A hidden host is drawn only a few pixels off, so a press on its row
+        // also reaches the real row once it's back (even the save offer's button).
+        const hidden = kind.startsWith("hidden")
+        const dx = hidden ? -12 : restore ? -80 : -220, dy = hidden ? 6 : restore ? 10 : 200
+        const point = { x: frame.x + dx + (target.x - frame.x + target.width / 2) * factor, y: frame.y + dy + (target.y - frame.y + target.height / 2) * factor }
+        const triggerPoint = restore ? { x: 20, y: 600 } : point
+        if (kind.endsWith("keyboard")) await page.keyboard.press("ArrowDown")
+        const before = (await hostLog(run)).filter((r) => ["fill", "save"].includes(String(r.type))).length
+        await menu.evaluate((selector) => {
+          for (const type of ["pointerdown", "click"]) addEventListener(type, (e) => {
+            if (e.isTrusted && (e.target as Element).closest(selector)) {
+              const seen = window as unknown as { rowPressed?: boolean; rowClicked?: boolean }
+              if (type === "pointerdown") seen.rowPressed = true
+              else seen.rowClicked = true
+            }
+          }, true)
+        }, selector)
+        await page.evaluate(({ kind, point, triggerPoint, dx, dy }) => {
+          const host = document.querySelector<HTMLElement>("html > [popover]")!
+          const r = host.getBoundingClientRect()
+          const decoy = document.createElement("button")
+          decoy.textContent = "Continue reading"
+          decoy.style.cssText = `position:fixed;left:${point.x - 20}px;top:${point.y - 15}px;width:180px;height:40px;margin:0`
+          document.body.append(decoy)
+          const state = { restyles: 0, restored: false, closedDrawn: "" }
+          ;(window as unknown as { attack: typeof state }).attack = state
+          if (kind.startsWith("hidden")) {
+            // Set up once, well before the loop: by then any restart of the
+            // wait this caused is long over.
+            for (const type of ["beforetoggle", "toggle"]) addEventListener(type, (e) => { if (e.target === host) e.stopPropagation() }, true)
+            document.documentElement.style.transform = `translate(${dx}px,${dy}px)`
+            document.body.style.transform = `translate(${-dx}px,${-dy}px)`
+          }
+          window.addEventListener("pointermove", function trigger(e) {
+            if (!e.isTrusted || Math.abs(e.clientX - triggerPoint.x) > 25 || Math.abs(e.clientY - triggerPoint.y) > 25) return
+            removeEventListener("pointermove", trigger)
+            const restore = kind.endsWith("task") || kind.endsWith("observer")
+            const tick = document.createElement("i")
+            const wrapper = document.createElement("div")
+            wrapper.style.cssText = "position:fixed;left:-10000px;top:0"
+            tick.style.cssText = "display:block;width:1px;height:1px"
+            wrapper.append(tick)
+            document.body.append(wrapper)
+            let n = 0
+            const apply = () => {
+              if (!host.isConnected) return
+              if (kind.startsWith("hidden")) {
+                // Closed, the host leaves the top layer; if it were still drawn
+                // it would follow <html>'s transform, which <body>'s cancels for
+                // the page itself. Deadbolt's own listener on the host never
+                // hears it close.
+                try { host.hidePopover() } catch {}
+                // Laid out at all while closed, it would be painted there.
+                const drawn = host.getBoundingClientRect()
+                if (drawn.width || drawn.height) state.closedDrawn = `${drawn.left - r.left},${drawn.top - r.top}`
+                state.restyles++
+                setTimeout(() => {
+                  try { host.showPopover() } catch {}
+                  if (state.restyles < 3) requestAnimationFrame(loop)
+                  else state.restored = true
+                }, 0)
+                return
+              }
+              const css = host.style.cssText
+              if (kind.startsWith("scale")) {
+                host.style.setProperty("transform-origin", "top left", "important")
+                host.style.setProperty("transform", `translate(${dx}px,${dy}px) scale(1.25)`, "important")
+              } else if (kind.startsWith("translate")) host.style.setProperty("transform", `translate(${dx}px,${dy}px)`, "important")
+              else {
+                host.style.setProperty("left", `${r.left + dx}px`, "important")
+                host.style.setProperty("top", `${r.top + dy}px`, "important")
+              }
+              state.restyles++
+              if (restore) setTimeout(() => {
+                host.style.cssText = css
+                if (state.restyles < 3) requestAnimationFrame(loop)
+                else state.restored = true
+              }, 0)
+              else requestAnimationFrame(loop)
+            }
+            const loop = () => {
+              if (kind.endsWith("observer")) tick.style.width = (1 + (++n % 2)) + "px"
+              else apply()
+            }
+            if (kind.endsWith("observer")) new ResizeObserver(apply).observe(tick)
+            else requestAnimationFrame(loop)
+          })
+        }, { kind, point, triggerPoint, dx, dy })
+        if (hidden) await Bun.sleep(700)
+        await page.mouse.move(triggerPoint.x, triggerPoint.y)
+        const restyled = await until(`${surface} ${kind}: three late restyles`, () => page.evaluate(() => (window as unknown as { attack: { restyles: number } }).attack.restyles >= 3), 350)
+        if (restore) {
+          await until("the task restored the host", () => page.evaluate(() => (window as unknown as { attack: { restored: boolean } }).attack.restored), 350)
+          // Chromium can route a click to the host instead of its OOPIF while
+          // their hit-test maps disagree. Let that map settle, still well
+          // inside the dwell: restoration must not erase the earlier moves.
+          await Bun.sleep(100)
+        }
+        if (kind.endsWith("keyboard")) {
+          check(await menu.evaluate(() => document.hasFocus()), `${kind}: keyboard entered the menu`)
+          await page.keyboard.press("Enter")
+        } else {
+          if (restore) await page.mouse.move(point.x, point.y)
+          await page.mouse.down()
+          await page.mouse.up()
+          check(await menu.evaluate(() => {
+            const seen = window as unknown as { rowPressed?: boolean; rowClicked?: boolean }
+            return seen.rowPressed === true && seen.rowClicked === true
+          }).catch(() => false), `${surface} ${kind}: trusted press and click reach the action`)
+        }
+        // Read the refusal as soon as it shows: a status broadcast reloads the
+        // menu and clears its foot, which on a loaded machine can land before
+        // a fixed wait is over.
+        const foot = menu.locator(surface === "save" ? ".offer-status" : "#foot")
+        const settledAt = Date.now() + 1700
+        let refusal = ""
+        while (Date.now() < settledAt && !refusal.includes("covered")) {
+          refusal = (await foot.textContent().catch(() => "")) ?? ""
+          await Bun.sleep(50)
+        }
+        await Bun.sleep(Math.max(0, settledAt - Date.now()))
+        check(!!restyled, `${surface} ${kind}: late restyle ran repeatedly`)
+        if (hidden) {
+          const drawn = await page.evaluate(() => (window as unknown as { attack: { closedDrawn: string } }).attack.closedDrawn)
+          check(!drawn, `${surface} ${kind}: the closed host isn't drawn (offset ${drawn || "none"})`)
+        }
+        check((await hostLog(run)).filter((r) => ["fill", "save"].includes(String(r.type))).length === before, `${surface} ${kind}: no credential request or save`)
+        if (surface === "menu") check(await page.inputValue("#password") === "", `${kind}: no password written`)
+        check(refusal.includes("covered"), `${surface} ${kind}: covered refusal (${refusal})`)
+      }
+    }
+  } catch (err) {
+    check(false, `menu position threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "menu position")
   } finally {
     await close(run)
   }
@@ -4784,6 +5011,10 @@ const once: Record<string, () => Promise<void>> = {
   menuScale: async () => {
     for (const scale of [1, 1.25, 1.5, 2.5, 3]) await menuScale(scale)
   },
+  menuPosition,
+  menuPositionDpr: async () => {
+    for (const scale of [1.25, 2]) await menuPosition(scale)
+  },
   topLayer,
   viewportResize,
   menuReveal,
@@ -4802,7 +5033,7 @@ const once: Record<string, () => Promise<void>> = {
 }
 const gauntletRun = gauntletScenarios<Run>({ site, port: server.port!, launch, close, check, settled, hostLog, isCode, diagnose, video })
 Object.assign(once, gauntletRun.scenarios)
-const groups: Record<string, string[]> = { gauntlet: Object.keys(gauntletRun.scenarios), forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "menuScale", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
+const groups: Record<string, string[]> = { gauntlet: Object.keys(gauntletRun.scenarios), forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "menuScale", "menuPosition", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
@@ -4814,7 +5045,7 @@ const cost: Record<string, number> = {
   signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
   coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
   formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
-  menuReveal: 4, menuScale: 100,
+  menuReveal: 4, menuScale: 100, menuPosition: 130, menuPositionDpr: 110,
   pageZoom: 5,
   pageDismiss: 5,
   escInDialog: 4,
