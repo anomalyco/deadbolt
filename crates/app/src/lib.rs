@@ -88,7 +88,10 @@ pub fn run() {
         .as_deref()
         .map_or_else(|| Some(shortcut::default()), shortcut::load);
     rune::run_windows_with(rune::RunOptions { accessory }, move |_| {
-        let mut main = rune::App::new(spec()).chrome(view::CHROME);
+        // Process-wide, so it covers the panel too; `RUNE_GPU_BACKEND=wgpu` overrides it.
+        let mut main = rune::App::new(spec())
+            .chrome(view::CHROME)
+            .gpu_backend(rune::GpuBackend::Metal);
         let mut quick = rune::App::new(panel::spec()).windowless();
         // Native menus are macOS's; headless scripts reach them everywhere.
         if cfg!(target_os = "macos") || headless {
