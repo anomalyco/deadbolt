@@ -119,7 +119,16 @@ pub(crate) struct Handler(pub Arc<Mutex<Option<Loaded>>>);
 impl Handler {
     pub(crate) fn with<T>(&self, f: impl FnOnce(&mut Loaded) -> Result<T>) -> Result<T> {
         let mut state = self.0.lock().map_err(|_| Error::State)?;
-        f(state.as_mut().ok_or(Error::Locked)?)
+        let result = f(state.as_mut().ok_or(Error::Locked)?);
+        if let Err(error @ Error::UnconfirmedWrite(_)) = &result {
+            // The final OPFS flush can fail after redb has switched roots.
+            // Neither the old nor the staged heads can authorize another request.
+            *state = None;
+            drop(state); // The connection gate checks this same state.
+            enforce_membership();
+            super::stop_worker(&error.to_string());
+        }
+        result
     }
 }
 

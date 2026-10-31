@@ -37,6 +37,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[wasm_bindgen(inline_js = r#"
 export function unix_time() { return Math.floor(Date.now() / 1000); }
 export function items_changed() { self.postMessage({ change: "items" }); }
+export function stop_worker(error) { self.postMessage({ error, fatal: true }); self.close(); }
 export function sync_failed() { console.warn("Deadbolt background sync failed; it will retry on the next wake"); }
 export async function storage_exists() {
     const root = await navigator.storage.getDirectory();
@@ -82,6 +83,7 @@ export async function storage_publish() {
 extern "C" {
     fn unix_time() -> f64;
     fn items_changed();
+    fn stop_worker(error: &str);
     fn sync_failed();
     #[wasm_bindgen(catch)]
     async fn storage_exists() -> std::result::Result<JsValue, JsValue>;
@@ -116,6 +118,10 @@ enum Error {
     Protocol(&'static str),
     #[error(transparent)]
     Store(#[from] deadbolt_store::Error),
+    #[error(
+        "Deadbolt couldn't confirm a vault change. Unlock it and check whether the change was saved."
+    )]
+    UnconfirmedWrite(#[source] deadbolt_store::Error),
     #[error(transparent)]
     History(#[from] crate::history::Error),
     #[error(transparent)]
@@ -192,28 +198,37 @@ impl Loaded {
             .into_iter()
             .map(Entry::encode)
             .collect();
+        if blobs.is_empty() {
+            return Ok(());
+        }
         self.store
-            .append_batch(blobs.iter().map(|blob| blob.as_slice()))?;
+            .append_batch(blobs.iter().map(|blob| blob.as_slice()))
+            .map_err(Error::UnconfirmedWrite)?;
+        // Nothing fallible between the signed commit and notifying its callers.
         self.vault = staged;
-        // A removed device's last seen means nothing any more.
-        let members: BTreeSet<String> = self.vault.members().map(|id| id.to_string()).collect();
-        let before = self.seen.len();
-        self.seen.retain(|id, _| members.contains(id));
-        if self.seen.len() != before {
-            self.store
-                .meta_set("extension/peer-seen", &serde_json::to_vec(&self.seen)?)?;
-        }
-        if !blobs.is_empty() {
-            items_changed();
-        }
+        items_changed();
         Ok(())
     }
 
     /// `peer` just completed a sync with this device.
     fn saw(&mut self, peer: &DeviceId) -> Result<()> {
-        self.seen.insert(peer.to_string(), unix_time() as u64);
+        // Only current members appear in devices(). Prune stale timestamps in
+        // the next metadata write, never in a second transaction after removal.
+        let mut seen = BTreeMap::new();
+        for member in self.vault.members() {
+            let id = member.to_string();
+            let last = if member == *peer {
+                Some(unix_time() as u64)
+            } else {
+                self.seen.get(&id).copied()
+            };
+            if let Some(last) = last {
+                seen.insert(id, last);
+            }
+        }
         self.store
-            .meta_set("extension/peer-seen", &serde_json::to_vec(&self.seen)?)?;
+            .meta_set("extension/peer-seen", &serde_json::to_vec(&seen)?)?;
+        self.seen = seen;
         Ok(())
     }
 
@@ -1046,6 +1061,7 @@ fn plain(error: &Error) -> String {
     match error {
         Error::Locked
         | Error::State
+        | Error::UnconfirmedWrite(_)
         | Error::WrongPassphrase
         | Error::PassphraseNeeded
         | Error::DomainMismatch

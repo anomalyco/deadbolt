@@ -174,8 +174,11 @@ between workers. An opaque handle id in Rust avoids claiming that a JS object is
 thread-safe; this build has no wasm threads/shared memory.
 
 Local writes and incoming sync batches stage a validated core vault, append the
-new encrypted entries durably, and only then publish the staged state. This retains
-the native invariant that a failed write must not advance live signed-log heads.
+new encrypted entries durably, and only then publish the staged state. A failed
+append can mean the final OPFS flush reported an error after redb switched roots:
+on reopen the transaction may be present or absent. The device drops its live
+vault and connections and locks; unlock revalidates the encrypted log before
+the user checks whether the change was saved. It does not retry the write.
 Browser storage is local to the extension's origin/profile. Removing the extension
 or clearing its storage destroys this replica; it is not a recovery mechanism.
 
