@@ -696,10 +696,9 @@ impl World {
             Action::WriteFailure(i) if self.can_write(i) => {
                 self.devices[i].with(|s| {
                     let key = &s.secret;
-                    let result = super::session::update(
-                        s.vaults.get_mut(&self.vault).unwrap(),
-                        |_| anyhow::bail!("injected disk full"),
+                    let result = s.vaults.get_mut(&self.vault).unwrap().transact(
                         |v| Ok(v.write(key, vec![])?),
+                        |_| anyhow::bail!("injected disk full"),
                     );
                     ensure!(result.is_err(), "write fault was not injected");
                     Ok(())

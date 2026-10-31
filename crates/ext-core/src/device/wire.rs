@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId};
+use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId, VaultWrite};
 pub(crate) use deadbolt_net::application::Addr;
 use deadbolt_net::application::{self, Hint, State, clean_name};
 use deadbolt_net::{Blob, HandlerError, Inviter, PairingContext, PeerId, SyncHandler};
@@ -46,15 +46,15 @@ impl State for Loaded {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> std::result::Result<T, application::Error>,
+        change: impl FnOnce(
+            &mut VaultWrite<'_>,
+            &DeviceSecret,
+        ) -> std::result::Result<T, application::Error>,
     ) -> Result<T> {
         if id != self.vault.id() {
             return Err(application::Error::VaultNotHeld.into());
         }
-        let mut staged = self.vault.clone();
-        let result = change(&mut staged, &self.secret)?;
-        self.commit(staged)?;
-        Ok(result)
+        self.mutate(|v, key| Ok(change(v, key)?))
     }
 
     fn learn(

@@ -357,7 +357,10 @@ impl ItemState {
 }
 
 /// Checks a data op against the current items, as of a new local entry.
-pub(crate) fn check(items: &BTreeMap<ItemId, ItemState>, op: &DataOp) -> Result<(), ItemError> {
+pub(crate) fn check<'a>(
+    items: impl Fn(&ItemId) -> Option<&'a ItemState>,
+    op: &DataOp,
+) -> Result<(), ItemError> {
     match op {
         DataOp::Create {
             kind,
@@ -368,7 +371,7 @@ pub(crate) fn check(items: &BTreeMap<ItemId, ItemState>, op: &DataOp) -> Result<
             ..
         } => item::check_create_with(kind, name.as_deref(), fields, source.as_ref(), tags),
         DataOp::Edit { item, change } => {
-            let state = items.get(item).ok_or(ItemError::NoSuchItem)?;
+            let state = items(item).ok_or(ItemError::NoSuchItem)?;
             item::check_change(&state.kind, change)
         }
     }
@@ -378,8 +381,8 @@ pub(crate) fn check(items: &BTreeMap<ItemId, ItemState>, op: &DataOp) -> Result<
 /// file holds at most [`item::MAX_FILE`] in files once the entry is
 /// applied. Only writes are held to it: concurrent changes on two devices
 /// can't see each other, so applying stays order-independent and ignores it.
-pub(crate) fn check_files(
-    items: &BTreeMap<ItemId, ItemState>,
+pub(crate) fn check_files<'a>(
+    items: impl Fn(&ItemId) -> Option<&'a ItemState>,
     ops: &[DataOp],
 ) -> Result<(), ItemError> {
     let mut after: BTreeMap<ItemId, (BTreeMap<String, usize>, Option<String>)> = BTreeMap::new();
@@ -396,7 +399,7 @@ pub(crate) fn check_files(
         if value.kind != crate::FieldType::File {
             continue;
         }
-        let Some(state) = items.get(item) else {
+        let Some(state) = items(item) else {
             continue;
         };
         after.entry(*item).or_insert_with(|| {
@@ -445,8 +448,8 @@ pub(crate) fn check_files(
 /// this entry holds at most [`tag::MAX_TAGS`] tags once applied. Only local
 /// writes enforce this cap so `apply` remains order-independent across
 /// concurrent additions on different devices.
-pub(crate) fn check_tags(
-    items: &BTreeMap<ItemId, ItemState>,
+pub(crate) fn check_tags<'a>(
+    items: impl Fn(&ItemId) -> Option<&'a ItemState>,
     ops: &[DataOp],
 ) -> Result<(), ItemError> {
     let mut after: BTreeMap<ItemId, (BTreeSet<String>, bool)> = BTreeMap::new();
@@ -457,7 +460,7 @@ pub(crate) fn check_tags(
         if !matches!(change, Change::TagAdd(_) | Change::TagRemove(_)) {
             continue;
         }
-        let Some(state) = items.get(item) else {
+        let Some(state) = items(item) else {
             continue;
         };
         let (tags, grew) = after.entry(*item).or_insert_with(|| {
@@ -491,7 +494,11 @@ pub(crate) fn check_tags(
 
 /// Applies a data entry, in causal order, to the item states. Invalid ops
 /// are skipped.
-pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
+pub(crate) fn apply(
+    items: &mut BTreeMap<ItemId, ItemState>,
+    inherited: Option<&BTreeMap<ItemId, ItemState>>,
+    node: &Node,
+) {
     let Payload::Data(ops) = node.entry.payload() else {
         return;
     };
@@ -515,6 +522,9 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                     continue;
                 }
                 let id = ItemId::of_create(&node.entry.hash(), index);
+                if inherited.is_some_and(|base| base.contains_key(&id)) {
+                    continue;
+                }
                 let mut state = ItemState {
                     kind: kind.clone(),
                     created: Write::new(node, at, ()),
@@ -548,6 +558,12 @@ pub(crate) fn apply(items: &mut BTreeMap<ItemId, ItemState>, node: &Node) {
                 items.entry(id).or_insert(state);
             }
             DataOp::Edit { item, change } => {
+                if let Some(base) = inherited
+                    && !items.contains_key(item)
+                    && let Some(state) = base.get(item)
+                {
+                    items.insert(*item, state.clone());
+                }
                 let Some(state) = items.get_mut(item) else {
                     continue;
                 };
