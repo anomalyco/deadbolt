@@ -13,17 +13,17 @@ use crate::policy::{self, Preset};
 use deadbolt_core::autofill::{self, Status, item_name, login_title, otp, urls, value};
 use deadbolt_core::site::{Site, page_url};
 use deadbolt_core::totp::Totp;
-use deadbolt_core::{DataOp, DeviceId, DeviceSecret, Entry, Field, FieldType, Item, ItemId, Vault};
+use deadbolt_core::{DataOp, DeviceId, DeviceSecret, Field, FieldType, Item, ItemId, Vault};
 use deadbolt_net::{Node, NodeConfig, PairingOptions, PeerAddr, PeerId};
 use deadbolt_store::{KdfParams, Unlocked};
 use n0_future::task::JoinHandle;
-use n0_future::time::{Instant, sleep, timeout};
+use n0_future::time::{sleep, timeout};
 use opfs::OpfsBackend;
 use serde::Serialize;
 use serde_json::{Value, json};
 use std::{
     cell::{Cell, RefCell},
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -101,7 +101,7 @@ async fn backend(create: bool) -> Result<OpfsBackend> {
 }
 
 #[derive(Debug, thiserror::Error)]
-enum Error {
+pub(crate) enum Error {
     #[error("Deadbolt is locked. Unlock it first.")]
     Locked,
     #[error("Deadbolt hit a problem. Lock it and unlock it again.")]
@@ -193,23 +193,16 @@ impl Loaded {
     }
 
     fn commit(&mut self, staged: Vault) -> Result<()> {
-        let blobs: Vec<_> = staged
-            .missing_for(&self.vault.heads())
-            .into_iter()
-            .map(Entry::encode)
-            .collect();
-        if blobs.is_empty() {
-            return Ok(());
-        }
-        self.store
-            .append_batch(blobs.iter().map(|blob| blob.as_slice()))
-            .map_err(|error| match error {
-                deadbolt_store::Error::AppendUncertain(_) => Error::UnconfirmedWrite(error),
-                _ => Error::Store(error),
-            })?;
+        let changed =
+            deadbolt_net::application::storage::commit(&self.store, &mut self.vault, staged)
+                .map_err(|error| match error {
+                    deadbolt_store::Error::AppendUncertain(_) => Error::UnconfirmedWrite(error),
+                    _ => Error::Store(error),
+                })?;
         // Nothing fallible between the signed commit and notifying its callers.
-        self.vault = staged;
-        items_changed();
+        if changed {
+            items_changed();
+        }
         Ok(())
     }
 
@@ -392,72 +385,7 @@ async fn start(store: Unlocked, device_name: Option<&str>) -> Result<()> {
 async fn sync_round() -> Result<()> {
     let node = node()?;
     let state = state();
-    let mut ready = state.with(|s| Ok(s.ready))?;
-    let deadline = Instant::now() + Duration::from_secs(30);
-    let mut attempts = BTreeSet::new();
-    loop {
-        let targets = state.with(|s| {
-            Ok(s.targets()
-                .into_iter()
-                .filter(|peer| ready || !attempts.contains(&peer.id))
-                .collect())
-        })?;
-        let completed = deadbolt_net::application::contact_round(
-            targets,
-            (!ready).then_some(deadline),
-            |peer, budget| {
-                let node = &node;
-                let state = &state;
-                async move {
-                    let id = peer.id;
-                    let until = Instant::now() + budget;
-                    let complete = match timeout(budget, node.connect(peer)).await {
-                        Ok(Ok(conn)) => {
-                            let result = timeout(
-                                until.saturating_duration_since(Instant::now()),
-                                conn.sync(),
-                            )
-                            .await;
-                            conn.close();
-                            match result {
-                                Ok(Ok(_)) => {
-                                    // Both sides processed everything: synced.
-                                    state.with(|s| s.saw(&DeviceId::from_bytes(id)))?;
-                                    true
-                                }
-                                Ok(Err(deadbolt_net::Error::MembershipRejected(_))) => true,
-                                Ok(Err(_)) | Err(_) => false,
-                            }
-                        }
-                        Ok(Err(deadbolt_net::Error::Rejected(_))) => false,
-                        Ok(Err(_)) | Err(_) => true,
-                    };
-                    Ok::<_, Error>(complete)
-                }
-            },
-        )
-        .await?;
-        attempts.extend(completed);
-        let complete =
-            state.with(|s| Ok(s.targets().iter().all(|peer| attempts.contains(&peer.id))))?;
-        if ready || complete || Instant::now() >= deadline {
-            state.with(|s| {
-                s.ready = true;
-                s.addr = Some(Addr::from_peer(node.addr()));
-                Ok(())
-            })?;
-            if !ready {
-                // As in the CLI, follow membership refresh immediately with a
-                // data round rather than waiting for the next browser alarm.
-                ready = true;
-                attempts.clear();
-                continue;
-            }
-            break;
-        }
-        sleep(Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()))).await;
-    }
-    Ok(())
+    deadbolt_net::application::sync_round(&node, &state).await
 }
 
 /// Parse the page using the same public-suffix policy as the native agent.

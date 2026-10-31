@@ -380,6 +380,12 @@ impl Node {
         self.inner.gate.connected_peers()
     }
 
+    /// Notify iroh of a possible network change (for example, foregrounding).
+    /// It refreshes interfaces and rebinds/reconnects when its state changes.
+    pub async fn network_change(&self) {
+        self.inner.endpoint.network_change().await;
+    }
+
     /// Closes all connections and the endpoint.
     pub async fn shutdown(&self) {
         self.inner.endpoint.close().await;

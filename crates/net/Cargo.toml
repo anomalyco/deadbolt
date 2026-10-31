@@ -19,9 +19,11 @@ path = "tests/net/main.rs"
 sim = []
 # Shared vault envelopes and application rules for native and browser devices.
 application = ["dep:deadbolt-core"]
+storage = ["application", "dep:deadbolt-store"]
 
 [dependencies]
 deadbolt-core = { path = "../core", default-features = false, optional = true }
+deadbolt-store = { path = "../store", optional = true }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1"
 argon2 = { version = "0.6", default-features = false, features = ["alloc", "zeroize"] }

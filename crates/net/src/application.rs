@@ -4,6 +4,12 @@
 //! rules; adapters own durable transactions, address books and readiness. No
 //! data is sent or accepted until the caller's membership barrier is open.
 
+#[cfg(feature = "storage")]
+pub mod storage;
+
+mod round;
+pub use round::{RoundState, sync_round};
+
 use std::{collections::BTreeMap, future::Future, net::SocketAddr, time::Duration};
 
 use data_encoding::HEXLOWER;
