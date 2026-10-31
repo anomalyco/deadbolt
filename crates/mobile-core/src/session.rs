@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
 };
 
-use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId};
+use deadbolt_core::{DeviceId, DeviceSecret, Entry, Vault, VaultId, VaultWrite};
 use deadbolt_net::application::{self, Addr, Hint, State};
 use deadbolt_net::approval::ApprovalInbox;
 use deadbolt_net::{Blob, HandlerError, Node, NodeConfig, PeerAddr, PeerId, SyncHandler};
@@ -91,15 +91,22 @@ impl State for Loaded {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> std::result::Result<T, application::Error>,
+        change: impl FnOnce(
+            &mut VaultWrite<'_>,
+            &DeviceSecret,
+        ) -> std::result::Result<T, application::Error>,
     ) -> Result<T> {
         if id != self.vault.id() {
             return Err(MobileError::InvalidVault);
         }
-        let mut staged = self.vault.clone();
-        let result = change(&mut staged, &self.secret)?;
-        application::storage::commit(&self.store, &mut self.vault, staged)?;
-        Ok(result)
+        self.vault.transact(
+            |vault| Ok(change(vault, &self.secret)?),
+            |entries| {
+                self.store
+                    .append_batch(entries.iter().copied().map(Entry::encode))?;
+                Ok(())
+            },
+        )
     }
     fn learn(
         &mut self,
