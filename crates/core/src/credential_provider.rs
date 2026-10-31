@@ -184,18 +184,21 @@ impl Scope {
 /// one at a time; deleted ones are skipped) that the picker offers for
 /// `scope`, best first. Only offered logins are kept. `used` gives a
 /// record's last fill time (0 if never).
+/// `map` consumes each offered item before the next is read, so callers can
+/// retain only secret-free metadata while sorting instead of complete items.
 ///
 /// Unassociated: every usable login, most recently filled first, then
 /// starred, title (case-insensitively), username, and record. Scoped: each
 /// usable login on any service's site, under the earliest service it
 /// matches, ordered by service, [`autofill::rank`] against that service's
 /// origin, and record.
-pub fn picker_logins(
+pub fn picker_logins<T>(
     scope: &Scope,
     items: impl IntoIterator<Item = (VaultId, Item)>,
     used: impl Fn(&str) -> u64,
     for_otp: bool,
-) -> Vec<Pick> {
+    mut map: impl FnMut(Pick) -> T,
+) -> Vec<T> {
     let live = items
         .into_iter()
         .filter(|(_, item)| !item.deleted && item.kind == "login" && usable(item, for_otp));
@@ -216,11 +219,11 @@ pub fn picker_logins(
                     let order = (Reverse(used), Reverse(item.favorite), title, username, key);
                     (
                         order,
-                        Pick {
+                        map(Pick {
                             vault,
                             item,
                             service: None,
-                        },
+                        }),
                     )
                 })
                 .collect();
@@ -242,11 +245,11 @@ pub fn picker_logins(
                     );
                     Some((
                         (idx, rank, key),
-                        Pick {
+                        map(Pick {
                             vault,
                             item,
                             service: Some(idx),
-                        },
+                        }),
                     ))
                 })
                 .collect();
@@ -635,7 +638,7 @@ mod tests {
     }
 
     fn picked(scope: &Scope, items: Vec<(VaultId, Item)>) -> Vec<ItemId> {
-        picker_logins(scope, items, |_| 0, false)
+        picker_logins(scope, items, |_| 0, false, |pick| pick)
             .into_iter()
             .map(|pick| pick.item.id)
             .collect()
@@ -649,6 +652,64 @@ mod tests {
         let services = scope([(ServiceKind::Domain, "example.com")]).unwrap();
         assert!(matches!(services, Scope::Services(_)));
         assert_eq!(picked(&services, items), live);
+    }
+
+    #[test]
+    fn picker_maps_each_item_before_reading_the_next_and_preserves_order() {
+        use std::cell::Cell;
+
+        let mut favorite = login(2, false);
+        favorite.favorite = true;
+        let mut recent = login(3, false);
+        recent.fields.insert(
+            "url".into(),
+            Field::new(FieldType::Url, "https://other.test/login"),
+        );
+        let items = vec![
+            (vault(), recent),
+            (vault(), login(1, false)),
+            (vault(), favorite),
+        ];
+        let recent_id = record_id(&vault(), &ItemId::from_bytes([3; 16]));
+        let used = |record: &str| if record == recent_id { 9 } else { 0 };
+        let scoped = scope([
+            (ServiceKind::Domain, "example.com"),
+            (ServiceKind::Domain, "other.test"),
+            (ServiceKind::Url, "https://example.com/login"),
+        ])
+        .unwrap();
+        for (scope, expected) in [
+            (Scope::Unassociated, [(3, None), (2, None), (1, None)]),
+            (scoped, [(2, Some(0)), (1, Some(0)), (3, Some(1))]),
+        ] {
+            let expected: Vec<_> = expected
+                .map(|(id, service)| (ItemId::from_bytes([id; 16]), service))
+                .into();
+            let retained = picker_logins(&scope, items.clone(), used, false, |pick| pick);
+            assert_eq!(
+                retained
+                    .iter()
+                    .map(|pick| (pick.item.id, pick.service))
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            let read = Cell::new(0);
+            let mapped = Cell::new(0);
+            let stream = items.clone().into_iter().inspect(|_| {
+                assert_eq!(
+                    read.get(),
+                    mapped.get(),
+                    "previous item must be mapped first"
+                );
+                read.set(read.get() + 1);
+            });
+            let metadata = picker_logins(&scope, stream, used, false, |pick| {
+                mapped.set(mapped.get() + 1);
+                (pick.item.id, pick.service)
+            });
+            assert_eq!(metadata, expected);
+            assert_eq!(mapped.get(), 3);
+        }
     }
 
     #[test]

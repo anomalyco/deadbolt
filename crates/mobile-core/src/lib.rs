@@ -2,7 +2,10 @@
 //! Every call is synchronous; run it off the UI thread. `lock` is independent
 //! of the network round and cancels all work from the previous generation.
 mod join;
+mod provider;
 mod session;
+
+pub use provider::{MobileCredentialProvider, MobileProviderAuthentication, MobileProviderError};
 
 #[cfg(target_os = "android")]
 mod android;
@@ -278,6 +281,15 @@ impl MobileDevice {
         }
         #[cfg(not(target_os = "ios"))]
         Ok(())
+    }
+
+    /// Secret-free identity publication for the app, using its existing store
+    /// owner. Do not open a provider while the app's session owns redb.
+    pub fn credential_identities(&self) -> Result<String> {
+        self.device.session()?.handler.with(|s| {
+            serde_json::to_string(&provider::identities(&s.vault))
+                .map_err(|_| MobileError::Internal)
+        })
     }
 
     /// `key` is a fresh random 32-byte wrapping key protected by the platform's
@@ -610,7 +622,7 @@ mod tests {
         p_cost: 1,
     };
 
-    fn fixture(
+    pub(crate) fn fixture(
         path: &std::path::Path,
         secret: &DeviceSecret,
         mut vault: Vault,
@@ -666,6 +678,10 @@ mod tests {
         let device = MobileDevice::new(dir.path().display().to_string(), "Phone".into()).unwrap();
         assert_eq!(call(&device, json!({"op":"status"}))["unlocked"], false);
         assert!(matches!(
+            device.credential_identities(),
+            Err(MobileError::Locked)
+        ));
+        assert!(matches!(
             device.call(json!({"op":"items"}).to_string()),
             Err(MobileError::Locked)
         ));
@@ -674,6 +690,16 @@ mod tests {
             Err(MobileError::Authentication)
         ));
         call(&device, json!({"op":"unlock","passphrase":"local-pass"}));
+        let identities = device.credential_identities().unwrap();
+        assert!(!identities.contains("synthetic-mobile-password"));
+        assert!(!identities.contains("JBSWY3DPEHPK3PXP"));
+        let identities: Value = serde_json::from_str(&identities).unwrap();
+        assert_eq!(identities["passwords"][0]["record_id"], id);
+        assert_eq!(identities["one_time_codes"][0]["record_id"], id);
+        assert!(matches!(
+            deadbolt_store::unlock(dir.path(), b"local-pass"),
+            Err(deadbolt_store::Error::InUse)
+        ));
         let status = call(&device, json!({"op":"status"}));
         assert_eq!(status["device_id"], secret.device_id().to_string());
         assert_eq!(

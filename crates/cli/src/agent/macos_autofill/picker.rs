@@ -46,6 +46,7 @@ pub(super) fn list_for_picker(
         items,
         |record| filled.get(record).copied().unwrap_or(0),
         for_otp,
+        |pick| pick,
     )
     .into_iter()
     .map(|pick| {
