@@ -104,7 +104,13 @@ If the toolbar popup says the helper isn't installed, run
 
 ## The extension
 
-### Opt-in corner sign-in authority
+### Universal sign-in
+
+**Everything should be effortless; when it cannot be effortless, get out of
+the way.** One guarded pick, no extra confirmation or progress dialog. The quiet
+corner status never takes focus and disappears within 1.5 seconds of success or
+handoff. Ambiguity ends the chain rather than guessing. An unsupported step stays
+as the provider left it; Deadbolt must not leave a half-filled form.
 
 **Default off.** “Offer to sign in” extends a trusted account pick in the
 extension-owned corner menu to same-origin navigation and submission. Page
@@ -125,7 +131,7 @@ vetoes that submission even with a learned flow. Site scripts can submit on fill
 Deadbolt does not duplicate an observed trusted submit event or mint a user-gesture timestamp.
 Every explicit submit rechecks visible fields, the button's form ownership and
 containment, and the effective form/submitter action and target: same origin,
-same browsing context only. Provider/OAuth clicks remain manual guidance.
+same browsing context only. A provider chain has the additional rules below.
 
 Auth-state evidence is local and value-free. The probe does not receive vault
 usernames or compare arbitrary text, aria-labels, titles or alt text with them.
@@ -136,6 +142,59 @@ inside the viewport invalidates sign-out memory, not a large `role=button`
 wrapper. Pointer coordinates must hit that bounded control; keyboard activation
 must focus it. Navigation, pick, dismissal, lock and setting-off end the offer. These
 bounds reduce probing; surface presence is not invisible to the page.
+
+#### One pick through a provider
+
+A corner pick of a site's linked provider account may activate its uniquely
+identified “Sign in with Google” control, then complete the provider's chooser,
+identifier, password and learned authenticator-code steps. Only such a pick,
+with the linked account and the provider's sign-in hosts known, starts a chain:
+a plain login picked on a provider's own host is the ordinary automatic sign-in,
+and a provider with no known hosts (Okta, a custom one) gets the site's button
+pointed at. Ordinary inline and toolbar picks still only offer manual provider
+guidance. The setting is not a standing grant.
+
+The site's origin must exactly match the saved login. Button text identifies
+a candidate, not a trusted destination: `webNavigation` and the browser's current
+committed document must place subsequent work on the provider's exact known
+HTTPS hosts (`signin.ts`), never a lookalike or cross-site frame, and on
+their own sign-in and OAuth paths only, never a settings, re-authentication or
+sudo page. Every return URL a provider page carries (`redirect_uri`,
+`return_to`, `continue` and the like) must lead to the site's registrable
+domain, directly or through another of the provider's sign-in pages; a chooser
+showing the provider's “will share your name, email…” notice is clicked only
+when one does. Anything else stops the chain, the page untouched. The linked
+username must select one eligible saved provider login, with an exact saved
+origin. Chooser tiles use `data-identifier` / `data-email`, never arbitrary text.
+Two candidates, a covered/offscreen control or an unknown step means no action.
+No scrolling, coordinates supplied by the page or account fallback is used.
+
+The chain owns only the initial tab and at most one popup opened by its top
+document during the provider-button action. Returning to the site's exact
+origin is checked with auth-state/outcome evidence; a redirect or field write
+alone is not success. Popup closure does not itself establish authentication.
+Authority lasts at most two minutes and eight actions total (entry/chooser/
+passkey clicks, form submits and passkey assertions), with one use per step.
+Escape, a real click anywhere, unrelated navigation, lock, disabling the setting
+or a worker restart ends it, including pending credential work. No secret or
+resumable chain is stored in session storage.
+
+**Never approve OAuth access.** Consent, “Allow”, or “Continue as …” that grants
+new access is always the person's decision. Deadbolt does not click it, even
+for the selected account. Only an existing-consent redirect proceeds by itself.
+Phone approval, SMS/email codes, security keys, captchas and unknown screens
+also hand off immediately and untouched. At most a brief corner hint says what
+is needed; no modal, error box or unsolicited fallback covers the page.
+
+Form preflight fixes the complete visible fields and submitter before requesting
+values. A stale/incomplete plan writes nothing; interrupted partial writes are
+rolled back without overwriting a person's edits. TOTP still requires a learned
+authenticator flow and never fills or submits a delivery-code prompt. A matching
+passkey uses the existing RP/allow-list/verification and Strict reauthentication
+checks, not a second account prompt or weakened verification. It signs without
+a prompt only when the agent verifies the person (Touch ID on, and the site
+doesn't discourage verification); otherwise the chain ends and the usual
+passkey prompt asks, so no assertion is made without the person present.
 
 ### Host connection
 
@@ -1098,6 +1157,9 @@ dax@gmail.com" in place of a password (see "In the extension" below).
 for one without a username.
 
 ### In the extension
+
+These are the ordinary field-menu semantics. The opt-in corner offer instead
+uses the bounded [universal sign-in provider chain](#one-pick-through-a-provider).
 
 - **The menu.** On any login field, identifier fields included, a login with
   `signIn` is a row "Sign in with Google" with its account (or the login's

@@ -57,8 +57,15 @@ pub fn spec() -> AppSpec<App> {
     }
 }
 
-/// Runs the app against this user's agent and clipboard, unless `argv` asks
-/// for Rune's tooling (`--snap`, `--tree`, `--script`, `--scene`, …): those
+/// What the `deadbolt` binary the app is built into hands it.
+pub struct Host {
+    /// The SHA-256 of the `deadbolt-enclave` that binary pinned (macOS),
+    /// which the app checks before trusting it about the agent.
+    pub enclave_sha256: &'static str,
+}
+
+/// Runs the app against this user's agent and clipboard, unless `args`
+/// (without the program name) ask for Rune's tooling (`--snap`, `--tree`, `--script`, `--scene`, …): those
 /// runs get no agent (and Rune keeps headless runs off the clipboard), so a
 /// snapshot or tree dump can never hold real vault data.
 ///
@@ -69,16 +76,17 @@ pub fn spec() -> AppSpec<App> {
 /// panel instead of the main window. Headless runs register the default
 /// shortcut on the panel virtually, so a script's `{"shortcut": …}` and
 /// `{"menu": …}` steps reach it without touching the desktop.
-pub fn run() {
+pub fn run(argv: Vec<String>, host: Host) {
+    enclave::pin(host.enclave_sha256);
     rune::set_app_id(APP_ID);
-    let args = rune::tooling::Args::parse();
+    let args = rune::tooling::Args::parse_from(argv.clone());
     let (live, headless) = (is_live(&args), args.headless());
     let extra = rune::extra_args();
     let reduced_motion = extra.iter().any(|a| a == "--reduced-motion");
     let panel_first = extra.iter().any(|a| a == panel::window::FLAG);
     // A headless `--desktop` run drives every window, so they can reach each
     // other as in a live run (the menus' items act on the main window).
-    let wired = live || std::env::args().any(|a| a == "--desktop");
+    let wired = live || argv.iter().any(|a| a == "--desktop");
     // Started for the panel, Deadbolt runs without a Dock icon so launching
     // doesn't activate it and the app you were in keeps focus; opening the
     // main window brings the icon back (`Windows::open_main`).
@@ -87,8 +95,11 @@ pub fn run() {
     let chosen = shortcut_file
         .as_deref()
         .map_or_else(|| Some(shortcut::default()), shortcut::load);
-    rune::run_windows_with(rune::RunOptions { accessory }, move |_| {
-        let mut main = rune::App::new(spec()).chrome(view::CHROME);
+    rune::run_windows_with_args(rune::RunOptions { accessory }, argv, move |_| {
+        // Process-wide, so it covers the panel too; `RUNE_GPU_BACKEND=wgpu` overrides it.
+        let mut main = rune::App::new(spec())
+            .chrome(view::CHROME)
+            .gpu_backend(rune::GpuBackend::Metal);
         let mut quick = rune::App::new(panel::spec()).windowless();
         // Native menus are macOS's; headless scripts reach them everywhere.
         if cfg!(target_os = "macos") || headless {

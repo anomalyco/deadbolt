@@ -11,7 +11,9 @@
 # Artifacts (docs/releasing.md), each with a manifest at
 # $RELEASE/deadbolt/<artifact>/<channel>.json:
 #
-#   cli        macos-arm64, macos-x64, linux-x64, linux-arm64: the CLI tarballs
+#   cli        macos-arm64, macos-x64, linux-x64, linux-arm64 (glibc, the
+#              app built in), linux-x64-musl, linux-arm64-musl (static, no
+#              app): the `deadbolt` tarballs
 #   desktop    macos-arm64, macos-x64: the universal Deadbolt.app zip (the
 #              updater's file, one per target as Hex's updater expects);
 #              macos-arm64-dmg, macos-x64-dmg: the universal DMG
@@ -52,6 +54,8 @@ targets() {
       echo "macos-x64=deadbolt-$v-darwin-x64.tar.gz"
       echo "linux-x64=deadbolt-$v-linux-x64.tar.gz"
       echo "linux-arm64=deadbolt-$v-linux-arm64.tar.gz"
+      echo "linux-x64-musl=deadbolt-$v-linux-x64-musl.tar.gz"
+      echo "linux-arm64-musl=deadbolt-$v-linux-arm64-musl.tar.gz"
       ;;
     desktop)
       echo "macos-arm64=Deadbolt-$v-macos-universal.zip"

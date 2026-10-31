@@ -14,30 +14,32 @@ cd "$root"
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
 export MACOSX_DEPLOYMENT_TARGET=12.0
-version=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "deadbolt-app"))')
+version=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "deadbolt-cli"))')
 # CFBundleVersion must be numeric: a dev build's run number, or X.Y.Z as XXYYZZ.
 case "$version" in
   0.0.0-dev-*) build=${version#0.0.0-dev-}; build=${build%%.*} ;;
   *) build=$(printf '%s\n' "${version%%-*}" | awk -F. '{ print ($1 * 10000) + ($2 * 100) + $3 }') ;;
 esac
 target=$(cargo +stable metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')
+# One program: `deadbolt` with the app built in. Contents/MacOS/Deadbolt and
+# Contents/Helpers/deadbolt are two copies of it, signed apart (the app as
+# pw.deadbolt.app, the CLI and agent as deadbolt), so the agent tells the app
+# from the CLI by signature and path; run as MacOS/Deadbolt it is only ever
+# the app.
 if $universal; then
-  # deadbolt-cli first: the app pins the helper its build.rs stages.
   for arch in aarch64 x86_64; do
     cargo +stable build --release --locked -p deadbolt-cli --target "$arch-apple-darwin" -j 2
-    cargo +stable build --release --locked -p deadbolt-app --target "$arch-apple-darwin" -j 2
   done
-  for bin in deadbolt deadbolt-enclave deadbolt-ui; do
+  for bin in deadbolt deadbolt-enclave; do
     lipo -create "$target/aarch64-apple-darwin/release/$bin" "$target/x86_64-apple-darwin/release/$bin" -output "$scratch/$bin"
   done
 else
   cargo +stable build --release --locked -p deadbolt-cli -j 2
-  cargo +stable build --release --locked -p deadbolt-app -j 2
-  cp "$target/release/deadbolt" "$target/release/deadbolt-enclave" "$target/release/deadbolt-ui" "$scratch/"
+  cp "$target/release/deadbolt" "$target/release/deadbolt-enclave" "$scratch/"
 fi
 app="$scratch/Deadbolt.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Helpers" "$app/Contents/Resources"
-cp "$scratch/deadbolt-ui" "$app/Contents/MacOS/Deadbolt"
+cp "$scratch/deadbolt" "$app/Contents/MacOS/Deadbolt"
 cp "$scratch/deadbolt" "$app/Contents/Helpers/deadbolt"
 cp "$scratch/deadbolt-enclave" "$app/Contents/Helpers/deadbolt-enclave"
 chmod 755 "$app/Contents/MacOS/Deadbolt" "$app/Contents/Helpers/deadbolt" "$app/Contents/Helpers/deadbolt-enclave"
@@ -94,7 +96,7 @@ fi
 # already signed it (or took the release workflow's Developer ID-signed helper
 # from `DEADBOLT_ENCLAVE_PREBUILT`; docs/releasing.md) (using `DEADBOLT_APPLE_SIGNING_IDENTITY` with `--options runtime
 # --timestamp` when set, or ad-hoc `-` otherwise) before embedding its whole-file
-# SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt` and `Deadbolt`. Re-signing `deadbolt-enclave`
+# SHA-256 (`DEADBOLT_ENCLAVE_SHA256`) into `deadbolt` (both copies). Re-signing `deadbolt-enclave`
 # after `deadbolt` is compiled would alter its `__LINKEDIT` signature bytes and
 # break the agent's SHA-256 verification.
 sign_id=${DEADBOLT_APPLE_SIGNING_IDENTITY:--}
@@ -130,7 +132,7 @@ if $bundle_autofill; then
   codesign --verify --strict "$app/Contents/PlugIns/DeadboltAutoFill.appex"
 fi
 codesign --verify --deep --strict "$app"
-# The app pins the helper it ships, as `deadbolt` does (crates/app/build.rs).
+# The app pins the helper it ships: it is `deadbolt`, built against it.
 helper="$app/Contents/Helpers/deadbolt-enclave"
 if $universal; then slices="arm64 x86_64"; else slices=thin; fi
 for slice in $slices; do
