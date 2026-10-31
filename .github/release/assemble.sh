@@ -12,6 +12,7 @@ dist=$(posix "$2")
 v=$DEADBOLT_VERSION
 files=(
   "deadbolt-$v-linux-x64.tar.gz" "deadbolt-$v-linux-arm64.tar.gz"
+  "deadbolt-$v-linux-x64-musl.tar.gz" "deadbolt-$v-linux-arm64-musl.tar.gz"
   "deadbolt-$v-darwin-x64.tar.gz" "deadbolt-$v-darwin-arm64.tar.gz"
   "Deadbolt-$v-macos-universal.zip" "Deadbolt-$v-macos-universal.dmg"
   "deadbolt-extension-$v.zip" "deadbolt-extension-standalone-$v.zip"
