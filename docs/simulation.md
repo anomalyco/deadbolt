@@ -106,7 +106,10 @@ ignored, so a crash after storing genesis cannot hide the new vault.
 
 Local item reads and writes are available immediately after unlock, including
 imports. Readiness gates sending data to peers, accepting inbound data, and
-invitations. Membership entries flow while the barrier is closed.
+invitations. Membership entries flow while the barrier is closed. On the native agent, a
+received item edit triggers immediate forwarding if there is another peer; it
+does not redial the sole peer that just sent the edit. Membership changes,
+local writes, and periodic anti-entropy still trigger their normal rounds.
 
 A startup round completes when each current member either completed its exchange
 or was unreachable during the dial. A remote membership-gate refusal also completes
