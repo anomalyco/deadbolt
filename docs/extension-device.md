@@ -173,8 +173,9 @@ the MV3 service worker or directly in the offscreen document. Handles never move
 between workers. An opaque handle id in Rust avoids claiming that a JS object is
 thread-safe; this build has no wasm threads/shared memory.
 
-Local writes and incoming sync batches stage a validated core vault, append the
-new encrypted entries durably, and only then publish the staged state. A storage
+Local writes and incoming sync batches validate a private suffix against the
+borrowed vault history (the same staging path as native), append its encrypted
+entries in one transaction, and publish only after confirmed commit. A storage
 error before the signed-log transaction reaches commit leaves the live vault
 unchanged and unlocked; further writes may require reopening the store. Once
 redb's commit starts, the store reports a failed commit as `AppendUncertain`.

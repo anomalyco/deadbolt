@@ -225,7 +225,7 @@ pub(super) async fn finish(body: &mut Value) -> Result<Value> {
             *fresh.secret.to_bytes(),
             KdfParams::DEFAULT,
         )?;
-        store.append_encoded(fresh.welcomed.vault.iter_entries().map(Entry::encode))?;
+        store.append_batch(fresh.welcomed.vault.iter_entries().map(Entry::encode))?;
         let mut loaded = Loaded::open(store)?;
         loaded
             .store

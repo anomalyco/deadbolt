@@ -131,8 +131,18 @@ treated as already unlocked: a bad passphrase leaves the device locked. Explicit
 `deadbolt lock` still closes the failed handle. No uncertain mutation is retried.
 A warning records only the typed failure class, I/O kind and numeric OS error,
 never backend messages, paths or vault values.
-Staging clones the validated vault, avoiding signature verification of historical
-entries. Sync batches publish independently per vault.
+Native and standalone writes use the same core transaction: validation borrows the
+committed log and checks each new entry against that prefix plus previously
+accepted entries in this batch. Only the new entries are encoded, one at a time,
+in membership-then-data order inside one store transaction. After confirmation
+the verified nodes, indexes and resolved membership become live, and the item
+view is updated. A single data edit does not copy historical nodes or item state.
+Compound local writes that read their earlier changes project those changes on
+demand. A membership change rebuilds the view if it changes which entries count
+in an already projected data log. Adding a new key therefore leaves existing
+items alone. Adding a key whose earlier admission was cut is different: its
+stored but ignored data now counts, so dependent edits must be replayed too.
+Sync batches still publish independently per vault.
 
 The native `agent::session::tests::ambiguous_append_` regressions use synthetic
 encrypted stores on a real file backend. They inject a lost acknowledgement

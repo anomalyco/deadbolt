@@ -214,13 +214,7 @@ impl Unlocked {
     /// Deduplication and hash verification happen in `deadbolt-core::Vault`
     /// before entries are staged for persistence, so the store keeps only the
     /// sealed entry bytes in append order.
-    pub fn append_batch<'a>(&self, entries: impl IntoIterator<Item = &'a [u8]>) -> Result<usize> {
-        self.append_encoded(entries)
-    }
-
-    /// As `append_batch`, accepting owned scratch buffers so a large verified
-    /// welcome can be encoded and sealed one entry at a time in one commit.
-    pub fn append_encoded<B: AsRef<[u8]>>(
+    pub fn append_batch<B: AsRef<[u8]>>(
         &self,
         entries: impl IntoIterator<Item = B>,
     ) -> Result<usize> {
