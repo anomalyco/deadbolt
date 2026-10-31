@@ -301,6 +301,10 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
   let codeTimer: ReturnType<typeof setTimeout> | undefined
   let tick: ReturnType<typeof setInterval> | undefined
   let reauth: "reveal" | "copy" | null = app.preset === "strict" && then ? then : null
+  /** The open passphrase form, kept across repaints with what's typed in it. */
+  let asking: { kind: "reveal" | "copy"; form: HTMLFormElement } | null = null
+  let removeBtn: HTMLButtonElement | null = null
+  let removeRow: HTMLElement | null = null
   const say = (m: string) => app.announce(m)
 
   /** Shows the password, out of sight again after half a minute. */
@@ -336,7 +340,8 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     if (s.password === undefined) {
       if (s.reauth) {
         reauth = "copy"
-        return paint()
+        paint()
+        return asking?.form.querySelector("input")?.focus()
       }
       return say(s.message ?? "Couldn't copy.")
     }
@@ -352,7 +357,8 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     if (s.password === undefined) {
       if (s.reauth) {
         reauth = "reveal"
-        return paint()
+        paint()
+        return asking?.form.querySelector("input")?.focus()
       }
       return say(s.message ?? "Couldn't show the password.")
     }
@@ -415,8 +421,10 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
       const eye = iconButton(glyph(revealed !== null ? "eyeOff" : "eye"), revealed !== null ? "Hide password" : "Show password", () => void reveal())
       const copy = iconButton(icon("copy"), "Copy password", (b) => void copyPassword(b), "copy-password")
       lines.push(line("Password", revealed !== null ? h("span", { class: "mono secret" }, revealed) : h("span", { class: "dots" }, "••••••••••••"), eye, copy))
-      if (reauth) lines.push(reauthLine(reauth))
+      if (reauth && asking?.kind !== reauth) asking = { kind: reauth, form: reauthLine(reauth) }
+      if (reauth) lines.push(asking!.form)
     }
+    if (!reauth) asking = null
     if (d.totp) {
       const t = d.totp
       const left = Math.max(0, t.until - Date.now() / 1000)
@@ -444,8 +452,15 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
     if (website) lines.push(line("Website", h("span", {}, host), iconButton(glyph("open"), "Open site", () => openSite(website))))
     const notes = d.fields.find((f) => f.name === "notes")?.value
     if (notes) lines.push(h("div", { class: "line" }, h("span", { class: "line-label" }, "Notes"), h("span", { class: "value lines" }, notes), h("span", { class: "line-actions" }, iconButton(icon("copy"), "Copy notes", (b) => void copied(b, notes, say, "Copied the notes")))))
-    keepFocus(el, () =>
-      el.replaceChildren(
+    // As in itemDetailView: the deletion button, armed or with its passphrase
+    // form, stays mounted across a new code or a sync.
+    removeBtn ??= deleteButton(app, ref, d.title)
+    removeBtn.dataset.what = d.title
+    removeBtn.setAttribute("aria-label", `Delete ${d.title}`)
+    removeRow ??= h("div", { class: "buttons end" }, removeBtn)
+    // Built inside keepFocus: moving a kept passphrase form into the new box blurs it.
+    keepFocus(el, () => {
+      const content: Node[] = [
         toolbar(
           "",
           () => app.go({ name: "list" }, -1),
@@ -457,9 +472,14 @@ export function detailView(app: App, ref: string, then?: "reveal" | "copy"): Vie
         ),
         h("div", { class: "detail-head" }, avatarFor(app, d.title, d.url ?? "", "detail"), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, host || "No website"), tagChips(app, d.tags))),
         h("div", { class: "box" }, ...lines),
-        h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
-      ),
-    )
+      ]
+      if (removeRow!.parentElement === el) {
+        while (el.firstChild && el.firstChild !== removeRow) el.firstChild.remove()
+        removeRow!.before(...content)
+      } else {
+        el.replaceChildren(...content, removeRow!)
+      }
+    })
   }
 
   const refreshCode = async () => {

@@ -1259,7 +1259,7 @@ async function addLogin(device: Page, title: string, username: string, password:
  * secret), edited without touching the secret, and deleted; and a login
  * given a one-time password, whose current code then shows.
  */
-async function itemTypes(device: Page) {
+async function itemTypes(device: Page, worker: Worker) {
   const add = async (kind: string) => {
     await device.getByRole("button", { name: "Add an item", exact: true }).click()
     await device.getByRole("button", { name: kind, exact: true }).click()
@@ -1314,6 +1314,57 @@ async function itemTypes(device: Page) {
   await device.getByRole("button", { name: "Save", exact: true }).click()
   const code = await until("the login's one-time code shows", async () => (await device.locator(".detail .code-value").textContent().catch(() => null))?.replace(/\s/g, ""))
   check(/^\d{6}$/.test(code), "a login given a one-time password shows its current code")
+
+  // Strict: a status push repaints the detail (as a new one-time code does),
+  // and an open passphrase form keeps its place, what's typed and its focus.
+  const repaint = async () => {
+    await device.evaluate(() => {
+      const detail = document.querySelector(".detail")!
+      const before = detail.querySelector(".detail-head")!
+      detail.removeAttribute("data-refreshed")
+      const observer = new MutationObserver(() => {
+        if (detail.querySelector(".detail-head") === before) return
+        observer.disconnect()
+        detail.setAttribute("data-refreshed", "true")
+      })
+      observer.observe(detail, { childList: true })
+    })
+    const status = (await request(device, { type: "device-status" })).status
+    await worker.evaluate((status) => chrome.runtime.sendMessage({ type: "db:status", status, change: "items" }), status)
+    await device.locator('.detail[data-refreshed="true"]').waitFor()
+  }
+  const kept = async (form: ReturnType<Page["locator"]>, how: string) => {
+    const input = form.getByLabel("Passphrase", { exact: true })
+    check(await form.count() === 1 && await input.inputValue() === passphrase && await input.evaluate((e) => e === document.activeElement), `a repaint keeps the ${how} passphrase form, its value and its focus`)
+  }
+  // An item's Show first offers clipboard clearing, a permission prompt headless Chromium never answers.
+  await device.evaluate(() => chrome.storage.local.set({ "deadbolt.clipboardAsked": true }))
+  await request(device, { type: "device-preset", preset: "strict" })
+  try {
+    await device.getByRole("button", { name: "Delete From browser", exact: true }).click()
+    await repaint()
+    check(!!(await device.getByRole("button", { name: "Delete From browser", exact: true }).textContent())?.includes("Delete for good?"), "a repaint keeps a login's armed Delete")
+    await device.getByRole("button", { name: "Show password", exact: true }).click()
+    const showAuth = device.locator(".detail .box form.reauth")
+    await showAuth.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+    await repaint()
+    await kept(showAuth, "login's Show")
+    await showAuth.getByRole("button", { name: "Show", exact: true }).click()
+    await device.locator(".detail .secret", { hasText: browserPassword }).waitFor()
+    check(!(await showAuth.count()), "and its Show still works after the repaint")
+    await back()
+    await device.locator(".list-view .vrow .title", { hasText: "Stripe test key" }).click()
+    await device.getByRole("button", { name: "Show Credential", exact: true }).click()
+    const credentialAuth = device.locator(".detail .box form.reauth")
+    await credentialAuth.getByLabel("Passphrase", { exact: true }).fill(passphrase)
+    await repaint()
+    await kept(credentialAuth, "item's Show")
+    await credentialAuth.getByRole("button", { name: "Show", exact: true }).click()
+    await device.locator(".detail .secret", { hasText: "sk_test_synthetic_4242" }).waitFor()
+    check(!(await credentialAuth.count()), "and the item's Show still works after the repaint")
+  } finally {
+    await request(device, { type: "device-preset", preset: "comfortable" })
+  }
   await back()
 }
 async function unlockOnPage(device: Page) {
@@ -1665,7 +1716,7 @@ try {
   await shown(device, "From browser")
   check(true, "device page lists the saved login without being asked")
   check((await logins(device)).length === 1, "extension writes a login")
-  await itemTypes(device)
+  await itemTypes(device, worker)
 
   if (smoke) {
     await quick(worker, "From browser", browserPassword, "with no peers")
