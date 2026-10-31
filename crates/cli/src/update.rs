@@ -744,10 +744,10 @@ fn refuse_foreign_root(dir: &Path) -> Result<()> {
 /// One CLI update at a time per state directory, through the final replacement,
 /// not just the floor write: an older in-flight download must not install last.
 /// Keep the lock file in place; locking the atomically replaced JSON would let
-/// another process lock a different inode. Closing the file releases the lock.
+/// another process lock a different inode.
 struct UpdateState {
     dir: PathBuf,
-    _lock: std::fs::File,
+    lock: std::fs::File,
 }
 
 impl UpdateState {
@@ -772,8 +772,22 @@ impl UpdateState {
         }
         Ok(Self {
             dir: dir.to_path_buf(),
-            _lock: lock,
+            lock,
         })
+    }
+}
+
+impl Drop for UpdateState {
+    fn drop(&mut self) {
+        // Closing our descriptor alone may leave the lock held by a concurrent
+        // fork until exec closes its inherited CLOEXEC descriptor. The update
+        // transaction is finished now; unlock the shared description explicitly.
+        if let Err(error) = self.lock.unlock() {
+            eprintln!(
+                "warning: couldn't release {}: {error}",
+                self.dir.join("update.lock").display()
+            );
+        }
     }
 }
 
@@ -2114,8 +2128,15 @@ mod tests {
         check_sequence(&state, "cli", "stable", &manifest(100, false), false).unwrap();
         // Atomic replacement of the state file must not release the lock.
         assert!(UpdateState::open(dir.path()).is_err());
+        // A concurrent process launch can inherit this open file description
+        // until exec closes its CLOEXEC descriptor. Hold a duplicate to model
+        // that window deterministically, without a fork or timing assumptions.
+        let inherited = state.lock.try_clone().unwrap();
         drop(state);
         let state = UpdateState::open(dir.path()).unwrap();
+        assert!(UpdateState::open(dir.path()).is_err());
+        drop(inherited);
+        assert!(UpdateState::open(dir.path()).is_err());
         let older = manifest(100, false).replace("\"sequence\":7", "\"sequence\":6");
         assert!(check_sequence(&state, "cli", "stable", &older, false).is_err());
     }
