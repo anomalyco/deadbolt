@@ -1,5 +1,51 @@
 # Universal sign-in: prototype and next decisions
 
+## Provider chains (2026-10-30)
+
+**Everything should be effortless; when it cannot be effortless, get out of
+the way.** One pick completes the happy path. No extra confirmation or progress
+dialog, nothing centre-screen, and no focus-taking status UI. The quiet corner
+pill disappears within 1.5 seconds after success or handoff. Unknown means stop,
+not guess; never leave a half-filled form. Consent or a phone prompt stays
+exactly as the provider left it so the person can carry on by hand.
+
+This extension of #116 replaces manual provider guidance **only for a guarded
+corner pick with “Offer to sign in” enabled**. Ordinary field/toolbar provider
+picks keep their existing behavior. The earlier prototype report below is
+historical; its same-origin-only limitation does not describe provider chains.
+
+`bg/provider-chain.ts` owns one memory-only, cancellable chain. It starts after
+the existing menu dwell and fresh `confirmPick`, binds the saved site's exact
+origin and linked username, and uses the known provider hosts in `signin.ts`.
+`webNavigation` and document-targeted delivery verify the real committed URL
+after the site's uniquely identified provider button opens a redirect or popup.
+Only the initial tab and one popup from that top document may participate;
+cross-site frames and lookalike hosts receive no account or credentials.
+
+`content/provider-chain.ts` fixes opaque, one-shot action plans. The complete
+form, submit destination and visibility are checked before asking for values
+and again before acting. Entry controls and chooser tiles use Deadbolt's own
+provider detection and fill visibility checks. Ambiguity, changed controls or
+an incomplete form fails closed. Interrupted writes are rolled back without
+clobbering user edits. Password/identifier/TOTP use the existing backend policy;
+code submission still requires a learned authenticator flow. Passkeys reuse
+the existing ceremony, RP, allow-list and Strict reauthentication checks.
+
+**OAuth consent is never automatic.** Never click “Allow” or a “Continue as …”
+screen granting new access. Only the provider's own existing-consent redirect
+continues. Phone prompts, SMS/email codes, security keys, captchas and unknown
+screens end the chain immediately, without a modal, error or fallback. At most
+the corner briefly says “Approve on your phone” or another short handoff hint.
+
+A chain expires after two minutes or eight total clicks/submits/assertions.
+Escape, any real page click, lock, setting-off, leaving its origins/tabs or a
+worker restart revokes pending work. On return, auth-state/outcome evidence
+must confirm sign-in; a redirect, popup closure or signature alone does not.
+**Security review needed.** Synthetic-provider tests are not evidence of real
+Google-account compatibility or a completed security review.
+
+## Original same-origin prototype report (2026-10-29)
+
 2026-10-29. Implemented opt-in prototype, with headless standalone verification
 reported below. This document records behavior, rationale and remaining product
 questions; it does not claim CI approval or completed security review. Research
