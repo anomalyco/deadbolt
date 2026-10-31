@@ -518,6 +518,23 @@ impl Vault {
         self.items.get(id).map(|state| state.item(*id))
     }
 
+    /// Closest live item ids on either side of `id`, for unique display
+    /// prefixes. Tombstones do not compete with live items for a prefix.
+    pub fn live_neighbors(&self, id: ItemId) -> [Option<ItemId>; 2] {
+        use std::ops::Bound::{Excluded, Unbounded};
+        [
+            self.items
+                .range(..id)
+                .rev()
+                .find(|(_, state)| !state.deleted())
+                .map(|(id, _)| *id),
+            self.items
+                .range((Excluded(id), Unbounded))
+                .find(|(_, state)| !state.deleted())
+                .map(|(id, _)| *id),
+        ]
+    }
+
     /// Live items in id order, materialized one at a time.
     pub fn iter_items(&self) -> impl Iterator<Item = Item> + '_ {
         self.items

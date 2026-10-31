@@ -71,20 +71,27 @@ pub(super) fn matches(item: &Item, query: &[String], has_any_tagged: bool) -> bo
 
 /// Shortest unique id prefix of `id` among `ids` (sorted), at least 4.
 fn short_id(ids: &[String], id: &str) -> String {
-    let common = |other: &String| {
+    let at = ids
+        .binary_search_by(|x| x.as_str().cmp(id))
+        .unwrap_or_else(|i| i);
+    let neighbours = [at.checked_sub(1), Some(at + 1)];
+    short_between(
+        id,
+        neighbours
+            .into_iter()
+            .flatten()
+            .filter_map(|i| ids.get(i).map(String::as_str)),
+    )
+}
+
+fn short_between<'a>(id: &str, neighbours: impl Iterator<Item = &'a str>) -> String {
+    let common = |other: &str| {
         id.bytes()
             .zip(other.bytes())
             .take_while(|(a, b)| a == b)
             .count()
     };
-    let at = ids
-        .binary_search_by(|x| x.as_str().cmp(id))
-        .unwrap_or_else(|i| i);
-    let neighbours = [at.checked_sub(1), Some(at + 1)];
     let shared = neighbours
-        .into_iter()
-        .flatten()
-        .filter_map(|i| ids.get(i))
         .filter(|other| *other != id)
         .map(common)
         .max()
@@ -152,7 +159,6 @@ impl Listing {
         with_otp: bool,
         with_ssh_private: bool,
     ) -> ItemInfo {
-        let id = item.id.to_string();
         let mut fields = Vec::new();
         if with_fields {
             let known: Vec<&str> = schema(&item.kind)
@@ -191,21 +197,14 @@ impl Listing {
                 })
                 .collect();
         }
-        ItemInfo {
-            short: short_id(&self.ids, &id),
-            id,
-            kind: item.kind.clone(),
-            label: label(item),
-            detail: detail(item),
+        summarize(
+            item,
+            short_id(&self.ids, &item.id.to_string()),
             fields,
-            source: super::mirror::source_app(item.source.as_ref()),
-            favorite: item.favorite,
-            tags: item.tags.iter().cloned().collect(),
-            deleted_at: self
-                .deleted
+            self.deleted
                 .as_ref()
                 .and_then(|at| at.get(&item.id).copied()),
-        }
+        )
     }
 
     pub(super) fn find(&self, query: &[String]) -> Result<&Item> {
@@ -233,6 +232,26 @@ impl Listing {
                 )
             }
         }
+    }
+}
+
+fn summarize(
+    item: &Item,
+    short: String,
+    fields: Vec<FieldInfo>,
+    deleted_at: Option<u64>,
+) -> ItemInfo {
+    ItemInfo {
+        short,
+        id: item.id.to_string(),
+        kind: item.kind.clone(),
+        label: label(item),
+        detail: detail(item),
+        fields,
+        source: super::mirror::source_app(item.source.as_ref()),
+        favorite: item.favorite,
+        tags: item.tags.iter().cloned().collect(),
+        deleted_at,
     }
 }
 
@@ -282,7 +301,20 @@ fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
 fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");
-    Listing::new(vault).info(&item, false, false)
+    live_summary(vault, &item)
+}
+
+// The caller already knows the precise item. Only its immediate live id
+// neighbours can lengthen its display prefix; never copy unrelated secrets.
+fn live_summary(vault: &Vault, item: &Item) -> ItemInfo {
+    let neighbours = vault
+        .live_neighbors(item.id)
+        .map(|id| id.map(|i| i.to_string()));
+    let short = short_between(
+        &item.id.to_string(),
+        neighbours.iter().filter_map(Option::as_deref),
+    );
+    summarize(item, short, Vec::new(), None)
 }
 
 /// "personal › GitHub": the one item `query` finds, without its values,
@@ -943,7 +975,7 @@ pub(super) fn remove_id(s: &mut Loaded, vault: VaultId, id: ItemId) -> Result<It
         .item(&id)
         .filter(|item| !item.deleted)
         .ok_or_else(|| anyhow!("no such item"))?;
-    let info = Listing::new(stored).info(&item, false, false);
+    let info = live_summary(stored, &item);
     write(s, vault, vec![DataOp::delete(id, crate::config::now())])?;
     Ok(info)
 }

@@ -2055,3 +2055,24 @@ fn removals_do_not_consume_the_membership_budget() {
         })
     );
 }
+
+#[test]
+fn live_neighbors_skip_deleted_ids_on_both_sides() {
+    let mut dev = Dev::create();
+    let mut ids = (0..7).map(|_| dev.login("synthetic")).collect::<Vec<_>>();
+    ids.sort();
+    for id in [ids[0], ids[2], ids[3], ids[6]] {
+        dev.write(vec![DataOp::delete(id, 1)]);
+    }
+    assert_eq!(dev.vault.live_neighbors(ids[1]), [None, Some(ids[4])]);
+    assert_eq!(
+        dev.vault.live_neighbors(ids[4]),
+        [Some(ids[1]), Some(ids[5])]
+    );
+    assert_eq!(dev.vault.live_neighbors(ids[5]), [Some(ids[4]), None]);
+    dev.write(vec![DataOp::restore(ids[3])]);
+    assert_eq!(
+        dev.vault.live_neighbors(ids[4]),
+        [Some(ids[3]), Some(ids[5])]
+    );
+}

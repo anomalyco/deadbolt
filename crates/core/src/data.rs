@@ -158,7 +158,7 @@ pub(crate) struct ItemState {
 
 impl ItemState {
     /// Concurrent edit (or restore) and delete: the edit wins.
-    fn deleted(&self) -> bool {
+    pub(crate) fn deleted(&self) -> bool {
         !self.alive.iter().any(|w| w.value == Life::Alive)
     }
 
