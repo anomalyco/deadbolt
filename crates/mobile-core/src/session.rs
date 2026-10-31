@@ -24,6 +24,8 @@ pub(crate) struct Loaded {
     peers: BTreeMap<String, Hint>,
     addr: Option<Addr>,
     ready: bool,
+    // Set only by a completed outbound data exchange in the serialized sync round.
+    synced_peer: bool,
 }
 
 impl Loaded {
@@ -45,6 +47,7 @@ impl Loaded {
             peers,
             addr: None,
             ready,
+            synced_peer: false,
         })
     }
 
@@ -261,7 +264,13 @@ impl application::RoundState for Handler {
         self.with(|s| Ok(s.targets()))
     }
     fn saw(&self, _: PeerId) -> Result<()> {
-        self.with(|_| Ok(()))
+        self.with(|s| {
+            // Membership refresh alone does not confirm a data sync.
+            if s.ready {
+                s.synced_peer = true;
+            }
+            Ok(())
+        })
     }
     fn publish_ready(&self, addr: Addr) -> Result<()> {
         self.with(|s| {
@@ -287,6 +296,14 @@ impl Session {
     pub async fn start(loaded: Loaded, cancel: CancellationToken) -> Result<Arc<Self>> {
         let mut config = NodeConfig::new(*loaded.secret.to_bytes());
         config.portmapper = false;
+        Self::start_with_config(loaded, cancel, config).await
+    }
+
+    async fn start_with_config(
+        loaded: Loaded,
+        cancel: CancellationToken,
+        mut config: NodeConfig,
+    ) -> Result<Arc<Self>> {
         let handler = Handler {
             loaded: Arc::new(Mutex::new(Some(loaded))),
             session: Arc::new(Mutex::new(Weak::new())),
@@ -328,7 +345,17 @@ impl Session {
             _ = self.cancel.cancelled() => Err(MobileError::Cancelled),
             result = async {
                 let _round = self.sync.lock().await;
-                application::sync_round(&self.node, &self.handler).await
+                self.handler.with(|s| {
+                    s.synced_peer = false;
+                    Ok(())
+                })?;
+                application::sync_round(&self.node, &self.handler).await?;
+                self.handler.with(|s| {
+                    if !s.synced_peer && s.vault.members().any(|id| id != s.device_id()) {
+                        return Err(MobileError::Network);
+                    }
+                    Ok(())
+                })
             } => result,
         }
     }
@@ -368,5 +395,78 @@ impl Session {
 impl Drop for Session {
     fn drop(&mut self) {
         self.lock();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    #[tokio::test]
+    async fn sync_requires_a_completed_exchange_only_when_there_are_peers() {
+        async fn local_session(
+            path: &std::path::Path,
+            key: &DeviceSecret,
+            vault: Vault,
+            peers: Value,
+        ) -> Arc<Session> {
+            crate::tests::fixture(path, key, vault, peers);
+            let store = deadbolt_store::unlock(path, b"local-pass").unwrap();
+            Session::start_with_config(
+                Loaded::open(store, "Fixture".into()).unwrap(),
+                CancellationToken::new(),
+                NodeConfig::local_only(*key.to_bytes()),
+            )
+            .await
+            .unwrap()
+        }
+
+        let a = DeviceSecret::generate();
+        let b = DeviceSecret::generate();
+        let home = tempfile::tempdir().unwrap();
+        let phone = tempfile::tempdir().unwrap();
+        let (vault, _) = Vault::create(&a, "sync-test").unwrap();
+        let host = local_session(home.path(), &a, vault, json!({})).await;
+        host.sync().await.unwrap(); // Sole member: nothing to contact.
+        let vault = host
+            .handler
+            .with(|s| {
+                s.update(s.vault.id(), |vault, key| {
+                    vault.add(
+                        key,
+                        b.device_id(),
+                        b.join_consent(&vault.id(), &key.device_id()),
+                    )?;
+                    Ok(())
+                })?;
+                Ok(s.vault.clone())
+            })
+            .unwrap();
+        // The signed member exists but has no route; loopback nodes have no lookup.
+        assert!(matches!(host.sync().await, Err(MobileError::Network)));
+        let hint = Hint {
+            addr: Some(Addr::from_peer(host.node.addr())),
+            name: None,
+            addr_seen: 0,
+        };
+        let mobile = local_session(
+            phone.path(),
+            &b,
+            vault,
+            json!({a.device_id().to_string():hint}),
+        )
+        .await;
+        mobile.sync().await.unwrap();
+        assert_eq!(host.handler.with(|s| Ok(s.vault.items().len())).unwrap(), 2);
+        // A previous exchange is not evidence for a new round refused by the peer.
+        host.lock();
+        assert!(matches!(mobile.sync().await, Err(MobileError::Network)));
+        assert_eq!(
+            mobile.handler.with(|s| Ok(s.vault.items().len())).unwrap(),
+            2
+        );
+        mobile.node.shutdown().await;
+        host.node.shutdown().await;
     }
 }
