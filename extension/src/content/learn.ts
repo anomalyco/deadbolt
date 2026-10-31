@@ -5,12 +5,14 @@
 // gets wrong is what learning is for.
 //
 // Nothing typed leaves the frame. For each field the user typed into it keeps
-// two digests from the last trusted keystroke (to tell a repeated value and,
-// in the background, a saved username) and, for fields that aren't password
-// boxes, the value itself in memory only, to scrub it out of page text. Both
-// go when the session ends. A field that was a password box at any point of
-// the session, or that the detector takes for one, stays secret: a
-// show-password toggle doesn't turn it into a username.
+// digests from the last trusted keystroke (to tell a repeated value and, in
+// the background, a saved username) and every typed value in memory only, to
+// scrub it out of page text: a page can echo a password into a label, a
+// placeholder, the title or the address, and the log keeps text. Values go
+// when the session ends. A field that was a password box at any point of the
+// session, or that the detector takes for one, stays secret: a show-password
+// toggle doesn't turn it into a username, and only a non-secret field's value
+// is kept for the saved-username check.
 
 import type { LearnSession, LearnStep, LearnInput, LearnTrigger, SubmitBy, Typed } from "../learn"
 import { clip, frameOf, lengthBand, MAX_FRAMES, MAX_INPUTS, scrub, sha256, shapeOf, truthOf, usernameDigest } from "../learn"
@@ -147,7 +149,10 @@ export async function snapshot(trigger: LearnTrigger, submitted?: { by: SubmitBy
   const roles = new Map(result?.fields.map((f) => [f.el, f]) ?? [])
   for (const f of result?.fields ?? []) if (f.role === "password" || f.role === "new-password") makeSecret(f.el)
   const form = result?.fields.find((f) => f.owner.form)?.owner.form ?? null
-  const values = [...identifiers, ...typedEls.filter((el) => !secrets.has(el)).map((el) => el.value)]
+  // Every typed value scrubs page text, secrets included. They stay in this
+  // frame for this snapshot (the inputs hold them anyway); `identifiers`
+  // never does.
+  const values = [...identifiers, ...typedEls.map((el) => el.value)]
   const text = (s: string | null | undefined, n?: number) => scrub(clip(s, n), values)
 
   const inputs: LearnInput[] = []
