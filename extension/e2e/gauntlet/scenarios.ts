@@ -682,6 +682,6 @@ export function gauntletScenarios<R extends GauntletRun>(h: Harness<R>): { scena
   if (missing.length) throw new Error(`gauntlet pages without a scenario: ${missing.join(", ")}`)
   return {
     scenarios: Object.fromEntries(Object.entries(units).map(([name, slugs]) => [name, () => runPages(slugs)])),
-    cost: { gauntletSignIn: 50, gauntletCodes: 90, gauntletIdentity: 25, gauntletDom: 60, gauntletDom2: 60, gauntletFlows: 40 },
+    cost: { gauntletSignIn: 38, gauntletCodes: 80, gauntletIdentity: 19, gauntletDom: 52, gauntletDom2: 50, gauntletFlows: 55 },
   }
 }

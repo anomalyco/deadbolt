@@ -2758,8 +2758,17 @@ async function menuPosition(scale = 1) {
             const f = extensionFrame(page, "menu.html")
             return f && await f.locator(".universal").count() ? f : null
           })
-          if (surface === "signin" && menu && (await menu.locator("button.row").first().textContent())?.includes("Sign in with Deadbolt")) {
-            await menu.locator("button.row").first().click()
+          // Two logins open as one "Sign in with Deadbolt" row, and a press on it
+          // only expands the list (no refusal): the press below must land on a
+          // login. A click that doesn't reach the frame (just placed) leaves the
+          // chooser there, so click until the logins show.
+          if (surface === "signin" && menu) {
+            const chooser = menu.locator("button.row", { hasText: "Sign in with Deadbolt" })
+            const listed = await until(`signin ${kind}: the logins listed`, async () => {
+              if (await chooser.count()) return void (await chooser.click().catch(() => {}))
+              return (await menu!.locator("button.row").count()) > 0
+            }, 4000)
+            if (!listed) continue
           }
         }
         if (!menu) { check(false, `${surface} opens for ${kind}`); continue }
@@ -5120,17 +5129,18 @@ const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
 // (each scenario in each scheme, then each `once` entry), balanced by these
-// rough run times in seconds (per scheme; unlisted ones count 10); `--list`
+// run times in seconds (per scheme, CI medians of native and standalone;
+// unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, signUpStep: 14, frameLogins: 25, frameMoves: 6, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
-  signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
-  coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
-  formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
-  menuReveal: 4, menuScale: 100, menuPosition: 130, menuPositionDpr: 110,
-  pageZoom: 5,
-  pageDismiss: 5,
-  escInDialog: 4,
+  detection: 111, occlusionSweep: 55, signInSessions: 53, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
+  signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
+  coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
+  formsSurface: 7, formsShapes: 14, formsFrames: 16, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,
+  menuReveal: 2, menuScale: 115, menuPosition: 169, menuPositionDpr: 247,
+  pageZoom: 11,
+  pageDismiss: 6,
+  escInDialog: 6,
   ...gauntletRun.cost,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */

@@ -209,7 +209,10 @@ CLI application's versioned envelopes and signed entries. Sync uses the same
 membership-first/data-second protocol. The startup barrier contacts all current
 members, including those learned during the round, before serving data. Dial
 failures count as unreachable, post-connect failures retry, and the native
-30-second best-effort deadline is preserved. A learned removal immediately closes
+30-second best-effort deadline is preserved. Contacts run at most four at a time,
+each with a 15-second dial-and-exchange budget. After startup, a full round attempts
+every peer without a shared deadline, so offline peers cannot starve later members.
+A learned removal immediately closes
 open sync connections; a stale offline replica has the same documented residual
 risk as the CLI.
 
@@ -752,8 +755,7 @@ name "this Mac" grants nothing: it only changes the wording.
    error UX, and run the full CLI e2e in CI against a local relay.
 2. Extend the shared application protocol's simulator coverage to browser-client
    storage/lifetime adapters, and exercise
-   suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
-   startup contacts (the proof dials sequentially within the same 30-second budget).
+   suspended/resumed/offline relays and storage exhaustion/corruption.
 3. Validate real platform providers in Chrome and Helium on macOS; evaluate
    capped wasm-worker crash recovery from offscreen memory only (not built).
 4. Stronger browser-lifetime guarantees and Comfortable biometric card policy.
