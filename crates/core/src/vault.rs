@@ -116,8 +116,8 @@ impl FromIterator<(LogId, u64)> for Heads {
 pub struct Vault {
     id: VaultId,
     nodes: HashMap<Hash, Node>,
-    /// Entry hashes per log, indexed by seq.
-    logs: BTreeMap<LogId, Vec<Hash>>,
+    /// Per-author sequence → offset in the corresponding causal arrival order.
+    logs: BTreeMap<LogId, Vec<usize>>,
     /// Arrival order, which is always causal.
     membership_order: Vec<Hash>,
     /// Non-removal entries in each author's validated membership chain.
@@ -291,7 +291,7 @@ impl Vault {
             return Err(Error::InvalidDeps);
         }
         if let Some(prev) = entry.seq().checked_sub(1) {
-            let prev = self.logs[&log_id][prev as usize];
+            let prev = self.order(log_id.log)[self.logs[&log_id][prev as usize]];
             if !entry.deps().contains(&prev) {
                 return Err(Error::InvalidDeps);
             }
@@ -363,7 +363,11 @@ impl Vault {
             Log::Membership => &self.membership_tips,
             Log::Data => &self.tips,
         };
-        let prev = self.logs.get(&log_id).and_then(|log| log.last());
+        let prev = self
+            .logs
+            .get(&log_id)
+            .and_then(|log| log.last())
+            .map(|&pos| &self.order(log_id.log)[pos]);
         let deps: Vec<Hash> = tips.iter().chain(prev).copied().collect();
         let entry = Entry::sign(secret, self.id, self.next_seq(log_id), deps, payload);
         let len = entry.encoded_len();
@@ -552,16 +556,35 @@ impl Vault {
     pub fn heads(&self) -> Heads {
         self.logs
             .iter()
-            .map(|(log, hashes)| (*log, hashes.len() as u64 - 1))
+            .map(|(log, offsets)| (*log, offsets.len() as u64 - 1))
             .collect()
     }
 
     /// Entries a peer holding `peer` heads lacks, in an order it can apply:
     /// all membership entries before any data entry.
     pub fn missing_for(&self, peer: &Heads) -> Vec<&Entry> {
-        self.membership_order
+        if peer.0.is_empty() {
+            return self.entries();
+        }
+        // A log's sequence is contiguous and its offsets are increasing. The
+        // earliest first-missing offset is the start of the only suffix that
+        // could contain a delta. Still filter interleaved, already-known logs.
+        let mut membership = self.membership_order.len();
+        let mut data = self.data_order.len();
+        for (id, offsets) in &self.logs {
+            let next = peer.get(id).map_or(0, |seq| seq.saturating_add(1));
+            let Some(&pos) = usize::try_from(next).ok().and_then(|n| offsets.get(n)) else {
+                continue;
+            };
+            let start = match id.log {
+                Log::Membership => &mut membership,
+                Log::Data => &mut data,
+            };
+            *start = (*start).min(pos);
+        }
+        self.membership_order[membership..]
             .iter()
-            .chain(&self.data_order)
+            .chain(&self.data_order[data..])
             .map(|hash| &self.nodes[hash].entry)
             .filter(|entry| {
                 peer.get(&entry.log_id())
@@ -572,7 +595,18 @@ impl Vault {
 
     /// Every stored entry, in an order [`Vault::load`] accepts.
     pub fn entries(&self) -> Vec<&Entry> {
-        self.missing_for(&Heads::default())
+        self.membership_order
+            .iter()
+            .chain(&self.data_order)
+            .map(|hash| &self.nodes[hash].entry)
+            .collect()
+    }
+
+    fn order(&self, log: Log) -> &[Hash] {
+        match log {
+            Log::Membership => &self.membership_order,
+            Log::Data => &self.data_order,
+        }
     }
 
     fn check_membership_budget(&self, author: DeviceId, payload: &Payload) -> Result<(), Error> {
@@ -587,7 +621,9 @@ impl Vault {
     }
 
     fn next_seq(&self, log: LogId) -> u64 {
-        self.logs.get(&log).map_or(0, |hashes| hashes.len() as u64)
+        self.logs
+            .get(&log)
+            .map_or(0, |offsets| offsets.len() as u64)
     }
 
     /// Resolves the membership of the causal past `clock` covers, excluding the
@@ -598,7 +634,7 @@ impl Vault {
             .logs
             .iter()
             .filter(|(log, _)| log.log == Log::Membership)
-            .map(|(log, hashes)| (log.author, hashes.len() as u64 - 1));
+            .map(|(log, offsets)| (log.author, offsets.len() as u64 - 1));
         if frontier.iter().copied().eq(current) {
             return &self.membership;
         }
@@ -625,7 +661,8 @@ impl Vault {
     fn insert(&mut self, node: Node) {
         let entry = &node.entry;
         let hash = entry.hash();
-        self.logs.entry(entry.log_id()).or_default().push(hash);
+        let offset = self.order(entry.log()).len();
+        self.logs.entry(entry.log_id()).or_default().push(offset);
         for dep in entry.deps() {
             self.tips.remove(dep);
         }
