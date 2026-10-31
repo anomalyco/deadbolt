@@ -11,6 +11,7 @@ on:
       - Cargo.lock
       - .github/workflows/mobile.yml
   push:
+    branches: [dev, main]
     paths: *mobile-paths
 
 concurrency:
@@ -43,11 +44,31 @@ jobs:
           xcodegen generate --spec project.yml
           xcodegen generate --spec lifecycle-tests.yml
       - name: Select an available iPhone for this Xcode
+        shell: bash
         run: |
-          destinations=$(xcodebuild -showdestinations -project Deadbolt.xcodeproj -scheme Deadbolt)
-          echo "$destinations"
-          udid=$(sed -nE '/platform:iOS Simulator/ s/.*id:([[:xdigit:]-]{36}),.*name:iPhone.*/\1/p' <<< "$destinations" | sed -n '1p')
-          test -n "$udid"
+          udid=$(xcrun simctl list devices available --json | jq -r 'first(
+            .devices[][] | select(.deviceTypeIdentifier | startswith("com.apple.CoreSimulator.SimDeviceType.iPhone-"))
+            | .udid) // empty')
+          if [[ -z "$udid" ]]; then
+            newest_ios() {
+              xcrun simctl list runtimes --json | jq -c '.runtimes | map(select(.isAvailable and
+                (.identifier | startswith("com.apple.CoreSimulator.SimRuntime.iOS-"))))
+                | max_by(.version | split(".") | map(tonumber)) // empty'
+            }
+            runtime=$(newest_ios)
+            if [[ -z "$runtime" ]]; then
+              echo 'No available iOS runtime; downloading one for this Xcode.'
+              xcodebuild -downloadPlatform iOS
+              runtime=$(newest_ios)
+              [[ -n "$runtime" ]] || { echo '::error::No available iOS runtime after download.'; exit 1; }
+            fi
+            runtime_id=$(jq -r '.identifier' <<< "$runtime")
+            type=$(jq -r 'first(.supportedDeviceTypes[] | select(.productFamily == "iPhone") | .identifier) // empty' <<< "$runtime")
+            [[ -n "$type" ]] || { echo "::error::No supported iPhone type for $runtime_id."; exit 1; }
+            echo "Creating $type on $runtime_id"
+            udid=$(xcrun simctl create 'Deadbolt CI iPhone' "$type" "$runtime_id")
+          fi
+          echo "Selected iPhone simulator: $udid"
           echo "DESTINATION=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
       - name: Build unsigned app with embedded AutoFill extension
         run: |
