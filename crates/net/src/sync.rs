@@ -303,8 +303,15 @@ async fn receive_entries(
 ) -> Result<(usize, Result<(), HandlerError>)> {
     let mut received = 0;
     let mut result = Ok(());
+    // Do not wait for DONE or a full-size batch before acknowledging *any* prefix
+    // to storage. On a slow path the session deadline could otherwise discard the
+    // same thousands of complete frames on every retry. Start with one frame so
+    // even the shortest useful exchange can advance heads, then double so a fast
+    // stream needs logarithmically many prefix commits before the normal cap.
+    let mut entry_limit = 1;
     loop {
-        let (batch, done) = frame::read_batch(recv, max).await?;
+        let (batch, done) = frame::read_prefix(recv, max, entry_limit).await?;
+        entry_limit = (entry_limit * 2).min(frame::BATCH_ENTRIES);
         received += batch.len();
         if result.is_ok() {
             result = handler.receive(peer, batch).await;

@@ -1402,6 +1402,39 @@ fn offline_unlock_keeps_local_items_available_and_failed_dials_finish_startup() 
     world.converge().unwrap();
 }
 
+/// Cut identical short sessions before DONE. Each retry must advance the signed
+/// frontier if a complete usable entry fits; confirm the prefix survives a
+/// native redb reopen (the private relay harness separately uses OPFS).
+#[test]
+fn short_sessions_commit_a_reopenable_prefix_before_done() {
+    let mut w = World::new().unwrap();
+    w.step(&Action::Pair(1)).unwrap();
+    for i in 0..32 {
+        w.step(&Action::Add(0, i)).unwrap();
+    }
+    let count = |w: &World| {
+        w.devices[1]
+            .with(|s| Ok(s.vault(&w.vault).items().len()))
+            .unwrap()
+    };
+    let mut before = count(&w);
+    for _ in 0..2 {
+        assert_eq!(
+            w.sync(0, 1, 31, Some(800), None).unwrap(),
+            sync::Attempt::Interrupted
+        );
+        let after = count(&w);
+        assert!(
+            after > before && after < 32,
+            "cut persisted {before} -> {after} of 32"
+        );
+        before = after;
+    }
+    w.step(&Action::Crash(1)).unwrap();
+    assert_eq!(count(&w), before);
+    w.converge().unwrap();
+}
+
 #[test]
 fn startup_retries_an_interrupted_exchange() {
     let mut world = World::new().unwrap();

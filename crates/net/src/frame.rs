@@ -73,8 +73,7 @@ pub(crate) async fn write_entries<W: AsyncWrite + Unpin>(
 /// growing once it reaches this, so it holds at most this plus one frame.
 pub(crate) const BATCH_BYTES: usize = 2 * DEFAULT_MAX_FRAME_LEN;
 /// Most entries [`read_batch`] buffers, bounding per-entry overhead when entries are
-/// tiny. A real vault's history is tens of thousands of entries at most, so a
-/// session rarely needs more than one batch.
+/// tiny. Sync grows its prefix limit up to this hard cap.
 pub(crate) const BATCH_ENTRIES: usize = 64 * 1024;
 
 /// Reads `ENTRY` frames until `DONE` or until the batch holds [`BATCH_ENTRIES`]
@@ -83,9 +82,18 @@ pub(crate) async fn read_batch<R: AsyncRead + Unpin>(
     r: &mut R,
     max: usize,
 ) -> Result<(Vec<Blob>, bool)> {
+    read_prefix(r, max, BATCH_ENTRIES).await
+}
+
+/// Sync starts with small durable prefixes, then amortizes commits over larger batches.
+pub(crate) async fn read_prefix<R: AsyncRead + Unpin>(
+    r: &mut R,
+    max: usize,
+    entry_limit: usize,
+) -> Result<(Vec<Blob>, bool)> {
     let mut entries = Vec::new();
     let mut bytes = 0;
-    while entries.len() < BATCH_ENTRIES && bytes < BATCH_BYTES {
+    while entries.len() < entry_limit.min(BATCH_ENTRIES) && bytes < BATCH_BYTES {
         match read(r, max).await? {
             (tag::ENTRY, body) => {
                 bytes += body.len();

@@ -132,7 +132,9 @@ treated as already unlocked: a bad passphrase leaves the device locked. Explicit
 A warning records only the typed failure class, I/O kind and numeric OS error,
 never backend messages, paths or vault values.
 Staging clones the validated vault, avoiding signature verification of historical
-entries. Sync batches publish independently per vault.
+entries. Sync batches publish independently per vault. The short-session regression uses
+the same cut budget twice, asserts each interrupted exchange advances the
+receiver before `DONE`, reopens that exact prefix, then heals.
 
 The native `agent::session::tests::ambiguous_append_` regressions use synthetic
 encrypted stores on a real file backend. They inject a lost acknowledgement

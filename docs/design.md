@@ -40,6 +40,19 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 - For incremental sync, each author’s contiguous sequence indexes offsets in membership or data arrival order. Delta selection skips the prefix known to the peer, then filters the suffix in the same causal order. Nothing is skipped on the basis of wall time or an unauthenticated cache; transmitted entries still undergo the same verification.
 - No compaction in v1. Deleted items stay in the history on your own devices, encrypted at rest under the local unlock key. (Later: snapshots.)
 
+### Catch-up across interrupted sessions
+
+Sync hands the first complete entry to the normal validating transaction, then
+prefixes of 2, 4, 8, … entries up to the existing count/byte limits. Waiting for
+`DONE` or a 32 MiB batch before publishing *anything* can strand a backlog on a
+slow link: every 15 s round redials with the same heads. Doubling keeps the
+number of extra transactions logarithmic on fast links. Neither wire framing,
+peer admission, verification nor startup readiness changes. The next heads
+exchange resumes at durable entries, **not** at a byte offset. An individual
+frame that never completes within a session still cannot sync on that path:
+a 10 MiB file takes over 100 s at 1 Mbit/s once base64-encoded. Earlier commits
+of preceding entries don't solve that separate limit.
+
 ## Items
 - Every item has a **type**, fixed at creation. Built-in types: `login`, `card`, `note` (a secure note), `ssh` (an SSH key), `identity`, `passkey`, `api` (an API credential), `database`, `server`, `wifi` (a Wi-Fi network), `license` (a software license), `bank` (a bank account), `document` (a file), `passport`, `driver-license`, `membership`, `crypto` (a crypto wallet) and `id-document` (a social security number, national ID card and the like). User-defined types come later; keep the type an open identifier, not a closed enum on the wire.
 - A type defines its known fields, each with a fixed field type, and which of them are required. Items may carry extra fields of any field type on top.
