@@ -65,6 +65,7 @@ pub enum MobileError {
 impl From<deadbolt_store::Error> for MobileError {
     fn from(error: deadbolt_store::Error) -> Self {
         match error {
+            deadbolt_store::Error::InUse => Self::Busy,
             deadbolt_store::Error::WrongPassphrase | deadbolt_store::Error::InvalidBiometric => {
                 Self::Authentication
             }
@@ -690,6 +691,23 @@ mod tests {
             device.call(json!({"op":"unlock","passphrase":"wrong"}).to_string()),
             Err(MobileError::Authentication)
         ));
+        // An offline provider can own the real store while the app is locked.
+        // Contention must stay retryable and must not publish an app session.
+        let provider_store = deadbolt_store::unlock(dir.path(), b"local-pass").unwrap();
+        let blocked = device.call(json!({"op":"unlock","passphrase":"local-pass"}).to_string());
+        assert!(matches!(blocked, Err(MobileError::Busy)), "{blocked:?}");
+        let locked = call(&device, json!({"op":"status"}));
+        assert_eq!(locked["unlocked"], false);
+        assert!(locked["device_id"].is_null());
+        assert!(matches!(
+            device.call(json!({"op":"items"}).to_string()),
+            Err(MobileError::Locked)
+        ));
+        assert!(matches!(
+            device.credential_identities(),
+            Err(MobileError::Locked)
+        ));
+        drop(provider_store);
         call(&device, json!({"op":"unlock","passphrase":"local-pass"}));
         let identities = device.credential_identities().unwrap();
         assert!(!identities.contains("synthetic-mobile-password"));
