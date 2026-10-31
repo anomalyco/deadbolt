@@ -148,7 +148,8 @@ fn manifest(program: &Path) -> Result<String> {
 
 /// Writes `body` to `path` through a synced temporary file in the same
 /// directory, then syncs the replacement's directory entry. Existing regular
-/// files keep their permissions; new files use 0666 filtered by the umask.
+/// files keep only ordinary rwx bits, never setuid/setgid/sticky bits on the
+/// replacement inode; new files use 0666 filtered by the umask.
 pub fn write_atomic(path: &Path, body: &str) -> Result<()> {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
@@ -159,7 +160,9 @@ pub fn write_atomic(path: &Path, body: &str) -> Result<()> {
     let name = path.file_name().context("path has no file name")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let permissions = match std::fs::symlink_metadata(path) {
-        Ok(meta) if meta.is_file() => Some(meta.permissions()),
+        Ok(meta) if meta.is_file() => Some(std::fs::Permissions::from_mode(
+            meta.permissions().mode() & 0o777,
+        )),
         Ok(_) => None,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
@@ -377,11 +380,13 @@ mod tests {
         std::fs::write(&ordinary, "ordinary").unwrap();
         let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
         assert_eq!(mode(&path), mode(&ordinary));
-        for permissions in [0o600, 0o640, 0o444, 0o750] {
+        for permissions in [0o600, 0o640, 0o444, 0o750, 0o4600, 0o2640, 0o1444, 0o7750] {
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(permissions)).unwrap();
+            assert_eq!(mode(&path), permissions);
             write_atomic(&path, "replacement").unwrap();
             assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
-            assert_eq!(mode(&path), permissions);
+            assert_eq!(mode(&path), permissions & 0o777);
+            assert_eq!(mode(&path) & 0o7000, 0);
         }
         // A failed rename must leave the destination and no temporary debris.
         let occupied = dir.join("occupied");
