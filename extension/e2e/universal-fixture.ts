@@ -79,9 +79,9 @@ export async function universalFixture(req: Request): Promise<Response> {
 // acme.test is the site; accounts.google.test is a fake Google, both mapped to
 // this server, and any other accounts.*.test host (a lookalike) serves the same
 // pages. The fake Google keeps no state: each step carries the run's options
-// in its query (flow, mode, chooser, pk, phone, consent, loop, delay, frame,
-// return). Every request is logged under its `flow`, so a run counts exactly
-// what was clicked or submitted. Synthetic accounts only.
+// in its query (flow, mode, chooser, pk, uv, phone, consent, loop, delay, frame,
+// redirect_uri, continue). Every request is logged under its `flow`, so a run
+// counts exactly what was clicked or submitted. Synthetic accounts only.
 export const GOOGLE_USER = "universal.google@example.test"
 export const GOOGLE_OTHER = "someone.else@example.test"
 export const GOOGLE_PASSWORD = "synthetic-google-password-51027"
@@ -121,7 +121,7 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
   const chip = `<p><span class="chip" data-profile-identifier="" translate="no">${GOOGLE_USER}</span></p>`
   const password = () => go(q.get("pk") === "1" ? "/v3/signin/challenge/pk" : "/v3/signin/challenge/pwd")
   const done = () => {
-    const back = new URL(q.get("return") ?? "http://acme.test/")
+    const back = new URL(q.get("redirect_uri") ?? "http://acme.test/")
     back.searchParams.set("as", GOOGLE_USER)
     return Response.redirect(back.href, 303)
   }
@@ -161,7 +161,7 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
           })
         </script>`)
     case "/pk/auth-options": {
-      const options = await generateAuthenticationOptions({ rpID: url.hostname, userVerification: "preferred" })
+      const options = await generateAuthenticationOptions({ rpID: url.hostname, userVerification: q.get("uv") === "discouraged" ? "discouraged" : "preferred" })
       googlePasskey.challenges.set(`auth:${hit.flow}`, options.challenge)
       return json(options)
     }
@@ -178,7 +178,7 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
       googlePasskey.verified++
       credential.counter = v!.authenticationInfo.newCounter
       const s = new URLSearchParams(q)
-      return json({ verified: true, next: q.get("consent") === "1" ? `${url.origin}/signin/oauth/consent?${s}` : (() => { const back = new URL(q.get("return") ?? "http://acme.test/"); back.searchParams.set("as", GOOGLE_USER); return back.href })() })
+      return json({ verified: true, next: q.get("consent") === "1" ? `${url.origin}/signin/oauth/consent?${s}` : (() => { const back = new URL(q.get("redirect_uri") ?? "http://acme.test/"); back.searchParams.set("as", GOOGLE_USER); return back.href })() })
     }
     // Passkey enrollment, as Google's "Create a passkey" page: a real WebAuthn create.
     case "/v3/signin/passkey/enroll":
@@ -226,6 +226,10 @@ async function googleFixture(req: Request, url: URL, hit: ProviderHit): Promise<
       return google("Sign in - Google Accounts", `<h1>Acme wants access to your Google Account</h1>${chip}<p>This will allow Acme to:</p><ul><li>See your primary email address</li><li>See your personal info</li></ul>${form("/signin/oauth/consent/approve", "", "Continue", '<button class="text" type="button" id="cancel">Cancel</button>')}`)
     case "/signin/oauth/consent/approve":
       return data ? done() : new Response("Method not allowed", { status: 405 })
+    // A re-authentication page, as before changing a setting: a password form that is no sign-in.
+    case "/security/signinoptions/password":
+      if (data) return google("Google Account", "<h1>Verified</h1>")
+      return google("Google Account", `<h1>Confirm it's you</h1>${chip}<p>To continue, first verify it's you</p>${form("/security/signinoptions/password", '<input type="password" name="Passwd" autocomplete="current-password" aria-label="Enter your password">')}`)
     default:
       return new Response("Not found", { status: 404 })
   }
@@ -237,20 +241,27 @@ function acmeFixture(req: Request, url: URL): Response {
     case "/signin": {
       // The site's own "Continue with Google": same tab, a popup, or an embedded
       // (cross-site) chooser, on accounts.google.test or the host `gh` names.
+      // A hostile site's variants: `foreign` returns to another site, `entry=settings`
+      // points the button at Google's re-authentication page, and `renav()`
+      // re-navigates the popup there. `okta` adds an Okta button.
       const options = new URLSearchParams(q)
-      options.delete("gh")
-      const callback = new URL(`${url.origin}/oauth/callback`)
+      for (const k of ["gh", "foreign", "entry", "okta"]) options.delete(k)
+      const callback = new URL(q.get("foreign") === "1" ? `http://evil.test:${url.port}/oauth/callback` : `${url.origin}/oauth/callback`)
       for (const k of ["flow", "mode"]) if (q.has(k)) callback.searchParams.set(k, q.get(k)!)
-      options.set("return", callback.href)
-      const auth = `http://${clean(q.get("gh")) || "accounts.google.test"}:${url.port}/o/oauth2/v2/auth?${options}`
+      options.set("redirect_uri", callback.href)
+      const provider = `http://${clean(q.get("gh")) || "accounts.google.test"}:${url.port}`
+      const settings = `${provider}/security/signinoptions/password?${options}`
+      const auth = q.get("entry") === "settings" ? settings : `${provider}/o/oauth2/v2/auth?${options}`
       return page("Sign in to Acme", `<style>body{font:16px system-ui;margin:0;background:#fafafa}main{max-width:440px;margin:90px auto}input,button{display:block;padding:12px;margin:12px 0;font:inherit;width:320px}</style></head><body><main>
         <h1>Sign in to Acme</h1><form method="post" action="/signin"><label>Email<input name="email" type="email" autocomplete="username"></label><label>Password<input name="password" type="password" autocomplete="current-password"></label><button type="submit">Sign in</button></form>
-        <p>or</p><button id="google" type="button">Continue with Google</button><div id="slot"></div></main>
+        <p>or</p><button id="google" type="button">Continue with Google</button>${q.get("okta") === "1" ? '<button id="okta" type="button" onclick="document.title = \'Okta clicked\'">Continue with Okta</button>' : ""}<div id="slot"></div></main>
         <script>
-          const auth = ${JSON.stringify(auth)}, mode = ${JSON.stringify(q.get("mode") ?? "tab")}, framed = ${q.get("frame") === "1"}
+          const auth = ${JSON.stringify(auth)}, settings = ${JSON.stringify(settings)}, mode = ${JSON.stringify(q.get("mode") ?? "tab")}, framed = ${q.get("frame") === "1"}
+          let popup = null
+          window.renav = () => { popup.location.href = settings }
           document.querySelector("#google").addEventListener("click", () => {
             if (framed) document.querySelector("#slot").innerHTML = '<iframe title="Sign in with Google" width="440" height="520" src="' + auth + '&frame=1"></iframe>'
-            else if (mode === "popup") window.open(auth, "google-signin", "popup,width=480,height=640")
+            else if (mode === "popup") popup = window.open(auth, "google-signin", "popup,width=480,height=640")
             else location.assign(auth)
           })
           addEventListener("message", (e) => { if (e.origin === location.origin && typeof e.data?.as === "string") location.assign("/account?as=" + encodeURIComponent(e.data.as)) })

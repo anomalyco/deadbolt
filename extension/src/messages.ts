@@ -232,7 +232,7 @@ export type ToBackground =
   | { type: "pk:popup-choose"; tabId: number; id: string; choice: PasskeyChoice }
 
 export type ToContent =
-  | { type: "db:provider-probe"; session: string; provider: string; account?: string; entry?: boolean }
+  | { type: "db:provider-probe"; session: string; provider: string; site: string; account?: string; entry?: boolean }
   | { type: "db:provider-act"; session: string; action: string; values?: FillValues }
   | { type: "db:provider-status"; session: string; label: string; done?: boolean }
   /**

@@ -46,6 +46,75 @@ export function providerForPage(url: string): Provider | undefined {
   return Object.keys(KNOWN).map(provider).find((p) => isProviderPage(p, url))
 }
 
+/**
+ * The paths of each known provider's own sign-in and OAuth pages. A provider
+ * chain (bg/provider-chain.ts) acts only on these: anything else on a
+ * provider's host (its settings, re-authentication or sudo pages, the rest of
+ * its product) is not a sign-in step, and stops the chain untouched.
+ */
+const SIGN_IN_PATHS: Record<string, RegExp> = {
+  google: /^\/(?:o\/oauth2\/|signin\/|v3\/signin\/|ServiceLogin\/?$|AccountChooser\/?$)/,
+  apple: /^\/(?:auth\/(?:authorize|oauth2\/)|appleauth\/auth\/(?:signin|authorize|verify\/))/,
+  github: /^\/(?:login|session|login\/oauth\/authorize|sessions\/two-factor(?:\/(?:app|webauthn|sms))?)\/?$/,
+  microsoft: /^\/(?:(?:common|consumers|organizations|[\w.-]+)\/oauth2\/(?:v2\.0\/)?authorize|login\.srf|oauth20_authorize\.srf|ppsecure\/post\.srf)\/?$/,
+  facebook: /^\/(?:login(?:\.php)?|(?:v\d+\.\d+\/)?dialog\/oauth)\/?$/,
+  x: /^\/(?:i\/oauth2\/authorize|oauth\/(?:authorize|authenticate)|i\/flow\/login|login)\/?$/,
+  amazon: /^\/ap\/(?:signin|oa|mfa)\/?$/,
+  discord: /^\/(?:login|oauth2\/authorize)\/?$/,
+  slack: /^\/(?:signin|oauth\/(?:v2\/)?authorize|openid\/connect\/authorize)\/?$/,
+  linkedin: /^\/(?:login|uas\/login|oauth\/v2\/authorization)\/?$/,
+  gitlab: /^\/(?:users\/sign_in|oauth\/authorize)\/?$/,
+}
+/** Re-authentication, sudo and settings pages: never a sign-in step, even under an allowed prefix. */
+const DENIED_PATH = /\/(?:settings|sudo|reauth|re-auth|confirm[-_]?access|security|myaccount|tokens?|personal_access_tokens|billing|password[-_]?(?:reset|change))(?:[/.]|$)/i
+/** Query parameters that name where a provider sends the person back. */
+const RETURN_PARAMS = ["redirect_uri", "redirect_url", "return_to", "returnTo", "return_url", "returnUrl", "continue", "followup", "next", "session_redirect", "openid.return_to"]
+
+/** Whether `url` is one of the provider's own sign-in or OAuth pages: its host (isProviderPage) and an allowed path. */
+export function isSignInPage(p: Provider, url: string): boolean {
+  const paths = SIGN_IN_PATHS[p.id]
+  if (!paths || !isProviderPage(p, url)) return false
+  const path = new URL(url).pathname
+  return paths.test(path) && !DENIED_PATH.test(path)
+}
+
+/**
+ * Where a provider page sends the person back, judged against `site`, the
+ * chain's home (a registrable domain): "home" when every return URL it
+ * carries resolves to that site, directly or through another of the
+ * provider's own sign-in pages that does; "none" when it carries none;
+ * otherwise "foreign".
+ */
+export function returnsTo(p: Provider, url: string, site: string, depth = 0): "home" | "none" | "foreign" {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    return "foreign"
+  }
+  let found = false
+  for (const name of RETURN_PARAMS) for (const value of u.searchParams.getAll(name)) {
+    found = true
+    let back: URL
+    try {
+      back = new URL(value, u)
+    } catch {
+      return "foreign"
+    }
+    const host = back.hostname.toLowerCase()
+    if (site && secure(back) && (host === site || host.endsWith(`.${site}`))) continue
+    if (depth < 3 && isSignInPage(p, back.href) && returnsTo(p, back.href, site, depth + 1) === "home") continue
+    return "foreign"
+  }
+  return found ? "home" : "none"
+}
+
+/** https, or in an e2e build its http `.test` stand-ins too (see isProviderPage). */
+function secure(u: URL): boolean {
+  if (u.protocol === "https:") return true
+  return typeof DEADBOLT_E2E !== "undefined" && DEADBOLT_E2E === true && u.protocol === "http:" && u.hostname.endsWith(".test")
+}
+
 export function provider(id: string): Provider {
   const known = KNOWN[id.toLowerCase()]
   return known ? { id: id.toLowerCase(), ...known } : { id, name: id, hosts: [], words: [id.toLowerCase()], chooser: false }

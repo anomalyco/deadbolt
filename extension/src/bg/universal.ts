@@ -1,5 +1,5 @@
 import { authState, exactSignInOrigin, SIGNED_IN_MS, SIGNIN_QUIET_MS, SIGNIN_SETTING, type AuthReport } from "../auth-state"
-import { providerForPage } from "../signin"
+import { provider as providerOf } from "../signin"
 import type { ProviderChain } from "./provider-chain"
 import type { MenuLoadReply, PickReply, SignInReply } from "../messages"
 import type { Account } from "../protocol"
@@ -138,15 +138,20 @@ export class UniversalSignIn {
       const memory = await this.memory(o.origin)
       if (o.cancelled || !account || !facts?.action || authState(facts, Date.now() - (memory.signedIn ?? 0) < SIGNED_IN_MS) !== "signed-out")
         return { ok: false, message: "The page changed. Nothing was filled." }
-      const chain = provider && !!account.signIn || !!providerForPage(o.origin)
+      // Only a pick of a provider-linked sign-in, with the account and the
+      // provider's sign-in hosts known, starts a chain. Every other pick, a
+      // plain login on a provider's own host included, is the ordinary
+      // automatic sign-in; a provider Deadbolt has no hosts for (Okta, a
+      // custom one) gets the site's button pointed at, as before.
+      const chain = provider && !!account.signIn?.account && providerOf(account.signIn.provider).hosts.length > 0
       let reply: PickReply
       if (chain) {
         await this.autofill.stopAutomatic(o.tabId)
         if (o.cancelled) return { ok: true }
-        const starting = this.providers.start(o, account, provider)
+        const starting = this.providers.start(o, account)
         await this.closeTab(o.tabId)
         reply = await starting
-      } else reply = await this.autofill.startAutomatic(o, account, facts.action)
+      } else reply = await this.autofill.startAutomatic(o, account, facts.action, provider)
       if (o.cancelled) {
         this.providers.stop(o.tabId)
         await this.autofill.stopAutomatic(o.tabId)

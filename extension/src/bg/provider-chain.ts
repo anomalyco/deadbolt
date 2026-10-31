@@ -3,7 +3,7 @@
 import { authState, exactSignInOrigin, SIGNIN_SETTING, type AuthReport } from "../auth-state"
 import { IDENTIFIER_ROLES, type FillValues, type PickReply, type ProviderReport } from "../messages"
 import type { Account, Passkey } from "../protocol"
-import { isProviderPage, provider, providerForPage, type Provider } from "../signin"
+import { isProviderPage, isSignInPage, provider, returnsTo, type Provider } from "../signin"
 import { flowFor, namedBy, wantFor } from "./autofill"
 import type { VaultBackend } from "./backend"
 import { sendToFrame, targetFor, topTarget, type FrameTarget } from "./frames"
@@ -19,6 +19,8 @@ const NEEDS = { consent: "Review access", phone: "Approve on your phone", sms: "
 interface Chain {
   id: string
   home: FrameTarget
+  /** The home origin's registrable domain: where the provider's return URLs must lead. */
+  site: string
   tab: number
   popup?: number
   popupClaimed?: boolean
@@ -65,6 +67,8 @@ export class ProviderChain {
     return this.live(s) && (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] === true && this.live(s)
   }
   private allowed(s: Chain, origin: string) { return origin === s.home.origin || isProviderPage(s.provider, origin) }
+  /** A provider page the chain may act on: a sign-in or OAuth path whose return URLs, if any, lead to the home site. */
+  private step(s: Chain, url: string) { return isSignInPage(s.provider, url) && returnsTo(s.provider, url, s.site) !== "foreign" }
   private consume(s: Chain) {
     if (!this.live(s) || s.actions >= PROVIDER_CHAIN_ACTIONS) { this.end(s); return false }
     s.actions++
@@ -90,21 +94,25 @@ export class ProviderChain {
     })
   }
 
-  /** Called only by UniversalSignIn after its existing dwell/confirmPick. */
-  async start(target: FrameTarget, account: Account, linked: boolean): Promise<PickReply> {
+  /**
+   * Called only by UniversalSignIn after its existing dwell/confirmPick, for a
+   * pick of a login linked to a provider with known sign-in hosts.
+   */
+  async start(target: FrameTarget, account: Account): Promise<PickReply> {
     this.stop(target.tabId)
     const generation = this.generations.get(target.tabId)
-    const p = linked && account.signIn ? provider(account.signIn.provider) : providerForPage(target.origin)
-    const username = linked ? account.signIn?.account : account.username
-    if (!p?.hosts.length || !username || target.frameId !== 0 || !account.urls.some((u) => exactSignInOrigin(u, target.origin)) ||
+    const p = account.signIn ? provider(account.signIn.provider) : undefined
+    const username = account.signIn?.account
+    const site = siteOf(new URL(target.origin).hostname)
+    if (!p?.hosts.length || !username || !site || target.frameId !== 0 || !account.urls.some((u) => exactSignInOrigin(u, target.origin)) ||
         this.host.status.state !== "ready" || (await chrome.storage.local.get(SIGNIN_SETTING))[SIGNIN_SETTING] !== true) return { ok: true }
     if (generation !== this.generations.get(target.tabId) || this.host.status.state !== "ready") return { ok: true }
-    const s: Chain = { id: crypto.randomUUID(), home: target, tab: target.tabId, provider: p, username, ...(linked ? {} : { ref: account.ref, documentId: target.documentId }),
-      phase: linked ? "entry" : "provider", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, busy: false, again: false,
+    const s: Chain = { id: crypto.randomUUID(), home: target, site, tab: target.tabId, provider: p, username,
+      phase: "entry", until: Date.now() + PROVIDER_CHAIN_TTL_MS, actions: 0, busy: false, again: false,
       used: new Set(), filled: new Set(), stop: new AbortController() }
     this.chains.add(s)
     s.timer = setTimeout(() => this.end(s), PROVIDER_CHAIN_TTL_MS)
-    this.linked.start(target.tabId, { provider: p.id, account: username }, siteOf(new URL(target.origin).hostname)!)
+    this.linked.start(target.tabId, { provider: p.id, account: username }, site)
     await this.advance(s, target)
     // Ambiguity is a quiet handoff, not an error in the old account menu.
     return { ok: true }
@@ -139,7 +147,7 @@ export class ProviderChain {
       }
       await sendToFrame(target, { type: "db:provider-status", session: s.id, label: `Signing in with ${s.provider.name}…` })
       if (!await this.ready(s)) return this.end(s)
-      const report = await sendToFrame<ProviderReport>(target, { type: "db:provider-probe", session: s.id, provider: s.provider.id,
+      const report = await sendToFrame<ProviderReport>(target, { type: "db:provider-probe", session: s.id, provider: s.provider.id, site: s.site,
         ...(s.phase === "entry" ? { entry: true } : { account: s.username }) })
       if (!this.live(s)) return
       // An acknowledged click can unload its document before a queued scan's
@@ -202,7 +210,7 @@ export class ProviderChain {
     if (!await this.ready(s)) { this.end(s); return null }
     if (s.filling) { this.end(s); return null }
     await sendToFrame(target, { type: "db:provider-status", session: s.id, label: `Signing in with ${s.provider.name}…` })
-    const report = await sendToFrame<ProviderReport>(target, { type: "db:provider-probe", session: s.id, provider: s.provider.id, account: s.username })
+    const report = await sendToFrame<ProviderReport>(target, { type: "db:provider-probe", session: s.id, provider: s.provider.id, site: s.site, account: s.username })
     const matches = keys.filter((k) => this.sameAccount(k.username, s.username))
     if (optional && report?.kind === "chooser") return undefined
     if (!report || !["form", "passkey"].includes(report.kind) || matches.length !== 1 || !await this.ready(s)) { this.end(s); return null }
@@ -225,7 +233,7 @@ export class ProviderChain {
     this.linked.opened(d.sourceTabId, d.tabId)
     // The first committed document may have arrived while provenance was checked.
     const current = await topTarget(d.tabId)
-    if (current.target && !isProviderPage(s.provider, current.target.origin)) return this.end(s)
+    if (current.target && (!isProviderPage(s.provider, current.target.origin) || !current.url || !this.step(s, current.url.href))) return this.end(s)
     s.documentId = current.target?.documentId
     // A content-script scan / DOMContentLoaded drives the first action, not an about:blank popup.
   }
@@ -241,6 +249,8 @@ export class ProviderChain {
       return
     }
     if (isProviderPage(s.provider, origin)) {
+      // Off the provider's sign-in pages, or sending the person anywhere but home: stop, untouched.
+      if (!this.step(s, d.url)) return this.end(s)
       s.phase = "provider"
       s.documentId = d.documentId
     }

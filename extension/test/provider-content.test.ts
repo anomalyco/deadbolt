@@ -53,7 +53,7 @@ function deliver<T>(message: ToContent, sender = WORKER()): Promise<T> {
   })
 }
 const status = (session: string, label = "Signing in with Google…", done?: boolean) => deliver<boolean>({ type: "db:provider-status", session, label, ...(done ? { done } : {}) })
-const probe = (session: string, account?: string) => deliver<ProviderReport>({ type: "db:provider-probe", session, provider: "google", ...(account ? { account } : {}) })
+const probe = (session: string, account?: string) => deliver<ProviderReport>({ type: "db:provider-probe", session, provider: "google", site: "example.com", ...(account ? { account } : {}) })
 const act = (session: string, action: string, values?: Record<string, string>) => deliver<boolean>({ type: "db:provider-act", session, action, ...(values ? { values } : {}) })
 
 function page(html: string, url = "https://accounts.google.com/v3/signin/identifier") {
@@ -286,14 +286,54 @@ describe("provider chain, page side", () => {
     expect(fake.sent.slice(before)).toContainEqual({ type: "db:signin-stop" })
   })
 
-  test("Google's sign-in disclosure is not consent; a consent control still is", async () => {
+  test("Google's sign-in disclosure is not consent when the chooser returns home; a consent control still is", async () => {
     const s = fresh()
     const footer = "<p>To continue, Google will share your name, email address, language preference and profile picture with Acme.</p>"
-    page(`<h1>Choose an account</h1><ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>${footer}`, "https://accounts.google.com/o/oauth2/v2/auth")
+    const chooser = `<h1>Choose an account</h1><ul><li data-box="10 100 300 48" data-identifier="kit@gmail.com">Kit</li></ul>${footer}`
+    page(chooser, "https://accounts.google.com/o/oauth2/v2/auth?client_id=acme&redirect_uri=https%3A%2F%2Fwww.example.com%2Fcallback")
     await status(s)
     expect((await probe(s, "kit@gmail.com")).kind).toBe("chooser")
     document.body.insertAdjacentHTML("beforeend", `<button data-box="400 300 120 32">Continue as Kit</button>`)
     expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
+    // A client the URL can't tie to the site: picking the account may be the consent itself.
+    page(chooser, "https://accounts.google.com/o/oauth2/v2/auth?client_id=someone")
+    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "consent" })
+    // Sending the person anywhere but the site: nothing at all.
+    page(chooser, "https://accounts.google.com/o/oauth2/v2/auth?client_id=someone&redirect_uri=https%3A%2F%2Fevil.test%2Fcallback")
+    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
+  })
+
+  test.each([
+    "https://accounts.google.com/security/signinoptions/password",
+    "https://accounts.google.com/v3/signin/reauth",
+    "https://accounts.google.com/settings/passkeys",
+    "https://accounts.google.com/",
+  ])("off the provider's sign-in paths (%s) nothing is offered, a lone passkey link included", async (url) => {
+    const s = fresh()
+    page(LOGIN, url)
+    await status(s)
+    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
+    page(`<h1>Confirm it's you</h1><button data-box="10 100 200 40">Use a passkey</button>`, url)
+    expect(await probe(s, "kit@gmail.com")).toEqual({ kind: "stop", reason: "unknown" })
+  })
+
+  test.each([
+    ["continue=https%3A%2F%2Fmyaccount.google.com%2Fsecurity", "stop"],
+    ["redirect_uri=https%3A%2F%2Fevil.test%2Fcb", "stop"],
+    ["redirect_uri=https%3A%2F%2Fwww.example.com.evil.test%2Fcb", "stop"],
+    ["redirect_uri=http%3A%2F%2Fwww.example.com%2Fcb", "stop"],
+    ["redirect_uri=https%3A%2F%2Fwww.example.com%2Fcb&continue=https%3A%2F%2Fevil.test%2F", "stop"],
+    [`continue=${encodeURIComponent("https://accounts.google.com/signin/oauth?redirect_uri=https://evil.test/cb")}`, "stop"],
+    [`continue=${encodeURIComponent("https://accounts.google.com/settings?redirect_uri=https://www.example.com/cb")}`, "stop"],
+    ["redirect_uri=https%3A%2F%2Fapp.example.com%2Fcb", "form"],
+    [`continue=${encodeURIComponent("https://accounts.google.com/signin/oauth?redirect_uri=https://www.example.com/cb")}`, "form"],
+  ] as const)("a provider page whose return URL is %s: %s", async (query, kind) => {
+    const s = fresh()
+    page(LOGIN, `https://accounts.google.com/v3/signin/challenge/pwd?${query}`)
+    await status(s)
+    const report = await probe(s, "kit@gmail.com")
+    expect(report.kind).toBe(kind)
+    if (kind === "stop") expect(report.reason).toBe("unknown")
   })
 
   const TOTP = (chip: string, extra = "") => `<h1>2-Step Verification</h1>

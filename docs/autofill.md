@@ -147,14 +147,23 @@ bounds reduce probing; surface presence is not invisible to the page.
 
 A corner pick of a site's linked provider account may activate its uniquely
 identified “Sign in with Google” control, then complete the provider's chooser,
-identifier, password and learned authenticator-code steps. A pick on the
-provider itself can start there. Ordinary inline and toolbar picks still only
-offer manual provider guidance. The setting is not a standing grant.
+identifier, password and learned authenticator-code steps. Only such a pick,
+with the linked account and the provider's sign-in hosts known, starts a chain:
+a plain login picked on a provider's own host is the ordinary automatic sign-in,
+and a provider with no known hosts (Okta, a custom one) gets the site's button
+pointed at. Ordinary inline and toolbar picks still only offer manual provider
+guidance. The setting is not a standing grant.
 
 The site's origin must exactly match the saved login. Button text identifies
 a candidate, not a trusted destination: `webNavigation` and the browser's current
 committed document must place subsequent work on the provider's exact known
-HTTPS hosts (`signin.ts`), never a lookalike or cross-site frame. The linked
+HTTPS hosts (`signin.ts`), never a lookalike or cross-site frame, and on
+their own sign-in and OAuth paths only, never a settings, re-authentication or
+sudo page. Every return URL a provider page carries (`redirect_uri`,
+`return_to`, `continue` and the like) must lead to the site's registrable
+domain, directly or through another of the provider's sign-in pages; a chooser
+showing the provider's “will share your name, email…” notice is clicked only
+when one does. Anything else stops the chain, the page untouched. The linked
 username must select one eligible saved provider login, with an exact saved
 origin. Chooser tiles use `data-identifier` / `data-email`, never arbitrary text.
 Two candidates, a covered/offscreen control or an unknown step means no action.
@@ -182,7 +191,10 @@ values. A stale/incomplete plan writes nothing; interrupted partial writes are
 rolled back without overwriting a person's edits. TOTP still requires a learned
 authenticator flow and never fills or submits a delivery-code prompt. A matching
 passkey uses the existing RP/allow-list/verification and Strict reauthentication
-checks, not a second account prompt or weakened verification.
+checks, not a second account prompt or weakened verification. It signs without
+a prompt only when the agent verifies the person (Touch ID on, and the site
+doesn't discourage verification); otherwise the chain ends and the usual
+passkey prompt asks, so no assertion is made without the person present.
 
 ### Host connection
 

@@ -79,7 +79,7 @@ interface Pending extends FrameTarget {
   prompt?: PasskeyPrompt
   choose?: (choice: PasskeyChoice) => void
   /** An autofill sign-in: the passkeys the inline menu may offer. */
-  conditional?: { passkeys: Passkey[]; challenge: string; rpId?: string; userVerification: UserVerification }
+  conditional?: { passkeys: Passkey[]; challenge: string; rpId?: string; userVerification: UserVerification; canVerify: boolean }
   /** An autofill sign-in held in a login frame on another origin of the top page's site (see conditional). */
   framed?: boolean
   automaticSignal?: AbortSignal
@@ -281,7 +281,7 @@ export class Passkeys {
     p.rpId = listed.rpId
     if (options.kind === "get") {
       const keys = options.allow.length ? listed.passkeys.filter((k) => options.allow.includes(k.credentialId)) : listed.passkeys
-      const automatic = await this.automaticGet(p, keys, options)
+      const automatic = await this.automaticGet(p, keys, options, listed.canVerify)
       if (automatic !== undefined) return automatic
     }
     return options.kind === "create" ? this.create(p, options, listed) : this.get(p, options, listed)
@@ -323,19 +323,21 @@ export class Passkeys {
    */
   private async conditional(p: Pending, o: GetOptions): Promise<HookReply> {
     let passkeys: Passkey[] = []
+    let canVerify = false
     if (!p.framed && this.host.capabilities.includes("passkeys")) {
       const listed = await this.passkeysFor(p, o.rpId)
       if (!("passkeys" in listed)) return listed
       p.rpId = listed.rpId
+      canVerify = listed.canVerify
       // Without Touch ID the agent can't verify the user. A nonempty allow list names the only passkeys the site takes.
       if (o.userVerification !== "required" || listed.canVerify) passkeys = o.allow.length ? listed.passkeys.filter((k) => o.allow.includes(k.credentialId)) : listed.passkeys
     }
-    const automatic = await this.automaticGet(p, passkeys, o, true)
+    const automatic = await this.automaticGet(p, passkeys, o, canVerify, true)
     if (automatic !== undefined) return automatic
     if (!passkeys.length && !(await this.hasLogins(p))) return FALLBACK
     // One autofill sign-in per document; a newer one replaces it.
     for (const other of this.pending.values()) if (other !== p && other.conditional && other.documentId === p.documentId) this.finish(other, fail("NotAllowedError"))
-    p.conditional = { passkeys, challenge: o.challenge, rpId: o.rpId, userVerification: o.userVerification }
+    p.conditional = { passkeys, challenge: o.challenge, rpId: o.rpId, userVerification: o.userVerification, canVerify }
     // Answered by menuPick, or ended by a cancel or navigation.
     return new Promise<HookReply>(() => {})
   }
@@ -553,8 +555,23 @@ export class Passkeys {
     if (signal.aborted) cancel()
   }
 
-  /** Reuses all existing RP, allow-list, UV and Strict ceremony checks. */
-  private async automaticGet(p: Pending, keys: Passkey[], o: { challenge: string; rpId?: string; userVerification: UserVerification }, optional = false): Promise<HookReply | undefined> {
+  /**
+   * Reuses all existing RP, allow-list, UV and Strict ceremony checks. A
+   * chain's assertion still needs the person: only where the agent verifies
+   * them (`canVerify`, and the site doesn't discourage it) does it sign
+   * without a prompt. Otherwise a modal call ends the chain quietly and goes
+   * on as an ordinary call, to the usual passkey prompt.
+   */
+  private async automaticGet(p: Pending, keys: Passkey[], o: { challenge: string; rpId?: string; userVerification: UserVerification }, canVerify: boolean, optional = false): Promise<HookReply | undefined> {
+    if (!canVerify || o.userVerification === "discouraged") {
+      if (!optional && this.automaticSession?.(p)) {
+        // Unbound first, so the chain's end doesn't cancel the call itself.
+        p.automaticCleanup?.()
+        p.automaticSignal = p.automaticCleanup = undefined
+        await this.automatic?.(p, [])
+      }
+      return undefined
+    }
     const choice = await this.automatic?.(p, keys, optional)
     if (choice === undefined) return undefined
     if (!choice || choice.signal.aborted) return fail("NotAllowedError")
@@ -573,7 +590,7 @@ export class Passkeys {
     const options = p.conditional
     p.conditional = undefined
     try {
-      const reply = await this.automaticGet(p, options.passkeys, options, true)
+      const reply = await this.automaticGet(p, options.passkeys, options, options.canVerify, true)
       if (reply === undefined) { p.conditional = options; return false }
       await this.deliver(p, reply)
     } catch (err) { this.finish(p, err === GONE ? fail("NotAllowedError") : errorReply(err)) }

@@ -106,16 +106,22 @@ async function offer(p: Page): Promise<Frame> {
     return null
   })
 }
-/** The one trusted pick: the offer's "Sign in with Google" row, after the real dwell. */
-async function pick(p: Page) {
+/** The one trusted pick: the offer's "Sign in with Google" row (or the row naming `row`), after the real dwell. */
+async function pick(p: Page, row = "Google") {
   const f = await offer(p)
   check(await p.evaluate(() => document.activeElement === document.body), "the offer does not move page focus")
   await p.waitForTimeout(1400)
-  const row = f.locator("button.row", { hasText: "Google" }).first()
-  const target = await row.boundingBox()
+  // With several logins for the site, the offer first says "Sign in with Deadbolt", which lists them.
+  const choose = f.locator("button.row", { hasText: "Sign in with Deadbolt" })
+  if (await choose.count()) {
+    await choose.click()
+    await p.waitForTimeout(1400)
+  }
+  const button = f.locator("button.row", { hasText: row }).first()
+  const target = await button.boundingBox()
   const recording = recordings.find((r) => r.page === p)
   if (target && recording) recording.clicks.push({ seconds: (performance.now() - recording.start) / 1000, x: target.x + target.width / 2, y: target.y + target.height / 2 })
-  await row.click()
+  await button.click()
   return Date.now()
 }
 
@@ -125,11 +131,11 @@ const LABEL = /Signing in with|^Signed in$|Review access|Approve on your phone|E
 interface Sample { at: number; url: string; text: string; box?: { x: number; y: number; width: number; height: number } }
 interface Watch { samples: Sample[]; focus: string[]; stop(): void }
 type Node = { nodeType: number; nodeValue?: string; backendNodeId: number; children?: Node[]; shadowRoots?: Array<Node & { shadowRootType?: string }>; contentDocument?: Node }
-async function labels(cdp: CDPSession) {
+async function labels(cdp: CDPSession, pattern = LABEL) {
   const { root } = await cdp.send("DOM.getDocument", { depth: -1, pierce: true }) as { root: Node }
   const found: Array<{ text: string; parent: number }> = []
   const walk = (n: Node, shadow: boolean, parent: number) => {
-    if (n.nodeType === 3 && shadow && LABEL.test((n.nodeValue ?? "").trim())) found.push({ text: n.nodeValue!.trim(), parent })
+    if (n.nodeType === 3 && shadow && pattern.test((n.nodeValue ?? "").trim())) found.push({ text: n.nodeValue!.trim(), parent })
     for (const s of n.shadowRoots ?? []) walk(s, shadow || s.shadowRootType !== "user-agent", n.backendNodeId)
     for (const c of n.children ?? []) walk(c, shadow, n.backendNodeId)
     if (n.contentDocument) walk(n.contentDocument, shadow, n.backendNodeId)
@@ -388,6 +394,24 @@ try {
     await p.close()
   }
 
+  // A plain login picked on the provider's own host is the ordinary automatic
+  // sign-in, with its own checks: never a provider chain.
+  await fresh()
+  {
+    const flow = "plain-on-provider"
+    const p = await context.newPage()
+    record(p, flow)
+    await p.goto(`${googleOrigin}/v3/signin/identifier?${new URLSearchParams({ flow, redirect_uri: `${site}/oauth/callback` })}`)
+    const w = await watch(p)
+    await pick(p)
+    await until("the identifier is submitted", async () => posts(flow, "/v3/signin/identifier") === 1)
+    check(hits(flow, (h) => h.method === "POST" && h.path === "/v3/signin/identifier").map((h) => h.value).join() === GOOGLE_USER, "a plain pick on Google's own page: the ordinary automatic sign-in submits the login's identifier")
+    await p.waitForTimeout(1500)
+    check(!w.samples.some((s) => /Signing in with Google/.test(s.text)), "a plain pick on Google's own page starts no provider chain")
+    w.stop()
+    await p.close()
+  }
+
   // Popup: identifier → password → TOTP in a popup, which closes back to Acme.
   await fresh()
   {
@@ -439,6 +463,53 @@ try {
     await p.close()
   }
 
+  // A hostile site: its button points at Google's re-authentication page, it
+  // re-navigates the popup it opened there, or its return URL leaves Acme.
+  // The chain stops at once and the provider's page is left untouched.
+  await fresh()
+  {
+    const flow = "reauth-entry"
+    const p = await open(flow, { entry: "settings" })
+    const w = await watch(p)
+    await pick(p)
+    await p.waitForURL(`${googleOrigin}/security/signinoptions/password*`)
+    await p.waitForTimeout(3000)
+    check(await p.inputValue('input[name="Passwd"]') === "" && posts(flow, "/security/signinoptions/password") === 0, "a site button pointing at Google's re-authentication page: the password is never filled")
+    check(quietOn(w, "accounts.google.test"), "re-authentication page: no status pill")
+    w.stop()
+    await p.close()
+  }
+  await fresh()
+  {
+    const flow = "popup-renav"
+    const p = await open(flow, { mode: "popup", delay: "4000" })
+    const popped = context.waitForEvent("page")
+    await pick(p)
+    const popup = await popped
+    record(popup, "popup-renav-window")
+    await until("tile clicked", async () => hits(flow, (h) => h.path === "/signin/select").length === 1)
+    await p.evaluate(() => (window as unknown as { renav(): void }).renav())
+    await popup.waitForURL(`${googleOrigin}/security/signinoptions/password*`)
+    await popup.waitForTimeout(3000)
+    check(await popup.inputValue('input[name="Passwd"]') === "" && posts(flow, "/security/signinoptions/password") === 0 && posts(flow, "/v3/signin/challenge/pwd") === 0,
+      "a popup the site re-navigates off the sign-in path: nothing is filled or submitted")
+    await popup.close()
+    await p.close()
+  }
+  for (const [flow, query] of [["foreign-redirect", { foreign: "1" }], ["foreign-continue", { chooser: "0", continue: `http://myaccount.google.test:${port}/security` }]] as const) {
+    await fresh()
+    const p = await open(flow, query)
+    const w = await watch(p)
+    await pick(p)
+    await p.waitForURL(flow === "foreign-redirect" ? `${googleOrigin}/o/oauth2/v2/auth*` : `${googleOrigin}/v3/signin/identifier*`)
+    await p.waitForTimeout(3000)
+    if (flow === "foreign-redirect") check(!hits(flow, (h) => h.path === "/signin/select").length, "a redirect_uri off Acme: the chooser's tile is never clicked")
+    else check(await p.inputValue("#identifierId") === "" && posts(flow, "/v3/signin/identifier") === 0, "a continue URL off Acme: the identifier is never filled")
+    check(quietOn(w, "accounts.google.test"), `${flow}: no status pill`)
+    w.stop()
+    await p.close()
+  }
+
   // A real passkey: made by Deadbolt in Google's own enrollment ceremony, saved
   // in the extension's prompt by the person, verified by the fake Google.
   {
@@ -454,28 +525,26 @@ try {
     await p.close()
   }
 
-  // One trusted pick: chooser → Google's passkey challenge, signed without a
-  // second pick or prompt, verified by the server, back to Acme.
-  await fresh()
-  {
-    const flow = "passkey"
+  // One trusted pick: chooser → Google's passkey challenge. The chain signs
+  // without a prompt only where the agent verifies the person (Touch ID on);
+  // this throwaway store has none, and a site may discourage verification,
+  // so the chain ends there and the usual passkey prompt asks. The person's
+  // own Sign in makes the one assertion, verified by the server.
+  for (const [flow, uv] of [["passkey", "preferred"], ["passkey-uv-discouraged", "discouraged"]] as const) {
+    await fresh()
     const before = googlePasskey.verified
-    const p = await open(flow, { pk: "1" })
+    const p = await open(flow, { pk: "1", uv })
     const w = await watch(p)
     await pick(p)
-    let prompted = false
-    const end = Date.now() + 20_000
-    while (Date.now() < end && !p.url().startsWith(`${site}/account`)) {
-      if (p.url().startsWith(googleOrigin) && !await noPasskeyPrompt(googleOrigin, 1)) prompted = true
-      await Bun.sleep(150)
-    }
-    await p.waitForURL(`${site}/account*`, { timeout: 1000 })
-    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, `${mode}: one trusted pick signs in with the saved passkey back to Acme`)
-    check(googlePasskey.verified === before + 1 && hits(flow, (h) => h.path === "/pk/auth" && h.value === "verified").length === 1, `${mode}: exactly one assertion, verified by @simplewebauthn/server`)
-    check(!prompted, `${mode}: no passkey prompt or second pick during the chain`)
-    check(!hits(flow, (h) => h.path === "/v3/signin/challenge/pwd" || h.path === "/v3/signin/challenge/selection").length, `${mode}: the passkey is used instead of the password, Try another way untouched`)
-    await settles(w, "/account", "passkey")
-    noFocus(w, "passkey")
+    const prompt = await passkeyPrompt(googleOrigin)
+    check(prompt?.heading === "Sign in to accounts.google.test with a passkey?", `${mode} ${flow}: the chain hands the passkey to the usual prompt (${prompt?.heading})`)
+    check(googlePasskey.verified === before && !hits(flow, (h) => h.path === "/pk/auth").length, `${mode} ${flow}: no assertion is made before the person answers`)
+    await prompt!.press("Sign in")
+    await p.waitForURL(`${site}/account*`, { timeout: 20_000 })
+    check(await p.locator("#who").textContent() === `Signed in as ${GOOGLE_USER} with Google`, `${mode} ${flow}: the person's Sign in finishes with the saved passkey back to Acme`)
+    check(googlePasskey.verified === before + 1 && hits(flow, (h) => h.path === "/pk/auth" && h.value === "verified").length === 1, `${mode} ${flow}: exactly one assertion, verified by @simplewebauthn/server`)
+    check(!hits(flow, (h) => h.path === "/v3/signin/challenge/pwd" || h.path === "/v3/signin/challenge/selection").length, `${mode} ${flow}: the passkey is used instead of the password, Try another way untouched`)
+    noFocus(w, flow)
     w.stop()
     await p.close()
   }
@@ -538,6 +607,33 @@ try {
     await p.waitForTimeout(3000)
     check(await p.inputValue('input[name="Passwd"]') === "" && posts(flow, "/v3/signin/challenge/pwd") === 0, "turning the setting off mid-chain stops it: the password is never filled")
     await setting(true)
+    await p.close()
+  }
+
+  // A linked login for a provider Deadbolt knows no hosts for (Okta): the pick
+  // points at the site's own Okta button, as before chains, and clicks nothing.
+  if (native) {
+    cli("new", "login", "--name", "Okta", "url=https://acme.okta.com", "username=kit@acme.test", "password=synthetic-okta-password")
+    const ref = JSON.stringify(await hostRequest({ type: "list", origin: "https://acme.okta.com" })).match(/"ref":"([^"]+)"/)?.[1]
+    if (!ref) throw new Error("the host lists no Okta login")
+    cli("new", "login", "--name", "Acme via Okta", `url=${site}`, "sign-in-with=okta", `sign-in-account=${ref.split(":")[1]}`)
+    cli("unset", "--field", "password", "Acme via Okta")
+  } else {
+    const save = async (name: string, fields: Array<{ name: string; value: string }>) => String((await command({ type: "device-item-save", kind: "login", name, fields })).reply.ref)
+    const oktaRef = await save("Okta", [{ name: "url", value: "https://acme.okta.com" }, { name: "username", value: "kit@acme.test" }, { name: "password", value: "synthetic-okta-password" }])
+    await save("Acme via Okta", [{ name: "url", value: site }, { name: "sign-in-with", value: "okta" }, { name: "sign-in-account", value: oktaRef.split(":")[1] }])
+  }
+  // Past the offer's five-second cache of Acme's logins (bg/universal.ts).
+  await Bun.sleep(5500)
+  await fresh()
+  {
+    const flow = "okta"
+    const p = await open(flow, { okta: "1" })
+    const cdp = await context.newCDPSession(p)
+    await pick(p, "Okta")
+    await until("the site's Okta button is pointed at", async () => (await labels(cdp, /^Your Okta sign-in$/)).length > 0, 5000)
+    await p.waitForTimeout(1500)
+    check(new URL(p.url()).pathname === "/signin" && await p.title() !== "Okta clicked" && !hits(flow, (h) => h.host !== "acme.test").length, "an Okta-linked pick points at the site's Okta button and clicks nothing")
     await p.close()
   }
 

@@ -21,7 +21,7 @@
 
 import { SIGNIN_SETTING } from "../auth-state"
 import { IDENTIFIER_ROLES, type FieldRole, type FillValues, type ProviderReport, type ToContent } from "../messages"
-import { isAccountPage, isChooserPage, isProviderPage, provider as providerById, type Provider } from "../signin"
+import { isAccountPage, isChooserPage, isProviderPage, isSignInPage, provider as providerById, returnsTo, type Provider } from "../signin"
 import { reducedMotion, timing } from "../ui/motion"
 import { signedInHint } from "./auth-state"
 import { hasPhrase, words } from "./clues"
@@ -67,6 +67,12 @@ const phrases = (list: string[]) => list.map((p) => words(p).trim())
 // Not "share your": Google's chooser and password pages carry the sign-in
 // disclosure "To continue, Google will share your name, email address…".
 const STRONG_CONSENT = phrases(["wants to access", "would like to access", "wants access", "is requesting access", "requesting permission", "grant access", "allow access", "access your", "will allow", "permissions requested"])
+/**
+ * The sign-in disclosure ("Google will share your name, email address…"): on
+ * a chooser, picking the account may itself be the consent for the client
+ * the URL names. Only a chooser whose return URL leads home is clicked.
+ */
+const SHARES = phrases(["will share your"])
 /** Page text longer than this is unknown: a warning past a cut-off must not be missed. */
 const TEXT_LIMIT = 20_000
 const SECURITY_KEY = phrases(["security key", "insert your key", "touch your key", "usb key", "hardware key"])
@@ -307,13 +313,20 @@ function evaluate(message: Probe): ProviderReport | "wait" {
     return text !== null && loading(text) ? "wait" : stop("unknown")
   }
   if (!onProvider) return stop("unknown")
+  // Only the provider's own sign-in and OAuth pages, sending the person back to the site picked on.
+  if (!isSignInPage(p, location.href)) return stop("unknown")
+  const back = returnsTo(p, location.href, message.site)
+  if (back === "foreign") return stop("unknown")
   if (deepQueryAll(CAPTCHA, openRoots()).some(isVisible)) return stop("captcha")
   const text = pageWords()
   if (text === null) return stop("unknown")
   if (strongConsent(text)) return stop("consent")
   const account = message.account
   const tile = account ? tileFor(p, account) : null
-  if (tile && account) return { kind: "chooser", action: mint({ kind: "click", ...base, provider: true, el: tile, find: () => tileFor(p, account) }) }
+  if (tile && account) {
+    if (back !== "home" && any(text, SHARES)) return stop("consent")
+    return { kind: "chooser", action: mint({ kind: "click", ...base, provider: true, el: tile, find: () => tileFor(p, account) }) }
+  }
   const form = inspectForm(account)
   if (form && form !== "wait" && "stop" in form) return stop(form.stop)
   if (form && form !== "wait") {
