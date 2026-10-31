@@ -35,6 +35,10 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("database error: {0}")]
     Db(redb::Error),
+    /// The signed-log commit was attempted but not acknowledged. The entire
+    /// batch may already be durable; discard derived state and reopen the store.
+    #[error("log append outcome is uncertain: {0}")]
+    AppendUncertain(#[source] redb::CommitError),
 }
 
 impl Error {

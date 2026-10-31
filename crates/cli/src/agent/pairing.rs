@@ -43,6 +43,7 @@ pub(super) fn offer(
     device: &DeviceId,
     addr: Option<Addr>,
 ) -> Result<Vec<u8>> {
+    s.ensure_usable()?;
     Ok(application::offer(s, vault, device, addr)?)
 }
 
@@ -73,6 +74,7 @@ pub(super) fn welcome(
     join: &[u8],
     fallback_addr: Option<Addr>,
 ) -> Result<(Vec<Blob>, DeviceInfo)> {
+    s.ensure_usable()?;
     let blobs = application::welcome(s, vault, device, join, fallback_addr)?;
     Ok((blobs, s.device_info(&device, &HashSet::new())))
 }

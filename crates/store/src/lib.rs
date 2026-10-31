@@ -87,8 +87,10 @@
 //! # Backend
 //!
 //! [redb](https://docs.rs/redb): a pure-Rust, single-file, copy-on-write
-//! B-tree with ACID transactions. A commit is durable when it returns (fsync),
-//! and a crash mid-commit leaves the previous committed state intact. We turn
+//! B-tree with ACID transactions. A successful commit is durable (fsync).
+//! An interrupted or failed commit can leave either the old or new state; an
+//! error is not proof of rollback. Signed-log callers must discard derived
+//! state and reopen on [`Error::AppendUncertain`]. We turn
 //! on its two-phase commit, which also makes redb refuse a damaged latest
 //! commit rather than quietly rolling back to the one before. That gives
 //! crash safety and an atomic multi-record update (entries + count) for free.

@@ -73,6 +73,7 @@ impl Device {
             unavailable: Default::default(),
             changes: Default::default(),
             health,
+            append_uncertain: false,
         })));
         let member_state = state.clone();
         let gate = MembershipGate::new(Arc::new(move |peer: &PeerId| {
