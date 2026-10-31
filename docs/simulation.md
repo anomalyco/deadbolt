@@ -104,8 +104,13 @@ an error. The store reports `AppendUncertain`; native `Loaded` permanently
 invalidates all live vaults until replay. The agent refuses reads, writes, sync
 and pairing, clears the membership gate and closes its sync connections, cancels
 background sync/health work and marks readiness closed. Startup deadlines and
-retries cannot reopen it. Run `deadbolt lock`, then `deadbolt unlock` to close the
-failed handle and rebuild from disk; do not retry the mutation on the old view.
+retries cannot reopen it. The app's Unlock action (or `deadbolt unlock`) closes
+the failed node/store under the lifecycle transition, then uses normal fresh
+passphrase or biometric authentication and disk replay. Quarantine is never
+treated as already unlocked: a bad passphrase leaves the device locked. Explicit
+`deadbolt lock` still closes the failed handle. No uncertain mutation is retried.
+A warning records only the typed failure class, I/O kind and numeric OS error,
+never backend messages, paths or vault values.
 Staging clones the validated vault, avoiding signature verification of historical
 entries. Sync batches publish independently per vault.
 
@@ -116,6 +121,9 @@ errored append persisted. They cover item changes, removals and both sides of
 pairing. This is not the simulator's pre-write fault or a claim to emulate power
 loss or every filesystem error. The agent regression also checks that an existing
 local-only sync connection is closed and readiness cannot be republished.
+The quarantine recovery regressions cover bad passphrases, overlapping explicit
+unlocks, fresh biometric authentication via the existing test hook, and explicit
+lock. They verify the committed edit is replayed once, not retried.
 
 The vault list comes from the encrypted entry log. Legacy `cli/vaults` metadata is
 ignored, so a crash after storing genesis cannot hide the new vault.

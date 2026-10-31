@@ -137,20 +137,19 @@ pub(super) fn set_json<T: Serialize>(store: &Unlocked, name: &str, value: &T) ->
 impl Loaded {
     pub fn ensure_usable(&self) -> Result<()> {
         if self.append_uncertain {
-            bail!(
-                "store commit outcome is uncertain; run `deadbolt lock` then `deadbolt unlock` to reload"
-            );
+            bail!("store commit outcome is uncertain; unlock again to authenticate and reload");
         }
         Ok(())
     }
 
     fn check_append<T>(&mut self, result: Result<T>) -> Result<T> {
-        if result.as_ref().err().is_some_and(|error| {
-            matches!(
-                error.downcast_ref::<deadbolt_store::Error>(),
-                Some(deadbolt_store::Error::AppendUncertain(_))
-            )
-        }) {
+        if let Some(diagnostic) = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<deadbolt_store::Error>())
+            .and_then(deadbolt_store::Error::append_diagnostic)
+        {
+            tracing::warn!(failure = %diagnostic, "signed-log commit unconfirmed; quarantining session; unlock to authenticate and replay");
             self.append_uncertain = true;
             // Never serve or republish the pre-commit view, including through
             // State::vaults, direct local reads, or the membership gate.

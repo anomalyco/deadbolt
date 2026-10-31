@@ -491,18 +491,30 @@ mod tests {
         );
         assert!(!*agent.ready.borrow());
         assert!(agent.wait_ready().await.is_err());
-        assert!(
-            agent
-                .unlock(zeroize::Zeroizing::new("test".into()), Some(0))
-                .await
-                .is_err()
-        );
-        assert!(
-            agent
-                .unlock_biometric_with_reason(Some(0), "test")
-                .await
-                .is_err()
-        );
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            agent.unlock(zeroize::Zeroizing::new("wrong".into()), Some(0)),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(wrong_passphrase(&error));
+        assert!(!agent.status().unlocked);
+        assert!(agent.session.lock().unwrap().is_none());
+        assert!(agent.members.read().unwrap().is_empty());
+        // A failed authentication discarded the old handle, not quarantine's
+        // protection. A later normal Unlock must authenticate and replay.
+        agent
+            .unlock(zeroize::Zeroizing::new("test".into()), Some(0))
+            .await
+            .unwrap();
+        agent
+            .with(|s| {
+                assert!(!s.vault(&id).is_member(&peer.device_id()));
+                assert_eq!(s.vault(&id).entries().len(), 3);
+                Ok(())
+            })
+            .unwrap();
         tokio::task::yield_now().await;
         assert!(aborted.is_finished());
         conn.close();
@@ -510,6 +522,107 @@ mod tests {
         peer_node.shutdown().await;
         let reopened = Loaded::open(dir.path(), b"test").unwrap();
         assert!(!reopened.vault(&id).is_member(&peer.device_id()));
+    }
+
+    #[tokio::test]
+    async fn quarantine_unlock_authenticates_and_replays_without_a_separate_lock() {
+        for biometric in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let agent = locked_agent(dir.path());
+            let (mut loaded, fault) = session::tests::fault_store(dir.path(), [7; 32]);
+            let id = loaded.create_vault("personal").unwrap();
+            let key = deadbolt_store::generate_biometric_key().unwrap();
+            loaded
+                .store
+                .set_biometric(&key, &make_valid_biometric_token(session::now()))
+                .unwrap();
+            let node = Node::spawn(
+                NodeConfig::local_only(*loaded.secret.to_bytes()),
+                Arc::new(|_: &PeerId| false),
+                sync::Handler(agent.clone()),
+            )
+            .await
+            .unwrap();
+            *agent.session.lock().unwrap() = Some(Session::new(loaded, node));
+            fault.store(2, Ordering::SeqCst);
+            assert!(
+                agent
+                    .with(|s| s.update(id, |v, key| Ok(v.rename(key, "committed")?)))
+                    .is_err()
+            );
+            assert!(!agent.status().unlocked);
+            if biometric {
+                crate::config::set_touch_id(&agent.paths.config, true).unwrap();
+                let calls = Arc::new(AtomicUsize::new(0));
+                let called = calls.clone();
+                let key = *key;
+                *agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |cancel| {
+                    assert!(!cancel.is_cancelled());
+                    called.fetch_add(1, Ordering::SeqCst);
+                    Ok(Zeroizing::new(key))
+                }));
+                assert!(
+                    tokio::time::timeout(
+                        Duration::from_secs(5),
+                        agent.unlock_biometric_with_reason(Some(0), "test recovery")
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap()
+                );
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            } else {
+                // Concurrent explicit unlocks serialize teardown/open. Neither
+                // may reopen the poisoned handle or duplicate the logged edit.
+                let (a, b) = tokio::time::timeout(Duration::from_secs(5), async {
+                    tokio::join!(
+                        agent.unlock(Zeroizing::new("test".into()), Some(0)),
+                        agent.unlock(Zeroizing::new("test".into()), Some(0))
+                    )
+                })
+                .await
+                .unwrap();
+                a.unwrap();
+                b.unwrap();
+            }
+            agent
+                .with(|s| {
+                    assert_eq!(s.vault(&id).name(), "committed");
+                    assert_eq!(s.vault(&id).entries().len(), 2);
+                    Ok(())
+                })
+                .unwrap();
+            agent.lock().await;
+            assert!(agent.session.lock().unwrap().is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn quarantine_explicit_lock_still_closes_the_failed_handle() {
+        let dir = tempfile::tempdir().unwrap();
+        let agent = locked_agent(dir.path());
+        let (mut loaded, fault) = session::tests::fault_store(dir.path(), [7; 32]);
+        let id = loaded.create_vault("personal").unwrap();
+        let node = Node::spawn(
+            NodeConfig::local_only(*loaded.secret.to_bytes()),
+            Arc::new(|_: &PeerId| false),
+            sync::Handler(agent.clone()),
+        )
+        .await
+        .unwrap();
+        *agent.session.lock().unwrap() = Some(Session::new(loaded, node));
+        fault.store(2, Ordering::SeqCst);
+        assert!(
+            agent
+                .with(|s| s.update(id, |v, key| Ok(v.rename(key, "committed")?)))
+                .is_err()
+        );
+        tokio::time::timeout(Duration::from_secs(5), agent.lock())
+            .await
+            .unwrap();
+        assert!(agent.session.lock().unwrap().is_none());
+        let loaded = Loaded::open(dir.path(), b"test").unwrap();
+        assert_eq!(loaded.vault(&id).name(), "committed");
     }
 
     #[tokio::test]
@@ -2164,8 +2277,8 @@ impl Agent {
             self.cancel_biometric_prompt();
             self.interrupt_op();
             self.watchers.locked();
-            // Keep the failed handle until explicit lock: recovery must close
-            // the node/store and replay, not reuse the old session on unlock.
+            // Keep the failed handle until explicit lock/unlock: recovery must
+            // close the node/store and authenticate/replay, never reuse it.
             session.ensure_usable()?;
         }
         // Publish even if `f` failed: it may have committed earlier changes.
@@ -2466,6 +2579,7 @@ impl Agent {
         timeout_secs: Option<u64>,
     ) -> Result<()> {
         let _transition = self.transition.lock().await;
+        self.close_quarantined(&_transition).await;
         self.settle_activity(true);
         *self
             .biometric_cooldown_until
@@ -2482,7 +2596,7 @@ impl Agent {
             });
         if let Some(check) = open {
             let check = check?;
-            if self.tighten_timeout(timeout_secs)? {
+            if self.with(|_| self.tighten_timeout(timeout_secs))? {
                 return Ok(());
             }
             let turn = self.guesses.turn()?;
@@ -2492,7 +2606,7 @@ impl Agent {
             if !right {
                 return Err(deadbolt_store::Error::WrongPassphrase.into());
             }
-            return self.set_timeout(timeout_secs);
+            return self.with(|_| self.set_timeout(timeout_secs));
         }
         if !deadbolt_store::is_initialized(&self.paths.data) {
             return Err(fail(
@@ -2553,16 +2667,16 @@ impl Agent {
         timeout_secs: Option<u64>,
         reason: &str,
     ) -> Result<bool> {
-        let unlocked = self
-            .session
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .is_some();
-        if unlocked {
-            self.with(|_| Ok(()))?;
-            if self.tighten_timeout(timeout_secs)? {
-                return Ok(false);
-            }
+        let unlocked = {
+            let transition = self.transition.lock().await;
+            self.close_quarantined(&transition).await;
+            self.session
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_some()
+        };
+        if unlocked && self.with(|_| self.tighten_timeout(timeout_secs))? {
+            return Ok(false);
         }
         if !unlocked && !deadbolt_store::is_initialized(&self.paths.data) {
             return Err(fail(
@@ -2614,7 +2728,9 @@ impl Agent {
                 // only shorten the timeout that request set, and never claims
                 // `unsealed_here = true` for passkey UV.
                 return match outcome {
-                    Ok(()) => self.tighten_timeout(timeout_secs).map(|_| false),
+                    Ok(()) => self
+                        .with(|_| self.tighten_timeout(timeout_secs))
+                        .map(|_| false),
                     Err(msg) => bail!("{msg}"),
                 };
             }
@@ -2680,6 +2796,7 @@ impl Agent {
         let now = session::now();
         let token = {
             let _transition = self.transition.lock().await;
+            self.close_quarantined(&_transition).await;
             let open = self
                 .session
                 .lock()
@@ -2692,7 +2809,7 @@ impl Agent {
             if let Some(token) = open {
                 let token = token?;
                 // Unlocked: the prompt only verifies a longer timeout.
-                if self.tighten_timeout(timeout_secs)? {
+                if self.with(|_| self.tighten_timeout(timeout_secs))? {
                     return Ok(false);
                 }
                 let Some(token) = token else {
@@ -2846,14 +2963,14 @@ impl Agent {
         };
 
         let _transition = self.transition.lock().await;
+        self.close_quarantined(&_transition).await;
         if self
             .session
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .is_some()
         {
-            self.with(|_| Ok(()))?;
-            self.set_timeout(timeout_secs)?;
+            self.with(|_| self.set_timeout(timeout_secs))?;
             return Ok(true);
         }
         if cancel.is_cancelled() {
@@ -3020,7 +3137,28 @@ impl Agent {
         self.ssh.clear_on_lock();
         self.cancel_biometric_prompt();
         self.interrupt_op();
-        let _transition = self.transition.lock().await;
+        let transition = self.transition.lock().await;
+        self.close_session(&transition).await;
+    }
+
+    /// Only an explicit unlock retires quarantine; all normal reads/retries
+    /// continue to fail closed. The transition serializes close with open and
+    /// lock, and avoids calling lock() while already holding its mutex.
+    async fn close_quarantined(&self, transition: &tokio::sync::MutexGuard<'_, ()>) {
+        let quarantined = self
+            .session
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|s| s.append_uncertain);
+        if quarantined {
+            // Quarantine already cancelled prompts and background work. Do not
+            // cancel a new biometric flight that is authenticating recovery.
+            self.close_session(transition).await;
+        }
+    }
+
+    async fn close_session(&self, _transition: &tokio::sync::MutexGuard<'_, ()>) {
         self.settle_activity(true);
         *self
             .biometric_cooldown_until
