@@ -35,6 +35,8 @@ jobs:
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +stable test --workspace --locked
+      - if: runner.os == 'Linux'
+        run: cargo +stable check -p deadbolt-net --features private-relay-fixture --locked
 
   # Both browser Rust clients: Send and the standalone extension device.
   wasm:
