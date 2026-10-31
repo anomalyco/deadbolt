@@ -518,13 +518,17 @@ impl Vault {
         self.items.get(id).map(|state| state.item(*id))
     }
 
-    /// All items that are not deleted, ordered by id.
-    pub fn items(&self) -> Vec<Item> {
+    /// Live items in id order, materialized one at a time.
+    pub fn iter_items(&self) -> impl Iterator<Item = Item> + '_ {
         self.items
             .iter()
             .map(|(id, state)| state.item(*id))
             .filter(|item| !item.deleted)
-            .collect()
+    }
+
+    /// All items that are not deleted, ordered by id.
+    pub fn items(&self) -> Vec<Item> {
+        self.iter_items().collect()
     }
 
     /// Deleted items, newest first: by when they were deleted, then those

@@ -110,14 +110,14 @@ pub(super) fn tag_ops(item: &Item, favorite: Option<bool>, tags: Option<&[String
 /// `device-items`: every item but deleted ones.
 pub(super) fn all() -> Result<Value> {
     state().with(|s| {
-        let items: Vec<_> = s
+        let rows = s
             .vault
-            .items()
-            .iter()
-            .filter(|i| !i.deleted)
-            .map(|i| summary(i, &s.vault))
+            .iter_items()
+            .map(|i| summary(&i, &s.vault))
             .collect();
-        Ok(json!({"type": "device-items", "items": items}))
+        let mut reply = json!({"type": "device-items"});
+        reply["items"] = Value::Array(rows);
+        Ok(reply)
     })
 }
 
