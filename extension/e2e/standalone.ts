@@ -1146,12 +1146,29 @@ async function passkeyFlows(device: Page, worker: Worker) {
     check(Array.isArray(detail.reply.fields) && !detail.reply.fields.some((f: { name: string }) => f.name === "private-key"), "the general item detail omits the passkey private key")
     check(!(await command(device, { type: "device-secret", ref: second.ref, field: "private-key", passphrase })).ok, "even reauthentication cannot reveal the passkey private key")
     await device.reload()
+    await device.bringToFront()
     await device.locator(".list-view .vrow").filter({ hasText: "second@acme.test" }).locator("button.vrow-main").click()
     const deleteItem = device.getByRole("button", { name: "Delete localhost", exact: true })
     await deleteItem.click()
-    await deleteItem.click()
+    await device.locator("button.btn.danger", { hasText: "Delete for good?" }).click()
     const deletionAuth = device.locator("form.reauth")
     await deletionAuth.getByLabel("Passphrase", { exact: true }).fill("wrong fixture passphrase")
+    // A sync/status refresh must not discard the item-detail confirmation or its input.
+    await device.evaluate(() => {
+      const detail = document.querySelector(".detail")!
+      const before = detail.querySelector(".detail-head")!
+      detail.removeAttribute("data-refreshed")
+      const observer = new MutationObserver(() => {
+        if (detail.querySelector(".detail-head") === before) return
+        observer.disconnect()
+        detail.setAttribute("data-refreshed", "true")
+      })
+      observer.observe(detail, { childList: true })
+    })
+    const detailStatus = (await request(device, { type: "device-status" })).status
+    await worker.evaluate((status) => chrome.runtime.sendMessage({ type: "db:status", status, change: "items" }), detailStatus)
+    await device.locator('.detail[data-refreshed="true"]').waitFor()
+    check(await deletionAuth.count() === 1 && await deletionAuth.getByLabel("Passphrase", { exact: true }).inputValue() === "wrong fixture passphrase", "a vault refresh preserves the item-detail deletion passphrase")
     await deletionAuth.getByRole("button", { name: "Delete", exact: true }).click()
     await deletionAuth.locator(".error").waitFor({ state: "visible" })
     check((await devicePasskeys(device)).some((k) => k.credentialId === again.id), "item-detail deletion keeps the passkey after a wrong Strict passphrase")
