@@ -1,12 +1,13 @@
 // Linux, private network/PID namespaces only. See run.sh and docs/extension-device.md.
 import { chromium, type BrowserContext, type Page } from "playwright-core"
-import { measure } from "./measure"
+import { meter } from "./measure"
 import { mkdir, copyFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { stallAuthority, initShape, privateServices, proxy, run, shape } from "./network"
 import type { DeviceCommand, DeviceReply, ItemSummary, VaultDevice } from "../../src/messages"
 
 const [root, dist, relay, store, pin, deadbolt, mode] = process.argv.slice(2)
+const measure = meter({ chrome: chromium.executablePath(), "iroh-relay": relay, deadbolt })
 const passphrase = "synthetic-relay-fixture"
 function check(ok: unknown, why: string): asserts ok {
   if (!ok) throw new Error(why)

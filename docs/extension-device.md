@@ -734,7 +734,12 @@ requires A's published relay hint rather than assuming bidirectional reachabilit
 `MEASURE` is request start to edit acknowledgment and to an exact remote value
 observed by poll. `PHASE` is elapsed time, sampled CPU seconds and peak **summed**
 RSS in KiB (Chromium includes open device pages and double-counts shared pages).
-250 ms sampling can miss short peaks/processes. Per-phase safety ceilings are
+The meter matches `/proc/<pid>/exe` device/inode to the three supplied images,
+not truncated process names. Each phase must start and end with a positive RSS
+sample for every group. Across restarts a group can be absent between samples;
+250 ms sampling misses short peaks, short-lived CLI commands and any CPU they
+use after their last observation. A sampled zero CPU delta is not zero wakeups.
+Per-phase safety ceilings are
 3 GiB Chromium, 1 GiB native CLI, 256 MiB relay, and at most 2 CPU seconds
 across the three in each ten-second idle/outage window. These are regression
 tripwires for this fixture, not general mobile memory limits. Catch-up allows
