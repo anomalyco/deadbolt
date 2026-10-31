@@ -77,10 +77,10 @@ async function measure<T>(images: ReadonlyMap<string, string>, phase: string, fn
     )
     if (peak.chrome > 3 * 1024 * 1024 || peak.deadbolt > 1024 * 1024 || peak["iroh-relay"] > 256 * 1024)
       throw new Error(`${phase}: fixture RSS budget exceeded`)
-    if (
-      (phase.startsWith("idle-") || phase === "blackhole-10s") &&
-      Object.values(ticks).reduce((a, b) => a + b, 0) / hz > 2
-    )
+    const cpuSeconds = Object.values(ticks).reduce((a, b) => a + b, 0) / hz
+    if (phase === "catch-up-with-restarts" && cpuSeconds > 120)
+      throw new Error(`${phase}: fixture exceeded 120 active CPU-seconds (${cpuSeconds.toFixed(2)})`)
+    if ((phase.startsWith("idle-") || phase === "blackhole-10s") && cpuSeconds > 2)
       throw new Error(`${phase}: exceeded two CPU-seconds in ten-second window`)
   }
 }

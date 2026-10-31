@@ -709,7 +709,9 @@ network namespace. For the poor-link cases only B's proxy-to-relay/resolver link
 CLI A and browser C are unshaped. Loopback MTU is 1500, segmentation/receive offload is off.
 Both directions get 150 ms delay + independent 2% packet loss (300 ms added
 RTT), **or** a separate 1 Mbit/s per-direction cap, **or** 100% loss without
-closing existing TCP connections. Netem statistics, not CDP offline emulation,
+closing existing TCP connections. The rate profile keeps a 1,000-packet queue
+in each direction: at MTU 1500 it can add roughly 12 s of queueing when full.
+These figures do not isolate the cost of bandwidth alone. Netem statistics, not CDP offline emulation,
 show which queues handled the traffic. Normal worker startup and sync deadlines
 still apply. This does not model multiple physical relays or internet routing.
 
@@ -718,13 +720,17 @@ It partitions the CLI and browser for ten seconds after concurrent edits,
 heals two cut/write/heal cycles, then appends **2,000 separately signed logins
 (2 KiB notes each) and two 64 KiB attachments** on the locked native store.
 It terminates the service worker and discards the offscreen owner during catch-up,
-checks lock and authenticated OPFS reopen, then interrupts the transfer again
-by restarting the browser and relay. No test command is linked into WASM.
+checks lock and authenticated OPFS reopen, then cuts B after at least one backlog
+item is visible but the last attachment is absent. With every B proxy tunnel
+closed/denied, it records the visible backlog refs, restarts the browser and relay,
+unlocks and checks **every captured ref** survived with no additional relay bytes
+and still no tail. Only then can B reconnect. No test command is linked into WASM.
 A third device joins. An offline example reopens the three encrypted stores,
 rejects duplicate entries, compares heads and complete items, and checks both
 conflict versions and attachment contents. Finally, removed C contacts B while B
 is returning with stale membership and an unsent item. A's advertised relay path is briefly stalled until C confirms direct contact
-with B, then restored before the ordinary dial deadline. B must learn the removal before serving that item; only A/B
+with B. A monotonic precondition requires both directions restored within 10 s
+of starting B's unlock, before its 15 s startup dial budget. B must learn the removal before serving that item; only A/B
 get both markers. The surviving stores are compared again. This tests **one
 reachable-authority schedule**. If A never published a usable address, it can
 be outbound-only; a missing route is not a completed refresh. By contract an
@@ -741,7 +747,9 @@ sample for every group. Across restarts a group can be absent between samples;
 use after their last observation. A sampled zero CPU delta is not zero wakeups.
 Per-phase safety ceilings are
 3 GiB Chromium, 1 GiB native CLI, 256 MiB relay, and at most 2 CPU seconds
-across the three in each ten-second idle/outage window. These are regression
+across the three in each ten-second idle/outage window. The fixed 2,002-entry
+backlog phase also fails above 120 sampled CPU seconds summed across the three
+process groups (previous normal runs used roughly 33 s total). These are regression
 tripwires for this fixture, not general mobile memory limits. Catch-up allows
 210 s after restart including startup and retries (payload-only minimum: 38.4 s).
 Proxy byte counts include TLS/WebSocket/control traffic, not unique payload.

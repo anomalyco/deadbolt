@@ -96,7 +96,7 @@ export function shape(mode: "clean" | "lossy" | "limited" | "blackhole") {
   const args = {
     clean: ["delay", "0ms"],
     lossy: ["delay", "150ms", "loss", "2%"],
-    limited: ["rate", "1mbit"],
+    limited: ["limit", "1000", "rate", "1mbit"],
     blackhole: ["loss", "100%"],
   }[mode]
   for (const band of [2, 3])

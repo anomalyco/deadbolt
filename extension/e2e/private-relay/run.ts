@@ -265,12 +265,34 @@ async function exercise() {
     const resumed = pb.bytes()
     await sync(b.page)
     await until("backlog transfer after offscreen restart", async () => pb.bytes() - resumed >= 96 * 1024)
-    check(!(await has(b.page, "File 1")), "restart interrupts transfer before the tail is visible")
+    // Traffic alone may be handshakes or a partial frame. Cut only once a
+    // validated backlog entry is visible; then identify the exact restart
+    // lower bound with B isolated, including from already-open relay sockets.
+    await until("an incomplete backlog is visible before browser restart", async () => {
+      const rows = await items(b.page)
+      if (rows.some((i) => i.title === "File 1")) throw new Error("schedule precondition: tail arrived before restart")
+      return rows.some((i) => i.title.startsWith("Backlog "))
+    })
+    pb.isolate(true)
+    const cutBytes = pb.bytes(),
+      cutRows = await items(b.page)
+    const prefix = cutRows.filter((i) => i.title.startsWith("Backlog ")).map((i) => i.ref)
+    check(
+      prefix.length > 0 && !cutRows.some((i) => i.title === "File 1"),
+      `isolated restart cut: ${prefix.length} backlog items, no tail`,
+    )
     await b.close()
     await services.restart()
     b = await launch("b", pb.port)
     check((await state(b.page)) === "locked", "browser restart during catch-up starts locked")
     await unlock(b.page)
+    const reopened = await items(b.page),
+      refs = new Set(reopened.map((i) => i.ref))
+    check(
+      prefix.every((ref) => refs.has(ref)) && !reopened.some((i) => i.title === "File 1") && pb.bytes() === cutBytes,
+      `authenticated OPFS reopen retained all ${prefix.length} pre-restart backlog refs without peer traffic`,
+    )
+    pb.isolate(false)
     // Request a real sync, not a synthetic retransmission. Waiting for list
     // state (not an RPC acknowledgment) proves the tail actually arrived.
     try {
@@ -344,29 +366,38 @@ async function exercise() {
   pb.isolate(false)
   shape("clean")
   b = await launch("b", pb.port)
-  await unlock(b.page)
-  const barrier = async () => {
-    const r = await command(b.page, { type: "device-rename", name: "private-relay-fixture" })
-    return !r.ok && /catching up/i.test(r.message)
+  const beforeUnlock = performance.now()
+  try {
+    await unlock(b.page)
+    const barrier = async () => {
+      const r = await command(b.page, { type: "device-rename", name: "private-relay-fixture" })
+      return !r.ok && /catching up/i.test(r.message)
+    }
+    check(await barrier(), "B's production startup membership barrier is engaged")
+    await sync(c.page)
+    await until(
+      "C confirms direct sync with B during B startup",
+      async () =>
+        ((await devices(c.page)).find((d) => d.id === bId)?.lastSeen ?? 0) >= Math.max(returned, priorSeen + 1),
+      8000,
+    )
+    const stillRefreshing = await barrier(),
+      cSawSentinel = await has(c.page, "B private before refresh"),
+      bStillTrustsC = (await devices(b.page)).some((d) => d.id === cId)
+    console.log("B membership after C contact", {
+      stillRefreshing,
+      cSawSentinel,
+      bStillTrustsC,
+    })
+    check(bStillTrustsC && stillRefreshing && !cSawSentinel, "stale C cannot fetch B's offline sentinel during startup")
+  } finally {
+    stallAuthority(false)
+    const restoredMs = performance.now() - beforeUnlock
+    check(
+      restoredMs < 10_000,
+      `schedule precondition: A restored ${Math.round(restoredMs)} ms after B began unlocking (must be <10000 ms, before its 15 s dial budget)`,
+    )
   }
-  check(await barrier(), "B's production startup membership barrier is engaged")
-  await sync(c.page)
-  await until(
-    "C confirms direct sync with B during B startup",
-    async () => ((await devices(c.page)).find((d) => d.id === bId)?.lastSeen ?? 0) >= Math.max(returned, priorSeen + 1),
-    8000,
-  )
-  const stillRefreshing = await barrier(),
-    cSawSentinel = await has(c.page, "B private before refresh"),
-    bStillTrustsC = (await devices(b.page)).some((d) => d.id === cId)
-  console.log("B membership after C contact", {
-    stillRefreshing,
-    cSawSentinel,
-    bStillTrustsC,
-    elapsed: Date.now() / 1000 - returned,
-  })
-  check(bStillTrustsC && stillRefreshing && !cSawSentinel, "stale C cannot fetch B's offline sentinel during startup")
-  stallAuthority(false)
   await sync(b.page)
   await until(
     "authorized survivors exchange data after removal",
