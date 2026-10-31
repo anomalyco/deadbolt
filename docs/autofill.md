@@ -1026,6 +1026,11 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
 - **A login's URLs** are all its fields of type url: `url`, plus `url-2`,
   `url-3`… that imports keep. Any one matching is enough. A list shows only
   the URLs that match.
+- Site lookup reads each live login's **winning URL fields** before materializing the
+  item. Losing, removed or non-URL fields cannot admit a login. Ranking and the
+  independent site check immediately before fill are unchanged. In memory a
+  field register points at the item's history record; the signed entries and
+  every superseded or conflicting change are retained. Nothing is compacted.
 - **Every vault** is searched. A `ref` is `<vault id>:<item id>` (64 and 32
   lowercase hex digits), so it names one login without ambiguity. New logins
   go to the default vault.

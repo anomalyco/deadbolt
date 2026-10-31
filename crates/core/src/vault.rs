@@ -526,6 +526,18 @@ impl Vault {
             .filter(|item| !item.deleted)
     }
 
+    /// Live logins for a page's registrable domain, in item-id order. Check
+    /// the winning URL fields before materializing any of an item's values.
+    pub fn site_logins<'a>(
+        &'a self,
+        site: &'a crate::site::Site,
+    ) -> impl Iterator<Item = Item> + 'a {
+        self.items
+            .iter()
+            .filter(|(_, state)| state.login_on(site))
+            .map(|(id, state)| state.item(*id))
+    }
+
     /// All items that are not deleted, ordered by id.
     pub fn items(&self) -> Vec<Item> {
         self.iter_items().collect()
