@@ -121,6 +121,30 @@ try {
       const shown = await request(page, { type: "device-secret", ref, ...(preset === "strict" ? { passphrase } : {}) })
       check(shown.reply.value === value, `${preset}: secret value survives the trap`)
     }
+    // Fail file growth while log.insert allocates the document's pages, before
+    // append_batch calls commit. The staged item must not leak into the list.
+    await inject(cdp, `chrome-extension://${id}/offscreen.html`, `(() => {
+      const proto = FileSystemSyncAccessHandle.prototype, truncate = proto.truncate;
+      proto.truncate = function(size) {
+        if (size > this.getSize()) {
+          self.growthRefused = true;
+          throw new DOMException('Synthetic quota', 'QuotaExceededError');
+        }
+        return truncate.call(this, size);
+      };
+    })()`)
+    const saved = await command(page, { type: "device-item-save", kind: "document", fields: [{ name: "file", value: "fixture.bin\n" + "A".repeat(4 << 20) }] })
+    check(!saved.ok && saved.code === "failed" && await state(page) === "ready", "a pre-commit allocation failure is a storage error, not a lock")
+    await inject(cdp, `chrome-extension://${id}/offscreen.html`, `if (!self.growthRefused) throw new Error('growth fault not exercised')`)
+    const unchanged = async () => {
+      const rows = (await request(page, { type: "device-items" })).reply.items as ItemSummary[]
+      return rows.length === 1 && rows[0]?.ref === ref && rows[0]?.title === "Crash fixture"
+    }
+    check(await unchanged(), "the old live view remains readable after the failed insert")
+    await request(page, { type: "device-lock" })
+    await request(page, { type: "device-unlock", passphrase })
+    check(await unchanged(), "reopen confirms the failed insert was not saved")
+
     // Lose the ack after redb's second (root switch) flush actually completes.
     // The saved edit is durable but the worker must not serve the prior view.
     await inject(cdp, `chrome-extension://${id}/offscreen.html`, `(() => {

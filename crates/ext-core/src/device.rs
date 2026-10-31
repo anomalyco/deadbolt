@@ -203,7 +203,10 @@ impl Loaded {
         }
         self.store
             .append_batch(blobs.iter().map(|blob| blob.as_slice()))
-            .map_err(Error::UnconfirmedWrite)?;
+            .map_err(|error| match error {
+                deadbolt_store::Error::AppendUncertain(_) => Error::UnconfirmedWrite(error),
+                _ => Error::Store(error),
+            })?;
         // Nothing fallible between the signed commit and notifying its callers.
         self.vault = staged;
         items_changed();
