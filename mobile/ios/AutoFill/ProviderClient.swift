@@ -157,9 +157,9 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         handle: AutofillCallHandle?
     ) async throws -> AutofillReply {
         let current = currentGeneration()
-        // The core can't be interrupted mid-call: a cancelled handle discards
-        // the result, and `endRequest()` revokes the request in the core.
-        if handle?.isCancelled == true {
+        // The core can't be interrupted mid-call: a cancelled task or handle
+        // discards the result, and `endRequest()` revokes the core request.
+        if Task.isCancelled || handle?.isCancelled == true {
             throw AgentCallError.cancelled
         }
         let reply: AutofillReply = try await withCheckedThrowingContinuation { continuation in
@@ -170,7 +170,7 @@ public final class InProcessProviderClient: AutofillAgentClient, @unchecked Send
         // Final check after the FFI returned: never deliver for a request
         // that ended or was replaced meanwhile.
         let stale = currentGeneration() != current
-        if stale || handle?.isCancelled == true {
+        if Task.isCancelled || stale || handle?.isCancelled == true {
             throw AgentCallError.cancelled
         }
         return reply
