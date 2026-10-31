@@ -64,8 +64,9 @@ const sameFields = (a: Field[], b: Field[]) =>
 /** Finds the login form's fields now. */
 function refresh() {
   if (!document.body) return
-  // One walk of the page's shadow roots serves the whole scan: nothing in it runs page script.
-  const roots = openRoots()
+  // One walk of the page's shadow roots serves the whole scan: nothing in it
+  // runs page script. A discovery walk: fills are checked on a full one.
+  const roots = openRoots(document, undefined, true)
   watchShadowRoots(roots)
   const result = scanPage(roots)
   kind = result.kind
