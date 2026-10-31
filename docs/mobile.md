@@ -392,9 +392,10 @@ both platforms; iOS provider enablement and password/OTP/passkey fills; the
 existing macOS Rust and Swift AutoFill tests; 1k/10k provider memory measurements.
 Unrun gates are not passing gates.
 
-PR #194 is a draft. Existing GitHub CI covers workspace Rust and browser checks,
-not Xcode or Gradle: mobile build, native tests and OS-flow evidence are local
-checks. A green CI result must not be described as a complete mobile proof.
+PR #194 is a draft. Alongside Rust and browser checks, GitHub CI builds the iOS
+simulator app and Android debug APK and runs XCTest and Gradle unit tests;
+OS-flow and physical-device verification remain local. A green CI result must
+not be described as a complete mobile proof.
 Physical iOS Secure Enclave unlock, fresh-biometric approval, user-verified
 passkey registration/sign-in and device jetsam validation are deferred until
 Ryan returns with a test device, not waived by simulator tests. Anomaly signing
