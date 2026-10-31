@@ -97,6 +97,8 @@ async function handle(message: ToBackground, sender: chrome.runtime.MessageSende
       return autofill.submitted(sender)
     case "db:menu-away":
       return autofill.menuAway(sender, message.dismissed === true)
+    case "db:menu-move":
+      return autofill.menuMove(sender, message.box)
     case "db:learn-ask":
       return learner.ask(sender)
     case "db:learn-step":

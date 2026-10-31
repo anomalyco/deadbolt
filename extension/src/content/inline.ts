@@ -130,8 +130,10 @@ const PILL_MAX = { width: 260, height: 32 }
 let dismissedFor: Element | null = null
 /** In a frame: the field the background last opened the menu for in the top page, which can't see the frame's events (see db:menu-away). */
 let framedFor: Element | null = null
-/** Where that field was in this frame's viewport then: the frame scrolling it elsewhere puts the menu away (see onFrameScroll). */
-let framedAt: { left: number; top: number } | null = null
+/** Where that field was in this frame's viewport, and how big: the menu follows it when that changes (see onFrameScroll). */
+let framedAt: Rect | null = null
+/** A new box for that field is on its way to the top page (see onFrameScroll). */
+let framedMoving = false
 
 /** In a frame: the menu the background opened in the top page for one of its fields goes (or went), with `tell`, by the user's doing here. */
 function framedGone(tell: boolean, dismissed = false) {
@@ -142,13 +144,28 @@ function framedGone(tell: boolean, dismissed = false) {
 
 /**
  * In a frame: a scroll, or the frame's own layout changing (it was resized,
- * say), that moved the field the menu is for in this frame. The top page's
- * menu can't follow it, so it goes.
+ * a hint came in above the field, the box around it opened), that moved the
+ * field the menu is for in this frame, or changed its size. The top page
+ * can't see that, so the frame says where the field shows now, one move at
+ * a time; the background checks it through every frame above, and the menu
+ * follows it there or goes (see Autofill.menuMove).
  */
 function onFrameScroll() {
-  if (!framedFor || !framedAt) return
-  const r = framedFor.getBoundingClientRect()
-  if (Math.abs(r.left - framedAt.left) > 2 || Math.abs(r.top - framedAt.top) > 2) framedGone(true)
+  if (!framedFor || !framedAt || framedMoving) return
+  const el = framedFor
+  const r = el.getBoundingClientRect()
+  const at = { left: r.left, top: r.top, width: r.width, height: r.height }
+  if ((["left", "top", "width", "height"] as const).every((k) => Math.abs(at[k] - framedAt![k]) <= 2)) return
+  const box = visibleBox(el)
+  if (!box) return framedGone(true)
+  framedMoving = true
+  void send<boolean>({ type: "db:menu-move", box }).then((moved) => {
+    framedMoving = false
+    if (framedFor !== el) return
+    if (moved === true) framedAt = at
+    // The background closed it already.
+    else framedGone(false)
+  })
 }
 
 let framedRaf = 0
@@ -163,8 +180,8 @@ function watchFramed() {
 }
 /**
  * Fields whose typing narrowed the menu to nothing (or that the user typed a
- * password into by hand): the menu doesn't come back on focus until the field
- * is cleared, clicked again, or ↓.
+ * password into by hand, or pressed Enter in): the menu doesn't come back on
+ * focus until the field is cleared, clicked again, or ↓.
  */
 const quiet = new WeakSet<Element>()
 /**
@@ -1004,7 +1021,7 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     // On a provider's own password step (accounts.google.com), the account
     // it shows narrows the menu too; the background checks the host again
     // and never hides the menu for it.
-    const onPage = later && !named ? pageAccount(el) : undefined
+    const onPage = later && !named ? pageAccount(el, box) : undefined
     // A pattern outside what generate.ts reads, or lengths that can't meet: no generated password.
     const rules = generating ? fieldRules(state.targets()) : undefined
     const reply =
@@ -1015,7 +1032,8 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     else if (!isTop) {
       framedFor = el
       const r = el.getBoundingClientRect()
-      framedAt = { left: r.left, top: r.top }
+      framedAt = { left: r.left, top: r.top, width: r.width, height: r.height }
+      framedMoving = false
       watchFramed()
     }
     else if (reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
@@ -1025,17 +1043,20 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
 /**
  * The account a provider's own password step shows, on a provider host whose
  * page-set account is trusted (see isAccountPage): its visible account chip,
- * else the hidden username box beside the field. Google's: a chip with
+ * else the hidden username box beside the field, else the form's own
+ * username box (`box`) the page filled in itself. Google's: a chip with
  * `data-profile-identifier`, and `<input name="identifier" id="hiddenEmail">`
  * in the same `<main>` as the password field (the page has no `<form>`).
+ * Apple's (idmsa.apple.com): the account box stays above the password box,
+ * holding the Apple Account it remembered.
  */
-function pageAccount(field: HTMLInputElement): string | undefined {
+function pageAccount(field: HTMLInputElement, box?: HTMLInputElement): string | undefined {
   if (!isAccountPage(location.href)) return undefined
   const chip = [...document.querySelectorAll("[data-profile-identifier]")].find((c) => c.getClientRects().length > 0)
   const shown = pageAccountOf(chip?.textContent?.slice(0, 501))
   if (shown) return shown
   const hidden = (field.closest("main") ?? document).querySelector<HTMLInputElement>('input[name="identifier"], input#hiddenEmail')
-  return pageAccountOf(hidden?.value)
+  return pageAccountOf(hidden?.value) ?? pageAccountOf(box?.value.slice(0, 501))
 }
 
 /**
@@ -1068,6 +1089,13 @@ const isControl = (el: unknown): el is FormControl => el instanceof HTMLInputEle
 
 function onFocusIn(event: FocusEvent) {
   const el = eventTarget(event)
+  // Focus moved on from the menu's field, by the user or the page's own
+  // script (an identifier-first sign-in focusing the password box it just
+  // opened below): the list for the field it left goes, so it never sits
+  // over the field the user is about to type into. Not for focus going into
+  // the menu itself (↓), or into the frame its field is in.
+  if (!isTop && framedFor && el !== framedFor) framedGone(true)
+  if (isTop && host && mode === "accounts" && !closing && el !== anchor && !event.composedPath().includes(host) && (anchor ? true : isControl(el))) closeMenu()
   if (!isControl(el)) return
   const clicked = recentGesture() && (lastPointer === el || (lastPointer instanceof HTMLLabelElement && lastPointer.control === el))
   void maybeOpen(el, clicked ? "click" : "focus")
@@ -1088,10 +1116,12 @@ function onInput(event: Event) {
     quiet.delete(el)
     byHand.delete(formOf(el))
   }
-  // In a frame, the menu in the top page can't narrow as the user types: it goes.
+  // In a frame, the menu in the top page can't narrow as the user types: it
+  // goes, and stays away while they type (the rescan their typing sets off
+  // would otherwise bring the whole list back) until the field is cleared,
+  // clicked again, or ↓.
   if (!isTop && el === framedFor) {
-    const role = targetFor(el)?.role
-    if (role && !IDENTIFIER_ROLES.includes(role)) quiet.add(el)
+    quiet.add(el)
     return framedGone(true)
   }
   if (!host || mode !== "accounts" || el !== anchor || closing) return
@@ -1156,10 +1186,17 @@ function onKeyDown(event: KeyboardEvent) {
   lastGestureAt = Date.now()
   lastPointer = null
   const target = eventTarget(event)
+  // Enter in a login field goes on with its form (Continue, sign in). The
+  // page's next step can open right below it, so a rescan doesn't bring the
+  // list back on the field while it still has focus.
+  if (event.key === "Enter" && !event.isComposing && target instanceof HTMLInputElement && targetFor(target)) quiet.add(target)
   if (!isTop && event.key === "Escape" && framedFor && target === framedFor) {
     dismissedFor = framedFor
     return framedGone(true, true)
   }
+  // Enter in the field goes on with the form (Continue, sign in): the list
+  // isn't what the user is answering, and the next step may open under it.
+  if (!isTop && event.key === "Enter" && !event.isComposing && framedFor && target === framedFor) return framedGone(true)
   if (!host) {
     // ↓ in a field that has no menu (dismissed, or focused from script) asks for one.
     if (event.key === "ArrowDown" && target instanceof HTMLInputElement && (targetFor(target) || state.formFields().some((f) => f.el === target))) {
@@ -1188,6 +1225,10 @@ function onKeyDown(event: KeyboardEvent) {
     event.stopPropagation()
     dismissedFor = anchor
     closeMenu(false, true)
+  } else if (event.key === "Enter" && !event.isComposing) {
+    // Enter in the field submits its form (Continue, sign in): the list goes
+    // with it, not left over the step that opens next.
+    closeMenu()
   } else if (event.key === "ArrowDown") {
     event.preventDefault()
     port?.postMessage({ type: "db:menu-enter" })
@@ -1452,6 +1493,8 @@ export function initMenu(page: PageState) {
         return true
       case "db:open-at":
         return void respond(openAt(String(message.token), Number(message.rows), message.box, message.mode === "pill" ? "pill" : "accounts", message.captioned === true))
+      case "db:move-at":
+        return void respond(moveAt(String(message.token), message.box))
       case "db:hold":
         // Only the surface the asker owns. Asked about another, it says
         // whether nothing of Deadbolt's shows, which the measuring needs.
@@ -1556,6 +1599,20 @@ function openAt(t: string, rows: number, box: Box, as: "accounts" | "pill", capt
   if (as === "accounts" && !(Number.isFinite(rows) && rows >= 1)) return false
   if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
   openMenu(null, t, as === "pill" ? 0 : rows, as, box, captioned)
+  return true
+}
+
+/**
+ * The frame's field the open list is for moved inside its frame: it now
+ * shows at `box` in this page (see Autofill.menuMove). The list follows it
+ * there, and waits its dwell again before it takes a pick, as for any move.
+ * Top page only.
+ */
+function moveAt(t: string, box: Box): boolean {
+  if (!isTop || !host || t !== token || mode !== "accounts" || closing || !anchorBox) return false
+  if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
+  anchorBox = { box, x: scrollX, y: scrollY, frame: frameAround(box) }
+  placementChanged()
   return true
 }
 

@@ -642,14 +642,15 @@ const cardFrame = (host: string, port: string) => `<h1>Payment</h1>
  * (idmsa.apple.com/appleauth/auth/signin, checked in October 2026): no
  * <form>, a text box for the account (autocomplete=off) with its label
  * floating over it, and a password box collapsed to zero height until
- * Continue, all in the one frame document.
+ * Continue (or Enter in the account box), all in the one frame document. It
+ * slides open below the account box, and the widget focuses it once open.
  * The second Continue tells the page around it, which goes on to the
  * signed-in page.
  */
 const APPLE_WIDGET = `<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title><style>
   body{margin:0;font:15px/1.4 system-ui,sans-serif;background:#fff;color:#1d1d1f}
   .signin{max-width:340px;margin:16px auto}h1{font-size:19px;margin:0 0 14px}
-  .form-cell-wrapper{position:relative;overflow:hidden}.hide-password .password .form-cell-wrapper{height:0}
+  .form-cell-wrapper{position:relative;overflow:hidden}.password .form-cell-wrapper{height:60px;transition:height .3s ease-out}.hide-password .password .form-cell-wrapper{height:0}
   input{display:block;width:100%;box-sizing:border-box;height:52px;padding:18px 12px 0;margin:0 0 8px;font:inherit;border:1px solid #d2d2d7;border-radius:10px}
   .form-textbox-label{position:absolute;left:13px;top:7px;font-size:12px;color:#6e6e73;pointer-events:none}
   button{width:100%;height:40px;border:0;border-radius:10px;background:#0071e3;color:#fff;font:inherit}button:disabled{opacity:.5}
@@ -666,12 +667,14 @@ const APPLE_WIDGET = `<!doctype html><html><head><meta charset="utf-8"><title>Si
   const update = () => (go.disabled = !(step() ? account.value : password.value))
   account.addEventListener("input", update)
   password.addEventListener("input", update)
+  account.addEventListener("keydown", (e) => { if (e.key === "Enter" && step() && account.value) go.click() })
   go.addEventListener("click", () => {
     if (!step()) return parent.postMessage({ type: "signed-in", account: account.value }, "*")
     setTimeout(() => {
       form.classList.remove("hide-password")
       password.tabIndex = 0
       password.closest(".password").removeAttribute("aria-hidden")
+      password.closest(".form-cell-wrapper").addEventListener("transitionend", () => password.focus(), { once: true })
       update()
     }, 200)
   })
@@ -1175,6 +1178,8 @@ interface LaunchOptions {
   signIn?: boolean
   /** The fake host lists three Google logins instead of its own. */
   google?: boolean
+  /** The fake host adds a login with no username. */
+  keyLogin?: boolean
   /** "deny": the fake host turns down Touch ID for a card's number. */
   touchId?: string
   /** http origins the browser treats as secure contexts, which WebAuthn needs. */
@@ -1220,6 +1225,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_ORIGIN: options.universal ? site : "",
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
+      DEADBOLT_FAKE_KEYLOGIN: options.keyLogin ? "1" : "",
       DEADBOLT_FAKE_TOUCHID: options.touchId ?? "",
       ...options.realHost,
     },
@@ -1335,6 +1341,7 @@ async function seedVault(run: Run, options: LaunchOptions) {
     } else {
       await login("Acme", [...urls(sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
       await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
+      if (options.keyLogin) await login("Acme API key", [...urls(sites), { name: "password", value: "acme api key" }])
       if (options.signIn) {
         const google = await login("Google", [...urls([`http://accounts.google.test:${port}`]), { name: "username", value: "kit@gmail.com" }, { name: "password", value: "google password" }])
         await login("Acme", [...urls(sites), { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: google.split(":")[1] }])
@@ -3114,9 +3121,18 @@ async function frameMoves() {
     await Bun.sleep(300)
     const after = await gap()
     check(!!before && !!after && after.dx === before.dx && after.dy === before.dy, `the menu follows the frame the page moved (${JSON.stringify(before)} then ${JSON.stringify(after)})`)
-    // Wider, the frame centres its form: the field moves inside it.
+    // Wider, the frame centres its form: the field moves inside it, which only the frame sees.
+    const field = await inner.locator("#account_name_text_field").boundingBox()
     await page.evaluate(() => (document.getElementById("aid-auth-widget-iFrame")!.style.width = "760px"))
-    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "and goes when the field moves inside its frame")
+    const moved = await until("the field moves inside its frame", async () => {
+      const now = await inner.locator("#account_name_text_field").boundingBox()
+      return now && field && Math.abs(now.x - field.x) > 40 ? now : null
+    }, 3000)
+    const followed = await until("the menu follows the field", async () => {
+      const g = extensionFrame(page, "menu.html") ? await gap() : null
+      return g && before && g.dx === before.dx && g.dy === before.dy ? g : null
+    }, 3000)
+    check(!!moved && !!followed, `and follows the field when it moves inside its frame (${JSON.stringify(field)} to ${JSON.stringify(moved)}, menu ${JSON.stringify(await gap())})`)
   } catch (err) {
     check(false, `frame moves threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "frame moves")
@@ -3507,7 +3523,7 @@ async function signInSessions() {
  * frame, gets no menu.
  */
 async function frameLogins() {
-  const run = await launch()
+  const run = await launch({ keyLogin: true })
   const page = await run.context.newPage()
   const top = `http://appstoreconnect.apple.test:${server.port}`
   const seen = () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)
@@ -3569,22 +3585,59 @@ async function frameLogins() {
     check(JSON.stringify(await wants()) === JSON.stringify([`username@${frameOrigin}`, `password@${frameOrigin}`]), `one fill per step, each for the frame's own origin (${await wants()})`)
     check(!!(await fieldBox()), "the page around the frame keeps its frame")
 
-    // Typed by hand: the username narrows the password step's menu to its login.
+    // Typed by hand, then Enter: the widget slides its password box open
+    // below the account box and focuses it itself (App Store Connect). The
+    // account box's list never stays over it; the password step's list opens
+    // under the password box, narrowed to the typed username's login, and
+    // follows the box when a hint pushes it down inside the frame.
     const typed = await open()
     if (typed) {
-      await typed.click("#account_name_text_field")
-      await until("the menu opens", menuNow, 15_000)
-      await typed.locator("#account_name_text_field").pressSequentially("admin", { delay: 30 })
+      const account = typed.locator("#account_name_text_field")
+      const password = typed.locator("#password_text_field")
+      const shown = typed.locator(".password .form-cell-wrapper")
+      await account.click()
+      const listed = await until("the menu opens", menuNow, 15_000)
+      check(!!listed && (await listed.locator("button.row").count()) === 2 && !(await listed.locator("button.row", { hasText: "Acme API key" }).count()), "a login with no username isn't offered on a form with a username box")
+      await account.pressSequentially("admin", { delay: 30 })
       check(!!(await until("typing in the frame puts the menu away", () => !extensionFrame(page, "menu.html"), 5000)), "typing in the frame's field puts the top page's menu away")
-      await typed.click("#sign-in")
-      await until("the password box opens", async () => ((await typed.locator("#password_text_field").boundingBox())?.height ?? 0) > 20)
-      await Bun.sleep(400)
-      await typed.click("#password_text_field")
+      await Bun.sleep(900)
+      check(!extensionFrame(page, "menu.html"), "and it stays away while the user types")
+      // ↓ brings the list back; Enter goes on with the form instead.
+      await account.press("ArrowDown")
+      check(!!(await until("↓ brings the list back", menuNow, 15_000)), "↓ in the frame's field brings its list back")
+      await account.press("Enter")
+      let covered = ""
+      for (const end = Date.now() + 2000; Date.now() < end; await Bun.sleep(40)) {
+        const m = extensionFrame(page, "menu.html")
+        const [box, input, wrap] = await Promise.all([m ? m.frameElement().then((e) => e.boundingBox()).catch(() => null) : null, password.boundingBox(), shown.boundingBox()])
+        // The part of the password box that shows so far: its wrapper cuts it while it opens.
+        const top = Math.max(input?.y ?? 0, wrap?.y ?? 0)
+        const bottom = Math.min((input?.y ?? 0) + (input?.height ?? 0), (wrap?.y ?? 0) + (wrap?.height ?? 0))
+        const field = input && wrap ? { x: input.x, y: top, width: input.width, height: bottom - top } : null
+        if (box && field && field.height > 8 && box.y < field.y + field.height && box.y + box.height > field.y && box.x < field.x + field.width && box.x + box.width > field.x) covered ||= JSON.stringify({ box, field })
+      }
+      check(!covered, `no list covers the password box as it opens below the account box${covered ? ` (${covered})` : ""}`)
+      check(!!(await until("the widget focuses the password box", () => password.evaluate((el) => el === document.activeElement))), "the widget focuses its password box once open")
+      const under = async (m: Frame) => {
+        const [box, field] = await Promise.all([m.frameElement().then((e) => e.boundingBox()).catch(() => null), password.boundingBox()])
+        return !!box && !!field && Math.abs(box.x - field.x) < 8 && box.y >= field.y + field.height && box.y < field.y + field.height + 24
+      }
+      // Opened by the widget's own focus right after the Enter, or asked for with ↓.
+      if (!(await until("the password step's list opens", menuNow, 2000))) await password.press("ArrowDown")
       const narrowed = await until("the password menu opens", menuNow, 15_000)
       check(!!narrowed && (await narrowed.locator("button.row").count()) === 1 && ((await narrowed.locator(".row .sub").textContent()) ?? "") === "admin", "a username typed by hand narrows the frame's password step to its login")
-      if (narrowed) {
-        await settled(narrowed)
-        await narrowed.locator("button.row").click()
+      check(!!narrowed && (await under(narrowed)), "its list opens under the password box, not over it")
+      if (narrowed) await shotAround(page, "frame-login-password-step", narrowed, "#aid-auth-widget-iFrame")
+      // A hint comes in above the boxes, inside the frame: only the frame sees the password box move.
+      await typed.locator("h1").evaluate((el) => void ((el as HTMLElement).style.marginBottom = "54px"))
+      const followed = await until("the list follows the password box", async () => {
+        const m = await menuNow()
+        return m && (await under(m)) ? m : null
+      }, 3000)
+      check(!!followed, "the list follows the password box when it moves inside the frame")
+      if (followed) {
+        await settled(followed)
+        await followed.locator("button.row").click()
         check(!!(await until("admin's password fills", async () => (await typed.inputValue("#password_text_field")) === "hunter2")), "and picking it fills the frame's password")
       }
     }

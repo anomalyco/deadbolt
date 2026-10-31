@@ -157,7 +157,7 @@ export function cleanApproved(reply: unknown): Approved | null {
  * coordinates. A frame that can't answer, such as an
  * ancestor without the content script, means no.
  */
-export async function boxesInTop(target: FrameTarget, first: Box[], how: { track?: boolean; unsandboxed?: boolean } = {}): Promise<Box[] | null> {
+export async function boxesInTop(target: FrameTarget, first: Box[], how: { track?: boolean; unsandboxed?: boolean; place?: boolean } = {}): Promise<Box[] | null> {
   const chain = await frameChain(target)
   if (!chain) return null
   let boxes: Box[] | undefined = first
@@ -166,7 +166,7 @@ export async function boxesInTop(target: FrameTarget, first: Box[], how: { track
     if (!isBoxes(boxes)) return null
     const nonce = newToken()
     // Ask the parent first, so it's listening when the child speaks up.
-    const answer: Promise<FrameBoxes | null> = sendToFrame<FrameBoxes>(parent, { type: "db:frame-child", nonce, boxes, ...(how.track ? { track: true } : {}), ...(how.unsandboxed ? { unsandboxed: true } : {}) })
+    const answer: Promise<FrameBoxes | null> = sendToFrame<FrameBoxes>(parent, { type: "db:frame-child", nonce, boxes, ...(how.track ? { track: true } : {}), ...(how.unsandboxed ? { unsandboxed: true } : {}), ...(how.place ? { place: true } : {}) })
     if (!(await sendToFrame(child, { type: "db:frame-announce", nonce }))) return null
     boxes = (await answer)?.boxes
     child = parent
@@ -225,8 +225,13 @@ export async function sameSiteTop(target: FrameTarget): Promise<FrameTarget | nu
 
 /** How a login frame's boxes go up to the top page: no sandboxed frame on the way, and each frame element unobscured. */
 export const LOGIN_FRAME = { track: true, unsandboxed: true } as const
-/** The same, for where a field shows (the menu's place, a pill's): no visibility reading. */
-export const LOGIN_FRAME_PLACE = { unsandboxed: true } as const
+/**
+ * The same, for where a field shows (the menu's place, a pill's): no
+ * visibility reading, and Deadbolt's own surface in the top page isn't taken
+ * for something over the field (it may be the list the field is moving
+ * under, or the one for the field before). A pick checks again with LOGIN_FRAME.
+ */
+export const LOGIN_FRAME_PLACE = { unsandboxed: true, place: true } as const
 
 export function newToken(): string {
   return Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, "0")).join("")

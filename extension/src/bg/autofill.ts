@@ -134,13 +134,23 @@ export function wantFor(roles: FieldRole[], account: Pick<Account, "hasPassword"
  * one-time password; on a phone field, only logins whose username is a
  * phone number; on a password field, logins with a password or a
  * "Sign in with …" (which shows as that, never as a fill).
+ *
+ * A login with no username (a key or a PIN saved as a login, say) can't
+ * sign in to a form that asks for one: on a form with a username box
+ * (`roles`), it's left out while another login has a username, and
+ * anywhere else it comes last.
  */
-export function menuAccounts(accounts: Account[], focused: FieldRole): Account[] {
+export function menuAccounts(accounts: Account[], focused: FieldRole, roles: FieldRole[] = []): Account[] {
   if (focused === "otp") return accounts.filter((a) => a.hasTotp)
   // A phone box takes only a phone number: a login saved under an email or a name can't go in it.
   if (focused === "phone") return accounts.filter((a) => phoneLike(a.username))
-  if (focused === "password") return accounts.filter((a) => a.hasPassword || a.signIn)
-  return accounts
+  const offered = focused === "password" ? accounts.filter((a) => a.hasPassword || a.signIn) : accounts
+  // A "Sign in with …" has no username of its own, and isn't one of these.
+  const nameless = (a: Account) => !a.signIn && !a.username?.trim()
+  const named = offered.filter((a) => !nameless(a))
+  if (named.length === offered.length) return offered
+  if (named.length && roles.some((r) => IDENTIFIER_ROLES.includes(r))) return named
+  return [...named, ...offered.filter(nameless)]
 }
 
 /** How many rows the menu shows for these logins: a login with both a password and a sign-in-with has two. */
@@ -337,6 +347,15 @@ export class Autofill {
       owner = top
       at = shown[0]
     }
+    // A sign-in session fills this step itself once the user goes on (see
+    // page): a field it waits for doesn't open the list on focus alone (a
+    // widget focusing the password box it just opened, say). In a frame, that
+    // list would also keep the step's fields from being measured. A click or
+    // ↓ still opens it.
+    if (!explicit && (focused === "password" || focused === "otp")) {
+      const s = await this.session(target.tabId)
+      if (s && !s.filled.includes(focused) && siteOf(new URL(target.origin).hostname) === s.site) return { rows: 0 }
+    }
     await this.host.connect()
     const generate = generating ? fieldRules(rules) : undefined
     const site = siteOf(new URL(target.origin).hostname) ?? target.origin
@@ -350,7 +369,7 @@ export class Autofill {
       this.lockedShown.add(site)
     } else if (state === "ready") {
       const reply = await this.list(target.origin).catch(() => null)
-      let shown = reply ? menuAccounts(reply.accounts, focused as FieldRole) : []
+      let shown = reply ? menuAccounts(reply.accounts, focused as FieldRole, clean) : []
       const later = focused === "password" || focused === "otp"
       const named = later ? (typeof identifier === "string" && identifier.length <= 500 && identifier.trim()) || this.submittedName?.(target.tabId, site) || "" : ""
       // On the provider's own pages during a sign-in with it, its linked
@@ -396,7 +415,7 @@ export class Autofill {
     try {
       const reply = await this.list(t.origin)
       const passkeys = this.passkeys?.menuPasskeys(t, t.focused)
-      const accounts = menuAccounts(reply.accounts, t.focused).filter((a) => !t.only || t.only.includes(a.ref))
+      const accounts = menuAccounts(reply.accounts, t.focused, t.roles).filter((a) => !t.only || t.only.includes(a.ref))
       // One login on a site that asks for the username first: "Continue as …".
       const flow = IDENTIFIER_ROLES.includes(t.focused) && accounts.length === 1 ? await flowFor(siteOf(new URL(t.origin).hostname) ?? "") : undefined
       const icons = (await iconSettings()).menu ? await menuIcons(accounts) : undefined
@@ -543,6 +562,33 @@ export class Autofill {
     }
     // Esc said no to an open menu, as in the top page; with none open (it was picked), it says nothing of the sign-in.
     if (dismissed && open) await this.cancel(target.tabId)
+  }
+
+  /**
+   * A frame's field the menu is open for in the top page moved inside its
+   * frame, which the top page can't see: it now shows at `box` in the
+   * frame's viewport. The box goes up through every frame with the checks
+   * it had when the menu opened (see query), and the menu follows it there
+   * (it waits its dwell again, as for any move); when it doesn't show, the
+   * menu goes. True if a menu followed.
+   */
+  async menuMove(sender: chrome.runtime.MessageSender, box: unknown): Promise<boolean> {
+    const target = await targetFor(sender)
+    if (!target || target.frameId === 0) return false
+    const own = cleanBox(box)
+    let moved = false
+    for (const [token, t] of this.tokens) {
+      if (!t.owner || t.picked || t.notice || t.tabId !== target.tabId || t.frameId !== target.frameId || t.documentId !== target.documentId) continue
+      const top = own ? await sameSiteTop(target) : null
+      const shown = top && own && top.documentId === t.owner.documentId ? await boxesInTop(target, [own], LOGIN_FRAME_PLACE) : null
+      if (shown && this.tokens.get(token) === t && (await sendToFrame<boolean>(t.owner, { type: "db:move-at", token, box: shown[0] })) === true) {
+        moved = true
+        continue
+      }
+      this.tokens.delete(token)
+      await sendToFrame(t.owner, { type: "db:close-menu", token })
+    }
+    return moved
   }
 
   /** The page closed its menu; with `dismissed`, the user said no (esc). */

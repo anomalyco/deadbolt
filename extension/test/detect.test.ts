@@ -395,6 +395,7 @@ describe("sign in with a provider", () => {
     expect(isProviderPage(provider("github"), "https://github.com/login")).toBe(true)
     // A page-set account narrows the menu only on Google's sign-in host.
     expect(isAccountPage("https://accounts.google.com/v3/signin/challenge/pwd")).toBe(true)
+    expect(isAccountPage("https://idmsa.apple.com/appleauth/auth/signin")).toBe(true)
     expect(isAccountPage("http://accounts.google.com/")).toBe(false)
     expect(isAccountPage("https://github.com/login")).toBe(false)
     expect(isAccountPage("https://accounts.google.com.evil.example/")).toBe(false)
