@@ -153,7 +153,11 @@ fn target() -> Result<String> {
         "x86_64" => "x64",
         arch => bail!("no Deadbolt releases for {arch}"),
     };
-    let libc = if cfg!(target_env = "musl") { "-musl" } else { "" };
+    let libc = if cfg!(target_env = "musl") {
+        "-musl"
+    } else {
+        ""
+    };
     Ok(format!("{os}-{arch}{libc}"))
 }
 
