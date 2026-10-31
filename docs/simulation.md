@@ -13,6 +13,25 @@ DEADBOLT_SIM_SEEDS=1000 cargo test -p deadbolt-cli --bin deadbolt agent::sim::ex
 In Kit's environment, put the command (including `env NAME=value`) after
 `hivemind run --kind cargo --`.
 
+The exact-cap file regression transfers a 10 MiB file, rejects a one-byte
+aggregate overflow, and checks concurrent attachments and selective reads after
+restart. It is explicitly **ignored in debug builds** to keep the default run
+fast; the smaller file regressions still run by default. Run the full-size case
+explicitly in debug with:
+
+```sh
+cargo test -p deadbolt-cli --bin deadbolt agent::sim::full_size_files_sync_and_concurrent_files_survive_reload -- --exact --ignored
+```
+
+In release builds it is **not ignored**: the existing nightly
+`cargo test --workspace --release --locked` runs it automatically, alongside
+the nightly seed exploration. To verify that release behavior without running
+the whole workspace:
+
+```sh
+cargo test -p deadbolt-cli --bin deadbolt --release --locked agent::sim::full_size_files_sync_and_concurrent_files_survive_reload -- --exact
+```
+
 ## A seed controls actions and delivery
 
 Two fixed seeds run by default. Each generates 48 actions after pairing three
@@ -51,7 +70,8 @@ and compares its wire digest.
   whose items or membership grew, which is what `watch` streams, and none for
   a vault's items or devices that didn't.
 - **Convergence:** after healing and unlocking, current members must agree on
-  heads, items and deleted items (with their deletion times) within twelve
+  heads, membership, vault names, items, deleted items (with their deletion
+  times), and complete histories of live and deleted items within twelve
   rounds. Stop early once they agree and their
   membership barriers are open. Removed devices need not converge.
 
