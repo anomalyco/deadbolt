@@ -683,18 +683,15 @@ impl Agent {
     }
 }
 
-/// Bundles always launch their own helper. Development runs allow an override.
+/// Bundles always launch their own helper; otherwise the agent is this
+/// `deadbolt` itself. Development runs allow an override.
 /// A passphrase goes only to an agent running that program, as the
 /// `deadbolt-enclave` beside it sees the agent's code signature, and only once
 /// that helper is the one this build pinned (macOS).
 pub fn launch() -> Launch {
     let exe = std::env::current_exe().ok().map(crate::binary::resolved);
-    let program = crate::binary::discover(
-        exe.as_deref(),
-        std::env::var_os("DEADBOLT_BIN").as_deref(),
-        &std::env::var_os("PATH").unwrap_or_default(),
-        std::env::var_os("HOME").map(PathBuf::from).as_deref(),
-    );
+    let program =
+        crate::binary::discover(exe.as_deref(), std::env::var_os("DEADBOLT_BIN").as_deref());
     let expected = std::fs::canonicalize(&program).unwrap_or_else(|_| program.clone());
     deadbolt_client::set_agent_check(Box::new(move |socket| {
         let helper = expected.with_file_name("deadbolt-enclave");

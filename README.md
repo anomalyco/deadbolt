@@ -25,7 +25,7 @@ brew install anomalyco/tap/deadbolt          # the CLI
 brew install --cask anomalyco/tap/deadbolt   # Deadbolt.app for macOS, with its CLI
 ```
 
-Run `deadbolt` in a terminal for the CLI, or `deadbolt app` (or Deadbolt from Applications, Spotlight or your launcher) for the app. Bare `deadbolt` started outside a terminal opens the app too; set `DEADBOLT_NO_UI=1` in scripts that must never get a window. On Linux, `deadbolt desktop install` adds Deadbolt to the app launcher; the app's program, `deadbolt-ui`, goes beside `deadbolt` or in `<prefix>/lib/deadbolt/` (Linux releases ship only the CLI).
+Run `deadbolt` in a terminal for the CLI, or `deadbolt app` (or Deadbolt from Applications, Spotlight or your launcher) for the app. Bare `deadbolt` started outside a terminal opens the app too; set `DEADBOLT_NO_UI=1` in scripts that must never get a window. The app is built into `deadbolt`, and the same file still runs on a server with no display. On Linux the app's first opening adds Deadbolt to the app launcher (`deadbolt desktop install` does it again, `deadbolt desktop uninstall` takes it out). On Alpine and other musl systems the install script picks the static build, which has no app.
 
 ### First run
 

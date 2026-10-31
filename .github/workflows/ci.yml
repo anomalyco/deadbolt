@@ -30,10 +30,12 @@ jobs:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev libwayland-dev
+        run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
       # Same steps as `bun run check`; cargo-deny stays in its dedicated job below.
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+      # The static musl release build: deadbolt without the app.
+      - run: cargo +stable clippy -p deadbolt-cli --no-default-features --all-targets --locked -- -D warnings
       - run: cargo +stable test --workspace --locked
       - if: runner.os == 'Linux'
         run: cargo +stable check -p deadbolt-net --features private-relay-fixture --locked
@@ -171,6 +173,7 @@ jobs:
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.4.2
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
       - run: cargo +stable build -p deadbolt-cli --locked
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
@@ -207,5 +210,5 @@ jobs:
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev libwayland-dev
+      - run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev
       - run: cargo test --workspace --release --locked
