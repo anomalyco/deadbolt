@@ -117,9 +117,33 @@ only with the net crate's `sim` feature, enabled by the CLI's dev-dependency.
 
 `Loaded` owns transport-independent unlocked state. A `Session` adds its iroh
 node. Vault changes build a private validated staging view, append new entries in
-one durable transaction, then publish the view. A failed append leaves live heads
-unchanged. Staging clones the validated vault, avoiding signature verification of
-historical entries. Sync batches publish independently per vault.
+one durable transaction, then publish the view. Validation and pre-commit errors
+leave live heads unchanged. A commit error is different: redb may already have
+persisted the new root, including a removal, even though its final sync returned
+an error. The store reports `AppendUncertain`; native `Loaded` permanently
+invalidates all live vaults until replay. The agent refuses reads, writes, sync
+and pairing, clears the membership gate and closes its sync connections, cancels
+background sync/health work and marks readiness closed. Startup deadlines and
+retries cannot reopen it. The app's Unlock action (or `deadbolt unlock`) closes
+the failed node/store under the lifecycle transition, then uses normal fresh
+passphrase or biometric authentication and disk replay. Quarantine is never
+treated as already unlocked: a bad passphrase leaves the device locked. Explicit
+`deadbolt lock` still closes the failed handle. No uncertain mutation is retried.
+A warning records only the typed failure class, I/O kind and numeric OS error,
+never backend messages, paths or vault values.
+Staging clones the validated vault, avoiding signature verification of historical
+entries. Sync batches publish independently per vault.
+
+The native `agent::session::tests::ambiguous_append_` regressions use synthetic
+encrypted stores on a real file backend. They inject a lost acknowledgement
+*after* the second/root-switch fsync succeeds, then reopen and verify that the
+errored append persisted. They cover item changes, removals and both sides of
+pairing. This is not the simulator's pre-write fault or a claim to emulate power
+loss or every filesystem error. The agent regression also checks that an existing
+local-only sync connection is closed and readiness cannot be republished.
+The quarantine recovery regressions cover bad passphrases, overlapping explicit
+unlocks, fresh biometric authentication via the existing test hook, and explicit
+lock. They verify the committed edit is replayed once, not retried.
 
 The vault list comes from the encrypted entry log. Legacy `cli/vaults` metadata is
 ignored, so a crash after storing genesis cannot hide the new vault.

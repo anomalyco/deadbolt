@@ -1143,6 +1143,7 @@ dependencies = [
  "p521",
  "pkcs8",
  "proptest",
+ "redb",
  "reqwest",
  "ring",
  "rpassword",

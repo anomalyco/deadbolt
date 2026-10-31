@@ -89,6 +89,7 @@ impl SyncHandler for Handler {
 }
 
 pub(super) fn hello(s: &Loaded, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<u8>> {
+    s.ensure_usable()?;
     Ok(application::hello(s, peer, addr)?)
 }
 
@@ -98,6 +99,7 @@ pub(super) fn missing_for(
     bytes: &[u8],
     ready: bool,
 ) -> Result<Vec<Blob>> {
+    s.ensure_usable()?;
     application::missing_for(s, peer, bytes, ready)
 }
 
@@ -107,6 +109,7 @@ pub(super) fn receive(
     entries: Vec<Blob>,
     ready: bool,
 ) -> Result<usize> {
+    s.ensure_usable()?;
     application::receive(s, peer, entries, ready)
 }
 
@@ -664,6 +667,7 @@ mod tests {
             unavailable: Default::default(),
             changes: Default::default(),
             health,
+            append_uncertain: false,
         };
         let (_, entry) = source
             .create_item(
