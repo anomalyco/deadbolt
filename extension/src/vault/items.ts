@@ -181,8 +181,8 @@ export function itemDetailView(app: App, ref: string): View {
   const shown = new Map<string, string>()
   let hideTimer: ReturnType<typeof setTimeout> | undefined
   let tick: ReturnType<typeof setInterval> | undefined
-  /** The field and action waiting on Strict's passphrase. */
-  let asking: { field: string; action: "show" | "copy" | "download" } | null = null
+  /** The field and action waiting on Strict's passphrase, and its form: kept across repaints with what's typed in it. */
+  let asking: { field: string; action: "show" | "copy" | "download"; form: HTMLFormElement } | null = null
   let removeBtn: HTMLButtonElement | null = null
   let removeRow: HTMLElement | null = null
   const say = (m: string) => app.announce(m)
@@ -197,8 +197,12 @@ export function itemDetailView(app: App, ref: string): View {
     const s = shown.has(field) && action === "copy" ? { value: shown.get(field) } : await secretOf(app, ref, field, passphrase)
     if (s.value === undefined) {
       if (s.reauth && !passphrase) {
-        asking = { field, action }
+        if (asking?.field !== field || asking.action !== action) {
+          const verb = action === "download" ? "Download" : action === "show" ? "Show" : "Copy"
+          asking = { field, action, form: reauthForm(verb, (p) => act(field, action, p)) }
+        }
         paint()
+        asking.form.querySelector("input")?.focus()
         return null
       }
       if (!passphrase) say(s.message ?? "Couldn't get that.")
@@ -249,11 +253,7 @@ export function itemDetailView(app: App, ref: string): View {
       if (f.type === "url" && /^https?:\/\//.test(value)) actions.push(iconButton(glyph("open"), "Open", () => void chrome.tabs.create({ url: value })))
       out.push(wrap(h("span", {}, value), ...actions))
     }
-    if (asking?.field === f.name) {
-      const verb = asking.action === "download" ? "Download" : asking.action === "show" ? "Show" : "Copy"
-      const action = asking.action
-      out.push(reauthForm(verb, (p) => act(f.name, action, p)))
-    }
+    if (asking?.field === f.name) out.push(asking.form)
     return out
   }
 
@@ -296,12 +296,13 @@ export function itemDetailView(app: App, ref: string): View {
     removeBtn.dataset.what = d.title
     removeBtn.setAttribute("aria-label", `Delete ${d.title}`)
     removeRow ??= h("div", { class: "buttons end" }, removeBtn)
-    const content: Node[] = [
-      toolbar("", () => app.go({ name: "list" }, -1), ...actions),
-      h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")), tagChips(app, d.tags))),
-      lines.length ? h("div", { class: "box" }, ...lines) : h("p", { class: "muted" }, "Nothing saved in it yet."),
-    ]
+    // Built inside keepFocus: moving a kept passphrase form into the new box blurs it.
     keepFocus(el, () => {
+      const content: Node[] = [
+        toolbar("", () => app.go({ name: "list" }, -1), ...actions),
+        h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")), tagChips(app, d.tags))),
+        lines.length ? h("div", { class: "box" }, ...lines) : h("p", { class: "muted" }, "Nothing saved in it yet."),
+      ]
       if (removeRow!.parentElement === el) {
         while (el.firstChild && el.firstChild !== removeRow) el.firstChild.remove()
         removeRow!.before(...content)
