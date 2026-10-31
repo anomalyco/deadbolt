@@ -99,8 +99,8 @@ fn grants(s: &Loaded) -> Result<Vec<Grant>> {
 
 /// One reference, found: the vault's id beside what the caller gets.
 pub struct Found {
-    vault_id: String,
-    ssh_secret: bool,
+    pub(super) vault_id: String,
+    pub(super) ssh_secret: bool,
     pub secret: ResolvedSecret,
 }
 
@@ -374,7 +374,7 @@ fn not_granted(missing: &[&Found], purpose: Purpose) -> anyhow::Error {
 
 impl Agent {
     /// Takes one of an AI caller's `resolve`s against its rate limits.
-    fn ai_rate(&self, caller: &CallerInfo) -> Result<()> {
+    pub(super) fn ai_rate(&self, caller: &CallerInfo) -> Result<()> {
         let now = std::time::Instant::now();
         let mut rates = self.resolve_rates.lock().unwrap_or_else(|e| e.into_inner());
         if rates.len() >= MAX_RATES {
@@ -963,6 +963,182 @@ mod tests {
         let key = f.key;
         *f.agent.biometric_hook.lock().unwrap() = Some(Arc::new(move |_| Ok(Zeroizing::new(key))));
         assert!(f.agent.ai_gate(&ai, &get, &conv).await.is_ok());
+    }
+
+    /// The application's security boundary, with real LOCAL_PEERTOKEN and the pinned
+    /// signature helper (no injected CallerInfo). The remote peer and its user
+    /// decision are synthetic fixtures; this is NOT a biometric/UI test.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn experimental_read_from_a_real_mac_socket_requires_one_signed_answer() {
+        use super::super::{
+            macos_autofill::SocketKind,
+            session::{Addr, Session},
+            sync::Handler,
+        };
+        use crate::protocol::{Claim, PROTOCOL_VERSION, Request};
+        use deadbolt_core::DeviceSecret;
+        use deadbolt_net::{Node, NodeConfig, PeerId, approval::ApprovalInbox};
+        let dir = tempfile::tempdir().unwrap();
+        let mut s = loaded(dir.path());
+        let vault = s.resolve(None).unwrap();
+        let item = new(
+            &mut s,
+            "login",
+            "test item",
+            &[("password", "synthetic-one"), ("username", "synthetic-two")],
+        );
+        let phone_key = DeviceSecret::generate();
+        let phone_id = phone_key.device_id();
+        s.update(vault, |v, key| {
+            Ok(v.add(
+                key,
+                phone_id,
+                phone_key.join_consent(&vault, &key.device_id()),
+            )?)
+        })
+        .unwrap();
+        let a = Agent::new(
+            super::super::tests::test_paths(dir.path()),
+            true,
+            deadbolt_store::KdfParams::DEFAULT,
+        );
+        let mac_key = *s.id.as_bytes();
+        let mac = Node::spawn(
+            NodeConfig::local_only(*s.secret.to_bytes()),
+            Arc::new(move |p: &PeerId| p == phone_id.as_bytes()),
+            Handler(a.clone()),
+        )
+        .await
+        .unwrap();
+        let inbox = ApprovalInbox::new(move |v, p| v == vault.to_string() && *p == mac_key);
+        let mut config = NodeConfig::local_only(*phone_key.to_bytes());
+        config.approval_inbox = Some(inbox.clone());
+        let phone = Node::spawn(
+            config,
+            Arc::new(move |p: &PeerId| *p == mac_key),
+            Handler(a.clone()),
+        )
+        .await
+        .unwrap();
+        s.peer_mut(&phone_id).addr = Some(Addr::from_peer(phone.addr()));
+        *a.session.lock().unwrap() = Some(Session::new(s, mac.clone()));
+        a.ready.send_replace(true);
+        let (conv, client, _keep) = super::super::tests::conversation();
+        let call = |command| {
+            a.clone().answer(
+                SocketKind::Control,
+                deadbolt_client::peer::Peer::of(&client),
+                Request {
+                    v: PROTOCOL_VERSION,
+                    claimed: Some(Claim {
+                        opencode_session: Some("test-claim-never-shown-as-verified".into()),
+                        caller: None,
+                    }),
+                    command,
+                },
+                &conv,
+            )
+        };
+        let refs = vec!["deadbolt://test item/password".to_string()];
+        let read = || Command::ExperimentalMobileRead { refs: refs.clone() };
+        assert_eq!(
+            code(
+                &call(Command::Resolve {
+                    refs: refs.clone(),
+                    purpose: Purpose::Read
+                })
+                .await
+                .0
+                .unwrap_err()
+            ),
+            Some(ErrorCode::Forbidden)
+        );
+        let (denied, _) = call(read()).await;
+        assert!(
+            denied
+                .unwrap_err()
+                .to_string()
+                .contains("no experimental read approver")
+        );
+        let designate = Command::ExperimentalApproverSet {
+            vault: None,
+            device: Some(phone_id.to_string()),
+            passphrase: Some(Zeroizing::new("test".into())),
+        };
+        assert_eq!(
+            code(&call(designate).await.0.unwrap_err()),
+            Some(ErrorCode::Forbidden)
+        );
+        // Arrange the synthetic admin's designation with proof of this temporary
+        // store's passphrase; don't impersonate a human caller on the socket.
+        super::super::tests::designate_fixture_approver(
+            &a,
+            vault,
+            phone_id,
+            Zeroizing::new("test".into()),
+        )
+        .await
+        .unwrap();
+        for grant in [true, false] {
+            let action = async {
+                let p = loop {
+                    if let Some(p) = inbox.pending() {
+                        break p;
+                    }
+                    tokio::task::yield_now().await;
+                };
+                assert_eq!(p.scope.item, item);
+                assert_eq!(p.scope.field, "password");
+                assert_eq!(p.origin, mac_key);
+                assert!(
+                    p.scope
+                        .caller
+                        .contains(&format!("pid {}:", std::process::id()))
+                        && p.scope.caller.contains("cdhash ")
+                );
+                assert!(!p.scope.caller.contains("test-claim-never"));
+                inbox.respond(&p.id, grant, &phone_key.to_bytes()).unwrap();
+                assert!(inbox.respond(&p.id, true, &phone_key.to_bytes()).is_err());
+            };
+            let ((result, entry), ()) = tokio::time::timeout(Duration::from_secs(10), async {
+                tokio::join!(call(read()), action)
+            })
+            .await
+            .unwrap();
+            if grant {
+                let Reply::Secrets { secrets } = result.unwrap() else {
+                    panic!("wrong reply")
+                };
+                assert_eq!(secrets.len(), 1);
+                assert_eq!(secrets[0].value.expose(), "synthetic-one");
+                assert!(entry.unwrap().command.contains(&phone_id.to_string()));
+            } else {
+                assert_eq!(code(&result.unwrap_err()), Some(ErrorCode::Forbidden));
+            }
+        }
+        // Revocation wins while the phone is displaying the challenge, without
+        // waiting for a signature or keeping the session designation alive.
+        let revoke = async {
+            while inbox.pending().is_none() {
+                tokio::task::yield_now().await;
+            }
+            a.with(|s| {
+                s.update(vault, |v, k| Ok(v.remove(k, phone_id)?))?;
+                a.refresh(s);
+                assert!(!s.approvers.contains_key(&vault));
+                Ok(())
+            })
+            .unwrap();
+        };
+        let ((result, _), ()) = tokio::time::timeout(Duration::from_secs(10), async {
+            tokio::join!(call(read()), revoke)
+        })
+        .await
+        .unwrap();
+        assert_eq!(code(&result.unwrap_err()), Some(ErrorCode::Forbidden));
+        a.lock().await;
+        phone.shutdown().await;
     }
 
     #[test]

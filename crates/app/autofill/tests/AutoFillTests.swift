@@ -85,6 +85,7 @@ private final class RecordingCompleter: ExtensionContextCompleting {
 private actor MockIdentityStore: IdentityStoreProviding {
     var enabled: Bool
     var replacedBatches: [[PasswordIdentity]] = []
+    var replacedSnapshots: [AutofillIdentitiesReply] = []
     var removeAllCalls = 0
 
     init(enabled: Bool = true) {
@@ -99,8 +100,9 @@ private actor MockIdentityStore: IdentityStoreProviding {
         enabled
     }
 
-    func replacePasswordIdentities(_ identities: [PasswordIdentity]) async throws {
-        replacedBatches.append(identities)
+    func replaceIdentities(_ snapshot: AutofillIdentitiesReply) async throws {
+        replacedBatches.append(snapshot.passwords)
+        replacedSnapshots.append(snapshot)
     }
 
     func removeAllIdentities() async throws {
@@ -132,7 +134,7 @@ private actor CountingMockClient: AutofillAgentClient {
     func send(
         _ command: AutofillCommand,
         timeout: TimeInterval,
-        handle: SocketCallHandle?
+        handle: AutofillCallHandle?
     ) async throws -> AutofillReply {
         calls.append(command)
         switch command {
@@ -292,7 +294,7 @@ private func testSocketCancellation() throws {
         }
     }
 
-    let handle = SocketCallHandle()
+    let handle = AutofillCallHandle()
     DispatchQueue.global().async {
         _ = accepted.wait(timeout: .now() + 2.0)
         usleep(40_000)
@@ -375,7 +377,7 @@ private func renderSnapshots(outputDir: URL?) async throws {
         func send(
             _ command: AutofillCommand,
             timeout: TimeInterval,
-            handle: SocketCallHandle?
+            handle: AutofillCallHandle?
         ) async throws -> AutofillReply {
             switch mode {
             case .notInitialized:

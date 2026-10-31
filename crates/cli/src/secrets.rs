@@ -69,6 +69,9 @@ pub struct InjectArgs {
 
 #[derive(Args)]
 pub struct ReadArgs {
+    /// EXPERIMENTAL: require fresh approval on the designated member for this single AI read.
+    #[arg(long)]
+    experimental_mobile: bool,
     /// deadbolt://[vault/]item/field
     reference: String,
     /// Don't print a newline after the value.
@@ -174,6 +177,7 @@ async fn resolve(
     paths: &Paths,
     refs: Vec<String>,
     purpose: Purpose,
+    experimental_mobile: bool,
     from_stdin: bool,
 ) -> Result<HashMap<String, ResolvedSecret>> {
     for reference in &refs {
@@ -183,9 +187,13 @@ async fn resolve(
         return Ok(HashMap::new());
     }
     client::ensure_running(paths).await?;
-    let command = Command::Resolve {
-        refs: refs.clone(),
-        purpose,
+    let command = if experimental_mobile {
+        Command::ExperimentalMobileRead { refs: refs.clone() }
+    } else {
+        Command::Resolve {
+            refs: refs.clone(),
+            purpose,
+        }
     };
     let Reply::Secrets { secrets } = request(paths, command, from_stdin).await? else {
         bail!("unexpected reply");
@@ -352,7 +360,7 @@ pub async fn run(paths: &Paths, args: RunArgs, from_stdin: bool) -> Result<ExitC
             refs.push(r.clone());
         }
     }
-    let values = resolve(paths, refs, Purpose::Run, from_stdin).await?;
+    let values = resolve(paths, refs, Purpose::Run, false, from_stdin).await?;
     let (program, rest) = args
         .command
         .split_first()
@@ -621,7 +629,7 @@ pub async fn inject(paths: &Paths, args: InjectArgs, from_stdin: bool) -> Result
     } else {
         Purpose::Inject
     };
-    let values = resolve(paths, refs, purpose, from_stdin).await?;
+    let values = resolve(paths, refs, purpose, false, from_stdin).await?;
     // A file field is written out whole and decoded, so it must be all of
     // the template (whitespace around it aside).
     if let Some(file) = values.values().find(|v| v.file) {
@@ -670,7 +678,14 @@ pub async fn read(paths: &Paths, args: ReadArgs, from_stdin: bool) -> Result<()>
     let reference = Reference::parse(&args.reference)
         .map_err(|e| anyhow!(e))?
         .to_string();
-    let values = resolve(paths, vec![reference.clone()], Purpose::Read, from_stdin).await?;
+    let values = resolve(
+        paths,
+        vec![reference.clone()],
+        Purpose::Read,
+        args.experimental_mobile,
+        from_stdin,
+    )
+    .await?;
     let mut stdout = std::io::stdout().lock();
     stdout.write_all(values[&reference].value.expose().as_bytes())?;
     if !args.no_newline {

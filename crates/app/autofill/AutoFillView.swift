@@ -1,7 +1,10 @@
-// Native AppKit UI for `DeadboltAutoFill.appex`: connecting, onboarding redirect,
-// Touch ID + passphrase unlock, and searchable credential picker.
-// Supports offscreen `NSBitmapImageRep` rendering for headless verification.
+// Native UI for the Deadbolt credential provider: connecting, onboarding
+// redirect, biometric + passphrase unlock, and searchable credential picker.
+// macOS: AppKit, with offscreen `NSBitmapImageRep` rendering for headless
+// verification. iOS: SwiftUI drawn with the app's Rune theme
+// (mobile/ios/Deadbolt/Theme.swift: Inter, IBM Plex Mono, Rune colours).
 
+#if os(macOS)
 import AppKit
 import Foundation
 
@@ -812,3 +815,420 @@ public final class AutoFillRootView: NSView, NSSearchFieldDelegate, NSTextFieldD
         return rep.representation(using: .png, properties: [:])
     }
 }
+#endif
+
+#if os(iOS)
+import Combine
+import SwiftUI
+
+/// Bumped by the model's `onChange` so SwiftUI re-reads the model.
+@MainActor
+public final class AutoFillObserver: ObservableObject {
+    @Published var revision = 0
+
+    public init() {}
+}
+
+public struct AutoFillRootView: View {
+    let model: AutoFillControllerModel
+    @ObservedObject var observer: AutoFillObserver
+
+    public init(model: AutoFillControllerModel, observer: AutoFillObserver) {
+        self.model = model
+        self.observer = observer
+    }
+
+    public var body: some View {
+        let _ = observer.revision
+        VStack(spacing: 0) {
+            ProviderHeader(title: model.contextLabel) { model.cancelByUser() }
+            ZStack {
+                switch model.screen {
+                case let .connecting(message):
+                    ProviderStatus(message: message, progress: true)
+                case .notInitialized:
+                    ProviderMessage(
+                        title: "Set up Deadbolt first",
+                        detail: "Open Deadbolt on this iPhone and set up or join your vault, then try again."
+                    )
+                case let .locked(touchIdReady, touchIdReset, unlocking, touchIdInFlight, error):
+                    ProviderLockView(
+                        model: model,
+                        prompt: model.lockedPrompt,
+                        biometricReady: touchIdReady,
+                        biometricReset: touchIdReset,
+                        unlocking: unlocking,
+                        biometricInFlight: touchIdInFlight,
+                        error: error
+                    )
+                case .syncingConfiguration:
+                    ProviderStatus(message: "Setting up AutoFill…", progress: true)
+                case .picker:
+                    ProviderPicker(model: model, observer: observer)
+                case let .failed(message):
+                    // Busy is a wait, not an error: say so quietly.
+                    ProviderMessage(
+                        title: model.failureIsBusy ? "Deadbolt is busy" : "Deadbolt couldn't fill this",
+                        detail: model.failureIsBusy
+                            ? "Deadbolt is finishing something else with your vault. Try again in a moment."
+                            : message
+                    ) {
+                        Button("Try again") { model.retryConnection() }
+                            .buttonStyle(RuneButtonStyle())
+                    }
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .background(Rune.bg.ignoresSafeArea())
+        .foregroundStyle(Rune.text)
+    }
+}
+
+private struct ProviderHeader: View {
+    let title: String
+    let cancel: () -> Void
+
+    var body: some View {
+        HStack(spacing: 10) {
+            KeyholeMark(size: 28)
+            Text(title)
+                .rune(.uiMedium)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 8)
+            Button("Cancel", action: cancel)
+                .buttonStyle(RuneButtonStyle())
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 8)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Rune.borderMuted).frame(height: 1)
+        }
+    }
+}
+
+private struct ProviderStatus: View {
+    let message: String
+    var progress = false
+
+    var body: some View {
+        VStack(spacing: 12) {
+            if progress {
+                ProgressView().tint(Rune.iconMuted)
+            }
+            Text(message).rune(.ui).foregroundStyle(Rune.muted)
+        }
+        .padding(28)
+    }
+}
+
+private struct ProviderMessage<Actions: View>: View {
+    let title: String
+    let detail: String
+    let actions: Actions
+
+    init(title: String, detail: String, @ViewBuilder actions: () -> Actions = { EmptyView() }) {
+        self.title = title
+        self.detail = detail
+        self.actions = actions()
+    }
+
+    var body: some View {
+        VStack(spacing: 12) {
+            Text(title).rune(.hero)
+            Text(detail)
+                .rune(.ui)
+                .foregroundStyle(Rune.muted)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+            actions.padding(.top, 4)
+        }
+        .padding(28)
+    }
+}
+
+private struct ProviderLockView: View {
+    let model: AutoFillControllerModel
+    let prompt: String?
+    let biometricReady: Bool
+    let biometricReset: Bool
+    let unlocking: Bool
+    let biometricInFlight: Bool
+    let error: String?
+
+    @State private var passphraseText = ""
+    @FocusState private var focused: Bool
+
+    private var biometryName: String { Enclave.biometryName }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text(model.needsBiometricVerification ? "Confirm it's you" : "Deadbolt is locked")
+                    .rune(.hero)
+                    .padding(.top, 8)
+                    .accessibilityAddTraits(.isHeader)
+                if let prompt {
+                    Text(prompt)
+                        .rune(.ui)
+                        .foregroundStyle(Rune.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if model.needsBiometricVerification {
+                    verification
+                } else {
+                    passphrase
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 16)
+        }
+        .scrollDismissesKeyboard(.interactively)
+    }
+
+    /// A verified passkey ceremony: only a fresh biometric match counts, so
+    /// there is no passphrase field to try.
+    @ViewBuilder private var verification: some View {
+        let shown = error == AutoFillControllerModel.verificationNeeded ? nil : error
+        if biometricReady {
+            biometricButton(kind: .primary)
+            errorLine(shown)
+            quiet("This site asks for \(biometryName). Your passphrase can't confirm a passkey.")
+        } else {
+            errorLine(shown)
+            quiet(Enclave.unavailableReason ?? (biometricReset
+                ? "\(biometryName) was reset. Open Deadbolt and unlock it with your passphrase to turn \(biometryName) back on."
+                : "Turn on \(biometryName) in Deadbolt's settings to use passkeys."))
+            quiet("This site asks for \(biometryName), and your passphrase can't confirm a passkey.")
+        }
+    }
+
+    @ViewBuilder private var passphrase: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            SecureField("Passphrase", text: $passphraseText)
+                .textContentType(.password)
+                .focused($focused)
+                .submitLabel(.go)
+                .onSubmit(unlock)
+                .onChange(of: passphraseText) { model.clearUnlockError() }
+                .runeInput(focused: focused, invalid: error != nil)
+                .disabled(unlocking)
+            errorLine(error)
+        }
+        Button(action: unlock) {
+            HStack(spacing: 8) {
+                if unlocking { ProgressView().tint(Rune.onContrast) }
+                Text("Unlock")
+            }
+        }
+        .buttonStyle(RuneButtonStyle(kind: .primary, wide: true))
+        .disabled(passphraseText.isEmpty || unlocking || biometricInFlight)
+        if biometricReady {
+            biometricButton(kind: .neutral)
+        } else if biometricReset {
+            quiet("\(biometryName) was reset. Enter your passphrase.")
+        }
+    }
+
+    private func biometricButton(kind: RuneButtonStyle.Kind) -> some View {
+        Button {
+            model.promptTouchID()
+        } label: {
+            HStack(spacing: 8) {
+                if biometricInFlight {
+                    ProgressView().tint(kind == .primary ? Rune.onContrast : Rune.iconMuted)
+                } else {
+                    Image(systemName: biometryName == "Touch ID" ? "touchid" : "faceid")
+                        .accessibilityHidden(true)
+                }
+                Text(kind == .primary ? "Use \(biometryName)" : "Unlock with \(biometryName)")
+            }
+        }
+        .buttonStyle(RuneButtonStyle(kind: kind, wide: true))
+        .disabled(unlocking || biometricInFlight)
+    }
+
+    @ViewBuilder private func errorLine(_ text: String?) -> some View {
+        if let text {
+            Text(text)
+                .rune(.textXSmall)
+                .foregroundStyle(Rune.danger)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func quiet(_ text: String) -> some View {
+        Text(text)
+            .rune(.textXSmall)
+            .foregroundStyle(Rune.muted)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func unlock() {
+        guard !passphraseText.isEmpty, !unlocking, !biometricInFlight else { return }
+        model.submitPassphrase(passphraseText)
+    }
+}
+
+private struct ProviderPicker: View {
+    let model: AutoFillControllerModel
+    /// The model isn't observable itself: without this the list would draw
+    /// before `updateSearchQuery` runs and lag one keystroke behind.
+    @ObservedObject var observer: AutoFillObserver
+    @State private var query: String
+
+    /// Starts from the model's query: after an unlock or a failed pick the
+    /// picker is rebuilt, and an empty field over a filtered list would lie.
+    init(model: AutoFillControllerModel, observer: AutoFillObserver) {
+        self.model = model
+        self.observer = observer
+        _query = State(initialValue: model.searchQuery)
+    }
+
+    var body: some View {
+        let _ = observer.revision
+        VStack(spacing: 0) {
+            ProviderSearchField(text: $query)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 10)
+                .onChange(of: query) { _, next in model.updateSearchQuery(next) }
+            if model.unassociated {
+                Text("This app has no website Deadbolt can match. Check the login before filling it.")
+                    .rune(.textXSmall)
+                    .foregroundStyle(Rune.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+            }
+            if let error = model.pickerError {
+                Text(error)
+                    .rune(.textXSmall)
+                    .foregroundStyle(Rune.danger)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.bottom, 8)
+            }
+            if model.filteredLogins.isEmpty && model.filteredPasskeys.isEmpty {
+                Spacer()
+                Text(query.isEmpty ? "Nothing saved for this site." : "No matches.")
+                    .rune(.ui)
+                    .foregroundStyle(Rune.muted)
+                Spacer()
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 2) {
+                        if !model.filteredPasskeys.isEmpty {
+                            ProviderSectionLabel(text: "Passkeys")
+                            ForEach(Array(model.filteredPasskeys.enumerated()), id: \.offset) { index, passkey in
+                                Button { model.fillPasskeyRow(index) } label: {
+                                    ProviderRow(
+                                        title: passkey.username ?? "Passkey",
+                                        detail: passkey.vault,
+                                        tile: passkey.username ?? "P"
+                                    )
+                                }
+                                .buttonStyle(ProviderRowStyle())
+                                .disabled(model.filling)
+                            }
+                            if !model.filteredLogins.isEmpty {
+                                ProviderSectionLabel(text: "Passwords")
+                            }
+                        }
+                        ForEach(Array(model.filteredLogins.enumerated()), id: \.offset) { index, login in
+                            Button { model.fillRow(index) } label: {
+                                ProviderRow(
+                                    title: login.title.isEmpty ? "Untitled" : login.title,
+                                    detail: model.hasMultipleVaults ? "\(login.subtitle) · \(login.vault)" : login.subtitle,
+                                    tile: login.title
+                                )
+                            }
+                            .buttonStyle(ProviderRowStyle())
+                            .disabled(model.filling)
+                        }
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+    }
+}
+
+private struct ProviderSectionLabel: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .runeLabel()
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+    }
+}
+
+/// The app's search field (Views.swift `SearchField`).
+private struct ProviderSearchField: View {
+    @Binding var text: String
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "magnifyingglass")
+                .font(.system(size: 15))
+                .foregroundStyle(Rune.iconMuted)
+            TextField("Search", text: $text)
+                .rune(.ui)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .submitLabel(.search)
+            if !text.isEmpty {
+                Button {
+                    text = ""
+                } label: {
+                    Image(systemName: "xmark.circle.fill").foregroundStyle(Rune.iconFaint)
+                }
+                .accessibilityLabel("Clear search")
+            }
+        }
+        .padding(.horizontal, 12)
+        .frame(minHeight: 40)
+        .background(RoundedRectangle(cornerRadius: Rune.radiusLg, style: .continuous).fill(Rune.searchFill))
+    }
+}
+
+/// The app's item row (Views.swift `ItemRow`).
+private struct ProviderRow: View {
+    let title: String
+    let detail: String
+    let tile: String
+
+    var body: some View {
+        HStack(spacing: 10) {
+            LetterTile(title: tile)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(title).rune(.ui).foregroundStyle(Rune.text).lineLimit(1)
+                if !detail.isEmpty {
+                    Text(detail).rune(.fact).foregroundStyle(Rune.textFaint).lineLimit(1)
+                }
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .frame(minHeight: 52)
+        .contentShape(Rectangle())
+    }
+}
+
+private struct ProviderRowStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                RoundedRectangle(cornerRadius: Rune.radiusLg, style: .continuous)
+                    .fill(configuration.isPressed ? Rune.pressed : .clear)
+            )
+            .animation(Rune.control, value: configuration.isPressed)
+    }
+}
+#endif

@@ -1,0 +1,32 @@
+# Hostless lifecycle tests intentionally need neither UniFFI nor the Rust build.
+# The provider tests drive ControllerModel through a fake AutofillAgentClient.
+name: DeadboltLifecycle
+options:
+  deploymentTarget:
+    iOS: "17.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    CODE_SIGN_IDENTITY: "-"
+    CODE_SIGN_STYLE: Manual
+targets:
+  DeadboltLifecycleTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: Deadbolt/AppModel.swift
+      - path: Deadbolt/CoreAPI.swift
+      - path: Deadbolt/Enclave.swift
+      # The provider's shared state machine, driven by a fake client.
+      - path: ../../crates/app/autofill/Protocol.swift
+      - path: ../../crates/app/autofill/IdentitySync.swift
+      - path: ../../crates/app/autofill/ControllerModel.swift
+      - path: DeadboltLifecycleTests
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: pw.deadbolt.lifecycle-tests
+        GENERATE_INFOPLIST_FILE: true
+    scheme:
+      testTargets:
+        - DeadboltLifecycleTests

@@ -1,0 +1,5 @@
+/Generated/
+/*.xcodeproj/
+/build/
+/Deadbolt/Info.plist
+/Deadbolt/Deadbolt.entitlements

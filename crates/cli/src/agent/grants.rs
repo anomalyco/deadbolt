@@ -737,6 +737,16 @@ impl Agent {
             };
             return Err(fail(ErrorCode::Forbidden, message));
         }
+        if let Command::ExperimentalApproverSet {
+            vault,
+            device,
+            passphrase,
+        } = command
+        {
+            return self
+                .experimental_approver_set(vault.as_deref(), device.as_deref(), passphrase, conv)
+                .await;
+        }
         // Locked fails before anyone is asked anything. The prompt says
         // plainly what is being allowed, the caller-chosen name quoted.
         let (passphrase, reason) = match &command {
@@ -852,7 +862,7 @@ impl Agent {
 
     /// The user is here: they typed the passphrase, or touched the sensor
     /// for a prompt the agent raised itself.
-    async fn prove_user(
+    pub(super) async fn prove_user(
         &self,
         conv: &Conversation,
         passphrase: Option<Zeroizing<String>>,
