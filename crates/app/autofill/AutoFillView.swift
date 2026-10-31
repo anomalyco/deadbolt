@@ -866,7 +866,13 @@ public struct AutoFillRootView: View {
                 case .picker:
                     ProviderPicker(model: model, observer: observer)
                 case let .failed(message):
-                    ProviderMessage(title: "Deadbolt couldn't fill this", detail: message) {
+                    // Busy is a wait, not an error: say so quietly.
+                    ProviderMessage(
+                        title: model.failureIsBusy ? "Deadbolt is busy" : "Deadbolt couldn't fill this",
+                        detail: model.failureIsBusy
+                            ? "Deadbolt is finishing something else with your vault. Try again in a moment."
+                            : message
+                    ) {
                         Button("Try again") { model.retryConnection() }
                             .buttonStyle(RuneButtonStyle())
                     }

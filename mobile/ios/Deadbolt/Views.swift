@@ -14,7 +14,7 @@ struct RootView: View {
             case .starting:
                 // Nothing at launch (it's brief); after pairing, the new vault
                 // can take a moment to open, so say so instead of a blank screen.
-                if model.status != nil {
+                if model.status != nil, model.notice == nil {
                     OpeningView()
                 } else {
                     Color.clear

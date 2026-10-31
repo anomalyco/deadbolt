@@ -157,6 +157,8 @@ public final class AutoFillControllerModel {
     /// Passkeys offered beside logins for a passkey request (iOS).
     public private(set) var allPasskeys: [SitePasskey] = []
     public private(set) var filteredPasskeys: [SitePasskey] = []
+    /// The failed screen is a wait (the vault is in use), not an error.
+    public private(set) var failureIsBusy = false
     /// What the locked screen unlocks for, when not just a fill.
     public private(set) var lockedPrompt: String?
 
@@ -167,6 +169,8 @@ public final class AutoFillControllerModel {
     private var unlockError: String?
     private var pendingPickerFill: SiteLogin?
     private var pendingPickerPasskey: SitePasskey?
+    /// iOS: the picker's rows were let go while a picked login fills.
+    private var rowsReleased = false
 
     private var activeCall: AutofillCallHandle?
     private var currentTask: Task<Void, Never>?
@@ -305,6 +309,9 @@ public final class AutoFillControllerModel {
             contextLabel = "All Passwords"
         }
         searchQuery = ""
+        // A pick from a replaced request never finishes here; this one starts idle.
+        filling = false
+        rowsReleased = false
         allLogins = []
         filteredLogins = []
         allPasskeys = []
@@ -612,7 +619,7 @@ public final class AutoFillControllerModel {
                 #if os(iOS)
                 case .busy:
                     // The app still holds the vault: quiet, with Try again.
-                    fail(message)
+                    fail(message, busy: true)
                 default:
                     await relockRefreshingStatus(message)
                 #else
@@ -776,7 +783,7 @@ public final class AutoFillControllerModel {
                 return
             }
             #endif
-            fail(err.userFacingUnlockMessage)
+            fail(err.userFacingUnlockMessage, busy: Self.isBusy(err))
         } catch {
             fail("Could not load logins from Deadbolt.")
         }
@@ -858,10 +865,26 @@ public final class AutoFillControllerModel {
         #endif
         filling = true
         pickerError = nil
+        #if os(iOS)
+        // The fill does its own unlock (another passphrase derivation), which
+        // must not stack on top of every listed row: keep only the picked
+        // login and let the list go. A failure reloads it (showPicker).
+        releasePickerRows()
+        setScreen(.connecting(workingMessage))
+        #else
         notify()
+        #endif
 
         runTask { [weak self] in
             guard let self else { return }
+            #if os(iOS)
+            // A short pause so SwiftUI can usually drop the list before the
+            // fill allocates. It is a delay, not a guaranteed render.
+            try? await Task.sleep(for: .milliseconds(32))
+            // Cancelled, finished or replaced by a new request meanwhile: this
+            // pick no longer owns the client and must not send or complete.
+            guard !Task.isCancelled, !self.finished else { return }
+            #endif
             do {
                 let reply = try await self.callAgent(
                     .autofillFill(
@@ -872,6 +895,11 @@ public final class AutoFillControllerModel {
                     ),
                     timeout: Self.interactiveTimeout
                 )
+                #if os(iOS)
+                // Cancelled or replaced while hopping back to the main actor:
+                // the reply belongs to no current request.
+                guard !Task.isCancelled, !self.finished else { return }
+                #endif
                 self.filling = false
                 #if os(iOS)
                 if wantCode {
@@ -900,8 +928,22 @@ public final class AutoFillControllerModel {
                     reportedHash: fill.identitiesHash
                 )
             } catch let err as AgentCallError {
+                #if os(iOS)
+                // A cancelled or replaced pick leaves the request's state alone.
+                guard !Task.isCancelled, !self.finished else { return }
+                #endif
                 self.filling = false
                 if err.isBiometricCancelled {
+                    #if os(iOS)
+                    if self.rowsReleased {
+                        // Face ID was cancelled and the request's unlock is gone:
+                        // say so truthfully. No relist, no new prompt; unlocking
+                        // again reloads the list.
+                        self.rowsReleased = false
+                        await self.relockRefreshingStatus("")
+                        return
+                    }
+                    #endif
                     self.showPicker(error: nil)
                     return
                 }
@@ -925,6 +967,9 @@ public final class AutoFillControllerModel {
                 }
                 self.showPicker(error: err.userFacingUnlockMessage)
             } catch {
+                #if os(iOS)
+                guard !Task.isCancelled, !self.finished else { return }
+                #endif
                 self.filling = false
                 self.showPicker(error: "Could not fill password.")
             }
@@ -967,12 +1012,10 @@ public final class AutoFillControllerModel {
                         return st
                     }
                 }
-                setScreen(
-                    .failed("Can't reach Deadbolt. Open Deadbolt to start its background agent.")
-                )
+                fail("Can't reach Deadbolt. Open Deadbolt to start its background agent.")
                 return nil
             }
-            fail(err.userFacingUnlockMessage)
+            fail(err.userFacingUnlockMessage, busy: Self.isBusy(err))
             return nil
         } catch {
             fail("Can't reach Deadbolt.")
@@ -1047,6 +1090,10 @@ public final class AutoFillControllerModel {
     }
 
     private func setScreen(_ next: Screen) {
+        if case .failed = next {} else {
+            // Only the failed screen it was set for may read it.
+            failureIsBusy = false
+        }
         screen = next
         notify()
     }
@@ -1107,11 +1154,19 @@ public final class AutoFillControllerModel {
 
     /// A failed screen offers Try again, which begins a new request. On iOS
     /// this request ends now, so its passphrase or Face ID choice isn't kept.
-    private func fail(_ message: String) {
+    private func fail(_ message: String, busy: Bool = false) {
+        failureIsBusy = busy
         #if os(iOS)
         client.endRequest()
         #endif
         setScreen(.failed(message))
+    }
+
+    private static func isBusy(_ err: AgentCallError) -> Bool {
+        if case let .agentError(code, _) = err {
+            return code == .busy
+        }
+        return false
     }
 
     /// Shows a picked login's failure on the picker. On iOS a pick resumed
@@ -1119,6 +1174,19 @@ public final class AutoFillControllerModel {
     private func showPicker(error: String?) {
         pickerError = error
         #if os(iOS)
+        if rowsReleased, let services = pickerServices {
+            // The list was let go for the fill: load it again under this
+            // request's current unlock, then show the error over it.
+            rowsReleased = false
+            setScreen(.connecting("Loading logins…"))
+            runTask { [weak self] in
+                await self?.loadPickerItems(services: services)
+                guard let self, self.screen == .picker else { return }
+                self.pickerError = error
+                self.notify()
+            }
+            return
+        }
         if screen != .picker {
             setScreen(.picker)
             return
@@ -1128,6 +1196,12 @@ public final class AutoFillControllerModel {
     }
 
     #if os(iOS)
+    private func releasePickerRows() {
+        allLogins = []
+        filteredLogins = []
+        rowsReleased = true
+    }
+
     /// Back to the locked screen after the core refused this request's
     /// unlock. Face ID readiness is read again first (an expired, reset or
     /// damaged slot turns it off), so the screen never offers a Face ID that
@@ -1359,7 +1433,7 @@ public final class AutoFillControllerModel {
                     finishCancel(.failed)
                 }
             default:
-                fail(message)
+                fail(message, busy: code == .busy)
             }
         } catch {
             touchIdInFlight = false

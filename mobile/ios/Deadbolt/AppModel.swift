@@ -208,7 +208,7 @@ final class AppModel: ObservableObject {
                 } catch {
                     guard self.isCurrent(generation) else { return }
                     self.joinTask = nil
-                    self.notice = error.localizedDescription
+                    self.notice = Self.describe(error)
                     try? await self.refreshStatus(generation: generation)
                     return
                 }
@@ -264,7 +264,7 @@ final class AppModel: ObservableObject {
             // Quietly back to the passphrase field.
         } catch {
             guard await acceptAuthentication(generation) else { return }
-            notice = error.localizedDescription
+            notice = Self.describe(error)
         }
     }
 
@@ -310,7 +310,7 @@ final class AppModel: ObservableObject {
             try await refreshStatus(generation: generation)
         } catch {
             guard generation == self.generation else { return }
-            notice = error.localizedDescription
+            notice = Self.describe(error)
         }
     }
 
@@ -447,8 +447,17 @@ final class AppModel: ObservableObject {
             // Keep the request available for Deny or another deliberate Allow.
         } catch {
             guard canRead(generation: generation), approval?.id == request.id else { return }
-            approvalNotice = error.localizedDescription
+            approvalNotice = Self.describe(error)
         }
+    }
+
+    /// The core's Busy covers two waits: another setup or unlock here, or
+    /// AutoFill holding the vault. Say something true for both.
+    static func describe(_ error: Error) -> String {
+        if let failure = error as? CoreFailure, failure.code == "Busy" {
+            return "Deadbolt is busy with another unlock or AutoFill. Try again in a moment."
+        }
+        return error.localizedDescription
     }
 
     /// The biometric sheet names this exact read, never just "unlock".
@@ -521,7 +530,7 @@ final class AppModel: ObservableObject {
             } catch {
                 guard canRead(generation: generation), !searchAgain else { continue }
                 itemsLoaded = true
-                notice = error.localizedDescription
+                notice = Self.describe(error)
             }
         } while searchAgain && canRead(generation: generation)
     }
@@ -657,7 +666,7 @@ final class AppModel: ObservableObject {
             try await body()
         } catch {
             guard await acceptAuthentication(generation) else { return }
-            notice = error.localizedDescription
+            notice = Self.describe(error)
         }
     }
 }

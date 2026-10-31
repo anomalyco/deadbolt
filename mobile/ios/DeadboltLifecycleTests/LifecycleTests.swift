@@ -1,5 +1,10 @@
 import XCTest
 import Combine
+import AuthenticationServices
+
+/// Protocol.swift reads the wire version the Rust build generates; these
+/// hostless tests never speak the wire protocol.
+let generatedProtocolVersion: UInt32 = 0
 
 /// These gates deliberately ignore cancellation, just like an already queued
 /// synchronous FFI call. A late success must not reopen the UI or the core.
@@ -66,8 +71,11 @@ private actor DelayedCore: CoreAPI {
         await record(.status)
         return snapshot
     }
+    private var unlockFailure: CoreFailure?
+    func failUnlock(with failure: CoreFailure?) { unlockFailure = failure }
     func unlock(passphrase: String) async throws {
         await record(.unlock)
+        if let unlockFailure { throw unlockFailure }
         state.unlocked = true
     }
     func lock() async throws {
@@ -225,6 +233,20 @@ final class LifecycleTests: XCTestCase {
         let locked = await waitForLock(model)
         XCTAssertTrue(locked)
         XCTAssertEqual(model.query, "")
+    }
+
+    /// Busy covers another unlock and AutoFill holding the vault alike.
+    func testBusyUnlockSaysSomethingTrueForBothCauses() async {
+        let core = DelayedCore()
+        await core.failUnlock(with: CoreFailure(code: "Busy", message: "Another setup or unlock is running. Finish or cancel it first."))
+        let model = model(core)
+        await model.start()
+        await model.unlock(passphrase: "test")
+        XCTAssertEqual(model.phase, .locked)
+        XCTAssertEqual(model.notice, "Deadbolt is busy with another unlock or AutoFill. Try again in a moment.")
+        await core.failUnlock(with: CoreFailure(code: "Authentication", message: "The passphrase or biometric key did not unlock this device."))
+        await model.unlock(passphrase: "wrong")
+        XCTAssertEqual(model.notice, "The passphrase or biometric key did not unlock this device.")
     }
 
     func testSearchBurstRunsOneReadThenOnlyTheLatestQuery() async {
@@ -734,5 +756,197 @@ final class LifecycleTests: XCTestCase {
         let state = await core.snapshot()
         XCTAssertFalse(state.unlocked)
         XCTAssertEqual(model.phase, .locked)
+    }
+}
+
+/// A fake in-process provider client: unlocked, two synthetic logins, and a
+/// record of every command each extension request sent.
+private final class FakeProviderClient: AutofillAgentClient, @unchecked Sendable {
+    private let lock = NSLock()
+    private var request = 0
+    private var sent: [(request: Int, command: AutofillCommand)] = []
+
+    /// Scripted refusals: the next fill, or the next status, fails with this.
+    var fillError: AgentCallError?
+    var statusError: AgentCallError?
+    /// Runs just before a successful fill reply is returned.
+    var beforeFillReply: (@Sendable () async -> Void)?
+
+    var fills: [(request: Int, command: AutofillCommand)] {
+        lock.lock(); defer { lock.unlock() }
+        return sent.filter { if case .autofillFill = $0.command { return true }; return false }
+    }
+
+    var lists: Int {
+        lock.lock(); defer { lock.unlock() }
+        return sent.filter { if case .autofillList = $0.command { return true }; return false }.count
+    }
+
+    func beginRequest(_ request: ProviderRequest) {
+        lock.lock(); self.request += 1; lock.unlock()
+    }
+
+    func endRequest() {}
+
+    func send(_ command: AutofillCommand, timeout: TimeInterval, handle: AutofillCallHandle?) async throws -> AutofillReply {
+        let (fillError, statusError) = lock.withLock { () -> (AgentCallError?, AgentCallError?) in
+            sent.append((request, command))
+            return (self.fillError, self.statusError)
+        }
+        switch command {
+        case .autofillStatus:
+            if let statusError {
+                lock.withLock { self.statusError = nil }
+                throw statusError
+            }
+            return .autofillStatus(AutofillStatusReply(initialized: true, unlocked: true, touchIdReady: false))
+        case let .autofillList(services, _, _, _):
+            let logins = ["one", "two"].map {
+                SiteLogin(login: LoginRef(vault: "vault", item: $0), vault: "Synthetic", title: "Synthetic \($0)",
+                          username: "synthetic-\($0)@example.test", hasPassword: true, service: services.first)
+            }
+            return .autofillList(AutofillListReply(logins: logins, identitiesHash: ""))
+        case .autofillFill:
+            if let fillError {
+                lock.withLock { self.fillError = nil }
+                throw fillError
+            }
+            if let hook = lock.withLock({ () -> (@Sendable () async -> Void)? in
+                defer { self.beforeFillReply = nil }
+                return self.beforeFillReply
+            }) {
+                await hook()
+            }
+            return .autofillFill(AutofillFillReply(values: SiteValues(username: "synthetic", password: "synthetic-password"), identitiesHash: ""))
+        default:
+            return .done
+        }
+    }
+}
+
+@MainActor
+private final class RecordingCompleter: ExtensionContextCompleting {
+    var passwords: [String] = []
+    func completePassword(user: String, password: String, afterDelivery: (@Sendable () async -> Void)?) { passwords.append(password) }
+    func completeExtensionConfiguration() {}
+    func cancelRequest(code: ASExtensionError.Code) {}
+    func completeOneTimeCode(_ code: String) {}
+    func completePasskeyAssertion(_ assertion: PasskeyAssertion) {}
+    func completePasskeyRegistration(_ registration: PasskeyRegistration) {}
+}
+
+private struct NoLauncher: AgentLaunching {
+    func startInBackground() async -> Bool { false }
+    func openContainingApp() async -> Bool { false }
+}
+
+@MainActor
+final class ProviderPickerTests: XCTestCase {
+    private func waitForPicker(_ model: AutoFillControllerModel) async -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while model.screen != .picker, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(5))
+        }
+        return model.screen == .picker
+    }
+
+    /// A pick lets the list go and pauses briefly before its fill. A new
+    /// request arriving in that pause owns the client: the old pick must not
+    /// send anything, and nothing may complete with its login.
+    func testPickReplacedDuringItsPauseNeverFills() async {
+        let client = FakeProviderClient()
+        let completer = RecordingCompleter()
+        let model = AutoFillControllerModel(client: client, launcher: NoLauncher(), identitySyncer: nil, completer: completer)
+        let site = AutofillService(identifier: "site-00042.example.test", kind: .domain)
+        model.beginCredentialList(services: [site])
+        let shown = await waitForPicker(model)
+        XCTAssertTrue(shown)
+        model.fillRow(0)
+        // The replacement request arrives inside the pick's pause.
+        model.beginCredentialList(services: [AutofillService(identifier: "other.example.test", kind: .domain)])
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(client.fills.isEmpty, "a replaced pick sent a fill")
+        XCTAssertTrue(completer.passwords.isEmpty)
+        let shownAgain = await waitForPicker(model)
+        XCTAssertTrue(shownAgain)
+        // The new request's picker is fully usable and fills its own pick.
+        XCTAssertFalse(model.filling)
+        model.fillRow(0)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(client.fills.map(\.request), [2])
+        XCTAssertEqual(completer.passwords, ["synthetic-password"])
+    }
+
+    /// A new request replaces the pick just as its successful reply comes
+    /// back: the old login never completes into the new request.
+    func testPickReplacedAsItsReplyReturnsNeverCompletes() async {
+        let client = FakeProviderClient()
+        let completer = RecordingCompleter()
+        let model = AutoFillControllerModel(client: client, launcher: NoLauncher(), identitySyncer: nil, completer: completer)
+        model.beginCredentialList(services: [AutofillService(identifier: "site-00042.example.test", kind: .domain)])
+        let shown = await waitForPicker(model)
+        XCTAssertTrue(shown)
+        client.beforeFillReply = { @MainActor [weak model] in
+            model?.beginCredentialList(services: [AutofillService(identifier: "other.example.test", kind: .domain)])
+        }
+        model.fillRow(0)
+        try? await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(client.fills.count, 1)
+        XCTAssertTrue(completer.passwords.isEmpty, "a replaced pick delivered its password into the new request")
+        let shownAgain = await waitForPicker(model)
+        XCTAssertTrue(shownAgain)
+        XCTAssertFalse(model.filling)
+    }
+
+    /// Face ID cancelled during a pick's fill (the list already let go): the
+    /// sheet says it is locked and neither relists nor prompts again.
+    func testCancelledFaceIDDuringPickShowsLockedWithoutRelisting() async {
+        let client = FakeProviderClient()
+        let completer = RecordingCompleter()
+        let model = AutoFillControllerModel(client: client, launcher: NoLauncher(), identitySyncer: nil, completer: completer)
+        model.beginCredentialList(services: [AutofillService(identifier: "site-00042.example.test", kind: .domain)])
+        let shown = await waitForPicker(model)
+        XCTAssertTrue(shown)
+        XCTAssertEqual(client.lists, 1)
+        client.fillError = .cancelled
+        model.fillRow(0)
+        try? await Task.sleep(for: .milliseconds(300))
+        XCTAssertEqual(client.lists, 1, "a cancelled Face ID relisted")
+        if case .locked = model.screen {} else { XCTFail("expected the locked screen, got \(model.screen)") }
+        XCTAssertTrue(completer.passwords.isEmpty)
+    }
+
+    /// The quiet busy presentation belongs to the failure it was set for.
+    func testBusyPresentationDoesNotOutliveItsFailure() async {
+        let client = FakeProviderClient()
+        let completer = RecordingCompleter()
+        let model = AutoFillControllerModel(client: client, launcher: NoLauncher(), identitySyncer: nil, completer: completer)
+        client.statusError = .agentError(code: .busy, message: "The app still has the vault open.")
+        model.beginCredentialList(services: [AutofillService(identifier: "site-00042.example.test", kind: .domain)])
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(model.failureIsBusy)
+        client.statusError = .agentError(code: .failed, message: "Something else went wrong.")
+        model.retryConnection()
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(model.screen, .failed("Something else went wrong."))
+        XCTAssertFalse(model.failureIsBusy, "a later non-busy failure kept the busy wording")
+        model.retryConnection()
+        let shown = await waitForPicker(model)
+        XCTAssertTrue(shown)
+        XCTAssertFalse(model.failureIsBusy)
+    }
+
+    /// Without interference the pick fills exactly once.
+    func testPickFillsOnce() async {
+        let client = FakeProviderClient()
+        let completer = RecordingCompleter()
+        let model = AutoFillControllerModel(client: client, launcher: NoLauncher(), identitySyncer: nil, completer: completer)
+        model.beginCredentialList(services: [AutofillService(identifier: "site-00042.example.test", kind: .domain)])
+        let shown = await waitForPicker(model)
+        XCTAssertTrue(shown)
+        model.fillRow(0)
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(client.fills.count, 1)
+        XCTAssertEqual(completer.passwords, ["synthetic-password"])
     }
 }

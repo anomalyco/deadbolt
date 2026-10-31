@@ -387,6 +387,10 @@ extension PasskeyVerify {
     /// treated as the WebAuthn default, `preferred`.
     init(_ preference: ASAuthorizationPublicKeyCredentialUserVerificationPreference) {
         self = PasskeyVerify(rawValue: preference.rawValue) ?? .preferred
+        #if targetEnvironment(simulator)
+        // Diagnose OS preference forwarding without logging request or account data.
+        NSLog("deadbolt-metric passkey_verify_received=%@ mapped=%@", preference.rawValue, rawValue)
+        #endif
     }
 }
 #endif
