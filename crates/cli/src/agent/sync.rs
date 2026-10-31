@@ -603,8 +603,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_sync_sends_all_membership_before_any_data() {
+    fn two_shared_vaults() -> (tempfile::TempDir, Loaded, DeviceId, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
         let peer = DeviceSecret::from_bytes(&[2; 32]);
@@ -631,13 +630,19 @@ mod tests {
             vaults,
         })
         .unwrap();
+        (dir, source, peer.device_id(), hello)
+    }
+
+    #[test]
+    fn shared_sync_sends_all_membership_before_any_data() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
         let logs = |mut h: application::OutgoingHistory, s: &Loaded| {
             std::iter::from_fn(|| h.next(s, true).unwrap())
                 .map(|bytes| deadbolt_core::Entry::decode(&bytes).unwrap().log())
                 .collect::<Vec<_>>()
         };
         let all = logs(
-            missing_for(&mut source, &peer.device_id(), &hello, true).unwrap(),
+            missing_for(&mut source, &peer, &hello, true).unwrap(),
             &source,
         );
         assert!(all.contains(&deadbolt_core::Log::Data));
@@ -651,10 +656,63 @@ mod tests {
                 .all(|log| *log == deadbolt_core::Log::Data)
         );
         let startup = logs(
-            missing_for(&mut source, &peer.device_id(), &hello, false).unwrap(),
+            missing_for(&mut source, &peer, &hello, false).unwrap(),
             &source,
         );
         assert_eq!(startup, all[..first_data]);
+    }
+
+    #[test]
+    fn multi_vault_sync_omits_only_the_revoked_vault() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        // Revoke the recipient after the first membership frame. Its vault
+        // still has both an Add and a data cursor in this snapshot.
+        let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
+        let first = history.next(&source, true).unwrap().unwrap();
+        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
+        let kept = *source.vaults.keys().find(|id| **id != revoked).unwrap();
+        let expected: Vec<_> = source
+            .vault(&kept)
+            .iter_entries()
+            .map(deadbolt_core::Entry::encode)
+            .collect();
+        source
+            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
+            .unwrap();
+        let remaining: Vec<_> = std::iter::from_fn(|| history.next(&source, true).transpose())
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, expected);
+    }
+
+    #[test]
+    fn multi_vault_sync_does_not_skip_a_missing_signed_tip() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
+        let first = history.next(&source, true).unwrap().unwrap();
+        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
+        source
+            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
+            .unwrap();
+        // Even a real signed removal can't disguise a partial replay: the
+        // restored view knows the removal but lacks the pinned data tip.
+        let mut membership = source
+            .vault(&revoked)
+            .iter_entries()
+            .filter(|e| e.log() == deadbolt_core::Log::Membership)
+            .cloned();
+        let mut partial = Vault::from_genesis(membership.next().unwrap()).unwrap();
+        for entry in membership {
+            partial.apply(entry).unwrap();
+        }
+        assert!(partial.was_removed(&peer));
+        source.vaults.insert(revoked, partial);
+        assert!(matches!(
+            history.next(&source, true),
+            Err(application::Error::Core(
+                deadbolt_core::Error::HistoryChanged
+            ))
+        ));
     }
 
     #[test]

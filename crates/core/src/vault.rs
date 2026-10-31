@@ -129,6 +129,20 @@ struct Pending {
 }
 
 impl MissingLog {
+    /// Check even a cursor that will be discarded: a missing signed tip is a
+    /// different failure from losing membership in a still-intact vault.
+    pub fn check_tips(&self, vault: &Vault) -> Result<(), Error> {
+        if self
+            .0
+            .iter()
+            .all(|Reverse(p)| vault.nodes.contains_key(&p.end))
+        {
+            Ok(())
+        } else {
+            Err(Error::HistoryChanged)
+        }
+    }
+
     pub fn next<'a>(&mut self, vault: &'a Vault) -> Result<Option<&'a Entry>, Error> {
         let Some(Reverse(mut pending)) = self.0.pop() else {
             return Ok(None);

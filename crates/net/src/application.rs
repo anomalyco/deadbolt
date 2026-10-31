@@ -5,7 +5,7 @@
 //! data is sent or accepted until the caller's membership barrier is open.
 
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     future::Future,
     net::SocketAddr,
     time::Duration,
@@ -219,22 +219,34 @@ pub fn hello(s: &impl State, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<
 pub struct OutgoingHistory {
     peer: DeviceId,
     meta: Option<Blob>,
-    logs: VecDeque<(VaultId, Log, MissingLog)>,
-    pairing: bool,
+    logs: VecDeque<(VaultId, MissingLog)>,
+    scope: HistoryScope,
+}
+
+enum HistoryScope {
+    Pairing,
+    Sync {
+        negotiated: BTreeSet<VaultId>,
+        data: bool,
+    },
 }
 
 impl OutgoingHistory {
     pub fn next(&mut self, s: &impl State, ready: bool) -> Result<Option<Blob>, Error> {
-        while let Some((id, log, cursor)) = self.logs.front_mut() {
+        while let Some((id, cursor)) = self.logs.front_mut() {
+            if !ready && !matches!(self.scope, HistoryScope::Sync { data: false, .. }) {
+                return Err(Error::Protocol("waiting for membership sync"));
+            }
             let v = s
                 .vaults()
                 .find(|v| v.id() == *id)
                 .ok_or(Error::VaultNotHeld)?;
-            if !v.is_member(&self.peer) || (self.pairing && !v.is_member(&s.device_id())) {
-                return Err(Error::Protocol("history transfer no longer authorized"));
+            if !v.is_member(&self.peer) {
+                self.omit_revoked(s)?;
+                continue;
             }
-            if !ready && (self.pairing || *log == Log::Data) {
-                return Err(Error::Protocol("waiting for membership sync"));
+            if matches!(self.scope, HistoryScope::Pairing) && !v.is_member(&s.device_id()) {
+                return Err(Error::Protocol("history transfer no longer authorized"));
             }
             if let Some(meta) = self.meta.take() {
                 return Ok(Some(meta));
@@ -245,6 +257,42 @@ impl OutgoingHistory {
             self.logs.pop_front();
         }
         Ok(None)
+    }
+
+    // Slow path under the same state lock as next(). Drop *both* phases of
+    // each revoked vault, even if later membership resolution changes again.
+    // A missing vault, missing signed tip or unexplained loss of admission
+    // isn't proof of removal; leave those errors fatal.
+    fn omit_revoked(&mut self, s: &impl State) -> Result<(), Error> {
+        let denied = || Error::Protocol("history transfer no longer authorized");
+        let HistoryScope::Sync { negotiated, .. } = &mut self.scope else {
+            return Err(denied());
+        };
+        let mut removed = BTreeMap::new();
+        let mut held = 0;
+        for v in s.vaults().filter(|v| negotiated.contains(&v.id())) {
+            held += 1;
+            if !v.is_member(&self.peer) {
+                if !v.was_removed(&self.peer) {
+                    return Err(denied());
+                }
+                removed.insert(v.id(), v);
+            }
+        }
+        if held != negotiated.len() {
+            return Err(Error::VaultNotHeld);
+        }
+        if held == removed.len() {
+            return Err(denied()); // No other negotiated vault still admits the peer.
+        }
+        for (id, cursor) in &self.logs {
+            if let Some(vault) = removed.get(id) {
+                cursor.check_tips(vault)?;
+            }
+        }
+        self.logs.retain(|(id, _)| !removed.contains_key(id));
+        negotiated.retain(|id| !removed.contains_key(id));
+        Ok(())
     }
 
     pub fn outgoing<'a>(
@@ -277,21 +325,21 @@ pub fn missing_for<S: State>(
         };
         let bytes = HEXLOWER.decode(heads.as_bytes()).map_err(|_| Error::Hex)?;
         let heads = Heads::decode(&bytes).map_err(Error::from)?;
-        logs.push_back((
-            id,
-            Log::Membership,
-            vault.missing_log(&heads, Log::Membership),
-        ));
+        logs.push_back((id, vault.missing_log(&heads, Log::Membership)));
         if ready {
-            data.push((id, Log::Data, vault.missing_log(&heads, Log::Data)));
+            data.push((id, vault.missing_log(&heads, Log::Data)));
         }
     }
+    let negotiated = logs.iter().map(|(id, _)| *id).collect();
     logs.extend(data);
     Ok(OutgoingHistory {
         peer: *peer,
         meta: None,
         logs,
-        pairing: false,
+        scope: HistoryScope::Sync {
+            negotiated,
+            data: ready,
+        },
     })
 }
 
@@ -444,13 +492,13 @@ pub fn welcome<S: State>(
         .ok_or(Error::VaultNotHeld)?;
     let logs = [Log::Membership, Log::Data]
         .into_iter()
-        .map(|log| (vault, log, held.missing_log(&Heads::default(), log)))
+        .map(|log| (vault, held.missing_log(&Heads::default(), log)))
         .collect();
     Ok(OutgoingHistory {
         peer: device,
         meta: Some(meta),
         logs,
-        pairing: true,
+        scope: HistoryScope::Pairing,
     })
 }
 
