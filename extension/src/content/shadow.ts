@@ -23,10 +23,19 @@ export function isOwnHost(el: Element): boolean {
   return own.has(el)
 }
 
+/**
+ * The only HTML elements attachShadow accepts (DOM spec, "valid shadow host
+ * name"), besides custom elements, whose names all have a hyphen. Any other
+ * element can't have an author shadow root, so it isn't asked for one: the
+ * extension call per element is most of a page walk's cost.
+ */
+const HOSTS = new Set(["article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span"])
+
 /** The element's shadow root, open or closed, unless it's Deadbolt's own. */
 export function shadowRootOf(el: Element): ShadowRoot | null {
   if (own.has(el)) return null
   if (el.shadowRoot) return el.shadowRoot
+  if (!HOSTS.has(el.localName) && !el.localName.includes("-")) return null
   const dom = (globalThis as { chrome?: { dom?: { openOrClosedShadowRoot?: (e: HTMLElement) => ShadowRoot | null } } }).chrome?.dom
   try {
     return el instanceof HTMLElement ? (dom?.openOrClosedShadowRoot?.(el) ?? null) : null
