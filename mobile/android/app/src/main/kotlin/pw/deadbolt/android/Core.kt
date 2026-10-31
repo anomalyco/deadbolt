@@ -165,12 +165,23 @@ class Core private constructor(private val device: MobileDevice) : VaultCore {
         call("sync")
     }
 
-    override suspend fun items(query: String): List<ItemRow> {
-        val array = call("items", "query" to query).getJSONArray("items")
-        return List(array.length()) { i ->
+    override suspend fun items(query: String): List<ItemRow> = withContext(Dispatchers.IO) {
+        val started = System.nanoTime()
+        val raw = try {
+            device.call(JSONObject().put("op", "items").put("query", query).toString())
+        } catch (e: MobileException) {
+            throw CoreError(e.message ?: "items failed")
+        }
+        val called = System.nanoTime()
+        val reply = JSONObject(raw)
+        if (!reply.optBoolean("ok")) throw CoreError(reply.optString("error", "items failed"))
+        val array = reply.getJSONArray("items")
+        val rows = List(array.length()) { i ->
             val o = array.getJSONObject(i)
             ItemRow(o.getString("id"), o.optString("title"), o.optString("username"), o.optString("kind"))
         }
+        Perf.split("items", called - started, System.nanoTime() - called)
+        rows
     }
 
     override suspend fun item(id: String): ItemDetail = call("item", "id" to id).let {

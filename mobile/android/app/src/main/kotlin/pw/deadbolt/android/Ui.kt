@@ -39,6 +39,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -52,6 +53,7 @@ import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -68,6 +70,9 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
@@ -101,15 +106,18 @@ fun DeadboltUi(
                 fadeIn(tween(Motion.OVERLAY_MS, easing = Settle)) togetherWith fadeOut(tween(Motion.CONTROL_MS))
             },
             label = "screen",
-        ) { _ ->
-            when (val screen = vault.screen) {
-                Vault.Screen.Loading -> Box(Modifier.fillMaxSize())
-                is Vault.Screen.Broken -> StateScreen("Deadbolt couldn't start", screen.message) {}
-                Vault.Screen.Pair -> PairScreen(vault)
-                Vault.Screen.Locked -> LockedScreen(vault, onBiometricUnlock)
-                Vault.Screen.Unlocked -> when {
-                    vault.approval != null -> ApprovalScreen(vault, onAllowApproval)
-                    vault.detail != null -> DetailScreen(vault)
+        ) { (screen, hasDetail, approvalId) ->
+            // Draw the screen this slot stands for, so the outgoing one fades out as
+            // itself (and its effects don't run twice) rather than as a second copy
+            // of the new one. The data shown is always the current state.
+            when (screen) {
+                Vault.Screen.Loading::class -> Box(Modifier.fillMaxSize())
+                Vault.Screen.Broken::class -> StateScreen("Deadbolt couldn't start", (vault.screen as? Vault.Screen.Broken)?.message) {}
+                Vault.Screen.Pair::class -> PairScreen(vault)
+                Vault.Screen.Locked::class -> LockedScreen(vault, onBiometricUnlock)
+                else -> when {
+                    approvalId != null -> ApprovalScreen(vault, onAllowApproval)
+                    hasDetail -> DetailScreen(vault)
                     else -> ListScreen(vault, onEnableBiometrics)
                 }
             }
@@ -159,10 +167,10 @@ private fun PairScreen(vault: Vault) {
         val mismatch = again.isNotEmpty() && again != passphrase
         StateScreen("Set up this phone", "Join the vault you already use on your computer. First, choose a passphrase for this phone.") {
             Field("Passphrase") {
-                Input(passphrase, { passphrase = it }, password = true, imeAction = ImeAction.Next)
+                Input(passphrase, { passphrase = it }, password = true, imeAction = ImeAction.Next, modifier = Modifier.semantics { contentDescription = "Passphrase" })
             }
             Field("Again") {
-                Input(again, { again = it }, password = true, onDone = ::submit)
+                Input(again, { again = it }, password = true, onDone = ::submit, modifier = Modifier.semantics { contentDescription = "Passphrase again" })
             }
             if (mismatch) Text("The passphrases don't match.", style = Deadbolt.type.textXsmall, color = Deadbolt.colors.danger)
             Spacer(Modifier.height(4.dp))
@@ -226,7 +234,26 @@ private fun LockedScreen(vault: Vault, onBiometricUnlock: () -> Unit) {
 private fun ListScreen(vault: Vault, onEnableBiometrics: () -> Unit) {
     val c = Deadbolt.colors
     val t = Deadbolt.type
-    LaunchedEffect(vault.items) { if (vault.items.isNotEmpty()) Perf.mark("list shown") }
+    val listState = rememberLazyListState()
+    val listedQuery = remember { arrayOf(vault.query) }
+    remember(vault.items) {
+        // New results for a different query start at the top, in the same frame,
+        // instead of keeping the old first row's place (rows are keyed by id).
+        // A sync's refresh of the same query keeps where the person scrolled.
+        if (listedQuery[0] != vault.query) {
+            listedQuery[0] = vault.query
+            listState.requestScrollToItem(0)
+        }
+    }
+    LaunchedEffect(vault.items) {
+        if (vault.items.isNotEmpty()) {
+            Perf.mark("list shown")
+            Perf.shown(vault.query.length, vault.items.size)
+            // The frame after the one that drew these rows: an upper bound on when they were visible.
+            withFrameNanos {}
+            Perf.event("visible len=${vault.query.length} rows=${vault.items.size} since query", System.nanoTime() - vault.searchedAt)
+        }
+    }
     Column(Modifier.fillMaxSize().imePadding()) {
         TopBar()
         Box(Modifier.padding(start = 14.dp, end = 14.dp, top = 10.dp, bottom = 6.dp)) {
@@ -234,6 +261,7 @@ private fun ListScreen(vault: Vault, onEnableBiometrics: () -> Unit) {
         }
         LazyColumn(
             Modifier.weight(1f),
+            state = listState,
             contentPadding = PaddingValues(horizontal = 8.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
@@ -250,7 +278,7 @@ private fun ListScreen(vault: Vault, onEnableBiometrics: () -> Unit) {
             items(vault.items, key = { it.id }) { item ->
                 ItemRowView(item) { vault.openItem(item.id) }
             }
-            if (vault.items.isEmpty()) {
+            if (vault.items.isEmpty() && vault.screen == Vault.Screen.Unlocked) { // not while fading out on lock
                 item(key = "empty") {
                     Text(
                         if (vault.query.isEmpty()) "No items yet." else "Nothing matches “${vault.query}”.",
@@ -305,11 +333,11 @@ private fun DetailScreen(vault: Vault) {
                     }
                     if (item.username.isNotEmpty()) {
                         divider()
-                        DetailLine("Username", item.username, action = "Copy", onAction = vault::copyUsername)
+                        DetailLine("Username", item.username, action = "Copy", actionDescription = "Copy username", onAction = vault::copyUsername)
                     }
                     if (item.hasPassword) {
                         divider()
-                        DetailLine("Password", "••••••••••••", action = "Copy", onAction = vault::copyPassword)
+                        DetailLine("Password", "••••••••••••", valueDescription = "Hidden", action = "Copy", actionDescription = "Copy password", onAction = vault::copyPassword)
                     }
                     if (item.hasOtp) {
                         divider()
@@ -525,7 +553,7 @@ private fun Button(text: String, primary: Boolean = false, enabled: Boolean = tr
 
 /** theme.css `.link`: muted medium text that darkens when pressed. */
 @Composable
-private fun Link(text: String, enabled: Boolean = true, onClick: () -> Unit) {
+private fun Link(text: String, enabled: Boolean = true, description: String? = null, onClick: () -> Unit) {
     val c = Deadbolt.colors
     val interaction = remember { MutableInteractionSource() }
     val pressed by interaction.collectIsPressedAsState()
@@ -533,11 +561,18 @@ private fun Link(text: String, enabled: Boolean = true, onClick: () -> Unit) {
     Box(
         Modifier
             .heightIn(min = 44.dp)
+            .widthIn(min = 44.dp)
             .clickable(interaction, indication = null, enabled = enabled, role = Role.Button, onClick = onClick)
             .padding(horizontal = 4.dp),
         contentAlignment = Alignment.Center,
     ) {
-        Text(text, style = Deadbolt.type.textXsmall.copy(fontWeight = Deadbolt.type.uiMedium.fontWeight), color = color.copy(alpha = if (enabled) 1f else 0.5f))
+        Text(
+            text,
+            style = Deadbolt.type.textXsmall.copy(fontWeight = Deadbolt.type.uiMedium.fontWeight),
+            color = color.copy(alpha = if (enabled) 1f else 0.5f),
+            // "Copy" alone is ambiguous to a screen reader on a page of them.
+            modifier = if (description != null) Modifier.semantics { contentDescription = description } else Modifier,
+        )
     }
 }
 
@@ -664,7 +699,8 @@ private fun ItemRowView(item: ItemRow, onClick: () -> Unit) {
 private fun Avatar(title: String, size: Int = 32) {
     val c = Deadbolt.colors
     Box(
-        Modifier.size(size.dp).clip(RoundedCornerShape(Radius.lg)).background(c.layer02),
+        // Decoration: the title next to it is what a screen reader should say.
+        Modifier.size(size.dp).clip(RoundedCornerShape(Radius.lg)).background(c.layer02).clearAndSetSemantics {},
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -676,7 +712,14 @@ private fun Avatar(title: String, size: Int = 32) {
 }
 
 @Composable
-private fun DetailLine(label: String, value: String, action: String? = null, onAction: (() -> Unit)? = null) {
+private fun DetailLine(
+    label: String,
+    value: String,
+    valueDescription: String? = null,
+    action: String? = null,
+    actionDescription: String? = null,
+    onAction: (() -> Unit)? = null,
+) {
     val c = Deadbolt.colors
     Row(
         Modifier.fillMaxWidth().heightIn(min = 56.dp).padding(start = 12.dp, end = 8.dp, top = 8.dp, bottom = 8.dp),
@@ -684,9 +727,16 @@ private fun DetailLine(label: String, value: String, action: String? = null, onA
     ) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(4.dp)) {
             Text(label, style = Deadbolt.type.smallMedium, color = c.muted)
-            Text(value, style = Deadbolt.type.ui, color = c.text, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Text(
+                value,
+                style = Deadbolt.type.ui,
+                color = c.text,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = if (valueDescription != null) Modifier.semantics { contentDescription = valueDescription } else Modifier,
+            )
         }
-        if (action != null && onAction != null) Link(action, onClick = onAction)
+        if (action != null && onAction != null) Link(action, description = actionDescription, onClick = onAction)
     }
 }
 
@@ -711,7 +761,7 @@ private fun CodeLine(code: OtpCode?, onCopy: () -> Unit) {
                 }
             }
         }
-        if (code != null) Link("Copy", onClick = onCopy)
+        if (code != null) Link("Copy", description = "Copy one-time code", onClick = onCopy)
     }
 }
 

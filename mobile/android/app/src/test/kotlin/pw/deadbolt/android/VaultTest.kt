@@ -52,8 +52,15 @@ class VaultTest {
         override suspend fun sync() {
             calls += "sync"
         }
-        override suspend fun items(query: String) =
-            listOf(ItemRow("1", "Example", "user@example.com", "login")).filter { query.isEmpty() || "example".contains(query) }
+        /** When set, each items() call waits here, so a test can type while one runs. */
+        var itemsGate: (suspend (String) -> Unit)? = null
+        val queries = mutableListOf<String>()
+        var rows = listOf(ItemRow("1", "Example", "user@example.com", "login"), ItemRow("2", "Other", "o@example.com", "login"))
+        override suspend fun items(query: String): List<ItemRow> {
+            queries += query
+            itemsGate?.invoke(query)
+            return rows.filter { query.isEmpty() || it.title.lowercase().contains(query) }
+        }
         override suspend fun item(id: String) = ItemDetail(id, "Example", "user@example.com", "https://example.com", true, true)
         override suspend fun secret(id: String, field: String) = "synthetic-secret"
         override suspend fun code(id: String) = OtpCode("123456", 30, 30)
@@ -156,7 +163,7 @@ class VaultTest {
         s.vault.unlock("right")
         runCurrent()
         assertEquals(Vault.Screen.Unlocked, s.vault.screen)
-        assertEquals(listOf("Example"), s.vault.items.map { it.title })
+        assertEquals(listOf("Example", "Other"), s.vault.items.map { it.title })
     }
 
     @Test
@@ -666,5 +673,110 @@ class VaultTest {
         s.biometrics.unseal.complete(null) // dismissed
         runCurrent()
         assertFalse(s.vault.shouldAutoPrompt())
+    }
+
+    // Search: immediate, one core call at a time, latest query wins.
+
+    @Test
+    fun searchRunsWithoutATypingPause() = runTest {
+        val s = setup()
+        s.vault.unlock("right")
+        runCurrent()
+        s.vault.search("ex")
+        runCurrent() // no virtual time passes
+        assertEquals(listOf("Example"), s.vault.items.map { it.title })
+    }
+
+    @Test
+    fun fastTypingRunsTheLatestQueryAndNeverShowsAStaleOne() = runTest {
+        val s = setup()
+        s.vault.unlock("right")
+        runCurrent()
+        val gates = mutableMapOf<String, CompletableDeferred<Unit>>()
+        s.core.itemsGate = { q -> gates.getOrPut(q) { CompletableDeferred() }.await() }
+        s.core.queries.clear()
+        s.vault.search("o")
+        runCurrent()
+        s.vault.search("ot")
+        s.vault.search("oth")
+        runCurrent()
+        assertEquals("one call at a time", listOf("o"), s.core.queries)
+        gates.getValue("o").complete(Unit)
+        runCurrent()
+        assertEquals("the stale \"o\" result is not shown", listOf("Example", "Other"), s.vault.items.map { it.title })
+        assertEquals("skips \"ot\", runs the latest", listOf("o", "oth"), s.core.queries)
+        gates.getValue("oth").complete(Unit)
+        runCurrent()
+        assertEquals(listOf("Other"), s.vault.items.map { it.title })
+        assertEquals("oth", s.vault.query)
+    }
+
+    @Test
+    fun clearingTheSearchShowsTheFullListAtOnce() = runTest {
+        val s = setup()
+        s.vault.unlock("right")
+        runCurrent()
+        s.vault.search("oth")
+        runCurrent()
+        s.core.queries.clear()
+        s.core.itemsGate = { CompletableDeferred<Unit>().await() } // the core would hang
+        s.vault.search("")
+        assertEquals(listOf("Example", "Other"), s.vault.items.map { it.title })
+        runCurrent()
+        assertTrue("no core call for the cached full list", s.core.queries.isEmpty())
+    }
+
+    @Test
+    fun aSyncRefreshesTheCachedFullList() = runTest {
+        val s = setup()
+        s.vault.unlock("right")
+        runCurrent()
+        s.core.rows = s.core.rows + ItemRow("3", "New", "n@example.com", "login")
+        s.vault.syncNow()
+        runCurrent()
+        assertEquals(listOf("Example", "Other", "New"), s.vault.items.map { it.title })
+    }
+
+    @Test
+    fun aSyncDuringASearchRerunsItAfterwardsWithoutASecondCoreCall() = runTest {
+        val s = setup()
+        s.vault.unlock("right")
+        runCurrent()
+        val gates = mutableListOf<CompletableDeferred<Unit>>()
+        s.core.itemsGate = { CompletableDeferred<Unit>().also { gates += it }.await() }
+        s.core.queries.clear()
+        s.vault.search("o")
+        runCurrent()
+        s.core.rows = s.core.rows + ItemRow("3", "Oak", "k@example.com", "login")
+        s.vault.syncNow()
+        runCurrent()
+        assertEquals("still one call at a time", listOf("o"), s.core.queries)
+        gates[0].complete(Unit)
+        runCurrent()
+        assertEquals("the query runs again after the sync", listOf("o", "o"), s.core.queries)
+        gates[1].complete(Unit)
+        runCurrent()
+        assertEquals(listOf("Other", "Oak"), s.vault.items.map { it.title })
+        s.core.itemsGate = null
+        s.vault.search("")
+        runCurrent()
+        assertEquals("the pre-sync full list was never cached", listOf("Example", "Other", "Oak"), s.vault.items.map { it.title })
+    }
+
+    @Test
+    fun lockingDuringASearchDropsItsResult() = runTest {
+        val s = setup()
+        s.vault.unlock("right")
+        runCurrent()
+        val gate = CompletableDeferred<Unit>()
+        s.core.itemsGate = { gate.await() }
+        s.vault.search("ex")
+        runCurrent()
+        s.vault.lock()
+        runCurrent()
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(s.vault.items.isEmpty())
+        assertEquals("", s.vault.query)
     }
 }

@@ -35,7 +35,6 @@ class Vault(
         const val JOIN_POLL_MS = 1_000L
         const val APPROVAL_POLL_MS = 1_000L
         private const val IDLE_CHECK_MS = 10_000L
-        private const val SEARCH_DEBOUNCE_MS = 150L
     }
 
     sealed interface Screen {
@@ -90,6 +89,13 @@ class Vault(
     private var starting: Job? = null
     private var joinJob: Job? = null
     private var searchJob: Job? = null
+    private var allItems: List<ItemRow>? = null
+
+    /** Bumped when the vault's contents may have changed (a sync): results fetched before it aren't cached. */
+    private var searchGen = 0L
+
+    /** When the query last changed ([System.nanoTime]), for the list's visible-latency mark. */
+    var searchedAt = 0L; private set
     private var codeJob: Job? = null
     private var biometricJob: Job? = null
     private var approvalJob: Job? = null
@@ -278,8 +284,10 @@ class Vault(
     fun unlock(passphrase: String) {
         if (busy) return
         invalidate() // a passphrase unlock replaces any biometric prompt
+        val submitted = System.nanoTime()
         act { core, started ->
             core.unlock(passphrase)
+            Perf.event("unlock passphrase core", System.nanoTime() - submitted)
             if (started != epoch) {
                 // Locked or left while the passphrase was checked: don't stay unlocked.
                 runCatching { core.lock() }
@@ -346,6 +354,8 @@ class Vault(
         unlockedJobs.forEach(Job::cancel)
         unlockedJobs = emptyList()
         searchJob?.cancel()
+        searchJob = null
+        allItems = null
         closeItem()
         items = emptyList()
         query = ""
@@ -367,7 +377,9 @@ class Vault(
             try {
                 key = biometrics.unseal(core.biometricToken(), prompter, "Unlock Deadbolt", "Use passphrase") ?: return@launch
                 if (started != epoch) return@launch
+                val unsealed = System.nanoTime()
                 core.unlockBiometric(key)
+                Perf.event("unlock biometric core", System.nanoTime() - unsealed)
                 if (started != epoch) runCatching { core.lock() }
                 refresh()
             } catch (e: BiometricInvalidated) {
@@ -490,20 +502,55 @@ class Vault(
 
     // Items.
 
+    /**
+     * Searches as soon as the query changes, with no typing pause. One core call
+     * runs at a time (the Rust call can't be interrupted); a query typed while it
+     * runs replaces any older waiting one, and the latest query always runs next,
+     * so fast typing never starves the list. A result only shows if its query is
+     * still the current one. The full list (empty query) is kept from the last
+     * fetch, so clearing the search shows it at once; sync and lock drop it.
+     */
     fun search(text: String) {
         query = text
+        searchedAt = System.nanoTime()
+        runSearch()
+    }
+
+    private fun runSearch() {
         val core = core ?: return
-        searchJob?.cancel()
+        if (query.isEmpty()) allItems?.let { items = it }
+        if (searchJob?.isActive == true) return // the running loop picks up the new query
         searchJob = scope.launch {
-            if (text.isNotEmpty()) delay(SEARCH_DEBOUNCE_MS)
-            try {
-                val started = System.nanoTime()
-                items = core.items(text)
-                Perf.search(text, items.size, System.nanoTime() - started)
-            } catch (e: CoreError) {
-                error = e.message
+            while (true) {
+                val q = query
+                val gen = searchGen
+                if (q.isEmpty() && allItems != null) {
+                    items = allItems!!
+                } else {
+                    try {
+                        val started = System.nanoTime()
+                        val found = core.items(q)
+                        Perf.search(q, found.size, System.nanoTime() - started)
+                        if (q.isEmpty() && gen == searchGen) allItems = found
+                        if (q == query) items = found
+                    } catch (e: CoreError) {
+                        error = e.message
+                    }
+                }
+                if (q == query && gen == searchGen) break
             }
         }
+    }
+
+    /**
+     * Forgets cached results and asks the core again. A search already running
+     * isn't cancelled (its Rust call would keep running beside the new one): its
+     * loop sees the new generation and runs the current query once more.
+     */
+    private fun refreshSearch() {
+        searchGen += 1
+        allItems = null
+        runSearch()
     }
 
     fun syncNow() {
@@ -518,7 +565,7 @@ class Vault(
             core.sync()
             syncedAt = System.currentTimeMillis()
             syncError = null
-            search(query)
+            refreshSearch()
             detail?.let { d -> runCatching { detail = core.item(d.id) } }
         } catch (e: CoreError) {
             syncError = e.message
