@@ -16,6 +16,7 @@
 //! A passkey's private key never leaves the agent: items come back without
 //! it (see `passkeys`).
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -44,7 +45,10 @@ pub use deadbolt_core::listing::{host, label};
 mod tests;
 
 pub(super) fn matches(item: &Item, query: &[String], has_any_tagged: bool) -> bool {
-    let parsed = Query::from_words(query);
+    matches_parsed(item, &Query::from_words(query), has_any_tagged)
+}
+
+fn matches_parsed(item: &Item, parsed: &Query, has_any_tagged: bool) -> bool {
     if parsed.favorite && !item.favorite {
         return false;
     }
@@ -208,31 +212,62 @@ impl Listing {
     }
 
     pub(super) fn find(&self, query: &[String]) -> Result<&Item> {
-        let any_tagged = self.has_any_tagged();
-        let found: Vec<&Item> = self
-            .items
-            .iter()
-            .filter(|i| matches(i, query, any_tagged))
-            .collect();
-        let query = query.join(" ");
-        match found.as_slice() {
-            [item] => Ok(item),
-            [] if self.deleted.is_some() => bail!("no deleted item matches {query:?}"),
-            [] => bail!("no item matches {query:?}"),
-            many => {
-                let mut lines: Vec<String> = many
-                    .iter()
-                    .map(|item| line(&self.info(item, false, false)))
-                    .collect();
-                lines.sort();
-                bail!(
-                    "{query:?} matches {} items; add words or use the id:\n{}",
-                    many.len(),
-                    lines.join("\n")
-                )
-            }
-        }
+        let parsed = Query::from_words(query);
+        let tagged = parsed.any_tag && self.has_any_tagged();
+        unique_match(
+            self.items
+                .iter()
+                .filter(|i| matches_parsed(i, &parsed, tagged)),
+            query,
+            self.deleted.is_some(),
+            |item| self.info(item, false, false),
+        )
     }
+}
+
+/// Single-target writes search one materialized item at a time. Only on an
+/// ambiguous query do we retain multiple rows, and then just public labels.
+pub(super) fn find_live(vault: &Vault, query: &[String]) -> Result<Item> {
+    let parsed = Query::from_words(query);
+    let tagged = parsed.any_tag && vault.iter_items().any(|i| !i.tags.is_empty());
+    unique_match(
+        vault
+            .iter_items()
+            .filter(|item| matches_parsed(item, &parsed, tagged)),
+        query,
+        false,
+        |item| live_summary(vault, item),
+    )
+}
+
+fn unique_match<T: Borrow<Item>>(
+    mut found: impl Iterator<Item = T>,
+    query: &[String],
+    deleted: bool,
+    describe: impl Fn(&Item) -> ItemInfo,
+) -> Result<T> {
+    let Some(first) = found.next() else {
+        let query = query.join(" ");
+        if deleted {
+            bail!("no deleted item matches {query:?}");
+        }
+        bail!("no item matches {query:?}");
+    };
+    let Some(second) = found.next() else {
+        return Ok(first);
+    };
+    let mut lines: Vec<_> = [first, second]
+        .into_iter()
+        .chain(found)
+        .map(|item| line(&describe(item.borrow())))
+        .collect();
+    lines.sort();
+    let query = query.join(" ");
+    bail!(
+        "{query:?} matches {} items; add words or use the id:\n{}",
+        lines.len(),
+        lines.join("\n")
+    )
 }
 
 fn summarize(
@@ -808,7 +843,7 @@ pub fn set_with(
     remove_tags: &[String],
 ) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
-    let item = Listing::new(s.vault(&vault)).find(query)?.clone();
+    let item = find_live(s.vault(&vault), query)?;
     let set = fields(&item.kind, Some(&item), inputs)?;
     let mut seen: BTreeSet<&str> = set.iter().map(|(name, _)| name.as_str()).collect();
     for field in unset {
@@ -939,7 +974,7 @@ pub fn unset(
     field: &str,
 ) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
-    let item = Listing::new(s.vault(&vault)).find(query)?.clone();
+    let item = find_live(s.vault(&vault), query)?;
     if !item.fields.contains_key(field) {
         bail!("{} has no field {field}", label(&item));
     }
