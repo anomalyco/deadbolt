@@ -218,19 +218,17 @@ impl Callers {
 }
 
 /// The app of the agent's own bundle, `Deadbolt.app/Contents/MacOS/Deadbolt`
-/// for its `Contents/Helpers/deadbolt`, symlinks resolved. A development
-/// build also takes the `deadbolt-ui` beside it.
+/// for its `Contents/Helpers/deadbolt`, symlinks resolved. Outside a bundle
+/// there is none: `deadbolt ui` there runs the agent's own code under its own
+/// identity, so it's a caller like the CLI.
 #[cfg(any(test, target_os = "macos"))]
 fn app_beside(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
     let contents = dir.parent()?;
-    let app = if dir.file_name()? == "Helpers" && contents.file_name()? == "Contents" {
-        contents.join("MacOS/Deadbolt")
-    } else if cfg!(debug_assertions) {
-        dir.join("deadbolt-ui")
-    } else {
+    if dir.file_name()? != "Helpers" || contents.file_name()? != "Contents" {
         return None;
-    };
+    }
+    let app = contents.join("MacOS/Deadbolt");
     Some(app.canonicalize().unwrap_or(app))
 }
 
@@ -262,6 +260,9 @@ fn browser_host_args(args: &[String]) -> bool {
 /// A Developer ID build knows its own code by team and identifier. An
 /// ad-hoc build knows it by path and code hash: the peer runs from the
 /// agent's own binary or its bundle's app, and is the code signed there.
+/// The app must run from the agent's bundle either way: its executable is
+/// the whole `deadbolt` binary signed as the app, which runs only the app
+/// there, but a copy elsewhere would run CLI commands under its signature.
 pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
     match evidence {
         Evidence::Signature {
@@ -277,7 +278,8 @@ pub fn classify(evidence: &Evidence, args: &[String]) -> (CallerClass, Check) {
                     code.runs_from(known.path) && code.signed_as(known.file, None, id)
                 }),
             };
-            let class = if is(app, APP_ID) {
+            let in_bundle = app.is_some_and(|known| code.runs_from(known.path));
+            let class = if in_bundle && is(app, APP_ID) {
                 CallerClass::App
             } else if is(autofill, AUTOFILL_ID) {
                 CallerClass::AutoFill
@@ -430,7 +432,16 @@ fn label(class: CallerClass, program: Option<&str>, process: &Process) -> String
         .map(|a| a.name.trim_start_matches('-'))
         .find(|name| SHELLS.contains(name))
         .map(str::to_string);
-    let program = program.map(base);
+    // The app outside a bundle is this binary run as `deadbolt ui` (labels
+    // only: a process can rewrite its own arguments).
+    let ui = process.args.get(1).is_some_and(|a| a == crate::app::UI);
+    let program = program.map(|p| {
+        if ui {
+            format!("{} ui", base(p))
+        } else {
+            base(p)
+        }
+    });
     let mut parts: Vec<String> = Vec::new();
     for part in [host, shell, program].into_iter().flatten() {
         if parts.last() != Some(&part) {
@@ -628,51 +639,76 @@ mod tests {
     }
 
     /// A Developer ID build's app is the app its own team signed as
-    /// `pw.deadbolt.app`, and nothing ad-hoc, wherever it runs from.
+    /// `pw.deadbolt.app`, and nothing ad-hoc, run from the agent's bundle:
+    /// that executable is the whole `deadbolt`, so a copy elsewhere could run
+    /// CLI commands under the app's signature.
     #[test]
-    fn a_signed_build_knows_its_app_by_team_and_identifier() {
+    fn a_signed_build_knows_its_app_by_team_and_identifier_in_its_bundle() {
         let team = Some("TEAM123456");
-        let path = Path::new("/Applications/Deadbolt.app/Contents/MacOS/Deadbolt");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let path = root.join("MacOS/Deadbolt");
+        let elsewhere = root.join("Copy");
+        for file in [&path, &elsewhere] {
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(file, b"").unwrap();
+        }
         let class_of = |code: CodeSignature, args: &[String]| {
             let evidence = Evidence::Signature {
                 code: &code,
                 exe: None,
-                app: None,
+                app: Some(Known {
+                    path: &path,
+                    file: None,
+                }),
                 autofill: None,
                 team,
             };
             classify(&evidence, args).0
         };
         assert_eq!(
-            class_of(at(path, "a1", team, APP_ID), &[]),
+            class_of(at(&path, "a1", team, APP_ID), &[]),
             CallerClass::App
         );
         assert_eq!(
-            class_of(at(path, "af1", team, AUTOFILL_ID), &[]),
-            CallerClass::AutoFill
-        );
-        assert_eq!(
-            class_of(at(path, "af1", None, AUTOFILL_ID), &[]),
+            class_of(at(&elsewhere, "a1", team, APP_ID), &[]),
             CallerClass::Caller
         );
         assert_eq!(
-            class_of(at(path, "a1", None, APP_ID), &[]),
+            class_of(at(&elsewhere, "af1", team, AUTOFILL_ID), &[]),
+            CallerClass::AutoFill
+        );
+        assert_eq!(
+            class_of(at(&elsewhere, "af1", None, AUTOFILL_ID), &[]),
+            CallerClass::Caller
+        );
+        assert_eq!(
+            class_of(at(&path, "a1", None, APP_ID), &[]),
             CallerClass::Caller
         );
         let other = Some("OTHER12345");
         assert_eq!(
-            class_of(at(path, "a1", other, APP_ID), &[]),
+            class_of(at(&path, "a1", other, APP_ID), &[]),
             CallerClass::Caller
         );
         assert_eq!(
-            class_of(at(path, "a1", team, AGENT_ID), &[]),
+            class_of(at(&path, "a1", team, AGENT_ID), &[]),
             CallerClass::Caller
         );
         let host = vec!["deadbolt".into(), "chrome-extension://abc/".into()];
         assert_eq!(
-            class_of(at(path, "e1", team, AGENT_ID), &host),
+            class_of(at(&elsewhere, "e1", team, AGENT_ID), &host),
             CallerClass::BrowserHost
         );
+        // Without a bundle beside the agent, nothing is the app.
+        let evidence = Evidence::Signature {
+            code: &at(&path, "a1", team, APP_ID),
+            exe: None,
+            app: None,
+            autofill: None,
+            team,
+        };
+        assert_eq!(classify(&evidence, &[]).0, CallerClass::Caller);
     }
 
     /// Linux names a peer's program from `/proc`, which a process can race:
@@ -692,6 +728,14 @@ mod tests {
             Some("/usr/lib/deadbolt/deadbolt-ui")
         );
         assert_eq!(info.label, "deadbolt-ui · unverified (Linux)");
+        let app = Process {
+            exe: Some("/home/kit/.local/bin/deadbolt".into()),
+            args: vec!["deadbolt".into(), "ui".into()],
+            ..Process::default()
+        };
+        let info = from_proc(peer(78, 1), app);
+        assert_eq!(info.class, CallerClass::Caller);
+        assert_eq!(info.label, "deadbolt ui · unverified (Linux)");
     }
 
     #[test]
@@ -755,11 +799,8 @@ mod tests {
             ))
         );
         assert_eq!(autofill_beside(Path::new("/w/target/debug/deadbolt")), None);
-        // Only a development build takes the app beside it.
-        assert_eq!(
-            app_beside(Path::new("/w/target/debug/deadbolt")),
-            cfg!(debug_assertions).then(|| PathBuf::from("/w/target/debug/deadbolt-ui"))
-        );
+        // Outside a bundle there's no app, development builds included.
+        assert_eq!(app_beside(Path::new("/w/target/debug/deadbolt")), None);
     }
 
     /// The CLI and the app send a passphrase only to an agent running the

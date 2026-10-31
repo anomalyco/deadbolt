@@ -140,7 +140,8 @@ pub fn classify(exe: &Path, macos: bool, exists: impl Fn(&Path) -> bool) -> Inst
     Install::Standalone(dir)
 }
 
-/// The release service's name for this build's platform.
+/// The release service's name for this build's platform: the static musl
+/// build follows its own target, `linux-<arch>-musl`.
 fn target() -> Result<String> {
     let os = match std::env::consts::OS {
         "macos" => "macos",
@@ -152,7 +153,12 @@ fn target() -> Result<String> {
         "x86_64" => "x64",
         arch => bail!("no Deadbolt releases for {arch}"),
     };
-    Ok(format!("{os}-{arch}"))
+    let libc = if cfg!(target_env = "musl") {
+        "-musl"
+    } else {
+        ""
+    };
+    Ok(format!("{os}-{arch}{libc}"))
 }
 
 /// The channel this build was published on; none for builds from source.

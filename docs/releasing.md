@@ -32,7 +32,8 @@ shown by `deadbolt --version`, e.g. `deadbolt 0.0.0-dev-42 (dev)`), which
 ```text
 Release (push dev | production | v*, or workflow_dispatch: channel)
 ├─ plan               plan.sh: channel, version, tag, notes                               [build]
-├─ build-linux-*      deadbolt-<v>-linux-{x64,arm64}.tar.gz (musl, static)                [build]
+├─ build-linux-*      deadbolt-<v>-linux-{x64,arm64}.tar.gz (glibc 2.28+, app built in)  [build]
+├─ build-linux-*-musl deadbolt-<v>-linux-{x64,arm64}-musl.tar.gz (static, no app)         [build]
 ├─ build-extension    deadbolt-extension-<v>.zip (manifest version stamped)                [build]
 ├─ build-extension-standalone
 │                     deadbolt-extension-standalone-<v>.zip (wasm vault; the only job
@@ -67,6 +68,25 @@ Release (push dev | production | v*, or workflow_dispatch: channel)
 boundary. Protect `.github/` with CODEOWNERS and a ruleset on `dev` and
 `production` (pull requests with code-owner review), as Hex does.
 
+### Linux
+
+Two builds of `deadbolt` per architecture:
+
+- **glibc, with the app** (`linux-x64`, `linux-arm64`): built in
+  `quay.io/pypa/manylinux_2_28` (AlmaLinux 8, glibc 2.28), pinned by tag and
+  digest, so it runs on glibc 2.28 and later (Debian 10, Ubuntu 18.10,
+  RHEL 8 and newer). The runner's own Ubuntu 24.04 would require glibc 2.39,
+  as Hex's builds do; 2.28 is the manylinux baseline Python wheels use. Rune
+  loads Wayland, X11 and the GPU drivers when a window opens, so the job fails
+  unless every `NEEDED` library is glibc's (libc, libm, libdl, libpthread,
+  the loader) or libgcc_s, and no symbol needs a glibc newer than 2.28. It then runs `--version`,
+  `--help`, `status`, `agent status`, `init`, `new`, `ls` and `app` (which
+  must say there's no graphical session) in AlmaLinux 8 minimal, which has no display and no
+  desktop libraries.
+- **musl, static, without the app** (`linux-x64-musl`, `linux-arm64-musl`):
+  `--no-default-features`, for Alpine, containers and glibc older than 2.28.
+  The job checks it's static and that `deadbolt app` says the app isn't in it.
+
 ### macOS and the Touch ID helper
 
 `deadbolt` pins the exact bytes, signature included, of the `deadbolt-enclave`
@@ -81,6 +101,9 @@ bytes change. `verify-macos` checks every architecture slice's pin.
   Mac, at about twice the size. The service lists the same files under both
   `macos-arm64` and `macos-x64`, so an updater looks up its own target as
   Hex's does.
+- `Contents/MacOS/Deadbolt` and `Contents/Helpers/deadbolt` are the same
+  `deadbolt` (the app built in), built once and signed twice, so the agent
+  tells the app from the CLI ([app.md](app.md#one-bundle-one-agent)).
 - Code identities: `pw.deadbolt.app` (the app), `pw.deadbolt.cli` (`deadbolt`,
   in the app and the tarballs), `pw.deadbolt.app.enclave` (the helper), all
   Developer ID team `5NZ4Q7NXJ4` with the hardened runtime and a secure
@@ -112,7 +135,8 @@ Deadbolt has three artifacts, each with a manifest at
 
 | Artifact | Targets | File |
 | --- | --- | --- |
-| `cli` | `macos-arm64`, `macos-x64`, `linux-x64`, `linux-arm64` | `deadbolt-<v>-{darwin,linux}-<arch>.tar.gz` |
+| `cli` | `macos-arm64`, `macos-x64`, `linux-x64`, `linux-arm64` (glibc, app built in) | `deadbolt-<v>-{darwin,linux}-<arch>.tar.gz` |
+| | `linux-x64-musl`, `linux-arm64-musl` (static, no app) | `deadbolt-<v>-linux-<arch>-musl.tar.gz` |
 | `desktop` | `macos-arm64`, `macos-x64` | `Deadbolt-<v>-macos-universal.zip` (root `Deadbolt.app`, for an updater) |
 | | `macos-arm64-dmg`, `macos-x64-dmg` | `Deadbolt-<v>-macos-universal.dmg` |
 | `extension` | `chromium` | `deadbolt-extension-<v>.zip` (unpacked MV3 build with its fixed key) |
@@ -124,7 +148,10 @@ downloads every published URL and compares it with the local bytes
 safe. Distributions: `cli` lists `brew` (formula `anomalyco/tap/deadbolt`),
 `desktop` lists `brew` (cask `anomalyco/tap/deadbolt`); each gains a version
 only after the tap serves it (`record-brew`). `site/public/install` reads the
-`cli` manifest for `${DEADBOLT_CHANNEL:-stable}` and checks size and SHA-256;
+`cli` manifest for `${DEADBOLT_CHANNEL:-stable}` and checks size and SHA-256.
+On Linux it installs the glibc build unless the system is musl (`/lib/ld-musl-*`,
+or `ldd --version` says musl) or its glibc is older than 2.28, which get the
+`-musl` build (`DEADBOLT_LIBC=gnu|musl` overrides);
 `DEADBOLT_VERSION` installs a pinned stable version from its GitHub release.
 
 ## Updater
@@ -162,7 +189,8 @@ channel's current release isn't the build it runs, a rollback included.
     (`<brew prefix>/Caskroom/deadbolt`) gets the manifest's
     `brew upgrade --cask` instead.
   - Anything else (the install script, a tarball, a build): the `cli`
-    artifact's tarball for this OS and architecture, read in-process: only
+    artifact's tarball for this OS and architecture (`linux-<arch>-musl` for
+    the static build), read in-process: only
     regular files named `deadbolt` and `deadbolt-enclave` are written, never
     links, devices, other names or owners, into the 0700 staging directory
     beside the install. On macOS a release without `deadbolt-enclave` doesn't

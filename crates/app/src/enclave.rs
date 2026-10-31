@@ -1,13 +1,21 @@
-//! The `deadbolt-enclave` beside the agent, checked against the SHA-256 this
-//! build pinned (`build.rs`) before the app trusts what it says about the
+//! The `deadbolt-enclave` beside the agent, checked against the SHA-256 the
+//! `deadbolt` binary this app is built into pinned (its `build.rs`, handed
+//! over through [`crate::Host`]) before the app trusts what it says about the
 //! agent, as `deadbolt` checks it before every use (docs/touch-id.md). A
 //! universal helper matches by the slice for this Mac's architecture.
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use sha2::{Digest, Sha256};
 
-const PINNED: &str = env!("DEADBOLT_ENCLAVE_SHA256");
+/// The helper's SHA-256, set once as the app starts; empty when unset.
+static PINNED: OnceLock<&'static str> = OnceLock::new();
+
+pub(crate) fn pin(sha256: &'static str) {
+    // The first pin wins: the app starts once per process.
+    PINNED.get_or_init(|| sha256);
+}
 
 const FAT_MAGIC: [u8; 4] = [0xca, 0xfe, 0xba, 0xbe];
 const CPU_TYPE_X86_64: u32 = 0x0100_0007;
@@ -24,14 +32,18 @@ pub fn verify(helper: &Path) -> Result<(), String> {
     if !cfg!(target_os = "macos") {
         return Ok(());
     }
-    verify_at(helper, PINNED, CURRENT_CPU)
+    verify_at(
+        helper,
+        PINNED.get().copied().unwrap_or_default(),
+        CURRENT_CPU,
+    )
 }
 
 fn verify_at(helper: &Path, expected: &str, cpu: u32) -> Result<(), String> {
     if expected.len() != 64 {
         return Err(format!(
             "this build of Deadbolt has no pinned {}, so it can't check its agent. \
-             Reinstall Deadbolt (or build it again, after deadbolt-cli)",
+             Reinstall Deadbolt",
             helper.display()
         ));
     }
@@ -43,8 +55,7 @@ fn verify_at(helper: &Path, expected: &str, cpu: u32) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!(
-            "{} isn't the one this Deadbolt was built with. \
-             Reinstall Deadbolt (or build it again, after deadbolt-cli)",
+            "{} isn't the one this Deadbolt was built with. Reinstall Deadbolt",
             helper.display()
         ))
     }

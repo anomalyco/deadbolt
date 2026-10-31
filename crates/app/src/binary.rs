@@ -67,36 +67,17 @@ pub fn resolved(exe: PathBuf) -> PathBuf {
     std::fs::canonicalize(&exe).unwrap_or(exe)
 }
 
-/// The agent program for the app at `exe` ([`resolved`]).
-pub fn discover(
-    exe: Option<&Path>,
-    override_bin: Option<&OsStr>,
-    path: &OsStr,
-    home: Option<&Path>,
-) -> PathBuf {
+/// The agent program for the app at `exe` ([`resolved`]): the bundle's own
+/// helper inside Deadbolt.app, else `override_bin` (`DEADBOLT_BIN`), else
+/// this very binary, which is `deadbolt` with the app built in.
+pub fn discover(exe: Option<&Path>, override_bin: Option<&OsStr>) -> PathBuf {
     if let Some(binary) = exe.and_then(bundled) {
         return binary;
     }
     if let Some(binary) = override_bin.filter(|s| !s.is_empty()) {
         return binary.into();
     }
-    let dir = exe.and_then(Path::parent);
-    let sibling = dir.map(|p| p.join("deadbolt"));
-    // `<prefix>/lib/deadbolt/deadbolt-ui` runs `<prefix>/bin/deadbolt`.
-    let prefix = dir
-        .filter(|d| d.ends_with("lib/deadbolt"))
-        .and_then(|d| d.parent()?.parent())
-        .map(|p| p.join("bin/deadbolt"));
-    sibling
-        .into_iter()
-        .chain(prefix)
-        .chain(
-            search_dirs(path, home)
-                .into_iter()
-                .map(|p| p.join("deadbolt")),
-        )
-        .find(|p| executable(p))
-        .unwrap_or_else(|| "deadbolt".into())
+    exe.map_or_else(|| "deadbolt".into(), Path::to_path_buf)
 }
 
 pub fn executable(path: &Path) -> bool {
@@ -107,18 +88,12 @@ pub fn executable(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     #[test]
     fn bundle_wins_even_when_missing_and_override_is_set() {
         let exe = Path::new("/Applications/Deadbolt.app/Contents/MacOS/Deadbolt");
         assert_eq!(
-            discover(
-                Some(exe),
-                Some(OsStr::new("/other/deadbolt")),
-                OsStr::new("/bin"),
-                None
-            ),
+            discover(Some(exe), Some(OsStr::new("/other/deadbolt"))),
             Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt")
         );
         assert!(bundled(Path::new("/tmp/MacOS/Deadbolt")).is_none());
@@ -127,7 +102,7 @@ mod tests {
     #[test]
     fn a_link_shaped_like_a_bundle_is_not_one() {
         let dir = tempfile::tempdir().unwrap();
-        let real = dir.path().join("bin/deadbolt-ui");
+        let real = dir.path().join("bin/deadbolt");
         let link = dir.path().join("Fake.app/Contents/MacOS/Deadbolt");
         std::fs::create_dir_all(real.parent().unwrap()).unwrap();
         std::fs::create_dir_all(link.parent().unwrap()).unwrap();
@@ -137,12 +112,7 @@ mod tests {
         let exe = resolved(link);
         assert!(bundled(&exe).is_none());
         assert_eq!(
-            discover(
-                Some(&exe),
-                Some(OsStr::new("/override")),
-                OsStr::new(""),
-                None
-            ),
+            discover(Some(&exe), Some(OsStr::new("/override"))),
             Path::new("/override")
         );
         let gone = dir.path().join("gone");
@@ -192,49 +162,14 @@ mod tests {
     }
 
     #[test]
-    fn dev_sibling_then_path_and_explicit_override() {
-        let dir = tempfile::tempdir().unwrap();
-        let dev = dir.path().join("debug");
-        let bin = dir.path().join("bin");
-        std::fs::create_dir(&dev).unwrap();
-        std::fs::create_dir(&bin).unwrap();
-        let write = |p: &Path| {
-            std::fs::write(p, "").unwrap();
-            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
-        };
-        write(&bin.join("deadbolt"));
-        let exe = dev.join("deadbolt-ui");
+    fn outside_a_bundle_the_agent_is_this_binary_unless_overridden() {
+        let exe = Path::new("/home/kit/.local/bin/deadbolt");
+        assert_eq!(discover(Some(exe), None), exe);
+        assert_eq!(discover(Some(exe), Some(OsStr::new(""))), exe);
         assert_eq!(
-            discover(Some(&exe), None, bin.as_os_str(), None),
-            bin.join("deadbolt")
-        );
-        write(&dev.join("deadbolt"));
-        assert_eq!(
-            discover(Some(&exe), None, bin.as_os_str(), None),
-            dev.join("deadbolt")
-        );
-        assert_eq!(
-            discover(
-                Some(&exe),
-                Some(OsStr::new("/override")),
-                bin.as_os_str(),
-                None
-            ),
+            discover(Some(exe), Some(OsStr::new("/override"))),
             Path::new("/override")
         );
-    }
-
-    #[test]
-    fn an_installed_app_runs_its_prefixs_deadbolt() {
-        let dir = tempfile::tempdir().unwrap();
-        let lib = dir.path().join("lib/deadbolt");
-        let bin = dir.path().join("bin");
-        std::fs::create_dir_all(&lib).unwrap();
-        std::fs::create_dir(&bin).unwrap();
-        let cli = bin.join("deadbolt");
-        std::fs::write(&cli, "").unwrap();
-        std::fs::set_permissions(&cli, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let exe = lib.join("deadbolt-ui");
-        assert_eq!(discover(Some(&exe), None, OsStr::new(""), None), cli);
+        assert_eq!(discover(None, None), Path::new("deadbolt"));
     }
 }
