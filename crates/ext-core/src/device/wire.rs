@@ -165,6 +165,8 @@ impl application::RoundState for Handler {
 }
 
 impl SyncHandler for Handler {
+    type ReceiveState = ();
+
     async fn heads(&self, peer: PeerId) -> std::result::Result<Vec<u8>, HandlerError> {
         self.with(|s| {
             Ok(application::hello(
@@ -194,6 +196,8 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         entries: Vec<Blob>,
+        _: &mut (),
+        _: bool,
     ) -> std::result::Result<(), HandlerError> {
         let result = self.with(|s| {
             let ready = s.ready;

@@ -70,6 +70,10 @@ pub struct Meta {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Changes {
     pub vaults: bool,
+    /// Data or label edits to forward, by vault. The watcher sets alone cannot
+    /// distinguish a rename from an admission, or a removal invalidating items
+    /// from new item data.
+    pub edits: BTreeSet<VaultId>,
     pub items: BTreeSet<VaultId>,
     pub devices: BTreeSet<VaultId>,
 }
@@ -84,9 +88,13 @@ impl Changes {
         for entry in entries {
             match entry.payload() {
                 Payload::Data(_) => {
+                    self.edits.insert(vault);
                     self.items.insert(vault);
                 }
-                Payload::Membership(MembershipOp::Rename { .. }) => self.vaults = true,
+                Payload::Membership(MembershipOp::Rename { .. }) => {
+                    self.edits.insert(vault);
+                    self.vaults = true;
+                }
                 Payload::Membership(op) => {
                     self.vaults = true;
                     self.devices.insert(vault);

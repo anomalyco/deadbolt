@@ -806,6 +806,8 @@ mod tests {
         #[derive(Clone)]
         struct Stalled(Arc<tokio::sync::Notify>);
         impl SyncHandler for Stalled {
+            type ReceiveState = ();
+
             async fn heads(&self, _: PeerId) -> std::result::Result<Vec<u8>, HandlerError> {
                 self.0.notify_one();
                 std::future::pending().await
@@ -821,6 +823,8 @@ mod tests {
                 &self,
                 _: PeerId,
                 _: Vec<Blob>,
+                _: &mut (),
+                _: bool,
             ) -> std::result::Result<(), HandlerError> {
                 std::future::pending().await
             }
@@ -976,6 +980,8 @@ mod tests {
 
         struct NoSync;
         impl SyncHandler for NoSync {
+            type ReceiveState = ();
+
             async fn heads(&self, _: PeerId) -> std::result::Result<Vec<u8>, HandlerError> {
                 Err("synthetic approval-only node".into())
             }
@@ -990,6 +996,8 @@ mod tests {
                 &self,
                 _: PeerId,
                 _: Vec<Blob>,
+                _: &mut (),
+                _: bool,
             ) -> std::result::Result<(), HandlerError> {
                 Err("synthetic approval-only node".into())
             }

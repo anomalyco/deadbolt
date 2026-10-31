@@ -76,6 +76,8 @@ impl Store {
 }
 
 impl SyncHandler for Store {
+    type ReceiveState = ();
+
     async fn heads(&self, _peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.entries.lock().unwrap().join(&b'\n'))
@@ -103,7 +105,13 @@ impl SyncHandler for Store {
         Ok(Box::new(missing.into_iter().map(Ok)))
     }
 
-    async fn receive(&self, _peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        _peer: PeerId,
+        entries: Vec<Blob>,
+        _: &mut (),
+        _: bool,
+    ) -> Result<(), HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let entries: Vec<Vec<u8>> = entries.iter().map(|e| e.to_vec()).collect();
         self.received.lock().unwrap().push(entries.clone());

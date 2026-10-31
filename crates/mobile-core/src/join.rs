@@ -130,6 +130,8 @@ impl Joiner for Fresh {
 
 struct NoSync;
 impl SyncHandler for NoSync {
+    type ReceiveState = ();
+
     async fn heads(&self, _: PeerId) -> std::result::Result<Vec<u8>, HandlerError> {
         Err("device not set up".into())
     }
@@ -140,7 +142,13 @@ impl SyncHandler for NoSync {
     ) -> std::result::Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         Err("device not set up".into())
     }
-    async fn receive(&self, _: PeerId, _: Vec<Blob>) -> std::result::Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        _: PeerId,
+        _: Vec<Blob>,
+        _: &mut (),
+        _: bool,
+    ) -> std::result::Result<(), HandlerError> {
         Err("device not set up".into())
     }
 }

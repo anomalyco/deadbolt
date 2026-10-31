@@ -41,6 +41,24 @@ Dropped from earlier drafts: shared vault key and re-keying, separate iroh key, 
 - **Throughput follow-up:** encoding a single near-16 MiB entry is synchronous under the session mutex. Network I/O is outside the lock, but local callers (and the standalone vault worker) can still wait on the encode. Measure lock hold time and concurrent local request latency during large transfers before changing ownership or moving encoding off-lock; retain the per-frame live authority check and one-frame scratch bound.
 - No compaction in v1. Deleted items stay in the history on your own devices, encrypted at rest under the local unlock key. (Later: snapshots.)
 
+### Catch-up across interrupted sessions
+
+Sync hands the first complete entry to the normal validating transaction, then
+prefixes of 2, 4, 8, … entries up to the existing count/byte limits. Waiting for
+`DONE` or a 32 MiB batch before publishing *anything* can strand a backlog on a
+slow link: every 15 s round redials with the same heads. Doubling keeps the
+number of extra transactions logarithmic on fast links. On native, each batch
+still publishes changes to watchers and enforces membership. Admissions and
+removals wake sync immediately. Data and vault renames for another peer wake
+forwarding once at `DONE`, even if that last batch is empty or all duplicates.
+A cut drops only that stream’s pending wake, not its durable prefix; periodic
+anti-entropy can still send it. Neither wire framing,
+peer admission, verification nor startup readiness changes. The next heads
+exchange resumes at durable entries, **not** at a byte offset. An individual
+frame that never completes within a session still cannot sync on that path:
+a 10 MiB file takes over 100 s at 1 Mbit/s once base64-encoded. Earlier commits
+of preceding entries don't solve that separate limit.
+
 ## Items
 - Every item has a **type**, fixed at creation. Built-in types: `login`, `card`, `note` (a secure note), `ssh` (an SSH key), `identity`, `passkey`, `api` (an API credential), `database`, `server`, `wifi` (a Wi-Fi network), `license` (a software license), `bank` (a bank account), `document` (a file), `passport`, `driver-license`, `membership`, `crypto` (a crypto wallet) and `id-document` (a social security number, national ID card and the like). User-defined types come later; keep the type an open identifier, not a closed enum on the wire.
 - A type defines its known fields, each with a fixed field type, and which of them are required. Items may carry extra fields of any field type on top.

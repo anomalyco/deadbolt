@@ -15,6 +15,8 @@ name = "net"
 path = "tests/net/main.rs"
 
 [features]
+# Only the opt-in debug CLI in the no-uplink relay harness trusts its ephemeral CA.
+private-relay-fixture = []
 # Exposes transport bypasses for deterministic simulations, never needed by the CLI runtime.
 sim = []
 # Shared vault envelopes and application rules for native and browser devices.

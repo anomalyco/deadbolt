@@ -172,6 +172,8 @@ impl Fresh {
 struct NoSync;
 
 impl SyncHandler for NoSync {
+    type ReceiveState = ();
+
     async fn heads(&self, _: PeerId) -> Result<Vec<u8>, HandlerError> {
         Err("this device is not set up".into())
     }
@@ -182,7 +184,13 @@ impl SyncHandler for NoSync {
     ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         Err("this device is not set up".into())
     }
-    async fn receive(&self, _: PeerId, _: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        _: PeerId,
+        _: Vec<Blob>,
+        _: &mut (),
+        _: bool,
+    ) -> Result<(), HandlerError> {
         Err("this device is not set up".into())
     }
 }

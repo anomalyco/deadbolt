@@ -242,6 +242,8 @@ fn failure(error: MobileError) -> HandlerError {
 }
 
 impl SyncHandler for Handler {
+    type ReceiveState = ();
+
     async fn heads(&self, peer: PeerId) -> std::result::Result<Vec<u8>, HandlerError> {
         self.with(|s| {
             Ok(application::hello(
@@ -266,6 +268,8 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         entries: Vec<Blob>,
+        _: &mut (),
+        _: bool,
     ) -> std::result::Result<(), HandlerError> {
         self.with(|s| {
             application::receive(s, &DeviceId::from_bytes(peer), entries, s.ready).map(drop)
