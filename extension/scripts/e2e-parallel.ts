@@ -4,6 +4,10 @@
 // any shard fails.
 //
 //   bun run e2e:parallel [--jobs <n>] [any e2e/run.ts option, e.g. --deadbolt <path>]
+//
+// Alongside the shards, once per run: universal sign-in through a provider
+// (e2e/universal-providers.ts) on the same build. The native build needs a
+// real agent for it (--deadbolt); without one it's skipped and says so.
 
 import { mkdtemp, rm } from "node:fs/promises"
 import { availableParallelism, tmpdir } from "node:os"
@@ -38,8 +42,20 @@ async function pipe(stream: ReadableStream<Uint8Array>, tag: string, lines: stri
   if (rest) out(rest)
 }
 
-await Promise.all(
-  Array.from({ length: jobs }, async (_, i) => {
+const standalone = argv.includes("--standalone")
+const deadboltAt = argv.indexOf("--deadbolt")
+const deadbolt = deadboltAt >= 0 ? argv[deadboltAt + 1] : undefined
+const providers = standalone ? ["--dist", dist] : deadbolt ? ["--dist", dist, "--native", "--deadbolt", deadbolt] : null
+if (!providers) console.log("[providers] skip: the native build's provider run needs --deadbolt <path>")
+
+await Promise.all([
+  ...(providers ? [(async () => {
+    const lines: string[] = []
+    const proc = Bun.spawn(["bun", "e2e/universal-providers.ts", ...providers], { cwd: root, stdout: "pipe", stderr: "pipe" })
+    await Promise.all([pipe(proc.stdout, "[providers]", lines), pipe(proc.stderr, "[providers]", lines)])
+    if ((await proc.exited) !== 0) failed.push({ shard: 0, lines })
+  })()] : []),
+  ...Array.from({ length: jobs }, async (_, i) => {
     const shard = i + 1
     const tag = `[${shard}/${jobs}]`
     const lines: string[] = []
@@ -47,7 +63,7 @@ await Promise.all(
     await Promise.all([pipe(proc.stdout, tag, lines), pipe(proc.stderr, tag, lines)])
     if ((await proc.exited) !== 0) failed.push({ shard, lines })
   }),
-)
+])
 
 await rm(dist, { recursive: true, force: true })
 const took = `${((Date.now() - started) / 1000).toFixed(0)} s`
@@ -58,7 +74,7 @@ if (!failed.length) {
 console.log(`\n${failed.length} of ${jobs} shards failed in ${took}:`)
 for (const { shard, lines } of failed.sort((a, b) => a.shard - b.shard)) {
   const fails = lines.filter((l) => /FAIL|threw|failed$/.test(l))
-  console.log(`  shard ${shard}/${jobs}:`)
+  console.log(shard ? `  shard ${shard}/${jobs}:` : "  universal-providers:")
   for (const l of fails.length ? fails : lines.slice(-10)) console.log(`    ${l}`)
 }
 process.exit(1)
