@@ -20,7 +20,7 @@
 
 use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
-use iroh::endpoint::Connection;
+use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tracing::debug;
 
@@ -41,6 +41,10 @@ pub const INBOUND_SYNC_TIMEOUT: Duration = Duration::from_secs(60);
 ///
 /// Implementations can use `async fn` for each method.
 pub trait SyncHandler: Send + Sync + 'static {
+    /// Local to one incoming entry stream, including when the same peer syncs
+    /// concurrently. Dropped if the exchange fails or is cancelled before DONE.
+    type ReceiveState: Default + Send;
+
     /// A summary of what this device has (e.g. the heads of each device log).
     fn heads(&self, peer: PeerId) -> impl Future<Output = Result<Vec<u8>, HandlerError>> + Send;
 
@@ -54,15 +58,20 @@ pub trait SyncHandler: Send + Sync + 'static {
 
     /// Entries received from `peer`, in the order it sent them. One session may call
     /// this several times, with consecutive batches; the last call (after the peer's
-    /// `DONE`, possibly with no entries) always happens unless an earlier one failed.
+    /// `DONE`, possibly with no entries) sets `done`. An interrupted stream need
+    /// never reach that call; commit and enforce authority on each batch.
     fn receive(
         &self,
         peer: PeerId,
         entries: Vec<Blob>,
+        state: &mut Self::ReceiveState,
+        done: bool,
     ) -> impl Future<Output = Result<(), HandlerError>> + Send;
 }
 
 impl<T: SyncHandler> SyncHandler for Arc<T> {
+    type ReceiveState = T::ReceiveState;
+
     fn heads(&self, peer: PeerId) -> impl Future<Output = Result<Vec<u8>, HandlerError>> + Send {
         (**self).heads(peer)
     }
@@ -79,38 +88,38 @@ impl<T: SyncHandler> SyncHandler for Arc<T> {
         &self,
         peer: PeerId,
         entries: Vec<Blob>,
+        state: &mut Self::ReceiveState,
+        done: bool,
     ) -> impl Future<Output = Result<(), HandlerError>> + Send {
-        (**self).receive(peer, entries)
+        (**self).receive(peer, entries, state, done)
     }
 }
 
 type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
+// Erase the concrete application at the QUIC session boundary, not at each
+// batch. The stream loop can then own the handler's typed receive state.
 pub(crate) trait DynSyncHandler: Send + Sync + 'static {
-    fn heads(&self, peer: PeerId) -> BoxFuture<'_, Result<Vec<u8>, HandlerError>>;
-    fn missing_for(
-        &self,
+    fn session<'a>(
+        &'a self,
         peer: PeerId,
-        peer_heads: Vec<u8>,
-    ) -> BoxFuture<'_, Result<crate::Outgoing<'_>, HandlerError>>;
-    fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> BoxFuture<'_, Result<(), HandlerError>>;
+        send: &'a mut SendStream,
+        recv: &'a mut RecvStream,
+        max: usize,
+        initiator: bool,
+    ) -> BoxFuture<'a, Result<SyncOutcome>>;
 }
 
 impl<T: SyncHandler> DynSyncHandler for T {
-    fn heads(&self, peer: PeerId) -> BoxFuture<'_, Result<Vec<u8>, HandlerError>> {
-        Box::pin(SyncHandler::heads(self, peer))
-    }
-
-    fn missing_for(
-        &self,
+    fn session<'a>(
+        &'a self,
         peer: PeerId,
-        peer_heads: Vec<u8>,
-    ) -> BoxFuture<'_, Result<crate::Outgoing<'_>, HandlerError>> {
-        Box::pin(SyncHandler::missing_for(self, peer, peer_heads))
-    }
-
-    fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> BoxFuture<'_, Result<(), HandlerError>> {
-        Box::pin(SyncHandler::receive(self, peer, entries))
+        send: &'a mut SendStream,
+        recv: &'a mut RecvStream,
+        max: usize,
+        initiator: bool,
+    ) -> BoxFuture<'a, Result<SyncOutcome>> {
+        Box::pin(run_session(self, peer, send, recv, max, initiator))
     }
 }
 
@@ -165,15 +174,10 @@ impl SyncConnection {
             Ok(streams) => streams,
             Err(e) => return Err(settle(&self.conn, Error::Closed(e.to_string())).await),
         };
-        let result = run_session(
-            &*self.handler,
-            self.peer(),
-            &mut send,
-            &mut recv,
-            self.max_frame_len,
-            true,
-        )
-        .await;
+        let result = self
+            .handler
+            .session(self.peer(), &mut send, &mut recv, self.max_frame_len, true)
+            .await;
         match result {
             Ok(outcome) => Ok(outcome),
             // Close before the streams drop, so the peer sees the reason rather than an
@@ -217,7 +221,7 @@ pub(crate) async fn serve_sync(
                 break;
             }
         };
-        let session = run_session(&*handler, peer, &mut send, &mut recv, max_frame_len, false);
+        let session = handler.session(peer, &mut send, &mut recv, max_frame_len, false);
         match n0_future::time::timeout(timeout, session).await {
             Ok(Ok(outcome)) => debug!(peer = %fmt_id(&peer), ?outcome, "served sync session"),
             Ok(Err(err)) => {
@@ -247,7 +251,7 @@ pub async fn run_sync_session(
 }
 
 async fn run_session(
-    handler: &dyn DynSyncHandler,
+    handler: &impl SyncHandler,
     peer: PeerId,
     send: &mut (impl AsyncWrite + Unpin),
     recv: &mut (impl AsyncRead + Unpin),
@@ -293,11 +297,12 @@ async fn run_session(
 /// and dropped, so the failure is reported in `RESULT` as before. Returns how many
 /// entries were read and the handler's result.
 async fn receive_entries(
-    handler: &dyn DynSyncHandler,
+    handler: &impl SyncHandler,
     peer: PeerId,
     recv: &mut (impl AsyncRead + Unpin),
     max: usize,
 ) -> Result<(usize, Result<(), HandlerError>)> {
+    let mut state = Default::default();
     let mut received = 0;
     let mut result = Ok(());
     // Do not wait for DONE or a full-size batch before acknowledging *any* prefix
@@ -311,7 +316,7 @@ async fn receive_entries(
         entry_limit = (entry_limit * 2).min(frame::BATCH_ENTRIES);
         received += batch.len();
         if result.is_ok() {
-            result = handler.receive(peer, batch).await;
+            result = handler.receive(peer, batch, &mut state, done).await;
         }
         if done {
             return Ok((received, result));

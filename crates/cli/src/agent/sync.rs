@@ -42,6 +42,8 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
 }
 
 impl SyncHandler for Handler {
+    type ReceiveState = bool;
+
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.0
             .with(|s| hello(s, &DeviceId::from_bytes(peer), Some(s.own_addr())))
@@ -67,30 +69,33 @@ impl SyncHandler for Handler {
         }))
     }
 
-    async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        peer: PeerId,
+        entries: Vec<Blob>,
+        pending_forward: &mut bool,
+        done: bool,
+    ) -> Result<(), HandlerError> {
         let agent = &self.0;
-        let forward = agent
+        let peer = DeviceId::from_bytes(peer);
+        agent
             .with(|s| {
                 let ready = *agent.ready.borrow();
-                let received = receive(s, &DeviceId::from_bytes(peer), entries, ready);
-                // Earlier vault transactions may have committed even if a later
-                // vault or address-book write failed. Always enforce those removals.
+                let received = receive(s, &peer, entries, ready);
+                // Even an errored batch may have committed an earlier vault's removal.
                 agent.refresh(s);
-                let added = received?;
-                // A data delta came from a peer that already has it. If that
-                // peer is our only target, a fresh dial would just echo heads.
-                // Always resync membership changes: they may unlock new data.
-                Ok(added > 0
-                    && (s.changes.vaults
-                        || s.vaults
-                            .values()
-                            .any(|v| v.members().any(|id| id != s.id && id.as_bytes() != &peer))))
+                // Defer only item and label forwarding, not watcher delivery, admission
+                // changes or enforcement. A sole sender already has its own delta.
+                *pending_forward |= s.changes.edits.iter().any(|id| {
+                    let vault = s.vault(id);
+                    vault.members().any(|id| id != s.id && id != peer)
+                });
+                if !s.changes.devices.is_empty() || (done && received.is_ok() && *pending_forward) {
+                    agent.sync_now.notify_one();
+                }
+                received.map(drop)
             })
-            .map_err(handler_error)?;
-        if forward {
-            agent.sync_now.notify_one();
-        }
-        Ok(())
+            .map_err(handler_error)
     }
 }
 
@@ -427,10 +432,184 @@ mod tests {
         p_cost: 1,
     };
 
+    // Drive the real wire reader up to a specific prefix without yielding to a timer.
+    // A background round waiting on sync_now would consume the same permit we inspect.
+    #[tokio::test]
+    async fn forward_committed_prefixes_once_at_done() {
+        use std::task::{Context, Waker};
+        use tokio::io::{AsyncWriteExt, DuplexStream};
+
+        // deadbolt/sync/1 tags, as sent by the scripted peer.
+        const HEADS: u8 = 1;
+        const ENTRY: u8 = 2;
+        const DONE: u8 = 3;
+        async fn frame(w: &mut DuplexStream, tag: u8, body: &[u8]) {
+            w.write_u32(1 + body.len() as u32).await.unwrap();
+            w.write_u8(tag).await.unwrap();
+            w.write_all(body).await.unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent::new(super::super::tests::test_paths(dir.path()), true, FAST);
+        agent
+            .setup("test".to_owned().into(), "local".into())
+            .await
+            .unwrap();
+        let sender = DeviceSecret::from_bytes(&[2; 32]);
+        let third = DeviceSecret::from_bytes(&[3; 32]);
+        let peer = *sender.device_id().as_bytes();
+        let (mut shared, mut sole_sender) = agent
+            .with(|s| {
+                s.sync_task.take();
+                s.health_task.take();
+                let mut vault = |name: &str, others: &[&DeviceSecret]| -> Result<Vault> {
+                    let id = s.create_vault(name)?;
+                    s.update(id, |v, key| {
+                        for device in others {
+                            v.add(
+                                key,
+                                device.device_id(),
+                                device.join_consent(&id, &key.device_id()),
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                    Ok(s.vault(&id).clone())
+                };
+                let vaults = (
+                    vault("shared", &[&sender, &third])?,
+                    vault("two", &[&sender])?,
+                );
+                agent.refresh(s);
+                Ok(vaults)
+            })
+            .unwrap();
+        let handler = Handler(agent.clone());
+        let session = || {
+            let (mut reader, writer) = tokio::io::duplex(8192);
+            let handler = &handler;
+            (
+                writer,
+                Box::pin(tokio::task::unconstrained(async move {
+                    deadbolt_net::run_sync_session(
+                        handler,
+                        peer,
+                        &mut tokio::io::sink(),
+                        &mut reader,
+                        deadbolt_net::DEFAULT_MAX_FRAME_LEN,
+                        false,
+                    )
+                    .await
+                    .unwrap()
+                })),
+            )
+        };
+        let cx = &mut Context::from_waker(Waker::noop());
+        let woke = || {
+            std::pin::pin!(agent.sync_now.notified())
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        };
+        let heads = handler.heads(peer).await.unwrap();
+        assert!(!woke());
+        let edit = |v: &mut Vault| {
+            v.create_item(&sender, "login", Some("edit".into()), [])
+                .unwrap()
+                .1
+                .encode()
+        };
+        for final_duplicate in [false, true] {
+            use crate::protocol::Change;
+            let watcher = agent.watchers.subscribe(false);
+            let (mut wire, mut exchange) = session();
+            frame(&mut wire, HEADS, &heads).await;
+            let first = if final_duplicate {
+                shared.rename(&sender, "new-label").unwrap().encode()
+            } else {
+                edit(&mut shared)
+            };
+            frame(&mut wire, ENTRY, &first).await;
+            assert!(exchange.as_mut().poll(cx).is_pending());
+            assert!(
+                !woke(),
+                "neither a data prefix nor a label is a membership change"
+            );
+            // Completing an overlapping stream from the same peer must not flush
+            // or consume this one's pending forward.
+            let (mut other, concurrent) = session();
+            frame(&mut other, HEADS, &heads).await;
+            frame(&mut other, DONE, &[]).await;
+            concurrent.await;
+            assert!(!woke());
+
+            frame(&mut wire, ENTRY, &edit(&mut sole_sender)).await;
+            let last = if final_duplicate {
+                edit(&mut sole_sender)
+            } else {
+                edit(&mut shared)
+            };
+            frame(&mut wire, ENTRY, &last).await;
+            assert!(exchange.as_mut().poll(cx).is_pending());
+            assert!(!woke());
+            // Watches do not wait for DONE, lose the second vault or report a
+            // label change as a device change.
+            let seen = tokio::time::timeout(Duration::from_secs(5), watcher.next())
+                .await
+                .unwrap();
+            let items = |v: &Vault| Change::Items {
+                vault: v.id().to_string(),
+            };
+            assert_eq!(seen.len(), 2, "{seen:?}");
+            assert!(seen.contains(&items(&sole_sender)));
+            assert!(seen.contains(&if final_duplicate {
+                Change::Vaults
+            } else {
+                items(&shared)
+            }));
+            if final_duplicate {
+                frame(&mut wire, ENTRY, &last).await;
+            }
+            frame(&mut wire, DONE, &[]).await;
+            exchange.await;
+            assert!(woke(), "the final batch need not add anything");
+        }
+        // Abandon a dirty stream. A later exchange with new data *only* for
+        // the sole sender must not inherit its pending forward or echo it.
+        let (mut wire, mut cut) = session();
+        frame(&mut wire, HEADS, &heads).await;
+        frame(&mut wire, ENTRY, &edit(&mut shared)).await;
+        assert!(cut.as_mut().poll(cx).is_pending());
+        drop(cut);
+        let (mut wire, next) = session();
+        frame(&mut wire, HEADS, &heads).await;
+        frame(&mut wire, ENTRY, &edit(&mut sole_sender)).await;
+        frame(&mut wire, DONE, &[]).await;
+        next.await;
+        assert!(!woke());
+        // Removing the third peer must wake and close its gate *before* DONE.
+        let (mut wire, mut exchange) = session();
+        frame(&mut wire, HEADS, &heads).await;
+        let removal = shared.remove(&sender, third.device_id()).unwrap();
+        frame(&mut wire, ENTRY, &removal.encode()).await;
+        assert!(exchange.as_mut().poll(cx).is_pending());
+        assert!(woke());
+        assert!(
+            !agent
+                .members
+                .read()
+                .unwrap()
+                .contains(third.device_id().as_bytes())
+        );
+        drop(exchange);
+        agent.lock().await;
+    }
+
     /// The production sync handlers, ready, over a plain in-memory stream.
     struct Plain(std::sync::Mutex<Loaded>, std::sync::atomic::AtomicUsize);
 
     impl SyncHandler for Plain {
+        type ReceiveState = ();
+
         async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
             let s = self.0.lock().unwrap();
             hello(&s, &DeviceId::from_bytes(peer), None).map_err(handler_error)
@@ -447,7 +626,13 @@ mod tests {
             Ok(history.outgoing(|h| Ok(h.next(&*self.0.lock().unwrap(), true)?)))
         }
 
-        async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+        async fn receive(
+            &self,
+            peer: PeerId,
+            entries: Vec<Blob>,
+            _: &mut (),
+            _: bool,
+        ) -> Result<(), HandlerError> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut s = self.0.lock().unwrap();
             receive(&mut s, &DeviceId::from_bytes(peer), entries, true)

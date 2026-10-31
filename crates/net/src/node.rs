@@ -809,6 +809,8 @@ pub(crate) mod tests {
     pub(crate) struct Nothing;
 
     impl SyncHandler for Nothing {
+        type ReceiveState = ();
+
         async fn heads(&self, _: PeerId) -> Result<Vec<u8>, HandlerError> {
             Ok(vec![])
         }
@@ -819,7 +821,13 @@ pub(crate) mod tests {
         ) -> Result<crate::Outgoing<'_>, HandlerError> {
             Ok(Box::new(std::iter::empty()))
         }
-        async fn receive(&self, _: PeerId, _: Vec<crate::Blob>) -> Result<(), HandlerError> {
+        async fn receive(
+            &self,
+            _: PeerId,
+            _: Vec<crate::Blob>,
+            _: &mut (),
+            _: bool,
+        ) -> Result<(), HandlerError> {
             Ok(())
         }
     }

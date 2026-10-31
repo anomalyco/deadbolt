@@ -47,7 +47,12 @@ Sync hands the first complete entry to the normal validating transaction, then
 prefixes of 2, 4, 8, … entries up to the existing count/byte limits. Waiting for
 `DONE` or a 32 MiB batch before publishing *anything* can strand a backlog on a
 slow link: every 15 s round redials with the same heads. Doubling keeps the
-number of extra transactions logarithmic on fast links. Neither wire framing,
+number of extra transactions logarithmic on fast links. On native, each batch
+still publishes changes to watchers and enforces membership. Admissions and
+removals wake sync immediately. Data and vault renames for another peer wake
+forwarding once at `DONE`, even if that last batch is empty or all duplicates.
+A cut drops only that stream’s pending wake, not its durable prefix; periodic
+anti-entropy can still send it. Neither wire framing,
 peer admission, verification nor startup readiness changes. The next heads
 exchange resumes at durable entries, **not** at a byte offset. An individual
 frame that never completes within a session still cannot sync on that path:

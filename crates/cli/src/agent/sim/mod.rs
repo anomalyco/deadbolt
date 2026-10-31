@@ -170,6 +170,8 @@ fn report_problem(
     None
 }
 impl SyncHandler for Handler {
+    type ReceiveState = ();
+
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         let guard = self.state.lock().unwrap();
         sync::hello(
@@ -200,7 +202,13 @@ impl SyncHandler for Handler {
             )?)
         }))
     }
-    async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        peer: PeerId,
+        entries: Vec<Blob>,
+        _: &mut (),
+        _: bool,
+    ) -> Result<(), HandlerError> {
         let mut guard = self.state.lock().unwrap();
         let s = guard.as_mut().ok_or("locked")?;
         // Local writes and pairing record changes too; judge only this batch.
@@ -1430,6 +1438,8 @@ fn offline_unlock_keeps_local_items_available_and_failed_dials_finish_startup() 
 fn short_sessions_commit_a_reopenable_prefix_before_done() {
     let mut w = World::new().unwrap();
     w.step(&Action::Pair(1)).unwrap();
+    w.step(&Action::Pair(2)).unwrap();
+    w.sync(0, 1, 10, None, None).unwrap();
     for i in 0..32 {
         w.step(&Action::Add(0, i)).unwrap();
     }
@@ -1453,6 +1463,22 @@ fn short_sessions_commit_a_reopenable_prefix_before_done() {
     }
     w.step(&Action::Crash(1)).unwrap();
     assert_eq!(count(&w), before);
+    // No DONE/nudge, and the origin is gone. Ordinary anti-entropy must
+    // still forward the intermediate device's durable prefix to a third peer.
+    w.step(&Action::Partition(0, 1)).unwrap();
+    w.step(&Action::Partition(0, 2)).unwrap();
+    w.step(&Action::Startup(1)).unwrap();
+    assert_eq!(
+        w.sync(1, 2, 10, None, None).unwrap(),
+        sync::Attempt::Complete
+    );
+    assert_eq!(
+        w.devices[2]
+            .with(|s| Ok(s.vault(&w.vault).items().len()))
+            .unwrap(),
+        before
+    );
+    w.step(&Action::Heal).unwrap();
     w.converge().unwrap();
 }
 
@@ -1652,7 +1678,7 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
         assert_eq!(entries.len(), 3);
         let mut reversed = entries.clone();
         reversed.reverse();
-        target.receive(a, reversed).await.unwrap();
+        target.receive(a, reversed, &mut (), true).await.unwrap();
         world.check().unwrap();
         world.devices[1]
             .with(|s| {
@@ -1676,10 +1702,10 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
         assert_eq!(missing, entries[1..]);
         // Resume one batch at a time, then replay the entire overlapping session.
         for entry in missing {
-            target.receive(a, vec![entry]).await.unwrap();
+            target.receive(a, vec![entry], &mut (), true).await.unwrap();
             world.check().unwrap();
         }
-        target.receive(a, entries).await.unwrap();
+        target.receive(a, entries, &mut (), true).await.unwrap();
         world.check().unwrap();
         world.step(&Action::Crash(1)).unwrap();
         world.converge().unwrap();
@@ -1722,6 +1748,8 @@ async fn exhausted_author_does_not_block_removal_or_other_authors() {
             .receive(
                 world.devices[0].id,
                 vec![rejected.encode(), removal.encode()],
+                &mut (),
+                true,
             )
             .await
             .unwrap();

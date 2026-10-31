@@ -144,7 +144,8 @@ items alone. Adding a key whose earlier admission was cut is different: its
 stored but ignored data now counts, so dependent edits must be replayed too.
 Sync batches still publish independently per vault. The short-session regression uses
 the same cut budget twice, asserts each interrupted exchange advances the
-receiver before `DONE`, reopens that exact prefix, then heals.
+receiver before `DONE`, reopens that exact prefix and syncs it to a third
+member with the origin partitioned, then heals.
 
 The native `agent::session::tests::ambiguous_append_` regressions use synthetic
 encrypted stores on a real file backend. They inject a lost acknowledgement
@@ -162,10 +163,13 @@ ignored, so a crash after storing genesis cannot hide the new vault.
 
 Local item reads and writes are available immediately after unlock, including
 imports. Readiness gates sending data to peers, accepting inbound data, and
-invitations. Membership entries flow while the barrier is closed. On the native agent, a
-received item edit triggers immediate forwarding if there is another peer; it
-does not redial the sole peer that just sent the edit. Membership changes,
-local writes, and periodic anti-entropy still trigger their normal rounds.
+invitations. Membership entries flow while the barrier is closed. On the native
+agent, committed item or label edits with another recipient in their vault
+request one forwarding round at the end of the incoming stream.
+A native wire regression observes the actual wake and watcher notifications
+between prefixes, on empty or duplicate final batches, and across overlapping
+and cut streams from the same peer. Membership changes still wake immediately;
+local writes and periodic anti-entropy still trigger their normal rounds.
 
 A startup round completes when each current member either completed its exchange
 or was unreachable during the dial. A remote membership-gate refusal also completes
