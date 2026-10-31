@@ -39,7 +39,9 @@ Neither establishes native runtime proof of the final monitor build.
 
 The upstream 0.20 implementation is prepared on `ios-network-framework` at
 `93f76dcebac4e2a07e22bc213b5aef53583614f0`; no upstream PR has been posted.
-Posting requires Ryan's approval and coordination with the humans on #261/#263.
+Ryan posted a comment offering the branch on #261. Upstream's AI policy requires
+agreement on the approach there first; do not open a PR unless the maintainers
+ask for one in the issue.
 Physical Wi-Fi/cellular handoff and suspension/resumption are untested. Path
 notifications are not a promise of every same-interface address-change event;
 these limits are documented in the fork rather than hidden behind the old stub.
@@ -193,17 +195,22 @@ Face ID usage needs `NSFaceIDUsageDescription` in each target that authenticates
 Registering Associated Domains does not authorize inventing `webcredentials:`
 domains or bypassing OS-supplied service identifiers.
 
-As of this proof's setup, only macOS Developer ID profiles exist under
-`/Users/vogel/Documents/Deadbolt/apple/`; **no iOS provisioning profiles and no
-Anomaly-team signing identity are installed on this Mac**. Simulator builds use
-ad-hoc signing and the intended entitlements. This is not a device-signing test.
+Fresh signing metadata corrects the initial inspection: a valid Apple
+Development identity with its private key **is installed for team 5NZ4Q7NXJ4**.
+The certificate's subject OU confirms Anomaly, even though its common name is
+Ryan's. Automatic provisioning subsequently created development profiles for
+both Deadbolt bundle IDs, with 22 existing registered devices. The device app
+and embedded provider built and passed strict signature verification using the
+Anomaly identity, App Group and shared Keychain entitlements. Simulator builds
+remain ad-hoc and do not establish physical-device assurance. Ryan has deferred
+physical-device testing until he returns from his trip.
 
 Device/TestFlight distribution requires:
 
-1. Apple Development and Apple Distribution certificates with their private keys
-   for team 5NZ4Q7NXJ4 installed on the signing machine.
+1. An Apple Development identity for team 5NZ4Q7NXJ4 (present) for device testing;
+   an Anomaly Apple Distribution identity is additionally needed for TestFlight.
 2. iOS Development profiles for **both** bundle IDs, including test-device UDIDs,
-   App Group, shared Keychain group and the provider entitlement.
+   App Group, shared Keychain group and the provider entitlement (present).
 3. App Store distribution profiles for both bundle IDs with matching
    entitlements; the app embeds the separately signed provider.
 4. An App Store Connect app record for `pw.deadbolt.app` and TestFlight setup.
@@ -259,12 +266,12 @@ live database. Multiwindow contention and release/reopen behavior need explicit
 verification. If measured replay exceeds the extension budget, that is a failed
 gate requiring a storage design change, not permission to weaken authentication.
 
-Required measurements, not yet established:
+Native measurements so far (simulator/emulator; not device certification):
 
 | Synthetic vault | App peak | Provider peak (password / OTP / passkey) | Device jetsam check |
 | --- | --- | --- | --- |
-| 1,000 items | Not measured | Not measured | Requires signed physical device |
-| 10,000 items | Not measured | Not measured | Requires signed physical device |
+| 1,000 items | iOS peak not measured | Password list/suggestion: 107.5/101.1 MiB; OTP/passkey not measured | Deferred |
+| 10,000 items | iOS peak not measured; Android debug PSS 226 MB, optimized 209 MB | Password list/suggestion: 148.7/119.9 MiB; OTP/passkey not measured | Deferred |
 
 Initial offline Rust provider benchmarks (debug, production KDF) measured
 simulator list/fill at 236/207 ms for 1k and 819/581 ms for 10k. Isolated
@@ -283,8 +290,10 @@ Moving the existing metadata arrays into the JSON response, instead of cloning
 them, lowered the final 10k picker peak to **116.4 MiB (122.03 MB)**. That still
 exceeds a literal 120 MB ceiling and provides no useful headroom even against
 120 MiB. The memory gate remains failed. No projection or weaker KDF has been
-introduced; the actual native extension must be measured before another storage
-design is selected.
+introduced. Subsequent actual native extension measurement confirmed the failed
+gate: 148.7 MiB for the 10k list and 119.9 MiB for a suggested login, including
+Swift/OS overhead. Further optimization must be measured against this native
+path, not just the isolated Rust process.
 These are debug simulator processes without Swift/OS extension overhead or
 substantial edit history; physical-device certification remains outstanding.
 
@@ -333,12 +342,13 @@ PR #194 is a draft. Existing GitHub CI covers workspace Rust and browser checks,
 not Xcode or Gradle: mobile build, native tests and OS-flow evidence are local
 checks. A green CI result must not be described as a complete mobile proof.
 Physical iOS Secure Enclave unlock, fresh-biometric approval, user-verified
-passkey registration/sign-in and device jetsam validation are blocked on
-Anomaly signing/provisioning and a test device, not waived by simulator tests.
+passkey registration/sign-in and device jetsam validation are deferred until
+Ryan returns with a test device, not waived by simulator tests. Anomaly signing
+and both development profiles are verified; these are not signing blockers.
 Simulator password/OTP flows and rejection of passkeys that require biometric
 verification remain testable. A ceremony explicitly discouraging verification,
 if exercised, must not be labeled user-verified. These gates keep the proof
-incomplete.
+incomplete on hardware, but do not block finishing the simulator proof.
 
 Completed checks during development (not a substitute for the final combined
 workspace/platform runs):
@@ -355,12 +365,25 @@ workspace/platform runs):
 - macOS provider baseline: Swift 6 unit/wire/cancellation/offscreen checks passed;
   `cargo test -p deadbolt-app --test app autofill:: --locked` passed both the
   bundle validation and real-agent Swift end-to-end test.
-- Android native tests after review and runtime fixes: 41 passed. Actual 1k
-  pairing and approval test-host runs passed, with seven captioned media batches.
-- iOS lifecycle tests: 11 passed in the simulator using the built XCTest bundle
-  directly, compiling the real AppModel against a delayed test core. The usual
-  Instruments-driven test launch failed to connect; this is not a full real-core
-  app test. Tests cover background/join/unlock/status races and foreground work.
+- Android native tests after the UI-owner search/lifecycle batch: 47 passed.
+  Actual 1k pairing and fresh-fingerprint Allow/signed Deny test-host runs passed.
+- iOS XCTest: 12 native tests passed headlessly, including the real-core boundary,
+  simulator Secure Enclave refusal and the CoreFailure message regression.
+  Separately, 22 lifecycle tests passed against the delayed test core, including
+  immediate search and identity-publication ordering/background cancellation.
+  These use simulator `xctest` directly; the Instruments-driven launcher failed
+  to connect earlier. Neither suite substitutes for physical biometric testing.
+- Actual iOS 26.5 OS password fills passed through the picker and published
+  suggestion at 1k and 10k; passkeys requiring biometric verification refused
+  without a software fallback. OTP OS delivery remains a separate open gate.
+- Native 10k gates currently fail: iOS visible search 103–265 ms (p95 248 ms),
+  Android debug 120–223 ms. Optimized Android sampled queries were 43–93 ms,
+  but all-match Rust calls still cost 89–103 ms. iOS extension list/suggestion
+  footprint was 148.7/119.9 MiB at 10k, above the 120 MB budget; 1k was
+  107.5/101.1 MiB. Simulator measurements do not establish device jetsam safety.
+- The Rust C/assembly deployment metadata now matches iOS 17.0; the BLAKE3
+  NEON object no longer declares simulator 27.0 as its minimum. Older-OS runtime
+  compatibility remains untested.
 - Full app integration baseline: 208 passed, 21 failed. Nineteen failures are at
   the CLI `init` fixture step and two are setup timeouts; AI-caller setup refusal
   is a known restriction in this environment. This is not a green app-suite
