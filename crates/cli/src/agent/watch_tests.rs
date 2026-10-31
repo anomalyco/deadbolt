@@ -176,7 +176,7 @@ async fn a_watcher_sees_lock_state_local_writes_and_one_change_per_sync_batch() 
         .collect();
     agent.ready.send_replace(true);
     sync::Handler(agent.clone())
-        .receive(*other.device_id().as_bytes(), batch)
+        .receive(*other.device_id().as_bytes(), batch, &mut false, true)
         .await
         .unwrap();
     assert_eq!(
