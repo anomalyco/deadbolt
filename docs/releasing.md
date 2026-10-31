@@ -184,8 +184,17 @@ channel's current release isn't the build it runs, a rollback included.
   one that can't run is an error, never "unsigned".
 - **Older manifests:** the highest `sequence` seen for each artifact and
   channel is kept in `$XDG_STATE_HOME/deadbolt/release-sequences.json`, and a
-  lower one is refused unless `--allow-rollback`. A real rollback is a new
-  write with a higher sequence, so installs still follow it. The protocol's
+  lower one is refused unless `--allow-rollback`, which never lowers the
+  remembered maximum. Only manifests with valid shape and matching app,
+  artifact and channel can advance it. A missing state file starts empty;
+  an unreadable or malformed one stops the update, even with
+  `--allow-rollback`, rather than discarding trusted floors. A persistent
+  `update.lock` in the same state directory gives `update` (including
+  `--check`) and `browser switch` exclusive access for the whole transaction,
+  through installation. A competing invocation fails and must be retried
+  after the first finishes; separate state directories are not coordinated.
+  A real rollback is a new write with a higher sequence, so installs still
+  follow it. The protocol's
   `revoked_versions` is always `[]` and clients ignore it, so `update` does
   too.
 - **Root:** as euid 0, `update` only changes an install in a root-owned
