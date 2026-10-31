@@ -63,19 +63,25 @@ impl SyncHandler for Handler {
 
     async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
         let agent = &self.0;
-        let received = agent
+        let forward = agent
             .with(|s| {
                 let ready = *agent.ready.borrow();
                 let received = receive(s, &DeviceId::from_bytes(peer), entries, ready);
                 // Earlier vault transactions may have committed even if a later
                 // vault or address-book write failed. Always enforce those removals.
                 agent.refresh(s);
-                Ok(received)
+                let added = received?;
+                // A data delta came from a peer that already has it. If that
+                // peer is our only target, a fresh dial would just echo heads.
+                // Always resync membership changes: they may unlock new data.
+                Ok(added > 0
+                    && (s.changes.vaults
+                        || s.vaults
+                            .values()
+                            .any(|v| v.members().any(|id| id != s.id && id.as_bytes() != &peer))))
             })
             .map_err(handler_error)?;
-        let added = received.map_err(handler_error)?;
-        if added > 0 {
-            // Pass news on to the other members.
+        if forward {
             agent.sync_now.notify_one();
         }
         Ok(())
