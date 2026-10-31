@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use deadbolt_core::{DeviceId, DeviceSecret, Entry};
-use deadbolt_net::application::{self, Addr, Offer, Welcomed};
+use deadbolt_net::application::{self, Addr, Offer, WelcomeReplay, Welcomed};
 use deadbolt_net::{
     Blob, HandlerError, Joiner, Node, NodeConfig, PairingCode, PairingContext, PairingOptions,
     PeerId, SyncHandler,
@@ -72,19 +72,13 @@ impl Fresh {
             },
         );
         let metadata = serde_json::to_vec(&peers).map_err(|_| MobileError::Internal)?;
-        let entries: Vec<_> = welcomed
-            .vault
-            .entries()
-            .into_iter()
-            .map(Entry::encode)
-            .collect();
         let store = deadbolt_store::init_with_setup(
             path,
             passphrase,
             *self.secret.to_bytes(),
             KdfParams::DEFAULT,
             |store| {
-                store.append_batch(entries.iter().map(|e| e.as_slice()))?;
+                store.append_batch(welcomed.vault.iter_entries().map(Entry::encode))?;
                 store.meta_set(PEERS, &metadata)?;
                 Ok(())
             },
@@ -94,6 +88,8 @@ impl Fresh {
 }
 
 impl Joiner for Fresh {
+    type Welcome = WelcomeReplay;
+
     async fn join(
         &self,
         ctx: &PairingContext,
@@ -113,7 +109,7 @@ impl Joiner for Fresh {
     async fn receive(
         &self,
         ctx: &PairingContext,
-        welcome: Vec<Blob>,
+        welcome: WelcomeReplay,
     ) -> std::result::Result<(), HandlerError> {
         let offer = self
             .offer
@@ -141,7 +137,7 @@ impl SyncHandler for NoSync {
         &self,
         _: PeerId,
         _: Vec<u8>,
-    ) -> std::result::Result<Vec<Blob>, HandlerError> {
+    ) -> std::result::Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         Err("device not set up".into())
     }
     async fn receive(&self, _: PeerId, _: Vec<Blob>) -> std::result::Result<(), HandlerError> {

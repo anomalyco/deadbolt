@@ -41,7 +41,7 @@ pub use node::{
 };
 pub use pair::{
     DEFAULT_FIND_TIMEOUT, DEFAULT_PAIRING_TTL, Inviter, Joiner, PairingContext, PairingListener,
-    PairingOptions, PairingOutcome,
+    PairingOptions, PairingOutcome, WelcomeSink,
 };
 #[cfg(feature = "sim")]
 pub use pair::{PairingStream, ProvenPairing};
@@ -62,6 +62,9 @@ pub type PeerId = [u8; 32];
 /// An entry as sent or received: opaque bytes that may hold secret values, wiped when
 /// dropped.
 pub type Blob = zeroize::Zeroizing<Vec<u8>>;
+
+/// Pull one encoded frame at a time; the producer never borrows state across I/O.
+pub type Outgoing<'a> = Box<dyn Iterator<Item = Result<Blob, HandlerError>> + Send + 'a>;
 
 /// The current member set, as seen by this device.
 pub trait Membership: Send + Sync {

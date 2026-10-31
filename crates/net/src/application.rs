@@ -10,11 +10,17 @@ pub mod storage;
 mod round;
 pub use round::{RoundState, sync_round};
 
-use std::{collections::BTreeMap, future::Future, net::SocketAddr, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    future::Future,
+    net::SocketAddr,
+    time::Duration,
+};
 
 use data_encoding::HEXLOWER;
 use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, Heads, Log, Signature, Vault, VaultId, VaultWrite, valid_name,
+    DeviceId, DeviceSecret, Entry, Heads, Log, MissingLog, Signature, Vault, VaultId, VaultWrite,
+    valid_name,
 };
 use n0_future::time::Instant;
 use n0_future::{FuturesUnorderedBounded, StreamExt};
@@ -214,18 +220,107 @@ pub fn hello(s: &impl State, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<
     })?)
 }
 
+/// Snapshot selection is made under the state lock. A pull reacquires that
+/// lock only long enough to check current authority and encode one frame.
+pub struct OutgoingHistory {
+    peer: DeviceId,
+    meta: Option<Blob>,
+    logs: VecDeque<(VaultId, MissingLog)>,
+    scope: HistoryScope,
+}
+
+enum HistoryScope {
+    Pairing,
+    Sync {
+        negotiated: BTreeSet<VaultId>,
+        data: bool,
+    },
+}
+
+impl OutgoingHistory {
+    pub fn next(&mut self, s: &impl State, ready: bool) -> Result<Option<Blob>, Error> {
+        while let Some((id, cursor)) = self.logs.front_mut() {
+            if !ready && !matches!(self.scope, HistoryScope::Sync { data: false, .. }) {
+                return Err(Error::Protocol("waiting for membership sync"));
+            }
+            let v = s
+                .vaults()
+                .find(|v| v.id() == *id)
+                .ok_or(Error::VaultNotHeld)?;
+            if !v.is_member(&self.peer) {
+                self.omit_revoked(s)?;
+                continue;
+            }
+            if matches!(self.scope, HistoryScope::Pairing) && !v.is_member(&s.device_id()) {
+                return Err(Error::Protocol("history transfer no longer authorized"));
+            }
+            if let Some(meta) = self.meta.take() {
+                return Ok(Some(meta));
+            }
+            if let Some(entry) = cursor.next(v)? {
+                return Ok(Some(entry.encode()));
+            }
+            self.logs.pop_front();
+        }
+        Ok(None)
+    }
+
+    // Slow path under the same state lock as next(). Drop *both* phases of
+    // each revoked vault, even if later membership resolution changes again.
+    // A missing vault, missing signed tip or unexplained loss of admission
+    // isn't proof of removal; leave those errors fatal.
+    fn omit_revoked(&mut self, s: &impl State) -> Result<(), Error> {
+        let denied = || Error::Protocol("history transfer no longer authorized");
+        let HistoryScope::Sync { negotiated, .. } = &mut self.scope else {
+            return Err(denied());
+        };
+        let mut removed = BTreeMap::new();
+        let mut held = 0;
+        for v in s.vaults().filter(|v| negotiated.contains(&v.id())) {
+            held += 1;
+            if !v.is_member(&self.peer) {
+                if !v.was_removed(&self.peer) {
+                    return Err(denied());
+                }
+                removed.insert(v.id(), v);
+            }
+        }
+        if held != negotiated.len() {
+            return Err(Error::VaultNotHeld);
+        }
+        if held == removed.len() {
+            return Err(denied()); // No other negotiated vault still admits the peer.
+        }
+        for (id, cursor) in &self.logs {
+            if let Some(vault) = removed.get(id) {
+                cursor.check_tips(vault)?;
+            }
+        }
+        self.logs.retain(|(id, _)| !removed.contains_key(id));
+        negotiated.retain(|id| !removed.contains_key(id));
+        Ok(())
+    }
+
+    pub fn outgoing<'a>(
+        mut self,
+        mut pull: impl FnMut(&mut Self) -> Result<Option<Blob>, crate::HandlerError> + Send + 'a,
+    ) -> crate::Outgoing<'a> {
+        Box::new(std::iter::from_fn(move || pull(&mut self).transpose()))
+    }
+}
+
 pub fn missing_for<S: State>(
     s: &mut S,
     peer: &DeviceId,
     bytes: &[u8],
     ready: bool,
-) -> Result<Vec<Blob>, S::Error> {
+) -> Result<OutgoingHistory, S::Error> {
     let hello: Hello = serde_json::from_slice(bytes).map_err(Error::from)?;
     if hello.v != 1 {
         return Err(Error::Protocol("unsupported sync envelope").into());
     }
     s.learn(peer, &hello.name, hello.addr, hello.peers)?;
-    let mut membership = Vec::new();
+    let mut logs = VecDeque::new();
     let mut data = Vec::new();
     for (id, heads) in &hello.vaults {
         let Ok(id) = unhex::<32>(id).map(VaultId::from_bytes) else {
@@ -236,16 +331,22 @@ pub fn missing_for<S: State>(
         };
         let bytes = HEXLOWER.decode(heads.as_bytes()).map_err(|_| Error::Hex)?;
         let heads = Heads::decode(&bytes).map_err(Error::from)?;
-        for entry in vault.missing_for(&heads) {
-            match entry.log() {
-                Log::Membership => membership.push(entry.encode()),
-                Log::Data if ready => data.push(entry.encode()),
-                Log::Data => {}
-            }
+        logs.push_back((id, vault.missing_log(&heads, Log::Membership)));
+        if ready {
+            data.push((id, vault.missing_log(&heads, Log::Data)));
         }
     }
-    membership.append(&mut data);
-    Ok(membership)
+    let negotiated = logs.iter().map(|(id, _)| *id).collect();
+    logs.extend(data);
+    Ok(OutgoingHistory {
+        peer: *peer,
+        meta: None,
+        logs,
+        scope: HistoryScope::Sync {
+            negotiated,
+            data: ready,
+        },
+    })
 }
 
 /// Skip malformed/rejected entries, not the valid removals beside them. Check
@@ -361,7 +462,7 @@ pub fn welcome<S: State>(
     device: DeviceId,
     bytes: &[u8],
     fallback_addr: Option<Addr>,
-) -> Result<Vec<Blob>, S::Error> {
+) -> Result<OutgoingHistory, S::Error> {
     let join: JoinBlob = serde_json::from_slice(bytes).map_err(Error::from)?;
     if join.v != 2 {
         return Err(Error::Protocol("unsupported pairing envelope").into());
@@ -384,19 +485,27 @@ pub fn welcome<S: State>(
         join.addr.or(fallback_addr),
         BTreeMap::new(),
     )?;
-    let mut blobs = vec![Blob::new(
+    let meta = Blob::new(
         serde_json::to_vec(&WelcomeMeta {
             v: 2,
             peers: s.hints_for(&device),
         })
         .map_err(Error::from)?,
-    )];
+    );
     let held = s
         .vaults()
         .find(|v| v.id() == vault)
         .ok_or(Error::VaultNotHeld)?;
-    blobs.extend(held.entries().into_iter().map(Entry::encode));
-    Ok(blobs)
+    let logs = [Log::Membership, Log::Data]
+        .into_iter()
+        .map(|log| (vault, held.missing_log(&Heads::default(), log)))
+        .collect();
+    Ok(OutgoingHistory {
+        peer: device,
+        meta: Some(meta),
+        logs,
+        scope: HistoryScope::Pairing,
+    })
 }
 
 /// Validated but not stored, so a fresh device can wait for its passphrase.
@@ -408,22 +517,42 @@ pub struct Welcomed {
     pub peers: BTreeMap<String, Hint>,
 }
 
+/// Private replay until DONE. A cut, invalid signature/dependency, wrong
+/// offered vault or missing final admission cannot publish a partial vault.
+#[derive(Default)]
+pub struct WelcomeReplay {
+    meta: Option<WelcomeMeta>,
+    vault: Option<Vault>,
+}
+
+impl crate::WelcomeSink for WelcomeReplay {
+    fn push(&mut self, blob: Blob) -> Result<(), crate::HandlerError> {
+        if self.meta.is_none() {
+            let meta: WelcomeMeta = serde_json::from_slice(&blob)?;
+            if meta.v != 2 {
+                return Err(Error::Protocol("unsupported pairing envelope").into());
+            }
+            self.meta = Some(meta);
+        } else {
+            let entry = Entry::decode(&blob)?;
+            if let Some(vault) = &mut self.vault {
+                vault.apply(entry)?;
+            } else {
+                self.vault = Some(Vault::from_genesis(entry)?);
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn verify_welcome(
     device: &DeviceId,
     inviter: DeviceId,
     offer: Offer,
-    welcome: Vec<Blob>,
+    welcome: WelcomeReplay,
 ) -> Result<Welcomed, Error> {
-    let mut blobs = welcome.into_iter();
-    let meta: WelcomeMeta =
-        serde_json::from_slice(&blobs.next().ok_or(Error::Protocol("empty welcome"))?)?;
-    if meta.v != 2 {
-        return Err(Error::Protocol("unsupported pairing envelope"));
-    }
-    let entries: Vec<Entry> = blobs
-        .map(|bytes| Entry::decode(&bytes))
-        .collect::<Result<_, _>>()?;
-    let vault = Vault::load(entries)?;
+    let meta = welcome.meta.ok_or(Error::Protocol("empty welcome"))?;
+    let vault = welcome.vault.ok_or(deadbolt_core::Error::InvalidGenesis)?;
     if vault.id().to_string() != offer.vault {
         return Err(Error::Protocol("the welcome is for another vault"));
     }

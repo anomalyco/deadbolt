@@ -1,4 +1,5 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cmp::Reverse;
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap, HashMap};
 
 use crate::data::{self, Deleted, Item, ItemState, Version};
 use crate::encoding::{Reader, Writer};
@@ -108,6 +109,52 @@ impl Heads {
 impl FromIterator<(LogId, u64)> for Heads {
     fn from_iter<I: IntoIterator<Item = (LogId, u64)>>(iter: I) -> Self {
         Self(iter.into_iter().collect())
+    }
+}
+
+/// A bounded snapshot of the missing suffix of each author in one log. No
+/// entry payloads or per-entry references are retained. Depth strictly
+/// increases on every dependency edge, so merging author chains by depth
+/// preserves causal order even across a reload with a different arrival order.
+#[derive(Debug, Default)]
+pub struct MissingLog(BinaryHeap<Reverse<Pending>>);
+
+#[derive(Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct Pending {
+    depth: u64,
+    log: LogId,
+    seq: usize,
+    /// Signed last entry: pins the entire contiguous, fork-rejecting chain.
+    end: Hash,
+}
+
+impl MissingLog {
+    /// Check even a cursor that will be discarded: a missing signed tip is a
+    /// different failure from losing membership in a still-intact vault.
+    pub fn check_tips(&self, vault: &Vault) -> Result<(), Error> {
+        if self
+            .0
+            .iter()
+            .all(|Reverse(p)| vault.nodes.contains_key(&p.end))
+        {
+            Ok(())
+        } else {
+            Err(Error::HistoryChanged)
+        }
+    }
+
+    pub fn next<'a>(&mut self, vault: &'a Vault) -> Result<Option<&'a Entry>, Error> {
+        let Some(Reverse(mut pending)) = self.0.pop() else {
+            return Ok(None);
+        };
+        let end = vault.nodes.get(&pending.end).ok_or(Error::HistoryChanged)?;
+        let node = vault.at_seq(pending.log, pending.seq);
+        if node.entry.hash() != end.entry.hash() {
+            pending.seq += 1;
+            pending.depth = vault.at_seq(pending.log, pending.seq).depth;
+            self.0.push(Reverse(pending));
+        }
+        Ok(Some(&node.entry))
     }
 }
 
@@ -759,13 +806,46 @@ impl Vault {
             .collect()
     }
 
-    /// Every stored entry, in an order [`Vault::load`] accepts.
-    pub fn entries(&self) -> Vec<&Entry> {
+    fn at_seq(&self, id: LogId, seq: usize) -> &Node {
+        &self.nodes[&self.order(id.log)[self.logs[&id][seq]]]
+    }
+
+    /// Capture a fixed upper bound for each missing author chain, not the
+    /// entries themselves. Later appends cannot enter this transfer.
+    pub fn missing_log(&self, heads: &Heads, log: Log) -> MissingLog {
+        MissingLog(
+            self.logs
+                .iter()
+                .filter_map(|(&id, offsets)| {
+                    if id.log != log {
+                        return None;
+                    }
+                    let next = heads.get(&id).map_or(0, |s| s.saturating_add(1));
+                    let seq = usize::try_from(next).ok()?;
+                    if seq >= offsets.len() {
+                        return None;
+                    }
+                    Some(Reverse(Pending {
+                        depth: self.at_seq(id, seq).depth,
+                        log: id,
+                        seq,
+                        end: self.at_seq(id, offsets.len() - 1).entry.hash(),
+                    }))
+                })
+                .collect(),
+        )
+    }
+
+    pub fn iter_entries(&self) -> impl Iterator<Item = &Entry> {
         self.membership_order
             .iter()
             .chain(&self.data_order)
-            .map(|hash| &self.nodes[hash].entry)
-            .collect()
+            .map(|h| &self.nodes[h].entry)
+    }
+
+    /// Every stored entry, in an order [`Vault::load`] accepts.
+    pub fn entries(&self) -> Vec<&Entry> {
+        self.iter_entries().collect()
     }
 }
 

@@ -52,13 +52,19 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
-        self.0
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+        let history = self
+            .0
             .with(|s| {
                 let ready = *self.0.ready.borrow();
                 missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready)
             })
-            .map_err(handler_error)
+            .map_err(handler_error)?;
+        Ok(history.outgoing(|h| {
+            self.0
+                .with(|s| Ok(h.next(&**s, *self.0.ready.borrow())?))
+                .map_err(handler_error)
+        }))
     }
 
     async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
@@ -98,7 +104,7 @@ pub(super) fn missing_for(
     peer: &DeviceId,
     bytes: &[u8],
     ready: bool,
-) -> Result<Vec<Blob>> {
+) -> Result<application::OutgoingHistory> {
     s.ensure_usable()?;
     application::missing_for(s, peer, bytes, ready)
 }
@@ -434,9 +440,11 @@ mod tests {
             &self,
             peer: PeerId,
             heads: Vec<u8>,
-        ) -> Result<Vec<Blob>, HandlerError> {
+        ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
             let mut s = self.0.lock().unwrap();
-            missing_for(&mut s, &DeviceId::from_bytes(peer), &heads, true).map_err(handler_error)
+            let history = missing_for(&mut s, &DeviceId::from_bytes(peer), &heads, true)
+                .map_err(handler_error)?;
+            Ok(history.outgoing(|h| Ok(h.next(&*self.0.lock().unwrap(), true)?)))
         }
 
         async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
@@ -500,7 +508,13 @@ mod tests {
         let join = super::super::pairing::join_blob(&b.secret, "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
             super::super::pairing::welcome(&mut a, vault, b.id, &join, None).unwrap();
-        super::super::pairing::apply_welcome(&mut b, a.id, offer, welcome).unwrap();
+        super::super::pairing::apply_welcome(
+            &mut b,
+            a.id,
+            offer,
+            super::super::pairing::test_replay(&a, welcome),
+        )
+        .unwrap();
         assert_eq!(b.vault(&vault).items().len(), 3004);
 
         // Then sync a second import, one item near the limit and single edits.
@@ -589,8 +603,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_sync_sends_all_membership_before_any_data() {
+    fn two_shared_vaults() -> (tempfile::TempDir, Loaded, DeviceId, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
         let peer = DeviceSecret::from_bytes(&[2; 32]);
@@ -617,13 +630,21 @@ mod tests {
             vaults,
         })
         .unwrap();
-        let logs = |blobs: Vec<Blob>| {
-            blobs
-                .into_iter()
+        (dir, source, peer.device_id(), hello)
+    }
+
+    #[test]
+    fn shared_sync_sends_all_membership_before_any_data() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        let logs = |mut h: application::OutgoingHistory, s: &Loaded| {
+            std::iter::from_fn(|| h.next(s, true).unwrap())
                 .map(|bytes| deadbolt_core::Entry::decode(&bytes).unwrap().log())
                 .collect::<Vec<_>>()
         };
-        let all = logs(missing_for(&mut source, &peer.device_id(), &hello, true).unwrap());
+        let all = logs(
+            missing_for(&mut source, &peer, &hello, true).unwrap(),
+            &source,
+        );
         assert!(all.contains(&deadbolt_core::Log::Data));
         let first_data = all
             .iter()
@@ -634,8 +655,64 @@ mod tests {
                 .iter()
                 .all(|log| *log == deadbolt_core::Log::Data)
         );
-        let startup = logs(missing_for(&mut source, &peer.device_id(), &hello, false).unwrap());
+        let startup = logs(
+            missing_for(&mut source, &peer, &hello, false).unwrap(),
+            &source,
+        );
         assert_eq!(startup, all[..first_data]);
+    }
+
+    #[test]
+    fn multi_vault_sync_omits_only_the_revoked_vault() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        // Revoke the recipient after the first membership frame. Its vault
+        // still has both an Add and a data cursor in this snapshot.
+        let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
+        let first = history.next(&source, true).unwrap().unwrap();
+        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
+        let kept = *source.vaults.keys().find(|id| **id != revoked).unwrap();
+        let expected: Vec<_> = source
+            .vault(&kept)
+            .iter_entries()
+            .map(deadbolt_core::Entry::encode)
+            .collect();
+        source
+            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
+            .unwrap();
+        let remaining: Vec<_> = std::iter::from_fn(|| history.next(&source, true).transpose())
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, expected);
+    }
+
+    #[test]
+    fn multi_vault_sync_does_not_skip_a_missing_signed_tip() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
+        let first = history.next(&source, true).unwrap().unwrap();
+        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
+        source
+            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
+            .unwrap();
+        // Even a real signed removal can't disguise a partial replay: the
+        // restored view knows the removal but lacks the pinned data tip.
+        let mut membership = source
+            .vault(&revoked)
+            .iter_entries()
+            .filter(|e| e.log() == deadbolt_core::Log::Membership)
+            .cloned();
+        let mut partial = Vault::from_genesis(membership.next().unwrap()).unwrap();
+        for entry in membership {
+            partial.apply(entry).unwrap();
+        }
+        assert!(partial.was_removed(&peer));
+        source.vaults.insert(revoked, partial);
+        assert!(matches!(
+            history.next(&source, true),
+            Err(application::Error::Core(
+                deadbolt_core::Error::HistoryChanged
+            ))
+        ));
     }
 
     #[test]
@@ -685,11 +762,16 @@ mod tests {
         assert!(
             missing_for(&mut loaded, &peer, &heads, false)
                 .unwrap()
-                .is_empty()
+                .next(&loaded, false)
+                .unwrap()
+                .is_none()
         );
         assert_eq!(
-            missing_for(&mut loaded, &peer, &heads, true).unwrap(),
-            vec![entry.encode()]
+            missing_for(&mut loaded, &peer, &heads, true)
+                .unwrap()
+                .next(&loaded, true)
+                .unwrap(),
+            Some(entry.encode())
         );
     }
 }

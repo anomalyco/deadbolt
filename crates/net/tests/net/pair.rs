@@ -11,7 +11,16 @@ struct NewDevice {
     welcome: Mutex<Option<Vec<Vec<u8>>>>,
 }
 
+#[derive(Default)]
+struct Frames(Vec<Vec<u8>>);
+impl deadbolt_net::WelcomeSink for Frames {
+    fn push(&mut self, frame: Blob) -> Result<(), HandlerError> {
+        self.0.push(frame.to_vec());
+        Ok(())
+    }
+}
 impl Joiner for NewDevice {
+    type Welcome = Frames;
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         *self.offer.lock().unwrap() = Some(offer.clone());
         // Like real join consent: bound to the joining and the inviting device.
@@ -22,8 +31,8 @@ impl Joiner for NewDevice {
         Ok(join)
     }
 
-    async fn receive(&self, _ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
-        *self.welcome.lock().unwrap() = Some(welcome.iter().map(|b| b.to_vec()).collect());
+    async fn receive(&self, _ctx: &PairingContext, welcome: Frames) -> Result<(), HandlerError> {
+        *self.welcome.lock().unwrap() = Some(welcome.0);
         Ok(())
     }
 }
@@ -43,7 +52,7 @@ impl Inviter for ExistingDevice {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         let mut expected = b"consent:vault-1".to_vec();
         expected.extend_from_slice(&ctx.remote);
         expected.extend_from_slice(&ctx.local);
@@ -51,11 +60,15 @@ impl Inviter for ExistingDevice {
             return Err("bad join".into());
         }
         *self.join.lock().unwrap() = Some(join);
-        Ok(vec![
-            Blob::new(b"add".to_vec()),
-            Blob::new(b"membership-log".to_vec()),
-            Blob::new(b"data".to_vec()),
-        ])
+        Ok(Box::new(
+            [
+                Blob::new(b"add".to_vec()),
+                Blob::new(b"membership-log".to_vec()),
+                Blob::new(b"data".to_vec()),
+            ]
+            .into_iter()
+            .map(Ok),
+        ))
     }
 }
 

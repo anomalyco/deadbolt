@@ -647,7 +647,7 @@ mod tests {
     use super::*;
     use deadbolt_core::{DeviceSecret, Entry, Field, FieldType, Vault};
     use deadbolt_net::application::{Addr, Hint};
-    use deadbolt_net::{Blob, HandlerError, Node, NodeConfig, PeerId, SyncHandler};
+    use deadbolt_net::{Blob, HandlerError, Node, NodeConfig, Outgoing, PeerId, SyncHandler};
     use deadbolt_store::KdfParams;
 
     const KDF: KdfParams = KdfParams {
@@ -814,7 +814,7 @@ mod tests {
                 &self,
                 _: PeerId,
                 _: Vec<u8>,
-            ) -> std::result::Result<Vec<Blob>, HandlerError> {
+            ) -> std::result::Result<Outgoing<'_>, HandlerError> {
                 std::future::pending().await
             }
             async fn receive(
@@ -983,7 +983,7 @@ mod tests {
                 &self,
                 _: PeerId,
                 _: Vec<u8>,
-            ) -> std::result::Result<Vec<Blob>, HandlerError> {
+            ) -> std::result::Result<Outgoing<'_>, HandlerError> {
                 Err("synthetic approval-only node".into())
             }
             async fn receive(
@@ -1269,19 +1269,17 @@ mod tests {
                 &self,
                 ctx: &PairingContext,
                 bytes: Vec<u8>,
-            ) -> std::result::Result<Vec<Blob>, HandlerError> {
-                self.0
-                    .handler
-                    .with(|s| {
-                        application::welcome(
-                            s,
-                            s.vault.id(),
-                            DeviceId::from_bytes(ctx.remote),
-                            &bytes,
-                            None,
-                        )
-                    })
-                    .map_err(|e| e.to_string().into())
+            ) -> std::result::Result<Outgoing<'_>, HandlerError> {
+                let history = self.0.handler.with(|s| {
+                    application::welcome(
+                        s,
+                        s.vault.id(),
+                        DeviceId::from_bytes(ctx.remote),
+                        &bytes,
+                        None,
+                    )
+                })?;
+                Ok(self.0.handler.stream(history))
             }
         }
 

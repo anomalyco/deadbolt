@@ -164,6 +164,23 @@ pub(crate) struct Handler {
 }
 
 impl Handler {
+    pub(crate) fn stream(
+        &self,
+        history: application::OutgoingHistory,
+    ) -> deadbolt_net::Outgoing<'_> {
+        history.outgoing(|history| {
+            let slot = self.loaded.lock().map_err(|_| MobileError::Internal)?;
+            let s = slot.as_ref().ok_or(MobileError::Locked)?;
+            if self.cancel.is_cancelled() {
+                return Err(MobileError::Locked.into());
+            }
+            if !s.vault.is_member(&s.device_id()) {
+                return Err(MobileError::InvalidVault.into());
+            }
+            Ok(history.next(s, s.ready).map_err(MobileError::from)?)
+        })
+    }
+
     pub fn with<T>(&self, f: impl FnOnce(&mut Loaded) -> Result<T>) -> Result<T> {
         if self.cancel.is_cancelled() {
             return Err(MobileError::Locked);
@@ -239,9 +256,11 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         bytes: Vec<u8>,
-    ) -> std::result::Result<Vec<Blob>, HandlerError> {
-        self.with(|s| application::missing_for(s, &DeviceId::from_bytes(peer), &bytes, s.ready))
-            .map_err(failure)
+    ) -> std::result::Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+        let history = self
+            .with(|s| application::missing_for(s, &DeviceId::from_bytes(peer), &bytes, s.ready))
+            .map_err(failure)?;
+        Ok(self.stream(history))
     }
     async fn receive(
         &self,
@@ -450,6 +469,7 @@ mod tests {
             name: None,
             addr_seen: 0,
         };
+        let id = vault.id();
         let mobile = local_session(
             phone.path(),
             &b,
@@ -459,8 +479,25 @@ mod tests {
         .await;
         mobile.sync().await.unwrap();
         assert_eq!(host.handler.with(|s| Ok(s.vault.items().len())).unwrap(), 2);
+        // Start a full catch-up. Lock must also stop an already-selected history,
+        // not just reject the next connection.
+        let hello = json!({
+            "v": 1, "name": "Fixture", "addr": null,
+            "vaults": {id.to_string():
+                data_encoding::HEXLOWER.encode(&deadbolt_core::Heads::default().encode())}
+        });
+        let mut history = host
+            .handler
+            .missing_for(
+                *b.device_id().as_bytes(),
+                serde_json::to_vec(&hello).unwrap(),
+            )
+            .await
+            .unwrap();
+        assert!(history.next().unwrap().is_ok());
         // A previous exchange is not evidence for a new round refused by the peer.
         host.lock();
+        assert!(history.next().unwrap().is_err());
         assert!(matches!(mobile.sync().await, Err(MobileError::Network)));
         assert_eq!(
             mobile.handler.with(|s| Ok(s.vault.items().len())).unwrap(),
