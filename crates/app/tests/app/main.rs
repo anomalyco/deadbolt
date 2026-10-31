@@ -7,6 +7,8 @@
 #[cfg(debug_assertions)]
 mod support;
 
+mod deadbolt;
+
 mod agent;
 #[cfg(all(debug_assertions, target_os = "macos"))]
 mod autofill;

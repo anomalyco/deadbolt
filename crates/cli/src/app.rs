@@ -1,13 +1,16 @@
 //! Opening the desktop app: `deadbolt app` from anywhere, and bare
 //! `deadbolt` started from outside a terminal (docs/app.md, "One command").
-//! The app is its own program, so this binary stays free of GUI libraries.
+//! The app is built into this binary (the `app` feature, on by default; the
+//! static musl build leaves it out). It runs in its own process, this binary
+//! started again as `deadbolt ui`, a thin client of the agent like any other.
 //! A running app is brought forward through the agent (`app-activate`)
 //! rather than started again.
 
+use std::ffi::OsString;
 use std::io::IsTerminal;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -15,8 +18,10 @@ use anyhow::{Context, Result, bail};
 use crate::paths::Paths;
 use crate::protocol::Reply;
 
-/// The desktop app's program: beside `deadbolt`, or in `<prefix>/lib/deadbolt/`.
-pub const PROGRAM: &str = "deadbolt-ui";
+/// The hidden subcommand that runs the app in this process, taking Rune's
+/// flags (`--scene`, `--snap`, `--panel`, …). `deadbolt app` starts it
+/// detached; development and tests run it directly.
+pub const UI: &str = "ui";
 /// Deadbolt.app's bundle identifier.
 const BUNDLE_ID: &str = "pw.deadbolt.app";
 /// Keeps bare `deadbolt` from ever opening a window (scripts, agents).
@@ -24,6 +29,12 @@ const NO_UI: &str = "DEADBOLT_NO_UI";
 /// The longest `app-activate` may take: the agent holds it while an app
 /// another launch is starting gets to its window (`watchers::STARTING`).
 const ACTIVATE_TIMEOUT: Duration = Duration::from_secs(10);
+/// Whether this build has the app in it.
+pub const BUILT_IN: bool = cfg!(feature = "app");
+/// What a build without the app says when asked for it.
+const NOT_BUILT: &str = "this deadbolt is the static build for servers and containers, \
+without the desktop app. On a macOS or glibc Linux desktop, install the build with the \
+app: `curl -fsSL https://deadbolt.pw/install | sh`";
 
 /// The token a launcher gave this process for the window it opens:
 /// Wayland's `XDG_ACTIVATION_TOKEN`, else X11's `DESKTOP_STARTUP_ID`. A
@@ -56,12 +67,21 @@ async fn activate_running(paths: &Paths) -> bool {
 /// graphical session exists (always on macOS; a Wayland or X display on
 /// Linux), it isn't an SSH session and `DEADBOLT_NO_UI` isn't set.
 pub fn bare_opens_app(terminal: bool, macos: bool, var: impl Fn(&str) -> Option<String>) -> bool {
-    let set = |name: &str| var(name).is_some_and(|v| !v.is_empty());
     let opted_out = var(NO_UI).is_some_and(|v| !v.is_empty() && v != "0");
-    if terminal || opted_out || set("SSH_CONNECTION") {
+    if terminal || opted_out || set(&var, "SSH_CONNECTION") {
         return false;
     }
-    macos || set("WAYLAND_DISPLAY") || set("DISPLAY")
+    graphical(macos, var)
+}
+
+fn set(var: &impl Fn(&str) -> Option<String>, name: &str) -> bool {
+    var(name).is_some_and(|v| !v.is_empty())
+}
+
+/// Whether there's a graphical session to open a window in: always on
+/// macOS; a Wayland or X display elsewhere.
+fn graphical(macos: bool, var: impl Fn(&str) -> Option<String>) -> bool {
+    macos || set(&var, "WAYLAND_DISPLAY") || set(&var, "DISPLAY")
 }
 
 /// Whether this process was started from a terminal.
@@ -71,57 +91,88 @@ pub fn from_terminal() -> bool {
         || std::io::stderr().is_terminal()
 }
 
+/// The arguments to run the app with in this process, if this process is
+/// the app: `deadbolt ui [flags]`, or (macOS) Deadbolt.app's own
+/// `Contents/MacOS/Deadbolt` whatever its arguments. That file is this
+/// binary too, signed as the app, so it never runs a CLI command: the agent
+/// takes it for the app, and a command run through it would carry the
+/// app's standing.
+pub fn ui_args(args: &[OsString], exe: Option<&Path>, macos: bool) -> Option<Vec<String>> {
+    let text = |args: &[OsString]| {
+        args.iter()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    };
+    if macos && exe.is_some_and(|exe| app_bundle_of(exe).is_some()) {
+        return Some(text(args.get(1..).unwrap_or_default()));
+    }
+    (args.get(1).is_some_and(|a| a == UI)).then(|| text(&args[2..]))
+}
+
+/// Runs the app in this process until it quits.
+pub fn run_ui(argv: Vec<String>) -> ExitCode {
+    #[cfg(feature = "app")]
+    {
+        deadbolt_app::run(
+            argv,
+            deadbolt_app::Host {
+                enclave_sha256: env!("DEADBOLT_ENCLAVE_SHA256"),
+            },
+        );
+        ExitCode::SUCCESS
+    }
+    #[cfg(not(feature = "app"))]
+    {
+        let _ = argv;
+        eprintln!("error: {NOT_BUILT}");
+        ExitCode::FAILURE
+    }
+}
+
 /// What opens the app.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Target {
     /// The Deadbolt.app this binary is the helper of, through `open`.
     Bundle(PathBuf),
-    /// The app's program, run directly.
-    Program(PathBuf),
-    /// Whichever Deadbolt.app Launch Services knows, through `open -b`.
-    BundleId,
+    /// This binary as `deadbolt ui`, after trying (macOS release builds)
+    /// whichever Deadbolt.app Launch Services knows, through `open -b`.
+    BuiltIn { bundle_id_first: bool },
+    /// No app here: a build without it.
+    NotBuilt,
 }
 
-/// Where the app is for the `deadbolt` at `exe` (symlinks resolved), or
-/// the places looked in. In order: the bundle `exe` is the helper of, on
-/// macOS; `deadbolt-ui` beside `exe`; `<prefix>/lib/deadbolt/deadbolt-ui`
-/// for `<prefix>/bin/deadbolt`; then, on macOS, an installed Deadbolt.app.
-pub fn locate(exe: &Path, macos: bool) -> Result<Target, Vec<PathBuf>> {
+/// What opens the app for the `deadbolt` at `exe` (symlinks resolved).
+pub fn locate(exe: &Path, macos: bool, built_in: bool, release: bool) -> Target {
     if macos && let Some(bundle) = bundle_of(exe) {
-        return Ok(Target::Bundle(bundle));
+        return Target::Bundle(bundle);
     }
-    let mut looked = Vec::new();
-    if let Some(dir) = exe.parent() {
-        looked.push(dir.join(PROGRAM));
-        if dir.file_name().is_some_and(|n| n == "bin")
-            && let Some(prefix) = dir.parent()
-        {
-            looked.push(prefix.join("lib/deadbolt").join(PROGRAM));
+    if built_in {
+        Target::BuiltIn {
+            bundle_id_first: macos && release,
         }
+    } else {
+        Target::NotBuilt
     }
-    if let Some(program) = looked.iter().find(|p| executable(p)) {
-        return Ok(Target::Program(program.clone()));
-    }
-    if macos {
-        return Ok(Target::BundleId);
-    }
-    Err(looked)
 }
 
 /// `X.app` for `X.app/Contents/Helpers/deadbolt`.
 pub fn bundle_of(exe: &Path) -> Option<PathBuf> {
-    let helpers = exe.parent()?;
-    let contents = helpers.parent()?;
+    bundle_with(exe, "Helpers")
+}
+
+/// `X.app` for its own executable, `X.app/Contents/MacOS/<name>`.
+fn app_bundle_of(exe: &Path) -> Option<PathBuf> {
+    bundle_with(exe, "MacOS")
+}
+
+fn bundle_with(exe: &Path, dir: &str) -> Option<PathBuf> {
+    let inner = exe.parent()?;
+    let contents = inner.parent()?;
     let bundle = contents.parent()?;
-    (helpers.file_name()? == "Helpers"
+    (inner.file_name()? == dir
         && contents.file_name()? == "Contents"
         && bundle.extension()? == "app")
         .then(|| bundle.to_path_buf())
-}
-
-fn executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
 /// This binary's path, symlinks resolved, so a `~/.local/bin/deadbolt`
@@ -133,54 +184,97 @@ pub fn this_binary() -> Result<PathBuf> {
 
 /// Opens the app and returns once it's launched, detached from this
 /// process, or once a running one came forward. Deadbolt.app goes through
-/// Launch Services, which brings a running copy to the front. `deadbolt-ui`
-/// is asked through the agent first (`app-activate`), and only started when
-/// no app answers.
+/// Launch Services, which brings a running copy to the front. The built-in
+/// app is asked through the agent first (`app-activate`), and only started
+/// when no app answers.
 pub async fn open(paths: &Paths) -> Result<()> {
     let exe = this_binary()?;
     let macos = cfg!(target_os = "macos");
-    match locate(&exe, macos) {
-        Ok(Target::Bundle(bundle)) => launch_services(Command::new("/usr/bin/open").arg(&bundle))
-            .with_context(|| format!("couldn't open {}", bundle.display())),
-        Ok(Target::BundleId) => {
-            launch_services(Command::new("/usr/bin/open").args(["-b", BUNDLE_ID])).context(
-                "couldn't open Deadbolt.app. Install it with `brew install --cask \
-                 anomalyco/tap/deadbolt`, or download it from \
-                 https://github.com/anomalyco/deadbolt/releases",
-            )
+    let release = !cfg!(debug_assertions);
+    match locate(&exe, macos, BUILT_IN, release) {
+        Target::Bundle(bundle) => {
+            if let Some(home) = crate::config::env("HOME").ok().filter(|h| !h.is_empty()) {
+                link_into_applications(&bundle, Path::new(&home));
+            }
+            launch_services(Command::new("/usr/bin/open").arg(&bundle))
+                .with_context(|| format!("couldn't open {}", bundle.display()))
         }
-        Ok(Target::Program(program)) => {
+        Target::BuiltIn { bundle_id_first } => {
+            if bundle_id_first
+                && launch_services(Command::new("/usr/bin/open").args(["-b", BUNDLE_ID])).is_ok()
+            {
+                return Ok(());
+            }
+            if !graphical(macos, |name| crate::config::env(name).ok()) {
+                bail!(
+                    "there's no graphical session here (neither WAYLAND_DISPLAY nor DISPLAY \
+                     is set); `deadbolt app` opens a window on your desktop"
+                );
+            }
             if activate_running(paths).await {
                 return Ok(());
             }
-            let mut command = Command::new(&program);
-            // The app runs this `deadbolt` as its agent, not another on PATH.
-            if crate::config::env("DEADBOLT_BIN").is_err() {
-                command.env("DEADBOLT_BIN", &exe);
+            if !macos {
+                crate::desktop::ensure(&exe);
             }
-            command
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .process_group(0)
-                .spawn()
-                .with_context(|| format!("starting {}", program.display()))?;
-            Ok(())
+            start(&exe)
         }
-        Err(looked) => {
-            let looked: Vec<String> = looked
-                .iter()
-                .map(|p| format!("  {}", p.display()))
-                .collect();
-            bail!(
-                "Deadbolt's desktop app isn't installed with this deadbolt. Looked for:\n{}\n\
-                 Install `{PROGRAM}` there; from a checkout, \
-                 `cargo install --locked --path crates/app` puts it beside a \
-                 cargo-installed deadbolt.",
-                looked.join("\n")
-            )
-        }
+        Target::NotBuilt => bail!("{NOT_BUILT}"),
     }
+}
+
+/// Starts this binary as the app, in its own process group with no stdio.
+/// It inherits the launcher's activation token for its first window (Rune
+/// takes it from the environment), and runs this binary as its agent.
+fn start(exe: &Path) -> Result<()> {
+    // Debug builds only: tests stand a script in for the app.
+    let program = cfg!(debug_assertions)
+        .then(|| crate::config::env("DEADBOLT_TEST_UI").ok())
+        .flatten()
+        .filter(|p| !p.is_empty())
+        .map_or_else(|| exe.to_path_buf(), PathBuf::from);
+    Command::new(&program)
+        .arg(UI)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("starting {} {UI}", program.display()))?;
+    Ok(())
+}
+
+/// Puts a link to `bundle` in `~/Applications`, so Launchpad, Finder and
+/// Spotlight's apps list Deadbolt, when it lives somewhere else (an npm
+/// install's package) and neither Applications folder has a Deadbolt yet.
+/// Best effort: opening the app doesn't wait on it.
+fn link_into_applications(bundle: &Path, home: &Path) {
+    let Some(link) = applications_link(bundle, home, |p| p.symlink_metadata().is_ok()) else {
+        return;
+    };
+    if let Some(dir) = link.parent()
+        && std::fs::create_dir_all(dir).is_ok()
+        && std::os::unix::fs::symlink(bundle, &link).is_ok()
+    {
+        eprintln!("Linked {} to {}", link.display(), bundle.display());
+    }
+}
+
+/// Where [`link_into_applications`] links `bundle`, if it should.
+fn applications_link(
+    bundle: &Path,
+    home: &Path,
+    exists: impl Fn(&Path) -> bool,
+) -> Option<PathBuf> {
+    let user = home.join("Applications");
+    let text = bundle.to_string_lossy();
+    let movable = !(text.starts_with("/Volumes/") || text.contains("/AppTranslocation/"));
+    let elsewhere = [Path::new("/Applications"), &user]
+        .iter()
+        .all(|dir| bundle.parent() != Some(dir));
+    let link = user.join("Deadbolt.app");
+    let taken = exists(&link) || exists(Path::new("/Applications/Deadbolt.app"));
+    (movable && elsewhere && !taken).then_some(link)
 }
 
 /// Runs `open`, which returns once Launch Services has the app started.
@@ -200,7 +294,6 @@ fn launch_services(command: &mut Command) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     fn env<'a>(vars: &'a [(&str, &str)]) -> impl Fn(&str) -> Option<String> + 'a {
         |name| {
@@ -269,48 +362,87 @@ mod tests {
         }
     }
 
-    fn program(path: &Path) {
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(path, "").unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    fn argv(args: &[&str]) -> Vec<OsString> {
+        args.iter().map(OsString::from).collect()
     }
 
     #[test]
-    fn the_app_is_found_beside_deadbolt_then_under_its_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        let bin = dir.path().join("bin");
-        let exe = bin.join("deadbolt");
-        program(&exe);
-        let sibling = bin.join(PROGRAM);
-        let lib = dir.path().join("lib/deadbolt").join(PROGRAM);
-        assert_eq!(locate(&exe, false), Err(vec![sibling.clone(), lib.clone()]));
-        assert_eq!(locate(&exe, true), Ok(Target::BundleId));
-        program(&lib);
-        assert_eq!(locate(&exe, false), Ok(Target::Program(lib.clone())));
-        program(&sibling);
-        assert_eq!(locate(&exe, false), Ok(Target::Program(sibling.clone())));
-        assert_eq!(locate(&exe, true), Ok(Target::Program(sibling)));
+    fn only_deadbolt_ui_and_the_bundles_own_executable_run_the_app_here() {
+        let cli = Path::new("/home/kit/.local/bin/deadbolt");
+        let ui = argv(&["deadbolt", "ui", "--scene", "vault"]);
+        assert_eq!(
+            ui_args(&ui, Some(cli), false),
+            Some(vec!["--scene".into(), "vault".into()])
+        );
+        assert_eq!(
+            ui_args(&argv(&["deadbolt", "ui"]), None, true),
+            Some(vec![])
+        );
+        for other in [&["deadbolt"][..], &["deadbolt", "ls"], &["deadbolt", "app"]] {
+            assert_eq!(ui_args(&argv(other), Some(cli), true), None, "{other:?}");
+        }
+        // Deadbolt.app's own executable is the app whatever it's asked.
+        let app = Path::new("/Applications/Deadbolt.app/Contents/MacOS/Deadbolt");
+        let ls = argv(&["Deadbolt", "get", "github"]);
+        assert_eq!(
+            ui_args(&ls, Some(app), true),
+            Some(vec!["get".into(), "github".into()])
+        );
+        assert_eq!(ui_args(&argv(&["Deadbolt"]), Some(app), true), Some(vec![]));
+        // Its helper is the CLI.
+        let helper = Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt");
+        assert_eq!(ui_args(&ls, Some(helper), true), None);
+        // Only macOS has bundles.
+        assert_eq!(ui_args(&ls, Some(app), false), None);
     }
 
     #[test]
-    fn only_an_executable_file_counts_and_only_bin_has_a_prefix() {
-        let dir = tempfile::tempdir().unwrap();
-        let debug = dir.path().join("target/debug");
-        let exe = debug.join("deadbolt");
-        program(&exe);
-        std::fs::write(debug.join(PROGRAM), "").unwrap();
-        program(&dir.path().join("target/lib/deadbolt").join(PROGRAM));
-        assert_eq!(locate(&exe, false), Err(vec![debug.join(PROGRAM)]));
+    fn the_app_is_the_bundle_else_built_in_else_missing() {
+        let helper = Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt");
+        let bundle = PathBuf::from("/Applications/Deadbolt.app");
+        assert_eq!(
+            locate(helper, true, true, true),
+            Target::Bundle(bundle.clone())
+        );
+        assert_eq!(locate(helper, true, false, true), Target::Bundle(bundle));
+        let cli = Path::new("/usr/local/bin/deadbolt");
+        assert_eq!(
+            locate(cli, true, true, true),
+            Target::BuiltIn {
+                bundle_id_first: true
+            }
+        );
+        // A development build opens its own app, not an installed one.
+        assert_eq!(
+            locate(cli, true, true, false),
+            Target::BuiltIn {
+                bundle_id_first: false
+            }
+        );
+        assert_eq!(
+            locate(cli, false, true, true),
+            Target::BuiltIn {
+                bundle_id_first: false
+            }
+        );
+        // Linux has no bundles, even shaped like one.
+        assert_eq!(
+            locate(helper, false, true, true),
+            Target::BuiltIn {
+                bundle_id_first: false
+            }
+        );
+        assert_eq!(locate(cli, false, false, true), Target::NotBuilt);
     }
 
     #[test]
-    fn the_bundles_helper_opens_its_own_bundle() {
-        let dir = tempfile::tempdir().unwrap();
-        let bundle = dir.path().join("Deadbolt.app");
-        let exe = bundle.join("Contents/Helpers/deadbolt");
-        program(&exe);
-        program(&bundle.join("Contents/Helpers").join(PROGRAM));
-        assert_eq!(locate(&exe, true), Ok(Target::Bundle(bundle)));
+    fn the_bundle_is_found_by_its_helpers_shape() {
+        assert_eq!(
+            bundle_of(Path::new(
+                "/Applications/Deadbolt.app/Contents/Helpers/deadbolt"
+            )),
+            Some(PathBuf::from("/Applications/Deadbolt.app"))
+        );
         assert!(
             bundle_of(Path::new(
                 "/Applications/Deadbolt/Contents/Helpers/deadbolt"
@@ -323,5 +455,40 @@ mod tests {
             ))
             .is_none()
         );
+    }
+
+    #[test]
+    fn an_app_outside_applications_gets_a_link_in_the_users() {
+        let home = Path::new("/Users/kit");
+        let npm =
+            Path::new("/opt/homebrew/lib/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app");
+        let nothing = |_: &Path| false;
+        assert_eq!(
+            applications_link(npm, home, nothing),
+            Some(PathBuf::from("/Users/kit/Applications/Deadbolt.app"))
+        );
+        // Either Applications folder already has a Deadbolt (a link included).
+        for there in [
+            "/Users/kit/Applications/Deadbolt.app",
+            "/Applications/Deadbolt.app",
+        ] {
+            assert_eq!(
+                applications_link(npm, home, |p| p == Path::new(there)),
+                None
+            );
+        }
+        // Already in one, or somewhere it can't stay.
+        for bundle in [
+            "/Applications/Deadbolt.app",
+            "/Users/kit/Applications/Deadbolt.app",
+            "/Volumes/Deadbolt/Deadbolt.app",
+            "/private/var/folders/x/AppTranslocation/y/d/Deadbolt.app",
+        ] {
+            assert_eq!(
+                applications_link(Path::new(bundle), home, nothing),
+                None,
+                "{bundle}"
+            );
+        }
     }
 }

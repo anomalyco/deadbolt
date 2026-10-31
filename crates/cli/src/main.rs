@@ -261,9 +261,11 @@ enum Commands {
     Health(health::HealthArgs),
     /// Open the desktop app, or bring the running one forward (bare
     /// `deadbolt` does too when started from an app launcher rather than a
-    /// terminal; DEADBOLT_NO_UI=1 stops that).
+    /// terminal; DEADBOLT_NO_UI=1 stops that). On Linux its first opening
+    /// adds Deadbolt to the app launcher.
     App,
-    /// Add Deadbolt to the Linux app launcher, opening `deadbolt app`.
+    /// Add Deadbolt to the Linux app launcher, opening `deadbolt app`, or
+    /// take it out.
     #[command(subcommand)]
     Desktop(DesktopCommand),
     /// Connect Deadbolt's browser extension to this computer's Deadbolt.
@@ -412,9 +414,14 @@ enum TouchIdCommand {
 }
 
 fn main() -> ExitCode {
+    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
+    // Deadbolt.app's own executable and `deadbolt ui` are the app itself.
+    let exe = app::this_binary().ok();
+    if let Some(argv) = app::ui_args(&args, exe.as_deref(), cfg!(target_os = "macos")) {
+        return app::run_ui(argv);
+    }
     // A browser runs a native messaging host with the caller's origin as its
     // only argument, which can't name a subcommand.
-    let mut args: Vec<std::ffi::OsString> = std::env::args_os().collect();
     if args.len() == 2
         && args[1]
             .to_str()
@@ -431,6 +438,7 @@ fn main() -> ExitCode {
     // Bare `deadbolt` from an app launcher opens the app; from a terminal,
     // or when the app can't be opened, it prints usage as before.
     if args.len() == 1
+        && app::BUILT_IN
         && app::bare_opens_app(app::from_terminal(), cfg!(target_os = "macos"), |name| {
             config::env(name).ok()
         })
