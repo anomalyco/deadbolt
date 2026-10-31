@@ -362,22 +362,41 @@ pub(crate) fn check_files(
     ops: &[DataOp],
 ) -> Result<(), ItemError> {
     let mut after: BTreeMap<ItemId, (BTreeMap<String, usize>, Option<String>)> = BTreeMap::new();
+    // Only a file write can trigger the cap. Collect those items first so
+    // removals earlier in the batch still make room for later file writes.
+    for op in ops {
+        let DataOp::Edit {
+            item,
+            change: Change::Set { value, .. },
+        } = op
+        else {
+            continue;
+        };
+        if value.kind != crate::FieldType::File {
+            continue;
+        }
+        let Some(state) = items.get(item) else {
+            continue;
+        };
+        after.entry(*item).or_insert_with(|| {
+            let sizes = state
+                .fields
+                .iter()
+                .filter_map(|(name, frontier)| {
+                    let field = winner(frontier)?.value.as_ref()?;
+                    Some((name.clone(), item::files_size([field])))
+                })
+                .collect();
+            (sizes, None)
+        });
+    }
     for op in ops {
         let DataOp::Edit { item, change } = op else {
             continue;
         };
-        let Some(state) = items.get(item) else {
+        let Some((sizes, grew)) = after.get_mut(item) else {
             continue;
         };
-        let (sizes, grew) = after.entry(*item).or_insert_with(|| {
-            let sizes = state
-                .item(*item)
-                .fields
-                .iter()
-                .map(|(name, field)| (name.clone(), item::files_size([field])))
-                .collect();
-            (sizes, None)
-        });
         match change {
             Change::Set { field, value } => {
                 if value.kind == crate::FieldType::File {
@@ -414,15 +433,18 @@ pub(crate) fn check_tags(
         let DataOp::Edit { item, change } = op else {
             continue;
         };
+        if !matches!(change, Change::TagAdd(_) | Change::TagRemove(_)) {
+            continue;
+        }
         let Some(state) = items.get(item) else {
             continue;
         };
         let (tags, grew) = after.entry(*item).or_insert_with(|| {
             let folded = state
-                .item(*item)
                 .tags
                 .iter()
-                .map(|t| tag::fold_tag(t))
+                .filter(|(_, frontier)| frontier.iter().any(|w| w.value.is_some()))
+                .map(|(folded, _)| folded.clone())
                 .collect();
             (folded, false)
         });
