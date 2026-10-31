@@ -73,7 +73,7 @@ pub(super) fn welcome(
     device: DeviceId,
     join: &[u8],
     fallback_addr: Option<Addr>,
-) -> Result<(Vec<Blob>, DeviceInfo)> {
+) -> Result<(application::OutgoingHistory, DeviceInfo)> {
     s.ensure_usable()?;
     let blobs = application::welcome(s, vault, device, join, fallback_addr)?;
     Ok((blobs, s.device_info(&device, &HashSet::new())))
@@ -93,7 +93,7 @@ pub(super) fn verify_welcome(
     device: &DeviceId,
     inviter: DeviceId,
     offer: Offer,
-    welcome: Vec<Blob>,
+    welcome: application::WelcomeReplay,
 ) -> Result<Welcomed> {
     Ok(application::verify_welcome(
         device, inviter, offer, welcome,
@@ -116,11 +116,24 @@ pub(super) fn adopt(s: &mut Loaded, welcomed: Welcomed) -> Result<VaultInfo> {
 }
 
 #[cfg(test)]
+pub(super) fn test_replay(
+    s: &Loaded,
+    mut history: application::OutgoingHistory,
+) -> application::WelcomeReplay {
+    use deadbolt_net::WelcomeSink;
+    let mut replay = application::WelcomeReplay::default();
+    while let Some(blob) = history.next(s, true).unwrap() {
+        replay.push(blob).unwrap();
+    }
+    replay
+}
+
+#[cfg(test)]
 pub(super) fn apply_welcome(
     s: &mut Loaded,
     inviter: DeviceId,
     offer: Offer,
-    welcome: Vec<Blob>,
+    welcome: application::WelcomeReplay,
 ) -> Result<VaultInfo> {
     let welcomed = verify_welcome(&s.id, inviter, offer, welcome)?;
     adopt(s, welcomed)
@@ -162,7 +175,11 @@ impl SyncHandler for NoSync {
     async fn heads(&self, _: PeerId) -> Result<Vec<u8>, HandlerError> {
         Err("this device is not set up".into())
     }
-    async fn missing_for(&self, _: PeerId, _: Vec<u8>) -> Result<Vec<Blob>, HandlerError> {
+    async fn missing_for(
+        &self,
+        _: PeerId,
+        _: Vec<u8>,
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         Err("this device is not set up".into())
     }
     async fn receive(&self, _: PeerId, _: Vec<Blob>) -> Result<(), HandlerError> {
@@ -193,6 +210,7 @@ struct NewDevice<'a> {
 }
 
 impl Joiner for NewDevice<'_> {
+    type Welcome = application::WelcomeReplay;
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let (offer, vault) = read_offer(&offer).map_err(handler_error)?;
         let inviter = DeviceId::from_bytes(ctx.remote);
@@ -222,7 +240,11 @@ impl Joiner for NewDevice<'_> {
         Ok(join)
     }
 
-    async fn receive(&self, ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        ctx: &PairingContext,
+        welcome: application::WelcomeReplay,
+    ) -> Result<(), HandlerError> {
         let offer = self
             .offer
             .lock()
@@ -442,7 +464,7 @@ impl Inviter for ExistingDevice<'_> {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         let device = DeviceId::from_bytes(ctx.remote);
         let (blobs, info) = self
             .agent
@@ -453,7 +475,11 @@ impl Inviter for ExistingDevice<'_> {
             })
             .map_err(handler_error)?;
         *self.added.lock().unwrap_or_else(|e| e.into_inner()) = Some(info);
-        Ok(blobs)
+        Ok(blobs.outgoing(|h| {
+            self.agent
+                .with_data(|s| Ok(h.next(&**s, true)?))
+                .map_err(handler_error)
+        }))
     }
 }
 
@@ -750,7 +776,8 @@ mod tests {
             .unwrap();
         let err = a
             .with(|s| welcome(s, vault, b_dev, &join, None))
-            .unwrap_err();
+            .err()
+            .unwrap();
         assert_eq!(
             err.to_string(),
             "that device was removed from personal and can't rejoin it"
@@ -789,7 +816,7 @@ mod tests {
                 &self,
                 _: &PairingContext,
                 _: Vec<u8>,
-            ) -> Result<Vec<Blob>, HandlerError> {
+            ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
                 unreachable!("the joiner must refuse before sending its consent")
             }
         }

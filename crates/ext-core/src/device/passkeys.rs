@@ -132,12 +132,7 @@ pub(super) fn delete(body: &mut Value) -> Result<Value> {
     check_passphrase(body, PRESET.with(Cell::get).reauth())?;
     let reply = state().with(|s| {
         let item = find(s, body)?;
-        let mut staged = s.vault.clone();
-        staged.write(
-            &s.secret,
-            vec![DataOp::delete(item.id, super::unix_time() as u64)],
-        )?;
-        s.commit(staged)?;
+        s.write(vec![DataOp::delete(item.id, super::unix_time() as u64)])?;
         Ok(json!({"type": "device-delete", "ok": true}))
     })?;
     request_sync();
@@ -213,10 +208,8 @@ fn create_inner(body: &mut Value, authorized: bool) -> Result<Value> {
         let items = s.vault.items();
         passkeys::check_excluded(&items, &rp, &exclude)?;
         let made = passkeys::register(&new, false, &passkey_date())?;
-        let mut staged = s.vault.clone();
-        let entry = staged.write(&s.secret, vec![made.create])?;
-        let id = ItemId::of_create(&entry.hash(), 0);
-        s.commit(staged)?;
+        let hash = s.write(vec![made.create])?;
+        let id = ItemId::of_create(&hash, 0);
         Ok(json!({"type": "passkey-created", "ref": reference(&s.vault, id), "credentialId": made.credential_id,
             "clientDataJSON": made.client_data_json, "attestationObject": made.attestation_object,
             "authenticatorData": made.authenticator_data, "publicKey": made.public_key, "verified": false}))

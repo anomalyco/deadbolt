@@ -164,6 +164,13 @@ export type ToBackground =
    */
   | { type: "db:menu-away"; dismissed?: boolean }
   /**
+   * From the same frame: the field moved or changed size inside the frame
+   * (its form reflowed, a hint came in above it, a box opened around it),
+   * and `box` is where it shows in the frame now. The menu follows it there,
+   * or goes when it doesn't show through every frame above.
+   */
+  | { type: "db:menu-move"; box: Box }
+  /**
    * The user clicked into an identity or card field (see content/forms.ts):
    * the menu for it. `section` names the field's section in form snapshot
    * `form`. From a frame, `box` is where the field shows in the frame's
@@ -261,6 +268,8 @@ export type ToContent =
    * session step's pill on that field instead. Top page only.
    */
   | { type: "db:open-at"; token: string; rows: number; box: Box; mode?: "pill"; captioned?: true }
+  /** The frame's field the open menu `token` is for now shows at `box` in this page (see db:menu-move). Top page only. */
+  | { type: "db:move-at"; token: string; box: Box }
   /** Which of the form's identity or card fields may be filled now: those of `section`, or every one of `kind` (see Approved). */
   | { type: "db:forms-approve"; form: number; kind: FormKind; section?: string; measure: boolean }
   /** Where the fields of a forms approval show now, if every one of them still does. */
@@ -290,7 +299,7 @@ export type ToContent =
    * element says it's unobscured; with `unsandboxed`, only if that element
    * has no `sandbox` attribute.
    */
-  | { type: "db:frame-child"; nonce: string; boxes: Box[]; track?: boolean; unsandboxed?: boolean }
+  | { type: "db:frame-child"; nonce: string; boxes: Box[]; track?: boolean; unsandboxed?: boolean; place?: boolean }
   /** To the frame below: tell the frame above which element you're in. */
   | { type: "db:frame-announce"; nonce: string }
   /** To every frame of a tab: the learning session it joins, or null when it ends. */

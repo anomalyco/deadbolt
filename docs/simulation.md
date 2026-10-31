@@ -82,7 +82,7 @@ simulator shares the CLI's `Offer`, join consent and welcome helpers; its
 adapter omits display and live addresses. Rendezvous, code expiry, single use,
 burning on a wrong guess and TLS exporter wiring remain covered by the
 real-iroh tests in `crates/net/src/pair.rs` and `crates/net/tests/net/pair.rs`.
-Focused regressions also cut pairing during its exchange and check persistence
+Focused regressions interleave outgoing frame pulls with a new attachment and a durable removal. The stream stops at the original signed frontier, aborting on loss of the last shared vault or on a pairing removal after the welcome header. The multi-vault sync handler regressions remove a recipient between pulls: the surviving vault sends its original membership and data, while not even the removed vault’s queued `Add` leaves. A replay missing a pinned data tip aborts instead of being mistaken for a safe skip. Other regressions cut pairing during its exchange and check persistence
 across reopening. A cut after admission can leave the inviter with a member that
 never received its welcome; these traces check durability rather than
 convergence, and pairing such a device again finishes the join without a second
@@ -131,8 +131,18 @@ treated as already unlocked: a bad passphrase leaves the device locked. Explicit
 `deadbolt lock` still closes the failed handle. No uncertain mutation is retried.
 A warning records only the typed failure class, I/O kind and numeric OS error,
 never backend messages, paths or vault values.
-Staging clones the validated vault, avoiding signature verification of historical
-entries. Sync batches publish independently per vault. The short-session regression uses
+Native and standalone writes use the same core transaction: validation borrows the
+committed log and checks each new entry against that prefix plus previously
+accepted entries in this batch. Only the new entries are encoded, one at a time,
+in membership-then-data order inside one store transaction. After confirmation
+the verified nodes, indexes and resolved membership become live, and the item
+view is updated. A single data edit does not copy historical nodes or item state.
+Compound local writes that read their earlier changes project those changes on
+demand. A membership change rebuilds the view if it changes which entries count
+in an already projected data log. Adding a new key therefore leaves existing
+items alone. Adding a key whose earlier admission was cut is different: its
+stored but ignored data now counts, so dependent edits must be replayed too.
+Sync batches still publish independently per vault. The short-session regression uses
 the same cut budget twice, asserts each interrupted exchange advances the
 receiver before `DONE`, reopens that exact prefix, then heals.
 

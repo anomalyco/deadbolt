@@ -173,8 +173,9 @@ the MV3 service worker or directly in the offscreen document. Handles never move
 between workers. An opaque handle id in Rust avoids claiming that a JS object is
 thread-safe; this build has no wasm threads/shared memory.
 
-Local writes and incoming sync batches stage a validated core vault, append the
-new encrypted entries durably, and only then publish the staged state. A storage
+Local writes and incoming sync batches validate a private suffix against the
+borrowed vault history (the same staging path as native), append its encrypted
+entries in one transaction, and publish only after confirmed commit. A storage
 error before the signed-log transaction reaches commit leaves the live vault
 unchanged and unlocked; further writes may require reopening the store. Once
 redb's commit starts, the store reports a failed commit as `AppendUncertain`.
@@ -235,7 +236,7 @@ attempts can start again; codes and secrets are never logged.
 
 Like the CLI's `Fresh`, the joining node uses a fresh device key and refuses all
 sync. It reuses `application::read_offer`, `join_blob` and `verify_welcome`, keeping
-the admitted vault and key only in memory. No local passphrase or OPFS write is
+a private, incrementally verified vault and key only in memory. It never keeps a second copy of the complete encoded welcome. No local passphrase or OPFS write is
 needed until admission. `device-join-finish {passphrase, deviceName}` writes the
 encrypted key, complete welcome log and peer hints into the exclusive pending
 OPFS file, closes it, and atomically publishes it without replacing an existing

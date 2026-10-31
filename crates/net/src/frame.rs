@@ -61,12 +61,16 @@ pub(crate) async fn expect<R: AsyncRead + Unpin>(r: &mut R, want: u8, max: usize
 
 pub(crate) async fn write_entries<W: AsyncWrite + Unpin>(
     w: &mut W,
-    entries: &[Blob],
-) -> Result<()> {
+    entries: impl Iterator<Item = Result<Blob, crate::HandlerError>>,
+) -> Result<usize> {
+    let mut count = 0;
     for entry in entries {
-        write(w, tag::ENTRY, entry).await?;
+        let entry = entry.map_err(Error::Handler)?;
+        write(w, tag::ENTRY, &entry).await?;
+        count += 1;
     }
-    write(w, tag::DONE, &[]).await
+    write(w, tag::DONE, &[]).await?;
+    Ok(count)
 }
 
 /// Most entry bytes [`read_batch`] buffers: two maximum-size frames. A batch stops
@@ -78,6 +82,7 @@ pub(crate) const BATCH_ENTRIES: usize = 64 * 1024;
 
 /// Reads `ENTRY` frames until `DONE` or until the batch holds [`BATCH_ENTRIES`]
 /// entries or [`BATCH_BYTES`] bytes. Returns the batch and whether `DONE` was read.
+#[cfg(test)]
 pub(crate) async fn read_batch<R: AsyncRead + Unpin>(
     r: &mut R,
     max: usize,
@@ -94,32 +99,27 @@ pub(crate) async fn read_prefix<R: AsyncRead + Unpin>(
     let mut entries = Vec::new();
     let mut bytes = 0;
     while entries.len() < entry_limit.min(BATCH_ENTRIES) && bytes < BATCH_BYTES {
-        match read(r, max).await? {
-            (tag::ENTRY, body) => {
+        match read_entry(r, max).await? {
+            Some(body) => {
                 bytes += body.len();
                 entries.push(body);
             }
-            (tag::DONE, _) => return Ok((entries, true)),
-            (tag, _) => {
-                return Err(Error::Protocol(format!(
-                    "expected entry or done, got {tag:#04x}"
-                )));
-            }
+            None => return Ok((entries, true)),
         }
     }
     Ok((entries, false))
 }
 
-/// Reads every entry up to `DONE`, without a bound on their total. Only for a
-/// pairing's welcome, which comes from a device the user just confirmed.
-pub(crate) async fn read_entries<R: AsyncRead + Unpin>(r: &mut R, max: usize) -> Result<Vec<Blob>> {
-    let mut entries = Vec::new();
-    loop {
-        let (mut batch, done) = read_batch(r, max).await?;
-        entries.append(&mut batch);
-        if done {
-            return Ok(entries);
-        }
+pub(crate) async fn read_entry<R: AsyncRead + Unpin>(
+    r: &mut R,
+    max: usize,
+) -> Result<Option<Blob>> {
+    match read(r, max).await? {
+        (tag::ENTRY, body) => Ok(Some(body)),
+        (tag::DONE, _) => Ok(None),
+        (tag, _) => Err(Error::Protocol(format!(
+            "expected entry or done, got {tag:#04x}"
+        ))),
     }
 }
 
@@ -162,14 +162,14 @@ mod tests {
     async fn roundtrip_and_limits() {
         let (mut a, mut b) = tokio::io::duplex(1024);
         write(&mut a, tag::HEADS, b"hello").await.unwrap();
-        write_entries(&mut a, &blobs(&[b"x", b"", b"yz"]))
+        write_entries(&mut a, blobs(&[b"x", b"", b"yz"]).into_iter().map(Ok))
             .await
             .unwrap();
         write(&mut a, tag::HEADS, &[0u8; 100]).await.unwrap();
         assert_eq!(*expect(&mut b, tag::HEADS, 64).await.unwrap(), b"hello");
         assert_eq!(
-            read_entries(&mut b, 64).await.unwrap(),
-            blobs(&[b"x", b"", b"yz"])
+            read_batch(&mut b, 64).await.unwrap(),
+            (blobs(&[b"x", b"", b"yz"]), true)
         );
         assert!(matches!(
             read(&mut b, 64).await,
@@ -185,7 +185,7 @@ mod tests {
             .map(|i| Zeroizing::new((i as u32).to_be_bytes().to_vec()))
             .collect();
         let (mut a, mut b) = tokio::io::duplex(64 * 1024);
-        let write = write_entries(&mut a, &entries);
+        let write = write_entries(&mut a, entries.iter().cloned().map(Ok));
         let read = async {
             let mut sizes = Vec::new();
             let mut all = Vec::new();
@@ -214,7 +214,7 @@ mod tests {
             .map(|len| Zeroizing::new(vec![1; len]))
             .collect();
         let (mut a, mut b) = tokio::io::duplex(1024 * 1024);
-        let write = write_entries(&mut a, &entries);
+        let write = write_entries(&mut a, entries.iter().cloned().map(Ok));
         let read = async {
             let mut sizes = Vec::new();
             loop {

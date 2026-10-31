@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use data_encoding::HEXLOWER;
 use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, MembershipOp, Payload, Vault, VaultId, valid_name,
+    DeviceId, DeviceSecret, Entry, MembershipOp, Payload, Vault, VaultId, VaultWrite, valid_name,
 };
 use deadbolt_net::application::{self, State};
 pub use deadbolt_net::application::{Addr, Hint, clean_name};
@@ -80,7 +80,7 @@ impl Changes {
     }
 
     /// Records entries newly committed to `vault`.
-    fn committed(&mut self, vault: VaultId, entries: &[Entry]) {
+    fn committed(&mut self, vault: VaultId, entries: &[&Entry]) {
         for entry in entries {
             match entry.payload() {
                 Payload::Data(_) => {
@@ -166,21 +166,24 @@ impl Loaded {
     pub fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T>,
     ) -> Result<T> {
         self.available(id)?;
         let store = &self.store;
         let secret = &self.secret;
         let changes = &mut self.changes;
-        let result = update(
-            self.vaults.get_mut(&id).context("vault not held")?,
-            |entries| {
-                persist(store, entries)?;
-                changes.committed(id, entries);
-                Ok(())
-            },
-            |vault| change(vault, secret),
-        );
+        let result = self
+            .vaults
+            .get_mut(&id)
+            .context("vault not held")?
+            .transact(
+                |vault| change(vault, secret),
+                |entries| {
+                    persist(store, entries.iter().copied())?;
+                    changes.committed(id, entries);
+                    Ok(())
+                },
+            );
         self.check_append(result)
     }
 
@@ -329,7 +332,7 @@ impl State for Loaded {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T, application::Error>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T, application::Error>,
     ) -> Result<T> {
         self.update(id, |vault, secret| Ok(change(vault, secret)?))
     }
@@ -615,7 +618,11 @@ impl Loaded {
         if self.contains_vault(&id) {
             bail!("this device already holds vault {}", vault.name());
         }
-        let result = persist(&self.store, vault.entries());
+        let result = self
+            .store
+            .append_batch(vault.iter_entries().map(Entry::encode))
+            .map(drop)
+            .map_err(Into::into);
         self.check_append(result)?;
         self.vaults.insert(id, vault);
         self.changes.vaults = true;
@@ -737,29 +744,9 @@ fn resolve_by_name_or_id<'a, T: Copy + PartialEq + std::fmt::Display>(
 }
 
 fn persist<'a>(store: &Unlocked, entries: impl IntoIterator<Item = &'a Entry>) -> Result<()> {
-    // Plaintext, wiped as soon as the batch is sealed.
-    let encoded: Vec<_> = entries.into_iter().map(Entry::encode).collect();
-    if !encoded.is_empty() {
-        store.append_batch(encoded.iter().map(|entry| entry.as_slice()))?;
-    }
+    // Seal and wipe one encoding at a time, inside the same transaction.
+    store.append_batch(entries.into_iter().map(Entry::encode))?;
     Ok(())
-}
-
-pub(super) fn update<T>(
-    vault: &mut Vault,
-    persist: impl FnOnce(&[Entry]) -> Result<()>,
-    change: impl FnOnce(&mut Vault) -> Result<T>,
-) -> Result<T> {
-    let heads = vault.heads();
-    // Clone the validated state without re-verifying historical signatures.
-    // Validation failure leaves the live log usable. The Loaded caller must
-    // invalidate it if persistence reports an uncertain commit instead.
-    let mut staged = vault.clone();
-    let result = change(&mut staged)?;
-    let entries: Vec<_> = staged.missing_for(&heads).into_iter().cloned().collect();
-    persist(&entries)?;
-    *vault = staged;
-    Ok(result)
 }
 
 #[cfg(test)]
@@ -950,8 +937,13 @@ pub(super) mod tests {
         assert!(inviter.vault(&id).is_member(&peer.device_id()));
         let (welcome, _) =
             pairing::welcome(&mut inviter, id, peer.device_id(), &join, None).unwrap();
-        let welcomed =
-            pairing::verify_welcome(&peer.device_id(), inviter.id, offer, welcome).unwrap();
+        let welcomed = pairing::verify_welcome(
+            &peer.device_id(),
+            inviter.id,
+            offer,
+            pairing::test_replay(&inviter, welcome),
+        )
+        .unwrap();
         let (mut joiner, fault) = fault_store(joiner_dir.path(), [8; 32]);
         // Adopt is already past signature/identity validation; its store append
         // must fail closed regardless of whether this is the first held vault.
@@ -1181,10 +1173,9 @@ pub(super) mod tests {
         let secret = DeviceSecret::from_bytes(&[1; 32]);
         let (mut vault, _) = Vault::create(&secret, "test").unwrap();
         let before = vault.heads();
-        let result = update(
-            &mut vault,
-            |_| bail!("injected disk full"),
+        let result = vault.transact(
             |v| Ok(v.rename(&secret, "lost")?),
+            |_| bail!("injected disk full"),
         );
         assert!(result.is_err());
         assert_eq!(vault.heads(), before);

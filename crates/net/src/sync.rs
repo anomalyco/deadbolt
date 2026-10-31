@@ -50,7 +50,7 @@ pub trait SyncHandler: Send + Sync + 'static {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> impl Future<Output = Result<Vec<Blob>, HandlerError>> + Send;
+    ) -> impl Future<Output = Result<crate::Outgoing<'_>, HandlerError>> + Send;
 
     /// Entries received from `peer`, in the order it sent them. One session may call
     /// this several times, with consecutive batches; the last call (after the peer's
@@ -71,7 +71,7 @@ impl<T: SyncHandler> SyncHandler for Arc<T> {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> impl Future<Output = Result<Vec<Blob>, HandlerError>> + Send {
+    ) -> impl Future<Output = Result<crate::Outgoing<'_>, HandlerError>> + Send {
         (**self).missing_for(peer, peer_heads)
     }
 
@@ -92,7 +92,7 @@ pub(crate) trait DynSyncHandler: Send + Sync + 'static {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> BoxFuture<'_, Result<Vec<Blob>, HandlerError>>;
+    ) -> BoxFuture<'_, Result<crate::Outgoing<'_>, HandlerError>>;
     fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> BoxFuture<'_, Result<(), HandlerError>>;
 }
 
@@ -105,7 +105,7 @@ impl<T: SyncHandler> DynSyncHandler for T {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> BoxFuture<'_, Result<Vec<Blob>, HandlerError>> {
+    ) -> BoxFuture<'_, Result<crate::Outgoing<'_>, HandlerError>> {
         Box::pin(SyncHandler::missing_for(self, peer, peer_heads))
     }
 
@@ -264,14 +264,11 @@ async fn run_session(
         .missing_for(peer, std::mem::take(&mut *peer_heads))
         .await
         .map_err(Error::Handler)?;
-    let ((), (received, local)) = tokio::try_join!(
-        frame::write_entries(send, &missing),
+    let (sent, (received, local)) = tokio::try_join!(
+        frame::write_entries(send, missing),
         receive_entries(handler, peer, recv, max),
     )?;
-    let outcome = SyncOutcome {
-        sent: missing.len(),
-        received,
-    };
+    let outcome = SyncOutcome { sent, received };
 
     if initiator {
         if let Err(error) = send.shutdown().await {

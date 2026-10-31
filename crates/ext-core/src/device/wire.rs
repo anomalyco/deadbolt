@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId};
+use deadbolt_core::{DeviceId, DeviceSecret, Vault, VaultId, VaultWrite};
 pub(crate) use deadbolt_net::application::Addr;
 use deadbolt_net::application::{self, Hint, State, clean_name};
 use deadbolt_net::{Blob, HandlerError, Inviter, PairingContext, PeerId, SyncHandler};
@@ -46,15 +46,15 @@ impl State for Loaded {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> std::result::Result<T, application::Error>,
+        change: impl FnOnce(
+            &mut VaultWrite<'_>,
+            &DeviceSecret,
+        ) -> std::result::Result<T, application::Error>,
     ) -> Result<T> {
         if id != self.vault.id() {
             return Err(application::Error::VaultNotHeld.into());
         }
-        let mut staged = self.vault.clone();
-        let result = change(&mut staged, &self.secret)?;
-        self.commit(staged)?;
-        Ok(result)
+        self.mutate(|v, key| Ok(change(v, key)?))
     }
 
     fn learn(
@@ -117,6 +117,10 @@ impl State for Loaded {
 pub(crate) struct Handler(pub Arc<Mutex<Option<Loaded>>>);
 
 impl Handler {
+    fn stream(&self, history: application::OutgoingHistory) -> deadbolt_net::Outgoing<'_> {
+        history.outgoing(|h| self.with(|s| Ok(h.next(s, s.ready)?)).map_err(failure))
+    }
+
     pub(crate) fn with<T>(&self, f: impl FnOnce(&mut Loaded) -> Result<T>) -> Result<T> {
         let mut state = self.0.lock().map_err(|_| Error::State)?;
         let result = f(state.as_mut().ok_or(Error::Locked)?);
@@ -152,12 +156,14 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         bytes: Vec<u8>,
-    ) -> std::result::Result<Vec<Blob>, HandlerError> {
-        self.with(|s| {
-            let ready = s.ready;
-            application::missing_for(s, &DeviceId::from_bytes(peer), &bytes, ready)
-        })
-        .map_err(failure)
+    ) -> std::result::Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+        let history = self
+            .with(|s| {
+                let ready = s.ready;
+                application::missing_for(s, &DeviceId::from_bytes(peer), &bytes, ready)
+            })
+            .map_err(failure)?;
+        Ok(self.stream(history))
     }
 
     async fn receive(
@@ -192,13 +198,13 @@ impl Inviter for Handler {
         &self,
         ctx: &PairingContext,
         bytes: Vec<u8>,
-    ) -> std::result::Result<Vec<Blob>, HandlerError> {
+    ) -> std::result::Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         let result = self.with(|s| {
             s.require_ready()?;
             let vault = s.vault.id();
             application::welcome(s, vault, DeviceId::from_bytes(ctx.remote), &bytes, None)
         });
         enforce_membership();
-        result.map_err(failure)
+        Ok(self.stream(result.map_err(failure)?))
     }
 }
