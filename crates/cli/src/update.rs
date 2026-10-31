@@ -256,9 +256,19 @@ fn parse(text: &str) -> Option<Manifest> {
     .then_some(manifest)
 }
 
-/// The manifest's `sequence`; 0 if it doesn't parse.
-fn sequence(text: &str) -> u64 {
-    parse(text).map_or(0, |m| m.sequence)
+/// Validate identity as well as shape before using a manifest's sequence.
+fn validated(artifact: &str, channel: &str, text: &str) -> Result<Manifest, &'static str> {
+    let manifest = parse(text).ok_or("malformed")?;
+    if manifest.app != "deadbolt" {
+        return Err("wrong_app");
+    }
+    if manifest.artifact != artifact {
+        return Err("wrong_artifact");
+    }
+    if manifest.channel != channel {
+        return Err("wrong_channel");
+    }
+    Ok(manifest)
 }
 
 /// Decides what to do with `text`, the manifest for `artifact` on
@@ -266,18 +276,10 @@ fn sequence(text: &str) -> u64 {
 /// ever tested for equality: an install updates whenever the channel's
 /// current release isn't the build it runs.
 pub fn decide(artifact: &str, channel: &str, text: &str, running: &Running) -> Decision {
-    let Some(manifest) = parse(text) else {
-        return Decision::Reject("malformed");
+    let manifest = match validated(artifact, channel, text) {
+        Ok(manifest) => manifest,
+        Err(reason) => return Decision::Reject(reason),
     };
-    if manifest.app != "deadbolt" {
-        return Decision::Reject("wrong_app");
-    }
-    if manifest.artifact != artifact {
-        return Decision::Reject("wrong_artifact");
-    }
-    if manifest.channel != channel {
-        return Decision::Reject("wrong_channel");
-    }
     let release = manifest.release;
     let mut candidate = release.version.clone();
     let mut target = None;
@@ -509,7 +511,8 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
-    let bucket = rollout_bucket(&state);
+    let state = UpdateState::open(&state)?;
+    let bucket = rollout_bucket(&state.dir);
     let target = target()?;
     let shown = match built {
         Some(built) => format!("{VERSION} ({built})"),
@@ -544,13 +547,7 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
     if let Decision::Reject(reason) = decision {
         bail!("{url} is not a usable {artifact} manifest ({reason})");
     }
-    check_sequence(
-        &state,
-        artifact,
-        channel,
-        sequence(&text),
-        args.allow_rollback,
-    )?;
+    check_sequence(&state, artifact, channel, &text, args.allow_rollback)?;
     match decision {
         Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),
         Decision::None("up_to_date") => println!("{what} {shown} is up to date on {channel}"),
@@ -744,22 +741,85 @@ fn refuse_foreign_root(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// One CLI update at a time per state directory, through the final replacement,
+/// not just the floor write: an older in-flight download must not install last.
+/// Keep the lock file in place; locking the atomically replaced JSON would let
+/// another process lock a different inode.
+struct UpdateState {
+    dir: PathBuf,
+    lock: std::fs::File,
+}
+
+impl UpdateState {
+    fn open(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        let path = dir.join("update.lock");
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("opening {}", path.display()))?;
+        match lock.try_lock() {
+            Ok(()) => {}
+            Err(std::fs::TryLockError::WouldBlock) => {
+                bail!(
+                    "another deadbolt update or browser switch is running; try again when it finishes"
+                );
+            }
+            Err(error) => return Err(error).with_context(|| format!("locking {}", path.display())),
+        }
+        Ok(Self {
+            dir: dir.to_path_buf(),
+            lock,
+        })
+    }
+}
+
+impl Drop for UpdateState {
+    fn drop(&mut self) {
+        // Closing our descriptor alone may leave the lock held by a concurrent
+        // fork until exec closes its inherited CLOEXEC descriptor. The update
+        // transaction is finished now; unlock the shared description explicitly.
+        if let Err(error) = self.lock.unlock() {
+            eprintln!(
+                "warning: couldn't release {}: {error}",
+                self.dir.join("update.lock").display()
+            );
+        }
+    }
+}
+
 /// The highest manifest `sequence` seen for each artifact and channel, kept
 /// in the state directory, so a replayed older manifest can't take an
 /// install back. A real rollback is a new write with a higher sequence
 /// (docs/protocol.md, "Operations"), so it passes.
 fn check_sequence(
-    state: &Path,
+    state: &UpdateState,
     artifact: &str,
     channel: &str,
-    sequence: u64,
+    text: &str,
     allow_rollback: bool,
 ) -> Result<()> {
-    let path = state.join("release-sequences.json");
-    let mut seen: BTreeMap<String, u64> = std::fs::read(&path)
-        .ok()
-        .and_then(|b| serde_json::from_slice(&b).ok())
-        .unwrap_or_default();
+    let sequence = validated(artifact, channel, text)
+        .map_err(|reason| anyhow::anyhow!("not a usable {artifact} manifest ({reason})"))?
+        .sequence;
+    let path = state.dir.join("release-sequences.json");
+    let recovery = || {
+        format!(
+            "reading {}: cannot use release sequence state; restore this file from a trusted \
+             backup (or correct its read permissions). Deleting it loses all remembered \
+             replay floors; deadbolt will not delete it automatically",
+            path.display()
+        )
+    };
+    let mut seen: BTreeMap<String, u64> = match std::fs::read(&path) {
+        Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(recovery)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(error).with_context(recovery),
+    };
     let key = format!("{artifact}/{channel}");
     let highest = seen.get(&key).copied().unwrap_or(0);
     if sequence < highest && !allow_rollback {
@@ -770,7 +830,6 @@ fn check_sequence(
     }
     if sequence > highest {
         seen.insert(key, sequence);
-        std::fs::create_dir_all(state).with_context(|| format!("creating {}", state.display()))?;
         crate::browser::write_atomic(&path, &serde_json::to_string(&seen)?)?;
     }
     Ok(())
@@ -1380,7 +1439,7 @@ fn extension_build(dir: &Path) -> Option<ExtensionBuild> {
 async fn extension(
     dirs: &[ExtensionDir],
     service: &Service,
-    state: &Path,
+    state: &UpdateState,
     channel: &str,
     bucket: u8,
     built: Option<&str>,
@@ -1402,7 +1461,7 @@ async fn extension(
         println!("Browser extension: no {channel} release yet");
         return Ok(false);
     };
-    check_sequence(state, "extension", channel, sequence(&text), allow_rollback)?;
+    check_sequence(state, "extension", channel, &text, allow_rollback)?;
     let mut available = false;
     let mut failed = None;
     for entry in dirs {
@@ -1513,6 +1572,12 @@ pub async fn switch_extension(
              pass --channel dev or --channel stable"
         );
     };
+    let state = paths
+        .log
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    let state = UpdateState::open(&state)?;
     let config = crate::config::Config::load(&paths.config)?;
     let dir = match (dir, config.extensions.as_slice()) {
         (Some(dir), _) => {
@@ -1554,12 +1619,7 @@ pub async fn switch_extension(
     };
     crate::config::set_extension_dir(&paths.config, &dir, build)?;
     let service = Service::new(built)?;
-    let state = paths
-        .log
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    let bucket = rollout_bucket(&state);
+    let bucket = rollout_bucket(&state.dir);
     extension(
         &[ExtensionDir { dir, build }],
         &service,
@@ -2048,19 +2108,132 @@ mod tests {
     }
 
     #[test]
+    fn unreadable_sequence_state_is_not_a_fresh_install() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = UpdateState::open(dir.path()).unwrap();
+        let path = dir.path().join("release-sequences.json");
+        for invalid in [
+            b"not json".as_slice(),
+            b"{\"cli/dev\":\"7\"}",
+            b" ",
+            b"{\"cli/dev\":7",
+        ] {
+            std::fs::write(&path, invalid).unwrap();
+            for allow in [false, true] {
+                let error = check_sequence(&state, "cli", "stable", &manifest(100, false), allow)
+                    .unwrap_err();
+                let message = format!("{error:#}");
+                assert!(message.contains(path.to_str().unwrap()), "{message}");
+                assert!(message.contains("trusted backup"), "{message}");
+                assert!(
+                    message.contains("loses all remembered replay floors"),
+                    "{message}"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), invalid);
+            }
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        let zero = manifest(100, false).replace("\"sequence\":7", "\"sequence\":0");
+        let error = check_sequence(&state, "cli", "stable", &zero, false).unwrap_err();
+        assert!(format!("{error:#}").contains("trusted backup"));
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn empty_sequence_state_initializes_like_missing_state() {
+        for allow in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = UpdateState::open(dir.path()).unwrap();
+            let path = dir.path().join("release-sequences.json");
+            std::fs::write(&path, "").unwrap();
+            let zero = manifest(100, false).replace("\"sequence\":7", "\"sequence\":0");
+            check_sequence(&state, "cli", "stable", &zero, allow).unwrap();
+            check_sequence(&state, "cli", "stable", &manifest(100, false), allow).unwrap();
+            let seen: BTreeMap<String, u64> =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(seen, BTreeMap::from([("cli/stable".into(), 7)]));
+            assert!(check_sequence(&state, "cli", "stable", &zero, false).is_err());
+        }
+    }
+
+    #[test]
+    fn sequence_state_stays_locked_until_the_update_finishes() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = UpdateState::open(dir.path()).unwrap();
+        assert!(UpdateState::open(dir.path()).is_err());
+        check_sequence(&state, "cli", "stable", &manifest(100, false), false).unwrap();
+        // Atomic replacement of the state file must not release the lock.
+        assert!(UpdateState::open(dir.path()).is_err());
+        // A concurrent process launch can inherit this open file description
+        // until exec closes its CLOEXEC descriptor. Hold a duplicate to model
+        // that window deterministically, without a fork or timing assumptions.
+        let inherited = state.lock.try_clone().unwrap();
+        drop(state);
+        let state = UpdateState::open(dir.path()).unwrap();
+        assert!(UpdateState::open(dir.path()).is_err());
+        drop(inherited);
+        assert!(UpdateState::open(dir.path()).is_err());
+        let older = manifest(100, false).replace("\"sequence\":7", "\"sequence\":6");
+        assert!(check_sequence(&state, "cli", "stable", &older, false).is_err());
+    }
+
+    #[test]
+    fn rejected_manifests_leave_sequence_state_unchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = UpdateState::open(dir.path()).unwrap();
+        let good = manifest(100, false);
+        check_sequence(&state, "cli", "stable", &good, false).unwrap();
+        let path = dir.path().join("release-sequences.json");
+        let original = std::fs::read(&path).unwrap();
+        let high = good.replace("\"sequence\":7", "\"sequence\":999");
+        for invalid in [
+            high.replace("\"cli\"", "\"extension\""),
+            high.replace("\"stable\"", "\"dev\""),
+            high.replace("\"deadbolt\"", "\"other\""),
+            high.replace("\"schema\":1", "\"schema\":2"),
+            "not json".to_string(),
+        ] {
+            for allow in [false, true] {
+                assert!(check_sequence(&state, "cli", "stable", &invalid, allow).is_err());
+                assert_eq!(std::fs::read(&path).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
     fn refuses_older_manifests_unless_asked() {
         let dir = tempfile::tempdir().unwrap();
-        let state = dir.path().join("state");
-        check_sequence(&state, "cli", "dev", 5, false).unwrap();
-        check_sequence(&state, "cli", "dev", 5, false).unwrap();
-        check_sequence(&state, "cli", "dev", 7, false).unwrap();
-        assert!(check_sequence(&state, "cli", "dev", 6, false).is_err());
+        let state = UpdateState::open(&dir.path().join("state")).unwrap();
+        let check = |artifact: &str, channel: &str, sequence: u64, allow| {
+            let mut text: serde_json::Value = serde_json::from_str(&manifest(100, false)).unwrap();
+            text["artifact"] = artifact.into();
+            text["channel"] = channel.into();
+            text["sequence"] = sequence.into();
+            check_sequence(&state, artifact, channel, &text.to_string(), allow)
+        };
+        check("cli", "dev", 0, false).unwrap();
+        check("cli", "dev", 5, false).unwrap();
+        check("cli", "dev", 5, false).unwrap();
+        check("cli", "dev", 7, false).unwrap();
+        assert!(check("cli", "dev", 6, false).is_err());
         // Each artifact and channel is its own.
-        check_sequence(&state, "cli", "stable", 1, false).unwrap();
-        check_sequence(&state, "extension", "dev", 1, false).unwrap();
-        check_sequence(&state, "cli", "dev", 6, true).unwrap();
-        assert!(check_sequence(&state, "cli", "dev", 5, false).is_err());
-        assert_eq!(sequence(&manifest(100, false)), 7);
+        check("cli", "stable", 1, false).unwrap();
+        check("extension", "dev", 1, false).unwrap();
+        check("cli", "dev", 6, true).unwrap();
+        assert!(check("cli", "dev", 6, false).is_err());
+        let seen: BTreeMap<String, u64> = serde_json::from_slice(
+            &std::fs::read(state.dir.join("release-sequences.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            seen,
+            BTreeMap::from([
+                ("cli/dev".into(), 7),
+                ("cli/stable".into(), 1),
+                ("extension/dev".into(), 1),
+            ])
+        );
     }
 
     #[test]

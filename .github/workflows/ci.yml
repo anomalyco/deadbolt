@@ -128,6 +128,8 @@ jobs:
   # Hidden and covered fields, form swaps, opaque origins, value swaps,
   # navigating mid-fill and the back/forward cache, in headless Chromium with
   # the fake host (extension/e2e): the fast gate before the full run below.
+  # One build, then the 11 scenarios split over two concurrent processes
+  # (`e2e:parallel --jobs 2`, the `--shard` slices of `--only security`).
   extension-security:
     name: Browser extension security e2e
     if: github.event_name != 'schedule'
@@ -143,7 +145,7 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
-      - run: bun run e2e --only security
+      - run: bun run e2e:parallel --jobs 2 --only security
 
   # The whole e2e suite, stills and the passkey run against a real
   # `deadbolt browser-host` included, in four balanced slices

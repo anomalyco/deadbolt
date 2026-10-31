@@ -146,22 +146,72 @@ fn manifest(program: &Path) -> Result<String> {
     Ok(serde_json::to_string_pretty(&manifest)? + "\n")
 }
 
-/// Writes `body` to `path` through a temporary file in the same directory.
+/// Writes `body` to `path` through a synced temporary file in the same
+/// directory, then syncs the replacement's directory entry. Existing regular
+/// files keep only ordinary rwx bits, never setuid/setgid/sticky bits on the
+/// replacement inode; new files use 0666 filtered by the umask.
 pub fn write_atomic(path: &Path, body: &str) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+
+    use rustix::io::Errno;
+
     let dir = path.parent().context("path has no directory")?;
     let name = path.file_name().context("path has no file name")?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
-    let temp = dir.join(format!(
-        ".{}.{}",
-        name.to_string_lossy(),
-        std::process::id()
-    ));
-    std::fs::write(&temp, body).with_context(|| format!("writing {}", temp.display()))?;
-    let renamed = std::fs::rename(&temp, path);
-    if renamed.is_err() {
-        std::fs::remove_file(&temp).ok();
+    let permissions = match std::fs::symlink_metadata(path) {
+        Ok(meta) if meta.is_file() => Some(std::fs::Permissions::from_mode(
+            meta.permissions().mode() & 0o777,
+        )),
+        Ok(_) => None,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+    };
+    let directory =
+        std::fs::File::open(dir).with_context(|| format!("opening {}", dir.display()))?;
+    let sync_dir = || {
+        // Some filesystems reject fsync on directories with EINVAL or
+        // ENOTSUP/EOPNOTSUPP. Only those unsupported-directory cases are
+        // skipped; I/O errors (including after rename) must reach the caller.
+        directory
+            .sync_all()
+            .or_else(|error| {
+                if Errno::from_io_error(&error).is_some_and(|errno| {
+                    [Errno::INVAL, Errno::NOTSUP, Errno::OPNOTSUPP].contains(&errno)
+                }) {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            })
+            .with_context(|| format!("syncing {}", dir.display()))
+    };
+    let mut temp = tempfile::Builder::new()
+        .prefix(&format!(".{}.", name.to_string_lossy()))
+        .permissions(
+            permissions
+                .clone()
+                .unwrap_or_else(|| std::fs::Permissions::from_mode(0o666)),
+        )
+        .tempfile_in(dir)
+        .with_context(|| format!("creating a temporary file in {}", dir.display()))?;
+    temp.write_all(body.as_bytes())
+        .with_context(|| format!("writing {}", path.display()))?;
+    if let Some(permissions) = permissions {
+        temp.as_file()
+            .set_permissions(permissions)
+            .with_context(|| format!("setting permissions for {}", path.display()))?;
     }
-    renamed.with_context(|| format!("writing {}", path.display()))
+    temp.as_file()
+        .sync_all()
+        .with_context(|| format!("syncing {}", path.display()))?;
+    // Persist the pre-rename entries first, and surface directory sync failures
+    // before replacing the destination whenever possible.
+    sync_dir()?;
+    temp.persist(path)
+        .map_err(|error| error.error)
+        .with_context(|| format!("writing {}", path.display()))?;
+    sync_dir()
 }
 
 /// The browsers `chosen` names; none means those installed here.
@@ -315,6 +365,64 @@ pub fn uninstall(browsers: &[Browser]) -> Result<()> {
 mod tests {
     use super::*;
     use sha2::{Digest, Sha256};
+
+    #[test]
+    fn atomic_writes_preserve_modes_and_clean_up_failures() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path().join("new/directory");
+        let path = dir.join("state.json");
+        write_atomic(&path, "first").unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "first");
+        // New files keep the helper's ordinary-file creation mode and umask.
+        let ordinary = dir.join("ordinary");
+        std::fs::write(&ordinary, "ordinary").unwrap();
+        let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(mode(&path), mode(&ordinary));
+        for permissions in [0o600, 0o640, 0o444, 0o750, 0o4600, 0o2640, 0o1444, 0o7750] {
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(permissions)).unwrap();
+            assert_eq!(mode(&path), permissions);
+            write_atomic(&path, "replacement").unwrap();
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+            assert_eq!(mode(&path), permissions & 0o777);
+            assert_eq!(mode(&path) & 0o7000, 0);
+        }
+        // A failed rename must leave the destination and no temporary debris.
+        let occupied = dir.join("occupied");
+        std::fs::create_dir(&occupied).unwrap();
+        std::fs::write(occupied.join("keep"), "keep").unwrap();
+        assert!(write_atomic(&occupied, "cannot replace a directory").is_err());
+        assert_eq!(
+            std::fs::read_to_string(occupied.join("keep")).unwrap(),
+            "keep"
+        );
+        let mut names: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["occupied", "ordinary", "state.json"]);
+    }
+
+    #[test]
+    fn atomic_writes_do_not_follow_temporary_or_destination_symlinks() {
+        let dir = tempfile::tempdir().unwrap();
+        let victim = dir.path().join("victim");
+        std::fs::write(&victim, "untouched").unwrap();
+        let path = dir.path().join("state.json");
+        let old_temp = dir
+            .path()
+            .join(format!(".state.json.{}", std::process::id()));
+        std::os::unix::fs::symlink(&victim, &old_temp).unwrap();
+        std::os::unix::fs::symlink(&victim, &path).unwrap();
+        write_atomic(&path, "replacement").unwrap();
+        assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "replacement");
+        assert!(!std::fs::symlink_metadata(&path).unwrap().is_symlink());
+        assert!(std::fs::symlink_metadata(&old_temp).unwrap().is_symlink());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 3);
+    }
 
     #[test]
     fn the_extension_id_derives_from_the_committed_key() {

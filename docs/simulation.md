@@ -13,6 +13,25 @@ DEADBOLT_SIM_SEEDS=1000 cargo test -p deadbolt-cli --bin deadbolt agent::sim::ex
 In Kit's environment, put the command (including `env NAME=value`) after
 `hivemind run --kind cargo --`.
 
+The exact-cap file regression transfers a 10 MiB file, rejects a one-byte
+aggregate overflow, and checks concurrent attachments and selective reads after
+restart. It is explicitly **ignored in debug builds** to keep the default run
+fast; the smaller file regressions still run by default. Run the full-size case
+explicitly in debug with:
+
+```sh
+cargo test -p deadbolt-cli --bin deadbolt agent::sim::full_size_files_sync_and_concurrent_files_survive_reload -- --exact --ignored
+```
+
+In release builds it is **not ignored**: the existing nightly
+`cargo test --workspace --release --locked` runs it automatically, alongside
+the nightly seed exploration. To verify that release behavior without running
+the whole workspace:
+
+```sh
+cargo test -p deadbolt-cli --bin deadbolt --release --locked agent::sim::full_size_files_sync_and_concurrent_files_survive_reload -- --exact
+```
+
 ## A seed controls actions and delivery
 
 Two fixed seeds run by default. Each generates 48 actions after pairing three
@@ -51,7 +70,8 @@ and compares its wire digest.
   whose items or membership grew, which is what `watch` streams, and none for
   a vault's items or devices that didn't.
 - **Convergence:** after healing and unlocking, current members must agree on
-  heads, items and deleted items (with their deletion times) within twelve
+  heads, membership, vault names, items, deleted items (with their deletion
+  times), and complete histories of live and deleted items within twelve
   rounds. Stop early once they agree and their
   membership barriers are open. Removed devices need not converge.
 
@@ -97,16 +117,43 @@ only with the net crate's `sim` feature, enabled by the CLI's dev-dependency.
 
 `Loaded` owns transport-independent unlocked state. A `Session` adds its iroh
 node. Vault changes build a private validated staging view, append new entries in
-one durable transaction, then publish the view. A failed append leaves live heads
-unchanged. Staging clones the validated vault, avoiding signature verification of
-historical entries. Sync batches publish independently per vault.
+one durable transaction, then publish the view. Validation and pre-commit errors
+leave live heads unchanged. A commit error is different: redb may already have
+persisted the new root, including a removal, even though its final sync returned
+an error. The store reports `AppendUncertain`; native `Loaded` permanently
+invalidates all live vaults until replay. The agent refuses reads, writes, sync
+and pairing, clears the membership gate and closes its sync connections, cancels
+background sync/health work and marks readiness closed. Startup deadlines and
+retries cannot reopen it. The app's Unlock action (or `deadbolt unlock`) closes
+the failed node/store under the lifecycle transition, then uses normal fresh
+passphrase or biometric authentication and disk replay. Quarantine is never
+treated as already unlocked: a bad passphrase leaves the device locked. Explicit
+`deadbolt lock` still closes the failed handle. No uncertain mutation is retried.
+A warning records only the typed failure class, I/O kind and numeric OS error,
+never backend messages, paths or vault values.
+Staging clones the validated vault, avoiding signature verification of historical
+entries. Sync batches publish independently per vault.
+
+The native `agent::session::tests::ambiguous_append_` regressions use synthetic
+encrypted stores on a real file backend. They inject a lost acknowledgement
+*after* the second/root-switch fsync succeeds, then reopen and verify that the
+errored append persisted. They cover item changes, removals and both sides of
+pairing. This is not the simulator's pre-write fault or a claim to emulate power
+loss or every filesystem error. The agent regression also checks that an existing
+local-only sync connection is closed and readiness cannot be republished.
+The quarantine recovery regressions cover bad passphrases, overlapping explicit
+unlocks, fresh biometric authentication via the existing test hook, and explicit
+lock. They verify the committed edit is replayed once, not retried.
 
 The vault list comes from the encrypted entry log. Legacy `cli/vaults` metadata is
 ignored, so a crash after storing genesis cannot hide the new vault.
 
 Local item reads and writes are available immediately after unlock, including
 imports. Readiness gates sending data to peers, accepting inbound data, and
-invitations. Membership entries flow while the barrier is closed.
+invitations. Membership entries flow while the barrier is closed. On the native agent, a
+received item edit triggers immediate forwarding if there is another peer; it
+does not redial the sole peer that just sent the edit. Membership changes,
+local writes, and periodic anti-entropy still trigger their normal rounds.
 
 A startup round completes when each current member either completed its exchange
 or was unreachable during the dial. A remote membership-gate refusal also completes

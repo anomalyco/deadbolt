@@ -393,44 +393,51 @@ async fn sync_round() -> Result<()> {
     let node = node()?;
     let state = state();
     let mut ready = state.with(|s| Ok(s.ready))?;
-    let mut deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut attempts = BTreeSet::new();
     loop {
-        let targets = state.with(|s| Ok(s.targets()))?;
-        for peer in targets {
-            if !ready && attempts.contains(&peer.id) {
-                continue;
-            }
-            let id = peer.id;
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let budget = Duration::from_secs(15).min(remaining);
-            let until = Instant::now() + budget;
-            match timeout(budget, node.connect(peer)).await {
-                Ok(Ok(conn)) => {
-                    let result =
-                        timeout(until.saturating_duration_since(Instant::now()), conn.sync()).await;
-                    conn.close();
-                    match result {
-                        Ok(Ok(_)) => {
-                            // Both sides processed everything: synced.
-                            state.with(|s| s.saw(&DeviceId::from_bytes(id)))?;
-                            attempts.insert(id);
+        let targets = state.with(|s| {
+            Ok(s.targets()
+                .into_iter()
+                .filter(|peer| ready || !attempts.contains(&peer.id))
+                .collect())
+        })?;
+        let completed = deadbolt_net::application::contact_round(
+            targets,
+            (!ready).then_some(deadline),
+            |peer, budget| {
+                let node = &node;
+                let state = &state;
+                async move {
+                    let id = peer.id;
+                    let until = Instant::now() + budget;
+                    let complete = match timeout(budget, node.connect(peer)).await {
+                        Ok(Ok(conn)) => {
+                            let result = timeout(
+                                until.saturating_duration_since(Instant::now()),
+                                conn.sync(),
+                            )
+                            .await;
+                            conn.close();
+                            match result {
+                                Ok(Ok(_)) => {
+                                    // Both sides processed everything: synced.
+                                    state.with(|s| s.saw(&DeviceId::from_bytes(id)))?;
+                                    true
+                                }
+                                Ok(Err(deadbolt_net::Error::MembershipRejected(_))) => true,
+                                Ok(Err(_)) | Err(_) => false,
+                            }
                         }
-                        Ok(Err(deadbolt_net::Error::MembershipRejected(_))) => {
-                            attempts.insert(id);
-                        }
-                        Ok(Err(_)) | Err(_) => {}
-                    }
+                        Ok(Err(deadbolt_net::Error::Rejected(_))) => false,
+                        Ok(Err(_)) | Err(_) => true,
+                    };
+                    Ok::<_, Error>(complete)
                 }
-                Ok(Err(deadbolt_net::Error::Rejected(_))) => {}
-                Ok(Err(_)) | Err(_) => {
-                    attempts.insert(id);
-                }
-            }
-        }
+            },
+        )
+        .await?;
+        attempts.extend(completed);
         let complete =
             state.with(|s| Ok(s.targets().iter().all(|peer| attempts.contains(&peer.id))))?;
         if ready || complete || Instant::now() >= deadline {
@@ -444,12 +451,11 @@ async fn sync_round() -> Result<()> {
                 // data round rather than waiting for the next browser alarm.
                 ready = true;
                 attempts.clear();
-                deadline = Instant::now() + Duration::from_secs(30);
                 continue;
             }
             break;
         }
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()))).await;
     }
     Ok(())
 }
