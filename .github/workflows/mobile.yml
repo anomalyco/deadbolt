@@ -108,10 +108,11 @@ jobs:
       - name: Install Android SDK and NDK
         run: |
           "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
-            'platforms;android-37' 'build-tools;37.0.0' "ndk;$NDK_VERSION"
+            'platforms;android-37.0' 'build-tools;37.0.0' "ndk;$NDK_VERSION"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
       # Gradle's buildDeadboltCoreDebug runs scripts/build-core.sh once for both tasks.
       - name: Build Rust core, run unit tests and assemble APK
+        id: gradle
         working-directory: mobile/android
         run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -120,7 +121,7 @@ jobs:
           path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && steps.gradle.outcome != 'skipped' }}
         with:
           name: android-unit-test-reports
           path: |
