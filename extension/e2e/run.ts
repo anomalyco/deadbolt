@@ -2758,8 +2758,17 @@ async function menuPosition(scale = 1) {
             const f = extensionFrame(page, "menu.html")
             return f && await f.locator(".universal").count() ? f : null
           })
-          if (surface === "signin" && menu && (await menu.locator("button.row").first().textContent())?.includes("Sign in with Deadbolt")) {
-            await menu.locator("button.row").first().click()
+          // Two logins open as one "Sign in with Deadbolt" row, and a press on it
+          // only expands the list (no refusal): the press below must land on a
+          // login. A click that doesn't reach the frame (just placed) leaves the
+          // chooser there, so click until the logins show.
+          if (surface === "signin" && menu) {
+            const chooser = menu.locator("button.row", { hasText: "Sign in with Deadbolt" })
+            const listed = await until(`signin ${kind}: the logins listed`, async () => {
+              if (await chooser.count()) return void (await chooser.click().catch(() => {}))
+              return (await menu!.locator("button.row").count()) > 0
+            }, 4000)
+            if (!listed) continue
           }
         }
         if (!menu) { check(false, `${surface} opens for ${kind}`); continue }
