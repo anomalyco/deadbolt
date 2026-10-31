@@ -15,18 +15,18 @@ pub enum Status {
 
 /// Callers supply only live logins on the page's site. Without a username,
 /// any username with the same password is `Same`, and nothing is `Update`.
-pub fn check<'a>(
-    items: impl IntoIterator<Item = &'a Item>,
+pub fn check(
+    items: impl IntoIterator<Item = Item>,
     username: Option<&str>,
     password: &str,
 ) -> (Status, Vec<ItemId>) {
     let mut same = Vec::new();
     let mut other = Vec::new();
     for item in items {
-        if !username.is_none_or(|u| same_username(value(item, "username"), u)) {
+        if !username.is_none_or(|u| same_username(value(&item, "username"), u)) {
             continue;
         }
-        if same_password(value(item, "password"), password) {
+        if same_password(value(&item, "password"), password) {
             same.push(item.id);
         } else {
             other.push(item.id);
@@ -107,8 +107,13 @@ pub fn value<'a>(item: &'a Item, field: &str) -> Option<&'a str> {
 
 /// A login's URLs: its fields of type url (`url`, and `url-2`… from imports).
 pub fn urls(item: &Item) -> impl Iterator<Item = &str> {
-    item.fields
-        .values()
+    field_urls(item.fields.values())
+}
+
+pub(crate) fn field_urls<'a>(
+    fields: impl Iterator<Item = &'a Field>,
+) -> impl Iterator<Item = &'a str> {
+    fields
         .filter(|f| f.kind == FieldType::Url)
         .map(|f| f.value.as_str())
 }

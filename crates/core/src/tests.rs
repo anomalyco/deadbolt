@@ -2055,3 +2055,40 @@ fn removals_do_not_consume_the_membership_budget() {
         })
     );
 }
+
+#[test]
+fn site_lookup_only_returns_live_logins_with_winning_urls() {
+    let mut a = Dev::create();
+    let item = a.login("local");
+    let mut b = a.invite();
+    let compare = |v: &Vault| {
+        for origin in ["https://a.test", "https://b.test", "https://c.test"] {
+            let page = site::Site::from_origin(origin).unwrap();
+            let reference: Vec<_> = v
+                .items()
+                .into_iter()
+                .filter(|i| i.kind == "login" && page.matches(autofill::urls(i)))
+                .collect();
+            assert_eq!(v.site_logins(&page).collect::<Vec<_>>(), reference);
+        }
+    };
+    a.set(item, "url", "https://a.test");
+    b.set(item, "url", "https://b.test");
+    sync_both(&mut a, &mut b);
+    compare(&a.vault);
+    a.write(vec![DataOp::set(
+        item,
+        "second",
+        Field::new(FieldType::Url, "https://c.test"),
+    )]);
+    compare(&a.vault);
+    a.write(vec![DataOp::remove(item, "url")]);
+    compare(&a.vault);
+    a.write(vec![DataOp::delete(item, 2)]);
+    compare(&a.vault);
+    a.write(vec![
+        DataOp::restore(item),
+        DataOp::set(item, "second", text("https://c.test")),
+    ]);
+    compare(&a.vault);
+}
