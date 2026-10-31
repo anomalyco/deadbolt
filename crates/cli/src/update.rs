@@ -806,12 +806,19 @@ fn check_sequence(
         .map_err(|reason| anyhow::anyhow!("not a usable {artifact} manifest ({reason})"))?
         .sequence;
     let path = state.dir.join("release-sequences.json");
+    let recovery = || {
+        format!(
+            "reading {}: cannot use release sequence state; restore this file from a trusted \
+             backup (or correct its read permissions). Deleting it loses all remembered \
+             replay floors; deadbolt will not delete it automatically",
+            path.display()
+        )
+    };
     let mut seen: BTreeMap<String, u64> = match std::fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).with_context(|| {
-            format!("reading {}: invalid release sequence state", path.display())
-        })?,
+        Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(recovery)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-        Err(error) => return Err(error).with_context(|| format!("reading {}", path.display())),
+        Err(error) => return Err(error).with_context(recovery),
     };
     let key = format!("{artifact}/{channel}");
     let highest = seen.get(&key).copied().unwrap_or(0);
@@ -2105,11 +2112,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let state = UpdateState::open(dir.path()).unwrap();
         let path = dir.path().join("release-sequences.json");
-        for invalid in [b"not json".as_slice(), b"{\"cli/dev\":\"7\"}", b""] {
+        for invalid in [
+            b"not json".as_slice(),
+            b"{\"cli/dev\":\"7\"}",
+            b" ",
+            b"{\"cli/dev\":7",
+        ] {
             std::fs::write(&path, invalid).unwrap();
             for allow in [false, true] {
+                let error = check_sequence(&state, "cli", "stable", &manifest(100, false), allow)
+                    .unwrap_err();
+                let message = format!("{error:#}");
+                assert!(message.contains(path.to_str().unwrap()), "{message}");
+                assert!(message.contains("trusted backup"), "{message}");
                 assert!(
-                    check_sequence(&state, "cli", "stable", &manifest(100, false), allow).is_err()
+                    message.contains("loses all remembered replay floors"),
+                    "{message}"
                 );
                 assert_eq!(std::fs::read(&path).unwrap(), invalid);
             }
@@ -2117,7 +2135,26 @@ mod tests {
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         let zero = manifest(100, false).replace("\"sequence\":7", "\"sequence\":0");
-        assert!(check_sequence(&state, "cli", "stable", &zero, false).is_err());
+        let error = check_sequence(&state, "cli", "stable", &zero, false).unwrap_err();
+        assert!(format!("{error:#}").contains("trusted backup"));
+        assert!(path.is_dir());
+    }
+
+    #[test]
+    fn empty_sequence_state_initializes_like_missing_state() {
+        for allow in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let state = UpdateState::open(dir.path()).unwrap();
+            let path = dir.path().join("release-sequences.json");
+            std::fs::write(&path, "").unwrap();
+            let zero = manifest(100, false).replace("\"sequence\":7", "\"sequence\":0");
+            check_sequence(&state, "cli", "stable", &zero, allow).unwrap();
+            check_sequence(&state, "cli", "stable", &manifest(100, false), allow).unwrap();
+            let seen: BTreeMap<String, u64> =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            assert_eq!(seen, BTreeMap::from([("cli/stable".into(), 7)]));
+            assert!(check_sequence(&state, "cli", "stable", &zero, false).is_err());
+        }
     }
 
     #[test]
