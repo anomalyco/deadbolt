@@ -349,6 +349,11 @@ public final class AutoFillControllerModel {
 
     public func handleViewDisappearing() {
         cancelInFlightWork()
+        #if os(iOS)
+        // The system has dismissed the sheet: nothing may complete this
+        // request any more. A new request starts with its own begin*.
+        finished = true
+        #endif
         client.endRequest()
     }
 

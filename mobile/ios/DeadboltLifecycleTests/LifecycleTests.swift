@@ -121,6 +121,13 @@ private actor DelayedCore: CoreAPI {
     }
 }
 
+/// The reasons the app asked the biometric sheet to show.
+private actor Reasons {
+    private var reasons: [String] = []
+    func add(_ reason: String) { reasons.append(reason) }
+    func all() -> [String] { reasons }
+}
+
 /// What the app handed to the system identity store.
 private actor Published {
     private var snapshots: [String] = []
@@ -151,7 +158,11 @@ final class LifecycleTests: XCTestCase {
         let model = model(core)
         await model.start()
         await model.unlock(passphrase: "test")
-        await core.waitFor(.items)
+        // Let the post-unlock sync and its refresh read settle first.
+        for await state in model.$sync.values {
+            if case .synced = state { break }
+        }
+        await core.waitFor(.items, count: 2)
         let before = await core.count(.items)
         let typed = Date()
         model.query = "00999"
@@ -160,6 +171,86 @@ final class LifecycleTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(typed), 0.1)
         let last = await core.searched().last
         XCTAssertEqual(last, "00999")
+        await model.lock()
+    }
+
+    /// Bounded: a lock that never comes fails instead of hanging the run.
+    private func waitForLock(_ model: AppModel) async -> Bool {
+        let deadline = Date().addingTimeInterval(2)
+        while model.phase != .locked, Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+        return model.phase == .locked
+    }
+
+    /// Sync, approval polling and list reads are passive: five idle minutes
+    /// after the last touch lock the vault however much they ran.
+    func testPassiveWorkDoesNotHoldTheIdleLockOpen() async {
+        let core = DelayedCore()
+        let model = model(core)
+        await model.start()
+        let unlocked = Date()
+        await model.unlock(passphrase: "test")
+        for await state in model.$sync.values {
+            if case .synced = state { break }
+        }
+        await core.waitFor(.approvalPending, count: 2)
+        await model.syncNow()
+        model.checkIdle(now: unlocked.addingTimeInterval(AppModel.idleLimit - 5))
+        XCTAssertEqual(model.phase, .unlocked)
+        // Measured from the unlock, not from the passive work (over 1 s later).
+        model.checkIdle(now: unlocked.addingTimeInterval(AppModel.idleLimit + 0.5))
+        let locked = await waitForLock(model)
+        XCTAssertTrue(locked)
+        XCTAssertTrue(model.items.isEmpty)
+        let locks = await core.count(.lock)
+        XCTAssertGreaterThanOrEqual(locks, 1)
+    }
+
+    /// A touch or a typed query restarts the five minutes.
+    func testActivityRestartsTheIdleLock() async {
+        let core = DelayedCore()
+        let model = model(core)
+        await model.start()
+        await model.unlock(passphrase: "test")
+        let touched = Date().addingTimeInterval(1)
+        try? await Task.sleep(for: .seconds(1))
+        model.noteActivity()
+        model.checkIdle(now: touched.addingTimeInterval(AppModel.idleLimit - 1))
+        XCTAssertEqual(model.phase, .unlocked)
+        model.query = "typed"
+        model.checkIdle(now: Date().addingTimeInterval(AppModel.idleLimit - 1))
+        XCTAssertEqual(model.phase, .unlocked)
+        model.checkIdle(now: Date().addingTimeInterval(AppModel.idleLimit + 1))
+        let locked = await waitForLock(model)
+        XCTAssertTrue(locked)
+        XCTAssertEqual(model.query, "")
+    }
+
+    func testSearchBurstRunsOneReadThenOnlyTheLatestQuery() async {
+        let core = DelayedCore()
+        let model = model(core)
+        await model.start()
+        await model.unlock(passphrase: "test")
+        for await state in model.$sync.values {
+            if case .synced = state { break }
+        }
+        await core.waitFor(.items, count: 2)
+        let before = await core.count(.items)
+        let read = Gate()
+        await core.delay(.items, with: read)
+        model.query = "0"
+        await read.waitUntilEntered()
+        // Keystrokes while the uncancellable read runs only mark a rerun.
+        for query in ["00", "009", "0099", "00999"] { model.query = query }
+        await read.release()
+        await core.waitFor(.items, count: before + 2)
+        // Absence check: no further read follows the latest query.
+        try? await Task.sleep(for: .milliseconds(150))
+        let reads = await core.count(.items)
+        XCTAssertEqual(reads, before + 2)
+        let searched = await core.searched().suffix(2)
+        XCTAssertEqual(Array(searched), ["0", "00999"])
         await model.lock()
     }
 
@@ -267,7 +358,7 @@ final class LifecycleTests: XCTestCase {
 
     func testForegroundDuringLockPromptsAfterLockFinishes() async {
         let core = DelayedCore(biometricReady: true)
-        let model = AppModel(openCore: { core }, unseal: { _ in Data(repeating: 3, count: 32) }, biometricAvailability: { nil })
+        let model = AppModel(openCore: { core }, unseal: { _, _ in Data(repeating: 3, count: 32) }, biometricAvailability: { nil })
         await model.start()
         let gate = Gate()
         await core.delay(.lock, with: gate)
@@ -325,7 +416,12 @@ final class LifecycleTests: XCTestCase {
         await core.setApproval(pending)
         let key = Data(repeating: 2, count: 32)
         let match = Gate()
-        let model = AppModel(openCore: { core }, unseal: { _ in await match.wait(); return key }, biometricAvailability: { nil })
+        let reasons = Reasons()
+        let model = AppModel(openCore: { core }, unseal: { _, reason in
+            await reasons.add(reason)
+            await match.wait()
+            return key
+        }, biometricAvailability: { nil })
         await model.start()
         model.scenePhaseChanged(to: .active)
         await model.unlock(passphrase: "test")
@@ -341,6 +437,24 @@ final class LifecycleTests: XCTestCase {
         XCTAssertEqual(responses.first?.id, pending.id)
         XCTAssertEqual(responses.first?.allow, true)
         XCTAssertEqual(responses.first?.key, key)
+        // The system sheet names this exact read, not a vault unlock.
+        let asked = await reasons.all()
+        XCTAssertEqual(asked, ["Allow Test computer to read password from Test login"])
+        await model.lock()
+    }
+
+    func testBiometricUnlockAsksToUnlockDeadbolt() async {
+        let core = DelayedCore(biometricReady: true)
+        let reasons = Reasons()
+        let model = AppModel(openCore: { core }, unseal: { _, reason in
+            await reasons.add(reason)
+            return Data(repeating: 1, count: 32)
+        }, biometricAvailability: { nil })
+        model.scenePhaseChanged(to: .active)
+        await model.start()
+        XCTAssertEqual(model.phase, .unlocked)
+        let asked = await reasons.all()
+        XCTAssertEqual(asked, ["Unlock Deadbolt"])
         await model.lock()
     }
 
@@ -349,7 +463,7 @@ final class LifecycleTests: XCTestCase {
         let pending = request()
         await core.setApproval(pending)
         let match = Gate()
-        let model = AppModel(openCore: { core }, unseal: { _ in
+        let model = AppModel(openCore: { core }, unseal: { _, _ in
             await match.wait()
             return Data(repeating: 2, count: 32)
         }, biometricAvailability: { nil })
@@ -374,7 +488,7 @@ final class LifecycleTests: XCTestCase {
         let pending = request()
         await core.setApproval(pending)
         let match = Gate()
-        let model = AppModel(openCore: { core }, unseal: { _ in
+        let model = AppModel(openCore: { core }, unseal: { _, _ in
             await match.wait()
             return Data(repeating: 2, count: 32)
         }, biometricAvailability: { nil })
@@ -567,7 +681,7 @@ final class LifecycleTests: XCTestCase {
         let core = DelayedCore(biometricReady: true)
         let gate = Gate()
         await core.delay(.biometricToken, with: gate)
-        let model = AppModel(openCore: { core }, unseal: { _ in
+        let model = AppModel(openCore: { core }, unseal: { _, _ in
             XCTFail("stale token started a biometric prompt")
             throw CancellationError()
         }, biometricAvailability: { nil })
@@ -586,7 +700,7 @@ final class LifecycleTests: XCTestCase {
     func testLateBiometricMatchDoesNotSubmitKeyAfterForegroundReturn() async {
         let core = DelayedCore(biometricReady: true)
         let match = Gate()
-        let model = AppModel(openCore: { core }, unseal: { _ in
+        let model = AppModel(openCore: { core }, unseal: { _, _ in
             await match.wait()
             return Data(repeating: 1, count: 32)
         }, biometricAvailability: { nil })
@@ -607,7 +721,7 @@ final class LifecycleTests: XCTestCase {
         let core = DelayedCore(biometricReady: true)
         let gate = Gate()
         await core.delay(.unlockBiometric, with: gate)
-        let model = AppModel(openCore: { core }, unseal: { _ in
+        let model = AppModel(openCore: { core }, unseal: { _, _ in
             Data(repeating: 1, count: 32)
         }, biometricAvailability: { nil })
         model.scenePhaseChanged(to: .active)

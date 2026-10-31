@@ -12,7 +12,13 @@ struct RootView: View {
             Rune.bg.ignoresSafeArea()
             switch model.phase {
             case .starting:
-                Color.clear
+                // Nothing at launch (it's brief); after pairing, the new vault
+                // can take a moment to open, so say so instead of a blank screen.
+                if model.status != nil {
+                    OpeningView()
+                } else {
+                    Color.clear
+                }
             case .failed(let message):
                 CenteredMessage(title: "Deadbolt couldn't start", detail: message)
             case .setup:
@@ -33,6 +39,16 @@ struct RootView: View {
         .foregroundStyle(Rune.text)
         // Locking must remove secrets immediately, never cross-fade them out.
         .animation(model.phase == .unlocked ? Rune.overlay : nil, value: model.phase)
+    }
+}
+
+struct OpeningView: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            ProgressView().tint(Rune.iconMuted)
+            Text("Opening your vault").rune(.ui).foregroundStyle(Rune.muted)
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -204,7 +220,7 @@ struct LockView: View {
                     .focused($focused)
                     .submitLabel(.go)
                     .onSubmit(unlock)
-                    .runeInput(focused: focused)
+                    .runeInput(focused: focused, invalid: model.notice != nil)
                 NoticeLine(text: model.notice)
             }
             Button(action: unlock) {

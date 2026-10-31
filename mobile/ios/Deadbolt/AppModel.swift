@@ -53,12 +53,17 @@ final class AppModel: ObservableObject {
     private var pendingLocks = 0
     private var statusRequest: UInt64 = 0
     private let openCore: @MainActor () async throws -> any CoreAPI
-    private let unseal: @Sendable (Data) async throws -> Data
+    /// Opens the Secure Enclave envelope with a fresh biometric match. The
+    /// reason is what the system sheet says the match is for.
+    private let unseal: @Sendable (_ token: Data, _ reason: String) async throws -> Data
     private let biometricAvailability: @MainActor () -> String?
     private let publishIdentities: @Sendable (String) async -> Void
     private var lastActivity = Date()
     private var idleTimer: Timer?
     private var searchTask: Task<Void, Never>?
+    /// The query changed (or the vault did) while a read was in flight.
+    private var searchAgain = false
+    private var searchToken: UInt64 = 0
     private var joinTask: Task<Void, Never>?
     private var approvalTask: Task<Void, Never>?
     private var identityTask: Task<Void, Never>?
@@ -82,9 +87,9 @@ final class AppModel: ObservableObject {
 
     init(
         openCore: @escaping @MainActor () async throws -> any CoreAPI,
-        unseal: @escaping @Sendable (Data) async throws -> Data = { token in
+        unseal: @escaping @Sendable (_ token: Data, _ reason: String) async throws -> Data = { token, reason in
             try await Task.detached(priority: .userInitiated) {
-                try Enclave.unseal(token, reason: "Unlock Deadbolt")
+                try Enclave.unseal(token, reason: reason)
             }.value
         },
         biometricAvailability: @escaping @MainActor () -> String? = { Enclave.unavailableReason },
@@ -249,7 +254,7 @@ final class AppModel: ObservableObject {
             let token = try await core.biometricToken()
             guard await acceptAuthentication(generation) else { return }
             guard !token.isEmpty else { return }
-            let key = try await unseal(token)
+            let key = try await unseal(token, "Unlock Deadbolt")
             guard await acceptAuthentication(generation) else { return }
             unlockStarted = Date()
             try await core.unlockBiometric(key: key)
@@ -324,6 +329,8 @@ final class AppModel: ObservableObject {
         idleTimer?.invalidate()
         idleTimer = nil
         searchTask?.cancel()
+        searchTask = nil
+        searchAgain = false
         approvalTask?.cancel()
         approvalTask = nil
         approval = nil
@@ -430,7 +437,7 @@ final class AppModel: ObservableObject {
                 guard await acceptAuthentication(generation), approval?.id == request.id, !request.expired else { return }
                 // A fresh cryptographic match for this exact signed request;
                 // a prior vault unlock is never authorization for a read.
-                key = try await unseal(token)
+                key = try await unseal(token, Self.approvalReason(request))
                 guard await acceptAuthentication(generation), approval?.id == request.id, !request.expired else { return }
             }
             try await core.approvalRespond(id: request.id, allow: allow, key: key)
@@ -442,6 +449,11 @@ final class AppModel: ObservableObject {
             guard canRead(generation: generation), approval?.id == request.id else { return }
             approvalNotice = error.localizedDescription
         }
+    }
+
+    /// The biometric sheet names this exact read, never just "unlock".
+    static func approvalReason(_ request: PendingApproval) -> String {
+        "Allow \(request.originName) to read \(request.field) from \(request.title)"
     }
 
     /// Syncs in the background; the list stays usable throughout.
@@ -469,31 +481,49 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// One core read at a time: the FFI call can't be cancelled, so a burst of
+    /// keystrokes runs the read in flight and then only the latest query,
+    /// instead of queueing one read per keystroke.
     private func scheduleSearch() {
-        searchTask?.cancel()
         guard phase == .unlocked, let core else { return }
-        let query = self.query
+        guard searchTask == nil else {
+            searchAgain = true
+            return
+        }
+        searchToken &+= 1
+        let token = searchToken
         let generation = self.generation
         searchTask = Task { [weak self] in
-            guard !Task.isCancelled else { return }
+            await self?.runSearches(core: core, generation: generation)
+            guard let self, self.searchToken == token else { return }
+            self.searchTask = nil
+        }
+    }
+
+    private func runSearches(core: any CoreAPI, generation: UInt64) async {
+        repeat {
+            searchAgain = false
+            guard canRead(generation: generation) else { return }
+            let query = self.query
             let started = Date()
             do {
                 let items = try await core.items(query: query)
-                guard !Task.isCancelled, let self, self.canRead(generation: generation) else { return }
+                // A newer query is waiting: drop this stale result unseen.
+                guard canRead(generation: generation), !searchAgain else { continue }
                 self.items = items
-                let first = !self.itemsLoaded
-                self.itemsLoaded = true
+                let first = !itemsLoaded
+                itemsLoaded = true
                 Metrics.record("search_ms", since: started, extra: "items=\(items.count) query_len=\(query.count)")
-                if first, let unlockStarted = self.unlockStarted {
+                if first, let unlockStarted {
                     Metrics.record("unlock_to_list_ms", since: unlockStarted, extra: "items=\(items.count)")
                     self.unlockStarted = nil
                 }
             } catch {
-                guard !Task.isCancelled, let self, self.canRead(generation: generation) else { return }
-                self.itemsLoaded = true
-                self.notice = error.localizedDescription
+                guard canRead(generation: generation), !searchAgain else { continue }
+                itemsLoaded = true
+                notice = error.localizedDescription
             }
-        }
+        } while searchAgain && canRead(generation: generation)
     }
 
     /// Copies `value` for this device only, expiring after 30 seconds, and
@@ -538,9 +568,10 @@ final class AppModel: ObservableObject {
         idleTimer = timer
     }
 
-    private func checkIdle() {
+    /// `now` is a seam for the lifecycle tests; the timer passes the clock.
+    func checkIdle(now: Date = Date()) {
         guard phase == .unlocked else { return }
-        if Date().timeIntervalSince(lastActivity) >= Self.idleLimit {
+        if now.timeIntervalSince(lastActivity) >= Self.idleLimit {
             Task { await lock() }
         }
     }

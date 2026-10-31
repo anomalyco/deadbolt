@@ -1072,7 +1072,15 @@ private struct ProviderPicker: View {
     /// The model isn't observable itself: without this the list would draw
     /// before `updateSearchQuery` runs and lag one keystroke behind.
     @ObservedObject var observer: AutoFillObserver
-    @State private var query = ""
+    @State private var query: String
+
+    /// Starts from the model's query: after an unlock or a failed pick the
+    /// picker is rebuilt, and an empty field over a filtered list would lie.
+    init(model: AutoFillControllerModel, observer: AutoFillObserver) {
+        self.model = model
+        self.observer = observer
+        _query = State(initialValue: model.searchQuery)
+    }
 
     var body: some View {
         let _ = observer.revision
