@@ -1010,9 +1010,21 @@ impl World {
     fn converged(&self) -> Result<bool> {
         let members = self.devices[0]
             .with(|s| Ok(s.vault(&self.vault).members().collect::<BTreeSet<_>>()))?;
-        let (heads, items, deleted) = self.devices[0].with(|s| {
+        let (heads, items, deleted, name) = self.devices[0].with(|s| {
             let vault = s.vault(&self.vault);
-            Ok((vault.heads(), vault.items(), vault.deleted()))
+            Ok((
+                vault.heads(),
+                vault.items(),
+                vault.deleted(),
+                vault.name().to_owned(),
+            ))
+        })?;
+        let histories = self.devices[0].with(|s| {
+            Ok(items
+                .iter()
+                .chain(deleted.iter().map(|gone| &gone.item))
+                .map(|item| (item.id, s.vault(&self.vault).history(&item.id)))
+                .collect::<BTreeMap<_, _>>())
         })?;
         for d in &self.devices {
             if !members.contains(&DeviceId::from_bytes(d.id)) {
@@ -1026,7 +1038,14 @@ impl World {
                     .vaults
                     .get(&self.vault)
                     .ok_or_else(|| anyhow::anyhow!("member missing vault"))?;
-                Ok(vault.heads() == heads && vault.items() == items && vault.deleted() == deleted)
+                Ok(vault.heads() == heads
+                    && vault.members().collect::<BTreeSet<_>>() == members
+                    && vault.name() == name
+                    && vault.items() == items
+                    && vault.deleted() == deleted
+                    && histories
+                        .iter()
+                        .all(|(id, history)| vault.history(id) == *history))
             })?;
             if !same {
                 return Ok(false);
@@ -1468,4 +1487,295 @@ fn files_never_reach_the_disk_in_the_clear() {
     let (name, contents) = deadbolt_core::item::file_parts(&file);
     assert!(name.starts_with(SECRET_MARKER), "{name}");
     assert!(contents.unwrap().starts_with(FILE_MARKER));
+}
+
+/// Application batches can overlap across sessions. A child arriving before
+/// its parent is dropped, not persisted; the next heads exchange must recover
+/// it, including after reopening the accepted prefix.
+#[tokio::test]
+async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
+    // The manual stream scheduler owns polling; an enclosing Tokio task's
+    // cooperative budget must not make its duplex streams spuriously stall.
+    tokio::task::unconstrained(async {
+        let mut world = World::new().unwrap();
+        world.step(&Action::Pair(1)).unwrap();
+        world.devices[0]
+            .with(|s| {
+                super::items::create(s, None, "note", Some("reordered".into()), vec![])?;
+                Ok(())
+            })
+            .unwrap();
+        for action in [Action::Attach(0, 2), Action::Attach(0, 3)] {
+            world.step(&action).unwrap();
+        }
+        let source = world.devices[0].handler();
+        let target = world.devices[1].handler();
+        let (a, b) = (world.devices[0].id, world.devices[1].id);
+        let entries = source
+            .missing_for(b, target.heads(a).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+        let mut reversed = entries.clone();
+        reversed.reverse();
+        target.receive(a, reversed).await.unwrap();
+        world.check().unwrap();
+        world.devices[1]
+            .with(|s| {
+                assert_eq!(s.vault(&world.vault).items().len(), 1);
+                assert!(
+                    !s.vault(&world.vault).items()[0]
+                        .fields
+                        .contains_key("receipt")
+                );
+                Ok(())
+            })
+            .unwrap();
+        world.step(&Action::Crash(1)).unwrap();
+        world.step(&Action::Startup(1)).unwrap();
+        let missing = source
+            .missing_for(b, target.heads(a).await.unwrap())
+            .await
+            .unwrap();
+        assert_eq!(missing, entries[1..]);
+        // Resume one batch at a time, then replay the entire overlapping session.
+        for entry in missing {
+            target.receive(a, vec![entry]).await.unwrap();
+            world.check().unwrap();
+        }
+        target.receive(a, entries).await.unwrap();
+        world.check().unwrap();
+        world.step(&Action::Crash(1)).unwrap();
+        world.converge().unwrap();
+    })
+    .await;
+}
+
+/// A cap rejection must not discard a following removal at the same sequence.
+/// Another author remains writable independently, and its changes converge.
+#[tokio::test]
+async fn exhausted_author_does_not_block_removal_or_other_authors() {
+    tokio::task::unconstrained(async {
+        let mut world = World::new().unwrap();
+        world.step(&Action::Pair(1)).unwrap();
+        world.step(&Action::Pair(2)).unwrap();
+        world.step(&Action::MembershipFlood(0, 1)).unwrap();
+        let removed = DeviceId::from_bytes(world.devices[2].id);
+        let (rejected, removal) = world.devices[0]
+            .with(|s| {
+                let mut probe = s.vault(&world.vault).clone();
+                let removal = probe.remove(&s.secret, removed)?;
+                let rejected = Entry::sign(
+                    &s.secret,
+                    world.vault,
+                    removal.seq(),
+                    removal.deps().to_vec(),
+                    Payload::Membership(MembershipOp::Rename {
+                        name: "over-budget".into(),
+                    }),
+                );
+                let removal = s.update(world.vault, |v, key| Ok(v.remove(key, removed)?))?;
+                Ok((rejected, removal))
+            })
+            .unwrap();
+        let renamed = world.devices[1]
+            .with(|s| s.update(world.vault, |v, key| Ok(v.rename(key, "still-writable")?)))
+            .unwrap();
+        let handler = world.devices[1].handler();
+        handler
+            .receive(
+                world.devices[0].id,
+                vec![rejected.encode(), removal.encode()],
+            )
+            .await
+            .unwrap();
+        world.devices[1]
+            .with(|s| {
+                let vault = s.vault(&world.vault);
+                assert!(!vault.is_member(&removed));
+                assert!(
+                    !vault
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.hash() == rejected.hash())
+                );
+                assert_eq!(
+                    membership_writes(vault, DeviceId::from_bytes(world.devices[0].id)),
+                    MAX_MEMBERSHIP_ENTRIES
+                );
+                Ok(())
+            })
+            .unwrap();
+        world.check().unwrap();
+        world.step(&Action::Crash(1)).unwrap();
+        world.converge().unwrap();
+        world.devices[0]
+            .with(|s| {
+                assert!(
+                    s.vault(&world.vault)
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.hash() == renamed.hash())
+                );
+                assert_eq!(
+                    membership_writes(
+                        s.vault(&world.vault),
+                        DeviceId::from_bytes(world.devices[1].id)
+                    ),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    })
+    .await;
+}
+
+/// The small-chunk scheduler intentionally bounds trace size. Exercise full
+/// production frames separately with the same application handlers and stores,
+/// without sockets: exact file cap, concurrent aggregate overflow, and reload.
+#[tokio::test]
+async fn full_size_files_sync_and_concurrent_files_survive_reload() {
+    use crate::protocol::FieldInput;
+    use deadbolt_core::item::{MAX_FILE, file_parts, file_value, files_size};
+
+    tokio::task::unconstrained(async {
+        let mut world = World::new().unwrap();
+        world.step(&Action::Pair(1)).unwrap();
+        let mut bytes = vec![b'x'; MAX_FILE];
+        bytes[..SECRET_MARKER.len()].copy_from_slice(SECRET_MARKER.as_bytes());
+        let full = file_value("cap.bin", &bytes);
+        let half = file_value("half.bin", &bytes[..MAX_FILE / 2 + 1]);
+        let field = |name: &str, value: &str| FieldInput {
+            name: name.into(),
+            kind: Some("file".into()),
+            value: value.into(),
+        };
+        let (document, note) = world.devices[0]
+            .with(|s| {
+                super::items::create(
+                    s,
+                    None,
+                    "document",
+                    Some("full".into()),
+                    vec![field("file", &full)],
+                )?;
+                super::items::create(s, None, "note", Some("concurrent".into()), vec![])?;
+                let items = s.vault(&world.vault).items();
+                let document = items
+                    .iter()
+                    .find(|item| item.kind == "document")
+                    .unwrap()
+                    .id;
+                let note = items.iter().find(|item| item.kind == "note").unwrap().id;
+                let before = s.vault(&world.vault).heads();
+                let error = super::items::set(
+                    s,
+                    None,
+                    &[document.to_string()],
+                    vec![field("extra", &file_value("one.bin", b"x"))],
+                    None,
+                    &[],
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("at most 10 MiB together"),
+                    "{error:#}"
+                );
+                assert_eq!(s.vault(&world.vault).heads(), before);
+                Ok((document, note))
+            })
+            .unwrap();
+        for round in 0..2 {
+            if round == 1 {
+                for (i, name) in [(0, "left"), (1, "right")] {
+                    world.devices[i]
+                        .with(|s| {
+                            super::items::set(
+                                s,
+                                None,
+                                &[note.to_string()],
+                                vec![field(name, &half)],
+                                None,
+                                &[],
+                            )?;
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+            }
+            let (a, b) = (world.devices[0].handler(), world.devices[1].handler());
+            let (left, right) = tokio::io::duplex(64 * 1024);
+            let (mut ar, mut aw) = tokio::io::split(left);
+            let (mut br, mut bw) = tokio::io::split(right);
+            let max = deadbolt_net::DEFAULT_MAX_FRAME_LEN;
+            let (sent, received) = tokio::join!(
+                run_sync_session(&a, world.devices[1].id, &mut aw, &mut ar, max, true),
+                run_sync_session(&b, world.devices[0].id, &mut bw, &mut br, max, false),
+            );
+            assert_eq!(sent.unwrap().sent, received.unwrap().received);
+            assert!(world.converged().unwrap());
+            world.check().unwrap();
+        }
+        for i in 0..2 {
+            world.step(&Action::Crash(i)).unwrap();
+            world.devices[i]
+                .with(|s| {
+                    let items = s.vault(&world.vault).items();
+                    let merged = items.iter().find(|item| item.id == note).unwrap();
+                    assert_eq!(files_size(merged.fields.values()), MAX_FILE + 2);
+                    // Ordinary app reads expose names; requesting one file leaves the
+                    // other attachment hidden, even after a concurrent cap overflow.
+                    for (id, selected, expected) in
+                        [(document, "file", &full), (note, "left", &half)]
+                    {
+                        let query = [id.to_string()];
+                        let listed = super::items::get(s, None, &query, false, false, &[], false)?;
+                        let names: Vec<_> = listed
+                            .fields
+                            .iter()
+                            .filter(|f| f.kind == "file")
+                            .map(|f| f.value.as_str())
+                            .collect();
+                        assert_eq!(
+                            names,
+                            if id == document {
+                                vec!["cap.bin"]
+                            } else {
+                                vec!["half.bin", "half.bin"]
+                            }
+                        );
+                        let fetched = super::items::get(
+                            s,
+                            None,
+                            &query,
+                            false,
+                            false,
+                            &[selected.into()],
+                            false,
+                        )?;
+                        assert_eq!(
+                            fetched
+                                .fields
+                                .iter()
+                                .find(|f| f.name == selected)
+                                .unwrap()
+                                .value,
+                            expected.as_str()
+                        );
+                        assert!(
+                            fetched
+                                .fields
+                                .iter()
+                                .filter(|f| f.kind == "file" && f.name != selected)
+                                .all(|f| file_parts(&f.value).1.is_none())
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+        world.converge().unwrap();
+    })
+    .await;
 }
