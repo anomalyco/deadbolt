@@ -329,7 +329,11 @@ mod tests {
                 item: home
             })
         );
-        let listed = format!("{identities:?}{cards:?}");
+        // Random hex IDs can contain "9876" by chance: mask them, scan the rest.
+        let mut listed = format!("{identities:?}{cards:?}");
+        for id in [vault.id().to_string(), home.to_string(), card.to_string()] {
+            listed = listed.replace(&id, "<id>");
+        }
         for secret in ["4242424242424242", "X1234567", "9876", "+17185550100"] {
             assert!(!listed.contains(secret));
         }
