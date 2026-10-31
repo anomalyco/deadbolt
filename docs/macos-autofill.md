@@ -132,13 +132,15 @@ Neither `pw.deadbolt.app` nor `pw.deadbolt.app.autofill` is registered yet in Ap
    - `pw.deadbolt.app` (*Deadbolt*): enable **AutoFill Credential Provider** and **App Groups**.
    - `pw.deadbolt.app.autofill` (*Deadbolt AutoFill*): enable **AutoFill Credential Provider** and **App Groups**.
    *(No `group.*` identifier registration is needed for the macOS-style `5NZ4Q7NXJ4.pw.deadbolt` group; enabling **App Groups** on macOS App IDs automatically authorizes `5NZ4Q7NXJ4.*` in generated macOS profiles.)*
-2. **Create two Developer ID provisioning profiles** at [Profiles](https://developer.apple.com/account/resources/profiles/list) › `+` › Distribution › **Developer ID** › macOS, selecting Anomaly's `Developer ID Application` certificate (`5NZ4Q7NXJ4`):
+2. **Create two Developer ID provisioning profiles** at [Profiles](https://developer.apple.com/account/resources/profiles/list) › `+` › Distribution › **Developer ID** › **Developer ID Application**, selecting **all** `Developer ID Application` certificates on team `5NZ4Q7NXJ4` (so whichever certificate is stored in `APPLE_SIGNING_CERTIFICATE` matches):
    - One for `pw.deadbolt.app` (`Deadbolt Developer ID`).
    - One for `pw.deadbolt.app.autofill` (`Deadbolt AutoFill Developer ID`).
    Verify each downloaded `.provisionprofile` with `security cms -D -i <file>` to confirm `Entitlements` includes `com.apple.developer.authentication-services.autofill-credential-provider = true` and `com.apple.security.application-groups = ["5NZ4Q7NXJ4.*"]`.
 3. **Add two secrets to the `release` GitHub Actions environment** on `anomalyco/deadbolt`:
-   - `APPLE_PROVISIONING_PROFILE_APP`: `base64 < Deadbolt_Developer_ID.provisionprofile`
-   - `APPLE_PROVISIONING_PROFILE_AUTOFILL`: `base64 < Deadbolt_AutoFill_Developer_ID.provisionprofile`
+   ```sh
+   base64 < Deadbolt_Developer_ID.provisionprofile | tr -d '\n' | gh secret set APPLE_PROVISIONING_PROFILE_APP --repo anomalyco/deadbolt --env release
+   base64 < Deadbolt_AutoFill_Developer_ID.provisionprofile | tr -d '\n' | gh secret set APPLE_PROVISIONING_PROFILE_AUTOFILL --repo anomalyco/deadbolt --env release
+   ```
 4. *(Optional, for local SIP-on testing before CI signing)* Create two **macOS App Development** profiles for `pw.deadbolt.app` and `pw.deadbolt.app.autofill` bound to an `Apple Development` certificate and the test Mac's Hardware UDID.
 
 ## PR plan
