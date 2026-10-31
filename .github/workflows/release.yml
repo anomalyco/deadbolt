@@ -94,9 +94,107 @@ jobs:
 
   # ---- Build: repository code; no environment, secrets, or id-token ----------
 
-  # Static (musl) CLI tarballs.
+  # `deadbolt` with the app built in (glibc), for desktops and most servers.
+  # Built in manylinux_2_28 (AlmaLinux 8, glibc 2.28), so it runs on any
+  # distribution with glibc 2.28 or newer (Debian 10, Ubuntu 18.10, RHEL 8 and
+  # later); a runner's own Ubuntu 24.04 would need 2.39. Rune loads Wayland,
+  # X11 and the GPU drivers when a window opens, so the binary links only
+  # libc, libm and libgcc_s, and the CLI and agent run on a box with no
+  # display or desktop libraries (checked in AlmaLinux 8 minimal). Building
+  # links libxkbcommon, which --as-needed drops again since nothing calls it.
   build-linux-x64:
     name: Build Linux x64
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+      TARGET: x86_64-unknown-linux-gnu
+      PLATFORM: linux-x64
+      LOADER: ld-linux-x86-64.so.2
+      BUILDER: quay.io/pypa/manylinux_2_28_x86_64:2026.10.31-1@sha256:43f7ce12d79ed98b6dbfa3291d5afe389efd40a7e76de089959ffe99501b6edf
+      RUNNER: almalinux:8-minimal@sha256:3f9b9fdb5957745afcc9269e82c8c43e3140ab8802172967927070c5bc8be907
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps: &linux-steps
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - name: Build
+        run: |
+          scripts/set-crate-version.sh "$PWD" "$DEADBOLT_VERSION"
+          docker run --rm -v "$PWD:/src" -w /src -e DEADBOLT_BUILD_CHANNEL -e TARGET -e HOST_UID="$(id -u)" "$BUILDER" bash -euo pipefail -c '
+            # Linked against, then dropped as unused (--as-needed): Rune
+            # loads libxkbcommon at runtime.
+            dnf install -y -q libxkbcommon-devel
+            curl --proto "=https" --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
+            export PATH="$HOME/.cargo/bin:$PATH"
+            cargo build --release --locked -p deadbolt-cli --target "$TARGET"
+            chown -R "$HOST_UID" target'
+          scripts/package-cli.sh "$DEADBOLT_VERSION" "$PLATFORM" "target/$TARGET/release" "$RUNNER_TEMP/dist"
+      - name: Check
+        run: |
+          check=$(mktemp -d)
+          tar -xzf "$RUNNER_TEMP/dist/deadbolt-$DEADBOLT_VERSION-$PLATFORM.tar.gz" -C "$check"
+          # Only glibc and libgcc_s: every desktop library is loaded at runtime.
+          for lib in $(readelf -dW "$check/deadbolt" | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p'); do
+            case "$lib" in
+              "$LOADER" | libc.so.6 | libm.so.6 | libdl.so.2 | libpthread.so.0 | librt.so.1 | libutil.so.1 | libgcc_s.so.1) ;;
+              *) echo "::error::deadbolt needs $lib, beyond glibc and libgcc_s."; exit 1 ;;
+            esac
+          done
+          newest=$(objdump -T "$check/deadbolt" | grep -o 'GLIBC_[0-9.]*' | sort -uV | tail -1)
+          if [ "$(printf '%s\nGLIBC_2.28\n' "$newest" | sort -V | tail -1)" != GLIBC_2.28 ]; then
+            echo "::error::deadbolt needs $newest, newer than glibc 2.28."
+            exit 1
+          fi
+          # The CLI and the agent on a glibc 2.28 box with no display and no
+          # desktop libraries; `app` says there's no graphical session.
+          docker run --rm -v "$check:/check:ro" -e DEADBOLT_VERSION "$RUNNER" bash -euo pipefail -c '
+            if ls /usr/lib64/libwayland-client.so* /usr/lib64/libX11.so* /usr/lib64/libxkbcommon.so* 2> /dev/null; then
+              echo "this image has desktop libraries" >&2
+              exit 1
+            fi
+            export HOME=$(mktemp -d) XDG_RUNTIME_DIR=$(mktemp -d)
+            /check/deadbolt --version | grep -qF "deadbolt $DEADBOLT_VERSION"
+            /check/deadbolt --help > /dev/null
+            /check/deadbolt status
+            /check/deadbolt agent status
+            DEADBOLT_PASSPHRASE="release check" /check/deadbolt init --device-name release < /dev/null
+            /check/deadbolt new login --name Example username=release password=release-check-password < /dev/null
+            /check/deadbolt ls < /dev/null | grep -q Example
+            if /check/deadbolt app 2> "$HOME/app.err"; then echo "app opened without a display" >&2; exit 1; fi
+            grep -q "no graphical session" "$HOME/app.err"
+            /check/deadbolt agent stop'
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-cli-${{ env.PLATFORM }}
+          path: ${{ runner.temp }}/dist
+
+  build-linux-arm64:
+    name: Build Linux arm64
+    needs: plan
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 90
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+      TARGET: aarch64-unknown-linux-gnu
+      PLATFORM: linux-arm64
+      LOADER: ld-linux-aarch64.so.1
+      BUILDER: quay.io/pypa/manylinux_2_28_aarch64:2026.10.31-1@sha256:724b504247662e1cf122590957c857211ec2d16b113ec134f92c570a2d01250f
+      RUNNER: almalinux:8-minimal@sha256:3f9b9fdb5957745afcc9269e82c8c43e3140ab8802172967927070c5bc8be907
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps: *linux-steps
+
+  # Static (musl) `deadbolt` without the app, for Alpine and other musl
+  # systems, containers and anything older than glibc 2.28.
+  build-linux-x64-musl:
+    name: Build Linux x64 (musl)
     needs: plan
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -104,10 +202,10 @@ jobs:
       DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
       DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
       TARGET: x86_64-unknown-linux-musl
-      PLATFORM: linux-x64
+      PLATFORM: linux-x64-musl
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
-    steps: &linux-steps
+    steps: &musl-steps
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.plan.outputs.sha }}
@@ -122,7 +220,7 @@ jobs:
           # C code (ring, blake3) for the musl target goes through musl-gcc.
           export "CC_${TARGET//-/_}=musl-gcc"
           scripts/set-crate-version.sh "$PWD" "$DEADBOLT_VERSION"
-          cargo build --release --locked -p deadbolt-cli --target "$TARGET"
+          cargo build --release --locked -p deadbolt-cli --no-default-features --target "$TARGET"
           scripts/package-cli.sh "$DEADBOLT_VERSION" "$PLATFORM" "target/$TARGET/release" "$RUNNER_TEMP/dist"
           check=$(mktemp -d)
           tar -xzf "$RUNNER_TEMP/dist/deadbolt-$DEADBOLT_VERSION-$PLATFORM.tar.gz" -C "$check"
@@ -136,14 +234,17 @@ jobs:
             exit 1
           fi
           "$check/deadbolt" --version | grep -qF "deadbolt $DEADBOLT_VERSION"
+          # No app in this build, and it says so.
+          if "$check/deadbolt" app 2> "$check/app.err"; then exit 1; fi
+          grep -q "without the desktop app" "$check/app.err"
       - id: upload
         uses: ./.github/release/upload
         with:
           name: build-cli-${{ env.PLATFORM }}
           path: ${{ runner.temp }}/dist
 
-  build-linux-arm64:
-    name: Build Linux arm64
+  build-linux-arm64-musl:
+    name: Build Linux arm64 (musl)
     needs: plan
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 60
@@ -151,10 +252,10 @@ jobs:
       DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
       DEADBOLT_BUILD_CHANNEL: ${{ needs.plan.outputs.release-channel }}
       TARGET: aarch64-unknown-linux-musl
-      PLATFORM: linux-arm64
+      PLATFORM: linux-arm64-musl
     outputs:
       digest: ${{ steps.upload.outputs.digest }}
-    steps: *linux-steps
+    steps: *musl-steps
 
   # The Chromium extension, stamped with the release version.
   build-extension:
@@ -448,10 +549,11 @@ jobs:
   # credential. Publishes the cli, desktop (signed builds only), and extension
   # artifacts.
   publish:
-    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-extension-standalone, build-macos, sign-enclave, sign-macos, verify-macos]
+    needs: [plan, build-linux-x64, build-linux-arm64, build-linux-x64-musl, build-linux-arm64-musl, build-extension, build-extension-standalone, build-macos, sign-enclave, sign-macos, verify-macos]
     if: >-
       ${{ !cancelled() && needs.plan.outputs.channel != 'check'
       && needs.build-linux-x64.result == 'success' && needs.build-linux-arm64.result == 'success'
+      && needs.build-linux-x64-musl.result == 'success' && needs.build-linux-arm64-musl.result == 'success'
       && needs.build-extension.result == 'success' && needs.build-extension-standalone.result == 'success'
       && needs.build-macos.result == 'success'
       && (needs.sign-enclave.outputs.signed != 'true' || needs.verify-macos.result == 'success') }}
@@ -475,6 +577,8 @@ jobs:
           digests: >-
             build-cli-linux-x64=${{ needs.build-linux-x64.outputs.digest }}
             build-cli-linux-arm64=${{ needs.build-linux-arm64.outputs.digest }}
+            build-cli-linux-x64-musl=${{ needs.build-linux-x64-musl.outputs.digest }}
+            build-cli-linux-arm64-musl=${{ needs.build-linux-arm64-musl.outputs.digest }}
             build-extension=${{ needs.build-extension.outputs.digest }}
             build-extension-standalone=${{ needs.build-extension-standalone.outputs.digest }}
             ${{ needs.sign-enclave.outputs.signed == 'true' && format('sign-macos={0}', needs.sign-macos.outputs.digest) || format('build-macos-cli={0}', needs.build-macos.outputs.cli-digest) }}
@@ -501,7 +605,7 @@ jobs:
 
   github:
     name: GitHub release
-    needs: [plan, build-linux-x64, build-linux-arm64, build-extension, build-extension-standalone, build-macos, sign-enclave, sign-macos, publish]
+    needs: [plan, build-linux-x64, build-linux-arm64, build-linux-x64-musl, build-linux-arm64-musl, build-extension, build-extension-standalone, build-macos, sign-enclave, sign-macos, publish]
     if: ${{ !cancelled() && needs.publish.result == 'success' && needs.plan.outputs.release-channel == 'stable' }}
     runs-on: ubuntu-24.04
     permissions:

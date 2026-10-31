@@ -145,14 +145,19 @@ The agent reads the socket's peer, not anything the caller says:
 
 That sorts every connection into one of three:
 
-- **Deadbolt.app:** for a Developer ID build, code signed by the team
-  compiled into the agent (`DEADBOLT_APPLE_TEAM_ID`, or the team in
-  `DEADBOLT_APPLE_SIGNING_IDENTITY`, at build time) as `pw.deadbolt.app`.
-  For an ad-hoc build, the process must run the `MacOS/Deadbolt` of the
-  agent's own bundle, by real path, and match that file's cdhash, since two
-  ad-hoc builds with one identifier aren't the same code. A copy of the app
-  run from anywhere else, byte for byte, is a caller. A debug build's app is
-  also the `deadbolt-ui` beside the agent's binary. Everything, as today.
+- **Deadbolt.app:** a process running the `MacOS/Deadbolt` of the agent's
+  own bundle, by real path, that is that code: for a Developer ID build,
+  signed by the team compiled into the agent (`DEADBOLT_APPLE_TEAM_ID`, or
+  the team in `DEADBOLT_APPLE_SIGNING_IDENTITY`, at build time) as
+  `pw.deadbolt.app`; for an ad-hoc build, matching that file's cdhash, since
+  two ad-hoc builds with one identifier aren't the same code. A copy of the
+  app run from anywhere else, byte for byte, is a caller. The path counts
+  for Developer ID builds too because `MacOS/Deadbolt` is the whole
+  `deadbolt` binary: run from its bundle it is only ever the app
+  (`docs/app.md`, One command), but a copy elsewhere would run CLI commands
+  under the app's signature. Outside a bundle there's no app: `deadbolt ui`
+  is the agent's own code under its own identity, a caller. Everything, as
+  today.
   - **Ad-hoc is only as strong as the bundle's directory.** Something that
     can write into `Deadbolt.app` can swap `MacOS/Deadbolt` and be the app.
     Developer ID builds close this: the team and identifier come from

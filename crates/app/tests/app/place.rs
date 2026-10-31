@@ -2,8 +2,6 @@
 //! scripted displays and a pointer: Rune resolves `place()` against them and
 //! records the result as `placed` in `--tree`.
 
-use std::process::Command;
-
 use deadbolt_app::panel;
 use serde_json::{Value, json};
 
@@ -25,7 +23,7 @@ fn placed(pointer: [f64; 2]) -> Option<(u64, [f64; 4])> {
     let tree = dir.path().join("tree.json");
     let desktop = json!({"displays": displays(), "pointer": pointer, "events": []});
     std::fs::write(&script, desktop.to_string()).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_deadbolt-ui"))
+    let out = crate::deadbolt::ui()
         .args(["--window", "panel", "--panel", "--frames", "2", "--script"])
         .arg(&script)
         .arg("--tree")

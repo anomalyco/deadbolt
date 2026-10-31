@@ -13,6 +13,12 @@ workspace = true
 name = "deadbolt"
 path = "src/main.rs"
 
+[features]
+default = ["app"]
+# The desktop app, built in: `deadbolt app` (docs/app.md). The static musl
+# release build leaves it out.
+app = ["dep:deadbolt-app"]
+
 [dependencies]
 anyhow = "1.0.104"
 blake3 = { version = "1.8", features = ["zeroize"] }
@@ -20,6 +26,7 @@ clap = { version = "4.6.7", features = ["derive"] }
 data-encoding = "2.11.1"
 getrandom = "0.4"
 indexmap = "2.14"
+deadbolt-app = { path = "../app", optional = true }
 deadbolt-client = { path = "../client" }
 deadbolt-core = { path = "../core" }
 deadbolt-net = { path = "../net", features = ["application"] }

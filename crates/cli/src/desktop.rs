@@ -1,5 +1,6 @@
 //! `deadbolt desktop install`: a Linux desktop entry, so app launchers list
-//! Deadbolt and open it with `deadbolt app`. On macOS, Deadbolt.app is that.
+//! Deadbolt and open it with `deadbolt app`. The app's first opening writes
+//! it too (`ensure`). On macOS, Deadbolt.app is that.
 
 use std::path::{Path, PathBuf};
 
@@ -45,6 +46,11 @@ impl Files {
         let entry = entry(program)?;
         write_atomic(&self.icon, ICON)?;
         write_atomic(&self.entry, &entry)
+    }
+
+    /// Whether there's no entry at all, not even a dangling link.
+    fn missing(&self) -> bool {
+        self.entry.symlink_metadata().is_err()
     }
 
     /// Removes both, returning those that were there.
@@ -125,6 +131,24 @@ pub fn install() -> Result<()> {
         program.display()
     );
     Ok(())
+}
+
+/// The first time the app opens on Linux: writes the entry and its icon
+/// for `program` unless an entry is already there, whichever binary it
+/// opens (`desktop install` rewrites it). Best effort: the app opens either
+/// way.
+pub fn ensure(program: &Path) {
+    let Ok(files) = Files::get() else { return };
+    if !files.missing() {
+        return;
+    }
+    match files.write(program) {
+        Ok(()) => eprintln!(
+            "Added Deadbolt to your app launcher ({}); `deadbolt desktop uninstall` removes it.",
+            files.entry.display()
+        ),
+        Err(error) => tracing::warn!("adding Deadbolt to the app launcher: {error:#}"),
+    }
 }
 
 /// Removes the entry and its icon.
@@ -228,6 +252,17 @@ mod tests {
             [files.entry.as_path(), files.icon.as_path()]
         );
         assert!(files.remove().unwrap().is_empty());
+    }
+
+    #[test]
+    fn the_first_opening_writes_an_entry_only_where_there_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().to_str().unwrap().to_owned();
+        let files =
+            Files::from_vars(|name| (name == "XDG_DATA_HOME").then(|| data.clone())).unwrap();
+        assert!(files.missing());
+        files.write(Path::new("/opt/other/deadbolt")).unwrap();
+        assert!(!files.missing());
     }
 
     #[test]

@@ -1,16 +1,19 @@
 #!/bin/sh
-# Installs the deadbolt CLI.
+# Installs deadbolt: the CLI, with the desktop app built in (`deadbolt app`).
 #
 #   curl -fsSL https://deadbolt.pw/install | sh
 #
 # DEADBOLT_CHANNEL   release channel to install: stable (default) or dev
 # DEADBOLT_VERSION   a stable version to install instead, from its GitHub release
 # DEADBOLT_INSTALL   install directory (default: ~/.local/bin)
+# DEADBOLT_LIBC      Linux only: gnu or musl, instead of detecting it
 #
 # The channel's current release comes from the Anomaly release service
 # (https://anoma.ly/release/deadbolt/cli/<channel>.json); the download must
 # have the size and SHA-256 the manifest names. On macOS the tarball also holds
-# deadbolt-enclave, the Touch ID helper, installed beside deadbolt.
+# deadbolt-enclave, the Touch ID helper, installed beside deadbolt. On Linux
+# with glibc 2.28 or newer it's the build with the app; on musl (Alpine) or an
+# older glibc, the static build without it.
 set -eu
 
 release="${DEADBOLT_RELEASE_URL:-https://anoma.ly/release}"
@@ -33,6 +36,30 @@ case "$(uname -m)" in
   *) fail "unsupported architecture $(uname -m)" ;;
 esac
 
+# glibc_at_least_2_28: whether this system's glibc can run the build with
+# the app (`ldd --version` prints "ldd (GNU libc) 2.36" or similar).
+glibc_at_least_2_28() {
+  version="$(ldd --version 2>/dev/null | head -n 1 | sed -n 's/.* \([0-9][0-9]*\)\.\([0-9][0-9]*\)$/\1 \2/p')"
+  [ -n "$version" ] || return 1
+  # shellcheck disable=SC2086 # two numbers, split on purpose
+  set -- $version
+  [ "$1" -gt 2 ] || { [ "$1" -eq 2 ] && [ "$2" -ge 28 ]; }
+}
+
+libc=""
+if [ "$os" = linux ]; then
+  case "${DEADBOLT_LIBC:-}" in
+    gnu) ;;
+    musl) libc="-musl" ;;
+    "")
+      if ls /lib/ld-musl-* >/dev/null 2>&1 || ldd --version 2>&1 | grep -qi musl || ! glibc_at_least_2_28; then
+        libc="-musl"
+      fi
+      ;;
+    *) fail "DEADBOLT_LIBC must be gnu or musl, not $DEADBOLT_LIBC" ;;
+  esac
+fi
+
 if command -v sha256sum >/dev/null 2>&1; then
   sha256() { sha256sum "$1" | cut -d ' ' -f 1; }
 elif command -v shasum >/dev/null 2>&1; then
@@ -48,9 +75,9 @@ trap 'rm -rf "$tmp"' EXIT
 if [ -n "${DEADBOLT_VERSION:-}" ]; then
   # A pinned version: stable releases keep their files and SHA256SUMS on GitHub.
   version="${DEADBOLT_VERSION#v}"
-  file="deadbolt-$version-$os-$arch.tar.gz"
+  file="deadbolt-$version-$os-$arch$libc.tar.gz"
   base="https://github.com/$repo/releases/download/v$version"
-  echo "Downloading deadbolt $version for $os-$arch..."
+  echo "Downloading deadbolt $version for $os-$arch$libc..."
   curl -fsSL -o "$tmp/$file" "$base/$file"
   curl -fsSL -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
   expected="$(awk -v f="$file" '$2 == f { print $1 }' "$tmp/SHA256SUMS")"
@@ -78,8 +105,8 @@ else
   release_json="${manifest#*\"release\":}"
   version="$(field version "$release_json")"
   target="${release_json#*\"targets\":}"
-  target="${target#*\""$target_os-$arch"\":\{}"
-  [ "$target" != "${release_json#*\"targets\":}" ] || fail "the $channel release has no $target_os-$arch build"
+  target="${target#*\""$target_os-$arch$libc"\":\{}"
+  [ "$target" != "${release_json#*\"targets\":}" ] || fail "the $channel release has no $target_os-$arch$libc build"
   target="${target%%\}*}"
   url="$(field url "$target")"
   expected="$(field sha256 "$target")"
@@ -89,7 +116,7 @@ else
     *) fail "unexpected download URL $url" ;;
   esac
   file="${url##*/}"
-  echo "Downloading deadbolt $version ($channel) for $os-$arch..."
+  echo "Downloading deadbolt $version ($channel) for $os-$arch$libc..."
   curl -fsSL -o "$tmp/$file" "$url"
 fi
 
@@ -118,3 +145,8 @@ case ":$PATH:" in
      echo "  export PATH=\"$dir:\$PATH\"" ;;
 esac
 echo "Get started: deadbolt init"
+if [ -z "$libc" ]; then
+  echo "Open the app: deadbolt app"
+else
+  echo "This is the static build for servers and containers, without the desktop app."
+fi

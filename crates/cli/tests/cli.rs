@@ -123,6 +123,9 @@ impl Device {
             .env("XDG_RUNTIME_DIR", self.path("run"))
             .env("XDG_STATE_HOME", self.path("state"))
             .env("XDG_CONFIG_HOME", self.path("config"))
+            // `deadbolt app` writes a desktop entry here, never the real one.
+            .env("XDG_DATA_HOME", self.path("data"))
+            .env_remove("DEADBOLT_TEST_UI")
             .env("DEADBOLT_NET", "local")
             .env("DEADBOLT_KDF", "fast")
             .env("DEADBOLT_PASSPHRASE", PASSPHRASE)
@@ -736,8 +739,9 @@ fn a_new_device_join_needs_a_passphrase_source() {
     assert!(out.status.success());
 }
 
-/// `deadbolt app` beside a stand-in `deadbolt-ui` that records each start
-/// and the token it was given. The app's window is a watcher with `app` set.
+/// `deadbolt app` with a stand-in for the app it starts (`deadbolt ui`) that
+/// records each start and the token it was given. The app's window is a
+/// watcher with `app` set. The first opening adds the desktop entry.
 #[cfg(target_os = "linux")]
 #[test]
 fn app_comes_forward_through_the_agent_instead_of_starting_again() {
@@ -752,21 +756,33 @@ fn app_comes_forward_through_the_agent_instead_of_starting_again() {
         std::fs::copy(BIN, &deadbolt).unwrap();
     }
     let starts = a.path("starts");
-    let ui = bin.join("deadbolt-ui");
+    let ui = bin.join("stand-in");
     std::fs::write(
         &ui,
         format!(
-            "#!/bin/sh\necho \"${{XDG_ACTIVATION_TOKEN:-none}}\" >> '{}'\n",
+            "#!/bin/sh\necho \"$1 ${{XDG_ACTIVATION_TOKEN:-none}}\" >> '{}'\n",
             starts.display()
         ),
     )
     .unwrap();
     std::fs::set_permissions(&ui, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let entry = a.path("data/applications/pw.deadbolt.Deadbolt.desktop");
+
+    // No display: nothing starts, and it says why.
+    let mut cmd = a.cmd_of(&deadbolt, &["app"]);
+    cmd.env_remove("WAYLAND_DISPLAY").env_remove("DISPLAY");
+    let out = a.output(&mut cmd);
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no graphical session"));
+    assert!(!entry.exists());
+
     let app = |vars: &[(&str, &str)]| {
         let mut cmd = a.cmd_of(&deadbolt, &["app"]);
         cmd.env_remove("XDG_ACTIVATION_TOKEN")
             .env_remove("DESKTOP_STARTUP_ID")
-            .env_remove("DEADBOLT_BIN")
+            .env_remove("DISPLAY")
+            .env("WAYLAND_DISPLAY", "wayland-test")
+            .env("DEADBOLT_TEST_UI", &ui)
             .envs(vars.iter().copied());
         assert!(a.output(&mut cmd).status.success());
     };
@@ -780,13 +796,24 @@ fn app_comes_forward_through_the_agent_instead_of_starting_again() {
 
     // No agent: the app starts, and takes the launcher's token itself.
     app(&[("XDG_ACTIVATION_TOKEN", "one")]);
-    eventually("the first start", || started() == ["one"]);
+    eventually("the first start", || started() == ["ui one"]);
     assert_eq!(a.agent_pid(), None, "opening the app starts no agent");
+    let written = std::fs::read_to_string(&entry).unwrap();
+    assert!(
+        written.contains(&format!("Exec={} app\n", deadbolt.display())),
+        "{written}"
+    );
+    // An entry already there stays as it is.
+    std::fs::write(&entry, "[Desktop Entry]\nExec=/elsewhere app\n").unwrap();
 
     // An agent, but no app watching: it starts.
     a.run(&["status"]);
     app(&[("XDG_ACTIVATION_TOKEN", "two")]);
-    eventually("the second start", || started() == ["one", "two"]);
+    eventually("the second start", || started() == ["ui one", "ui two"]);
+    assert_eq!(
+        std::fs::read_to_string(&entry).unwrap(),
+        "[Desktop Entry]\nExec=/elsewhere app\n"
+    );
 
     // The app's window watches: later launches bring it forward with their token.
     let paths = deadbolt_client::Paths::from_vars(|name| match name {
@@ -826,7 +853,7 @@ fn app_comes_forward_through_the_agent_instead_of_starting_again() {
     app(&[]);
     assert_eq!(next(&mut watch), Some(Change::Activate { token: None }));
     std::thread::sleep(Duration::from_millis(300));
-    assert_eq!(started(), ["one", "two"], "nothing started again");
+    assert_eq!(started(), ["ui one", "ui two"], "nothing started again");
 }
 
 #[test]
