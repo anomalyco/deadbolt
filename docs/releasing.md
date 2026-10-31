@@ -44,7 +44,11 @@ Release (push dev | production | v*, or workflow_dispatch: channel)
 │                     deadbolt-<v>-darwin-{arm64,x64}.tar.gz                                [build]
 ├─ sign-macos         sign-macos.sh: CLI + app inside-out, notarize, staple, zip + DMG       [release]
 ├─ verify-macos       Gatekeeper, staple, update requirement, Touch ID pin, launch            [build]
+├─ build-npm          signed only: @deadbolt/cli + 6 platform packages (scripts/package-npm.sh),
+│                     the app's signature and an install checked                            [build]
 ├─ publish            OIDC: cli, desktop, extension to the release service; provenance      [release]
+├─ publish-attestations  build provenance for the npm tarballs                             [id-token]
+├─ publish-npm        OIDC trusted publishing: npm, dist-tag dev / latest                   [release]
 ├─ github             stable: tag v<v>, GitHub release with every file + SHA256SUMS        [contents: write]
 ├─ homebrew-stage     stable: render formula + cask, brew style/audit/install/test          [build]
 ├─ homebrew           stable: push deadbolt.rb and Casks/deadbolt.rb to the tap             [release]
@@ -154,6 +158,54 @@ or `ldd --version` says musl) or its glibc is older than 2.28, which get the
 `-musl` build (`DEADBOLT_LIBC=gnu|musl` overrides);
 `DEADBOLT_VERSION` installs a pinned stable version from its GitHub release.
 
+## npm
+
+As OpenCode publishes `@opencode/cli`: `npm i -g @deadbolt/cli` (stable,
+dist-tag `latest`) or `@deadbolt/cli@dev`. Seven packages, all `UNLICENSED`
+with `repository` `anomalyco/deadbolt` (provenance requires it):
+
+| Package | Holds | `os` / `cpu` / `libc` |
+| --- | --- | --- |
+| `@deadbolt/cli` | `bin/deadbolt` (a placeholder), `postinstall.mjs`; every platform package as an exact-version `optionalDependency` | darwin, linux / arm64, x64 |
+| `@deadbolt/cli-darwin-arm64`, `-darwin-x64` | `Deadbolt.app`, signed, notarized and stapled (universal, the release's app zip) | darwin / its cpu |
+| `@deadbolt/cli-linux-x64`, `-linux-arm64` | `bin/deadbolt`, glibc with the app | linux / its cpu / glibc |
+| `@deadbolt/cli-linux-x64-musl`, `-linux-arm64-musl` | `bin/deadbolt`, static without the app | linux / its cpu / musl |
+
+The wrapper's postinstall (`packaging/npm/postinstall.mjs`, as OpenCode's)
+links `bin/deadbolt` to the installed platform package's `deadbolt`, checking
+its version and that it runs, and installs the package itself when the
+package manager skipped it. Where install scripts don't run (pnpm, bun, npm
+with scripts disallowed), the placeholder runs the postinstall on first use,
+then the command. On
+musl it prefers the `-musl` package, else the glibc one, each falling back to
+the other. It links rather than copies, since Deadbolt knows its files by real
+path: on macOS the command is the app's own `Contents/Helpers/deadbolt`, so
+the CLI, the agent and the app are one install, Touch ID's helper sits beside
+it, and `deadbolt app` opens that Deadbolt.app, first linking it as
+`~/Applications/Deadbolt.app` when neither Applications folder has one (so
+Launchpad and Finder list it). `deadbolt update` leaves an npm install to npm
+(`npm i -g @deadbolt/cli@<tag>`).
+
+- `build-npm` (macOS, no secrets) packs from the verified Linux tarballs and
+  the signed app zip, so a run without the Apple values publishes no npm.
+  It checks the packed apps with `codesign --verify --deep --strict`,
+  `spctl` and `stapler validate`, then installs the darwin-arm64 package and
+  the wrapper into a temporary prefix and runs `deadbolt --version`.
+- `publish-attestations` signs build provenance for every tarball;
+  `publish-npm` (`release` environment) verifies it with `gh attestation
+  verify`, reads each tarball's `package.json` as data and requires exactly
+  the seven names at `DEADBOLT_VERSION`, no `publishConfig` beyond `access`, no
+  install script but the wrapper's, the app in the darwin packages and only
+  `bin/deadbolt` in the Linux ones. It publishes with a clean npmrc,
+  `--tag <dev|beta|latest> --access public --ignore-scripts --provenance`,
+  platform packages first and the wrapper last, skipping versions the
+  registry already has. Dev versions (`0.0.0-dev-<run>[.<attempt>]`) are
+  valid semver prereleases.
+- **Trusted publishing:** each of the seven packages trusts repository
+  `anomalyco/deadbolt`, workflow `release.yml`, environment `release`. There
+  is no npm token; the job's OIDC token is the credential (npm 11.5+, Node
+  24.11 here).
+
 ## Updater
 
 `deadbolt update [--check] [--channel dev|beta|stable] [--yes] [--allow-rollback]`
@@ -198,8 +250,9 @@ channel's current release isn't the build it runs, a rollback included.
     helper). The running files are moved into the stage, the new pair renamed
     in, and on any failure both old files come back. If the running agent is
     this binary it is stopped and started again from the new one.
-  - A path under Homebrew's `Cellar`, `/nix/store`, `/usr` (not `/usr/local`)
-    or `~/.cargo/bin` belongs to that package manager: `update` prints the
+  - A path under `node_modules` (npm, checked before the bundle, as npm's
+    darwin package carries Deadbolt.app), Homebrew's `Cellar`, `/nix/store`,
+    `/usr` (not `/usr/local`) or `~/.cargo/bin` belongs to that package manager: `update` prints the
     manifest's `command` (or a hint) and changes nothing.
 - **Signatures:** a release build (published on a channel) on macOS always
   requires its replacement to satisfy the update requirement with identifier
@@ -300,7 +353,8 @@ Both live in `anomalyco/homebrew-tap`, rendered from `packaging/homebrew/` by
 - The environment has no required reviewer (every push to `dev` publishes);
   its deployment policy admits `dev`, `production` and `v*` tags.
 - Publishing needs no secret: the service authorizes the `publish` and
-  `record-brew` jobs by their OIDC token.
+  `record-brew` jobs by their OIDC token, and npm authorizes `publish-npm`
+  by its OIDC token (trusted publishing, see npm).
 
 ## Cutting a stable release
 

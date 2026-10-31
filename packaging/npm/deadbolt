@@ -1,0 +1,21 @@
+#!/bin/sh
+# @deadbolt/cli's postinstall replaces this with a link to this platform's
+# deadbolt (postinstall.mjs). When the package manager skipped install
+# scripts (pnpm, bun, npm with scripts disallowed), the first run links it
+# here, then runs it.
+self=$0
+while [ -L "$self" ]; do
+  link=$(readlink "$self")
+  case "$link" in
+    /*) self=$link ;;
+    *) self=$(dirname "$self")/$link ;;
+  esac
+done
+package=$(cd "$(dirname "$self")/.." && pwd)
+if command -v node > /dev/null 2>&1 && node "$package/postinstall.mjs" >&2 && [ -L "$package/bin/deadbolt" ]; then
+  exec "$package/bin/deadbolt" "$@"
+fi
+echo "Error: @deadbolt/cli's postinstall script was not run, and running it failed." >&2
+echo "" >&2
+echo "Run \`node $package/postinstall.mjs\`, or reinstall with install scripts enabled." >&2
+exit 1
