@@ -4,16 +4,60 @@
 //! rules; adapters own durable transactions, address books and readiness. No
 //! data is sent or accepted until the caller's membership barrier is open.
 
-use std::{collections::BTreeMap, net::SocketAddr};
+use std::{collections::BTreeMap, future::Future, net::SocketAddr, time::Duration};
 
 use data_encoding::HEXLOWER;
 use deadbolt_core::{
     DeviceId, DeviceSecret, Entry, Heads, Log, Signature, Vault, VaultId, valid_name,
 };
+use n0_future::time::Instant;
+use n0_future::{FuturesUnorderedBounded, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::{Blob, PeerAddr, PeerId};
+
+const CONTACT_TIMEOUT: Duration = Duration::from_secs(15);
+const CONTACT_CONCURRENCY: usize = 4;
+
+/// Contact a snapshot of peers, with a shared deadline only during startup.
+/// At most four contacts run at once, without spawning detached tasks. Each
+/// contact must bound its dial and exchange together by the supplied budget.
+/// A true result counts as contacted (including unreachable during the dial).
+/// Ready rounds have no shared deadline, so every queued peer gets an attempt.
+pub async fn contact_round<E, F: Future<Output = Result<bool, E>>>(
+    targets: Vec<PeerAddr>,
+    deadline: Option<Instant>,
+    contact: impl Fn(PeerAddr, Duration) -> F,
+) -> Result<Vec<PeerId>, E> {
+    let mut targets = targets.into_iter();
+    let mut pending = FuturesUnorderedBounded::new(CONTACT_CONCURRENCY);
+    let mut completed = Vec::new();
+    loop {
+        while pending.len() < CONTACT_CONCURRENCY {
+            let budget = deadline.map_or(CONTACT_TIMEOUT, |until| {
+                CONTACT_TIMEOUT.min(until.saturating_duration_since(Instant::now()))
+            });
+            if budget.is_zero() {
+                break;
+            }
+            let Some(peer) = targets.next() else { break };
+            let contact = &contact;
+            pending.push(async move {
+                let id = peer.id;
+                contact(peer, budget).await.map(|complete| (id, complete))
+            });
+        }
+        let Some(result) = pending.next().await else {
+            break;
+        };
+        let (id, complete) = result?;
+        if complete {
+            completed.push(id);
+        }
+    }
+    Ok(completed)
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -386,4 +430,127 @@ pub fn verify_welcome(
         inviter_addr: offer.addr,
         peers: meta.peers,
     })
+}
+
+#[cfg(test)]
+mod contact_tests {
+    use super::*;
+    use n0_future::time::timeout;
+    use std::{cell::Cell, convert::Infallible, future::pending};
+
+    fn peers(count: u8) -> Vec<PeerAddr> {
+        (0..count).map(|id| PeerAddr::from([id; 32])).collect()
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn healthy_peer_does_not_wait_for_stalled_dials() {
+        let start = Instant::now();
+        let healthy = Cell::new(None);
+        let healthy = &healthy;
+        let completed = contact_round(
+            peers(3),
+            Some(start + CONTACT_TIMEOUT * 2),
+            |peer, budget| async move {
+                if peer.id[0] < 2 {
+                    assert!(timeout(budget, pending::<()>()).await.is_err());
+                } else {
+                    healthy.set(Some(start.elapsed()));
+                }
+                Ok::<_, Infallible>(true)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(healthy.get(), Some(Duration::ZERO));
+        assert_eq!(completed.len(), 3);
+        assert_eq!(start.elapsed(), CONTACT_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn ready_round_attempts_every_peer_beyond_startup_deadline() {
+        let start = Instant::now();
+        let active = Cell::new(0);
+        let peak = Cell::new(0);
+        let attempts = Cell::new(0);
+        let healthy = Cell::new(None);
+        let (active, peak, attempts, healthy) = (&active, &peak, &attempts, &healthy);
+        // More than two full windows of stalled dials ahead of a healthy peer.
+        let count = (CONTACT_CONCURRENCY * 3 + 1) as u8;
+        let completed = contact_round(peers(count), None, |peer, budget| async move {
+            attempts.set(attempts.get() + 1);
+            active.set(active.get() + 1);
+            peak.set(peak.get().max(active.get()));
+            assert_eq!(budget, CONTACT_TIMEOUT);
+            if peer.id[0] < count - 1 {
+                assert!(timeout(budget, pending::<()>()).await.is_err());
+            } else {
+                healthy.set(Some(start.elapsed()));
+            }
+            active.set(active.get() - 1);
+            Ok::<_, Infallible>(true)
+        })
+        .await
+        .unwrap();
+        assert_eq!(attempts.get(), count);
+        assert_eq!(completed.len(), usize::from(count));
+        assert_eq!(peak.get(), CONTACT_CONCURRENCY);
+        assert_eq!(active.get(), 0);
+        assert_eq!(healthy.get(), Some(CONTACT_TIMEOUT * 3));
+        assert_eq!(start.elapsed(), CONTACT_TIMEOUT * 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn startup_budget_includes_queueing_and_bounds_last_contacts() {
+        let start = Instant::now();
+        let limit = CONTACT_TIMEOUT * 2;
+        let attempts = Cell::new(0);
+        let attempts = &attempts;
+        let completed = contact_round(
+            peers((CONTACT_CONCURRENCY * 4) as u8),
+            Some(start + limit),
+            |peer, budget| async move {
+                attempts.set(attempts.get() + 1);
+                // Free one slot partway through: the next contact starts early,
+                // and its successor must get less than the per-peer budget.
+                if peer.id[0] == 0 {
+                    n0_future::time::sleep(Duration::from_secs(5)).await;
+                    return Ok::<_, Infallible>(true);
+                }
+                assert!(timeout(budget, pending::<()>()).await.is_err());
+                Ok(false) // An interrupted exchange must not complete the barrier.
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(completed, vec![[0; 32]]);
+        assert_eq!(attempts.get(), CONTACT_CONCURRENCY * 2 + 1);
+        assert_eq!(start.elapsed(), limit);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn error_drops_in_flight_contacts_without_starting_the_queue() {
+        struct Active<'a>(&'a Cell<usize>);
+        impl Drop for Active<'_> {
+            fn drop(&mut self) {
+                self.0.set(self.0.get() - 1);
+            }
+        }
+        let active = Cell::new(0);
+        let attempts = Cell::new(0);
+        let (active, attempts) = (&active, &attempts);
+        let result = contact_round(peers(10), None, |peer, budget| async move {
+            active.set(active.get() + 1);
+            attempts.set(attempts.get() + 1);
+            let _active = Active(active);
+            if usize::from(peer.id[0]) == CONTACT_CONCURRENCY - 1 {
+                return Err("store failed");
+            }
+            assert!(timeout(budget, pending::<()>()).await.is_err());
+            Ok(true)
+        })
+        .await;
+        assert_eq!(result, Err("store failed"));
+        assert_eq!(attempts.get(), CONTACT_CONCURRENCY);
+        assert_eq!(active.get(), 0);
+    }
 }

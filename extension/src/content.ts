@@ -64,8 +64,11 @@ const sameFields = (a: Field[], b: Field[]) =>
 /** Finds the login form's fields now. */
 function refresh() {
   if (!document.body) return
-  watchShadowRoots()
-  const result = scanPage()
+  // One walk of the page's shadow roots serves the whole scan: nothing in it
+  // runs page script. A discovery walk: fills are checked on a full one.
+  const roots = openRoots(document, undefined, true)
+  watchShadowRoots(roots)
+  const result = scanPage(roots)
   kind = result.kind
   provider = result.provider
   // A reset form's email box isn't something to fill.
@@ -74,7 +77,7 @@ function refresh() {
   fields = next
   submitControl = kind ? result.submit : undefined
   // A field a login form claims (its email box) is the login's.
-  const forms = scanForms().filter((f) => !fields.some((l) => l.el === f.el))
+  const forms = scanForms(roots).filter((f) => !fields.some((l) => l.el === f.el))
   const same = forms.length === formFields.length && forms.every((f, i) => f.el === formFields[i].el && f.role === formFields[i].role && f.section === formFields[i].section && f.form === formFields[i].form && f.parent === formFields[i].parent)
   if (!same) formsId++
   formFields = forms
@@ -272,8 +275,8 @@ function start() {
 // Shadow roots need their own observer, and their own submit listener:
 // "submit" doesn't cross shadow boundaries the way click and keydown do.
 const watchedRoots = new WeakSet<ShadowRoot>()
-function watchShadowRoots() {
-  for (const root of openRoots()) {
+function watchShadowRoots(roots: Array<Document | ShadowRoot>) {
+  for (const root of roots) {
     if (!(root instanceof ShadowRoot) || watchedRoots.has(root)) continue
     watchedRoots.add(root)
     observer?.observe(root, OBSERVE)

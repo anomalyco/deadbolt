@@ -36,16 +36,26 @@ export function shadowRootOf(el: Element): ShadowRoot | null {
 }
 
 /**
+ * The only HTML elements attachShadow accepts today (DOM spec, "valid shadow
+ * host name"), besides custom elements, whose names all have a hyphen.
+ */
+const HOSTS = new Set(["article", "aside", "blockquote", "body", "div", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "header", "main", "nav", "p", "section", "span"])
+
+/**
  * The document plus every shadow root under it, open and closed (despite the
  * name), outermost first. Closed roots include those other extensions put in
  * the page; at most `max` (MAX_ROOTS) are walked, whoever made them.
+ * `discovery` skips asking for a closed root on elements outside HOSTS, the
+ * extension call that is most of a walk's cost: for finding forms only,
+ * where a root missed (on a host a later spec allows) means a form not
+ * offered. Checks of what a fill may write (fill.ts) walk every element.
  */
-export function openRoots(start: Document | ShadowRoot = document, max = MAX_ROOTS): Array<Document | ShadowRoot> {
+export function openRoots(start: Document | ShadowRoot = document, max = MAX_ROOTS, discovery = false): Array<Document | ShadowRoot> {
   const roots: Array<Document | ShadowRoot> = [start]
   for (let i = 0; i < roots.length && roots.length < max; i++) {
     const walker = document.createTreeWalker(roots[i], NodeFilter.SHOW_ELEMENT)
     for (let node = walker.nextNode() as Element | null; node; node = walker.nextNode() as Element | null) {
-      const root = shadowRootOf(node)
+      const root = discovery && !node.shadowRoot && !HOSTS.has(node.localName) && !node.localName.includes("-") ? null : shadowRootOf(node)
       if (root) roots.push(root)
       if (roots.length >= max) break
     }

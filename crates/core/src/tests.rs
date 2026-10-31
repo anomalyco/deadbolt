@@ -1693,6 +1693,49 @@ fn missing_for_sends_membership_first_and_converges() {
 }
 
 #[test]
+fn indexed_delta_matches_a_full_scan_for_each_peer_frontier() {
+    let mut a = Dev::create();
+    let item = a.login("original");
+    let b = a.invite();
+    // Interleave two data chains, then append membership after data. Vary the
+    // frontier for each chain independently, including missing and future heads.
+    for i in 0..8 {
+        let key = if i % 2 == 0 { &a.secret } else { &b.secret };
+        a.vault
+            .write(key, vec![DataOp::set(item, "f", text("edit"))])
+            .unwrap();
+    }
+    a.vault.rename(&b.secret, "renamed").unwrap();
+    let entries = a.vault.entries();
+    let mut frontiers = vec![Heads::default()];
+    for (log, last) in a.vault.heads().iter() {
+        let previous = frontiers.clone();
+        for seq in (0..=last).chain([u64::MAX]) {
+            frontiers.extend(
+                previous
+                    .iter()
+                    .map(|h| h.iter().chain([(log, seq)]).collect()),
+            );
+        }
+    }
+    for heads in frontiers {
+        let expected: Vec<_> = entries
+            .iter()
+            .copied()
+            .filter(|e| heads.get(&e.log_id()).is_none_or(|s| s < e.seq()))
+            .map(Entry::hash)
+            .collect();
+        let actual: Vec<_> = a
+            .vault
+            .missing_for(&heads)
+            .into_iter()
+            .map(Entry::hash)
+            .collect();
+        assert_eq!(actual, expected);
+    }
+}
+
+#[test]
 fn heads_encoding_round_trips() {
     let mut a = Dev::create();
     let _b = a.invite();
