@@ -601,6 +601,56 @@ items, fields, purposes, expires_at, passphrase?}` → `secret-grants
 removes either kind. Not yet: `Event::Waiting`, `argv`/`cwd`/`mask` in the
 purpose (the panel's facts), `--no-prompt`, `needs-approval`.
 
+## Experimental: a single read approved on a foreground mobile member
+
+**Security review needed.** Off by default. On the Mac, a human checks the
+phone's full device id (`deadbolt devices --full`) and runs `deadbolt agents
+experimental-approver <full-device-id> --vault <vault>` with the ordinary grant
+administration proof (Touch ID or the vault passphrase). AI callers cannot run
+it. This is a local, per-vault capability, not part of admission: one designated
+member, for this unlock only. `experimental-approver off`, locking, replacing
+the designation or losing either device's membership withdraws the capability.
+
+An AI's `deadbolt read --experimental-mobile deadbolt://vault/item/field`
+asks the designated device to release that **one field to this caller**. The Mac
+requires a valid running-code signature from the socket audit token, including
+executable path, cdhash and pid/version. For a CLI read the verified process
+is `deadbolt`; an AI host in its parents or a claimed session is a hint, not
+proof of which AI session is calling. Linux has no verified caller and is
+refused. There is no fallback to regular `read`, standing grants or a
+self-approval. File fields, SSH private keys/passphrases and passkey private
+keys cannot be released this way. Regular reads, run, inject and browser fills
+are unchanged.
+
+Both peers use their existing device keys and endpoint and the same dial,
+post-handshake and revocation gates as sync. Only an explicitly installed
+mobile inbox advertises `deadbolt/experimental/read-approval/1`. Both also
+check the **specific vault**, both member keys and their membership startup
+barrier. As for sync, a partition can hide a removal not yet learned locally.
+The Mac signs a 256-bit random nonce, 90-second expiry, both keys and the
+resolved vault/item ids, field and display metadata. The phone shows only a
+verified, addressed request; the mobile adapter must freshly authenticate its
+OS-protected biometric slot for the displayed hash before signing. The answer
+signs the request hash, approver, decision and time. Hashes are SHA-256 over
+ALPN + type domain + compact JSON of fixed-order structs. The phone tolerates a
+request issued up to 30 seconds ahead of its clock, but dismisses at the signed
+expiry on its own clock. The Mac tolerates up to 30 seconds between the signed
+answer time and receipt (including transit). Neither tolerance extends release:
+the signed expiry on the Mac's clock and its 90-second monotonic deadline both
+apply through consumption. A remote wait does not postpone idle lock.
+A signed answer proves possession of the **designated device key**, not hardware
+attestation of a finger: a compromised designated member can lie. In the other
+direction the phone authenticates the Mac's assertion about its socket peer; it
+does not independently inspect the Mac's process tree or code signature.
+
+The one-shot answer belongs to that waiting socket, never a bearer grant or a
+vault-log entry. Before returning the current value, the Mac rechecks expiry,
+readiness, membership, the same designation generation, stable ids, title and
+field together under its session lock. A denied, expired, disconnected or
+replayed answer releases nothing. Activity records the approving device id on
+a successful experimental read, never the value. There is no push, multi-device
+fan-out, cached approval or unattended responder. Control protocol 25.
+
 ## Standing grants: agent sign-ins (built)
 
 2026-10-28. Built, and scoped to one kind of client: a browser relay, such

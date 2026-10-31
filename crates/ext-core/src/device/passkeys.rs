@@ -200,7 +200,7 @@ fn create_inner(body: &mut Value, authorized: bool) -> Result<Value> {
             .and_then(Value::as_str)
             .unwrap_or_default(),
     );
-    state().with(|s| Ok(passkeys::check_excluded(&s.vault.items(), &rp, &exclude)?))?;
+    state().with(|s| Ok(passkeys::check_excluded(s.vault.items(), &rp, &exclude)?))?;
     if !authorized {
         consent(body)?;
     }

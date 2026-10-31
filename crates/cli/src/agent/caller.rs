@@ -353,7 +353,7 @@ pub fn is_ai(info: &CallerInfo) -> bool {
 }
 
 /// The AI host among `info`'s parents ("OpenCode"), if any.
-fn ai_host(info: &CallerInfo) -> Option<&'static str> {
+pub(super) fn ai_host(info: &CallerInfo) -> Option<&'static str> {
     let host = |name: &str| {
         let name = name.trim_start_matches('-');
         HOSTS

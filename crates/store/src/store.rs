@@ -381,6 +381,17 @@ impl Unlocked {
         Ok(KeySet::unwrap_biometric(key, &token, &wrapped).is_ok())
     }
 
+    /// Recover the signing seed from the biometric slot, not the unlocked
+    /// session's cached key set. The caller supplies a wrapping key released
+    /// by its OS cryptographic user-verification gate for this operation.
+    /// The store proves key possession, not freshness or a userspace boolean.
+    pub fn biometric_device_secret(&self, key: &[u8; KEY_LEN]) -> Result<Zeroizing<[u8; 32]>> {
+        let txn = self.db.begin_read()?;
+        let table = txn.open_table(HEADER)?;
+        let (token, wrapped) = read_biometric(&table)?.ok_or(Error::InvalidBiometric)?;
+        Ok(KeySet::unwrap_biometric(key, &token, &wrapped)?.device_secret)
+    }
+
     /// Removes the enrolled biometric key set and token. Returns whether a slot
     /// was present.
     pub fn clear_biometric(&self) -> Result<bool> {
@@ -643,5 +654,46 @@ fn begin_write(db: &Database) -> Result<WriteTransaction> {
 impl Unlocked {
     pub(crate) fn keys_for_test(&self) -> &Keys {
         &self.keys
+    }
+}
+
+#[cfg(test)]
+mod biometric_seed_tests {
+    use super::*;
+
+    #[test]
+    fn signing_seed_comes_from_the_authenticated_slot_not_cached_keys() {
+        let mut store = init_with_backend(
+            redb::backends::InMemoryBackend::new(),
+            b"synthetic",
+            [7; 32],
+            KdfParams {
+                m_cost_kib: 64,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        let key = [42; 32];
+        assert!(matches!(
+            store.biometric_device_secret(&key),
+            Err(Error::InvalidBiometric)
+        ));
+        store
+            .set_biometric(&key, b"opaque synthetic platform token")
+            .unwrap();
+        // A faulty implementation that checked a boolean then returned its
+        // cached key set would return [9; 32], not the authenticated slot seed.
+        store.keys.keyset.device_secret = Zeroizing::new([9; 32]);
+        assert_eq!(*store.biometric_device_secret(&key).unwrap(), [7; 32]);
+        assert!(matches!(
+            store.biometric_device_secret(&[43; 32]),
+            Err(Error::InvalidBiometric)
+        ));
+        store.clear_biometric().unwrap();
+        assert!(matches!(
+            store.biometric_device_secret(&key),
+            Err(Error::InvalidBiometric)
+        ));
     }
 }

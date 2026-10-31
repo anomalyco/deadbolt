@@ -1,68 +1,11 @@
-// Cancellation-safe POSIX `AF_UNIX` client and `NSWorkspace` agent launcher
-// for `DeadboltAutoFill.appex`.
+// macOS only: cancellation-safe POSIX `AF_UNIX` client and `NSWorkspace`
+// agent launcher for `DeadboltAutoFill.appex`. The client seam it implements
+// (`AutofillAgentClient`, `AutofillCallHandle`, `AgentLaunching`) is in
+// Protocol.swift; iOS uses the in-process core instead and never builds this.
 
 import AppKit
 import Darwin
 import Foundation
-
-/// Thread-safe handle to an in-flight socket request. Calling `cancel()` (for
-/// example from `viewWillDisappear`) shuts down the socket immediately, waking
-/// `poll()` here and triggering `conv.closed()` in `deadbolt agent` so an
-/// open Touch ID sheet is dismissed right away.
-public final class SocketCallHandle: @unchecked Sendable {
-    private let lock = NSLock()
-    private var fd: Int32 = -1
-    private var cancelled = false
-
-    public init() {}
-
-    public var isCancelled: Bool {
-        lock.lock()
-        defer { lock.unlock() }
-        return cancelled
-    }
-
-    public func cancel() {
-        lock.lock()
-        cancelled = true
-        let current = fd
-        lock.unlock()
-        if current >= 0 {
-            _ = Darwin.shutdown(current, SHUT_RDWR)
-        }
-    }
-
-    fileprivate func attach(socketFD: Int32) -> Bool {
-        lock.lock()
-        if cancelled {
-            lock.unlock()
-            _ = Darwin.shutdown(socketFD, SHUT_RDWR)
-            return false
-        }
-        fd = socketFD
-        lock.unlock()
-        return true
-    }
-
-    fileprivate func detach() {
-        lock.lock()
-        fd = -1
-        lock.unlock()
-    }
-}
-
-public protocol AutofillAgentClient: Sendable {
-    func send(
-        _ command: AutofillCommand,
-        timeout: TimeInterval,
-        handle: SocketCallHandle?
-    ) async throws -> AutofillReply
-}
-
-public protocol AgentLaunching: Sendable {
-    func startInBackground() async -> Bool
-    func openContainingApp() async -> Bool
-}
 
 public struct WorkspaceAgentLauncher: AgentLaunching {
     public let bundle: ContainingBundle?
@@ -148,7 +91,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
     public func send(
         _ command: AutofillCommand,
         timeout: TimeInterval,
-        handle: SocketCallHandle? = nil
+        handle: AutofillCallHandle? = nil
     ) async throws -> AutofillReply {
         guard let socketPath = socketPathProvider(), !socketPath.isEmpty else {
             throw AgentCallError.agentUnavailable(
@@ -178,7 +121,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         socketPath: String,
         command: AutofillCommand,
         timeout: TimeInterval,
-        handle: SocketCallHandle? = nil,
+        handle: AutofillCallHandle? = nil,
         peerVerifier: PeerVerifyFn? = nil
     ) throws -> AutofillReply {
         if handle?.isCancelled == true {
@@ -201,7 +144,9 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
             throw AgentCallError.agentUnavailable("could not create Unix socket")
         }
         defer {
-            handle?.detach()
+            // Cleared under the handle's lock before close, so a late cancel
+            // never shuts down a reused descriptor.
+            handle?.clearCancelAction()
             _ = Darwin.close(fd)
         }
 
@@ -213,7 +158,8 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
             _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
         }
 
-        guard handle?.attach(socketFD: fd) ?? true else {
+        let attached = handle?.onCancel { _ = Darwin.shutdown(fd, SHUT_RDWR) } ?? true
+        guard attached else {
             throw AgentCallError.cancelled
         }
 
@@ -293,7 +239,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         fd: Int32,
         events: Int16,
         deadlineNanos: UInt64,
-        handle: SocketCallHandle?
+        handle: AutofillCallHandle?
     ) throws {
         while true {
             if handle?.isCancelled == true {
@@ -325,7 +271,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         fd: Int32,
         data: Data,
         deadlineNanos: UInt64,
-        handle: SocketCallHandle?
+        handle: AutofillCallHandle?
     ) throws {
         var offset = 0
         while offset < data.count {
@@ -366,7 +312,7 @@ public struct UnixSocketAgentClient: AutofillAgentClient {
         fd: Int32,
         maxBytes: Int,
         deadlineNanos: UInt64,
-        handle: SocketCallHandle?
+        handle: AutofillCallHandle?
     ) throws -> Data {
         var buffer = Data()
         buffer.reserveCapacity(1024)

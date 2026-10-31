@@ -6,6 +6,7 @@ version = 2
 yanked = "deny"
 ignore = [
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but only reachable through iroh; no replacement available" },
+    { id = "RUSTSEC-2026-0374", reason = "basic-toml is unmaintained; required by Askama in UniFFI's optional host-side binding generator, absent from the mobile runtime graph. Latest UniFFI 0.32.2/Askama 0.16.1 still require it; remove when upstream replaces it." },
 ]
 
 [licenses]
@@ -37,4 +38,8 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = ["https://github.com/anomalyco/rune"]
+allow-git = [
+    "https://github.com/anomalyco/rune",
+    # Exact reviewed netwatch 0.19.3 iOS NWPathMonitor backend rev is pinned in Cargo.toml.
+    "https://github.com/anomalyco/net-tools",
+]

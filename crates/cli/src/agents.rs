@@ -83,6 +83,9 @@ pub enum AgentsCommand {
         #[arg(long)]
         expires: Option<String>,
     },
+    /// EXPERIMENTAL: designate one member to approve individual AI reads for this vault until lock.
+    /// Needs your proof. Use the full device key, or `off` to revoke.
+    ExperimentalApprover { device: String },
     /// List the standing grants: sign-ins and secrets.
     Grants {
         #[arg(long)]
@@ -104,7 +107,12 @@ pub async fn run(
     vault: Option<String>,
     from_stdin: bool,
 ) -> Result<()> {
-    if vault.is_some() && !matches!(command, AgentsCommand::AllowSecrets { .. }) {
+    if vault.is_some()
+        && !matches!(
+            command,
+            AgentsCommand::AllowSecrets { .. } | AgentsCommand::ExperimentalApprover { .. }
+        )
+    {
         bail!("--vault does not apply to this command");
     }
     client::ensure_running(paths).await?;
@@ -184,6 +192,21 @@ pub async fn run(
                 bail!("unexpected reply");
             };
             println!("allowed\t{}", grant_line(&grant));
+        }
+        AgentsCommand::ExperimentalApprover { device } => {
+            let device = (device != "off").then_some(device);
+            with_proof(paths, from_stdin, |passphrase| {
+                Command::ExperimentalApproverSet {
+                    vault: vault.clone(),
+                    device: device.clone(),
+                    passphrase,
+                }
+            })
+            .await?;
+            println!(
+                "experimental read approver: {}",
+                device.as_deref().unwrap_or("off")
+            );
         }
         AgentsCommand::AllowSecrets {
             items,

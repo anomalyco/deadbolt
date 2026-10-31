@@ -17,14 +17,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
-use deadbolt_core::totp::Totp;
-use deadbolt_core::{Item, ItemId, VaultId, passkeys as shared_passkeys, site as core_site};
+use deadbolt_core::credential_provider::{self as provider, UserVerification, Verification, Want};
+use deadbolt_core::{Item, ItemId, VaultId, passkeys as shared_passkeys};
 use tokio::net::UnixListener;
 
 pub use identities::{identities, identities_hash};
-use picker::{MAX_CREDENTIALS, list_for_picker, resolve_service};
+use picker::{list_for_picker, service_kind};
 
-use super::autofill::{self, login_ref, otp, value};
+use super::autofill::{self, login_ref};
 use super::items::label;
 use super::passkeys;
 use super::session::{self, Loaded, unhex};
@@ -184,24 +184,52 @@ fn find_any_login(s: &Loaded, login: &LoginRef) -> Result<(VaultId, Item)> {
     Ok((vault, item))
 }
 
-fn extract_values(item: &Item, want: &[Fill], now: Duration) -> Result<SiteValues> {
-    let mut values = SiteValues::default();
-    for fill in want {
-        match fill {
-            Fill::Username => values.username = value(item, "username").map(str::to_string),
-            Fill::Password => values.password = value(item, "password").map(Secret::new),
-            Fill::Totp => {
-                let Some(field) = otp(item).filter(|f| !f.value.is_empty()) else {
-                    continue;
-                };
-                let totp = Totp::parse(&field.value).map_err(|e| {
-                    anyhow!("the one-time password of {} is invalid: {e}", label(item))
-                })?;
-                values.totp = Some(Secret::new(totp.code(now.as_secs())));
-            }
+fn want(fill: Fill) -> Want {
+    match fill {
+        Fill::Username => Want::Username,
+        Fill::Password => Want::Password,
+        Fill::Totp => Want::Totp,
+    }
+}
+
+fn user_verification(verify: Verify) -> UserVerification {
+    match verify {
+        Verify::Required => UserVerification::Required,
+        Verify::Preferred => UserVerification::Preferred,
+        Verify::Discouraged => UserVerification::Discouraged,
+    }
+}
+
+fn extract_values(item: &Item, want: &[Want], now: Duration) -> Result<SiteValues> {
+    let values = provider::login_values(item, want, now.as_secs()).map_err(map_provider_error)?;
+    Ok(SiteValues {
+        username: values.username,
+        password: values.password.map(|p| Secret::new(p.as_str())),
+        totp: values.totp.map(|t| Secret::new(t.as_str())),
+    })
+}
+
+/// The wire error for a credential-provider rule, with the macOS messages
+/// and error codes the AutoFill extension expects.
+fn map_provider_error(error: provider::Error) -> anyhow::Error {
+    use provider::Error as E;
+    match error {
+        E::InvalidService { .. } | E::AppService | E::NoService | E::InvalidRpId { .. } => {
+            fail(ErrorCode::DomainMismatch, error.to_string())
+        }
+        E::FillFields => anyhow!("autofill-fill wants 1 to 3 fields"),
+        E::UnassociatedApp => fail(ErrorCode::InteractionRequired, error.to_string()),
+        E::VerificationUnavailable => {
+            anyhow!("this site requires user verification, and Touch ID is off or not set up")
+        }
+        E::InteractionRequired => fail(
+            ErrorCode::InteractionRequired,
+            "Touch ID user verification requires interactive presentation",
+        ),
+        E::InvalidTotp { .. } | E::TooManyAllowed | E::TooManyExcluded | E::AllowedNotBase64 => {
+            anyhow!("{error}")
         }
     }
-    Ok(values)
 }
 
 fn map_passkey_error(error: shared_passkeys::Error) -> anyhow::Error {
@@ -370,24 +398,18 @@ impl Agent {
                 want,
                 interactive,
             } => {
-                if want.is_empty() || want.len() > 3 {
-                    bail!("autofill-fill wants 1 to 3 fields");
-                }
-                let resolved = match &service {
-                    Some(svc) => Some(resolve_service(svc)?),
-                    None => {
-                        if !interactive {
-                            return Err(fail(
-                                ErrorCode::InteractionRequired,
-                                "filling into an unassociated app requires confirmation",
-                            ));
-                        }
-                        None
-                    }
-                };
+                let wants: Vec<Want> = want.iter().copied().map(self::want).collect();
+                let resolved = provider::fill_target(
+                    &wants,
+                    service
+                        .as_ref()
+                        .map(|svc| (service_kind(svc.kind), svc.identifier.as_str())),
+                    interactive,
+                )
+                .map_err(map_provider_error)?;
                 self.take_autofill_fill_rate()?;
                 let unlock_reason = match &resolved {
-                    Some((site, _)) => format!("unlock Deadbolt and fill on {}", site.domain),
+                    Some(svc) => format!("unlock Deadbolt and fill on {}", svc.site.domain),
                     None => "unlock Deadbolt and fill in an app".to_string(),
                 };
                 let unlocked_by_touch_id = self
@@ -395,11 +417,11 @@ impl Agent {
                     .await?;
 
                 match resolved {
-                    Some((_, origin)) => {
+                    Some(svc) => {
                         let (values, hash) = self.with(|s| {
                             let values = autofill::fill(
                                 s,
-                                &origin,
+                                &svc.origin,
                                 &login,
                                 &want,
                                 crate::config::wall_clock(),
@@ -424,7 +446,7 @@ impl Agent {
                         let now = crate::config::wall_clock();
                         let (values, hash) = self.with(|s| {
                             let (_, item) = find_any_login(s, &login)?;
-                            let values = extract_values(&item, &want, now)?;
+                            let values = extract_values(&item, &wants, now)?;
                             let key = format!("{}:{}", login.vault, login.item);
                             s.set_filled(key, now.as_secs())?;
                             Ok((values, identities_hash(s)))
@@ -443,29 +465,14 @@ impl Agent {
                 verify,
                 interactive,
             } => {
-                let rp = core_site::valid_rp_id(&rp_id).map_err(|reason| {
-                    fail(ErrorCode::DomainMismatch, format!("{rp_id}: {reason}"))
-                })?;
+                let rp = provider::valid_rp_id(&rp_id).map_err(map_provider_error)?;
                 webauthn::client_data_hash(&client_data_hash).map_err(|e| anyhow!("{e}"))?;
                 self.take_autofill_passkey_rate()?;
 
                 if !interactive {
                     self.with(|s| passkeys::find(s, &passkey, &rp).map(drop))?;
-                    match verify {
-                        Verify::Discouraged => {}
-                        Verify::Preferred if !self.can_verify() => {}
-                        Verify::Required if !self.can_verify() => {
-                            bail!(
-                                "this site requires user verification, and Touch ID is off or not set up"
-                            );
-                        }
-                        Verify::Preferred | Verify::Required => {
-                            return Err(fail(
-                                ErrorCode::InteractionRequired,
-                                "Touch ID user verification requires interactive presentation",
-                            ));
-                        }
-                    }
+                    provider::silent_verification(user_verification(verify), self.can_verify())
+                        .map_err(map_provider_error)?;
                     let (signed, hash) = self.with(|s| {
                         let (_, item) = passkeys::find(s, &passkey, &rp)?;
                         let signed =
@@ -489,13 +496,16 @@ impl Agent {
                     .ensure_unlocked_for_ceremony(conv, true, &unlock_reason)
                     .await?;
                 self.with(|s| passkeys::find(s, &passkey, &rp).map(drop))?;
-                let verified = if verify == Verify::Discouraged {
-                    false
-                } else if unlocked_by_touch_id {
-                    true
-                } else {
-                    let reason = format!("sign in to {rp} with a passkey");
-                    self.verify_ceremony(conv, verify, &reason).await?
+                let verified = match provider::interactive_verification(
+                    user_verification(verify),
+                    unlocked_by_touch_id,
+                ) {
+                    Verification::Skip => false,
+                    Verification::Verified => true,
+                    Verification::Prompt => {
+                        let reason = format!("sign in to {rp} with a passkey");
+                        self.verify_ceremony(conv, verify, &reason).await?
+                    }
                 };
                 let (signed, hash) = self.with(|s| {
                     let (_, item) = passkeys::find(s, &passkey, &rp)?;
@@ -524,9 +534,7 @@ impl Agent {
                 verify,
                 interactive,
             } => {
-                if exclude.len() > MAX_CREDENTIALS {
-                    bail!("at most {MAX_CREDENTIALS} excluded credentials");
-                }
+                provider::check_exclude(&exclude).map_err(map_provider_error)?;
                 let mut new = shared_passkeys::check_create_hash(
                     &rp_id,
                     &client_data_hash,
@@ -546,21 +554,8 @@ impl Agent {
                         shared_passkeys::check_excluded(&items, &new.rp_id, &new.exclude)
                             .map_err(map_passkey_error)
                     })?;
-                    match verify {
-                        Verify::Discouraged => {}
-                        Verify::Preferred if !self.can_verify() => {}
-                        Verify::Required if !self.can_verify() => {
-                            bail!(
-                                "this site requires user verification, and Touch ID is off or not set up"
-                            );
-                        }
-                        Verify::Preferred | Verify::Required => {
-                            return Err(fail(
-                                ErrorCode::InteractionRequired,
-                                "Touch ID user verification requires interactive presentation",
-                            ));
-                        }
-                    }
+                    provider::silent_verification(user_verification(verify), self.can_verify())
+                        .map_err(map_provider_error)?;
                     let now = i64::try_from(session::now()).unwrap_or(i64::MAX);
                     let (made, passkey, hash) = self.with(|s| {
                         let items: Vec<_> = passkeys::passkeys(s, &new.rp_id)
@@ -602,13 +597,16 @@ impl Agent {
                     shared_passkeys::check_excluded(&items, &new.rp_id, &new.exclude)
                         .map_err(map_passkey_error)
                 })?;
-                let verified = if verify == Verify::Discouraged {
-                    false
-                } else if unlocked_by_touch_id {
-                    true
-                } else {
-                    let reason = format!("save a passkey for {}", new.rp_id);
-                    self.verify_ceremony(conv, verify, &reason).await?
+                let verified = match provider::interactive_verification(
+                    user_verification(verify),
+                    unlocked_by_touch_id,
+                ) {
+                    Verification::Skip => false,
+                    Verification::Verified => true,
+                    Verification::Prompt => {
+                        let reason = format!("save a passkey for {}", new.rp_id);
+                        self.verify_ceremony(conv, verify, &reason).await?
+                    }
                 };
                 let now = i64::try_from(session::now()).unwrap_or(i64::MAX);
                 let (made, passkey, hash) = self.with(|s| {

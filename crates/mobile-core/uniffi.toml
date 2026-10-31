@@ -1,0 +1,7 @@
+[bindings.kotlin]
+package_name = "pw.deadbolt.mobile.core"
+cdylib_name = "deadbolt_mobile_core"
+
+[bindings.swift]
+module_name = "DeadboltCore"
+ffi_module_name = "DeadboltCoreFFI"

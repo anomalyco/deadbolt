@@ -1,0 +1,43 @@
+[package]
+name = "deadbolt-mobile-core"
+description = "Native mobile device and UniFFI boundary for Deadbolt."
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[features]
+bindings = ["uniffi/cli"]
+
+[[bin]]
+name = "deadbolt-mobile-bindgen"
+path = "src/bin/bindgen.rs"
+required-features = ["bindings"]
+
+[dependencies]
+deadbolt-core = { path = "../core", default-features = false }
+deadbolt-store = { path = "../store" }
+deadbolt-net = { path = "../net", features = ["application", "storage"] }
+data-encoding = "2.11.1"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+time = "0.3"
+tokio = { version = "1.53.3", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+uniffi = "=0.32.2"
+zeroize = { version = "1.9", features = ["serde"] }
+
+[target.'cfg(target_os = "android")'.dependencies]
+jni = "0.22.4"
+rustls-platform-verifier = "0.7.1"
+
+[dev-dependencies]
+tempfile = "3"
