@@ -39,7 +39,8 @@ Neither establishes native runtime proof of the final monitor build.
 
 The upstream 0.20 implementation is prepared on `ios-network-framework` at
 `93f76dcebac4e2a07e22bc213b5aef53583614f0`; no upstream PR has been posted.
-Ryan posted a comment offering the branch on #261. Upstream's AI policy requires
+Ryan [offered the branch in #261](https://github.com/n0-computer/net-tools/issues/261#issuecomment-6547184339).
+Upstream's AI policy requires
 agreement on the approach there first; do not open a PR unless the maintainers
 ask for one in the issue.
 Physical Wi-Fi/cellular handoff and suspension/resumption are untested. Path
@@ -55,18 +56,22 @@ The authorized fixture creates separate 1k and 10k synthetic CLI stores.
 Android's 1k run passed native pairing, passphrase/fingerprint unlock,
 list/search, TOTP rollover, sensitive copy, sync/background lock and a fresh
 biometric approval followed by a signed denial. Android has also paired the
-10k fixture, and iOS has paired and displayed its separate 1k fixture. Remaining
-flows, performance measurements and physical iOS biometrics are separate gates.
+10k fixture, and iOS has independently paired its 1k and 10k fixtures. Remaining
+OS flows and performance gates are tracked below; physical iOS biometrics are
+deferred.
 The stock CLI also correctly refuses AI-driven unlock. An ignored Mac test host
 therefore uses test-only synthetic unlock/designation and production pairing
 and approval code. Its real-phone evidence must be labeled as a test-host proof,
 not proof of a human unlocking or designating through the stock CLI.
 
-The offline Rust credential-provider implementation passes host and simulator
-tests; shared Swift/iOS extension integration is in progress. This does not yet
-establish an end-to-end OS AutoFill ceremony or an acceptable extension memory
-footprint. Android's approval proof is complete for its synthetic 1k fixture;
-iOS fresh-biometric approval still requires a signed physical-device build.
+The offline Rust provider and shared Swift/iOS integration are implemented and
+reviewed. Actual OS password and OTP fills pass on iOS 26.5, and fresh non-UV
+passkey registration passed independent relying-party verification. The OS
+assertion request required biometric verification despite the page requesting
+`discouraged`; its signature remains deferred to a physical iPhone. Observed
+Release memory is below 120 MB, but with limited rather than substantial headroom.
+Android's approval proof is complete for its synthetic 1k fixture. iOS signed
+Deny is verified; fresh-biometric Allow is deferred to physical-device testing.
 
 ## Model
 
@@ -132,21 +137,40 @@ requested access. Internal protocol/storage terms do not belong in the UI.
 
 Required visual evidence is a side-by-side of the real desktop still, real
 extension popup, iOS Simulator and Android emulator in both appearances. The
-first light-mode comparison is published in `mobile/11-native-light-comparison`
-under the temporary media root below; dark-mode evidence remains pending. No
+light and dark comparisons are published in `mobile/11-native-light-comparison`
+under the temporary media root below. No
 mockups stand in for those builds.
 
 | Measurement | iOS Simulator | Android emulator |
 | --- | --- | --- |
-| Cold launch to unlock UI | Not measured on current pinned build | 1k: 846 / 914 / 948 ms to fingerprint prompt |
-| Unlock to list, passphrase | Not measured | 1k: approximately 3 s after submit (recording) |
-| Unlock to list, biometric (excluding user wait) | Not measured | 1k: approximately 0.7 s after emulator fingerprint touch |
-| Search, 1k / 10k items | Not measured | 1k: 9–34 ms nonempty core queries, 22–84 ms clearing; 10k pending |
+| Cold launch to unlock UI | Release 10k: 917 ms first after install; 589–654 ms warm | Final Release 10k: 228–273 ms; fingerprint prompt 266–280 ms |
+| Unlock to list, passphrase | Release 10k: 243 ms | Final Release 10k: 145–165 ms core + 65–73 ms list |
+| Unlock to list, biometric (excluding user wait) | Deferred physical-device operation | Final Release 10k: 55–114 ms core + 95–111 ms list |
+| Visible search, 1k / 10k items | Debug 1k: 0–53 ms; Release 10k: 15–62 ms, clear 48–63 ms | Final Debug 1k: 34–69 ms; Release 10k: 39–59 ms |
 
-Android's current search UI adds a 150 ms typing debounce before the core call.
-The core measurements therefore do **not** establish the below-100 ms
-user-visible search target. All Android numbers above are debug/emulator
-measurements, not physical-device or release-build results.
+Android's 150 ms debounce has been removed. One active core search and a latest
+pending query prevent overlapping FFI work; clearing normally uses the full-list
+cache. On the final Release 10k build, a title-only typing burst measured 75 ms,
+cached clear 23 ms, and clear after a successful sync with a filtered query in
+flight 90 ms (a marginal pass). Clearing during an all-match post-sync refetch is
+a separate measurement, not covered by that number. Two follow-up attempts
+cleared during an all-match call after sync had invalidated the full-list cache:
+fresh data arrived within an upper bound of 89–92 ms from that call's start.
+The displayed rows already matched the empty query, so no new visible-frame
+marker fired. These attempts did not clear during the sync's own short refetch.
+All-match queries whose displayed list did not change cost 40–57 ms in the core;
+these are not additional visible-latency samples. The final Debug 10k build still
+fails: search 123–175 ms, title burst 528 ms and post-sync clear 312 ms.
+Release measurements use non-debuggable Kotlin, optimized Rust, a local debug
+signing key and speed-profile compilation; capture protection stayed enabled.
+Release visible timings are in-app presentation instrumentation, not recordings;
+they exclude input delivery before the field callback and display scan-out.
+These are emulator comparisons, not physical-device results. The old
+approximately 3 s passphrase estimate included host-side
+polling and is superseded by the in-app/frame measurements above. iOS Release
+measurements use recorded frames, with 20 search/clear samples giving a standard
+median of 55 ms and nearest-rank p95 of 63 ms. Its all-match core timings of
+29–31 ms are separate, because those queries did not change the visible rows.
 
 On the dedicated headless `Deadbolt_API_36` emulator, the debug Android build's
 first-launch setup Activity was shown after **2,424 ms**, with first core status
@@ -266,19 +290,27 @@ live database. Multiwindow contention and release/reopen behavior need explicit
 verification. If measured replay exceeds the extension budget, that is a failed
 gate requiring a storage design change, not permission to weaken authentication.
 
+The simulator provider's busy/retry path was exercised by an external process
+holding only the store's exclusive file lock, without writes. After release,
+Try again reached unlock and the login list. This is synthetic lock-contention
+evidence, not a simultaneous real app/provider race: the app released its store
+about 1.25 seconds after backgrounding. The app also refused the held lock.
+Both now show a recoverable busy message and offer retry; the app unlocked
+normally after the synthetic lock was released.
+
 Native measurements so far (simulator/emulator; not device certification):
 
 | Synthetic vault | App peak | Provider peak (password / OTP / passkey) | Device jetsam check |
 | --- | --- | --- | --- |
-| 1,000 items | iOS peak not measured | Password list/suggestion: 107.5/101.1 MiB; OTP/passkey not measured | Deferred |
-| 10,000 items | iOS peak not measured; Android debug PSS 226 MB, optimized 209 MB | Password list/suggestion: 148.7/119.9 MiB; OTP/passkey not measured | Deferred |
+| 1,000 logins | iOS peak not measured | Final merged-core Release password list+fill: 102.2 MiB; suggested fill (v6): 100.3 MiB | Deferred |
+| 10,001 logins (after OTP fixture) | Peak not measured; Android 10k unlocked PSS (`dumpsys`): Debug 210,587 kB, Release 157,051 kB | Final merged-core Release password list+fill: 104.5 MiB; OTP: 101.9 MiB; passkey registration: 100.7 MiB; suggested fill (v6): 100.1 MiB | Deferred |
 
 Initial offline Rust provider benchmarks (debug, production KDF) measured
 simulator list/fill at 236/207 ms for 1k and 819/581 ms for 10k. Isolated
 provider-only processes then measured simulator peak physical footprint at
 74.6 MiB for either 1k operation, **126.7 MiB for the 10k picker**, and 94.0 MiB
-for the 10k selected fill. The picker exceeds the stated budget before native
-extension overhead: this gate fails, rather than being excused as test setup.
+for the 10k selected fill. That Debug picker exceeded the stated budget before
+native extension overhead; it was a failed gate, not excused as test setup.
 
 Fixtures were created in separate processes. An external 2 ms sampler used
 `proc_pid_rusage(RUSAGE_INFO_V4)` and acknowledged phase checkpoints. Replay
@@ -289,13 +321,35 @@ picker materialization alone did not lower the simulator peak (128.4 MiB).
 Moving the existing metadata arrays into the JSON response, instead of cloning
 them, lowered the final 10k picker peak to **116.4 MiB (122.03 MB)**. That still
 exceeds a literal 120 MB ceiling and provides no useful headroom even against
-120 MiB. The memory gate remains failed. No projection or weaker KDF has been
+120 MiB. That Debug memory gate remained failed. No projection or weaker KDF has been
 introduced. Subsequent actual native extension measurement confirmed the failed
 gate: 148.7 MiB for the 10k list and 119.9 MiB for a suggested login, including
 Swift/OS overhead. Further optimization must be measured against this native
 path, not just the isolated Rust process.
-These are debug simulator processes without Swift/OS extension overhead or
-substantial edit history; physical-device certification remains outstanding.
+The isolated measurements exclude Swift/OS overhead; the actual extension
+measurements include it. Both used Debug simulator builds without substantial
+edit history; physical-device certification remains outstanding.
+
+The subsequent arm64 Release Swift/provider build with optimized Rust reduced
+the 10k list-plus-fill peak to **112.6 MiB (118.07 MB)** in two runs, and the
+suggested-login peak to **100.3 MiB (105.17 MB)**. Only 1.93 MB remains below the
+literal 120 MB ceiling for the list flow: this still fails the substantial-
+headroom requirement. These measurements used 10,000 logins plus one passkey,
+before adding the origin-matched OTP fixture. Phase-specific inspection is
+complete: the displayed picker retained about 12 MiB of metadata during the
+selected fill's second KDF. An iOS-only presentation change releases those rows
+before filling; measured list loading now peaks at 103.0–103.5 MiB, and selected
+fill at 102.7–102.9 MiB. The overall 103.5 MiB is about 108.53 MB, leaving
+11.47 MB (9.6%) below the literal ceiling. This is a limited margin, not device
+certification. The later v6 cancellation-fix build measured 103.9 MiB for the
+10,001-login picker and 101.5 MiB for a completed OTP fill; its fresh 1k picker
+was 102.3 MiB. An earlier 31.1 MiB OTP sample ended before unlock and is excluded.
+The final Release build on the merged core (`abdadb8` plus the committed picker
+batch) measured 104.5 MiB for the 10,001-login picker and fill, 102.2 MiB at 1k,
+101.9 MiB for an OTP fill and 100.7 MiB for passkey registration: about 109.6 MB
+at worst, roughly 10 MB below the literal ceiling. Row release uses a 32 ms scheduling pause,
+not a render acknowledgement, so the observed reduction is not a memory bound
+under arbitrary main-thread load.
 
 Measure cold launch, biometric unwrap, list/search, selected fill, identity
 publication and passkey commit separately; record OS/runtime, process footprint,
@@ -353,8 +407,8 @@ incomplete on hardware, but do not block finishing the simulator proof.
 Completed checks during development (not a substitute for the final combined
 workspace/platform runs):
 
-- `bun run check:extension`: TypeScript check, 563 tests (2,863 assertions),
-  and the native extension build passed.
+- After integrating current dev, `bun run check:extension`: TypeScript check,
+  564 tests (2,868 assertions), and the native extension build passed.
 - Existing headless Linux `extension/e2e/run.ts --only fillAndTotp` on exos:
   login fill, OTP fill, origin/field scope and popup checks passed in both light
   and dark; real popup stills saved as the design reference.
@@ -366,33 +420,82 @@ workspace/platform runs):
   `cargo test -p deadbolt-app --test app autofill:: --locked` passed both the
   bundle validation and real-agent Swift end-to-end test.
 - Android native tests after the UI-owner search/lifecycle batch: 47 passed.
+  The final Gradle build reused that cached result with unchanged compiled inputs;
+  it did not re-execute the tests.
   Actual 1k pairing and fresh-fingerprint Allow/signed Deny test-host runs passed.
+  Final-core 1k offline sync now shows the quiet offline status after about
+  15 seconds; online sync succeeds. The fresh 10k fixture paired in 16.5 seconds,
+  and final Release measurements meet the search/clear target as detailed above.
+  Search keyboard personalization and a possible duplicate post-unlock list
+  composition remain follow-ups. Only one core read was observed for the latter;
+  its cause is not established.
 - iOS XCTest: 12 native tests passed headlessly, including the real-core boundary,
   simulator Secure Enclave refusal and the CoreFailure message regression.
-  Separately, 22 lifecycle tests passed against the delayed test core, including
-  immediate search and identity-publication ordering/background cancellation.
+  Separately, 32 lifecycle tests passed against delayed fake cores/clients,
+  including
+  coalesced search, exact approval-prompt binding, idle lock and identity-
+  publication ordering/background cancellation and five iOS picker regressions.
+  Replacement both before dispatch and as the successful fill reply returns is
+  rejected; the latter regression failed without the final reply guard.
+  Shared Swift compiled with
+  optimization and warnings denied; five macOS provider stills were unchanged.
   These use simulator `xctest` directly; the Instruments-driven launcher failed
   to connect earlier. Neither suite substitutes for physical biometric testing.
 - Actual iOS 26.5 OS password fills passed through the picker and published
   suggestion at 1k and 10k; passkeys requiring biometric verification refused
-  without a software fallback. OTP OS delivery remains a separate open gate.
-- Native 10k gates currently fail: iOS visible search 103–265 ms (p95 248 ms),
-  Android debug 120–223 ms. Optimized Android sampled queries were 43–93 ms,
-  but all-match Rust calls still cost 89–103 ms. iOS extension list/suggestion
-  footprint was 148.7/119.9 MiB at 10k, above the 120 MB budget; 1k was
+  without a software fallback. Safari QuickType OTP delivery also passed: the
+  provider unlocked by passphrase, filled the code, and an independent TOTP
+  recomputation matched the public synthetic seed and capture time.
+- A real Safari registration on the controlled tailnet origin, requested with
+  user verification discouraged, returned a passkey with UP=1, UV=0 and AT=1.
+  Independent relying-party verification accepted the origin, captured challenge,
+  RP hash, credential ID and COSE/SPKI key. The historical recorder did not prove
+  server challenge issuance or separately capture `rawId`. A fresh registration
+  against the stricter one-use, cookie-bound backend was independently verified:
+  the server-issued challenge was consumed after 9.26 seconds of its 150-second
+  window, `id`/`rawId`/attested ID matched, and the new ES256/P-256 COSE key matched
+  SPKI. The fresh response again had UP=1, UV=0 and AT=1.
+  `fmt=none` provides neither hardware attestation nor private-key-possession
+  proof. Simulator diagnostics show that registration received and mapped
+  `discouraged`, but assertion received and mapped `required`, although both
+  page requests specify `discouraged`. The provider correctly refused the
+  received assertion requirement without a software biometric fallback. Why
+  the OS strengthened that preference is not established. No native assertion
+  signature or user-verified ceremony is claimed; those need a physical iPhone.
+- Wrong-passphrase runtime checks displayed the generated core error in both
+  appearances. The coalesced-search Debug build measured 97–183 ms at 10k
+  (p95 177 ms), still failing the 100 ms gate. Release search now passes at
+  15–62 ms on recorded frames; clear passes at 48–63 ms.
+- The pre-optimization iOS extension list/suggestion footprint was
+  148.7/119.9 MiB at 10k, above the 120 MB budget; 1k was
   107.5/101.1 MiB. Simulator measurements do not establish device jetsam safety.
+  iOS Release list-plus-fill initially improved to 112.6 MiB but still failed
+  on headroom. Releasing picker rows subsequently measured 103.0–103.5 MiB,
+  pending the final cancellation-fix build; suggested-login fill is 100.3 MiB.
+  Android Release search does not establish an iOS memory result.
 - The Rust C/assembly deployment metadata now matches iOS 17.0; the BLAKE3
   NEON object no longer declares simulator 27.0 as its minimum. Older-OS runtime
   compatibility remains untested.
+- Dev's history-streaming change (`9358d17`, PR #190) is integrated in `abdadb8`.
+  Mobile welcomes now use the shared verified replay and lazy durable append;
+  outgoing frames recheck live membership, readiness and cancellation per pull.
+  Core tests: 151 passed, 1 ignored; mobile: 12 passed, 3 ignored; net application:
+  4 passed; CLI simulations: 19 passed, 1 ignored. The separately invoked public-
+  relay mobile-core pairing/restart/sync regression passed too. Workspace and
+  wasm Clippy and formatting passed. The rebuilt optimized iOS archive is
+  `ee53ada2ad1cad50353273e1773e966462a9a9ce0b46bcc1c1dd84f1de7363ea`;
+  all 653 Mach-O deployment minimums are at or below iOS 17.0.
 - Full app integration baseline: 208 passed, 21 failed. Nineteen failures are at
   the CLI `init` fixture step and two are setup timeouts; AI-caller setup refusal
   is a known restriction in this environment. This is not a green app-suite
   result, and production caller guards were not relaxed to make it pass.
-- [Initial PR #194 CI](https://github.com/anomalyco/deadbolt/actions/runs/41212530457)
-  on `86f783d`: all 15 PR jobs passed (nightly skipped), including
+- [PR #194 CI](https://github.com/anomalyco/deadbolt/actions/runs/41232497486)
+  on `ea04910`: all 15 PR jobs passed (nightly skipped), including
   Linux/macOS Rust, cargo-deny, browser cores and extension native/standalone
-  smoke, security and end-to-end shards. This predates the provider and iOS
-  integration commits; final-head CI is still required.
+  smoke, security and end-to-end shards. This includes the committed provider,
+  native integrations, typed-row optimization, offline-sync fix, synthetic OTP
+  helper and iOS search/prompt fixes. Remaining local changes still require CI
+  on their final pushed head.
 - `crates/app/scripts/snap.sh` before and after Rune `1b787190 → 3062e9b8`:
   all 174 headless PNGs are byte-identical. Theme tokens and font assets are
   unchanged by that update.
