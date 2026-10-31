@@ -112,8 +112,35 @@ impl FromIterator<(LogId, u64)> for Heads {
 }
 
 /// A vault's entries and the state derived from them.
+pub type Vault = VaultState<()>;
+
+/// Candidate changes in a durable transaction. The prefix is borrowed, never
+/// modified, and the suffix cannot be published against another vault.
+pub type VaultWrite<'a> = VaultState<&'a Vault>;
+
+// Static dispatch keeps the normal owned/replay path free of overlay lookups.
+pub trait Prefix {
+    fn base(&self) -> Option<&Vault>;
+}
+impl Prefix for () {
+    fn base(&self) -> Option<&Vault> {
+        None
+    }
+}
+impl Prefix for &Vault {
+    fn base(&self) -> Option<&Vault> {
+        Some(self)
+    }
+}
+
 #[derive(Clone)]
-pub struct Vault {
+pub struct VaultState<P> {
+    prefix: P,
+    // Only compound local edits need item projections during staging. A
+    // single write or incoming batch can project once, after persistence.
+    projected: usize,
+    rebuild_projection: bool,
+    inherit_items: bool,
     id: VaultId,
     nodes: HashMap<Hash, Node>,
     /// Per-author sequence → offset in the corresponding causal arrival order.
@@ -187,19 +214,7 @@ impl Vault {
             return Err(Error::InvalidGenesis);
         }
         genesis.verify()?;
-        let mut vault = Self {
-            id: genesis.vault(),
-            nodes: HashMap::new(),
-            logs: BTreeMap::new(),
-            membership_order: Vec::new(),
-            membership_writes: BTreeMap::new(),
-            data_order: Vec::new(),
-            membership_tips: BTreeSet::new(),
-            tips: BTreeSet::new(),
-            membership: Membership::default(),
-            past_memberships: HashMap::new(),
-            items: BTreeMap::new(),
-        };
+        let mut vault = Self::empty(genesis.vault(), ());
         let clock = Clock::from([(genesis.log_id(), 0)]);
         vault.insert(Node {
             entry: genesis,
@@ -218,6 +233,113 @@ impl Vault {
             vault.apply(entry)?;
         }
         Ok(vault)
+    }
+
+    /// Persist exactly the validated delta (membership before data), then
+    /// publish its already verified nodes. On either error the base has not
+    /// been touched. The adapter must quarantine it on an uncertain commit.
+    pub fn transact<T, E>(
+        &mut self,
+        change: impl FnOnce(&mut VaultWrite<'_>) -> Result<T, E>,
+        persist: impl FnOnce(&[&Entry]) -> Result<(), E>,
+    ) -> Result<T, E> {
+        let mut write = VaultWrite::empty(self.id, &*self);
+        write.inherit_items = true;
+        write.membership = self.membership.clone();
+        write.membership_tips = self.membership_tips.clone();
+        write.tips = self.tips.clone();
+        write.membership_writes = self.membership_writes.clone();
+        // Include prefix log IDs so frontier iteration sees all authors. Do
+        // not copy their (potentially very large) sequence-offset arrays.
+        write.logs = self.logs.keys().map(|id| (*id, Vec::new())).collect();
+        let result = change(&mut write)?;
+        // Compound reads may have needed temporary item projections. They are
+        // not part of the durable delta or of the publication recipe.
+        drop(write.items);
+        if write.nodes.is_empty() {
+            return Ok(result);
+        }
+        let entries: Vec<_> = write
+            .membership_order
+            .iter()
+            .chain(&write.data_order)
+            .map(|hash| &write.nodes[hash].entry)
+            .collect();
+        persist(&entries)?;
+
+        // No fallible validation after the commit. Move verified nodes and
+        // their resolved membership; offsets were relative to the suffix.
+        let VaultState {
+            nodes,
+            logs,
+            membership_order,
+            data_order,
+            membership_tips,
+            tips,
+            membership_writes,
+            membership,
+            past_memberships,
+            ..
+        } = write;
+        let start = self.data_order.len();
+        for (id, offsets) in logs.into_iter().filter(|(_, v)| !v.is_empty()) {
+            let prefix = self.order(id.log).len();
+            self.logs
+                .entry(id)
+                .or_default()
+                .extend(offsets.into_iter().map(|pos| prefix + pos));
+        }
+        self.nodes.extend(nodes);
+        self.tips = tips;
+        let rebuild = !membership_order.is_empty() && !self.membership.counts_like(&membership);
+        if !membership_order.is_empty() {
+            self.membership_order.extend(membership_order);
+            self.membership = membership;
+            self.membership_tips = membership_tips;
+            self.membership_writes = membership_writes;
+            self.past_memberships.clear();
+        }
+        self.past_memberships.extend(past_memberships);
+        self.data_order.extend(data_order);
+        if rebuild {
+            self.items.clear();
+        }
+        self.project_suffix(if rebuild { 0 } else { start });
+        Ok(result)
+    }
+}
+
+impl VaultWrite<'_> {
+    /// Read your own prior appends during a compound local operation (e.g. an
+    /// import linking two newly created items). Not needed to receive sync.
+    pub fn item(&mut self, id: &ItemId) -> Option<Item> {
+        self.project_pending();
+        self.items
+            .get(id)
+            .or_else(|| self.inherited_items()?.get(id))
+            .map(|state| state.item(*id))
+    }
+}
+
+impl<P: Prefix> VaultState<P> {
+    fn empty(id: VaultId, prefix: P) -> Self {
+        Self {
+            prefix,
+            projected: 0,
+            rebuild_projection: false,
+            inherit_items: false,
+            id,
+            nodes: HashMap::new(),
+            logs: BTreeMap::new(),
+            membership_order: Vec::new(),
+            membership_writes: BTreeMap::new(),
+            data_order: Vec::new(),
+            membership_tips: BTreeSet::new(),
+            tips: BTreeSet::new(),
+            membership: Membership::default(),
+            past_memberships: HashMap::new(),
+            items: BTreeMap::new(),
+        }
     }
 
     pub fn id(&self) -> VaultId {
@@ -258,7 +380,7 @@ impl Vault {
                 found: entry.vault(),
             });
         }
-        if self.nodes.contains_key(&entry.hash()) {
+        if self.node(&entry.hash()).is_some() {
             return Ok(false);
         }
         let log_id = entry.log_id();
@@ -275,26 +397,27 @@ impl Vault {
         // With a contiguous, fork-rejecting chain, this count covers exactly
         // the author's predecessors, independent of other authors' arrival.
         self.check_membership_budget(entry.author(), entry.payload())?;
-        let missing: Vec<Hash> = entry
-            .deps()
-            .iter()
-            .filter(|dep| !self.nodes.contains_key(dep))
-            .copied()
-            .collect();
+        let mut deps = Vec::with_capacity(entry.deps().len());
+        let mut missing = Vec::new();
+        for dep in entry.deps() {
+            match self.node(dep) {
+                Some(node) => deps.push(node),
+                None => missing.push(*dep),
+            }
+        }
         if !missing.is_empty() {
             return Err(Error::MissingDeps(missing));
         }
-        let deps: Vec<&Node> = entry.deps().iter().map(|dep| &self.nodes[dep]).collect();
         if entry.log() == Log::Membership
             && deps.iter().any(|dep| dep.entry.log() != Log::Membership)
         {
             return Err(Error::InvalidDeps);
         }
-        if let Some(prev) = entry.seq().checked_sub(1) {
-            let prev = self.order(log_id.log)[self.logs[&log_id][prev as usize]];
-            if !entry.deps().contains(&prev) {
-                return Err(Error::InvalidDeps);
-            }
+        if self
+            .previous(log_id)
+            .is_some_and(|prev| !entry.deps().contains(prev))
+        {
+            return Err(Error::InvalidDeps);
         }
         entry.verify()?;
         match entry.payload() {
@@ -353,21 +476,27 @@ impl Vault {
         };
         self.check_membership_budget(author, &payload)?;
         if let Payload::Data(ops) = &payload {
-            for op in ops {
-                data::check(&self.items, op)?;
+            if self.prefix.base().is_some()
+                && ops.iter().any(|op| matches!(op, DataOp::Edit { .. }))
+            {
+                self.project_pending();
             }
-            data::check_files(&self.items, ops)?;
-            data::check_tags(&self.items, ops)?;
+            let items = |id: &ItemId| {
+                self.items
+                    .get(id)
+                    .or_else(|| self.inherited_items()?.get(id))
+            };
+            for op in ops {
+                data::check(items, op)?;
+            }
+            data::check_files(items, ops)?;
+            data::check_tags(items, ops)?;
         }
         let tips = match log_id.log {
             Log::Membership => &self.membership_tips,
             Log::Data => &self.tips,
         };
-        let prev = self
-            .logs
-            .get(&log_id)
-            .and_then(|log| log.last())
-            .map(|&pos| &self.order(log_id.log)[pos]);
+        let prev = self.previous(log_id);
         let deps: Vec<Hash> = tips.iter().chain(prev).copied().collect();
         let entry = Entry::sign(secret, self.id, self.next_seq(log_id), deps, payload);
         let len = entry.encoded_len();
@@ -492,7 +621,7 @@ impl Vault {
                     max: MAX_ENTRY_LEN,
                 });
             }
-            data::check(&self.items, &op)?;
+            data::check(|id| self.items.get(id), &op)?;
             match batches.last_mut() {
                 Some(batch) if size + bytes <= CREATE_BATCH_BYTES => batch.push(op),
                 _ => {
@@ -512,7 +641,9 @@ impl Vault {
         }
         Ok((ids, entries))
     }
+}
 
+impl Vault {
     /// An item, including deleted ones.
     pub fn item(&self, id: &ItemId) -> Option<Item> {
         self.items.get(id).map(|state| state.item(*id))
@@ -605,6 +736,26 @@ impl Vault {
             .map(|hash| &self.nodes[hash].entry)
             .collect()
     }
+}
+
+impl<P: Prefix> VaultState<P> {
+    fn node(&self, hash: &Hash) -> Option<&Node> {
+        self.nodes
+            .get(hash)
+            .or_else(|| self.prefix.base()?.nodes.get(hash))
+    }
+
+    fn previous(&self, log: LogId) -> Option<&Hash> {
+        self.logs
+            .get(&log)
+            .and_then(|offsets| offsets.last())
+            .map(|&i| &self.order(log.log)[i])
+            .or_else(|| {
+                let base = self.prefix.base()?;
+                let &i = base.logs.get(&log)?.last()?;
+                Some(&base.order(log.log)[i])
+            })
+    }
 
     fn order(&self, log: Log) -> &[Hash] {
         match log {
@@ -625,9 +776,16 @@ impl Vault {
     }
 
     fn next_seq(&self, log: LogId) -> u64 {
-        self.logs
-            .get(&log)
-            .map_or(0, |offsets| offsets.len() as u64)
+        self.log_len(log, self.logs.get(&log).map_or(0, Vec::len))
+    }
+
+    fn log_len(&self, log: LogId, suffix: usize) -> u64 {
+        (suffix
+            + self
+                .prefix
+                .base()
+                .and_then(|v| v.logs.get(&log))
+                .map_or(0, Vec::len)) as u64
     }
 
     /// Resolves the membership of the causal past `clock` covers, excluding the
@@ -638,20 +796,23 @@ impl Vault {
             .logs
             .iter()
             .filter(|(log, _)| log.log == Log::Membership)
-            .map(|(log, offsets)| (log.author, offsets.len() as u64 - 1));
+            .map(|(log, offsets)| (log.author, self.log_len(*log, offsets.len()) - 1));
         if frontier.iter().copied().eq(current) {
             return &self.membership;
         }
         let nodes = &self.nodes;
         let ops = &self.membership_order;
+        let base = self.prefix.base();
+        // A cached frontier names only immutable, fork-checked prefix nodes.
+        if let Some(past) = base.and_then(|v| v.past_memberships.get(&frontier)) {
+            return past;
+        }
         let id = &self.id;
         self.past_memberships
             .entry(frontier)
             .or_insert_with_key(|frontier| {
                 let covered: BTreeMap<_, _> = frontier.iter().copied().collect();
-                let past = ops
-                    .iter()
-                    .map(|hash| &nodes[hash])
+                let past = membership_nodes(base, ops, nodes)
                     .filter(|node| {
                         covered
                             .get(&node.entry.author())
@@ -690,42 +851,99 @@ impl Vault {
         self.nodes.insert(hash, node);
         match log {
             Log::Membership => {
-                let ops = self
-                    .membership_order
-                    .iter()
-                    .map(|hash| &self.nodes[hash])
+                let ops = membership_nodes(self.prefix.base(), &self.membership_order, &self.nodes)
                     .collect();
                 let membership = membership::resolve(&self.id, ops);
                 self.past_memberships.clear();
                 let rebuild = !membership.counts_like(&self.membership);
                 self.membership = membership;
-                if rebuild {
-                    self.rebuild_items();
+                if rebuild && self.prefix.base().is_some() {
+                    self.rebuild_projection = true;
+                } else if rebuild {
+                    self.items.clear();
+                    self.project_suffix(0);
                 }
             }
+            Log::Data if self.prefix.base().is_some() => {} // projected lazily for subsequent local edits
             Log::Data => {
                 let node = &self.nodes[&hash];
                 if self
                     .membership
                     .counts(&node.entry.author(), node.entry.seq())
                 {
-                    data::apply(&mut self.items, node);
+                    data::apply(&mut self.items, None, node);
                 }
             }
         }
     }
 
-    fn rebuild_items(&mut self) {
-        let mut items = BTreeMap::new();
-        for hash in &self.data_order {
-            let node = &self.nodes[hash];
-            if self
-                .membership
-                .counts(&node.entry.author(), node.entry.seq())
-            {
-                data::apply(&mut items, node);
-            }
-        }
-        self.items = items;
+    fn inherited_items(&self) -> Option<&BTreeMap<ItemId, ItemState>> {
+        self.prefix
+            .base()
+            .filter(|_| self.inherit_items)
+            .map(|v| &v.items)
     }
+
+    fn project_pending(&mut self) {
+        let Some(base) = self.prefix.base() else {
+            return;
+        };
+        if self.rebuild_projection {
+            // Changed removal cutoffs may invalidate any previous item. Only
+            // a later *local edit* needs that intermediate projection.
+            self.items.clear();
+            self.inherit_items = false;
+            project(
+                &mut self.items,
+                None,
+                &self.membership,
+                base.data_order.iter().map(|h| &base.nodes[h]),
+            );
+            self.projected = 0;
+            self.rebuild_projection = false;
+        }
+        // Split the immutable prefix borrow from the mutable projection.
+        let inherited = self.inherit_items.then_some(&base.items);
+        project(
+            &mut self.items,
+            inherited,
+            &self.membership,
+            self.data_order[self.projected..]
+                .iter()
+                .map(|h| &self.nodes[h]),
+        );
+        self.projected = self.data_order.len();
+    }
+
+    fn project_suffix(&mut self, start: usize) {
+        project(
+            &mut self.items,
+            None,
+            &self.membership,
+            self.data_order[start..].iter().map(|h| &self.nodes[h]),
+        );
+    }
+}
+
+fn project<'a>(
+    items: &mut BTreeMap<ItemId, ItemState>,
+    inherited: Option<&BTreeMap<ItemId, ItemState>>,
+    membership: &Membership,
+    nodes: impl Iterator<Item = &'a Node>,
+) {
+    for node in nodes {
+        if membership.counts(&node.entry.author(), node.entry.seq()) {
+            data::apply(items, inherited, node);
+        }
+    }
+}
+
+fn membership_nodes<'a>(
+    base: Option<&'a Vault>,
+    order: &'a [Hash],
+    nodes: &'a HashMap<Hash, Node>,
+) -> impl Iterator<Item = &'a Node> {
+    base.into_iter()
+        .flat_map(|v| v.membership_order.iter().map(|h| &v.nodes[h]))
+        .chain(order.iter().map(|h| &nodes[h]))
 }

@@ -604,11 +604,10 @@ const LINK_BATCH: usize = 256;
 
 /// The source of an item imported from 1Password, as it records a digest
 /// of the item as written: now with `field` as its `sign-in-account`.
-fn relinked_source(v: &Vault, id: &ItemId, field: &Field) -> Option<DataOp> {
-    let item = v.item(id)?;
+fn relinked_source(item: Item, field: &Field) -> Option<DataOp> {
     let source = item.source.as_ref()?;
     let mut version = MirrorVersion::parse(&source.version)?;
-    let mut fields = item.fields.clone();
+    let mut fields = item.fields;
     fields.insert("sign-in-account".into(), field.clone());
     version.digest = digest(
         &item.kind,
@@ -621,7 +620,7 @@ fn relinked_source(v: &Vault, id: &ItemId, field: &Field) -> Option<DataOp> {
         id: source.id.clone(),
         version: version.to_string(),
     };
-    Some(DataOp::source(*id, Some(source)))
+    Some(DataOp::source(item.id, Some(source)))
 }
 
 /// Imports a mapped export. Items the vault already has, or the export
@@ -736,7 +735,7 @@ pub fn import(
                 };
                 let id = ids[at];
                 let field = Field::new(FieldType::Text, hex(account.as_bytes()));
-                ops.extend(relinked_source(v, &id, &field));
+                ops.extend(v.item(&id).and_then(|item| relinked_source(item, &field)));
                 ops.push(DataOp::set(id, "sign-in-account", field));
             }
             for batch in ops.chunks(LINK_BATCH) {

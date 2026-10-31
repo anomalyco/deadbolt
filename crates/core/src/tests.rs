@@ -2055,3 +2055,77 @@ fn removals_do_not_consume_the_membership_budget() {
         })
     );
 }
+
+// The previous clone/change/diff path is the oracle. Exercise reads of the
+// committed prefix and this transaction's suffix, on both sides of a cutoff.
+#[test]
+fn staged_delta_matches_an_eager_vault_and_durable_replay() {
+    let mut a = Dev::create();
+    let kept = a.login("original");
+    let mut b = a.invite();
+    // b's writes see a past membership frontier, not this rename.
+    a.vault.rename(&a.secret, "renamed").unwrap();
+    let prefix = a.vault.clone();
+    let drop_b = prefix.clone().remove(&a.secret, b.id()).unwrap();
+    let edit = b.set(kept, "password", "unseen");
+    let (cut, create) = b.login_entry("also-unseen");
+    let final_ops = || vec![DataOp::set(kept, "username", text("durable"))];
+
+    let mut eager = prefix.clone();
+    for entry in [&edit, &create, &drop_b] {
+        assert_eq!(eager.apply(entry.clone()), Ok(true));
+    }
+    let final_hash = eager.write(&a.secret, final_ops()).unwrap().hash();
+    let heads = prefix.heads();
+    let expected_delta = eager.missing_for(&heads);
+    let mut durable: Vec<_> = prefix.entries().into_iter().cloned().collect();
+    for confirmed in [false, true] {
+        let result = a.vault.transact(
+            |v| {
+                assert!(matches!(v.apply(create.clone()), Err(Error::SeqGap { .. })));
+                assert_eq!(v.apply(edit.clone()), Ok(true));
+                assert_eq!(v.apply(create.clone()), Ok(true));
+                assert_eq!(v.apply(create.clone()), Ok(false));
+                assert_eq!(value(&v.item(&kept).unwrap(), "password"), "unseen");
+                assert!(v.item(&cut).is_some());
+                assert_eq!(v.apply(drop_b.clone()), Ok(true));
+                assert!(!v.is_member(&b.id()));
+                assert!(v.item(&cut).is_none());
+                assert_eq!(value(&v.item(&kept).unwrap(), "password"), "original");
+                assert_eq!(v.write(&a.secret, final_ops()).unwrap().hash(), final_hash);
+                Ok(())
+            },
+            |entries| {
+                assert_eq!(entries, expected_delta);
+                if !confirmed {
+                    return Err("precommit failure");
+                }
+                durable.extend(entries.iter().copied().cloned());
+                Ok(())
+            },
+        );
+        assert_eq!(result.is_ok(), confirmed);
+        let expected = if confirmed { &eager } else { &prefix };
+        let replay = Vault::load(durable.clone()).unwrap();
+        for vault in [&a.vault, &replay] {
+            assert_eq!(vault.heads(), expected.heads());
+            assert_eq!(vault.entries(), expected.entries());
+            assert_eq!(
+                snapshot(vault, &[kept, cut]),
+                snapshot(expected, &[kept, cut])
+            );
+        }
+    }
+    // Redelivery of already durable entries is not another disk transaction.
+    a.vault
+        .transact(
+            |v| {
+                for entry in expected_delta {
+                    assert!(!v.apply(entry.clone())?);
+                }
+                Ok::<_, Error>(())
+            },
+            |_| panic!("empty append"),
+        )
+        .unwrap();
+}

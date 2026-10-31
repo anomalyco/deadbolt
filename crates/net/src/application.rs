@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, future::Future, net::SocketAddr, time::Duration
 
 use data_encoding::HEXLOWER;
 use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, Heads, Log, Signature, Vault, VaultId, valid_name,
+    DeviceId, DeviceSecret, Entry, Heads, Log, Signature, Vault, VaultId, VaultWrite, valid_name,
 };
 use n0_future::time::Instant;
 use n0_future::{FuturesUnorderedBounded, StreamExt};
@@ -148,10 +148,11 @@ pub struct WelcomeMeta {
     pub peers: BTreeMap<String, Hint>,
 }
 
-/// The only application I/O seam. `update` must stage a private vault, commit
-/// its new entries durably, then publish it. A failed commit must not change
-/// the live vault. Callers must enforce membership even when a later update
-/// or address-book write fails: an earlier vault may already have committed.
+/// The only application I/O seam. `update` must validate privately, commit its
+/// new entries durably, then publish them. A precommit error leaves the vault
+/// unchanged; an uncertain commit must invalidate the live view until replay.
+/// Enforce membership even if a later vault or address-book write fails: an
+/// earlier vault may already have committed.
 pub trait State {
     type Error: From<Error>;
 
@@ -162,7 +163,7 @@ pub trait State {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T, Error>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T, Error>,
     ) -> Result<T, Self::Error>;
     /// Learn and persist the peer's direct metadata and indirect hints.
     fn learn(

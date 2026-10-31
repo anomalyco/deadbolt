@@ -297,7 +297,7 @@ fn batch_appends_preserve_order_and_skip_empty() {
     assert!(append(&store, b"one").unwrap());
     let added = store.append_batch([&b"two"[..], &b"three"[..]]).unwrap();
     assert_eq!(added, 2);
-    assert_eq!(store.append_batch([]).unwrap(), 0);
+    assert_eq!(store.append_batch(std::iter::empty::<&[u8]>()).unwrap(), 0);
     assert_eq!(
         all(&store),
         [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
