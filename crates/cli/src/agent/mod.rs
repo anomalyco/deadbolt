@@ -930,6 +930,217 @@ mod tests {
         Ok(())
     }
 
+    /// Manual two-stage proof: pair the fixture with the real phone, then read
+    /// after biometric enrollment. This is a Mac test host, not a stock CLI
+    /// operator: it opens only the synthetic fixture, invokes its production
+    /// inviter internally, and designates via the test-only proof helper. The
+    /// read goes through the unmodified Unix socket/audit-token boundary.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires an isolated synthetic fixture and a real foreground mobile device"]
+    async fn paired_mobile_fixture_approval() -> Result<()> {
+        use crate::protocol::{Check, Claim, Purpose};
+        use anyhow::{anyhow, ensure};
+
+        // The operator supplies the synthetic fixture. Never fall back to the
+        // default store or accept arbitrary passphrases or item selectors.
+        const PASS: &str = "synthetic-mobile-fixture-passphrase";
+        const TITLE: &str = "Synthetic account 00000";
+        const EXPECTED: &str = "synthetic-password-00000";
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("DEADBOLT_MOBILE_FIXTURE_DIR")
+                .context("set DEADBOLT_MOBILE_FIXTURE_DIR to the synthetic CLI fixture")?,
+        );
+        let expected_count = match dir.file_name().and_then(|name| name.to_str()) {
+            Some("deadbolt-mobile-fixture-1000") => 1_000,
+            Some("deadbolt-mobile-fixture-10000") => 10_000,
+            _ => bail!("expected a named 1000- or 10000-item synthetic fixture"),
+        };
+        enum Stage {
+            Pair(deadbolt_net::PairingCode),
+            Read(DeviceId),
+        }
+        let stage = match (
+            crate::config::test_env("DEADBOLT_MOBILE_PAIR_CODE").map(Zeroizing::new),
+            crate::config::test_env("DEADBOLT_MOBILE_APPROVER_ID"),
+        ) {
+            (Some(code), None) => Stage::Pair(
+                code.parse()
+                    .map_err(|_| anyhow!("invalid five-word code"))?,
+            ),
+            (None, Some(id)) => Stage::Read(DeviceId::from_bytes(
+                session::unhex(&id).map_err(|_| anyhow!("invalid phone device id"))?,
+            )),
+            _ => bail!(
+                "supply exactly one of DEADBOLT_MOBILE_PAIR_CODE or DEADBOLT_MOBILE_APPROVER_ID"
+            ),
+        };
+        let loaded = Loaded::open(&dir, PASS.as_bytes()).map_err(|_| anyhow!("cannot open fixture: confirm stock fixture agent stopped and fixture passphrase matches"))?;
+        ensure!(
+            loaded.meta.device_name == "Synthetic fixture CLI"
+                && loaded.vaults.len() == 1
+                && loaded.unavailable.is_empty(),
+            "wrong fixture identity"
+        );
+        let vault = loaded.resolve(None)?;
+        let v = loaded.vault(&vault);
+        ensure!(
+            v.name() == "mobile-fixture" && v.is_member(&loaded.id),
+            "not a current fixture vault"
+        );
+        match &stage {
+            Stage::Pair(_) => ensure!(
+                v.members().count() == 1,
+                "pair mode requires the fresh, single-member fixture"
+            ),
+            Stage::Read(phone) => ensure!(
+                v.members().count() == 2 && *phone != loaded.id && v.is_member(phone),
+                "expected fixture CLI and named phone as the two paired members"
+            ),
+        }
+        ensure!(
+            v.iter_items().count() == expected_count,
+            "wrong fixture item count"
+        );
+        let item = v
+            .iter_items()
+            .find(|i| {
+                i.name.as_deref() == Some(TITLE)
+                    && i.kind == "login"
+                    && i.fields
+                        .get("password")
+                        .is_some_and(|f| f.value == EXPECTED)
+            })
+            .context("expected synthetic login missing")?
+            .id;
+        let refs = vec![format!("deadbolt://{vault}/{item}/password")];
+        let runtime = tempfile::tempdir()?;
+        let mut paths = test_paths(runtime.path());
+        paths.data = dir;
+        let env = crate::config::Environment::load();
+        ensure!(
+            !env.local_net,
+            "unset DEADBOLT_NET=local for the real mobile peer"
+        );
+        let agent = Agent::new(paths, env.local_net, env.kdf);
+
+        async fn request(agent: &Arc<Agent>, command: Command) -> Result<Message> {
+            let (server, mut client) = UnixStream::pair()?;
+            let (_, message) = tokio::try_join!(agent.clone().handle(server, MAX_LINE), async {
+                let request = Request {
+                    v: PROTOCOL_VERSION,
+                    command,
+                    claimed: Some(Claim {
+                        caller: None,
+                        opencode_session: Some("synthetic-mobile-approval-harness".into()),
+                    }),
+                };
+                client
+                    .write_all(&deadbolt_client::encode_json(b"", &request, b"\n")?)
+                    .await?;
+                let reply = request_line(&mut BufReader::new(&mut client), 64 * 1024)
+                    .await?
+                    .context("no reply")?;
+                serde_json::from_str(&reply).map_err(|_| anyhow!("invalid reply"))
+            })?;
+            Ok(message)
+        }
+        let run = async {
+            agent.start(loaded, None).await?;
+            agent.wait_ready().await?;
+            let phone = match stage {
+                Stage::Read(phone) => phone,
+                Stage::Pair(code) => {
+                    let (conv, _socket, _open) = conversation();
+                    println!("APPROVAL_HARNESS_READY phase=pair vault={vault}");
+                    let paired =
+                        pairing::pair(&agent, &conv, code.to_string(), Some(vault.to_string()))
+                            .await?;
+                    let Reply::Device { device, .. } = paired else {
+                        bail!("pair did not return an admitted device")
+                    };
+                    let phone = DeviceId::from_bytes(session::unhex(&device.id)?);
+                    agent.with_data(|s| {
+                        let held = s.vault(&vault);
+                        ensure!(
+                            phone != s.id && held.is_member(&phone) && held.members().count() == 2,
+                            "pair did not admit the remote member"
+                        );
+                        Ok(())
+                    })?;
+                    return Ok(format!(
+                        "APPROVAL_HARNESS_PAIRED vault={vault} phone={phone}"
+                    ));
+                }
+            };
+            let Message::Ok {
+                reply: Reply::Status(status),
+            } = request(&agent, Command::Status).await?
+            else {
+                bail!("status failed")
+            };
+            ensure!(
+                status.caller.check == Check::Signature
+                    && status.caller.pid == std::process::id()
+                    && status.caller.signature.is_some_and(|sig| sig.valid)
+                    && !agent.can_verify(),
+                "expected verified test host and no Mac biometric slot"
+            );
+            let plain = Command::Resolve {
+                refs: refs.clone(),
+                purpose: Purpose::Read,
+            };
+            let refused = request(&agent, plain).await?;
+            ensure!(
+                matches!(
+                    refused,
+                    Message::Error {
+                        code: ErrorCode::Forbidden,
+                        ..
+                    }
+                ),
+                "ordinary AI resolve was not refused"
+            );
+            designate_fixture_approver(&agent, vault, phone, Zeroizing::new(PASS.into())).await?;
+            let read = || Command::ExperimentalMobileRead { refs: refs.clone() };
+            println!(
+                "APPROVAL_HARNESS_READY phase=allow caller=verified-mac-test-host vault={vault} phone={phone} item={item} field=password"
+            );
+            let first = request(&agent, read()).await?;
+            let Message::Ok {
+                reply: Reply::Secrets { secrets },
+            } = first
+            else {
+                bail!("first phone read was not approved")
+            };
+            ensure!(
+                matches!(secrets.as_slice(), [s] if s.item == item.to_string() && s.vault == "mobile-fixture" && s.title == TITLE && s.field == "password" && s.value.expose() == EXPECTED),
+                "answer did not release exactly the requested fixture field"
+            );
+            drop(secrets);
+            println!(
+                "APPROVAL_HARNESS_READY phase=deny first_release_count=1 phone={phone} item={item} field=password"
+            );
+            // The SAME read must ask again. Only a signed denial passes, not a
+            // timeout, offline phone, local failure or an already-consumed allow.
+            let second = request(&agent, read()).await?;
+            ensure!(
+                matches!(second, Message::Error {code: ErrorCode::Forbidden, message, ..} if message.ends_with("read denied on approver")),
+                "second read did not receive a signed denial"
+            );
+            Ok::<_, anyhow::Error>(
+                "APPROVAL_HARNESS_PASS ordinary=refused first=one_field second=signed_denial"
+                    .into(),
+            )
+        };
+        let result = tokio::time::timeout(Duration::from_secs(240), run).await;
+        tokio::time::timeout(Duration::from_secs(10), agent.lock())
+            .await
+            .context("fixture shutdown timed out")?;
+        println!("{}", result.context("phone proof exceeded 240 seconds")??);
+        Ok(())
+    }
+
     fn sync_op() -> Command {
         Command::SyncOnePassword {
             vault: None,
