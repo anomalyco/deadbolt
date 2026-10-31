@@ -36,18 +36,9 @@ pub fn load(store: &Unlocked) -> Result<Vault, Error> {
     Vault::load(entries).map_err(|reason| Error::Unavailable { id, reason })
 }
 
-/// No live state is published before durable append. On `AppendUncertain`,
-/// callers must quarantine the session and close its connections until replay.
-pub fn commit(store: &Unlocked, live: &mut Vault, staged: Vault) -> deadbolt_store::Result<bool> {
-    let blobs: Vec<_> = staged
-        .missing_for(&live.heads())
-        .into_iter()
-        .map(Entry::encode)
-        .collect();
-    if blobs.is_empty() {
-        return Ok(false);
-    }
-    store.append_batch(blobs.iter().map(|blob| blob.as_slice()))?;
-    *live = staged;
-    Ok(true)
+/// Persist a validated `Vault::transact` delta, encoding one entry at a time.
+/// On `AppendUncertain`, callers must quarantine the session until replay.
+pub fn append(store: &Unlocked, entries: &[&Entry]) -> deadbolt_store::Result<()> {
+    store.append_batch(entries.iter().copied().map(Entry::encode))?;
+    Ok(())
 }

@@ -233,15 +233,7 @@ impl MobileDevice {
                 self.runtime()?.block_on(session.sync())?;
                 json!({"ok":true})
             }
-            Request::Items { query } => self.device.session()?.handler.with(|s| {
-                let query = query.trim().to_lowercase();
-                let mut items: Vec<_> = s.vault.items().into_iter().filter(|item| !item.deleted && item.kind == "login")
-                    .filter(|item| query.is_empty() || listing::searchable(item).iter().any(|text| text.to_lowercase().contains(&query)))
-                    .map(|item| json!({"id":format!("{}:{}",s.vault.id(),item.id),"title":listing::label(&item),"username":autofill::value(&item,"username").unwrap_or_default(),"kind":item.kind}))
-                    .collect();
-                items.sort_by(|a,b| a["title"].as_str().cmp(&b["title"].as_str()).then_with(|| a["id"].as_str().cmp(&b["id"].as_str())));
-                Ok(json!({"ok":true,"items":items}))
-            })?,
+            Request::Items { query } => return self.device.session()?.handler.with(|s| items(&s.vault, &query)),
             Request::Item { id } => self.device.session()?.handler.with(|s| {
                 let item = find(s, &id)?;
                 Ok(json!({"ok":true,"id":id,"title":listing::label(&item),"username":autofill::value(&item,"username").unwrap_or_default(),"url":autofill::value(&item,"url").unwrap_or_default(),"has_password":autofill::value(&item,"password").is_some(),"has_otp":autofill::otp(&item).is_some()}))
@@ -583,6 +575,46 @@ impl Device {
     }
 }
 
+fn items(vault: &deadbolt_core::Vault, query: &str) -> Result<String> {
+    #[derive(Serialize)]
+    struct Row {
+        id: String,
+        title: String,
+        username: String,
+        kind: &'static str,
+    }
+    #[derive(Serialize)]
+    struct Reply {
+        ok: bool,
+        items: Vec<Row>,
+    }
+    let query = query.trim().to_lowercase();
+    let vault_id = vault.id().to_string();
+    let mut items: Vec<_> = vault
+        .iter_items()
+        .filter(|item| item.kind == "login")
+        .filter(|item| {
+            query.is_empty()
+                || listing::searchable(item)
+                    .iter()
+                    .any(|text| text.to_lowercase().contains(&query))
+        })
+        .map(|item| Row {
+            id: format!(
+                "{vault_id}:{}",
+                data_encoding::HEXLOWER.encode(item.id.as_bytes())
+            ),
+            title: listing::label(&item),
+            username: autofill::value(&item, "username")
+                .unwrap_or_default()
+                .to_owned(),
+            kind: "login",
+        })
+        .collect();
+    items.sort_unstable_by(|a, b| a.title.cmp(&b.title).then_with(|| a.id.cmp(&b.id)));
+    serde_json::to_string(&Reply { ok: true, items }).map_err(|_| MobileError::Internal)
+}
+
 fn find(s: &Loaded, id: &str) -> Result<Item> {
     let (vault, item) = id.split_once(':').ok_or(MobileError::InvalidRequest)?;
     if vault != s.vault.id().to_string() {
@@ -634,7 +666,7 @@ mod tests {
             .create_item(
                 secret,
                 "login",
-                Some("Example".into()),
+                Some("Example Account".into()),
                 [
                     ("username".into(), Field::new(FieldType::Text, "alice")),
                     (
@@ -721,10 +753,12 @@ mod tests {
         ));
         let status = call(&device, json!({"op":"status"}));
         assert_eq!(status["device_id"], secret.device_id().to_string());
-        assert_eq!(
-            call(&device, json!({"op":"items","query":"ALICE"}))["items"][0]["id"],
-            id
-        );
+        for query in [" ALICE ", "example account", "eXaMpLe AcCoUnT"] {
+            assert_eq!(
+                call(&device, json!({"op":"items","query":query})),
+                json!({"ok": true, "items":[{"id":id, "title":"Example Account", "username":"alice", "kind":"login"}]})
+            );
+        }
         assert_eq!(
             call(
                 &device,

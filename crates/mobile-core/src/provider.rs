@@ -426,6 +426,53 @@ impl Drop for Operation<'_> {
     }
 }
 
+// Typed rows keep a key/value tree (and a copy of every key) out of the
+// extension's working set. Only the secret-free fields below cross the FFI.
+#[derive(Serialize)]
+struct Record {
+    vault: String,
+    item: String,
+}
+
+impl Record {
+    fn new(vault: &str, item: ItemId) -> Self {
+        Self {
+            vault: vault.to_owned(),
+            item: data_encoding::HEXLOWER.encode(item.as_bytes()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct Login<'a> {
+    login: Record,
+    vault: &'a str,
+    title: String,
+    username: Option<String>,
+    has_password: bool,
+    has_otp: bool,
+    urls: Vec<String>,
+    sign_in: (),
+    service: Option<&'a Service>,
+}
+
+#[derive(Serialize)]
+struct Passkey<'a> {
+    passkey: Record,
+    vault: &'a str,
+    credential_id: Option<String>,
+    username: Option<String>,
+    created: Option<String>,
+}
+
+#[derive(Serialize)]
+struct Picker<'a> {
+    logins: Vec<Login<'a>>,
+    passkeys: Vec<Passkey<'a>>,
+    unassociated: bool,
+    biometric_enrolled: bool,
+}
+
 struct Opened {
     store: Unlocked,
     vault: Vault,
@@ -475,7 +522,8 @@ impl Opened {
             .ok_or(MobileProviderError::NotFound)
     }
 
-    fn list(&self, request: &Request) -> Result<Value> {
+    fn list<'a>(&'a self, request: &'a Request) -> Result<Picker<'a>> {
+        let vault_id = self.vault.id().to_string();
         let mut logins = Vec::new();
         let mut keys = Vec::new();
         let mut unassociated = false;
@@ -492,16 +540,22 @@ impl Opened {
                     otp,
                     |pick| {
                         let service = pick.service.and_then(|i| scope.service(i));
-                        let source = pick.service.and_then(|i| sources.get(i));
+                        let source = pick.service.and_then(|i| sources.get(i)).copied();
                         let item = &pick.item;
-                        json!({
-                            "login": reference(&self.vault, item.id), "vault": self.vault.name(),
-                            "title": listing::label(item), "username": autofill::value(item, "username"),
-                            "has_password": autofill::value(item, "password").is_some(),
-                            "has_otp": autofill::otp(item).is_some_and(|f| !f.value.is_empty()),
-                            "urls": autofill::urls(item).filter(|u| service.is_none_or(|s| s.site.matches_url(u))).collect::<Vec<_>>(),
-                            "sign_in": null, "service": source,
-                        })
+                        Login {
+                            login: Record::new(&vault_id, item.id),
+                            vault: self.vault.name(),
+                            title: listing::label(item),
+                            username: autofill::value(item, "username").map(str::to_owned),
+                            has_password: autofill::value(item, "password").is_some(),
+                            has_otp: autofill::otp(item).is_some_and(|f| !f.value.is_empty()),
+                            urls: autofill::urls(item)
+                                .filter(|u| service.is_none_or(|s| s.site.matches_url(u)))
+                                .map(str::to_owned)
+                                .collect(),
+                            sign_in: (),
+                            service: source,
+                        }
                     },
                 );
             }
@@ -514,26 +568,28 @@ impl Opened {
                 for item in self.vault.iter_items().filter(|item| {
                     passkeys::matches(item, &rp) && policy::allows(item, allowed_credentials)
                 }) {
-                    keys.push(json!({"passkey":reference(&self.vault, item.id),"vault":self.vault.name(),
-                        "credential_id":autofill::value(&item,"credential-id"),"username":autofill::value(&item,"username"),
-                        "created":autofill::value(&item,"created")}));
+                    keys.push(Passkey {
+                        passkey: Record::new(&vault_id, item.id),
+                        vault: self.vault.name(),
+                        credential_id: autofill::value(&item, "credential-id").map(str::to_owned),
+                        username: autofill::value(&item, "username").map(str::to_owned),
+                        created: autofill::value(&item, "created").map(str::to_owned),
+                    });
                 }
-                keys.sort_by(|a, b| {
-                    (a["username"].as_str(), a["passkey"]["item"].as_str())
-                        .cmp(&(b["username"].as_str(), b["passkey"]["item"].as_str()))
+                keys.sort_unstable_by(|a, b| {
+                    a.username
+                        .cmp(&b.username)
+                        .then_with(|| a.passkey.item.cmp(&b.passkey.item))
                 });
             }
             Request::PasskeyCreate { .. } => {}
         }
-        Ok(Value::Object(serde_json::Map::from_iter([
-            ("logins".into(), Value::Array(logins)),
-            ("passkeys".into(), Value::Array(keys)),
-            ("unassociated".into(), Value::Bool(unassociated)),
-            (
-                "biometric_enrolled".into(),
-                Value::Bool(self.store.biometric_token()?.is_some()),
-            ),
-        ])))
+        Ok(Picker {
+            logins,
+            passkeys: keys,
+            unassociated,
+            biometric_enrolled: self.store.biometric_token()?.is_some(),
+        })
     }
 
     fn verified(&self, verify: Verify, interactive: bool) -> Result<bool> {
@@ -665,15 +721,21 @@ impl Opened {
                 .to_string();
                 let made = passkeys::register_hash(&new, verified, &created)?;
                 let secret = DeviceSecret::from_bytes(self.store.device_secret());
-                let mut staged = self.vault.clone();
-                let entry = staged
-                    .write(&secret, vec![made.create])
-                    .map_err(|_| MobileProviderError::InvalidVault)?;
-                let record = reference(&self.vault, ItemId::of_create(&entry.hash(), 0));
-                operation.check()?;
-                // A cancelled call may already have durably written. Never
-                // return the credential before commit; never retry on ambiguity.
-                storage::commit(&self.store, &mut self.vault, staged)?;
+                let item = self.vault.transact(
+                    |vault| {
+                        let entry = vault
+                            .write(&secret, vec![made.create])
+                            .map_err(|_| MobileProviderError::InvalidVault)?;
+                        Ok(ItemId::of_create(&entry.hash(), 0))
+                    },
+                    |entries| {
+                        // A cancelled call may already have durably written. Never
+                        // return the credential before commit; never retry on ambiguity.
+                        operation.check()?;
+                        Ok::<_, MobileProviderError>(storage::append(&self.store, entries)?)
+                    },
+                )?;
+                let record = Record::new(&self.vault.id().to_string(), item);
                 encode(
                     &json!({"passkey":record,"credential_id":made.credential_id,"client_data_hash":made.client_data_hash,
                     "attestation_object":made.attestation_object,"authenticator_data":made.authenticator_data,
@@ -696,9 +758,6 @@ fn valid_services(services: &[Service]) -> Vec<&Service> {
         .iter()
         .filter(|s| policy::resolve_service(s.kind.into(), &s.identifier).is_ok())
         .collect()
-}
-fn reference(vault: &Vault, id: ItemId) -> Value {
-    json!({"vault":vault.id().to_string(),"item":id.to_string()})
 }
 fn encode(value: &impl Serialize) -> Result<Zeroizing<String>> {
     serde_json::to_string(value)
@@ -749,13 +808,22 @@ mod tests {
         provider.begin(json!({"op":op,"services":[{"kind":"domain","identifier":"example.com"}],"interactive":true}).to_string()).unwrap()
     }
 
-    fn mutate(dir: &std::path::Path, change: impl FnOnce(&mut Vault, &DeviceSecret)) {
+    fn mutate(
+        dir: &std::path::Path,
+        change: impl FnOnce(&mut deadbolt_core::VaultWrite<'_>, &DeviceSecret),
+    ) {
         let store = deadbolt_store::unlock(dir, b"local-pass").unwrap();
         let secret = DeviceSecret::from_bytes(store.device_secret());
-        let mut live = storage::load(&store).unwrap();
-        let mut staged = live.clone();
-        change(&mut staged, &secret);
-        storage::commit(&store, &mut live, staged).unwrap();
+        storage::load(&store)
+            .unwrap()
+            .transact(
+                |vault| {
+                    change(vault, &secret);
+                    Ok(())
+                },
+                |entries| storage::append(&store, entries),
+            )
+            .unwrap();
     }
 
     fn item_id(record: &str) -> ItemId {
@@ -802,7 +870,7 @@ mod tests {
             json!({
                 "logins": [{
                     "login": {"vault": vault_id, "item": item_id},
-                    "vault": "provider-fixture", "title": "Example", "username": "alice",
+                    "vault": "provider-fixture", "title": "Example Account", "username": "alice",
                     "has_password": true, "has_otp": true, "urls": ["https://example.com"],
                     "sign_in": null,
                     "service": {"kind": "url", "identifier": "https://example.com/signin"}
@@ -1048,6 +1116,16 @@ mod tests {
                 "required",
             ))
             .unwrap();
+        let listed = provider.list(id, passphrase()).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&listed).unwrap(),
+            json!({
+                "logins": [], "passkeys": [{"passkey": made["passkey"], "vault": "provider-fixture",
+                    "credential_id": credential, "username": autofill::value(&saved, "username"),
+                    "created": autofill::value(&saved, "created")}],
+                "unassociated": false, "biometric_enrolled": true,
+            })
+        );
         assert!(matches!(
             provider.complete(id, Some(record.clone()), passphrase()),
             Err(MobileProviderError::VerificationRequired)
@@ -1140,6 +1218,38 @@ mod tests {
             path.file_name().unwrap().to_str().unwrap(),
             format!("deadbolt-mobile-fixture-{count}")
         );
+        if std::env::var_os("DEADBOLT_MOBILE_MEASURE_SEARCH").is_some() {
+            let device =
+                crate::MobileDevice::new(path.display().to_string(), "Bench".into()).unwrap();
+            device
+                .call(
+                    json!({"op":"unlock","passphrase":"synthetic-mobile-fixture-passphrase"})
+                        .to_string(),
+                )
+                .unwrap();
+            for _ in 0..3 {
+                for (query, expected) in [
+                    ("", count),
+                    ("Synthetic", count),
+                    ("synthetic account", count), // title only; usernames use a hyphen
+                    ("00042", 1),
+                    ("absent", 0),
+                ] {
+                    let request = json!({"op":"items", "query":query}).to_string();
+                    let start = std::time::Instant::now();
+                    let reply = device.call(request).unwrap();
+                    let elapsed = start.elapsed();
+                    let rows: Value = serde_json::from_str(&reply).unwrap();
+                    assert_eq!(rows["items"].as_array().unwrap().len(), expected);
+                    println!(
+                        "search rows={expected} query_len={} call_us={}",
+                        query.len(),
+                        elapsed.as_micros()
+                    );
+                }
+            }
+            return;
+        }
         if let Some(mode) = std::env::var_os("DEADBOLT_MOBILE_MEMORY_MODE") {
             // An external sampler reads this process's OS memory counters at
             // each checkpoint, then acknowledges on stdin. Fixture generation
@@ -1187,13 +1297,9 @@ mod tests {
                     let id = request();
                     let operation = provider.reserve(id).unwrap();
                     let list = opened.list(&operation.request).unwrap();
-                    assert_eq!(list["logins"].as_array().unwrap().len(), count);
-                    let first = &list["logins"][0]["login"];
-                    println!(
-                        "provider-record {}:{}",
-                        first["vault"].as_str().unwrap(),
-                        first["item"].as_str().unwrap()
-                    );
+                    assert_eq!(list.logins.len(), count);
+                    let first = &list.logins[0].login;
+                    println!("provider-record {}:{}", first.vault, first.item);
                     checkpoint("picker_metadata");
                     let response = encode(&list).unwrap();
                     println!("provider-response-bytes {}", response.len());
