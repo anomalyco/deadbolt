@@ -737,6 +737,27 @@ fn one_device_key_across_vaults() {
 // ---- data -----------------------------------------------------------------
 
 #[test]
+fn live_neighbors_skip_deleted_ids_on_both_sides() {
+    let mut dev = Dev::create();
+    let mut ids = (0..7).map(|_| dev.login("synthetic")).collect::<Vec<_>>();
+    ids.sort();
+    for id in [ids[0], ids[2], ids[3], ids[6]] {
+        dev.write(vec![DataOp::delete(id, 1)]);
+    }
+    assert_eq!(dev.vault.live_neighbors(ids[1]), [None, Some(ids[4])]);
+    assert_eq!(
+        dev.vault.live_neighbors(ids[4]),
+        [Some(ids[1]), Some(ids[5])]
+    );
+    assert_eq!(dev.vault.live_neighbors(ids[5]), [Some(ids[4]), None]);
+    dev.write(vec![DataOp::restore(ids[3])]);
+    assert_eq!(
+        dev.vault.live_neighbors(ids[4]),
+        [Some(ids[3]), Some(ids[5])]
+    );
+}
+
+#[test]
 fn items_set_delete_and_restore() {
     let mut a = Dev::create();
     let fields = [
@@ -1642,6 +1663,9 @@ fn concurrent_removals_keep_the_larger_cutoff() {
     sync(&b, &mut c);
     a.remove(b.id());
     c.remove(b.id());
+    // Neither cutoff includes this tip; moving the cutoff from 0 to 1
+    // still changes the projection, even though membership did not change.
+    b.set(item, "password", "2");
     let vault = assert_order_independent(&all_entries(&[&a, &b, &c]), &[item]);
     assert_eq!(value(&vault.item(&item).unwrap(), "password"), "1");
     assert!(!vault.is_member(&b.id()));
@@ -1658,6 +1682,56 @@ fn data_from_device_with_cut_admission_is_ignored() {
     sync_both(&mut a, &mut b);
     assert_eq!(a.vault.item(&item), None);
     assert!(!a.vault.is_member(&d.id()));
+}
+
+#[test]
+fn surviving_add_restores_data_from_a_cut_admission_and_dependent_edits() {
+    let mut a = Dev::create();
+    let mut editor = a.invite();
+    let mut b = a.invite();
+    let (mut d, cut_add) = b.invite_with_entry();
+    let (item, create) = d.login_entry("original");
+    sync(&d, &mut editor);
+    let data = [create, editor.set(item, "password", "edited")];
+    let expected = editor.vault.item(&item).unwrap();
+    let history = editor.vault.history(&item);
+
+    a.remove(b.id()); // Did not see b's Add(d).
+    a.vault.apply(cut_add).unwrap();
+    assert!(!a.vault.is_member(&d.id()));
+    assert!(!a.vault.was_removed(&d.id()));
+    let consent = d.secret.join_consent(&a.vault.id(), &a.id());
+    let add = a.vault.clone().add(&a.secret, d.id(), consent).unwrap();
+
+    // Owned insertion during reload can encounter the old data before the new Add.
+    let prefix = a.vault.entries().into_iter().cloned();
+    let replay = Vault::load(prefix.chain(data.clone()).chain([add.clone()])).unwrap();
+    assert_eq!(replay.item(&item).unwrap(), expected);
+    assert_eq!(replay.history(&item), history);
+
+    // Split the same data across the borrowed prefix and already visited suffix.
+    // The membership change restores d's create *and* the other author's edit.
+    for split in 0..=data.len() {
+        let mut vault = a.vault.clone();
+        for entry in &data[..split] {
+            vault.apply(entry.clone()).unwrap();
+        }
+        vault
+            .transact(
+                |w| {
+                    for entry in &data[split..] {
+                        w.apply(entry.clone())?;
+                    }
+                    assert_eq!(w.item(&item), None);
+                    w.apply(add.clone())?;
+                    assert_eq!(w.item(&item).unwrap(), expected);
+                    Ok::<_, Error>(())
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(snapshot(&vault, &[item]), snapshot(&replay, &[item]));
+    }
 }
 
 // ---- sync -----------------------------------------------------------------
@@ -2054,4 +2128,115 @@ fn removals_do_not_consume_the_membership_budget() {
             max: MAX_MEMBERSHIP_ENTRIES
         })
     );
+}
+
+#[test]
+fn site_lookup_only_returns_live_logins_with_winning_urls() {
+    let mut a = Dev::create();
+    let item = a.login("local");
+    let mut b = a.invite();
+    let compare = |v: &Vault| {
+        for origin in ["https://a.test", "https://b.test", "https://c.test"] {
+            let page = site::Site::from_origin(origin).unwrap();
+            let reference: Vec<_> = v
+                .items()
+                .into_iter()
+                .filter(|i| i.kind == "login" && page.matches(autofill::urls(i)))
+                .collect();
+            assert_eq!(v.site_logins(&page).collect::<Vec<_>>(), reference);
+        }
+    };
+    a.set(item, "url", "https://a.test");
+    b.set(item, "url", "https://b.test");
+    sync_both(&mut a, &mut b);
+    compare(&a.vault);
+    a.write(vec![DataOp::set(
+        item,
+        "second",
+        Field::new(FieldType::Url, "https://c.test"),
+    )]);
+    compare(&a.vault);
+    a.write(vec![DataOp::remove(item, "url")]);
+    compare(&a.vault);
+    a.write(vec![DataOp::delete(item, 2)]);
+    compare(&a.vault);
+    a.write(vec![
+        DataOp::restore(item),
+        DataOp::set(item, "second", text("https://c.test")),
+    ]);
+    compare(&a.vault);
+}
+
+// The previous clone/change/diff path is the oracle. Exercise reads of the
+// committed prefix and this transaction's suffix, on both sides of a cutoff.
+#[test]
+fn staged_delta_matches_an_eager_vault_and_durable_replay() {
+    let mut a = Dev::create();
+    let kept = a.login("original");
+    let mut b = a.invite();
+    // b's writes see a past membership frontier, not this rename.
+    a.vault.rename(&a.secret, "renamed").unwrap();
+    let prefix = a.vault.clone();
+    let drop_b = prefix.clone().remove(&a.secret, b.id()).unwrap();
+    let edit = b.set(kept, "password", "unseen");
+    let (cut, create) = b.login_entry("also-unseen");
+    let final_ops = || vec![DataOp::set(kept, "username", text("durable"))];
+
+    let mut eager = prefix.clone();
+    for entry in [&edit, &create, &drop_b] {
+        assert_eq!(eager.apply(entry.clone()), Ok(true));
+    }
+    let final_hash = eager.write(&a.secret, final_ops()).unwrap().hash();
+    let heads = prefix.heads();
+    let expected_delta = eager.missing_for(&heads);
+    let mut durable: Vec<_> = prefix.entries().into_iter().cloned().collect();
+    for confirmed in [false, true] {
+        let result = a.vault.transact(
+            |v| {
+                assert!(matches!(v.apply(create.clone()), Err(Error::SeqGap { .. })));
+                assert_eq!(v.apply(edit.clone()), Ok(true));
+                assert_eq!(v.apply(create.clone()), Ok(true));
+                assert_eq!(v.apply(create.clone()), Ok(false));
+                assert_eq!(value(&v.item(&kept).unwrap(), "password"), "unseen");
+                assert!(v.item(&cut).is_some());
+                assert_eq!(v.apply(drop_b.clone()), Ok(true));
+                assert!(!v.is_member(&b.id()));
+                assert!(v.item(&cut).is_none());
+                assert_eq!(value(&v.item(&kept).unwrap(), "password"), "original");
+                assert_eq!(v.write(&a.secret, final_ops()).unwrap().hash(), final_hash);
+                Ok(())
+            },
+            |entries| {
+                assert_eq!(entries, expected_delta);
+                if !confirmed {
+                    return Err("precommit failure");
+                }
+                durable.extend(entries.iter().copied().cloned());
+                Ok(())
+            },
+        );
+        assert_eq!(result.is_ok(), confirmed);
+        let expected = if confirmed { &eager } else { &prefix };
+        let replay = Vault::load(durable.clone()).unwrap();
+        for vault in [&a.vault, &replay] {
+            assert_eq!(vault.heads(), expected.heads());
+            assert_eq!(vault.entries(), expected.entries());
+            assert_eq!(
+                snapshot(vault, &[kept, cut]),
+                snapshot(expected, &[kept, cut])
+            );
+        }
+    }
+    // Redelivery of already durable entries is not another disk transaction.
+    a.vault
+        .transact(
+            |v| {
+                for entry in expected_delta {
+                    assert!(!v.apply(entry.clone())?);
+                }
+                Ok::<_, Error>(())
+            },
+            |_| panic!("empty append"),
+        )
+        .unwrap();
 }

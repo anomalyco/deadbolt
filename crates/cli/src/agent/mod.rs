@@ -2209,8 +2209,7 @@ impl Agent {
                 // change or sync during Touch ID must not retarget the delete.
                 let (vault, id, passkey) = self.with(|s| {
                     let vault = s.resolve(vault.as_deref())?;
-                    let listing = items::Listing::new(s.vault(&vault));
-                    let item = listing.find(&query)?;
+                    let item = items::find_live(s.vault(&vault), &query)?;
                     Ok((vault, item.id, item.kind == "passkey"))
                 })?;
                 if passkey {

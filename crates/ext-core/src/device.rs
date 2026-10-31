@@ -13,7 +13,9 @@ use crate::policy::{self, Preset};
 use deadbolt_core::autofill::{self, Status, item_name, login_title, otp, urls, value};
 use deadbolt_core::site::{Site, page_url};
 use deadbolt_core::totp::Totp;
-use deadbolt_core::{DataOp, DeviceId, DeviceSecret, Field, FieldType, Item, ItemId, Vault};
+use deadbolt_core::{
+    DataOp, DeviceId, DeviceSecret, Entry, Field, FieldType, Item, ItemId, Vault, VaultWrite,
+};
 use deadbolt_net::{Node, NodeConfig, PairingOptions, PeerAddr, PeerId};
 use deadbolt_store::{KdfParams, Unlocked};
 use n0_future::task::JoinHandle;
@@ -192,18 +194,32 @@ impl Loaded {
         })
     }
 
-    fn commit(&mut self, staged: Vault) -> Result<()> {
-        let changed =
-            deadbolt_net::application::storage::commit(&self.store, &mut self.vault, staged)
-                .map_err(|error| match error {
-                    deadbolt_store::Error::AppendUncertain(_) => Error::UnconfirmedWrite(error),
-                    _ => Error::Store(error),
-                })?;
-        // Nothing fallible between the signed commit and notifying its callers.
+    fn write(&mut self, ops: Vec<DataOp>) -> Result<deadbolt_core::Hash> {
+        self.mutate(|v, key| Ok(v.write(key, ops)?.hash()))
+    }
+
+    fn mutate<T>(
+        &mut self,
+        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T>,
+    ) -> Result<T> {
+        let mut changed = false;
+        let result = self.vault.transact(
+            |v| change(v, &self.secret),
+            |entries| {
+                self.store
+                    .append_batch(entries.iter().copied().map(Entry::encode))
+                    .map_err(|error| match error {
+                        deadbolt_store::Error::AppendUncertain(_) => Error::UnconfirmedWrite(error),
+                        _ => Error::Store(error),
+                    })?;
+                changed = true;
+                Ok(())
+            },
+        )?;
         if changed {
             items_changed();
         }
-        Ok(())
+        Ok(result)
     }
 
     /// `peer` just completed a sync with this device.
@@ -469,15 +485,13 @@ fn list_logins(body: &Value) -> Result<Value> {
             .unwrap_or_default();
         let mut accounts: Vec<_> = s
             .vault
-            .items()
-            .iter()
-            .filter(|i| matches(i, &page))
+            .site_logins(&page)
             .map(|i| {
-                let mut account = account(i, &s.vault);
-                let urls: Vec<_> = urls(i).filter(|url| page.matches_url(url)).collect();
+                let mut account = account(&i, &s.vault);
+                let urls: Vec<_> = urls(&i).filter(|url| page.matches_url(url)).collect();
                 account["urls"] = json!(urls);
                 let used = filled.get(&reference(&s.vault, i.id)).copied().unwrap_or(0);
-                (autofill::rank(origin, i, used), account)
+                (autofill::rank(origin, &i, used), account)
             })
             .collect();
         accounts.sort_by(|(ra, a), (rb, b)| {
@@ -539,11 +553,7 @@ fn check_login(body: &Value) -> Result<Value> {
     }
     state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, body)?;
-        let (status, ids) = autofill::check(
-            s.vault.items().iter().filter(|i| matches(i, &page)),
-            username,
-            &password,
-        );
+        let (status, ids) = autofill::check(s.vault.site_logins(&page), username, &password);
         let status = match status {
             Status::New => "new",
             Status::Update => "update",
@@ -569,13 +579,9 @@ fn save_login(body: &Value) -> Result<Value> {
     }
     let reply = state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, input)?;
-        let mut staged = s.vault.clone();
         let (id, created) = if body.get("ref").is_some() {
             let item = find_login(s, body, &page)?;
-            staged.write(
-                &s.secret,
-                vec![autofill::password_update(item.id, &password)],
-            )?;
+            s.write(vec![autofill::password_update(item.id, &password)])?;
             (item.id, false)
         } else {
             let mut fields = vec![
@@ -586,10 +592,9 @@ fn save_login(body: &Value) -> Result<Value> {
                 fields.push(("username".into(), Field::new(FieldType::Text, username)));
             }
             let name = Some(item_name(title)).filter(|t| !t.is_empty() && *t != page.domain);
-            let (id, _) = staged.create_item(&s.secret, "login", name, fields)?;
+            let id = s.mutate(|v, key| Ok(v.create_item(key, "login", name, fields)?.0))?;
             (id, true)
         };
-        s.commit(staged)?;
         generate::saved(&mut s.generated, input);
         Ok(json!({"type": "save", "ref": reference(&s.vault, id), "created": created}))
     })?;
@@ -697,7 +702,6 @@ fn edit_login(body: &Value) -> Result<Value> {
                 Some(_) => return Err(Error::Protocol("A login's fields are text")),
             }
         }
-        let mut staged = s.vault.clone();
         let (id, created) = if let Some(item) = existing {
             let id = item.id;
             let mut ops = vec![DataOp::name(id, Some(title.into()))];
@@ -715,23 +719,25 @@ fn edit_login(body: &Value) -> Result<Value> {
                     .map(|(name, value)| DataOp::set(id, name, value)),
             );
             ops.extend(items::tag_ops(&item, favorite, tags.as_deref()));
-            staged.write(&s.secret, ops)?;
+            s.write(ops)?;
             (id, false)
         } else {
             if password.is_empty() {
                 return Err(Error::Protocol("A new login needs a password"));
             }
-            let (id, _) = staged.create_item_with(
-                &s.secret,
-                "login",
-                Some(title.into()),
-                fields,
-                favorite.unwrap_or(false),
-                tags.unwrap_or_default(),
-            )?;
+            let id = s.mutate(|v, key| {
+                let (id, _) = v.create_item_with(
+                    key,
+                    "login",
+                    Some(title.into()),
+                    fields,
+                    favorite.unwrap_or(false),
+                    tags.unwrap_or_default(),
+                )?;
+                Ok(id)
+            })?;
             (id, true)
         };
-        s.commit(staged)?;
         Ok(json!({"type": "device-save", "ref": reference(&s.vault, id), "created": created}))
     })?;
     request_sync();
@@ -751,9 +757,7 @@ fn remove_device(body: &Value) -> Result<Value> {
         if !s.vault.is_member(&target) {
             return Err(Error::Protocol("That device isn't in the vault"));
         }
-        let mut staged = s.vault.clone();
-        staged.remove(&s.secret, target)?;
-        s.commit(staged)
+        s.mutate(|v, key| Ok(v.remove(key, target)?))
     })?;
     enforce_membership();
     request_sync();
@@ -767,9 +771,10 @@ fn rename_vault(body: &Value) -> Result<Value> {
         if name == s.vault.name() {
             return Ok(());
         }
-        let mut staged = s.vault.clone();
-        staged.rename(&s.secret, name)?;
-        s.commit(staged)
+        s.mutate(|v, key| {
+            v.rename(key, name)?;
+            Ok(())
+        })
     })?;
     request_sync();
     Ok(json!({"type": "device-rename", "ok": true}))

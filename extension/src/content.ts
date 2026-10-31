@@ -263,6 +263,13 @@ function start() {
     if (location.href !== lastUrl) scheduleScan()
   }, 1000)
   document.addEventListener("visibilitychange", scheduleScan)
+  // A box that slides open (Apple's password box) is drawn in full only once
+  // its transition ends, which no mutation says: scan again then.
+  const moved = (e: Event) => {
+    if (e.target instanceof HTMLInputElement || (e.target instanceof Element && e.target.querySelector("input"))) scheduleScan()
+  }
+  document.addEventListener("transitionend", moved, true)
+  document.addEventListener("animationend", moved, true)
   // Back from the back/forward cache: the background forgot this document's form.
   window.addEventListener("pageshow", (event) => {
     if (!event.persisted) return
