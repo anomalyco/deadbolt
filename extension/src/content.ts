@@ -4,7 +4,7 @@
 // submit tracking are ported from Foyer (github.com/R44VC0RP/foyer,
 // src/content.ts, by Ryan Vogel), without its sign-in recording.
 
-import { isVisible, scanPage, type Field } from "./content/detect"
+import { deliveredCode, isVisible, scanPage, type Field } from "./content/detect"
 import { SIGNIN_SETTING } from "./auth-state"
 import { authReport, SIGN_OUT, takeSignInAction } from "./content/auth-state"
 import { initFrameChecks } from "./content/embed"
@@ -15,6 +15,7 @@ import { initMenu, markSubmitted, noteSubmitGesture, refreshMenu, send, stepped 
 import { initLearn, learnScanned } from "./content/learn"
 import { pageFacts } from "./content/outcome"
 import { initPasskeyChannel } from "./content/passkeys"
+import { initProviderChain } from "./content/provider-chain"
 import { deepActiveElement, eventTarget, openRoots } from "./content/shadow"
 import { IDENTIFIER_ROLES, type SurfaceKind, type ToContent } from "./messages"
 
@@ -102,7 +103,11 @@ function scan() {
   void report(false)
   reportForms()
   learnScanned()
-  if (offerSignIn && isTop) void send({ type: "db:signin-check" })
+  if (offerSignIn && isTop) {
+    void send({ type: "db:signin-check" })
+    // A provider chain's next step, after an SPA change or a new document.
+    void send({ type: "db:provider-check" })
+  }
 
   // Autofocused login fields get the menu once the form is recognised.
   const active = deepActiveElement()
@@ -166,7 +171,7 @@ async function report(always: boolean) {
 }
 
 chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
-  if (message?.type === "db:fill" && message.automatic) submittedForm = undefined
+  if ((message?.type === "db:fill" && message.automatic) || message?.type === "db:provider-act") submittedForm = undefined
   if (message?.type === "db:auth-probe") {
     if (!isTop || !offerSignIn) return void respond(null)
     return void respond(authReport(state, message.fresh === true))
@@ -187,15 +192,7 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     const target = button?.getAttribute("formtarget") ?? form?.getAttribute("target") ?? ""
     // A remembered code step is not permission to send a TOTP into a prompt
     // that currently describes delivery by SMS or email.
-    const codeContext = form?.closest<HTMLElement>("dialog, [role=dialog], main, [role=main]") ?? document.body
-    const codePrompts = fields.some((f) => f.role === "otp") ? [
-      ...fields.flatMap((f) => [f.el.getAttribute("aria-label") ?? "", f.el.placeholder, ...Array.from(f.el.labels ?? []).map((label) => label.innerText)]),
-      document.title, ...Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, [role=heading]")).map((el) => el.innerText),
-      codeContext.innerText,
-    ] : []
-    // Check each specific hint before the surrounding copy. Oversized context
-    // is unknown, not permission to truncate away a delivery warning.
-    const deliveredCode = codePrompts.some((text) => text.length > 12000 || /\b(?:sms|text(?:ed| message)?|e-?mail|phone|mobile|inbox|sent|messages?|deliver(?:ed|y)?|call|voice|whatsapp|push|notifications?|approve)\b|@|[•*]{2,}|\+\d/i.test(text))
+    const delivered = deliveredCode(fields, form)
     // The fields passed the full check, paint included, as each was written;
     // this one is about submitting, so it leaves the costly paint check out.
     const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
@@ -203,7 +200,7 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
       !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
       form instanceof HTMLFormElement && fields.length > 0 &&
       !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el, null, false)) &&
-      !deliveredCode &&
+      !delivered &&
       new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
     respond(!!safe)
     if (safe) {
@@ -430,6 +427,15 @@ initPasskeyChannel(send)
 const state = { targets: () => fields, form: () => formId, kind: () => kind, rescan: refresh, formFields: () => formFields, formsForm: () => formsId }
 initMenu(state)
 initFrameChecks(state)
+// A provider sign-in chain's submit: what db:signin-submit does after its checks.
+initProviderChain(state, {
+  enabled: () => isTop && offerSignIn,
+  submit(form, button) {
+    captured()
+    stepSubmitted()
+    if (!form || submittedForm !== form) button.click()
+  },
+})
 initLearn()
 // On window, in the capture phase, from document_start: these run before any
 // listener a page script can add, so a page can't swap a value in first.

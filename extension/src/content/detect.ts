@@ -421,14 +421,14 @@ export function scanPage(roots = openRoots()): ScanResult {
 // Pages between sign-in steps: an authenticator picker, a CAPTCHA, a
 // "verify it's you" check. They have no form to fill, but the sign-in hasn't
 // finished.
-const STEP_PHRASES = [
+export const STEP_PHRASES = [
   "select an authenticator", "choose an authenticator", "verify with", "verify it s you", "confirm it s you", "it s really you",
   "choose a verification method", "choose how you want to sign in", "try another way", "2 step verification", "two step verification",
   "security check", "i m not a robot", "verify you are human", "are you a robot", "checking your browser", "complete the captcha",
   "signing you in", "redirecting",
 ].map((p) => words(p).trim())
-const CAPTCHA = ".g-recaptcha, .h-captcha, .cf-turnstile, iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[src*='challenges.cloudflare.com']"
-const BUSY = "[role=progressbar], [aria-busy=true]"
+export const CAPTCHA = ".g-recaptcha, .h-captcha, .cf-turnstile, iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[src*='challenges.cloudflare.com']"
+export const BUSY = "[role=progressbar], [aria-busy=true]"
 
 /**
  * Whether a page with no login form still looks like part of a sign-in: its
@@ -484,12 +484,15 @@ const WIDGETS: Record<string, string> = {
  * The site's own button for signing in with the provider, if one shows: a
  * provider widget, or a control whose text, label or data attributes say
  * "sign in with <provider>" and little else (see signInWithText). Deadbolt
- * only points at it; the user clicks it.
+ * points at it for the user to click. With `unique`, the one such control
+ * (innermost, so a wrapper and its button are one), or null when there are
+ * several: something Deadbolt clicks itself must not be a guess.
  */
-export function findProviderButton(p: { id: string; words: string[] }): Element | null {
+export function findProviderButton(p: { id: string; words: string[] }, unique = false): Element | null {
   const roots = openRoots()
   const widget = WIDGETS[p.id]
-  if (widget) for (const el of deepQueryAll(widget, roots)) if (isVisible(el)) return el
+  const found: Element[] = []
+  if (widget) for (const el of deepQueryAll(widget, roots)) if (isVisible(el)) { if (!unique) return el; found.push(el) }
   const candidates = deepQueryAll(BUTTONS, roots).slice(0, 600)
   let best: Element | null = null
   for (const el of candidates) {
@@ -500,24 +503,61 @@ export function findProviderButton(p: { id: string; words: string[] }): Element 
     const tagged = !!data && p.words.some((w) => data.split(/[\s_-]+/).includes(w)) && /(sign|log)\s?in|login|signin|sso|oauth|social|continue/.test(data)
     const providerOnly = el.getAttribute("data-provider")?.toLowerCase() === p.id
     if (!named && !tagged && !providerOnly) continue
+    found.push(el)
     // The innermost match: the button itself, not a wrapper around it.
     if (!best || best.contains(el)) best = el
   }
-  return best
+  return unique ? sole(found) : best
+}
+
+/** The one element left once wrappers of another candidate are dropped, or null for none or several. */
+export function sole(found: Element[]): Element | null {
+  const inner = [...new Set(found)].filter((el, _, all) => !all.some((other) => other !== el && el.contains(other)))
+  return inner.length === 1 ? inner[0] : null
 }
 
 /**
  * On the provider's account chooser, the tile for `account` (an email or
  * username), by the attribute Google's tiles carry it in. Never by text: a
- * page's own text could name anyone.
+ * page's own text could name anyone. With `unique`, null unless exactly one
+ * tile carries it.
  */
-export function findAccountTile(account: string): Element | null {
+export function findAccountTile(account: string, unique = false): Element | null {
   const want = account.trim().toLowerCase()
   if (!want) return null
   const roots = openRoots()
+  const found: Element[] = []
   for (const el of deepQueryAll("[data-identifier], [data-email]", roots)) {
     const id = (el.getAttribute("data-identifier") ?? el.getAttribute("data-email") ?? "").trim().toLowerCase()
-    if (id === want && isVisible(el)) return el.closest('[role=link], [role=button], li, a, button') ?? el
+    if (id !== want || !isVisible(el)) continue
+    const tile = el.closest('[role=link], [role=button], li, a, button') ?? el
+    if (!unique) return tile
+    found.push(tile)
   }
-  return null
+  const tiles = [...new Set(found)]
+  return tiles.length === 1 ? tiles[0] : null
+}
+
+/**
+ * Whether a code step's prompt describes a code delivered by SMS, email,
+ * a call or a push approval, or is too long to judge: a remembered or
+ * automatic code step never sends an authenticator code into such a prompt.
+ * Each specific hint is checked before the surrounding copy; oversized
+ * context is unknown, not permission to truncate away a delivery warning.
+ */
+export function deliveredCode(fields: Field[], form: HTMLFormElement | null | undefined, chipAccount?: string): boolean {
+  if (!fields.some((f) => f.role === "otp")) return false
+  const context = form?.closest<HTMLElement>("dialog, [role=dialog], main, [role=main]") ?? document.body
+  // `chipAccount`: on a provider's own account page whose account chip shows
+  // exactly the linked account (see provider-chain.ts chipAccount), a line of
+  // the surrounding copy that is that account and nothing else is its chip,
+  // not a delivery address. Labels, the title and headings stay strict.
+  const chip = chipAccount?.trim().toLowerCase()
+  const copy = (context?.innerText ?? "").split("\n").filter((line) => !chip || line.trim().toLowerCase() !== chip).join("\n")
+  const prompts = [
+    ...fields.flatMap((f) => [f.el.getAttribute("aria-label") ?? "", f.el.placeholder, ...Array.from(f.el.labels ?? []).map((label) => label.innerText)]),
+    document.title, ...Array.from(document.querySelectorAll<HTMLElement>("h1, h2, h3, [role=heading]")).map((el) => el.innerText),
+    copy,
+  ]
+  return prompts.some((text) => text.length > 12000 || /\b(?:sms|text(?:ed| message)?|e-?mail|phone|mobile|inbox|sent|messages?|deliver(?:ed|y)?|call|voice|whatsapp|push|notifications?|approve)\b|@|[•*]{2,}|\+\d/i.test(text))
 }

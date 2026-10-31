@@ -685,6 +685,38 @@ describe("user verification", () => {
     await preferred
     expect(h.requests.filter((r) => r.type === "passkey-create").map((r) => (r as { userVerification: string }).userVerification)).toEqual(["discouraged", "preferred"])
   })
+
+  /** A provider chain owning the page's call, as bg/provider-chain.ts hooks in: `[]` ends it. */
+  function chained(canVerify: boolean) {
+    h = passkeyHost(canVerify)
+    passkeys = new Passkeys(h.host, { openPopup: async () => {} })
+    const session = new AbortController()
+    const ended: boolean[] = []
+    passkeys.automaticSession = () => (session.signal.aborted ? undefined : session.signal)
+    passkeys.automatic = async (_target, keys) => {
+      if (session.signal.aborted) return undefined
+      if (!keys.length) { ended.push(true); session.abort(); return null }
+      return { ref: keys[0].ref, signal: session.signal }
+    }
+    return ended
+  }
+
+  test("a provider chain signs without a prompt only where the agent verifies the person", async () => {
+    const ended = chained(true)
+    expect(await call("get", pageSender(), 1, get({ userVerification: "preferred" }))).toMatchObject({ credential: { credentialId: "Y3JlZA" } })
+    expect(ended).toEqual([])
+    expect(passkeys.prompt(1)).toBeUndefined()
+  })
+
+  test.each([[false, "preferred"], [true, "discouraged"], [false, "discouraged"]] as const)("canVerify %p and %s: the chain ends and the usual prompt asks", async (canVerify, userVerification) => {
+    const ended = chained(canVerify)
+    const reply = call("get", pageSender(), 1, get({ userVerification }))
+    const prompt = await prompted()
+    expect(ended).toEqual([true])
+    expect(kinds()).not.toContain("passkey-get")
+    passkeys.choose(1, prompt.id, { action: "use", ref: REF })
+    expect(await reply).toMatchObject({ credential: { credentialId: "Y3JlZA" } })
+  })
 })
 
 describe("host replies", () => {

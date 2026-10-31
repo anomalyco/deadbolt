@@ -201,8 +201,10 @@ try {
       await until("site-submitted code dashboard", async () => new URL(codes.url()).pathname === "/dashboard")
       check(posts === 1, "a site that submits on fill receives exactly one code submission")
     } else {
-      await until("delivered-code prompt is filled", async () => (await codes.inputValue("#code")).length === 6)
-      await codes.waitForTimeout(800)
+      // A code the person brings (SMS or email) is theirs to type: never filled, never submitted.
+      await codes.waitForURL(`**/${mode}-code`)
+      await codes.waitForTimeout(2500)
+      check(await codes.inputValue("#code") === "", `a delivered ${mode} code prompt is left empty`)
       check(posts === 0, `a learned flow never auto-submits a ${mode} code prompt`)
     }
     await codes.close()

@@ -1,8 +1,9 @@
 // Page text never leaves this isolated world and is never compared with vault
 // data. Only boolean evidence and an opaque action handle go back to the
 // background. No cookies are inspected.
-import type { AuthReport, AuthSignals } from "../auth-state"
-import { controlText, isVisible, LOGIN_URL } from "./detect"
+import { authState, type AuthReport, type AuthSignals } from "../auth-state"
+import { isChooserPage, providerForPage } from "../signin"
+import { controlText, isVisible, LOGIN_URL, providerForControl } from "./detect"
 import { pageFacts } from "./outcome"
 import { deepQueryAll, openRoots } from "./shadow"
 import type { PageState } from "./inline"
@@ -41,14 +42,36 @@ function scan(state: PageState): { signals: AuthSignals; entry?: HTMLElement } {
   const deadline = performance.now() + 25
   const controls = deepQueryAll("a, button, [role=button], [role=menuitem], [aria-label], img[alt]", openRoots())
   let entry: HTMLElement | undefined
+  /** A visible "Continue with <known provider>" button: an entry, though not one the opaque go action clicks. */
+  let providerEntry = false
   for (const el of controls.slice(0, 400)) {
     if (performance.now() > deadline) { signals.uncertain = true; break }
     if (!signals.accountMenu && ACCOUNT.test(controlText(el).trim()) && shown(el)) signals.accountMenu = true
     if (!entry && safeEntry(el)) entry = el
+    if (!providerEntry && el.matches("a, button, [role=button]")) {
+      const p = providerForControl(el, controlText(el))
+      providerEntry = !!p && p !== "sso" && shown(el)
+    }
   }
   if (controls.length > 400) signals.uncertain = true
-  signals.entry = !!entry
+  // A known provider's own account chooser, by its tiles' attributes only: no username is read or compared.
+  const chooserPage = providerForPage(location.href)
+  const chooser = !!chooserPage && isChooserPage(chooserPage, location.href) &&
+    deepQueryAll("[data-identifier], [data-email]", openRoots()).some(shown)
+  // A dashboard's stray provider button is not a sign-in entry.
+  signals.entry = !!entry || (!signals.signOut && !signals.accountMenu && (providerEntry || chooser))
   return { signals, entry }
+}
+
+/**
+ * Positive signed-in evidence (a visible sign-out control) with no login
+ * form, challenge or uncertainty, from a fresh scan. An account menu is
+ * uncertainty, not success.
+ */
+export function signedInHint(state: PageState): boolean {
+  state.rescan()
+  const { signals } = scan(state)
+  return authState(signals) === "signed-in" && !signals.loginForm && !signals.challenge && !signals.uncertain
 }
 
 /**
@@ -62,7 +85,10 @@ export function authReport(state: PageState, fresh = false): AuthReport {
   if (!reuse) last = { key, at: Date.now(), ...scan(state) }
   const { signals, entry } = last!
   const result: AuthReport = { ...signals }
-  if (signals.loginForm || entry) {
+  // A provider button or chooser counts too: the offer's pick needs an
+  // action, and takeSignInAction still finds nothing to do with one that has
+  // neither a login form nor a sign-in entry element.
+  if (signals.loginForm || entry || signals.entry) {
     const id = crypto.randomUUID()
     if (actions.size >= 8) actions.delete(actions.keys().next().value!)
     actions.set(id, { ...(signals.loginForm ? {} : { element: entry }), form: state.form(), url: location.href, at: Date.now() })
