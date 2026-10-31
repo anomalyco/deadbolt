@@ -1141,6 +1141,146 @@ mod tests {
         Ok(())
     }
 
+    /// Add one origin-matched login to the already paired 10k Safari fixture.
+    /// Prepare offline first; serve only the replayed item on the ordinary network.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[ignore = "requires an explicitly named, paired synthetic Safari fixture"]
+    async fn paired_mobile_fixture_otp() -> Result<()> {
+        use anyhow::ensure;
+        use deadbolt_core::{Field, FieldType};
+        use std::collections::BTreeMap;
+
+        const TITLE: &str = "Synthetic OTP Safari";
+        let dir = std::path::PathBuf::from(
+            std::env::var_os("DEADBOLT_MOBILE_FIXTURE_DIR").context("set the fixture directory")?,
+        );
+        ensure!(
+            dir.is_absolute()
+                && dir.file_name().and_then(|s| s.to_str())
+                    == Some("deadbolt-mobile-fixture-10000"),
+            "expected an absolute, named 10k fixture directory"
+        );
+        let phone = DeviceId::from_bytes(session::unhex(
+            &crate::config::env("DEADBOLT_MOBILE_APPROVER_ID")
+                .context("set the paired phone ID")?,
+        )?);
+        let serve = match crate::config::env("DEADBOLT_MOBILE_OTP_STAGE").as_deref() {
+            Ok("prepare") => false,
+            Ok("serve") => true,
+            _ => bail!("set DEADBOLT_MOBILE_OTP_STAGE to prepare or serve"),
+        };
+        let open = || Loaded::open(&dir, b"synthetic-mobile-fixture-passphrase");
+        let fields = |username: String, password: String, url: String| {
+            BTreeMap::from([
+                ("username".into(), Field::new(FieldType::Text, username)),
+                ("password".into(), Field::new(FieldType::Secret, password)),
+                ("url".into(), Field::new(FieldType::Url, url)),
+                ("otp".into(), Field::new(FieldType::Otp, "JBSWY3DPEHPK3PXP")),
+            ])
+        };
+        let otp = fields(
+            "synthetic-otp@example.test".into(),
+            "synthetic-password-otp".into(),
+            "https://deadbolt-otp.i.vogel.dev".into(),
+        );
+        let inspect = |loaded: &Loaded| -> Result<_> {
+            ensure!(
+                loaded.meta.device_name == "Synthetic fixture CLI"
+                    && loaded.vaults.len() == 1
+                    && loaded.unavailable.is_empty(),
+                "wrong fixture identity"
+            );
+            let vault = loaded.resolve(None)?;
+            let v = loaded.vault(&vault);
+            ensure!(
+                v.name() == "mobile-fixture"
+                    && phone != loaded.id
+                    && v.members().count() == 2
+                    && v.is_member(&loaded.id)
+                    && v.is_member(&phone),
+                "expected the fixture CLI and named phone as the only members"
+            );
+            let mut numbered: HashSet<_> = (0..10_000).map(|n| format!("{n:05}")).collect();
+            let mut existing = None;
+            for item in v.iter_items() {
+                // The phone may also have synced its separate passkey fixture.
+                if item.kind == "passkey" {
+                    continue;
+                }
+                ensure!(item.kind == "login", "unexpected fixture item kind");
+                if item.name.as_deref() == Some(TITLE) {
+                    ensure!(
+                        item.fields == otp && existing.replace(item.id).is_none(),
+                        "wrong or duplicate Safari login"
+                    );
+                    continue;
+                }
+                let n = item
+                    .name
+                    .as_deref()
+                    .and_then(|n| n.strip_prefix("Synthetic account "))
+                    .context("unexpected login in synthetic fixture")?;
+                ensure!(
+                    numbered.remove(n)
+                        && item.fields
+                            == fields(
+                                format!("synthetic-{n}@example.test"),
+                                format!("synthetic-password-{n}"),
+                                format!("https://site-{n}.example.test")
+                            ),
+                    "wrong or duplicate numbered fixture login"
+                );
+            }
+            ensure!(numbered.is_empty(), "missing numbered fixture login");
+            Ok((vault, existing))
+        };
+        let mut loaded = open()?;
+        let (vault, existing) = inspect(&loaded)?;
+        if !serve {
+            let item = match existing {
+                Some(item) => item,
+                None => loaded.update(vault, |write, key| {
+                    Ok(write
+                        .create_item(key, "login", Some(TITLE.into()), otp.clone())?
+                        .0)
+                })?,
+            };
+            drop(loaded);
+            ensure!(
+                inspect(&open()?)? == (vault, Some(item)),
+                "signed login failed durable replay"
+            );
+            println!(
+                "OTP_FIXTURE_PREPARED item={item} logins=10001 appended={}",
+                existing.is_none()
+            );
+            return Ok(());
+        }
+        let item = existing.context("prepare the fixture offline before serving")?;
+        let runtime = tempfile::tempdir()?;
+        let mut paths = test_paths(runtime.path());
+        paths.data = dir;
+        let env = crate::config::Environment::load();
+        ensure!(
+            !env.local_net,
+            "unset DEADBOLT_NET=local for the real mobile peer"
+        );
+        let agent = Agent::new(paths, env.local_net, env.kdf);
+        let run = async {
+            agent.start(loaded, None).await?;
+            agent.wait_ready().await?;
+            println!("OTP_FIXTURE_SERVING item={item} logins=10001 seconds=300");
+            tokio::time::sleep(Duration::from_secs(300)).await;
+            Ok(())
+        };
+        let result = tokio::time::timeout(Duration::from_secs(360), run).await;
+        tokio::time::timeout(Duration::from_secs(10), agent.lock())
+            .await
+            .context("fixture shutdown timed out")?;
+        result.context("fixture serving timed out")?
+    }
+
     fn sync_op() -> Command {
         Command::SyncOnePassword {
             vault: None,
