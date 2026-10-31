@@ -25,9 +25,9 @@ blake3 = "1.8"
 deadbolt-client = { path = "../client" }
 deadbolt-core = { path = "../core" }
 # Rune is pinned to a rev and bumped deliberately.
-rune = { git = "https://github.com/anomalyco/rune", rev = "791971423cf6614aff061491e1f82e283dfc9f0e", features = ["native-file-dialog", "metal-backend"] }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "791971423cf6614aff061491e1f82e283dfc9f0e" }
-rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "791971423cf6614aff061491e1f82e283dfc9f0e" }
+rune = { git = "https://github.com/anomalyco/rune", rev = "b1457ab0d1f18cd77fa49da83155b280af2830f8", features = ["native-file-dialog", "metal-backend"] }
+rune-kit = { git = "https://github.com/anomalyco/rune", rev = "b1457ab0d1f18cd77fa49da83155b280af2830f8" }
+rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "b1457ab0d1f18cd77fa49da83155b280af2830f8" }
 rustix = { version = "1.1.5", default-features = false, features = ["system", "fs", "std"] }
 serde_json = "1.0.151"
 sha2 = "0.11"

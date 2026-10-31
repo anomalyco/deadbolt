@@ -4790,7 +4790,7 @@ dependencies = [
 [[package]]
 name = "rune"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=791971423cf6614aff061491e1f82e283dfc9f0e#791971423cf6614aff061491e1f82e283dfc9f0e"
+source = "git+https://github.com/anomalyco/rune?rev=b1457ab0d1f18cd77fa49da83155b280af2830f8#b1457ab0d1f18cd77fa49da83155b280af2830f8"
 dependencies = [
  "arboard",
  "blake3",
@@ -4859,7 +4859,7 @@ dependencies = [
 [[package]]
 name = "rune-kit"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=791971423cf6614aff061491e1f82e283dfc9f0e#791971423cf6614aff061491e1f82e283dfc9f0e"
+source = "git+https://github.com/anomalyco/rune?rev=b1457ab0d1f18cd77fa49da83155b280af2830f8#b1457ab0d1f18cd77fa49da83155b280af2830f8"
 dependencies = [
  "rune",
  "rune-motion",
@@ -4869,12 +4869,12 @@ dependencies = [
 [[package]]
 name = "rune-motion"
 version = "0.1.0"
-source = "git+https://github.com/anomalyco/rune?rev=791971423cf6614aff061491e1f82e283dfc9f0e#791971423cf6614aff061491e1f82e283dfc9f0e"
+source = "git+https://github.com/anomalyco/rune?rev=b1457ab0d1f18cd77fa49da83155b280af2830f8#b1457ab0d1f18cd77fa49da83155b280af2830f8"
 
 [[package]]
 name = "rune-staging"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=791971423cf6614aff061491e1f82e283dfc9f0e#791971423cf6614aff061491e1f82e283dfc9f0e"
+source = "git+https://github.com/anomalyco/rune?rev=b1457ab0d1f18cd77fa49da83155b280af2830f8#b1457ab0d1f18cd77fa49da83155b280af2830f8"
 dependencies = [
  "wgpu",
 ]
@@ -4882,7 +4882,7 @@ dependencies = [
 [[package]]
 name = "rune-theme-opencode"
 version = "0.0.1"
-source = "git+https://github.com/anomalyco/rune?rev=791971423cf6614aff061491e1f82e283dfc9f0e#791971423cf6614aff061491e1f82e283dfc9f0e"
+source = "git+https://github.com/anomalyco/rune?rev=b1457ab0d1f18cd77fa49da83155b280af2830f8#b1457ab0d1f18cd77fa49da83155b280af2830f8"
 dependencies = [
  "rune",
  "rune-kit",
