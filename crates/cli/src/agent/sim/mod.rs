@@ -1635,6 +1635,10 @@ async fn exhausted_author_does_not_block_removal_or_other_authors() {
 /// production frames separately with the same application handlers and stores,
 /// without sockets: exact file cap, concurrent aggregate overflow, and reload.
 #[tokio::test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "full-sized file coverage runs automatically in nightly release; use --ignored in debug"
+)]
 async fn full_size_files_sync_and_concurrent_files_survive_reload() {
     use crate::protocol::FieldInput;
     use deadbolt_core::item::{MAX_FILE, file_parts, file_value, files_size};
