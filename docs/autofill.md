@@ -521,6 +521,20 @@ not running without sending hello, which would start the agent again.
   hand, and the field opens no menu, unless they press ↓ or click it again.
   So a failed sign-in that comes back with an unknown username doesn't
   offer the whole list on its password field.
+- **Logins with no username.** A login saved without a username (a key or
+  a PIN imported as a login, say) can't sign in to a form that asks for
+  one: on a form with a username box it isn't offered while another login
+  has a username, and anywhere else it comes last.
+- **Moving on from a field.** Enter in a login field goes on with its form,
+  so the list for it goes, and a rescan doesn't bring it back on that field
+  while it keeps focus (as after typing a password by hand). Focus moving
+  on to anything else in the page, by the user or by the page's own script
+  (an identifier-first sign-in focusing the password box it just opened),
+  puts the list for the field it left away. So the list never stays over
+  the box the user is about to type into. In a frame, while a sign-in
+  session waits for a password or code step, that field doesn't open the
+  list on focus alone (a click or ↓ still does): the session fills it, and
+  the list would keep the frame's fields from being measured.
 - **Passwords masked with CSS.** A text box the page masks with
   `-webkit-text-security` (to keep the browser's own password handling
   away) is a password box like any other: it gets the password, and the
@@ -531,8 +545,11 @@ not running without sending hello, which would start the agent again.
   page (no `<form>`). On `https://accounts.google.com` only (a provider marked
   `pageAccount` in `signin.ts`, exact host, over https), with no username of
   the user's own, the content script sends that account as `pageAccount`
-  (the visible chip first, then the hidden box; an email address or plain
-  username of at most 500 characters). The background takes it only when
+  (the visible chip first, then the hidden box, then the form's own username
+  box; an email address or plain username of at most 500 characters).
+  Apple's sign-in frame (`https://idmsa.apple.com`, App Store Connect's and
+  Apple Account's) keeps the account box above the password box it opens,
+  holding the Apple Account it remembered, and counts the same way. The background takes it only when
   the asking frame's origin is that exact origin, and uses it after the
   linked sign-in-with account and the user's own username. It only narrows:
   when it names logins, the menu shows those; when it names none, the menu
@@ -622,8 +639,17 @@ not running without sending hello, which would start the agent again.
     fields' boxes are cut to what shows separately. (A
     reading of the field itself, as the popup takes, says no on Apple's
     widget: its label floats over its own field.) Typing in the
-    field, clicking elsewhere in the frame, scrolling the field elsewhere,
-    or esc there (which the top page can't see) puts the menu away. Esc on
+    field, clicking elsewhere in the frame, focus moving on in it, Enter,
+    or esc there (which the top page can't see) puts the menu away. When
+    the field moves or changes size inside its frame (a scroll there, the
+    frame resized, a hint above it, the box around it opening), which the
+    top page can't see either, the frame says where it shows now; the
+    background carries that box up with the checks it had when the menu
+    opened, and the menu follows it there and waits its dwell again, or
+    goes if it no longer shows. Placing the menu (opening it, or following
+    the field) doesn't take Deadbolt's own surface in the top page for a
+    cover over the field: it may be the list the field is moving under, or
+    the one for the field before. A pick's checks still count it. Esc on
     an open menu ends the sign-in session, as in the top page; once a pick
     has filled, it says nothing of it. A frame never gets a generated password.
   - **The popup.** Any same-site frame's form also fills from the popup,

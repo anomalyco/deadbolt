@@ -772,9 +772,9 @@ export function fillable(el: FormControl, ours?: Element | null, paint = true): 
  * rotation or skew) and has to be what's under the middle of each field.
  * With `unsandboxed`, a frame element with a `sandbox` attribute doesn't show
  * anything either: a login menu never serves a sandboxed frame (see
- * sameSiteTop).
+ * sameSiteTop). `ours`, Deadbolt's own surface, doesn't count as over a field.
  */
-export function throughFrame(el: HTMLElement, boxes: Box[], unsandboxed = false): Box[] | null {
+export function throughFrame(el: HTMLElement, boxes: Box[], unsandboxed = false, ours?: Element | null): Box[] | null {
   if (!el.isConnected || (unsandboxed && el.hasAttribute("sandbox"))) return null
   const r = el.getBoundingClientRect()
   if (r.width < MIN_SIDE || r.height < MIN_SIDE || hiddenByStyle(el)) return null
@@ -784,7 +784,7 @@ export function throughFrame(el: HTMLElement, boxes: Box[], unsandboxed = false)
   const style = getComputedStyle(el)
   const offset = { x: r.left + el.clientLeft + (parseFloat(style.paddingLeft) || 0), y: r.top + el.clientTop + (parseFloat(style.paddingTop) || 0) }
   const root = el.getRootNode() as Document | ShadowRoot
-  return placeBoxes(boxes, offset, clip, (x, y) => root.elementFromPoint?.(x, y) === el)
+  return placeBoxes(boxes, offset, clip, (x, y) => (ours ? root.elementsFromPoint?.(x, y).find((h) => h !== ours) : root.elementFromPoint?.(x, y)) === el)
 }
 
 /** Moves each box by `offset` and cuts it to `clip`: most of it has to show, and `hits` its middle. */
