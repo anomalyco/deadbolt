@@ -222,7 +222,15 @@ not running without sending hello, which would start the agent again.
   when the field is there), because content outside is inert or not drawn.
   If the page puts something in the top layer after the surface (a popover,
   a modal dialog, full screen) or hides its popover, the surface goes back
-  on top and waits its 500 ms again. It does this at most three times, then
+  on top and waits its 500 ms again. The host's `beforetoggle` and `toggle`
+  are heard on the window in the capture phase, registered at
+  document_start before any page script, so a page listener can't stop
+  them reaching Deadbolt. A closed host isn't drawn at all: a rule in its
+  closed shadow root, `:host(:not(:popover-open)) { display: none
+  !important }`, beats the inline `display` (important declarations from a
+  shadow tree win over the light tree's). Out of the top layer it would
+  otherwise be an ordinary fixed box that an ancestor's transform can move,
+  with `<body>` transformed back so the page looks unchanged. It does this at most three times, then
   closes. A modal dialog or full screen that the surface isn't inside closes
   it. Each frame it hit-tests five points of its own box, and anything else
   there (such as a popover in a shadow root it can't watch) counts as
@@ -303,14 +311,58 @@ not running without sending hello, which would start the agent again.
   physical/CSS ratio, since compensating zoom with size can keep physical
   pixels unchanged. A ratio change restarts the dwell even if IO v2 says
   visible.
+- **Late placement changes.** Before restoring the host's CSS, the content
+  script checks its rect against the last intended placement. A mutation
+  observer also watches the host and its ancestors: external host style/class
+  writes (including a write immediately restored in the same task), reparenting,
+  and ancestor writes that change placement or inherited zoom invalidate a
+  geometry generation and restart the half-second wait. Unrelated ancestor
+  class changes don't interrupt a pick. Only the single synchronous mutation
+  from our own style write is excluded; pending page mutations are processed
+  first. Repeated late rAF
+  or ResizeObserver restyles therefore never earn a settled pick, even when
+  they change only position or apply a proportional transform scale-up.
+  The private channel carries the generation and the latched verdict. After
+  confirmation, the frame asks the content script to check that generation
+  and the current, **unrestored** rect again. A missing answer fails closed.
+  It also requires the host to be an open popover. This applies to pointer
+  and keyboard picks, including passkey rows, save offers and universal
+  sign-in. It doesn't infer the viewport origin from
+  `window.screenX/Y` (those describe the browser window, not its content
+  viewport), or mix CSS pixels with device pixels at browser zoom.
+- **Painted placement.** An `IntersectionObserver` on the host, rooted at the
+  document with its root margin shrunk to the written rect ± 2 px and a
+  threshold of 1, fires when the browser lays the host out leaving that box
+  or coming back, in its own pass after every script in the frame. The root
+  margin is only the trigger: each entry is judged by the host's own
+  `boundingClientRect` in it against the written rect ± 2 px, so a viewport
+  the page changed after Deadbolt's frame (a root scrollbar toggled through
+  an attribute) still yields evidence. Every entry in a delivery counts, not
+  just the last: a page that starves the event loop makes Chromium render
+  the next frame (with the host back in place) before it delivers the
+  displaced one, so one delivery can hold both. Any entry drawn elsewhere
+  latches "displaced", bumps the geometry generation and restarts the wait;
+  the last entry says whether it's in place now, and the pick verdict
+  requires it. Coming back in place is a move too, so a pick waits another
+  500 ms. The observer is remade whenever the written rect or the viewport
+  size changes, so following a scrolled or reflowed field doesn't count;
+  records still pending on the old observer are judged first.
+  The menu restarts its own wait for every geometry message except one
+  where only "visible" came back: the content script already restarted it
+  when the verdict changed, so recovery takes 500 ms, not twice that.
 - **Chromium timing.** A deeper page ResizeObserver can change the host after
   its observer ran; Chromium defers that shallower observation. The child's
   ratio-change defense relies on Chromium syncing the frame at both our
   forced layout and the scaled paint. The absolute physical-width reference
   above does not require that alternation. These checks are tested in
-  headless Chromium, not a claim about other engines. Host size observers
-  do not see position-only or transform restyles; those remain a separate
-  [follow-up (#148)](https://github.com/anomalyco/deadbolt/issues/148).
+  headless Chromium, not a claim about other engines. Size observers alone
+  do not see position-only or transform restyles; mutation generations,
+  the unrestored placement check and painted placement above cover those
+  changes independently. An ancestor zoom applied through an attribute and
+  a stylesheet rule (no style or class mutation) is left to the size
+  observers. In headless Chromium, a click during a continuous hide/show loop
+  went to the host element rather than its frame, and a short loop restarted
+  the frame's own visibility wait; neither is relied on.
 - **A press takes no focus.** A pointer press in the menu leaves focus where
   it was, in the page's field (the menu cancels the press's default
   action). The page never sees its field blur at the moment of the press,
@@ -380,8 +432,63 @@ not running without sending hello, which would start the agent again.
   containment clips like overflow; and a scrolling or clipping box clips
   only what it holds (an absolutely positioned field escapes a box between
   it and its containing block, Intercom's sign-in; a fixed one every box up
-  to a transformed or contained one). The centre of what shows is
-  hit-tested too, and only the centre. Split one-time
+  to a transformed or contained one). A mask anywhere up the tree (any
+  `mask-image`, `-webkit-mask` or mask border) hides the field, and so
+  does a blend mode other than `normal` and a filter that can make it
+  unreadable: a blur over 1 px, `brightness()` under 0.2 or over 5,
+  `contrast()` under 0.2 or over 5, `invert()` near half, an SVG `url()`
+  filter or any function not known to be safe. Filters that keep a page
+  readable are fine: `opacity()` (counted with opacity), `drop-shadow()`,
+  `hue-rotate()`, `saturate()`, `sepia()`, `grayscale()` and `invert()`
+  (Dark Reader's filter mode puts `invert(1) hue-rotate(180deg)` on
+  `<html>`). The centre of what shows is hit-tested too, and only the
+  centre: what the user would click there must be the field or its label,
+  and nothing may paint over it there. Hit tests skip `pointer-events:
+  none` and `inert` elements, so for that one synchronous check every
+  element of the page and its shadow roots is made to take part: a
+  stylesheet with its rules in a cascade layer declared before any of the
+  page's (whose `!important` beats the page's own, in a layer, on `:host`
+  or not), `inert` lifted, and an inline `!important` on anything over the
+  point that still lets clicks through; all of it is put back before the
+  check returns. No node is added where the page's selectors could see it
+  (`:first-child`, `* + *` and `:empty` would match differently and move
+  things): the probe's sheet is adopted, first in a root with no sheets of
+  its own, else last with its layer declared at the top of the root's
+  first sheet (`@layer deadbolt-probe;`, deleted again). Only when that
+  first sheet is another origin's does a style element go first instead,
+  the document's in `<html>`; if the page's CSP refuses it, it isn't tried
+  again on that page, and every element's `::before` and `::after` that
+  still lets clicks through and draws counts as a cover. Each element then
+  stacked above the field's centre, and each one inside a shadow host
+  there, must draw nothing: no opaque background colour or image, backdrop
+  filter, inset shadow, border at that point, glyphs of its own text over
+  the point (drawn by their fill, a stroke or a text-shadow), opaque
+  `::before`/`::after`, graphic, form control or SVG shape, unless it's
+  faded out. The field's own label counts like anything else (a floating
+  label's text beside the centre is fine). An ancestor listed above the
+  field draws over it through a pseudo-element, or, when the field sits
+  under it by a negative z-index, through its background too. A
+  transparent outline that lets clicks through (Material's) doesn't hide
+  it. Paint the browser never hit-tests is looked for across the whole
+  page: an outline reaching the centre (the field's own and its ancestors'
+  too, since outlines draw over content), and, from anything but the field
+  and its ancestors, an outer box-shadow's solid part, a text-shadow, a
+  `drop-shadow()` filter, a border image outset or a `-webkit-box-reflect`
+  mirror whose reach covers it, and any SVG `url()` filter at all (it can
+  flood or move paint anywhere). Anything over the point that still can't
+  be hit and draws counts as a cover, as does a page with 5,000 shadow
+  roots or more. On a login page of 1,000 to 2,000 elements the check
+  takes under 10 ms; on a 16,000 element page about 100 ms, so the check
+  before submitting a sign-in Deadbolt filled leaves it out (the fields
+  passed it as they were written). Known gap: a `::before` or `::after`
+  held at `pointer-events: none` by a running transition (issue #167). An
+  Intersection Observer v2 reading isn't required for top-page fields: it
+  counts any overlap (a floating label, an icon in the box), opacity or
+  filter as hidden, and read 19 of 53 visible, uncovered sign-in fields on
+  real sites as not visible (Google, Stripe, Chase, Facebook). These checks run when
+  the fields are approved and again right before each write, after the
+  page's focus and keydown handlers have run, for a successor input too.
+  Split one-time
   code boxes fill only as one whole group within one form. One exception
   to "the field it was found as": some pages re-render their form on every
   input event, with new elements. When a single field (never a box of a
@@ -461,6 +568,20 @@ not running without sending hello, which would start the agent again.
   hand, and the field opens no menu, unless they press ↓ or click it again.
   So a failed sign-in that comes back with an unknown username doesn't
   offer the whole list on its password field.
+- **Logins with no username.** A login saved without a username (a key or
+  a PIN imported as a login, say) can't sign in to a form that asks for
+  one: on a form with a username box it isn't offered while another login
+  has a username, and anywhere else it comes last.
+- **Moving on from a field.** Enter in a login field goes on with its form,
+  so the list for it goes, and a rescan doesn't bring it back on that field
+  while it keeps focus (as after typing a password by hand). Focus moving
+  on to anything else in the page, by the user or by the page's own script
+  (an identifier-first sign-in focusing the password box it just opened),
+  puts the list for the field it left away. So the list never stays over
+  the box the user is about to type into. In a frame, while a sign-in
+  session waits for a password or code step, that field doesn't open the
+  list on focus alone (a click or ↓ still does): the session fills it, and
+  the list would keep the frame's fields from being measured.
 - **Passwords masked with CSS.** A text box the page masks with
   `-webkit-text-security` (to keep the browser's own password handling
   away) is a password box like any other: it gets the password, and the
@@ -471,8 +592,11 @@ not running without sending hello, which would start the agent again.
   page (no `<form>`). On `https://accounts.google.com` only (a provider marked
   `pageAccount` in `signin.ts`, exact host, over https), with no username of
   the user's own, the content script sends that account as `pageAccount`
-  (the visible chip first, then the hidden box; an email address or plain
-  username of at most 500 characters). The background takes it only when
+  (the visible chip first, then the hidden box, then the form's own username
+  box; an email address or plain username of at most 500 characters).
+  Apple's sign-in frame (`https://idmsa.apple.com`, App Store Connect's and
+  Apple Account's) keeps the account box above the password box it opens,
+  holding the Apple Account it remembered, and counts the same way. The background takes it only when
   the asking frame's origin is that exact origin, and uses it after the
   linked sign-in-with account and the user's own username. It only narrows:
   when it names logins, the menu shows those; when it names none, the menu
@@ -562,8 +686,17 @@ not running without sending hello, which would start the agent again.
     fields' boxes are cut to what shows separately. (A
     reading of the field itself, as the popup takes, says no on Apple's
     widget: its label floats over its own field.) Typing in the
-    field, clicking elsewhere in the frame, scrolling the field elsewhere,
-    or esc there (which the top page can't see) puts the menu away. Esc on
+    field, clicking elsewhere in the frame, focus moving on in it, Enter,
+    or esc there (which the top page can't see) puts the menu away. When
+    the field moves or changes size inside its frame (a scroll there, the
+    frame resized, a hint above it, the box around it opening), which the
+    top page can't see either, the frame says where it shows now; the
+    background carries that box up with the checks it had when the menu
+    opened, and the menu follows it there and waits its dwell again, or
+    goes if it no longer shows. Placing the menu (opening it, or following
+    the field) doesn't take Deadbolt's own surface in the top page for a
+    cover over the field: it may be the list the field is moving under, or
+    the one for the field before. A pick's checks still count it. Esc on
     an open menu ends the sign-in session, as in the top page; once a pick
     has filled, it says nothing of it. A frame never gets a generated password.
   - **The popup.** Any same-site frame's form also fills from the popup,
@@ -966,6 +1099,11 @@ These rules follow Foyer's (see Prior art), so the two behave alike:
 - **A login's URLs** are all its fields of type url: `url`, plus `url-2`,
   `url-3`… that imports keep. Any one matching is enough. A list shows only
   the URLs that match.
+- Site lookup reads each live login's **winning URL fields** before materializing the
+  item. Losing, removed or non-URL fields cannot admit a login. Ranking and the
+  independent site check immediately before fill are unchanged. In memory a
+  field register points at the item's history record; the signed entries and
+  every superseded or conflicting change are retained. Nothing is compacted.
 - **Every vault** is searched. A `ref` is `<vault id>:<item id>` (64 and 32
   lowercase hex digits), so it names one login without ambiguity. New logins
   go to the default vault.

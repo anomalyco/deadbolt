@@ -558,6 +558,7 @@ async fn find_item(
         vault,
         query: vec![id],
         otp: true,
+        ssh_private: true,
         files: Vec::new(),
         deleted: false,
     };

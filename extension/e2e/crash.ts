@@ -39,8 +39,8 @@ async function request(page: Page, body: DeviceCommand) {
 }
 const state = async (page: Page) => (await request(page, { type: "device-status" })).status.state
 
-/** Attaches to the offscreen document, then auto-attaches to find its vault worker, and traps it. */
-async function trapWorker(cdp: CDPSession, offscreen: string) {
+/** Inject a fault into the dedicated worker owned by this offscreen document. */
+async function inject(cdp: CDPSession, offscreen: string, expression: string) {
   const { targetInfos } = await cdp.send("Target.getTargets")
   const target = targetInfos.filter(t => t.url === offscreen)
   check(target.length === 1, "exactly one offscreen vault owner")
@@ -58,10 +58,21 @@ async function trapWorker(cdp: CDPSession, offscreen: string) {
     await cdp.send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id: 1, method: "Target.setAutoAttach", params: { autoAttach: true, waitForDebuggerOnStart: false, flatten: false } }) })
     const workerSession = await worker
     check(workerSession, "live dedicated vault worker attached")
-    // queueMicrotask: the trap escapes as an uncaught RuntimeError, as a wasm bug would.
-    await cdp.send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id: 2, method: "Target.sendMessageToTarget", params: { sessionId: workerSession, message: JSON.stringify({ id: 1, method: "Runtime.evaluate", params: {
-      expression: `queueMicrotask(() => new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from(${JSON.stringify(trap)}))).exports.trap())`,
-    } }) } }) })
+    if (receive) cdp.off("Target.receivedMessageFromTarget", receive)
+    const evaluated = bounded("worker fault injection", new Promise<void>((resolve, reject) => {
+      receive = event => {
+        if (event.sessionId !== sessionId) return
+        const outer = JSON.parse(event.message)
+        if (outer.method !== "Target.receivedMessageFromTarget" || outer.params.sessionId !== workerSession) return
+        const inner = JSON.parse(outer.params.message)
+        if (inner.id !== 1) return
+        if (inner.error || inner.result?.exceptionDetails) reject(new Error("Worker fault injection failed"))
+        else resolve()
+      }
+      cdp.on("Target.receivedMessageFromTarget", receive)
+    }))
+    await cdp.send("Target.sendMessageToTarget", { sessionId, message: JSON.stringify({ id: 2, method: "Target.sendMessageToTarget", params: { sessionId: workerSession, message: JSON.stringify({ id: 1, method: "Runtime.evaluate", params: { expression } }) } }) })
+    await evaluated
   } finally {
     if (receive) cdp.off("Target.receivedMessageFromTarget", receive)
     await cdp.send("Target.detachFromTarget", { sessionId }).catch(() => {})
@@ -93,7 +104,8 @@ try {
     for (const preset of ["comfortable", "relaxed", "strict"] as LockPreset[]) {
       await request(page, { type: "device-preset", preset })
       check(await state(page) === "ready", `${preset}: vault ready before the trap`)
-      await trapWorker(cdp, `chrome-extension://${id}/offscreen.html`)
+      // Throw outside the CDP evaluation as a background wasm task would.
+      await inject(cdp, `chrome-extension://${id}/offscreen.html`, `setTimeout(() => new WebAssembly.Instance(new WebAssembly.Module(Uint8Array.from(${JSON.stringify(trap)}))).exports.trap(), 0)`)
       await page.waitForFunction(async () => (await chrome.runtime.sendMessage({ type: "db:device", command: { type: "device-status" } })).status.state === "locked", undefined, { timeout: 10_000 })
       check(true, `${preset}: a real wasm trap locks the vault`)
       const listed = await command(page, { type: "device-items" })
@@ -109,8 +121,48 @@ try {
       const shown = await request(page, { type: "device-secret", ref, ...(preset === "strict" ? { passphrase } : {}) })
       check(shown.reply.value === value, `${preset}: secret value survives the trap`)
     }
+    // Fail file growth while log.insert allocates the document's pages, before
+    // append_batch calls commit. The staged item must not leak into the list.
+    await inject(cdp, `chrome-extension://${id}/offscreen.html`, `(() => {
+      const proto = FileSystemSyncAccessHandle.prototype, truncate = proto.truncate;
+      proto.truncate = function(size) {
+        if (size > this.getSize()) {
+          self.growthRefused = true;
+          throw new DOMException('Synthetic quota', 'QuotaExceededError');
+        }
+        return truncate.call(this, size);
+      };
+    })()`)
+    const saved = await command(page, { type: "device-item-save", kind: "document", fields: [{ name: "file", value: "fixture.bin\n" + "A".repeat(4 << 20) }] })
+    check(!saved.ok && saved.code === "failed" && await state(page) === "ready", "a pre-commit allocation failure is a storage error, not a lock")
+    await inject(cdp, `chrome-extension://${id}/offscreen.html`, `if (!self.growthRefused) throw new Error('growth fault not exercised')`)
+    const unchanged = async () => {
+      const rows = (await request(page, { type: "device-items" })).reply.items as ItemSummary[]
+      return rows.length === 1 && rows[0]?.ref === ref && rows[0]?.title === "Crash fixture"
+    }
+    check(await unchanged(), "the old live view remains readable after the failed insert")
+    await request(page, { type: "device-lock" })
+    await request(page, { type: "device-unlock", passphrase })
+    check(await unchanged(), "reopen confirms the failed insert was not saved")
+
+    // Lose the ack after redb's second (root switch) flush actually completes.
+    // The saved edit is durable but the worker must not serve the prior view.
+    await inject(cdp, `chrome-extension://${id}/offscreen.html`, `(() => {
+      const proto = FileSystemSyncAccessHandle.prototype, flush = proto.flush;
+      let count = 0;
+      proto.flush = function() {
+        flush.call(this);
+        if (++count === 2) throw new DOMException('Synthetic lost flush ack', 'UnknownError');
+      };
+    })()`)
+    const edited = await command(page, { type: "device-item-save", ref, fields: [], name: "Saved despite lost ack" })
+    check(!edited.ok && await state(page) === "locked", "an unconfirmed signed append ends the worker")
+    const refused = await command(page, { type: "device-items" })
+    check(!refused.ok && refused.code === "locked", "the stale live view cannot serve reads")
+    await request(page, { type: "device-unlock", passphrase })
+    check(((await request(page, { type: "device-items" })).reply.items as ItemSummary[]).some(i => i.ref === ref && i.title === "Saved despite lost ack"), "unlock recovers the committed edit without replay")
   } finally { await cdp.detach().catch(() => {}) }
-  console.log("PASS: real wasm trap in the vault worker locks, refuses reads, and unlocks with item and secret intact under comfortable, relaxed and strict")
+  console.log("PASS: wasm traps and an unconfirmed signed append lock the worker; unlock recovers the durable vault")
 } finally {
   await context.close()
   await rm(profile, { recursive: true, force: true })

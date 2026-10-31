@@ -130,8 +130,12 @@ const PILL_MAX = { width: 260, height: 32 }
 let dismissedFor: Element | null = null
 /** In a frame: the field the background last opened the menu for in the top page, which can't see the frame's events (see db:menu-away). */
 let framedFor: Element | null = null
-/** Where that field was in this frame's viewport then: the frame scrolling it elsewhere puts the menu away (see onFrameScroll). */
-let framedAt: { left: number; top: number } | null = null
+/** Where that field was in this frame's viewport, and how big: the menu follows it when that changes (see onFrameScroll). */
+let framedAt: Rect | null = null
+/** A new box for that field is on its way to the top page (see onFrameScroll). */
+let framedMoving = false
+/** Which menu for a field here that is: a move's answer for an earlier one says nothing of the one open now. */
+let framedSeq = 0
 
 /** In a frame: the menu the background opened in the top page for one of its fields goes (or went), with `tell`, by the user's doing here. */
 function framedGone(tell: boolean, dismissed = false) {
@@ -142,13 +146,30 @@ function framedGone(tell: boolean, dismissed = false) {
 
 /**
  * In a frame: a scroll, or the frame's own layout changing (it was resized,
- * say), that moved the field the menu is for in this frame. The top page's
- * menu can't follow it, so it goes.
+ * a hint came in above the field, the box around it opened), that moved the
+ * field the menu is for in this frame, or changed its size. The top page
+ * can't see that, so the frame says where the field shows now, one move at
+ * a time; the background checks it through every frame above, and the menu
+ * follows it there or goes (see Autofill.menuMove).
  */
 function onFrameScroll() {
-  if (!framedFor || !framedAt) return
-  const r = framedFor.getBoundingClientRect()
-  if (Math.abs(r.left - framedAt.left) > 2 || Math.abs(r.top - framedAt.top) > 2) framedGone(true)
+  if (!framedFor || !framedAt || framedMoving) return
+  const el = framedFor
+  const r = el.getBoundingClientRect()
+  const at = { left: r.left, top: r.top, width: r.width, height: r.height }
+  if ((["left", "top", "width", "height"] as const).every((k) => Math.abs(at[k] - framedAt![k]) <= 2)) return
+  const box = visibleBox(el)
+  if (!box) return framedGone(true)
+  framedMoving = true
+  const seq = framedSeq
+  void send<boolean>({ type: "db:menu-move", box }).then((moved) => {
+    if (seq !== framedSeq) return
+    framedMoving = false
+    if (framedFor !== el) return
+    if (moved === true) framedAt = at
+    // The background closed it already.
+    else framedGone(false)
+  })
 }
 
 let framedRaf = 0
@@ -163,8 +184,8 @@ function watchFramed() {
 }
 /**
  * Fields whose typing narrowed the menu to nothing (or that the user typed a
- * password into by hand): the menu doesn't come back on focus until the field
- * is cleared, clicked again, or ↓.
+ * password into by hand, or pressed Enter in): the menu doesn't come back on
+ * focus until the field is cleared, clicked again, or ↓.
  */
 const quiet = new WeakSet<Element>()
 /**
@@ -183,6 +204,20 @@ let lastRect = ""
 let lastGeometry = ""
 let scaleVisible = false
 let scaleObserver: ResizeObserver | null = null
+let placementObserver: MutationObserver | null = null
+let placementVersion = 0
+let placementChangedAt = -Infinity
+let placementAncestors: Node[] = []
+/** Paint-time evidence (see watchPaint): the host was last drawn where it was written. */
+let paintObserver: IntersectionObserver | null = null
+/** The host and the written rect the paint observer was made for. */
+let paintFor: { box: HTMLElement; at: Rect } | null = null
+let paintKey = ""
+let paintSeen = true
+/** Whether the scale observer has given a verdict yet: a later return to "visible" is a move back. */
+let scaleKnown = false
+/** The last host toggle handled: its own listener and the window's both hear it. */
+let lastToggle: Event | null = null
 /** Where a frame's field is in this page now (see anchorBox). */
 function boxNow(): DOMRect | null {
   if (!anchorBox) return null
@@ -391,11 +426,134 @@ function retarget(duration: number) {
   lastTarget = to
 }
 
+/** Never let a restoring write erase evidence of a late page restyle. */
+function placementChanged() {
+  placementVersion++
+  placementChangedAt = performance.now()
+  tellMoved()
+  tellGeometry()
+}
+
+function placed(): boolean {
+  if (!host || !written) return false
+  const r = host.getBoundingClientRect()
+  return (["left", "top", "width", "height"] as const).every((k) => Math.abs(r[k] - written![k]) <= 2)
+}
+
+function placementChanges(records: MutationRecord[]) {
+  if (!host || !records.length) return
+  const changed = records.some((r) => r.target === host || [...r.addedNodes, ...r.removedNodes].some((n) => within(host, n)))
+  // Ancestor transforms don't move a top-layer box, but inherited zoom can.
+  // Read it in the mutation microtask, before a later task can restore it;
+  // unrelated theme/scroll-lock classes mustn't keep a dialog menu unsettled.
+  const zoom = (host as HTMLElement & { currentCSSZoom?: number }).currentCSSZoom
+  if (changed || (!held && (!placed() || typeof zoom !== "number" || Math.abs(zoom - 1) >= 0.001))) placementChanged()
+}
+
+/** Watch only the rendered ancestry, not unrelated style churn in the page. */
+function watchPlacement() {
+  if (!host || !placementObserver) return
+  const ancestors: Node[] = []
+  for (let n: Node | null = host; n; n = n.parentNode ?? (n instanceof ShadowRoot ? n.host : null)) ancestors.push(n)
+  if (ancestors.length === placementAncestors.length && ancestors.every((n, i) => n === placementAncestors[i])) return
+  placementChanges(placementObserver.takeRecords())
+  placementObserver.disconnect()
+  placementAncestors = ancestors
+  for (const n of ancestors) placementObserver.observe(n, { attributes: true, attributeFilter: ["style", "class"], childList: true })
+}
+
+function placementSafe(): boolean {
+  return performance.now() - placementChangedAt >= 500
+}
+
+/**
+ * Where the host was painted, from the browser's own intersection pass, which
+ * runs after every script in the frame. The observer's root is the written
+ * rect ± 2 px, so the host leaving it or coming back triggers an entry; each
+ * entry is then judged by the host's own rect in it against the written
+ * rect. Whatever draws the host elsewhere (a late restyle, an ancestor's
+ * transform, a way not listed here) fails that, and a pick waits until it's
+ * back and has sat still again. Remade whenever the written rect or the
+ * viewport changes, so following a scrolled or reflowed field isn't taken
+ * for a displacement; a viewport the page changed after our frame (a
+ * scrollbar) only moves the trigger, not the judgement.
+ */
+function watchPaint() {
+  if (!host || !written || held || closing) {
+    stopPaint()
+    return
+  }
+  const view = document.scrollingElement ?? document.documentElement
+  const vw = view.clientWidth
+  const vh = view.clientHeight
+  const w = written
+  const key = [w.left, w.top, w.width, w.height, vw, vh].map((n) => Math.round(n * 4)).join()
+  if (key === paintKey) return
+  stopPaint()
+  paintKey = key
+  const box = host
+  const root = { left: w.left - 2, top: w.top - 2, right: w.left + w.width + 2, bottom: w.top + w.height + 2 }
+  const margin = [root.top, vw - root.right, vh - root.bottom, root.left].map((n) => `${-n}px`).join(" ")
+  const observer = new IntersectionObserver((entries) => observer === paintObserver && judgePaint(entries), { root: document, rootMargin: margin, threshold: 1 })
+  paintObserver = observer
+  paintFor = { box, at: { ...w } }
+  observer.observe(box)
+}
+
+/** Judges what the old observer still holds, then drops it. */
+function stopPaint() {
+  if (paintObserver) judgePaint(paintObserver.takeRecords())
+  paintObserver?.disconnect()
+  paintObserver = null
+  paintFor = null
+  paintKey = ""
+}
+
+/**
+ * Every entry is evidence, not just the last: a page can hold its
+ * notifications back until a later frame has put the host back, so one
+ * delivery may carry a displaced paint and then a good one. Any entry drawn
+ * elsewhere restarts the wait; the last one says whether it's in place now.
+ */
+function judgePaint(entries: IntersectionObserverEntry[]) {
+  if (!entries.length || !paintFor || host !== paintFor.box || held || closing) return
+  const at = paintFor.at
+  const near = (a: number, b: number) => Math.abs(a - b) <= 2
+  const verdicts = entries.map(({ boundingClientRect: r }) => near(r.left, at.left) && near(r.top, at.top) && near(r.width, at.width) && near(r.height, at.height))
+  const seen = verdicts[verdicts.length - 1]
+  const moved = verdicts.includes(false) || seen !== paintSeen
+  paintSeen = seen
+  // Drawn elsewhere, or back in place: either way it moved, and waits again.
+  if (moved) placementChanged()
+}
+
+/**
+ * The host hidden by the page, or by the browser for a modal dialog or full
+ * screen: that counts as a raise like any other, and a move. Heard on the
+ * host and, from document_start, on the window in the capture phase, before
+ * any listener a page can add there, so the page can't stop it reaching here.
+ */
+function onHostToggle(e: Event) {
+  const box = host
+  if (!box || e.target !== box || !e.isTrusted || e === lastToggle || raising || held || (e as ToggleEvent).newState !== "closed") return
+  lastToggle = e
+  // `toggle` comes a task later: if a raise already put it back, nothing to do.
+  if (e.type === "toggle" && box.matches(":popover-open")) return
+  queueMicrotask(() => {
+    if (host !== box) return
+    raise()
+    if (host === box) placementChanged()
+  })
+}
+
 function position() {
   if (!host) return
   // A pill's field re-rendered by the page as it filled: the pill moves to the box now in its place.
   if (anchor instanceof HTMLInputElement && !anchor.isConnected && mode === "pill" && anchorOwner) anchor = successor({ el: anchor, owner: anchorOwner }) ?? anchor
-  if ((anchor && !anchor.isConnected) || !host.isConnected) return closeMenu()
+  if ((anchor && !anchor.isConnected) || !host.isConnected || (!held && !host.matches(":popover-open"))) return closeMenu()
+  placementChanges(placementObserver?.takeRecords() ?? [])
+  watchPlacement()
+  if (written && !held && !placed()) placementChanged()
   const to = targetRect()
   if (!to) return closeMenu()
   lastTarget = to
@@ -420,6 +578,18 @@ function position() {
     "z-index": "2147483647",
     ...(closing ? { "pointer-events": "none" } : {}),
   })
+  // Only this synchronous style assignment is ours. Do not discard additional
+  // records: a page may upgrade the random host to a custom element and run
+  // an attributeChangedCallback synchronously inside the assignment.
+  const own = placementObserver?.takeRecords() ?? []
+  if (own.length !== 1 || own[0].target !== host || own[0].attributeName !== "style") placementChanges(own)
+  watchPaint()
+  // Publish recovery once, not every sub-pixel step of a size spring. The
+  // resize observer publishes actual size changes as before.
+  if (placementChangedAt !== -Infinity && placementSafe()) {
+    placementChangedAt = -Infinity
+    tellGeometry()
+  }
   // The menu only takes a pick once it has sat still for a moment (see
   // Dwell). From inside its frame it can't tell it was moved, so say so: the
   // page can restyle the host, and the field it follows can move.
@@ -443,7 +613,7 @@ function tellGeometry() {
   if (!port || !written) return
   // Keep fractional width: rounding it before multiplying by DPR would
   // inflate the physical-pixel tolerance on high-density displays.
-  const geometry = { width: written.width, height: Math.round(written.height), dpr: devicePixelRatio, visible: scaleVisible }
+  const geometry = { width: written.width, height: Math.round(written.height), dpr: devicePixelRatio, visible: scaleVisible && placementSafe() && paintSeen, version: placementVersion }
   const key = JSON.stringify(geometry)
   if (key === lastGeometry) return
   lastGeometry = key
@@ -511,11 +681,16 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   box.setAttribute("popover", "manual")
   // Hidden by the page, or by the browser for a modal dialog or full screen:
   // that counts as a raise like any other.
-  box.addEventListener("beforetoggle", (e) => {
-    if (e.isTrusted && (e as ToggleEvent).newState === "closed" && !raising) queueMicrotask(() => host === box && raise())
-  })
+  box.addEventListener("beforetoggle", onHostToggle)
   markOwnHost(box)
   const root = box.attachShadow({ mode: "closed" })
+  // A closed popover isn't drawn, whatever its inline display says:
+  // important declarations from a shadow tree beat the light tree's, inline
+  // ones included. Out of the top layer the host would be an ordinary fixed
+  // box, which an ancestor's transform can move (see watchPaint).
+  const sheet = new CSSStyleSheet()
+  sheet.replaceSync(":host(:not(:popover-open)) { display: none !important }")
+  root.adoptedStyleSheets = [sheet]
   frame = document.createElement("iframe")
   // No token in the URL: the menu asks for it (see onMenuReady).
   frame.src = chrome.runtime.getURL("menu.html")
@@ -526,6 +701,8 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
   root.append(frame)
   ;((el && modalAround(el)) ?? document.documentElement).append(box)
   show(box)
+  placementObserver = new MutationObserver(placementChanges)
+  watchPlacement()
   position()
   // ResizeObserver runs after all rAF callbacks, including a page's later
   // restyle. Observe physical pixels so zoom alone triggers it. Keep this
@@ -538,9 +715,14 @@ function openMenu(el: FormControl | null, t: string, rows: number, as: SurfaceMo
     const r = box.getBoundingClientRect()
     const zoom = (box as HTMLElement & { currentCSSZoom?: number }).currentCSSZoom
     const matches = (a: number, b: number) => Math.abs(a - b) <= 2
+    const was = scaleVisible
     scaleVisible =
       typeof zoom === "number" && Math.abs(zoom - 1) < 0.001 &&
       matches(r.left, written.left) && matches(r.top, written.top) && matches(r.width, written.width) && matches(r.height, written.height)
+    // Back to its own size after a scaled paint: that's a move too (the
+    // menu doesn't restart its wait for "visible" coming back alone).
+    if (scaleKnown && !was && scaleVisible) placementChanged()
+    scaleKnown = true
     tellGeometry()
   })
   scaleObserver.observe(box, { box: "device-pixel-content-box" })
@@ -700,9 +882,21 @@ export const menuHost = (): HTMLElement | null => host
 
 export function closeMenu(refocus = false, dismissed = false) {
   cancelAnimationFrame(raf)
+  placementObserver?.disconnect()
+  placementObserver = null
+  placementAncestors = []
+  placementVersion = 0
+  placementChangedAt = -Infinity
+  paintObserver?.disconnect()
+  paintObserver = null
+  paintFor = null
+  paintKey = ""
+  paintSeen = true
+  lastToggle = null
   scaleObserver?.disconnect()
   scaleObserver = null
   scaleVisible = false
+  scaleKnown = false
   reveal = null
   clearTimeout(revealTimer)
   if (token) void send({ type: "db:menu-close", token, dismissed })
@@ -831,7 +1025,7 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     // On a provider's own password step (accounts.google.com), the account
     // it shows narrows the menu too; the background checks the host again
     // and never hides the menu for it.
-    const onPage = later && !named ? pageAccount(el) : undefined
+    const onPage = later && !named ? pageAccount(el, box) : undefined
     // A pattern outside what generate.ts reads, or lengths that can't meet: no generated password.
     const rules = generating ? fieldRules(state.targets()) : undefined
     const reply =
@@ -842,7 +1036,9 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
     else if (!isTop) {
       framedFor = el
       const r = el.getBoundingClientRect()
-      framedAt = { left: r.left, top: r.top }
+      framedAt = { left: r.left, top: r.top, width: r.width, height: r.height }
+      framedMoving = false
+      framedSeq++
       watchFramed()
     }
     else if (reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)
@@ -852,17 +1048,20 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
 /**
  * The account a provider's own password step shows, on a provider host whose
  * page-set account is trusted (see isAccountPage): its visible account chip,
- * else the hidden username box beside the field. Google's: a chip with
+ * else the hidden username box beside the field, else the form's own
+ * username box (`box`) the page filled in itself. Google's: a chip with
  * `data-profile-identifier`, and `<input name="identifier" id="hiddenEmail">`
  * in the same `<main>` as the password field (the page has no `<form>`).
+ * Apple's (idmsa.apple.com): the account box stays above the password box,
+ * holding the Apple Account it remembered.
  */
-function pageAccount(field: HTMLInputElement): string | undefined {
+function pageAccount(field: HTMLInputElement, box?: HTMLInputElement): string | undefined {
   if (!isAccountPage(location.href)) return undefined
   const chip = [...document.querySelectorAll("[data-profile-identifier]")].find((c) => c.getClientRects().length > 0)
   const shown = pageAccountOf(chip?.textContent?.slice(0, 501))
   if (shown) return shown
   const hidden = (field.closest("main") ?? document).querySelector<HTMLInputElement>('input[name="identifier"], input#hiddenEmail')
-  return pageAccountOf(hidden?.value)
+  return pageAccountOf(hidden?.value) ?? pageAccountOf(box?.value.slice(0, 501))
 }
 
 /**
@@ -895,6 +1094,13 @@ const isControl = (el: unknown): el is FormControl => el instanceof HTMLInputEle
 
 function onFocusIn(event: FocusEvent) {
   const el = eventTarget(event)
+  // Focus moved on from the menu's field, by the user or the page's own
+  // script (an identifier-first sign-in focusing the password box it just
+  // opened below): the list for the field it left goes, so it never sits
+  // over the field the user is about to type into. Not for focus going into
+  // the menu itself (↓), or into the frame its field is in.
+  if (!isTop && framedFor && el !== framedFor) framedGone(true)
+  if (isTop && host && mode === "accounts" && !closing && el !== anchor && !event.composedPath().includes(host) && (anchor ? true : isControl(el))) closeMenu()
   if (!isControl(el)) return
   const clicked = recentGesture() && (lastPointer === el || (lastPointer instanceof HTMLLabelElement && lastPointer.control === el))
   void maybeOpen(el, clicked ? "click" : "focus")
@@ -915,10 +1121,12 @@ function onInput(event: Event) {
     quiet.delete(el)
     byHand.delete(formOf(el))
   }
-  // In a frame, the menu in the top page can't narrow as the user types: it goes.
+  // In a frame, the menu in the top page can't narrow as the user types: it
+  // goes, and stays away while they type (the rescan their typing sets off
+  // would otherwise bring the whole list back) until the field is cleared,
+  // clicked again, or ↓.
   if (!isTop && el === framedFor) {
-    const role = targetFor(el)?.role
-    if (role && !IDENTIFIER_ROLES.includes(role)) quiet.add(el)
+    quiet.add(el)
     return framedGone(true)
   }
   if (!host || mode !== "accounts" || el !== anchor || closing) return
@@ -983,10 +1191,17 @@ function onKeyDown(event: KeyboardEvent) {
   lastGestureAt = Date.now()
   lastPointer = null
   const target = eventTarget(event)
+  // Enter in a login field goes on with its form (Continue, sign in). The
+  // page's next step can open right below it, so a rescan doesn't bring the
+  // list back on the field while it still has focus.
+  if (event.key === "Enter" && !event.isComposing && target instanceof HTMLInputElement && targetFor(target)) quiet.add(target)
   if (!isTop && event.key === "Escape" && framedFor && target === framedFor) {
     dismissedFor = framedFor
     return framedGone(true, true)
   }
+  // Enter in the field goes on with the form (Continue, sign in): the list
+  // isn't what the user is answering, and the next step may open under it.
+  if (!isTop && event.key === "Enter" && !event.isComposing && framedFor && target === framedFor) return framedGone(true)
   if (!host) {
     // ↓ in a field that has no menu (dismissed, or focused from script) asks for one.
     if (event.key === "ArrowDown" && target instanceof HTMLInputElement && (targetFor(target) || state.formFields().some((f) => f.el === target))) {
@@ -1015,6 +1230,10 @@ function onKeyDown(event: KeyboardEvent) {
     event.stopPropagation()
     dismissedFor = anchor
     closeMenu(false, true)
+  } else if (event.key === "Enter" && !event.isComposing) {
+    // Enter in the field submits its form (Continue, sign in): the list goes
+    // with it, not left over the step that opens next.
+    closeMenu()
   } else if (event.key === "ArrowDown") {
     event.preventDefault()
     port?.postMessage({ type: "db:menu-enter" })
@@ -1139,7 +1358,14 @@ function roundTo(radius: number) {
 let typedSinceOpen = false
 
 /** The frame, over the private channel: its pill or offer is done, or how many rows match what was typed. */
-function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown }>) {
+function onPortMessage(e: MessageEvent<{ type?: unknown; travel?: unknown; count?: unknown; radius?: unknown; version?: unknown; check?: unknown }>) {
+  if (e.data?.type === "db:menu-check") {
+    placementChanges(placementObserver?.takeRecords() ?? [])
+    // Do not call position(): check the page's layout, not a restored one.
+    const ok = !!host?.matches(":popover-open") && e.data.version === placementVersion && placementSafe() && scaleVisible && paintSeen && placed()
+    port?.postMessage({ type: "db:menu-checked", check: e.data.check, ok })
+    return
+  }
   if (e.data?.type === "db:surface-done") return leave(e.data.travel === true)
   // The offer changing shape (pill, card, dot): its corners follow its frame's size.
   if (e.data?.type === "db:radius" && mode === "save" && frame && typeof e.data.radius === "number") return roundTo(Math.min(Math.max(e.data.radius, 0), 20))
@@ -1224,6 +1450,9 @@ function onFullscreen() {
 
 export function initMenu(page: PageState) {
   state = page
+  // Before any page script: see onHostToggle.
+  window.addEventListener("beforetoggle", onHostToggle, true)
+  window.addEventListener("toggle", onHostToggle, true)
   if (isTop) {
     document.addEventListener("beforetoggle", onBeforeToggle, true)
     addEventListener("resize", onResize, true)
@@ -1269,6 +1498,8 @@ export function initMenu(page: PageState) {
         return true
       case "db:open-at":
         return void respond(openAt(String(message.token), Number(message.rows), message.box, message.mode === "pill" ? "pill" : "accounts", message.captioned === true))
+      case "db:move-at":
+        return void respond(moveAt(String(message.token), message.box))
       case "db:hold":
         // Only the surface the asker owns. Asked about another, it says
         // whether nothing of Deadbolt's shows, which the measuring needs.
@@ -1373,6 +1604,20 @@ function openAt(t: string, rows: number, box: Box, as: "accounts" | "pill", capt
   if (as === "accounts" && !(Number.isFinite(rows) && rows >= 1)) return false
   if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
   openMenu(null, t, as === "pill" ? 0 : rows, as, box, captioned)
+  return true
+}
+
+/**
+ * The frame's field the open list is for moved inside its frame: it now
+ * shows at `box` in this page (see Autofill.menuMove). The list follows it
+ * there, and waits its dwell again before it takes a pick, as for any move.
+ * Top page only.
+ */
+function moveAt(t: string, box: Box): boolean {
+  if (!isTop || !host || t !== token || mode !== "accounts" || closing || !anchorBox) return false
+  if (!box || ![box.left, box.top, box.right, box.bottom].every(Number.isFinite)) return false
+  anchorBox = { box, x: scrollX, y: scrollY, frame: frameAround(box) }
+  placementChanged()
   return true
 }
 

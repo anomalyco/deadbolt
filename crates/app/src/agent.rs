@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use deadbolt_client::export::ExportError;
 use deadbolt_client::protocol::{
     ActivityEntry, AppAction, Change, Code, ErrorCode, FieldInput, FindingKind, HealthReport,
-    ImportReport, ItemInfo, MirrorReport, Status,
+    ImportReport, ItemInfo, MirrorReport, SshKeyKind, Status,
 };
 use deadbolt_client::{Error, Launch, Paths};
 use rune::Waker;
@@ -42,6 +42,7 @@ pub enum Job {
     Unlock(Zeroizing<String>),
     UnlockBiometric,
     TouchIdSet(bool),
+    SshAgentSet(bool),
     Lock,
     /// The list; `generation` tells a reply from before a lock from a current one.
     List {
@@ -147,6 +148,18 @@ pub enum Job {
         enabled: bool,
         seq: u64,
     },
+    /// A new SSH key pair from the agent's generator.
+    SshGenerate {
+        kind: SshKeyKind,
+        comment: Option<String>,
+        seq: u64,
+    },
+    /// Reads an SSH private key file and normalizes it in the agent.
+    SshImportFile {
+        path: PathBuf,
+        comment: Option<String>,
+        seq: u64,
+    },
     /// The newest Activity entries (`activity::Activity`).
     Activity {
         seq: u64,
@@ -186,6 +199,10 @@ pub enum Done {
     /// failed so the lock screen sees if the biometric slot was reset.
     UnlockedBiometric(Result<Status, (Failure, Option<Box<Status>>)>),
     TouchIdSet {
+        enabled: bool,
+        result: Result<Status, (Failure, Option<Box<Status>>)>,
+    },
+    SshAgentSet {
         enabled: bool,
         result: Result<Status, (Failure, Option<Box<Status>>)>,
     },
@@ -235,6 +252,10 @@ pub enum Done {
     Generated {
         seq: u64,
         result: Result<Zeroizing<String>, Failure>,
+    },
+    SshGenerated {
+        seq: u64,
+        result: Result<crate::ssh::SshGeneratedKey, Failure>,
     },
     /// A file saved (its name), or why not.
     FileSaved(Result<String, Failure>),

@@ -64,7 +64,7 @@ pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 23;
+pub const PROTOCOL_VERSION: u32 = 24;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -180,6 +180,8 @@ pub enum Command {
         vault: Option<String>,
         query: Vec<String>,
         otp: bool,
+        #[serde(default)]
+        ssh_private: bool,
         #[serde(default)]
         files: Vec<String>,
         #[serde(default)]
@@ -644,6 +646,36 @@ pub enum Command {
     BreachChecksSet {
         enabled: bool,
     },
+    /// Turns the SSH agent listener (`ssh.sock`) on or off in `config.toml`
+    /// and binds or drops the socket immediately. Replies `done`.
+    SshAgentSet {
+        enabled: bool,
+    },
+    /// Generates a new SSH key pair (`ed25519` or `ecdsa-p256`) inside the
+    /// agent without writing to a vault yet; needs no unlock. Replies
+    /// `ssh-generated`.
+    SshGenerate {
+        kind: SshKeyKind,
+        comment: Option<String>,
+    },
+    /// Parses and normalizes an imported SSH private key file (decrypting with
+    /// `passphrase` when encrypted) into unencrypted OpenSSH PEM and derived
+    /// metadata without writing to a vault yet; needs no unlock. Replies
+    /// `ssh-generated`.
+    SshInspect {
+        private_key: Secret,
+        passphrase: Option<Secret>,
+        comment: Option<String>,
+    },
+    /// Signs `data` (standard base64 of raw bytes) in the OpenSSH `SSHSIG`
+    /// format (`ssh-keygen -Y sign`) using the vault's SSH key matching
+    /// `public_key`, approving with Touch ID (and unlocking with the same tap
+    /// when `touch_id_ready` is true). Replies `ssh-signature`.
+    SshSign {
+        public_key: String,
+        namespace: String,
+        data: String,
+    },
 }
 
 impl Command {
@@ -711,6 +743,13 @@ pub struct OneTimeCodeIdentity {
     pub label: String,
     pub record_id: String,
     pub rank: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SshKeyKind {
+    Ed25519,
+    EcdsaP256,
 }
 
 /// What resolved secrets are for: a command's environment (`deadbolt
@@ -1425,6 +1464,17 @@ pub enum Reply {
         verified: bool,
         identities_hash: String,
     },
+    SshGenerated {
+        private_key: Secret,
+        public_key: String,
+        fingerprint: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        comment: Option<String>,
+    },
+    SshSignature {
+        /// PEM-armored `-----BEGIN SSH SIGNATURE-----` block.
+        signature: String,
+    },
 }
 
 /// A Deadbolt Send share, as its sender sees it. Never its secrets.
@@ -1564,6 +1614,12 @@ pub struct Status {
     /// Whether Touch ID is enabled on this store, but its enrolled slot was
     /// reset (expired after 14 days, fingerprint set changed, or passphrase changed).
     pub touch_id_reset: bool,
+    /// Whether the SSH agent (`ssh.sock`) is turned on in config.toml.
+    #[serde(default)]
+    pub ssh_agent: bool,
+    /// Where SSH clients reach this agent's SSH socket when `ssh_agent` is on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ssh_socket: Option<String>,
     /// How the agent sees the client asking (`deadbolt whoami`).
     pub caller: CallerInfo,
 }

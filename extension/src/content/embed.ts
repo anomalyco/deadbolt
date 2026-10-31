@@ -120,7 +120,9 @@ export function initFrameChecks(state: PageState) {
         if (message.unsandboxed === true && self.origin === "null") return void respond(null)
         announcements.from(message.nonce, ANNOUNCE_WAIT_MS).then(async (source) => {
           const el = source ? deepQueryAll<HTMLIFrameElement>("iframe, frame").find((f) => f.contentWindow === source) : undefined
-          const boxes = el ? throughFrame(el, message.boxes, message.unsandboxed === true) : null
+          // Only placing a surface (`place`, never a fill's check): Deadbolt's own surface here isn't a cover.
+          const ours = message.place === true && message.track !== true ? menuHost() : null
+          const boxes = el ? throughFrame(el, message.boxes, message.unsandboxed === true, ours) : null
           // The frame element may be taller than the viewport: unobscured and on screen is enough (the fields' boxes are cut to what shows).
           respond(reply(boxes && el && message.track === true && !(await visibleNow(1000, el, true)) ? null : boxes))
         }, () => respond(null))

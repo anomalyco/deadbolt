@@ -32,8 +32,15 @@ async fn sync_exchanges_missing_entries_both_ways() {
     assert_eq!(b.store.sorted(), ["a1", "a2", "b1", "m1"]);
     // Order chosen by the sender is preserved.
     assert_eq!(
-        b.store.received.lock().unwrap().last().unwrap(),
-        &vec![b"a1".to_vec(), b"a2".to_vec()]
+        b.store
+            .received
+            .lock()
+            .unwrap()
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>(),
+        vec![b"a1".to_vec(), b"a2".to_vec()]
     );
 
     // Nothing left to exchange; also works on a reused connection.

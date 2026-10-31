@@ -62,7 +62,7 @@ let pressedAt = -Infinity
 const dwell = new Dwell(500)
 watchVisibility(dwell)
 /** The intended viewport and the parent's post-layout scale verdict, over its private channel. */
-let geometry: { width: number; height: number; dpr: number; visible: boolean } | null = null
+let geometry: { width: number; height: number; dpr: number; visible: boolean; version: number } | null = null
 let pressedScale = false
 
 // A page's ResizeObserver on a deeper element can change the host after
@@ -105,8 +105,29 @@ function scaleMatches(): boolean {
     Math.abs(paintedPixels - geometry.width * geometry.dpr) <= 2
 }
 
+let placementCheck = 0
+const placementChecks = new Map<number, (ok: boolean) => void>()
+
+/** A fresh answer from the parent, without letting it restore layout first. */
+function confirmPlacement(version: number): Promise<boolean> {
+  if (!port) return Promise.resolve(false)
+  const check = ++placementCheck
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => finish(false), 1000)
+    const finish = (ok: boolean) => {
+      clearTimeout(timer)
+      placementChecks.delete(check)
+      resolve(ok)
+    }
+    placementChecks.set(check, finish)
+    port!.postMessage({ type: "db:menu-check", check, version })
+  })
+}
+
 async function confirmScale(at: number): Promise<boolean> {
-  return pressedScale && scaleMatches() && (await confirmPick(dwell, at)) && scaleMatches()
+  const version = geometry?.version
+  if (version === undefined || !pressedScale || !scaleMatches() || !(await confirmPick(dwell, at))) return false
+  return (await confirmPlacement(version)) && geometry?.version === version && scaleMatches() && dwell.settled(at)
 }
 
 /** Whether the keyboard may pick: see Entry. */
@@ -1194,11 +1215,17 @@ async function claim(offered: string, origin: string, channel: MessagePort | und
   if (channel) {
     port = channel
     channel.onmessage = (e: MessageEvent<{ type?: unknown }>) => {
-      const data = e.data as { type?: unknown; query?: unknown; near?: unknown; geometry?: typeof geometry }
-      if (data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
+      const data = e.data as { type?: unknown; query?: unknown; near?: unknown; geometry?: typeof geometry; check?: number; ok?: boolean }
+      if (data?.type === "db:menu-checked" && typeof data.check === "number") placementChecks.get(data.check)?.(data.ok === true)
+      else if (data?.type === "db:menu-enter") entry.offered(performance.now(), document.hasFocus())
       else if (data?.type === "db:menu-geometry" && data.geometry) {
-        geometry = data.geometry
-        dwell.moved(performance.now())
+        const was = geometry
+        const now = data.geometry
+        geometry = now
+        // Only "visible" coming back isn't a move: the parent restarted the
+        // wait (a new version) when it changed, not again on recovery.
+        const back = !!was && now.visible && !was.visible && was.width === now.width && was.height === now.height && was.dpr === now.dpr && was.version === now.version
+        if (!back) dwell.moved(performance.now())
       } else if (data?.type === "db:fold") onFold(e.data as Parameters<typeof onFold>[0])
       else if (data?.type === "db:filter" && typeof data.query === "string") narrow(data.query)
       // The pointer near the offer pauses its bar, as being on it does.

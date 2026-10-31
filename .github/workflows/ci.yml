@@ -35,6 +35,8 @@ jobs:
       - run: cargo +stable fmt --all -- --check
       - run: cargo +stable clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo +stable test --workspace --locked
+      - if: runner.os == 'Linux'
+        run: cargo +stable check -p deadbolt-net --features private-relay-fixture --locked
 
   # Both browser Rust clients: Send and the standalone extension device.
   wasm:
@@ -128,11 +130,13 @@ jobs:
   # Hidden and covered fields, form swaps, opaque origins, value swaps,
   # navigating mid-fill and the back/forward cache, in headless Chromium with
   # the fake host (extension/e2e): the fast gate before the full run below.
+  # One build, then the 11 scenarios split over two concurrent processes
+  # (`e2e:parallel --jobs 2`, the `--shard` slices of `--only security`).
   extension-security:
     name: Browser extension security e2e
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: extension
@@ -143,7 +147,7 @@ jobs:
           bun-version: 1.4.2
       - run: bun install --frozen-lockfile
       - run: bunx playwright-core install --with-deps chromium
-      - run: bun run e2e --only security
+      - run: bun run e2e:parallel --jobs 2 --only security
 
   # The whole e2e suite, stills and the passkey run against a real
   # `deadbolt browser-host` included, in four balanced slices

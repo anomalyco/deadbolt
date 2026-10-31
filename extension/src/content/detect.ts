@@ -384,8 +384,7 @@ function codePageText(form: HTMLFormElement | null): string {
   return words([document.title, ...heads, innerText(form), innerText(document.body).slice(0, 3000)].join(" \n "))
 }
 
-export function scanPage(): ScanResult {
-  const roots = openRoots()
+export function scanPage(roots = openRoots()): ScanResult {
   const { fields: all, otpBoxes } = collectFields(roots)
   const form = primaryForm(all)
   // Judge and report the primary form only, so a sign-up form or newsletter

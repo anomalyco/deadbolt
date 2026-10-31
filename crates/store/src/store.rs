@@ -206,12 +206,18 @@ impl Unlocked {
     }
 
     /// Appends several entries in one durable transaction. Returns how many
-    /// were added. Either all entries are written or none are.
+    /// were added. Either all entries are written or none are, but a commit
+    /// error cannot tell the caller which. On [`Error::AppendUncertain`], stop
+    /// using derived state and reopen: even an error from the final sync may
+    /// leave the new root durable. Errors before commit do not append entries.
     ///
     /// Deduplication and hash verification happen in `deadbolt-core::Vault`
     /// before entries are staged for persistence, so the store keeps only the
     /// sealed entry bytes in append order.
-    pub fn append_batch<'a>(&self, entries: impl IntoIterator<Item = &'a [u8]>) -> Result<usize> {
+    pub fn append_batch<B: AsRef<[u8]>>(
+        &self,
+        entries: impl IntoIterator<Item = B>,
+    ) -> Result<usize> {
         let txn = begin_write(&self.db)?;
         let added = {
             let mut header = txn.open_table(HEADER)?;
@@ -223,7 +229,7 @@ impl Unlocked {
             }
             let mut len = start;
             for bytes in entries {
-                let row = crypto::seal(&self.keys.data, &log_aad(len), &[bytes])?;
+                let row = crypto::seal(&self.keys.data, &log_aad(len), &[bytes.as_ref()])?;
                 log.insert(len, row.as_slice())?;
                 len += 1;
             }
@@ -233,7 +239,7 @@ impl Unlocked {
             len - start
         };
         if added > 0 {
-            txn.commit()?;
+            txn.commit().map_err(Error::AppendUncertain)?;
         } else {
             txn.abort()?;
         }

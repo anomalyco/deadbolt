@@ -73,6 +73,7 @@ impl Device {
             unavailable: Default::default(),
             changes: Default::default(),
             health,
+            append_uncertain: false,
         })));
         let member_state = state.clone();
         let gate = MembershipGate::new(Arc::new(move |peer: &PeerId| {
@@ -169,6 +170,8 @@ fn report_problem(
     None
 }
 impl SyncHandler for Handler {
+    type ReceiveState = ();
+
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         let guard = self.state.lock().unwrap();
         sync::hello(
@@ -178,17 +181,34 @@ impl SyncHandler for Handler {
         )
         .map_err(|e| e.to_string().into())
     }
-    async fn missing_for(&self, peer: PeerId, heads: Vec<u8>) -> Result<Vec<Blob>, HandlerError> {
+    async fn missing_for(
+        &self,
+        peer: PeerId,
+        heads: Vec<u8>,
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         let mut guard = self.state.lock().unwrap();
-        sync::missing_for(
+        let history = sync::missing_for(
             guard.as_mut().ok_or("locked")?,
             &DeviceId::from_bytes(peer),
             &heads,
             self.ready.load(Ordering::SeqCst),
         )
-        .map_err(|e| e.to_string().into())
+        .map_err(|e| -> HandlerError { e.to_string().into() })?;
+        Ok(history.outgoing(|h| {
+            let g = self.state.lock().unwrap();
+            Ok(h.next(
+                g.as_ref().ok_or("locked")?,
+                self.ready.load(Ordering::SeqCst),
+            )?)
+        }))
     }
-    async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        peer: PeerId,
+        entries: Vec<Blob>,
+        _: &mut (),
+        _: bool,
+    ) -> Result<(), HandlerError> {
         let mut guard = self.state.lock().unwrap();
         let s = guard.as_mut().ok_or("locked")?;
         // Local writes and pairing record changes too; judge only this batch.
@@ -223,16 +243,23 @@ impl Inviter for Invitation<'_> {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
-        self.device
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+        let history = self
+            .device
             .with(|s| {
                 pairing::welcome(s, self.vault, DeviceId::from_bytes(ctx.remote), &join, None)
                     .map(|(blobs, _)| blobs)
             })
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| -> HandlerError { e.to_string().into() })?;
+        Ok(history.outgoing(|h| {
+            self.device
+                .with(|s| Ok(h.next(s, self.device.ready.load(Ordering::SeqCst))?))
+                .map_err(|e| e.to_string().into())
+        }))
     }
 }
 impl Joiner for Device {
+    type Welcome = deadbolt_net::application::WelcomeReplay;
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let inviter = DeviceId::from_bytes(ctx.remote);
         let (offer, vault) =
@@ -246,7 +273,11 @@ impl Joiner for Device {
         *self.offer.lock().unwrap() = Some(offer);
         Ok(join)
     }
-    async fn receive(&self, ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        ctx: &PairingContext,
+        welcome: Self::Welcome,
+    ) -> Result<(), HandlerError> {
         let offer = self.offer.lock().unwrap().take().ok_or("no offer")?;
         self.with(|s| {
             pairing::apply_welcome(s, DeviceId::from_bytes(ctx.remote), offer, welcome).map(|_| ())
@@ -695,10 +726,9 @@ impl World {
             Action::WriteFailure(i) if self.can_write(i) => {
                 self.devices[i].with(|s| {
                     let key = &s.secret;
-                    let result = super::session::update(
-                        s.vaults.get_mut(&self.vault).unwrap(),
-                        |_| anyhow::bail!("injected disk full"),
+                    let result = s.vaults.get_mut(&self.vault).unwrap().transact(
                         |v| Ok(v.write(key, vec![])?),
+                        |_| anyhow::bail!("injected disk full"),
                     );
                     ensure!(result.is_err(), "write fault was not injected");
                     Ok(())
@@ -1010,9 +1040,21 @@ impl World {
     fn converged(&self) -> Result<bool> {
         let members = self.devices[0]
             .with(|s| Ok(s.vault(&self.vault).members().collect::<BTreeSet<_>>()))?;
-        let (heads, items, deleted) = self.devices[0].with(|s| {
+        let (heads, items, deleted, name) = self.devices[0].with(|s| {
             let vault = s.vault(&self.vault);
-            Ok((vault.heads(), vault.items(), vault.deleted()))
+            Ok((
+                vault.heads(),
+                vault.items(),
+                vault.deleted(),
+                vault.name().to_owned(),
+            ))
+        })?;
+        let histories = self.devices[0].with(|s| {
+            Ok(items
+                .iter()
+                .chain(deleted.iter().map(|gone| &gone.item))
+                .map(|item| (item.id, s.vault(&self.vault).history(&item.id)))
+                .collect::<BTreeMap<_, _>>())
         })?;
         for d in &self.devices {
             if !members.contains(&DeviceId::from_bytes(d.id)) {
@@ -1026,7 +1068,14 @@ impl World {
                     .vaults
                     .get(&self.vault)
                     .ok_or_else(|| anyhow::anyhow!("member missing vault"))?;
-                Ok(vault.heads() == heads && vault.items() == items && vault.deleted() == deleted)
+                Ok(vault.heads() == heads
+                    && vault.members().collect::<BTreeSet<_>>() == members
+                    && vault.name() == name
+                    && vault.items() == items
+                    && vault.deleted() == deleted
+                    && histories
+                        .iter()
+                        .all(|(id, history)| vault.history(id) == *history))
             })?;
             if !same {
                 return Ok(false);
@@ -1382,6 +1431,57 @@ fn offline_unlock_keeps_local_items_available_and_failed_dials_finish_startup() 
     world.converge().unwrap();
 }
 
+/// Cut identical short sessions before DONE. Each retry must advance the signed
+/// frontier if a complete usable entry fits; confirm the prefix survives a
+/// native redb reopen (the private relay harness separately uses OPFS).
+#[test]
+fn short_sessions_commit_a_reopenable_prefix_before_done() {
+    let mut w = World::new().unwrap();
+    w.step(&Action::Pair(1)).unwrap();
+    w.step(&Action::Pair(2)).unwrap();
+    w.sync(0, 1, 10, None, None).unwrap();
+    for i in 0..32 {
+        w.step(&Action::Add(0, i)).unwrap();
+    }
+    let count = |w: &World| {
+        w.devices[1]
+            .with(|s| Ok(s.vault(&w.vault).items().len()))
+            .unwrap()
+    };
+    let mut before = count(&w);
+    for _ in 0..2 {
+        assert_eq!(
+            w.sync(0, 1, 31, Some(800), None).unwrap(),
+            sync::Attempt::Interrupted
+        );
+        let after = count(&w);
+        assert!(
+            after > before && after < 32,
+            "cut persisted {before} -> {after} of 32"
+        );
+        before = after;
+    }
+    w.step(&Action::Crash(1)).unwrap();
+    assert_eq!(count(&w), before);
+    // No DONE/nudge, and the origin is gone. Ordinary anti-entropy must
+    // still forward the intermediate device's durable prefix to a third peer.
+    w.step(&Action::Partition(0, 1)).unwrap();
+    w.step(&Action::Partition(0, 2)).unwrap();
+    w.step(&Action::Startup(1)).unwrap();
+    assert_eq!(
+        w.sync(1, 2, 10, None, None).unwrap(),
+        sync::Attempt::Complete
+    );
+    assert_eq!(
+        w.devices[2]
+            .with(|s| Ok(s.vault(&w.vault).items().len()))
+            .unwrap(),
+        before
+    );
+    w.step(&Action::Heal).unwrap();
+    w.converge().unwrap();
+}
+
 #[test]
 fn startup_retries_an_interrupted_exchange() {
     let mut world = World::new().unwrap();
@@ -1468,4 +1568,382 @@ fn files_never_reach_the_disk_in_the_clear() {
     let (name, contents) = deadbolt_core::item::file_parts(&file);
     assert!(name.starts_with(SECRET_MARKER), "{name}");
     assert!(contents.unwrap().starts_with(FILE_MARKER));
+}
+
+/// Pulls are separated by real durable writes. The sender must stop at its
+/// original signed tips, not chase the live tail; another stream opened at
+/// the same heads must stop entirely if the recipient loses membership.
+#[tokio::test]
+async fn outgoing_catchup_is_a_snapshot_and_rechecks_revocation() {
+    let mut world = World::new().unwrap();
+    world.pair(1).unwrap();
+    let source = world.devices[0].handler();
+    let target = world.devices[1].handler();
+    let (a, b) = (world.devices[0].id, world.devices[1].id);
+    let heads = target.heads(a).await.unwrap();
+    for i in 1..=2 {
+        world.step(&Action::Add(0, i)).unwrap();
+    }
+    // Use the non-streaming core selection as an independent oracle. A
+    // login creation can include an audit entry as well as the create.
+    let peer_heads = world.devices[1]
+        .with(|s| Ok(s.vault(&world.vault).heads()))
+        .unwrap();
+    let expected = world.devices[0]
+        .with(|s| {
+            Ok(s.vault(&world.vault)
+                .missing_for(&peer_heads)
+                .into_iter()
+                .map(Entry::encode)
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    assert!(expected.len() > 1);
+    let mut first = source.missing_for(b, heads.clone()).await.unwrap();
+    let mut revoked = source.missing_for(b, heads.clone()).await.unwrap();
+    let prefix = first.next().unwrap().unwrap();
+    assert_eq!(revoked.next().unwrap().unwrap(), prefix);
+    world.step(&Action::Attach(0, 3)).unwrap();
+    assert_eq!(prefix, expected[0]);
+    assert_eq!(first.collect::<Result<Vec<_>, _>>().unwrap(), expected[1..]);
+    let full = source
+        .missing_for(b, heads)
+        .await
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(full.len() > expected.len());
+    assert!(full.starts_with(&expected));
+    world.step(&Action::Remove(1)).unwrap();
+    assert!(revoked.next().unwrap().is_err());
+    world.check().unwrap();
+}
+
+/// PAIR connections use their own gate. Removal after the welcome header
+/// must abort before the next entry even though admission was durable.
+#[test]
+fn outgoing_welcome_stops_after_removal() {
+    let mut world = World::new().unwrap();
+    let device = DeviceId::from_bytes(world.devices[1].id);
+    let inviter = DeviceId::from_bytes(world.devices[0].id);
+    let join = world.devices[1]
+        .with(|s| pairing::join_blob(&s.secret, "beta", inviter, &world.vault, None))
+        .unwrap();
+    let mut history = world.devices[0]
+        .with(|s| Ok(pairing::welcome(s, world.vault, device, &join, None)?.0))
+        .unwrap();
+    world.devices[0]
+        .with(|s| {
+            assert!(history.next(s, true)?.is_some());
+            Ok(())
+        })
+        .unwrap();
+    world.step(&Action::Remove(1)).unwrap();
+    assert!(
+        world.devices[0]
+            .with(|s| Ok(history.next(s, true)?))
+            .is_err()
+    );
+    world.check().unwrap();
+}
+
+/// Application batches can overlap across sessions. A child arriving before
+/// its parent is dropped, not persisted; the next heads exchange must recover
+/// it, including after reopening the accepted prefix.
+#[tokio::test]
+async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
+    // The manual stream scheduler owns polling; an enclosing Tokio task's
+    // cooperative budget must not make its duplex streams spuriously stall.
+    tokio::task::unconstrained(async {
+        let mut world = World::new().unwrap();
+        world.step(&Action::Pair(1)).unwrap();
+        world.devices[0]
+            .with(|s| {
+                super::items::create(s, None, "note", Some("reordered".into()), vec![])?;
+                Ok(())
+            })
+            .unwrap();
+        for action in [Action::Attach(0, 2), Action::Attach(0, 3)] {
+            world.step(&action).unwrap();
+        }
+        let source = world.devices[0].handler();
+        let target = world.devices[1].handler();
+        let (a, b) = (world.devices[0].id, world.devices[1].id);
+        let entries = source
+            .missing_for(b, target.heads(a).await.unwrap())
+            .await
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(entries.len(), 3);
+        let mut reversed = entries.clone();
+        reversed.reverse();
+        target.receive(a, reversed, &mut (), true).await.unwrap();
+        world.check().unwrap();
+        world.devices[1]
+            .with(|s| {
+                assert_eq!(s.vault(&world.vault).items().len(), 1);
+                assert!(
+                    !s.vault(&world.vault).items()[0]
+                        .fields
+                        .contains_key("receipt")
+                );
+                Ok(())
+            })
+            .unwrap();
+        world.step(&Action::Crash(1)).unwrap();
+        world.step(&Action::Startup(1)).unwrap();
+        let missing = source
+            .missing_for(b, target.heads(a).await.unwrap())
+            .await
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(missing, entries[1..]);
+        // Resume one batch at a time, then replay the entire overlapping session.
+        for entry in missing {
+            target.receive(a, vec![entry], &mut (), true).await.unwrap();
+            world.check().unwrap();
+        }
+        target.receive(a, entries, &mut (), true).await.unwrap();
+        world.check().unwrap();
+        world.step(&Action::Crash(1)).unwrap();
+        world.converge().unwrap();
+    })
+    .await;
+}
+
+/// A cap rejection must not discard a following removal at the same sequence.
+/// Another author remains writable independently, and its changes converge.
+#[tokio::test]
+async fn exhausted_author_does_not_block_removal_or_other_authors() {
+    tokio::task::unconstrained(async {
+        let mut world = World::new().unwrap();
+        world.step(&Action::Pair(1)).unwrap();
+        world.step(&Action::Pair(2)).unwrap();
+        world.step(&Action::MembershipFlood(0, 1)).unwrap();
+        let removed = DeviceId::from_bytes(world.devices[2].id);
+        let (rejected, removal) = world.devices[0]
+            .with(|s| {
+                let mut probe = s.vault(&world.vault).clone();
+                let removal = probe.remove(&s.secret, removed)?;
+                let rejected = Entry::sign(
+                    &s.secret,
+                    world.vault,
+                    removal.seq(),
+                    removal.deps().to_vec(),
+                    Payload::Membership(MembershipOp::Rename {
+                        name: "over-budget".into(),
+                    }),
+                );
+                let removal = s.update(world.vault, |v, key| Ok(v.remove(key, removed)?))?;
+                Ok((rejected, removal))
+            })
+            .unwrap();
+        let renamed = world.devices[1]
+            .with(|s| s.update(world.vault, |v, key| Ok(v.rename(key, "still-writable")?)))
+            .unwrap();
+        let handler = world.devices[1].handler();
+        handler
+            .receive(
+                world.devices[0].id,
+                vec![rejected.encode(), removal.encode()],
+                &mut (),
+                true,
+            )
+            .await
+            .unwrap();
+        world.devices[1]
+            .with(|s| {
+                let vault = s.vault(&world.vault);
+                assert!(!vault.is_member(&removed));
+                assert!(
+                    !vault
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.hash() == rejected.hash())
+                );
+                assert_eq!(
+                    membership_writes(vault, DeviceId::from_bytes(world.devices[0].id)),
+                    MAX_MEMBERSHIP_ENTRIES
+                );
+                Ok(())
+            })
+            .unwrap();
+        world.check().unwrap();
+        world.step(&Action::Crash(1)).unwrap();
+        world.converge().unwrap();
+        world.devices[0]
+            .with(|s| {
+                assert!(
+                    s.vault(&world.vault)
+                        .entries()
+                        .iter()
+                        .any(|entry| entry.hash() == renamed.hash())
+                );
+                assert_eq!(
+                    membership_writes(
+                        s.vault(&world.vault),
+                        DeviceId::from_bytes(world.devices[1].id)
+                    ),
+                    1
+                );
+                Ok(())
+            })
+            .unwrap();
+    })
+    .await;
+}
+
+/// The small-chunk scheduler intentionally bounds trace size. Exercise full
+/// production frames separately with the same application handlers and stores,
+/// without sockets: exact file cap, concurrent aggregate overflow, and reload.
+#[tokio::test]
+#[cfg_attr(
+    debug_assertions,
+    ignore = "full-sized file coverage runs automatically in nightly release; use --ignored in debug"
+)]
+async fn full_size_files_sync_and_concurrent_files_survive_reload() {
+    use crate::protocol::FieldInput;
+    use deadbolt_core::item::{MAX_FILE, file_parts, file_value, files_size};
+
+    tokio::task::unconstrained(async {
+        let mut world = World::new().unwrap();
+        world.step(&Action::Pair(1)).unwrap();
+        let mut bytes = vec![b'x'; MAX_FILE];
+        bytes[..SECRET_MARKER.len()].copy_from_slice(SECRET_MARKER.as_bytes());
+        let full = file_value("cap.bin", &bytes);
+        let half = file_value("half.bin", &bytes[..MAX_FILE / 2 + 1]);
+        let field = |name: &str, value: &str| FieldInput {
+            name: name.into(),
+            kind: Some("file".into()),
+            value: value.into(),
+        };
+        let (document, note) = world.devices[0]
+            .with(|s| {
+                super::items::create(
+                    s,
+                    None,
+                    "document",
+                    Some("full".into()),
+                    vec![field("file", &full)],
+                )?;
+                super::items::create(s, None, "note", Some("concurrent".into()), vec![])?;
+                let items = s.vault(&world.vault).items();
+                let document = items
+                    .iter()
+                    .find(|item| item.kind == "document")
+                    .unwrap()
+                    .id;
+                let note = items.iter().find(|item| item.kind == "note").unwrap().id;
+                let before = s.vault(&world.vault).heads();
+                let error = super::items::set(
+                    s,
+                    None,
+                    &[document.to_string()],
+                    vec![field("extra", &file_value("one.bin", b"x"))],
+                    None,
+                    &[],
+                )
+                .unwrap_err();
+                assert!(
+                    error.to_string().contains("at most 10 MiB together"),
+                    "{error:#}"
+                );
+                assert_eq!(s.vault(&world.vault).heads(), before);
+                Ok((document, note))
+            })
+            .unwrap();
+        for round in 0..2 {
+            if round == 1 {
+                for (i, name) in [(0, "left"), (1, "right")] {
+                    world.devices[i]
+                        .with(|s| {
+                            super::items::set(
+                                s,
+                                None,
+                                &[note.to_string()],
+                                vec![field(name, &half)],
+                                None,
+                                &[],
+                            )?;
+                            Ok(())
+                        })
+                        .unwrap();
+                }
+            }
+            let (a, b) = (world.devices[0].handler(), world.devices[1].handler());
+            let (left, right) = tokio::io::duplex(64 * 1024);
+            let (mut ar, mut aw) = tokio::io::split(left);
+            let (mut br, mut bw) = tokio::io::split(right);
+            let max = deadbolt_net::DEFAULT_MAX_FRAME_LEN;
+            let (sent, received) = tokio::join!(
+                run_sync_session(&a, world.devices[1].id, &mut aw, &mut ar, max, true),
+                run_sync_session(&b, world.devices[0].id, &mut bw, &mut br, max, false),
+            );
+            assert_eq!(sent.unwrap().sent, received.unwrap().received);
+            assert!(world.converged().unwrap());
+            world.check().unwrap();
+        }
+        for i in 0..2 {
+            world.step(&Action::Crash(i)).unwrap();
+            world.devices[i]
+                .with(|s| {
+                    let items = s.vault(&world.vault).items();
+                    let merged = items.iter().find(|item| item.id == note).unwrap();
+                    assert_eq!(files_size(merged.fields.values()), MAX_FILE + 2);
+                    // Ordinary app reads expose names; requesting one file leaves the
+                    // other attachment hidden, even after a concurrent cap overflow.
+                    for (id, selected, expected) in
+                        [(document, "file", &full), (note, "left", &half)]
+                    {
+                        let query = [id.to_string()];
+                        let listed = super::items::get(s, None, &query, false, false, &[], false)?;
+                        let names: Vec<_> = listed
+                            .fields
+                            .iter()
+                            .filter(|f| f.kind == "file")
+                            .map(|f| f.value.as_str())
+                            .collect();
+                        assert_eq!(
+                            names,
+                            if id == document {
+                                vec!["cap.bin"]
+                            } else {
+                                vec!["half.bin", "half.bin"]
+                            }
+                        );
+                        let fetched = super::items::get(
+                            s,
+                            None,
+                            &query,
+                            false,
+                            false,
+                            &[selected.into()],
+                            false,
+                        )?;
+                        assert_eq!(
+                            fetched
+                                .fields
+                                .iter()
+                                .find(|f| f.name == selected)
+                                .unwrap()
+                                .value,
+                            expected.as_str()
+                        );
+                        assert!(
+                            fetched
+                                .fields
+                                .iter()
+                                .filter(|f| f.kind == "file" && f.name != selected)
+                                .all(|f| file_parts(&f.value).1.is_none())
+                        );
+                    }
+                    Ok(())
+                })
+                .unwrap();
+        }
+        world.converge().unwrap();
+    })
+    .await;
 }

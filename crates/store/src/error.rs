@@ -35,9 +35,36 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("database error: {0}")]
     Db(redb::Error),
+    /// The signed-log commit was attempted but not acknowledged. The entire
+    /// batch may already be durable; discard derived state and reopen the store.
+    #[error("log append outcome is uncertain: {0}")]
+    AppendUncertain(#[source] redb::CommitError),
 }
 
 impl Error {
+    /// Safe for operator diagnostics: only typed classes, I/O kind and numeric
+    /// OS code. Never format backend messages, corruption details or locations,
+    /// which may include application data or paths.
+    pub fn append_diagnostic(&self) -> Option<String> {
+        use redb::{CommitError, StorageError};
+        let Self::AppendUncertain(error) = self else {
+            return None;
+        };
+        Some(match error {
+            CommitError::Storage(StorageError::Io(error)) => {
+                format!("io kind={:?} os={:?}", error.kind(), error.raw_os_error())
+            }
+            CommitError::Storage(StorageError::Corrupted(_)) => "corrupt".into(),
+            CommitError::Storage(StorageError::ValueTooLarge(_)) => "value_too_large".into(),
+            CommitError::Storage(StorageError::Unsupported) => "unsupported".into(),
+            CommitError::Storage(StorageError::PreviousIo) => "previous_io".into(),
+            CommitError::Storage(StorageError::DatabaseClosed) => "database_closed".into(),
+            CommitError::Storage(StorageError::LockPoisoned(_)) => "lock_poisoned".into(),
+            CommitError::TransactionPoisoned => "transaction_poisoned".into(),
+            _ => "commit".into(),
+        })
+    }
+
     pub(crate) fn corrupt(msg: impl Into<String>) -> Self {
         Error::Corrupt(msg.into())
     }

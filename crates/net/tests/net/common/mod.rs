@@ -76,6 +76,8 @@ impl Store {
 }
 
 impl SyncHandler for Store {
+    type ReceiveState = ();
+
     async fn heads(&self, _peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.entries.lock().unwrap().join(&b'\n'))
@@ -85,24 +87,31 @@ impl SyncHandler for Store {
         &self,
         _peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         if let Some((entered, release)) = &self.block {
             entered.notify_one();
             release.notified().await;
         }
         let theirs: HashSet<&[u8]> = peer_heads.split(|b| *b == b'\n').collect();
-        Ok(self
+        let missing = self
             .entries
             .lock()
             .unwrap()
             .iter()
             .filter(|e| !theirs.contains(e.as_slice()))
             .map(|e| Blob::new(e.clone()))
-            .collect())
+            .collect::<Vec<_>>();
+        Ok(Box::new(missing.into_iter().map(Ok)))
     }
 
-    async fn receive(&self, _peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        _peer: PeerId,
+        entries: Vec<Blob>,
+        _: &mut (),
+        _: bool,
+    ) -> Result<(), HandlerError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         let entries: Vec<Vec<u8>> = entries.iter().map(|e| e.to_vec()).collect();
         self.received.lock().unwrap().push(entries.clone());

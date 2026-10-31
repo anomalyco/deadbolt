@@ -110,14 +110,14 @@ pub(super) fn tag_ops(item: &Item, favorite: Option<bool>, tags: Option<&[String
 /// `device-items`: every item but deleted ones.
 pub(super) fn all() -> Result<Value> {
     state().with(|s| {
-        let items: Vec<_> = s
+        let rows = s
             .vault
-            .items()
-            .iter()
-            .filter(|i| !i.deleted)
-            .map(|i| summary(i, &s.vault))
+            .iter_items()
+            .map(|i| summary(&i, &s.vault))
             .collect();
-        Ok(json!({"type": "device-items", "items": items}))
+        let mut reply = json!({"type": "device-items"});
+        reply["items"] = Value::Array(rows);
+        Ok(reply)
     })
 }
 
@@ -267,7 +267,6 @@ pub(super) fn save(body: &Value) -> Result<Value> {
     };
     let tags = parse_tags(body.get("tags"))?;
     let reply = state().with(|s| {
-        let mut staged = s.vault.clone();
         let (id, created) = if body.get("ref").is_some() {
             let item = find(s, body)?;
             let meta_only = name.is_none()
@@ -297,7 +296,7 @@ pub(super) fn save(body: &Value) -> Result<Value> {
             }
             ops.extend(tag_ops(&item, favorite, tags.as_deref()));
             if !ops.is_empty() {
-                staged.write(&s.secret, ops)?;
+                s.write(ops)?;
             }
             (item.id, false)
         } else {
@@ -306,17 +305,19 @@ pub(super) fn save(body: &Value) -> Result<Value> {
                 return Err(Error::Protocol("Deadbolt can't add that kind of item"));
             }
             let fields = inputs(kind, None, body)?;
-            let (id, _) = staged.create_item_with(
-                &s.secret,
-                kind,
-                name.filter(|n| !n.is_empty()),
-                fields,
-                favorite.unwrap_or(false),
-                tags.unwrap_or_default(),
-            )?;
+            let id = s.mutate(|v, key| {
+                let (id, _) = v.create_item_with(
+                    key,
+                    kind,
+                    name.filter(|n| !n.is_empty()),
+                    fields,
+                    favorite.unwrap_or(false),
+                    tags.unwrap_or_default(),
+                )?;
+                Ok(id)
+            })?;
             (id, true)
         };
-        s.commit(staged)?;
         Ok(json!({"type": "device-item-save", "ref": reference(&s.vault, id), "created": created}))
     })?;
     request_sync();
@@ -331,9 +332,7 @@ pub(super) fn delete(body: &mut Value) -> Result<Value> {
     check_passphrase(body, passkey && PRESET.with(Cell::get).reauth())?;
     state().with(|s| {
         let item = find(s, body)?;
-        let mut staged = s.vault.clone();
-        staged.write(&s.secret, vec![DataOp::delete(item.id, unix_time() as u64)])?;
-        s.commit(staged)
+        s.write(vec![DataOp::delete(item.id, unix_time() as u64)])
     })?;
     request_sync();
     Ok(json!({"type": "device-item-delete", "ok": true}))

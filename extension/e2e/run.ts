@@ -160,6 +160,62 @@ const HIDDEN: Record<string, string> = {
   offscreen: hiddenForm(`<div style="position:absolute;left:-2000px;width:300px">${passwordField}</div>`),
   // Visible until Deadbolt focuses it to write.
   "hide-on-focus": hiddenForm(`<div id="w">${passwordField}</div>`, `<script>document.getElementById("password").addEventListener("focus", () => document.getElementById("w").style.opacity = "0")</script>`),
+  opacity: hiddenForm(passwordField.replace("<input", '<input style="opacity:0"')),
+  // Painted transparent through a mask, or blurred past reading.
+  mask: hiddenForm(passwordField.replace("<input", '<input style="mask-image:linear-gradient(transparent,transparent)"')),
+  blur: hiddenForm(passwordField.replace("<input", '<input style="filter:blur(80px)"')),
+  "mask-on-focus": hiddenForm(passwordField, `<script>const p = document.getElementById("password"); p.addEventListener("focus", () => p.style.maskImage = "linear-gradient(transparent,transparent)")</script>`),
+  // An opaque sheet over it that lets clicks through, so hit tests find the field.
+  "click-through-cover": hiddenForm(coverField("background:#f4f4f5;pointer-events:none")),
+  // The same, made inert, in a closed shadow root, or drawn by a pseudo-element.
+  "inert-cover": hiddenForm(coverField("background:#f4f4f5", "inert")),
+  "shadow-cover": hiddenForm(`<div style="position:relative">${passwordField}<span id="c" style="position:absolute;inset:-2px;pointer-events:none"></span></div>`, `<script>document.getElementById("c").attachShadow({ mode: "closed" }).innerHTML = '<div style="position:absolute;inset:0;background:#f4f4f5;pointer-events:none"></div>'</script>`),
+  "pseudo-cover": hiddenForm(`<style>.pc { position: relative } .pc::after { content: ""; position: absolute; inset: -2px; background: #f4f4f5; pointer-events: none }</style><div class="pc">${passwordField}</div>`),
+  // Not hidden: a transparent outline over it that lets clicks through (Material's notched outline).
+  outline: hiddenForm(coverField("border:1px solid #888;border-radius:4px;pointer-events:none")),
+  // A cover whose pointer-events:none is !important in a cascade layer, or on a shadow host's :host (in a layer too).
+  "layer-cover": hiddenForm(coverField("background:#f4f4f5", 'class="lc"'), `<style>@layer page { .lc { pointer-events: none !important } }</style>`),
+  "host-cover": hiddenForm(hostCover(":host { pointer-events: none !important }")),
+  "host-layer-cover": hiddenForm(hostCover("@layer page { :host { pointer-events: none !important } }")),
+  // The field's own label over it, holding an opaque image or drawn as a thick border.
+  "label-image": hiddenForm(labelCover("", `<img alt="" style="display:block;width:100%;height:100%" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='100%25' height='100%25' fill='%23f4f4f5'/%3E%3C/svg%3E">`)),
+  "label-border": hiddenForm(labelCover("box-sizing:border-box;border:40px solid #f4f4f5")),
+  // Under its wrapper's background by a negative z-index, everything above it letting clicks through.
+  "negative-z": hiddenForm(`<div style="background:#f4f4f5">${passwordField.replace("<input", '<input style="position:relative;z-index:-1"')}</div>`, `<style>body, form, form div { pointer-events: none } #email, #password, button { pointer-events: auto }</style>`),
+  // Blended into the page: white on white.
+  "blend-mode": hiddenForm(passwordField.replace("<input", '<input style="mix-blend-mode:screen"')),
+  // Paint hit tests never see: glyphs that let clicks through, a box-shadow's spread and a wide outline from a 1 px box.
+  "text-cover": hiddenForm(coverField("pointer-events:none;overflow:hidden;font:120px/38px sans-serif;color:#f4f4f5;white-space:nowrap").replace("></div></div>", ">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</div></div>")),
+  "shadow-spread-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;box-shadow:0 0 0 400px #f4f4f5")),
+  "outline-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;outline:400px solid #f4f4f5")),
+  // Not hidden: Dark Reader's filter mode on the whole page.
+  "dark-reader": hiddenForm(passwordField, `<style>html { filter: invert(1) hue-rotate(180deg) !important }</style>`),
+  // Transparent glyphs drawn by an opaque text-shadow, in a box or a ::after.
+  "text-shadow-cover": hiddenForm(coverField(`pointer-events:none;overflow:hidden;font:120px/38px sans-serif;color:transparent;text-shadow:0 0 0 #f4f4f5;white-space:nowrap`).replace("></div></div>", ">&#9608;&#9608;&#9608;&#9608;&#9608;&#9608;</div></div>")),
+  "text-shadow-after-cover": hiddenForm(`<div class="tsa" style="position:relative">${passwordField}</div>`, `<style>.tsa::after { content: "\\2588\\2588\\2588\\2588\\2588\\2588"; position: absolute; inset: -2px; overflow: hidden; white-space: nowrap; font: 120px/38px sans-serif; color: transparent; text-shadow: 0 0 0 #f4f4f5; pointer-events: none }</style>`),
+  // A strict CSP (served with it, see /hidden/), and an ancestor's ::after cover held at pointer-events:none by !important in a layer.
+  "csp-layer-pseudo-cover": hiddenForm(`<div class="lpa" style="position:relative">${passwordField}</div>`, `<style nonce="e2e">@layer page { .lpa::after { content: ""; position: absolute; inset: -2px; background: #f4f4f5; pointer-events: none !important } }</style>`),
+  // Not hidden: the field below a web component whose adopted styles space every element after the first (\`* + *\`).
+  "shadow-owl": hiddenForm(`<div id="owl"></div>${passwordField}`, `<script>const r = document.getElementById("owl").attachShadow({ mode: "open" }); const s = new CSSStyleSheet(); s.replaceSync("* + * { margin-top: 300px }"); r.adoptedStyleSheets = [s]; r.innerHTML = "<p>Your password</p>"</script>`),
+  // The mirror image of a box below it, drawn over it by -webkit-box-reflect.
+  "reflect-cover": hiddenForm(coverField("inset:auto;left:-2px;right:-2px;top:calc(100% + 6px);height:calc(100% + 4px);background:#f4f4f5;-webkit-box-reflect:above 8px")),
+  // A 1 px box whose SVG filter floods a region over the field.
+  "svg-url-filter-cover": hiddenForm(coverField("inset:auto;left:0;top:0;width:1px;height:1px;filter:url(#flood)"), `<svg width="0" height="0" style="position:absolute"><filter id="flood" filterUnits="userSpaceOnUse" x="-20" y="-20" width="600" height="100"><feFlood flood-color="#f4f4f5"/></filter></svg>`),
+}
+
+/** The password field with its own label over it, 2 px bigger each way. */
+function labelCover(style: string, inside = "") {
+  return `<div style="position:relative">${passwordField}<label for="password" style="position:absolute;inset:-2px;z-index:1;${style}">${inside}</label></div>`
+}
+
+/** The password field with a shadow host over it whose :host draws an opaque box, styled by `rule` too. */
+function hostCover(rule: string) {
+  return `<div style="position:relative">${passwordField}<span class="hc"></span></div><script>document.querySelector(".hc").attachShadow({ mode: "closed" }).innerHTML = '<style>:host { position: absolute; inset: -2px; z-index: 1; display: block; background: #f4f4f5 } ${rule}</style>'</script>`
+}
+
+/** The password field with a box over it, 2 px bigger each way. */
+function coverField(style: string, attrs = "") {
+  return `<div style="position:relative">${passwordField}<div ${attrs} style="position:absolute;inset:-2px;z-index:1;${style}"></div></div>`
 }
 
 // Ways a page can try to get a click into a menu the user can't see properly.
@@ -197,8 +253,13 @@ const BEATEN: Record<string, string> = {
 }
 
 /** Restyle after our rAF, or from a deeper ResizeObserver that defers the host's observer. */
-const lateZoom = (where: "host" | "html", zoom: number, observer: boolean, compensate: boolean) => onMenu(`
+const lateZoom = (where: "host" | "html" | "attr", zoom: number, observer: boolean, compensate: boolean) => onMenu(`
   const target = ${where === "host" ? "host" : "document.documentElement"}
+  if (${where === "attr"}) {
+    const rule = document.createElement("style")
+    rule.textContent = "html[data-late-zoom] { zoom: ${zoom} }"
+    document.head.append(rule)
+  }
   const trigger = document.createElement("i")
   const wrapper = document.createElement("div")
   wrapper.style.cssText = "position:fixed;left:-10000px;top:0"
@@ -219,10 +280,12 @@ const lateZoom = (where: "host" | "html", zoom: number, observer: boolean, compe
       host.style.setProperty("width", (parseFloat(host.style.width) / ${zoom}) + "px", "important")
       host.style.setProperty("height", (parseFloat(host.style.height) / ${zoom}) + "px", "important")
     }
-    target.style.setProperty("zoom", "${zoom}", "important")
+    if (${where === "attr"}) target.dataset.lateZoom = ""
+    else target.style.setProperty("zoom", "${zoom}", "important")
     window.zoomPaints = (window.zoomPaints || 0) + 1
     setTimeout(() => {
-      target.style.removeProperty("zoom")
+      if (${where === "attr"}) delete target.dataset.lateZoom
+      else target.style.removeProperty("zoom")
       host.style.cssText = css
       // Register in the task, after Deadbolt registered its next rAF.
       requestAnimationFrame(loop)
@@ -579,14 +642,15 @@ const cardFrame = (host: string, port: string) => `<h1>Payment</h1>
  * (idmsa.apple.com/appleauth/auth/signin, checked in October 2026): no
  * <form>, a text box for the account (autocomplete=off) with its label
  * floating over it, and a password box collapsed to zero height until
- * Continue, all in the one frame document.
+ * Continue (or Enter in the account box), all in the one frame document. It
+ * slides open below the account box, and the widget focuses it once open.
  * The second Continue tells the page around it, which goes on to the
  * signed-in page.
  */
 const APPLE_WIDGET = `<!doctype html><html><head><meta charset="utf-8"><title>Sign in</title><style>
   body{margin:0;font:15px/1.4 system-ui,sans-serif;background:#fff;color:#1d1d1f}
   .signin{max-width:340px;margin:16px auto}h1{font-size:19px;margin:0 0 14px}
-  .form-cell-wrapper{position:relative;overflow:hidden}.hide-password .password .form-cell-wrapper{height:0}
+  .form-cell-wrapper{position:relative;overflow:hidden}.password .form-cell-wrapper{height:60px;transition:height .3s ease-out}.hide-password .password .form-cell-wrapper{height:0}
   input{display:block;width:100%;box-sizing:border-box;height:52px;padding:18px 12px 0;margin:0 0 8px;font:inherit;border:1px solid #d2d2d7;border-radius:10px}
   .form-textbox-label{position:absolute;left:13px;top:7px;font-size:12px;color:#6e6e73;pointer-events:none}
   button{width:100%;height:40px;border:0;border-radius:10px;background:#0071e3;color:#fff;font:inherit}button:disabled{opacity:.5}
@@ -603,12 +667,14 @@ const APPLE_WIDGET = `<!doctype html><html><head><meta charset="utf-8"><title>Si
   const update = () => (go.disabled = !(step() ? account.value : password.value))
   account.addEventListener("input", update)
   password.addEventListener("input", update)
+  account.addEventListener("keydown", (e) => { if (e.key === "Enter" && step() && account.value) go.click() })
   go.addEventListener("click", () => {
     if (!step()) return parent.postMessage({ type: "signed-in", account: account.value }, "*")
     setTimeout(() => {
       form.classList.remove("hide-password")
       password.tabIndex = 0
       password.closest(".password").removeAttribute("aria-hidden")
+      password.closest(".form-cell-wrapper").addEventListener("transitionend", () => password.focus(), { once: true })
       update()
     }, 200)
   })
@@ -866,7 +932,7 @@ const server = Bun.serve({
         const late = url.searchParams.get("late")
         const zoom = url.searchParams.get("zoom") === "1.5" ? 1.5 : 0.5
         const style = url.searchParams.has("fractional") ? "<style>main{max-width:313.5px}</style>" : url.searchParams.has("static") ? `<style>html{zoom:${url.searchParams.get("static") === "small" ? "0.8" : "1.25"}}</style>` : ""
-        return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" ? "html" : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
+        return html("Sign in to Acme", loginForm("/home") + style + (late ? lateZoom(late === "html" || late === "attr" ? late : "host", zoom, url.searchParams.has("observer"), url.searchParams.has("comp")) : ""))
       }
       // Centred in the viewport, as many sign-in pages are: an infobar coming or going moves the form.
       case "/centred":
@@ -1064,7 +1130,10 @@ const server = Bun.serve({
     if (url.pathname.startsWith("/detect-frame/") && DETECT_FRAMES[url.pathname.slice(14)]) return html("Acme", DETECT_FRAMES[url.pathname.slice(14)])
     // The site's own login page in a frame, on pages with no form of their own.
     if (url.pathname.startsWith("/framed/") && FRAMED[url.pathname.slice(8)]) return html("Acme", `<h1>Acme</h1>${FRAMED[url.pathname.slice(8)]}`)
-    if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) return html("Sign in to Acme", HIDDEN[url.pathname.slice(8)])
+    if (url.pathname.startsWith("/hidden/") && HIDDEN[url.pathname.slice(8)]) {
+      const name = url.pathname.slice(8)
+      return html("Sign in to Acme", HIDDEN[name], name.startsWith("csp-") ? { "content-security-policy": "style-src-elem 'nonce-e2e'" } : {})
+    }
     if (url.pathname.startsWith("/overlay/") && url.pathname.slice(9) in OVERLAY) return html("Sign in to Acme", loginForm("/home") + OVERLAY[url.pathname.slice(9)])
     if (url.pathname.startsWith("/beaten/") && url.pathname.slice(8) in BEATEN) return html("Sign in to Acme", loginForm("/home") + BEATEN[url.pathname.slice(8)])
     if (url.pathname.startsWith("/top/") && url.pathname.slice(5) in TOP) return html("Sign in to Acme", TOP[url.pathname.slice(5)])
@@ -1093,6 +1162,8 @@ interface LaunchOptions {
   listDelay?: number
   /** Playwright turns the back/forward cache off; keep it on. */
   bfcache?: boolean
+  /** Real classic scrollbars, as on Windows and Linux (Playwright hides them by default). */
+  scrollbars?: boolean
   /** Runs the deadbolt binary as the host, with this environment. */
   realHost?: Record<string, string>
   /** Records every page to this directory. */
@@ -1101,10 +1172,14 @@ interface LaunchOptions {
   scale?: number
   /** The browser prefers reduced motion. */
   reducedMotion?: boolean
+  /** Give the first fake account an exact origin for universal sign-in. */
+  universal?: boolean
   /** The fake host adds "Sign in with Google" logins. */
   signIn?: boolean
   /** The fake host lists three Google logins instead of its own. */
   google?: boolean
+  /** The fake host adds a login with no username. */
+  keyLogin?: boolean
   /** "deny": the fake host turns down Touch ID for a card's number. */
   touchId?: string
   /** http origins the browser treats as secure contexts, which WebAuthn needs. */
@@ -1138,7 +1213,7 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
     // CDP DPR emulation alone does not change ResizeObserver device pixels
     // or an extension OOPIF's DPR. Scale the renderer too, as a real display does.
     args: [`--force-device-scale-factor=${options.scale ?? 2}`, `--disable-extensions-except=${dist}`, `--load-extension=${dist}`, "--host-resolver-rules=MAP *.acme.test 127.0.0.1, MAP *.apple.test 127.0.0.1, MAP *.schwab.test 127.0.0.1, MAP *.google.test 127.0.0.1, MAP *.stripe.test 127.0.0.1, MAP *.evilpay.test 127.0.0.1", ...(options.secure ? [`--unsafely-treat-insecure-origin-as-secure=${options.secure.join(",")}`] : [])],
-    ignoreDefaultArgs: options.bfcache ? ["--disable-back-forward-cache"] : [],
+    ignoreDefaultArgs: [...(options.bfcache ? ["--disable-back-forward-cache"] : []), ...(options.scrollbars ? ["--hide-scrollbars"] : [])],
     ...(options.record ? { recordVideo: { dir: options.record, size: { width: 900, height: 640 } } } : {}),
     env: {
       ...process.env,
@@ -1147,8 +1222,10 @@ async function launch(options: LaunchOptions = {}): Promise<Run> {
       DEADBOLT_FAKE_RATE_LIMIT: options.rateLimit ?? "",
       DEADBOLT_FAKE_FILL_DELAY: String(options.fillDelay ?? 0),
       DEADBOLT_FAKE_LIST_DELAY: String(options.listDelay ?? 0),
+      DEADBOLT_FAKE_ORIGIN: options.universal ? site : "",
       DEADBOLT_FAKE_SIGNIN: options.signIn ? "1" : "",
       DEADBOLT_FAKE_GOOGLE: options.google ? "1" : "",
+      DEADBOLT_FAKE_KEYLOGIN: options.keyLogin ? "1" : "",
       DEADBOLT_FAKE_TOUCHID: options.touchId ?? "",
       ...options.realHost,
     },
@@ -1264,6 +1341,7 @@ async function seedVault(run: Run, options: LaunchOptions) {
     } else {
       await login("Acme", [...urls(sites), { name: "username", value: "kit@acme.test" }, { name: "password", value: "correct horse" }, { name: "otp", value: TOTP_SECRET }])
       await login("Acme admin", [...urls(sites), { name: "username", value: "admin" }, { name: "password", value: "hunter2" }])
+      if (options.keyLogin) await login("Acme API key", [...urls(sites), { name: "password", value: "acme api key" }])
       if (options.signIn) {
         const google = await login("Google", [...urls([`http://accounts.google.test:${port}`]), { name: "username", value: "kit@gmail.com" }, { name: "password", value: "google password" }])
         await login("Acme", [...urls(sites), { name: "sign-in-with", value: "google" }, { name: "sign-in-account", value: google.split(":")[1] }])
@@ -2163,7 +2241,7 @@ async function securityPage() {
       await menu.locator("button.row").first().click()
       await Bun.sleep(1500)
       const password = await page.inputValue("#password")
-      if (name === "visible" || name === "ring-room" || name === "escaped-row") check(password === "correct horse", `a visible password field fills (${name})`)
+      if (name === "visible" || name === "ring-room" || name === "escaped-row" || name === "outline" || name === "dark-reader" || name === "shadow-owl") check(password === "correct horse", `a visible password field fills (${name})`)
       else check(password === "", `a password field hidden by ${name} stays empty (${JSON.stringify(password)})`)
     }
 
@@ -2593,7 +2671,7 @@ async function menuScale(scale = 1) {
     // The downscale also exercises IO v2's incidental OOPIF intersection
     // flapping. The upscale is essential: IO stays visible and the old
     // guard actually fills, so this isn't just testing an existing refusal.
-    for (const query of ["?late=host", "?late=html", "?late=host&zoom=1.5", "?late=html&zoom=1.5", "?late=host&zoom=1.5&observer", "?late=html&zoom=1.5&observer", "?late=host&comp", "?late=html&zoom=1.5&comp", "?late=host&comp&observer", "?late=html&zoom=1.5&comp&observer"]) {
+    for (const query of ["?late=host", "?late=html", "?late=host&zoom=1.5", "?late=html&zoom=1.5", "?late=host&zoom=1.5&observer", "?late=html&zoom=1.5&observer", "?late=host&comp", "?late=html&zoom=1.5&comp", "?late=host&comp&observer", "?late=html&zoom=1.5&comp&observer", "?late=attr&zoom=1.5", "?late=attr&zoom=1.5&comp"]) {
       for (const how of ["pointer", "keyboard"]) {
         await page.goto(`${site}/menu-scale${query}`)
         const menu = await menuOn(page)
@@ -2621,6 +2699,253 @@ async function menuScale(scale = 1) {
   } catch (err) {
     check(false, `menu scale threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "menu scale")
+  } finally {
+    await close(run)
+  }
+}
+
+/** Late page-world restyles: the user's click on a decoy must not authorize the surface. */
+async function menuPosition(scale = 1) {
+  // Real scrollbars: the scrollbar case below changes the viewport's width.
+  const run = await launch({ scale, universal: true, scrollbars: true })
+  const page = await run.context.newPage()
+  try {
+    // Real browser zoom, not CDP page-scale emulation. The normal pick must
+    // work at each display scale; reset zoom before the attack matrix below.
+    for (const zoom of [1, 1.25]) {
+      await page.goto(`${site}/login`)
+      await run.worker.evaluate(async ({ origin, zoom }) => {
+        for (const tab of await chrome.tabs.query({})) {
+          if (tab.id === undefined) continue
+          const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 })
+          if (frame?.url.startsWith(origin)) return chrome.tabs.setZoom(tab.id, zoom)
+        }
+        throw new Error("no fixture tab")
+      }, { origin: site, zoom })
+      const menu = await menuOn(page)
+      if (!menu) throw new Error("no normal menu")
+      check(Math.abs(await menu.evaluate(() => devicePixelRatio) - scale * zoom) < 0.01, `browser zoom ${zoom} at display DPR ${scale} reaches the frame`)
+      if (zoom === 1) {
+        await page.evaluate(() => {
+          const churn = () => {
+            document.documentElement.classList.toggle("page-scrolling")
+            requestAnimationFrame(churn)
+          }
+          requestAnimationFrame(churn)
+        })
+        await Bun.sleep(200)
+      }
+      await menu.locator("button.row").first().click()
+      check(!!await until("normal zoomed pick fills", async () => await page.inputValue("#password") === "correct horse", 4000), `normal pick works at browser zoom ${zoom}, display DPR ${scale}`)
+    }
+    await run.worker.evaluate(async (origin) => {
+      for (const tab of await chrome.tabs.query({})) {
+        if (tab.id === undefined) continue
+        const frame = await chrome.webNavigation.getFrame({ tabId: tab.id, frameId: 0 })
+        if (frame?.url.startsWith(origin)) return chrome.tabs.setZoom(tab.id, 1)
+      }
+    }, site)
+    for (const surface of ["menu", "save", "signin"] as const) {
+      const kinds = surface === "menu" && scale === 1
+        ? ["left", "translate", "scale", "left-task", "translate-task", "scale-task", "hidden-task", "scrollbar-task", "batch-task", "left-observer", "translate-observer", "scale-observer", "left-keyboard", "translate-keyboard", "scale-keyboard"]
+        : ["left", "translate", "scale", "hidden-task", "scrollbar-task", "batch-task"]
+      for (const kind of kinds) {
+        await run.worker.evaluate(async (on) => {
+          await chrome.storage.local.set({ offerToSignIn: on })
+          const all = await chrome.storage.session.get(null)
+          await chrome.storage.session.remove(Object.keys(all).filter((k) => k.startsWith("signin-memory:") || k.startsWith("session:") || k === "opened:localhost"))
+        }, surface === "signin")
+        let menu: Frame | null
+        if (surface === "save") {
+          await signIn(run, page, "/outcome/login?to=/auth/complete", `position-${kind}@acme.test`, "synthetic position password")
+          menu = await saveSurface(page)
+        } else {
+          await page.goto(`${site}/login`)
+          menu = surface === "menu" ? await menuOn(page) : await until("universal sign-in offer", async () => {
+            const f = extensionFrame(page, "menu.html")
+            return f && await f.locator(".universal").count() ? f : null
+          })
+          // Two logins open as one "Sign in with Deadbolt" row, and a press on it
+          // only expands the list (no refusal): the press below must land on a
+          // login. A click that doesn't reach the frame (just placed) leaves the
+          // chooser there, so click until the logins show.
+          if (surface === "signin" && menu) {
+            const chooser = menu.locator("button.row", { hasText: "Sign in with Deadbolt" })
+            const listed = await until(`signin ${kind}: the logins listed`, async () => {
+              if (await chooser.count()) return void (await chooser.click().catch(() => {}))
+              return (await menu!.locator("button.row").count()) > 0
+            }, 4000)
+            if (!listed) continue
+          }
+        }
+        if (!menu) { check(false, `${surface} opens for ${kind}`); continue }
+        await settled(menu)
+        await Bun.sleep(700)
+        check(Math.abs(await menu.evaluate(() => devicePixelRatio) - scale) < 0.001, `${surface} ${kind}: real DPR ${scale}`)
+        const selector = surface === "save" ? ".offer-row .btn.primary" : "button.row"
+        // Only the test sees the row. The hostile code below sees the public host,
+        // never its closed root, frame, token, or extension messages.
+        const target = await menu.locator(selector).first().boundingBox()
+        if (!target) throw new Error("no target for displacement")
+        const frame = await frameBox(menu)
+        const factor = kind.startsWith("scale") ? 1.25 : 1
+        const restore = kind.endsWith("task") || kind.endsWith("observer")
+        // Restored variants overlap the original row. After their burst,
+        // prove refusal of a real press, not a click outside the frame.
+        // Hidden, scrollbar and batch hosts are drawn only a few pixels off, so a press on its row
+        // also reaches the real row once it's back (even the save offer's button).
+        const hidden = kind.startsWith("hidden")
+        const small = hidden || kind.startsWith("scrollbar") || kind.startsWith("batch")
+        const dx = small ? -12 : restore ? -80 : -220, dy = small ? 6 : restore ? 10 : 200
+        const point = { x: frame.x + dx + (target.x - frame.x + target.width / 2) * factor, y: frame.y + dy + (target.y - frame.y + target.height / 2) * factor }
+        const triggerPoint = restore ? { x: 20, y: 600 } : point
+        if (kind.endsWith("keyboard")) await page.keyboard.press("ArrowDown")
+        const before = (await hostLog(run)).filter((r) => ["fill", "save"].includes(String(r.type))).length
+        await menu.evaluate((selector) => {
+          for (const type of ["pointerdown", "click"]) addEventListener(type, (e) => {
+            if (e.isTrusted && (e.target as Element).closest(selector)) {
+              const seen = window as unknown as { rowPressed?: boolean; rowClicked?: boolean }
+              if (type === "pointerdown") seen.rowPressed = true
+              else seen.rowClicked = true
+            }
+          }, true)
+        }, selector)
+        await page.evaluate(({ kind, point, triggerPoint, dx, dy }) => {
+          const host = document.querySelector<HTMLElement>("html > [popover]")!
+          const r = host.getBoundingClientRect()
+          const decoy = document.createElement("button")
+          decoy.textContent = "Continue reading"
+          decoy.style.cssText = `position:fixed;left:${point.x - 20}px;top:${point.y - 15}px;width:180px;height:40px;margin:0`
+          document.body.append(decoy)
+          const state = { restyles: 0, restored: false, closedDrawn: "" }
+          const scrollbar = document.createElement("style")
+          scrollbar.textContent = "html[data-late-scrollbar] { overflow-y: scroll }"
+          document.head.append(scrollbar)
+          ;(window as unknown as { attack: typeof state }).attack = state
+          if (kind.startsWith("hidden")) {
+            // Set up once, well before the loop: by then any restart of the
+            // wait this caused is long over.
+            for (const type of ["beforetoggle", "toggle"]) addEventListener(type, (e) => { if (e.target === host) e.stopPropagation() }, true)
+            document.documentElement.style.transform = `translate(${dx}px,${dy}px)`
+            document.body.style.transform = `translate(${-dx}px,${-dy}px)`
+          }
+          window.addEventListener("pointermove", function trigger(e) {
+            if (!e.isTrusted || Math.abs(e.clientX - triggerPoint.x) > 25 || Math.abs(e.clientY - triggerPoint.y) > 25) return
+            removeEventListener("pointermove", trigger)
+            const restore = kind.endsWith("task") || kind.endsWith("observer")
+            const tick = document.createElement("i")
+            const wrapper = document.createElement("div")
+            wrapper.style.cssText = "position:fixed;left:-10000px;top:0"
+            tick.style.cssText = "display:block;width:1px;height:1px"
+            wrapper.append(tick)
+            document.body.append(wrapper)
+            let n = 0
+            const apply = () => {
+              if (!host.isConnected) return
+              if (kind.startsWith("hidden")) {
+                // Closed, the host leaves the top layer; if it were still drawn
+                // it would follow <html>'s transform, which <body>'s cancels for
+                // the page itself. Deadbolt's own listener on the host never
+                // hears it close.
+                try { host.hidePopover() } catch {}
+                // Laid out at all while closed, it would be painted there.
+                const drawn = host.getBoundingClientRect()
+                if (drawn.width || drawn.height) state.closedDrawn = `${drawn.left - r.left},${drawn.top - r.top}`
+                state.restyles++
+                setTimeout(() => {
+                  try { host.showPopover() } catch {}
+                  if (state.restyles < 3) requestAnimationFrame(loop)
+                  else state.restored = true
+                }, 0)
+                return
+              }
+              const css = host.style.cssText
+              if (kind.startsWith("scale")) {
+                host.style.setProperty("transform-origin", "top left", "important")
+                host.style.setProperty("transform", `translate(${dx}px,${dy}px) scale(1.25)`, "important")
+              } else if (kind.startsWith("translate")) host.style.setProperty("transform", `translate(${dx}px,${dy}px)`, "important")
+              else {
+                host.style.setProperty("left", `${r.left + dx}px`, "important")
+                host.style.setProperty("top", `${r.top + dy}px`, "important")
+              }
+              // A root scrollbar comes with the displacement, through an
+              // attribute and a stylesheet rule: the viewport the paint
+              // observer was made for is a scrollbar wider than the one it
+              // measures in.
+              if (kind.startsWith("scrollbar")) document.documentElement.toggleAttribute("data-late-scrollbar", true)
+              state.restyles++
+              if (kind.startsWith("batch")) setTimeout(() => {
+                // Starve the event loop: Chromium then renders the next frame
+                // (where Deadbolt's own write has put the host back) before it
+                // delivers this one's intersection entries, so one delivery
+                // carries the displaced paint and then a good one.
+                const until = performance.now() + 130
+                while (performance.now() < until);
+                if (state.restyles < 3) requestAnimationFrame(() => requestAnimationFrame(loop))
+                else state.restored = true
+              }, 0)
+              else if (restore) setTimeout(() => {
+                host.style.cssText = css
+                document.documentElement.toggleAttribute("data-late-scrollbar", false)
+                if (state.restyles < 3) requestAnimationFrame(loop)
+                else state.restored = true
+              }, 0)
+              else requestAnimationFrame(loop)
+            }
+            const loop = () => {
+              if (kind.endsWith("observer")) tick.style.width = (1 + (++n % 2)) + "px"
+              else apply()
+            }
+            if (kind.endsWith("observer")) new ResizeObserver(apply).observe(tick)
+            else requestAnimationFrame(loop)
+          })
+        }, { kind, point, triggerPoint, dx, dy })
+        if (hidden) await Bun.sleep(700)
+        await page.mouse.move(triggerPoint.x, triggerPoint.y)
+        const restyled = await until(`${surface} ${kind}: three late restyles`, () => page.evaluate(() => (window as unknown as { attack: { restyles: number } }).attack.restyles >= 3), kind.startsWith("batch") ? 2000 : 350)
+        if (restore) {
+          await until("the task restored the host", () => page.evaluate(() => (window as unknown as { attack: { restored: boolean } }).attack.restored), kind.startsWith("batch") ? 2000 : 350)
+          // Chromium can route a click to the host instead of its OOPIF while
+          // their hit-test maps disagree. Let that map settle, still well
+          // inside the dwell: restoration must not erase the earlier moves.
+          await Bun.sleep(100)
+        }
+        if (kind.endsWith("keyboard")) {
+          check(await menu.evaluate(() => document.hasFocus()), `${kind}: keyboard entered the menu`)
+          await page.keyboard.press("Enter")
+        } else {
+          if (restore) await page.mouse.move(point.x, point.y)
+          await page.mouse.down()
+          await page.mouse.up()
+          check(await menu.evaluate(() => {
+            const seen = window as unknown as { rowPressed?: boolean; rowClicked?: boolean }
+            return seen.rowPressed === true && seen.rowClicked === true
+          }).catch(() => false), `${surface} ${kind}: trusted press and click reach the action`)
+        }
+        // Read the refusal as soon as it shows: a status broadcast reloads the
+        // menu and clears its foot, which on a loaded machine can land before
+        // a fixed wait is over.
+        const foot = menu.locator(surface === "save" ? ".offer-status" : "#foot")
+        const settledAt = Date.now() + 1700
+        let refusal = ""
+        while (Date.now() < settledAt && !refusal.includes("covered")) {
+          refusal = (await foot.textContent().catch(() => "")) ?? ""
+          await Bun.sleep(50)
+        }
+        await Bun.sleep(Math.max(0, settledAt - Date.now()))
+        check(!!restyled, `${surface} ${kind}: late restyle ran repeatedly`)
+        if (hidden) {
+          const drawn = await page.evaluate(() => (window as unknown as { attack: { closedDrawn: string } }).attack.closedDrawn)
+          check(!drawn, `${surface} ${kind}: the closed host isn't drawn (offset ${drawn || "none"})`)
+        }
+        check((await hostLog(run)).filter((r) => ["fill", "save"].includes(String(r.type))).length === before, `${surface} ${kind}: no credential request or save`)
+        if (surface === "menu") check(await page.inputValue("#password") === "", `${kind}: no password written`)
+        check(refusal.includes("covered"), `${surface} ${kind}: covered refusal (${refusal})`)
+      }
+    }
+  } catch (err) {
+    check(false, `menu position threw: ${(err as Error).message.split("\n")[0]}`)
+    await diagnose(run, page, "menu position")
   } finally {
     await close(run)
   }
@@ -2796,9 +3121,18 @@ async function frameMoves() {
     await Bun.sleep(300)
     const after = await gap()
     check(!!before && !!after && after.dx === before.dx && after.dy === before.dy, `the menu follows the frame the page moved (${JSON.stringify(before)} then ${JSON.stringify(after)})`)
-    // Wider, the frame centres its form: the field moves inside it.
+    // Wider, the frame centres its form: the field moves inside it, which only the frame sees.
+    const field = await inner.locator("#account_name_text_field").boundingBox()
     await page.evaluate(() => (document.getElementById("aid-auth-widget-iFrame")!.style.width = "760px"))
-    check(!!(await until("the menu goes", () => !extensionFrame(page, "menu.html"), 3000)), "and goes when the field moves inside its frame")
+    const moved = await until("the field moves inside its frame", async () => {
+      const now = await inner.locator("#account_name_text_field").boundingBox()
+      return now && field && Math.abs(now.x - field.x) > 40 ? now : null
+    }, 3000)
+    const followed = await until("the menu follows the field", async () => {
+      const g = extensionFrame(page, "menu.html") ? await gap() : null
+      return g && before && g.dx === before.dx && g.dy === before.dy ? g : null
+    }, 3000)
+    check(!!moved && !!followed, `and follows the field when it moves inside its frame (${JSON.stringify(field)} to ${JSON.stringify(moved)}, menu ${JSON.stringify(await gap())})`)
   } catch (err) {
     check(false, `frame moves threw: ${(err as Error).message.split("\n")[0]}`)
     await diagnose(run, page, "frame moves")
@@ -3189,7 +3523,7 @@ async function signInSessions() {
  * frame, gets no menu.
  */
 async function frameLogins() {
-  const run = await launch()
+  const run = await launch({ keyLogin: true })
   const page = await run.context.newPage()
   const top = `http://appstoreconnect.apple.test:${server.port}`
   const seen = () => run.worker.evaluate(() => (globalThis as unknown as { __seen: string[] }).__seen)
@@ -3251,22 +3585,59 @@ async function frameLogins() {
     check(JSON.stringify(await wants()) === JSON.stringify([`username@${frameOrigin}`, `password@${frameOrigin}`]), `one fill per step, each for the frame's own origin (${await wants()})`)
     check(!!(await fieldBox()), "the page around the frame keeps its frame")
 
-    // Typed by hand: the username narrows the password step's menu to its login.
+    // Typed by hand, then Enter: the widget slides its password box open
+    // below the account box and focuses it itself (App Store Connect). The
+    // account box's list never stays over it; the password step's list opens
+    // under the password box, narrowed to the typed username's login, and
+    // follows the box when a hint pushes it down inside the frame.
     const typed = await open()
     if (typed) {
-      await typed.click("#account_name_text_field")
-      await until("the menu opens", menuNow, 15_000)
-      await typed.locator("#account_name_text_field").pressSequentially("admin", { delay: 30 })
+      const account = typed.locator("#account_name_text_field")
+      const password = typed.locator("#password_text_field")
+      const shown = typed.locator(".password .form-cell-wrapper")
+      await account.click()
+      const listed = await until("the menu opens", menuNow, 15_000)
+      check(!!listed && (await listed.locator("button.row").count()) === 2 && !(await listed.locator("button.row", { hasText: "Acme API key" }).count()), "a login with no username isn't offered on a form with a username box")
+      await account.pressSequentially("admin", { delay: 30 })
       check(!!(await until("typing in the frame puts the menu away", () => !extensionFrame(page, "menu.html"), 5000)), "typing in the frame's field puts the top page's menu away")
-      await typed.click("#sign-in")
-      await until("the password box opens", async () => ((await typed.locator("#password_text_field").boundingBox())?.height ?? 0) > 20)
-      await Bun.sleep(400)
-      await typed.click("#password_text_field")
+      await Bun.sleep(900)
+      check(!extensionFrame(page, "menu.html"), "and it stays away while the user types")
+      // ↓ brings the list back; Enter goes on with the form instead.
+      await account.press("ArrowDown")
+      check(!!(await until("↓ brings the list back", menuNow, 15_000)), "↓ in the frame's field brings its list back")
+      await account.press("Enter")
+      let covered = ""
+      for (const end = Date.now() + 2000; Date.now() < end; await Bun.sleep(40)) {
+        const m = extensionFrame(page, "menu.html")
+        const [box, input, wrap] = await Promise.all([m ? m.frameElement().then((e) => e.boundingBox()).catch(() => null) : null, password.boundingBox(), shown.boundingBox()])
+        // The part of the password box that shows so far: its wrapper cuts it while it opens.
+        const top = Math.max(input?.y ?? 0, wrap?.y ?? 0)
+        const bottom = Math.min((input?.y ?? 0) + (input?.height ?? 0), (wrap?.y ?? 0) + (wrap?.height ?? 0))
+        const field = input && wrap ? { x: input.x, y: top, width: input.width, height: bottom - top } : null
+        if (box && field && field.height > 8 && box.y < field.y + field.height && box.y + box.height > field.y && box.x < field.x + field.width && box.x + box.width > field.x) covered ||= JSON.stringify({ box, field })
+      }
+      check(!covered, `no list covers the password box as it opens below the account box${covered ? ` (${covered})` : ""}`)
+      check(!!(await until("the widget focuses the password box", () => password.evaluate((el) => el === document.activeElement))), "the widget focuses its password box once open")
+      const under = async (m: Frame) => {
+        const [box, field] = await Promise.all([m.frameElement().then((e) => e.boundingBox()).catch(() => null), password.boundingBox()])
+        return !!box && !!field && Math.abs(box.x - field.x) < 8 && box.y >= field.y + field.height && box.y < field.y + field.height + 24
+      }
+      // Opened by the widget's own focus right after the Enter, or asked for with ↓.
+      if (!(await until("the password step's list opens", menuNow, 2000))) await password.press("ArrowDown")
       const narrowed = await until("the password menu opens", menuNow, 15_000)
       check(!!narrowed && (await narrowed.locator("button.row").count()) === 1 && ((await narrowed.locator(".row .sub").textContent()) ?? "") === "admin", "a username typed by hand narrows the frame's password step to its login")
-      if (narrowed) {
-        await settled(narrowed)
-        await narrowed.locator("button.row").click()
+      check(!!narrowed && (await under(narrowed)), "its list opens under the password box, not over it")
+      if (narrowed) await shotAround(page, "frame-login-password-step", narrowed, "#aid-auth-widget-iFrame")
+      // A hint comes in above the boxes, inside the frame: only the frame sees the password box move.
+      await typed.locator("h1").evaluate((el) => void ((el as HTMLElement).style.marginBottom = "54px"))
+      const followed = await until("the list follows the password box", async () => {
+        const m = await menuNow()
+        return m && (await under(m)) ? m : null
+      }, 3000)
+      check(!!followed, "the list follows the password box when it moves inside the frame")
+      if (followed) {
+        await settled(followed)
+        await followed.locator("button.row").click()
         check(!!(await until("admin's password fills", async () => (await typed.inputValue("#password_text_field")) === "hunter2")), "and picking it fills the frame's password")
       }
     }
@@ -4784,6 +5155,10 @@ const once: Record<string, () => Promise<void>> = {
   menuScale: async () => {
     for (const scale of [1, 1.25, 1.5, 2.5, 3]) await menuScale(scale)
   },
+  menuPosition,
+  menuPositionDpr: async () => {
+    for (const scale of [1.25, 2]) await menuPosition(scale)
+  },
   topLayer,
   viewportResize,
   menuReveal,
@@ -4802,22 +5177,23 @@ const once: Record<string, () => Promise<void>> = {
 }
 const gauntletRun = gauntletScenarios<Run>({ site, port: server.port!, launch, close, check, settled, hostLog, isCode, diagnose, video })
 Object.assign(once, gauntletRun.scenarios)
-const groups: Record<string, string[]> = { gauntlet: Object.keys(gauntletRun.scenarios), forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "menuScale", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
+const groups: Record<string, string[]> = { gauntlet: Object.keys(gauntletRun.scenarios), forms: ["formsSurface", "formsShapes", "formsFrames", "formsTouchId"], security: ["securityPage", "keyboardEntry", "coveredMenu", "menuScale", "menuPosition", "topLayer", "viewportResize", "occlusionSweep", "midFill", "coveredPill", "backForward"] }
 const picked = only?.split(",").flatMap((name) => groups[name] ?? [name])
 
 // `--shard <i>/<n>` runs the i-th of n deterministic slices of the units below
 // (each scenario in each scheme, then each `once` entry), balanced by these
-// rough run times in seconds (per scheme; unlisted ones count 10); `--list`
+// run times in seconds (per scheme, CI medians of native and standalone;
+// unlisted ones count 10); `--list`
 // prints the units and their shards.
 const cost: Record<string, number> = {
-  detection: 108, occlusionSweep: 55, signInSessions: 52, signUpStep: 14, frameLogins: 25, frameMoves: 6, conditionalHeld: 12, savedInPage: 46, securityPage: 46, coveredMenu: 46, generator: 42, signInOutcomes: 39,
-  signInShapes: 34, savePrompt: 20, topLayer: 17, keyboardEntry: 14, corner: 12, passkeys: 12, rateLimited: 11, signInWith: 9, fillAndTotp: 8,
-  coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 6, locked: 2, notInstalled: 1,
-  formsSurface: 12, formsShapes: 15, formsFrames: 18, formsTouchId: 12, learnAndNever: 15, a11y: 18, a11yStates: 6,
-  menuReveal: 4, menuScale: 100,
-  pageZoom: 5,
-  pageDismiss: 5,
-  escInDialog: 4,
+  detection: 111, occlusionSweep: 55, signInSessions: 53, signUpStep: 19, frameLogins: 34, frameMoves: 2, conditionalHeld: 10, savedInPage: 46, securityPage: 164, coveredMenu: 56, generator: 43, signInOutcomes: 39,
+  signInShapes: 34, savePrompt: 20, topLayer: 18, keyboardEntry: 14, corner: 13, passkeys: 11, rateLimited: 12, signInWith: 8, fillAndTotp: 7,
+  coldSave: 8, backForward: 7, narrowing: 6, googleAccount: 8, midFill: 6, coveredPill: 5, viewportResize: 15, locked: 2, notInstalled: 1,
+  formsSurface: 7, formsShapes: 14, formsFrames: 16, formsTouchId: 9, learnAndNever: 23, a11y: 18, a11yStates: 4,
+  menuReveal: 2, menuScale: 115, menuPosition: 169, menuPositionDpr: 247,
+  pageZoom: 11,
+  pageDismiss: 6,
+  escInDialog: 6,
   ...gauntletRun.cost,
 }
 /** Scenarios tied to the native agent; standalone passkeys/Strict are in standalone.ts. */

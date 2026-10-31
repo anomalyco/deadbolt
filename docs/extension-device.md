@@ -173,9 +173,15 @@ the MV3 service worker or directly in the offscreen document. Handles never move
 between workers. An opaque handle id in Rust avoids claiming that a JS object is
 thread-safe; this build has no wasm threads/shared memory.
 
-Local writes and incoming sync batches stage a validated core vault, append the
-new encrypted entries durably, and only then publish the staged state. This retains
-the native invariant that a failed write must not advance live signed-log heads.
+Local writes and incoming sync batches validate a private suffix against the
+borrowed vault history (the same staging path as native), append its encrypted
+entries in one transaction, and publish only after confirmed commit. A storage
+error before the signed-log transaction reaches commit leaves the live vault
+unchanged and unlocked; further writes may require reopening the store. Once
+redb's commit starts, the store reports a failed commit as `AppendUncertain`.
+Both OPFS flushes of the two-phase commit are inside that boundary. The device
+then drops its live vault and connections and locks: unlock revalidates the log,
+which may contain the old or the new state. It never retries the write.
 Browser storage is local to the extension's origin/profile. Removing the extension
 or clearing its storage destroys this replica; it is not a recovery mechanism.
 
@@ -209,7 +215,10 @@ CLI application's versioned envelopes and signed entries. Sync uses the same
 membership-first/data-second protocol. The startup barrier contacts all current
 members, including those learned during the round, before serving data. Dial
 failures count as unreachable, post-connect failures retry, and the native
-30-second best-effort deadline is preserved. A learned removal immediately closes
+30-second best-effort deadline is preserved. Contacts run at most four at a time,
+each with a 15-second dial-and-exchange budget. After startup, a full round attempts
+every peer without a shared deadline, so offline peers cannot starve later members.
+A learned removal immediately closes
 open sync connections; a stale offline replica has the same documented residual
 risk as the CLI.
 
@@ -227,7 +236,7 @@ attempts can start again; codes and secrets are never logged.
 
 Like the CLI's `Fresh`, the joining node uses a fresh device key and refuses all
 sync. It reuses `application::read_offer`, `join_blob` and `verify_welcome`, keeping
-the admitted vault and key only in memory. No local passphrase or OPFS write is
+a private, incrementally verified vault and key only in memory. It never keeps a second copy of the complete encoded welcome. No local passphrase or OPFS write is
 needed until admission. `device-join-finish {passphrase, deviceName}` writes the
 encrypted key, complete welcome log and peer hints into the exclusive pending
 OPFS file, closes it, and atomically publishes it without replacing an existing
@@ -664,6 +673,99 @@ use only synthetic credentials; the profile and CLI store are deleted at the end
 The native fake-host suite (`bun run e2e`, `bun run e2e:parallel`) builds with
 `--native` as before.
 
+### Private relay fault run (opt-in Linux)
+
+Two disposable standalone Chromium profiles, the normal release-mode WASM
+worker, a debug native CLI peer, an `iroh-relay` matching the pinned transport,
+and a local HTTPS signed-packet store. Chromium's CONNECT proxies route exactly
+two names to numeric loopback sockets. The CLI gets two hosts entries and a
+loopback-only resolver in a private mount namespace. There is no external
+interface or default route. Each browser pins the one-run certificate; a
+non-default, debug-Linux-only Cargo feature gives the native endpoint only the
+fixture trust anchor and selects that single relay. The browser has no direct
+IP transport. Both A and AAAA lookups terminate locally so a native HTTPS
+probe can finish and advertise its home relay. No native messaging,
+public relay/resolver or system trust-store change. Download/build dependencies
+**before** entering the namespace:
+
+```sh
+# From the repo root. Needs bun, the wasm toolchain from scripts/wasm.sh,
+# Linux iproute2 (sch_netem), ethtool, openssl, util-linux, and sudo.
+export CARGO_TARGET_DIR="$HOME/.cache/cargo-target/poor-relay"
+export CARGO_BUILD_JOBS=6 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0
+(cd extension && bun install --frozen-lockfile && bun x playwright-core install chromium)
+bun extension/scripts/build.ts --standalone --e2e "$CARGO_TARGET_DIR/dist"
+cargo install --locked iroh-relay --version '=1.3.0' --features server \
+  --debug --root "$CARGO_TARGET_DIR/tools"
+cargo build --locked -p deadbolt-ext-core --example relay_store
+cargo build --locked -p deadbolt-cli --features deadbolt-net/private-relay-fixture
+extension/e2e/private-relay/run.sh "$CARGO_TARGET_DIR/dist" \
+  "$CARGO_TARGET_DIR/tools/bin/iroh-relay" "$CARGO_TARGET_DIR/debug/examples/relay_store" \
+  "$CARGO_TARGET_DIR/debug/deadbolt"
+```
+
+`sudo` creates the network and PID namespaces; Chromium, the relay, and the
+resolver run unprivileged. The driver needs `sudo -n tc` **inside** the empty
+network namespace. For the poor-link cases only B's proxy-to-relay/resolver link is shaped;
+CLI A and browser C are unshaped. Loopback MTU is 1500, segmentation/receive offload is off.
+Both directions get 150 ms delay + independent 2% packet loss (300 ms added
+RTT), **or** a separate 1 Mbit/s per-direction cap, **or** 100% loss without
+closing existing TCP connections. The rate profile keeps a 1,000-packet queue
+in each direction: at MTU 1500 it can add roughly 12 s of queueing when full.
+These figures do not isolate the cost of bandwidth alone. Netem statistics, not CDP offline emulation,
+show which queues handled the traffic. Normal worker startup and sync deadlines
+still apply. This does not model multiple physical relays or internet routing.
+
+The run compares three small edits on a clean link and three on the lossy link.
+It partitions the CLI and browser for ten seconds after concurrent edits,
+heals two cut/write/heal cycles, then appends **2,000 separately signed logins
+(2 KiB notes each) and two 64 KiB attachments** on the locked native store.
+It terminates the service worker and discards the offscreen owner during catch-up,
+checks lock and authenticated OPFS reopen, then records visible backlog refs
+while B is still connected and the last attachment is absent. After a further
+16 KiB of relay traffic it closes the browser **on that live path**. Only then
+does it close/deny B's proxy tunnels, restart the relay, relaunch B and unlock.
+Every captured ref must survive, with no further relay bytes and still no tail,
+before B can reconnect. More entries may have committed during shutdown. No test command is linked into WASM.
+A third device joins. An offline example reopens the three encrypted stores,
+rejects duplicate entries, compares heads and complete items, and checks both
+conflict versions and attachment contents. Finally, removed C contacts B while B
+is returning with stale membership and an unsent item. A's advertised relay path is briefly stalled until C confirms direct contact
+with B. A monotonic precondition requires both directions restored within 10 s
+of starting B's unlock, before its 15 s startup dial budget. B must learn the removal before serving that item; only A/B
+get both markers. The surviving stores are compared again. This tests **one
+reachable-authority schedule**. If A never published a usable address, it can
+be outbound-only; a missing route is not a completed refresh. By contract an
+unreachable peer can be skipped, even before the 30 s fallback, so the harness
+requires A's published relay hint rather than assuming bidirectional reachability.
+
+`MEASURE` is request start to edit acknowledgment and to an exact remote value
+observed by poll. `PHASE` is elapsed time, sampled CPU seconds and peak **summed**
+RSS in KiB (Chromium includes open device pages and double-counts shared pages).
+The meter matches `/proc/<pid>/exe` device/inode to the three supplied images,
+not truncated process names. Each phase must start and end with a positive RSS
+sample for every group. Across restarts a group can be absent between samples;
+250 ms sampling misses short peaks, short-lived CLI commands and any CPU they
+use after their last observation. A sampled zero CPU delta is not zero wakeups.
+Per-phase safety ceilings are
+3 GiB Chromium, 1 GiB native CLI, 256 MiB relay, and at most 2 CPU seconds
+across the three in each ten-second idle/outage window. The fixed 2,002-entry
+backlog phase also fails above 120 sampled CPU seconds summed across the three
+process groups (previous normal runs used roughly 33 s total). These are regression
+tripwires for this fixture, not general mobile memory limits. Catch-up allows
+210 s after restart including startup and retries (payload-only minimum: 38.4 s).
+Proxy byte counts include TLS/WebSocket/control traffic, not unique payload.
+OPFS sizes are logical file bytes. Heal/restart checks explicitly request sync.
+This is not an unattended wakeup, torn-write or single-oversize-frame test.
+
+For a short headless CI lane, pass `--smoke` before the four paths. It runs
+private native/browser pairing, three clean/lossy probes, the blackhole and
+conflicting edits/flaps; long catch-up, lifecycle and removal stay nightly.
+Without sudo or Chromium, `cargo test -p deadbolt-cli --bin deadbolt short_sessions_commit_a_reopenable_prefix_before_done`
+exercises the production stream reader, native store and authenticated reopen on
+a deterministic cut. Run the full opt-in script on an isolated Linux nightly
+runner with netem rather than loosening networking permissions on PR jobs.
+
 ## Installing and updating the standalone build
 
 Every dev release publishes the standalone build at
@@ -752,8 +854,7 @@ name "this Mac" grants nothing: it only changes the wording.
    error UX, and run the full CLI e2e in CI against a local relay.
 2. Extend the shared application protocol's simulator coverage to browser-client
    storage/lifetime adapters, and exercise
-   suspended/resumed/offline relays and storage exhaustion/corruption. Parallelize
-   startup contacts (the proof dials sequentially within the same 30-second budget).
+   suspended/resumed/offline relays and storage exhaustion/corruption.
 3. Validate real platform providers in Chrome and Helium on macOS; evaluate
    capped wasm-worker crash recovery from offscreen memory only (not built).
 4. Stronger browser-lifetime guarantees and Comfortable biometric card policy.

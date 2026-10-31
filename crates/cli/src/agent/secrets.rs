@@ -100,6 +100,7 @@ fn grants(s: &Loaded) -> Result<Vec<Grant>> {
 /// One reference, found: the vault's id beside what the caller gets.
 pub struct Found {
     vault_id: String,
+    ssh_secret: bool,
     pub secret: ResolvedSecret,
 }
 
@@ -181,6 +182,8 @@ pub fn find(s: &Loaded, reference: &Reference, now: Duration) -> Result<Found> {
     }
     Ok(Found {
         vault_id: vault.to_string(),
+        ssh_secret: item.kind == "ssh"
+            && matches!(reference.field.as_str(), "private-key" | "passphrase"),
         secret: ResolvedSecret {
             vault: s.vault(&vault).name().into(),
             item: item.id.to_string(),
@@ -317,6 +320,7 @@ fn refused(command: &Command) -> Option<&'static str> {
         Command::ItemRemove { .. } => "delete an item",
         Command::Import { .. } => "import items",
         Command::SyncOnePassword { .. } => "sync from 1Password",
+        Command::SshAgentSet { .. } => "turn the SSH agent on or off",
         _ => return None,
     })
 }
@@ -525,6 +529,17 @@ impl Agent {
                     "{} is a file: {use_}. Write it out with `deadbolt inject -o FILE` from a template that is only {{{{ {} }}}}, or `deadbolt get -o FILE`",
                     named(file),
                     reference_of(file)
+                ),
+            ));
+        }
+        if purpose != Purpose::Read
+            && let Some(ssh) = found.iter().find(|f| f.ssh_secret)
+        {
+            return Err(fail(
+                ErrorCode::Forbidden,
+                format!(
+                    "{} stays in Deadbolt: use Deadbolt's SSH agent (`deadbolt ssh on`) instead",
+                    named(ssh)
                 ),
             ));
         }
@@ -920,6 +935,7 @@ mod tests {
             vault: None,
             query: vec!["GitHub".into()],
             otp: false,
+            ssh_private: false,
             files: Vec::new(),
             deleted: false,
         };

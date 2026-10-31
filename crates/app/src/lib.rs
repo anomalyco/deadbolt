@@ -21,6 +21,7 @@ mod scenes;
 pub mod settings;
 pub mod sheet;
 pub mod shortcut;
+pub mod ssh;
 pub mod trash;
 pub mod vault;
 pub mod view;

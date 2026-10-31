@@ -29,7 +29,7 @@ export interface Provider {
 
 const KNOWN: Record<string, Omit<Provider, "id">> = {
   google: { name: "Google", hosts: ["accounts.google.com"], words: ["google"], chooser: true, pageAccount: true },
-  apple: { name: "Apple", hosts: ["appleid.apple.com"], words: ["apple", "apple id"], chooser: false },
+  apple: { name: "Apple", hosts: ["appleid.apple.com", "idmsa.apple.com"], words: ["apple", "apple id"], chooser: false, pageAccount: true },
   github: { name: "GitHub", hosts: ["github.com"], words: ["github"], chooser: false },
   microsoft: { name: "Microsoft", hosts: ["login.microsoftonline.com", "login.live.com"], words: ["microsoft", "outlook"], chooser: false },
   facebook: { name: "Facebook", hosts: ["www.facebook.com", "m.facebook.com"], words: ["facebook"], chooser: false },

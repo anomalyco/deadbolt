@@ -1204,6 +1204,15 @@ describe("sign in with a provider", () => {
     expect(menuAccounts([ACCOUNTS[0], phone, google], "phone")).toEqual([phone])
   })
 
+  test("a login with no username is left out on a form with a username box, and comes last anywhere else", () => {
+    const key = { ...ACCOUNTS[0], ref: `${"a".repeat(64)}:${"5".repeat(32)}`, title: "API key", username: undefined }
+    expect(menuAccounts([key, ACCOUNTS[0], google], "password", ["email", "password"])).toEqual([ACCOUNTS[0], google])
+    expect(menuAccounts([key, ACCOUNTS[0]], "email", ["email"])).toEqual([ACCOUNTS[0]])
+    expect(menuAccounts([key, ACCOUNTS[0]], "password", ["password"])).toEqual([ACCOUNTS[0], key])
+    // With nothing else to offer, it still shows.
+    expect(menuAccounts([key], "password", ["email", "password"])).toEqual([key])
+  })
+
   test("picking it starts following the sign-in and points at the page's button; it never fills", async () => {
     fake.answer = (m) => (m.type === "db:point" ? true : m.type === "db:approve" ? { approval: "x", roles: ["email"] } : true)
     const token = await autofill.query(pageSender(), ["email", "password"], "email", 1)

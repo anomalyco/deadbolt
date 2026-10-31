@@ -504,7 +504,7 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
         value = value.child(problem(k, "problem", p));
     }
     // Its name over it, as the item's page has them.
-    col()
+    let mut field_col = col()
         .key(format!("field-{}", input.name))
         .w_full()
         .gap(6.0)
@@ -514,7 +514,11 @@ fn field(s: &App, k: &Kit, f: &Form, i: usize) -> El {
                 .font(k.ty.small_medium)
                 .color(k.c.text_faint),
         )
-        .child(value)
+        .child(value);
+    if f.kind == "ssh" && input.name == "private-key" {
+        field_col = field_col.child(crate::ssh::generator_row(s, k, f.saving));
+    }
+    field_col
 }
 
 /// A focused field keeps a neutral edge instead of the kit's blue ring;

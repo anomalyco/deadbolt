@@ -42,6 +42,8 @@ fn handler_error(error: anyhow::Error) -> HandlerError {
 }
 
 impl SyncHandler for Handler {
+    type ReceiveState = bool;
+
     async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
         self.0
             .with(|s| hello(s, &DeviceId::from_bytes(peer), Some(s.own_addr())))
@@ -52,37 +54,53 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
-        self.0
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+        let history = self
+            .0
             .with(|s| {
                 let ready = *self.0.ready.borrow();
                 missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready)
             })
-            .map_err(handler_error)
+            .map_err(handler_error)?;
+        Ok(history.outgoing(|h| {
+            self.0
+                .with(|s| Ok(h.next(&**s, *self.0.ready.borrow())?))
+                .map_err(handler_error)
+        }))
     }
 
-    async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        peer: PeerId,
+        entries: Vec<Blob>,
+        pending_forward: &mut bool,
+        done: bool,
+    ) -> Result<(), HandlerError> {
         let agent = &self.0;
-        let received = agent
+        let peer = DeviceId::from_bytes(peer);
+        agent
             .with(|s| {
                 let ready = *agent.ready.borrow();
-                let received = receive(s, &DeviceId::from_bytes(peer), entries, ready);
-                // Earlier vault transactions may have committed even if a later
-                // vault or address-book write failed. Always enforce those removals.
+                let received = receive(s, &peer, entries, ready);
+                // Even an errored batch may have committed an earlier vault's removal.
                 agent.refresh(s);
-                Ok(received)
+                // Defer only item and label forwarding, not watcher delivery, admission
+                // changes or enforcement. A sole sender already has its own delta.
+                *pending_forward |= s.changes.edits.iter().any(|id| {
+                    let vault = s.vault(id);
+                    vault.members().any(|id| id != s.id && id != peer)
+                });
+                if !s.changes.devices.is_empty() || (done && received.is_ok() && *pending_forward) {
+                    agent.sync_now.notify_one();
+                }
+                received.map(drop)
             })
-            .map_err(handler_error)?;
-        let added = received.map_err(handler_error)?;
-        if added > 0 {
-            // Pass news on to the other members.
-            agent.sync_now.notify_one();
-        }
-        Ok(())
+            .map_err(handler_error)
     }
 }
 
 pub(super) fn hello(s: &Loaded, peer: &DeviceId, addr: Option<Addr>) -> Result<Vec<u8>> {
+    s.ensure_usable()?;
     Ok(application::hello(s, peer, addr)?)
 }
 
@@ -91,7 +109,8 @@ pub(super) fn missing_for(
     peer: &DeviceId,
     bytes: &[u8],
     ready: bool,
-) -> Result<Vec<Blob>> {
+) -> Result<application::OutgoingHistory> {
+    s.ensure_usable()?;
     application::missing_for(s, peer, bytes, ready)
 }
 
@@ -101,6 +120,7 @@ pub(super) fn receive(
     entries: Vec<Blob>,
     ready: bool,
 ) -> Result<usize> {
+    s.ensure_usable()?;
     application::receive(s, peer, entries, ready)
 }
 
@@ -412,10 +432,184 @@ mod tests {
         p_cost: 1,
     };
 
+    // Drive the real wire reader up to a specific prefix without yielding to a timer.
+    // A background round waiting on sync_now would consume the same permit we inspect.
+    #[tokio::test]
+    async fn forward_committed_prefixes_once_at_done() {
+        use std::task::{Context, Waker};
+        use tokio::io::{AsyncWriteExt, DuplexStream};
+
+        // deadbolt/sync/1 tags, as sent by the scripted peer.
+        const HEADS: u8 = 1;
+        const ENTRY: u8 = 2;
+        const DONE: u8 = 3;
+        async fn frame(w: &mut DuplexStream, tag: u8, body: &[u8]) {
+            w.write_u32(1 + body.len() as u32).await.unwrap();
+            w.write_u8(tag).await.unwrap();
+            w.write_all(body).await.unwrap();
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let agent = Agent::new(super::super::tests::test_paths(dir.path()), true, FAST);
+        agent
+            .setup("test".to_owned().into(), "local".into())
+            .await
+            .unwrap();
+        let sender = DeviceSecret::from_bytes(&[2; 32]);
+        let third = DeviceSecret::from_bytes(&[3; 32]);
+        let peer = *sender.device_id().as_bytes();
+        let (mut shared, mut sole_sender) = agent
+            .with(|s| {
+                s.sync_task.take();
+                s.health_task.take();
+                let mut vault = |name: &str, others: &[&DeviceSecret]| -> Result<Vault> {
+                    let id = s.create_vault(name)?;
+                    s.update(id, |v, key| {
+                        for device in others {
+                            v.add(
+                                key,
+                                device.device_id(),
+                                device.join_consent(&id, &key.device_id()),
+                            )?;
+                        }
+                        Ok(())
+                    })?;
+                    Ok(s.vault(&id).clone())
+                };
+                let vaults = (
+                    vault("shared", &[&sender, &third])?,
+                    vault("two", &[&sender])?,
+                );
+                agent.refresh(s);
+                Ok(vaults)
+            })
+            .unwrap();
+        let handler = Handler(agent.clone());
+        let session = || {
+            let (mut reader, writer) = tokio::io::duplex(8192);
+            let handler = &handler;
+            (
+                writer,
+                Box::pin(tokio::task::unconstrained(async move {
+                    deadbolt_net::run_sync_session(
+                        handler,
+                        peer,
+                        &mut tokio::io::sink(),
+                        &mut reader,
+                        deadbolt_net::DEFAULT_MAX_FRAME_LEN,
+                        false,
+                    )
+                    .await
+                    .unwrap()
+                })),
+            )
+        };
+        let cx = &mut Context::from_waker(Waker::noop());
+        let woke = || {
+            std::pin::pin!(agent.sync_now.notified())
+                .as_mut()
+                .poll(&mut Context::from_waker(Waker::noop()))
+                .is_ready()
+        };
+        let heads = handler.heads(peer).await.unwrap();
+        assert!(!woke());
+        let edit = |v: &mut Vault| {
+            v.create_item(&sender, "login", Some("edit".into()), [])
+                .unwrap()
+                .1
+                .encode()
+        };
+        for final_duplicate in [false, true] {
+            use crate::protocol::Change;
+            let watcher = agent.watchers.subscribe(false);
+            let (mut wire, mut exchange) = session();
+            frame(&mut wire, HEADS, &heads).await;
+            let first = if final_duplicate {
+                shared.rename(&sender, "new-label").unwrap().encode()
+            } else {
+                edit(&mut shared)
+            };
+            frame(&mut wire, ENTRY, &first).await;
+            assert!(exchange.as_mut().poll(cx).is_pending());
+            assert!(
+                !woke(),
+                "neither a data prefix nor a label is a membership change"
+            );
+            // Completing an overlapping stream from the same peer must not flush
+            // or consume this one's pending forward.
+            let (mut other, concurrent) = session();
+            frame(&mut other, HEADS, &heads).await;
+            frame(&mut other, DONE, &[]).await;
+            concurrent.await;
+            assert!(!woke());
+
+            frame(&mut wire, ENTRY, &edit(&mut sole_sender)).await;
+            let last = if final_duplicate {
+                edit(&mut sole_sender)
+            } else {
+                edit(&mut shared)
+            };
+            frame(&mut wire, ENTRY, &last).await;
+            assert!(exchange.as_mut().poll(cx).is_pending());
+            assert!(!woke());
+            // Watches do not wait for DONE, lose the second vault or report a
+            // label change as a device change.
+            let seen = tokio::time::timeout(Duration::from_secs(5), watcher.next())
+                .await
+                .unwrap();
+            let items = |v: &Vault| Change::Items {
+                vault: v.id().to_string(),
+            };
+            assert_eq!(seen.len(), 2, "{seen:?}");
+            assert!(seen.contains(&items(&sole_sender)));
+            assert!(seen.contains(&if final_duplicate {
+                Change::Vaults
+            } else {
+                items(&shared)
+            }));
+            if final_duplicate {
+                frame(&mut wire, ENTRY, &last).await;
+            }
+            frame(&mut wire, DONE, &[]).await;
+            exchange.await;
+            assert!(woke(), "the final batch need not add anything");
+        }
+        // Abandon a dirty stream. A later exchange with new data *only* for
+        // the sole sender must not inherit its pending forward or echo it.
+        let (mut wire, mut cut) = session();
+        frame(&mut wire, HEADS, &heads).await;
+        frame(&mut wire, ENTRY, &edit(&mut shared)).await;
+        assert!(cut.as_mut().poll(cx).is_pending());
+        drop(cut);
+        let (mut wire, next) = session();
+        frame(&mut wire, HEADS, &heads).await;
+        frame(&mut wire, ENTRY, &edit(&mut sole_sender)).await;
+        frame(&mut wire, DONE, &[]).await;
+        next.await;
+        assert!(!woke());
+        // Removing the third peer must wake and close its gate *before* DONE.
+        let (mut wire, mut exchange) = session();
+        frame(&mut wire, HEADS, &heads).await;
+        let removal = shared.remove(&sender, third.device_id()).unwrap();
+        frame(&mut wire, ENTRY, &removal.encode()).await;
+        assert!(exchange.as_mut().poll(cx).is_pending());
+        assert!(woke());
+        assert!(
+            !agent
+                .members
+                .read()
+                .unwrap()
+                .contains(third.device_id().as_bytes())
+        );
+        drop(exchange);
+        agent.lock().await;
+    }
+
     /// The production sync handlers, ready, over a plain in-memory stream.
     struct Plain(std::sync::Mutex<Loaded>, std::sync::atomic::AtomicUsize);
 
     impl SyncHandler for Plain {
+        type ReceiveState = ();
+
         async fn heads(&self, peer: PeerId) -> Result<Vec<u8>, HandlerError> {
             let s = self.0.lock().unwrap();
             hello(&s, &DeviceId::from_bytes(peer), None).map_err(handler_error)
@@ -425,12 +619,20 @@ mod tests {
             &self,
             peer: PeerId,
             heads: Vec<u8>,
-        ) -> Result<Vec<Blob>, HandlerError> {
+        ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
             let mut s = self.0.lock().unwrap();
-            missing_for(&mut s, &DeviceId::from_bytes(peer), &heads, true).map_err(handler_error)
+            let history = missing_for(&mut s, &DeviceId::from_bytes(peer), &heads, true)
+                .map_err(handler_error)?;
+            Ok(history.outgoing(|h| Ok(h.next(&*self.0.lock().unwrap(), true)?)))
         }
 
-        async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
+        async fn receive(
+            &self,
+            peer: PeerId,
+            entries: Vec<Blob>,
+            _: &mut (),
+            _: bool,
+        ) -> Result<(), HandlerError> {
             self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let mut s = self.0.lock().unwrap();
             receive(&mut s, &DeviceId::from_bytes(peer), entries, true)
@@ -491,7 +693,13 @@ mod tests {
         let join = super::super::pairing::join_blob(&b.secret, "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
             super::super::pairing::welcome(&mut a, vault, b.id, &join, None).unwrap();
-        super::super::pairing::apply_welcome(&mut b, a.id, offer, welcome).unwrap();
+        super::super::pairing::apply_welcome(
+            &mut b,
+            a.id,
+            offer,
+            super::super::pairing::test_replay(&a, welcome),
+        )
+        .unwrap();
         assert_eq!(b.vault(&vault).items().len(), 3004);
 
         // Then sync a second import, one item near the limit and single edits.
@@ -580,8 +788,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn shared_sync_sends_all_membership_before_any_data() {
+    fn two_shared_vaults() -> (tempfile::TempDir, Loaded, DeviceId, Vec<u8>) {
         let dir = tempfile::tempdir().unwrap();
         let mut source = Loaded::setup(dir.path(), b"test", "alpha", FAST).unwrap();
         let peer = DeviceSecret::from_bytes(&[2; 32]);
@@ -608,13 +815,21 @@ mod tests {
             vaults,
         })
         .unwrap();
-        let logs = |blobs: Vec<Blob>| {
-            blobs
-                .into_iter()
+        (dir, source, peer.device_id(), hello)
+    }
+
+    #[test]
+    fn shared_sync_sends_all_membership_before_any_data() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        let logs = |mut h: application::OutgoingHistory, s: &Loaded| {
+            std::iter::from_fn(|| h.next(s, true).unwrap())
                 .map(|bytes| deadbolt_core::Entry::decode(&bytes).unwrap().log())
                 .collect::<Vec<_>>()
         };
-        let all = logs(missing_for(&mut source, &peer.device_id(), &hello, true).unwrap());
+        let all = logs(
+            missing_for(&mut source, &peer, &hello, true).unwrap(),
+            &source,
+        );
         assert!(all.contains(&deadbolt_core::Log::Data));
         let first_data = all
             .iter()
@@ -625,8 +840,64 @@ mod tests {
                 .iter()
                 .all(|log| *log == deadbolt_core::Log::Data)
         );
-        let startup = logs(missing_for(&mut source, &peer.device_id(), &hello, false).unwrap());
+        let startup = logs(
+            missing_for(&mut source, &peer, &hello, false).unwrap(),
+            &source,
+        );
         assert_eq!(startup, all[..first_data]);
+    }
+
+    #[test]
+    fn multi_vault_sync_omits_only_the_revoked_vault() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        // Revoke the recipient after the first membership frame. Its vault
+        // still has both an Add and a data cursor in this snapshot.
+        let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
+        let first = history.next(&source, true).unwrap().unwrap();
+        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
+        let kept = *source.vaults.keys().find(|id| **id != revoked).unwrap();
+        let expected: Vec<_> = source
+            .vault(&kept)
+            .iter_entries()
+            .map(deadbolt_core::Entry::encode)
+            .collect();
+        source
+            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
+            .unwrap();
+        let remaining: Vec<_> = std::iter::from_fn(|| history.next(&source, true).transpose())
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, expected);
+    }
+
+    #[test]
+    fn multi_vault_sync_does_not_skip_a_missing_signed_tip() {
+        let (_dir, mut source, peer, hello) = two_shared_vaults();
+        let mut history = missing_for(&mut source, &peer, &hello, true).unwrap();
+        let first = history.next(&source, true).unwrap().unwrap();
+        let revoked = deadbolt_core::Entry::decode(&first).unwrap().vault();
+        source
+            .update(revoked, |v, key| Ok(v.remove(key, peer)?))
+            .unwrap();
+        // Even a real signed removal can't disguise a partial replay: the
+        // restored view knows the removal but lacks the pinned data tip.
+        let mut membership = source
+            .vault(&revoked)
+            .iter_entries()
+            .filter(|e| e.log() == deadbolt_core::Log::Membership)
+            .cloned();
+        let mut partial = Vault::from_genesis(membership.next().unwrap()).unwrap();
+        for entry in membership {
+            partial.apply(entry).unwrap();
+        }
+        assert!(partial.was_removed(&peer));
+        source.vaults.insert(revoked, partial);
+        assert!(matches!(
+            history.next(&source, true),
+            Err(application::Error::Core(
+                deadbolt_core::Error::HistoryChanged
+            ))
+        ));
     }
 
     #[test]
@@ -658,6 +929,7 @@ mod tests {
             unavailable: Default::default(),
             changes: Default::default(),
             health,
+            append_uncertain: false,
         };
         let (_, entry) = source
             .create_item(
@@ -675,11 +947,16 @@ mod tests {
         assert!(
             missing_for(&mut loaded, &peer, &heads, false)
                 .unwrap()
-                .is_empty()
+                .next(&loaded, false)
+                .unwrap()
+                .is_none()
         );
         assert_eq!(
-            missing_for(&mut loaded, &peer, &heads, true).unwrap(),
-            vec![entry.encode()]
+            missing_for(&mut loaded, &peer, &heads, true)
+                .unwrap()
+                .next(&loaded, true)
+                .unwrap(),
+            Some(entry.encode())
         );
     }
 }

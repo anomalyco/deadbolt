@@ -65,8 +65,11 @@ const sameFields = (a: Field[], b: Field[]) =>
 /** Finds the login form's fields now. */
 function refresh() {
   if (!document.body) return
-  watchShadowRoots()
-  const result = scanPage()
+  // One walk of the page's shadow roots serves the whole scan: nothing in it
+  // runs page script. A discovery walk: fills are checked on a full one.
+  const roots = openRoots(document, undefined, true)
+  watchShadowRoots(roots)
+  const result = scanPage(roots)
   kind = result.kind
   provider = result.provider
   // A reset form's email box isn't something to fill.
@@ -75,7 +78,7 @@ function refresh() {
   fields = next
   submitControl = kind ? result.submit : undefined
   // A field a login form claims (its email box) is the login's.
-  const forms = scanForms().filter((f) => !fields.some((l) => l.el === f.el))
+  const forms = scanForms(roots).filter((f) => !fields.some((l) => l.el === f.el))
   const same = forms.length === formFields.length && forms.every((f, i) => f.el === formFields[i].el && f.role === formFields[i].role && f.section === formFields[i].section && f.form === formFields[i].form && f.parent === formFields[i].parent)
   if (!same) formsId++
   formFields = forms
@@ -190,11 +193,13 @@ chrome.runtime.onMessage.addListener((message: ToContent, _sender, respond) => {
     // A remembered code step is not permission to send a TOTP into a prompt
     // that currently describes delivery by SMS or email.
     const delivered = deliveredCode(fields, form)
+    // The fields passed the full check, paint included, as each was written;
+    // this one is about submitting, so it leaves the costly paint check out.
     const safe = isTop && offerSignIn && !document.hidden && formId === message.form &&
       (kind === "login" || kind === "mfa") && button instanceof HTMLElement && isVisible(button) &&
       !button.matches(":disabled, [aria-disabled=true]") && /^(sign\s?in|log\s?in|login|continue|next|verify|confirm(?: code)?|submit)$/i.test(label) &&
       form instanceof HTMLFormElement && fields.length > 0 &&
-      !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el)) &&
+      !fields.some((f) => f.role === "captcha") && fields.every((f) => f.el.form === form && form.contains(f.el) && !!f.el.value && fillable(f.el, null, false)) &&
       !delivered &&
       new URL(destination, document.baseURI).origin === location.origin && (!target || target === "_self")
     respond(!!safe)
@@ -255,6 +260,13 @@ function start() {
     if (location.href !== lastUrl) scheduleScan()
   }, 1000)
   document.addEventListener("visibilitychange", scheduleScan)
+  // A box that slides open (Apple's password box) is drawn in full only once
+  // its transition ends, which no mutation says: scan again then.
+  const moved = (e: Event) => {
+    if (e.target instanceof HTMLInputElement || (e.target instanceof Element && e.target.querySelector("input"))) scheduleScan()
+  }
+  document.addEventListener("transitionend", moved, true)
+  document.addEventListener("animationend", moved, true)
   // Back from the back/forward cache: the background forgot this document's form.
   window.addEventListener("pageshow", (event) => {
     if (!event.persisted) return
@@ -267,8 +279,8 @@ function start() {
 // Shadow roots need their own observer, and their own submit listener:
 // "submit" doesn't cross shadow boundaries the way click and keydown do.
 const watchedRoots = new WeakSet<ShadowRoot>()
-function watchShadowRoots() {
-  for (const root of openRoots()) {
+function watchShadowRoots(roots: Array<Document | ShadowRoot>) {
+  for (const root of roots) {
     if (!(root instanceof ShadowRoot) || watchedRoots.has(root)) continue
     watchedRoots.add(root)
     observer?.observe(root, OBSERVE)

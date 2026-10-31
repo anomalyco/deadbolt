@@ -486,6 +486,14 @@ impl Form {
         }
     }
 
+    pub(crate) fn generating_seq(&self) -> Option<u64> {
+        self.generating
+    }
+
+    pub(crate) fn set_generating(&mut self, seq: Option<u64>) {
+        self.generating = seq;
+    }
+
     /// What saving would send. A new item (or one deleted meanwhile, saved
     /// again as new) sends every field with a value; an edit, only the
     /// fields that changed, and empties the ones that were cleared.

@@ -256,6 +256,26 @@ impl Node {
             .alpns(vec![SYNC_ALPN.to_vec(), PAIR_ALPN.to_vec()])
             .relay_mode(relay_mode)
             .hooks(GateHook(gate.clone()));
+        #[cfg(all(
+            feature = "private-relay-fixture",
+            debug_assertions,
+            target_os = "linux"
+        ))]
+        if let Some(path) = std::env::var_os("DEADBOLT_RELAY_FIXTURE_CA") {
+            let cert = tokio::fs::read(path)
+                .await
+                .map_err(|e| Error::Bind(e.to_string()))?;
+            // Only one regional name exists inside the no-uplink namespace. Do not
+            // let a randomly selected, nonexistent home relay make this CLI appear
+            // undialable to the browser. Retain QUIC address discovery on loopback.
+            let relay: RelayUrl = "https://use1-1.relay.n0.iroh.link./"
+                .parse()
+                .map_err(|_| Error::Bind("invalid fixture relay URL".into()))?;
+            builder = builder
+                .ca_tls_config(iroh::tls::CaTlsConfig::custom_roots([cert.into()]))
+                .relay_mode(RelayMode::custom([relay]))
+                .portmapper_config(PortmapperConfig::Disabled);
+        }
         if config.address_lookup {
             builder = builder
                 .address_lookup(PkarrPublisher::n0_dns())
@@ -789,6 +809,8 @@ pub(crate) mod tests {
     pub(crate) struct Nothing;
 
     impl SyncHandler for Nothing {
+        type ReceiveState = ();
+
         async fn heads(&self, _: PeerId) -> Result<Vec<u8>, HandlerError> {
             Ok(vec![])
         }
@@ -796,10 +818,16 @@ pub(crate) mod tests {
             &self,
             _: PeerId,
             _: Vec<u8>,
-        ) -> Result<Vec<crate::Blob>, HandlerError> {
-            Ok(vec![])
+        ) -> Result<crate::Outgoing<'_>, HandlerError> {
+            Ok(Box::new(std::iter::empty()))
         }
-        async fn receive(&self, _: PeerId, _: Vec<crate::Blob>) -> Result<(), HandlerError> {
+        async fn receive(
+            &self,
+            _: PeerId,
+            _: Vec<crate::Blob>,
+            _: &mut (),
+            _: bool,
+        ) -> Result<(), HandlerError> {
             Ok(())
         }
     }

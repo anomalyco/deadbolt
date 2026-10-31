@@ -13,7 +13,9 @@ use crate::policy::{self, Preset};
 use deadbolt_core::autofill::{self, Status, item_name, login_title, otp, urls, value};
 use deadbolt_core::site::{Site, page_url};
 use deadbolt_core::totp::Totp;
-use deadbolt_core::{DataOp, DeviceId, DeviceSecret, Entry, Field, FieldType, Item, ItemId, Vault};
+use deadbolt_core::{
+    DataOp, DeviceId, DeviceSecret, Entry, Field, FieldType, Item, ItemId, Vault, VaultWrite,
+};
 use deadbolt_net::{Node, NodeConfig, PairingOptions, PeerAddr, PeerId};
 use deadbolt_store::{KdfParams, Unlocked};
 use n0_future::task::JoinHandle;
@@ -37,6 +39,7 @@ type Result<T> = std::result::Result<T, Error>;
 #[wasm_bindgen(inline_js = r#"
 export function unix_time() { return Math.floor(Date.now() / 1000); }
 export function items_changed() { self.postMessage({ change: "items" }); }
+export function stop_worker(error) { self.postMessage({ error, fatal: true }); self.close(); }
 export function sync_failed() { console.warn("Deadbolt background sync failed; it will retry on the next wake"); }
 export async function storage_exists() {
     const root = await navigator.storage.getDirectory();
@@ -82,6 +85,7 @@ export async function storage_publish() {
 extern "C" {
     fn unix_time() -> f64;
     fn items_changed();
+    fn stop_worker(error: &str);
     fn sync_failed();
     #[wasm_bindgen(catch)]
     async fn storage_exists() -> std::result::Result<JsValue, JsValue>;
@@ -116,6 +120,10 @@ enum Error {
     Protocol(&'static str),
     #[error(transparent)]
     Store(#[from] deadbolt_store::Error),
+    #[error(
+        "Deadbolt couldn't confirm a vault change. Unlock it and check whether the change was saved."
+    )]
+    UnconfirmedWrite(#[source] deadbolt_store::Error),
     #[error(transparent)]
     History(#[from] crate::history::Error),
     #[error(transparent)]
@@ -186,34 +194,53 @@ impl Loaded {
         })
     }
 
-    fn commit(&mut self, staged: Vault) -> Result<()> {
-        let blobs: Vec<_> = staged
-            .missing_for(&self.vault.heads())
-            .into_iter()
-            .map(Entry::encode)
-            .collect();
-        self.store
-            .append_batch(blobs.iter().map(|blob| blob.as_slice()))?;
-        self.vault = staged;
-        // A removed device's last seen means nothing any more.
-        let members: BTreeSet<String> = self.vault.members().map(|id| id.to_string()).collect();
-        let before = self.seen.len();
-        self.seen.retain(|id, _| members.contains(id));
-        if self.seen.len() != before {
-            self.store
-                .meta_set("extension/peer-seen", &serde_json::to_vec(&self.seen)?)?;
-        }
-        if !blobs.is_empty() {
+    fn write(&mut self, ops: Vec<DataOp>) -> Result<deadbolt_core::Hash> {
+        self.mutate(|v, key| Ok(v.write(key, ops)?.hash()))
+    }
+
+    fn mutate<T>(
+        &mut self,
+        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T>,
+    ) -> Result<T> {
+        let mut changed = false;
+        let result = self.vault.transact(
+            |v| change(v, &self.secret),
+            |entries| {
+                self.store
+                    .append_batch(entries.iter().copied().map(Entry::encode))
+                    .map_err(|error| match error {
+                        deadbolt_store::Error::AppendUncertain(_) => Error::UnconfirmedWrite(error),
+                        _ => Error::Store(error),
+                    })?;
+                changed = true;
+                Ok(())
+            },
+        )?;
+        if changed {
             items_changed();
         }
-        Ok(())
+        Ok(result)
     }
 
     /// `peer` just completed a sync with this device.
     fn saw(&mut self, peer: &DeviceId) -> Result<()> {
-        self.seen.insert(peer.to_string(), unix_time() as u64);
+        // Only current members appear in devices(). Prune stale timestamps in
+        // the next metadata write, never in a second transaction after removal.
+        let mut seen = BTreeMap::new();
+        for member in self.vault.members() {
+            let id = member.to_string();
+            let last = if member == *peer {
+                Some(unix_time() as u64)
+            } else {
+                self.seen.get(&id).copied()
+            };
+            if let Some(last) = last {
+                seen.insert(id, last);
+            }
+        }
         self.store
-            .meta_set("extension/peer-seen", &serde_json::to_vec(&self.seen)?)?;
+            .meta_set("extension/peer-seen", &serde_json::to_vec(&seen)?)?;
+        self.seen = seen;
         Ok(())
     }
 
@@ -375,44 +402,51 @@ async fn sync_round() -> Result<()> {
     let node = node()?;
     let state = state();
     let mut ready = state.with(|s| Ok(s.ready))?;
-    let mut deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(30);
     let mut attempts = BTreeSet::new();
     loop {
-        let targets = state.with(|s| Ok(s.targets()))?;
-        for peer in targets {
-            if !ready && attempts.contains(&peer.id) {
-                continue;
-            }
-            let id = peer.id;
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
-                break;
-            }
-            let budget = Duration::from_secs(15).min(remaining);
-            let until = Instant::now() + budget;
-            match timeout(budget, node.connect(peer)).await {
-                Ok(Ok(conn)) => {
-                    let result =
-                        timeout(until.saturating_duration_since(Instant::now()), conn.sync()).await;
-                    conn.close();
-                    match result {
-                        Ok(Ok(_)) => {
-                            // Both sides processed everything: synced.
-                            state.with(|s| s.saw(&DeviceId::from_bytes(id)))?;
-                            attempts.insert(id);
+        let targets = state.with(|s| {
+            Ok(s.targets()
+                .into_iter()
+                .filter(|peer| ready || !attempts.contains(&peer.id))
+                .collect())
+        })?;
+        let completed = deadbolt_net::application::contact_round(
+            targets,
+            (!ready).then_some(deadline),
+            |peer, budget| {
+                let node = &node;
+                let state = &state;
+                async move {
+                    let id = peer.id;
+                    let until = Instant::now() + budget;
+                    let complete = match timeout(budget, node.connect(peer)).await {
+                        Ok(Ok(conn)) => {
+                            let result = timeout(
+                                until.saturating_duration_since(Instant::now()),
+                                conn.sync(),
+                            )
+                            .await;
+                            conn.close();
+                            match result {
+                                Ok(Ok(_)) => {
+                                    // Both sides processed everything: synced.
+                                    state.with(|s| s.saw(&DeviceId::from_bytes(id)))?;
+                                    true
+                                }
+                                Ok(Err(deadbolt_net::Error::MembershipRejected(_))) => true,
+                                Ok(Err(_)) | Err(_) => false,
+                            }
                         }
-                        Ok(Err(deadbolt_net::Error::MembershipRejected(_))) => {
-                            attempts.insert(id);
-                        }
-                        Ok(Err(_)) | Err(_) => {}
-                    }
+                        Ok(Err(deadbolt_net::Error::Rejected(_))) => false,
+                        Ok(Err(_)) | Err(_) => true,
+                    };
+                    Ok::<_, Error>(complete)
                 }
-                Ok(Err(deadbolt_net::Error::Rejected(_))) => {}
-                Ok(Err(_)) | Err(_) => {
-                    attempts.insert(id);
-                }
-            }
-        }
+            },
+        )
+        .await?;
+        attempts.extend(completed);
         let complete =
             state.with(|s| Ok(s.targets().iter().all(|peer| attempts.contains(&peer.id))))?;
         if ready || complete || Instant::now() >= deadline {
@@ -426,12 +460,11 @@ async fn sync_round() -> Result<()> {
                 // data round rather than waiting for the next browser alarm.
                 ready = true;
                 attempts.clear();
-                deadline = Instant::now() + Duration::from_secs(30);
                 continue;
             }
             break;
         }
-        sleep(Duration::from_secs(1)).await;
+        sleep(Duration::from_secs(1).min(deadline.saturating_duration_since(Instant::now()))).await;
     }
     Ok(())
 }
@@ -517,15 +550,13 @@ fn list_logins(body: &Value) -> Result<Value> {
             .unwrap_or_default();
         let mut accounts: Vec<_> = s
             .vault
-            .items()
-            .iter()
-            .filter(|i| matches(i, &page))
+            .site_logins(&page)
             .map(|i| {
-                let mut account = account(i, &s.vault);
-                let urls: Vec<_> = urls(i).filter(|url| page.matches_url(url)).collect();
+                let mut account = account(&i, &s.vault);
+                let urls: Vec<_> = urls(&i).filter(|url| page.matches_url(url)).collect();
                 account["urls"] = json!(urls);
                 let used = filled.get(&reference(&s.vault, i.id)).copied().unwrap_or(0);
-                (autofill::rank(origin, i, used), account)
+                (autofill::rank(origin, &i, used), account)
             })
             .collect();
         accounts.sort_by(|(ra, a), (rb, b)| {
@@ -587,11 +618,7 @@ fn check_login(body: &Value) -> Result<Value> {
     }
     state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, body)?;
-        let (status, ids) = autofill::check(
-            s.vault.items().iter().filter(|i| matches(i, &page)),
-            username,
-            &password,
-        );
+        let (status, ids) = autofill::check(s.vault.site_logins(&page), username, &password);
         let status = match status {
             Status::New => "new",
             Status::Update => "update",
@@ -617,13 +644,9 @@ fn save_login(body: &Value) -> Result<Value> {
     }
     let reply = state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, input)?;
-        let mut staged = s.vault.clone();
         let (id, created) = if body.get("ref").is_some() {
             let item = find_login(s, body, &page)?;
-            staged.write(
-                &s.secret,
-                vec![autofill::password_update(item.id, &password)],
-            )?;
+            s.write(vec![autofill::password_update(item.id, &password)])?;
             (item.id, false)
         } else {
             let mut fields = vec![
@@ -634,10 +657,9 @@ fn save_login(body: &Value) -> Result<Value> {
                 fields.push(("username".into(), Field::new(FieldType::Text, username)));
             }
             let name = Some(item_name(title)).filter(|t| !t.is_empty() && *t != page.domain);
-            let (id, _) = staged.create_item(&s.secret, "login", name, fields)?;
+            let id = s.mutate(|v, key| Ok(v.create_item(key, "login", name, fields)?.0))?;
             (id, true)
         };
-        s.commit(staged)?;
         generate::saved(&mut s.generated, input);
         Ok(json!({"type": "save", "ref": reference(&s.vault, id), "created": created}))
     })?;
@@ -745,7 +767,6 @@ fn edit_login(body: &Value) -> Result<Value> {
                 Some(_) => return Err(Error::Protocol("A login's fields are text")),
             }
         }
-        let mut staged = s.vault.clone();
         let (id, created) = if let Some(item) = existing {
             let id = item.id;
             let mut ops = vec![DataOp::name(id, Some(title.into()))];
@@ -763,23 +784,25 @@ fn edit_login(body: &Value) -> Result<Value> {
                     .map(|(name, value)| DataOp::set(id, name, value)),
             );
             ops.extend(items::tag_ops(&item, favorite, tags.as_deref()));
-            staged.write(&s.secret, ops)?;
+            s.write(ops)?;
             (id, false)
         } else {
             if password.is_empty() {
                 return Err(Error::Protocol("A new login needs a password"));
             }
-            let (id, _) = staged.create_item_with(
-                &s.secret,
-                "login",
-                Some(title.into()),
-                fields,
-                favorite.unwrap_or(false),
-                tags.unwrap_or_default(),
-            )?;
+            let id = s.mutate(|v, key| {
+                let (id, _) = v.create_item_with(
+                    key,
+                    "login",
+                    Some(title.into()),
+                    fields,
+                    favorite.unwrap_or(false),
+                    tags.unwrap_or_default(),
+                )?;
+                Ok(id)
+            })?;
             (id, true)
         };
-        s.commit(staged)?;
         Ok(json!({"type": "device-save", "ref": reference(&s.vault, id), "created": created}))
     })?;
     request_sync();
@@ -799,9 +822,7 @@ fn remove_device(body: &Value) -> Result<Value> {
         if !s.vault.is_member(&target) {
             return Err(Error::Protocol("That device isn't in the vault"));
         }
-        let mut staged = s.vault.clone();
-        staged.remove(&s.secret, target)?;
-        s.commit(staged)
+        s.mutate(|v, key| Ok(v.remove(key, target)?))
     })?;
     enforce_membership();
     request_sync();
@@ -815,9 +836,10 @@ fn rename_vault(body: &Value) -> Result<Value> {
         if name == s.vault.name() {
             return Ok(());
         }
-        let mut staged = s.vault.clone();
-        staged.rename(&s.secret, name)?;
-        s.commit(staged)
+        s.mutate(|v, key| {
+            v.rename(key, name)?;
+            Ok(())
+        })
     })?;
     request_sync();
     Ok(json!({"type": "device-rename", "ok": true}))
@@ -1046,6 +1068,7 @@ fn plain(error: &Error) -> String {
     match error {
         Error::Locked
         | Error::State
+        | Error::UnconfirmedWrite(_)
         | Error::WrongPassphrase
         | Error::PassphraseNeeded
         | Error::DomainMismatch

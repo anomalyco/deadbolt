@@ -20,6 +20,26 @@ const FAST: KdfParams = KdfParams {
 const PASS: &[u8] = b"correct horse battery staple";
 const SECRET: [u8; 32] = [0x5a; 32];
 
+#[test]
+fn append_diagnostics_omit_backend_messages_and_values() {
+    let error = Error::AppendUncertain(redb::CommitError::Storage(redb::StorageError::Io(
+        std::io::Error::other("private vault value and backend path"),
+    )));
+    assert_eq!(
+        error.append_diagnostic().as_deref(),
+        Some("io kind=Other os=None")
+    );
+    let error = Error::AppendUncertain(redb::CommitError::Storage(redb::StorageError::Io(
+        std::io::Error::from_raw_os_error(5),
+    )));
+    assert!(error.append_diagnostic().unwrap().ends_with("os=Some(5)"));
+    let error = Error::AppendUncertain(redb::CommitError::Storage(redb::StorageError::Corrupted(
+        "private decrypted entry".into(),
+    )));
+    assert_eq!(error.append_diagnostic().as_deref(), Some("corrupt"));
+    assert!(Error::WrongPassphrase.append_diagnostic().is_none());
+}
+
 fn init(dir: &Path) -> Unlocked {
     crate::init_with_params(dir, PASS, SECRET, FAST).unwrap()
 }
@@ -277,7 +297,7 @@ fn batch_appends_preserve_order_and_skip_empty() {
     assert!(append(&store, b"one").unwrap());
     let added = store.append_batch([&b"two"[..], &b"three"[..]]).unwrap();
     assert_eq!(added, 2);
-    assert_eq!(store.append_batch([]).unwrap(), 0);
+    assert_eq!(store.append_batch(std::iter::empty::<&[u8]>()).unwrap(), 0);
     assert_eq!(
         all(&store),
         [b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]

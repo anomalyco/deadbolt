@@ -87,8 +87,15 @@ pub struct PairingOutcome {
     pub peer: PeerId,
 }
 
+/// Private receiver state for one authenticated pairing. Dropped on a cut or
+/// error. Only the completed value can be adopted by the joining device.
+pub trait WelcomeSink: Default + Send {
+    fn push(&mut self, frame: Blob) -> Result<(), HandlerError>;
+}
+
 /// New-device side of pairing.
 pub trait Joiner: Send + Sync {
+    type Welcome: WelcomeSink;
     /// Produce the join blob (e.g. the new device's signed consent to join the vault named
     /// in `offer`). Runs only after both devices proved the code; an error ends the
     /// pairing and is reported to the inviter.
@@ -103,7 +110,7 @@ pub trait Joiner: Send + Sync {
     fn receive(
         &self,
         ctx: &PairingContext,
-        welcome: Vec<Blob>,
+        welcome: Self::Welcome,
     ) -> impl Future<Output = Result<(), HandlerError>> + Send;
 }
 
@@ -122,7 +129,7 @@ pub trait Inviter: Send + Sync {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> impl Future<Output = Result<Vec<Blob>, HandlerError>> + Send;
+    ) -> impl Future<Output = Result<crate::Outgoing<'_>, HandlerError>> + Send;
 }
 
 /// Options for [`Node::start_pairing`] and [`Node::pair`].
@@ -361,7 +368,7 @@ impl PairingStream {
         let mut join = frame::expect(recv, tag::JOIN, max).await?;
         let join = std::mem::take(&mut *join);
         let welcome = inviter.welcome(&ctx, join).await.map_err(Error::Handler)?;
-        frame::write_entries(send, &welcome).await?;
+        frame::write_entries(send, welcome).await?;
         if let Err(error) = send.shutdown().await {
             debug!(%error, "pairing send closed; peer result determines success");
         }
@@ -378,12 +385,12 @@ pub struct ProvenPairing {
 
 impl ProvenPairing {
     /// New-device exchange, after the transport adapter consumed the code.
-    pub async fn complete(
+    pub async fn complete<J: Joiner>(
         self,
         send: &mut (impl AsyncWrite + Unpin),
         recv: &mut (impl AsyncRead + Unpin),
         max: usize,
-        joiner: &impl Joiner,
+        joiner: &J,
     ) -> Result<PairingOutcome> {
         let ctx = self.stream.context();
         frame::write(send, tag::CONFIRM, &mac(&self.key, LISTENER_LABEL)).await?;
@@ -391,8 +398,20 @@ impl ProvenPairing {
         let offer = std::mem::take(&mut *offer);
         let join = joiner.join(&ctx, offer).await.map_err(Error::Handler)?;
         frame::write(send, tag::JOIN, &join).await?;
-        let welcome = frame::read_entries(recv, max).await?;
-        let received = joiner.receive(&ctx, welcome).await;
+        let mut replay = Ok(J::Welcome::default());
+        while let Some(frame) = frame::read_entry(recv, max).await? {
+            if let Ok(sink) = &mut replay
+                && let Err(e) = sink.push(frame)
+            {
+                // Drop the partial replay. Drain through DONE so a sender
+                // blocked on its next frame can receive the failure receipt.
+                replay = Err(e);
+            }
+        }
+        let received = match replay {
+            Ok(welcome) => joiner.receive(&ctx, welcome).await,
+            Err(e) => Err(e),
+        };
         let report = received.as_ref().map(|_| ()).map_err(|e| e.to_string());
         frame::write_result(send, &report).await?;
         if let Err(error) = send.shutdown().await {
@@ -905,11 +924,17 @@ mod tests {
 
     struct Joins;
 
+    impl WelcomeSink for () {
+        fn push(&mut self, _: Blob) -> Result<(), HandlerError> {
+            Ok(())
+        }
+    }
     impl Joiner for Joins {
+        type Welcome = ();
         async fn join(&self, _: &PairingContext, _: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
             Ok(b"join".to_vec())
         }
-        async fn receive(&self, _: &PairingContext, _: Vec<Blob>) -> Result<(), HandlerError> {
+        async fn receive(&self, _: &PairingContext, _: ()) -> Result<(), HandlerError> {
             Ok(())
         }
     }
@@ -920,8 +945,12 @@ mod tests {
         async fn offer(&self, _: &PairingContext) -> Result<Vec<u8>, HandlerError> {
             Ok(b"offer".to_vec())
         }
-        async fn welcome(&self, _: &PairingContext, _: Vec<u8>) -> Result<Vec<Blob>, HandlerError> {
-            Ok(vec![Blob::new(b"entry".to_vec())])
+        async fn welcome(
+            &self,
+            _: &PairingContext,
+            _: Vec<u8>,
+        ) -> Result<crate::Outgoing<'_>, HandlerError> {
+            Ok(Box::new(std::iter::once(Ok(Blob::new(b"entry".to_vec())))))
         }
     }
 
@@ -1053,10 +1082,11 @@ mod tests {
     struct NeverJoins;
 
     impl Joiner for NeverJoins {
+        type Welcome = ();
         async fn join(&self, _: &PairingContext, _: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
             Err("unused".into())
         }
-        async fn receive(&self, _: &PairingContext, _: Vec<Blob>) -> Result<(), HandlerError> {
+        async fn receive(&self, _: &PairingContext, _: ()) -> Result<(), HandlerError> {
             Err("unused".into())
         }
     }

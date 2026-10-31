@@ -6,7 +6,7 @@ use std::path::Path;
 use anyhow::{Context, Result, anyhow, bail};
 use data_encoding::HEXLOWER;
 use deadbolt_core::{
-    DeviceId, DeviceSecret, Entry, MembershipOp, Payload, Vault, VaultId, valid_name,
+    DeviceId, DeviceSecret, Entry, MembershipOp, Payload, Vault, VaultId, VaultWrite, valid_name,
 };
 use deadbolt_net::application::{self, State};
 pub use deadbolt_net::application::{Addr, Hint, clean_name};
@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub use crate::config::now;
-use crate::protocol::{DeviceInfo, VaultInfo};
+use crate::protocol::{DeviceInfo, ErrorCode, VaultInfo};
 
 const META_DEVICE_NAME: &str = "cli/device-name";
 const META_DEFAULT_VAULT: &str = "cli/default-vault";
@@ -70,6 +70,10 @@ pub struct Meta {
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct Changes {
     pub vaults: bool,
+    /// Data or label edits to forward, by vault. The watcher sets alone cannot
+    /// distinguish a rename from an admission, or a removal invalidating items
+    /// from new item data.
+    pub edits: BTreeSet<VaultId>,
     pub items: BTreeSet<VaultId>,
     pub devices: BTreeSet<VaultId>,
 }
@@ -80,13 +84,17 @@ impl Changes {
     }
 
     /// Records entries newly committed to `vault`.
-    fn committed(&mut self, vault: VaultId, entries: &[Entry]) {
+    fn committed(&mut self, vault: VaultId, entries: &[&Entry]) {
         for entry in entries {
             match entry.payload() {
                 Payload::Data(_) => {
+                    self.edits.insert(vault);
                     self.items.insert(vault);
                 }
-                Payload::Membership(MembershipOp::Rename { .. }) => self.vaults = true,
+                Payload::Membership(MembershipOp::Rename { .. }) => {
+                    self.edits.insert(vault);
+                    self.vaults = true;
+                }
                 Payload::Membership(op) => {
                     self.vaults = true;
                     self.devices.insert(vault);
@@ -118,6 +126,8 @@ pub struct Loaded {
     pub unavailable: IndexMap<VaultId, UnavailableVault>,
     pub changes: Changes,
     pub health: super::health::State,
+    /// Sticky until the store is closed and replayed; readiness cannot heal it.
+    pub(super) append_uncertain: bool,
 }
 
 pub(super) fn get_json<T: DeserializeOwned>(store: &Unlocked, name: &str) -> Result<Option<T>> {
@@ -133,25 +143,56 @@ pub(super) fn set_json<T: Serialize>(store: &Unlocked, name: &str, value: &T) ->
 }
 
 impl Loaded {
+    pub fn ensure_usable(&self) -> Result<()> {
+        if self.append_uncertain {
+            return Err(super::fail(
+                ErrorCode::Locked,
+                "store commit outcome is uncertain; unlock again to authenticate and reload",
+            ));
+        }
+        Ok(())
+    }
+
+    fn check_append<T>(&mut self, result: Result<T>) -> Result<T> {
+        if let Some(diagnostic) = result
+            .as_ref()
+            .err()
+            .and_then(|error| error.downcast_ref::<deadbolt_store::Error>())
+            .and_then(deadbolt_store::Error::append_diagnostic)
+        {
+            tracing::warn!(failure = %diagnostic, "signed-log commit unconfirmed; quarantining session; unlock to authenticate and replay");
+            self.append_uncertain = true;
+            // Never serve or republish the pre-commit view, including through
+            // State::vaults, direct local reads, or the membership gate.
+            self.vaults.clear();
+            self.changes = Changes::default();
+        }
+        result
+    }
+
     /// Stage and durably publish one vault mutation.
     pub fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T>,
     ) -> Result<T> {
         self.available(id)?;
         let store = &self.store;
         let secret = &self.secret;
         let changes = &mut self.changes;
-        update(
-            self.vaults.get_mut(&id).context("vault not held")?,
-            |entries| {
-                persist(store, entries)?;
-                changes.committed(id, entries);
-                Ok(())
-            },
-            |vault| change(vault, secret),
-        )
+        let result = self
+            .vaults
+            .get_mut(&id)
+            .context("vault not held")?
+            .transact(
+                |vault| change(vault, secret),
+                |entries| {
+                    persist(store, entries.iter().copied())?;
+                    changes.committed(id, entries);
+                    Ok(())
+                },
+            );
+        self.check_append(result)
     }
 
     /// Creates the device key and store. Blocking (Argon2).
@@ -193,6 +234,7 @@ impl Loaded {
             unavailable: IndexMap::new(),
             changes: Changes::default(),
             health,
+            append_uncertain: false,
         };
         save_meta(&loaded.store, &loaded.meta)?;
         Ok(loaded)
@@ -274,6 +316,7 @@ impl Loaded {
             unavailable,
             changes: Changes::default(),
             health,
+            append_uncertain: false,
         })
     }
 }
@@ -297,7 +340,7 @@ impl State for Loaded {
     fn update<T>(
         &mut self,
         id: VaultId,
-        change: impl FnOnce(&mut Vault, &DeviceSecret) -> Result<T, application::Error>,
+        change: impl FnOnce(&mut VaultWrite<'_>, &DeviceSecret) -> Result<T, application::Error>,
     ) -> Result<T> {
         self.update(id, |vault, secret| Ok(change(vault, secret)?))
     }
@@ -491,6 +534,7 @@ impl Loaded {
     }
 
     fn available(&self, id: VaultId) -> Result<VaultId> {
+        self.ensure_usable()?;
         if let Some(vault) = self.unavailable.get(&id) {
             bail!(
                 "vault {} ({id}) is unavailable: {}; its stored entries are retained",
@@ -508,6 +552,7 @@ impl Loaded {
 
     /// Finds a vault by name or id prefix; `None` means the default vault.
     pub fn resolve(&self, vault: Option<&str>) -> Result<VaultId> {
+        self.ensure_usable()?;
         let Some(query) = vault else {
             if let Some(id) = self.meta.default_vault.filter(|id| self.contains_vault(id)) {
                 // Say how to move on when another vault still works.
@@ -581,7 +626,12 @@ impl Loaded {
         if self.contains_vault(&id) {
             bail!("this device already holds vault {}", vault.name());
         }
-        persist(&self.store, vault.entries())?;
+        let result = self
+            .store
+            .append_batch(vault.iter_entries().map(Entry::encode))
+            .map(drop)
+            .map_err(Into::into);
+        self.check_append(result)?;
         self.vaults.insert(id, vault);
         self.changes.vaults = true;
         self.changes.items.insert(id);
@@ -702,33 +752,242 @@ fn resolve_by_name_or_id<'a, T: Copy + PartialEq + std::fmt::Display>(
 }
 
 fn persist<'a>(store: &Unlocked, entries: impl IntoIterator<Item = &'a Entry>) -> Result<()> {
-    // Plaintext, wiped as soon as the batch is sealed.
-    let encoded: Vec<_> = entries.into_iter().map(Entry::encode).collect();
-    if !encoded.is_empty() {
-        store.append_batch(encoded.iter().map(|entry| entry.as_slice()))?;
-    }
+    // Seal and wipe one encoding at a time, inside the same transaction.
+    store.append_batch(entries.into_iter().map(Entry::encode))?;
     Ok(())
 }
 
-pub(super) fn update<T>(
-    vault: &mut Vault,
-    persist: impl FnOnce(&[Entry]) -> Result<()>,
-    change: impl FnOnce(&mut Vault) -> Result<T>,
-) -> Result<T> {
-    let heads = vault.heads();
-    // Clone the validated state without re-verifying historical signatures.
-    // Failed validation or I/O cannot advance the live log.
-    let mut staged = vault.clone();
-    let result = change(&mut staged)?;
-    let entries: Vec<_> = staged.missing_for(&heads).into_iter().cloned().collect();
-    persist(&entries)?;
-    *vault = staged;
-    Ok(result)
-}
-
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    /// Real file writes and fsync, with a lost acknowledgement after the selected
+    /// sync. Only synthetic stores in a test-owned temporary directory use this.
+    #[derive(Debug)]
+    struct LostSyncAck {
+        file: redb::backends::FileBackend,
+        remaining: Arc<AtomicUsize>,
+    }
+
+    impl redb::StorageBackend for LostSyncAck {
+        fn len(&self) -> std::io::Result<u64> {
+            self.file.len()
+        }
+        fn read(&self, offset: u64, out: &mut [u8]) -> std::io::Result<()> {
+            self.file.read(offset, out)
+        }
+        fn set_len(&self, len: u64) -> std::io::Result<()> {
+            self.file.set_len(len)
+        }
+        fn write(&self, offset: u64, data: &[u8]) -> std::io::Result<()> {
+            self.file.write(offset, data)
+        }
+        fn sync_data(&self) -> std::io::Result<()> {
+            self.file.sync_data()?;
+            if self
+                .remaining
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .ok()
+                == Some(1)
+            {
+                return Err(std::io::Error::other("lost sync acknowledgement"));
+            }
+            Ok(())
+        }
+    }
+
+    pub(crate) fn fault_store(dir: &Path, secret: [u8; 32]) -> (Loaded, Arc<AtomicUsize>) {
+        let remaining = Arc::new(AtomicUsize::new(0));
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .open(dir.join(deadbolt_store::DB_FILE))
+            .unwrap();
+        let store = deadbolt_store::init_with_backend(
+            LostSyncAck {
+                file: redb::backends::FileBackend::new(file).unwrap(),
+                remaining: remaining.clone(),
+            },
+            b"test",
+            secret,
+            KdfParams {
+                m_cost_kib: 8,
+                t_cost: 1,
+                p_cost: 1,
+            },
+        )
+        .unwrap();
+        (Loaded::from_unlocked(store).unwrap(), remaining)
+    }
+
+    #[test]
+    fn ambiguous_append_removal_requires_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut loaded, fault) = fault_store(dir.path(), [7; 32]);
+        let id = loaded.create_vault("personal").unwrap();
+        let peer = DeviceSecret::from_bytes(&[8; 32]);
+        let consent = peer.join_consent(&id, &loaded.id);
+        loaded
+            .update(id, |v, key| Ok(v.add(key, peer.device_id(), consent)?))
+            .unwrap();
+        let old_heads = loaded.vault(&id).heads();
+        fault.store(2, Ordering::SeqCst);
+        assert!(
+            loaded
+                .update(id, |v, key| Ok(v.remove(key, peer.device_id())?))
+                .is_err()
+        );
+        assert_eq!(fault.load(Ordering::SeqCst), 0);
+        assert!(loaded.ensure_usable().is_err());
+        assert!(loaded.resolve(None).is_err());
+        assert!(loaded.held(&id).is_none());
+        assert!(loaded.peer_set().is_empty());
+        assert_eq!(State::vaults(&loaded).count(), 0);
+        assert!(super::super::sync::hello(&loaded, &peer.device_id(), None).is_err());
+        assert!(
+            super::super::sync::missing_for(&mut loaded, &peer.device_id(), b"{}", true).is_err()
+        );
+        assert!(super::super::sync::receive(&mut loaded, &peer.device_id(), vec![], true).is_err());
+        assert!(super::super::pairing::offer(&loaded, id, &peer.device_id(), None).is_err());
+        assert!(loaded.create_vault("another").is_err());
+        drop(loaded);
+        let reopened = Loaded::open(dir.path(), b"test").unwrap();
+        assert!(!reopened.vault(&id).is_member(&peer.device_id()));
+        assert_ne!(reopened.vault(&id).heads(), old_heads);
+    }
+
+    #[test]
+    fn quarantined_vault_reports_locked_to_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut loaded, fault) = fault_store(dir.path(), [7; 32]);
+        let id = loaded.create_vault("personal").unwrap();
+        fault.store(2, Ordering::SeqCst);
+        loaded
+            .update(id, |v, key| Ok(v.rename(key, "changed")?))
+            .unwrap_err();
+
+        let error = loaded.resolve(None).unwrap_err();
+        assert_eq!(crate::client::code(&error), Some(ErrorCode::Locked));
+        assert_eq!(
+            error.to_string(),
+            "store commit outcome is uncertain; unlock again to authenticate and reload"
+        );
+    }
+
+    #[test]
+    fn ambiguous_append_item_does_not_serve_the_old_value() {
+        use deadbolt_core::{DataOp, Field, FieldType};
+        let dir = tempfile::tempdir().unwrap();
+        let (mut loaded, fault) = fault_store(dir.path(), [7; 32]);
+        let id = loaded.create_vault("personal").unwrap();
+        let (item, _) = loaded
+            .update(id, |v, key| {
+                Ok(v.create_item(
+                    key,
+                    "login",
+                    None,
+                    [("password".into(), Field::new(FieldType::Secret, "old"))],
+                )?)
+            })
+            .unwrap();
+        fault.store(2, Ordering::SeqCst);
+        let error = loaded
+            .update(id, |v, key| {
+                Ok(v.write(
+                    key,
+                    vec![DataOp::set(
+                        item,
+                        "password",
+                        Field::new(FieldType::Secret, "new"),
+                    )],
+                )?)
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error.downcast_ref::<deadbolt_store::Error>(),
+            Some(deadbolt_store::Error::AppendUncertain(_))
+        ));
+        assert!(loaded.resolve(None).is_err());
+        assert!(loaded.held(&id).is_none());
+        drop(loaded);
+        let reopened = Loaded::open(dir.path(), b"test").unwrap();
+        assert_eq!(
+            reopened.vault(&id).item(&item).unwrap().fields["password"]
+                .value
+                .as_str(),
+            "new"
+        );
+    }
+
+    #[test]
+    fn ambiguous_append_pairing_never_returns_a_welcome_or_publishes_an_adoption() {
+        use super::super::pairing;
+        let inviter_dir = tempfile::tempdir().unwrap();
+        let joiner_dir = tempfile::tempdir().unwrap();
+        let (mut inviter, fault) = fault_store(inviter_dir.path(), [7; 32]);
+        let id = inviter.create_vault("personal").unwrap();
+        let peer = DeviceSecret::from_bytes(&[8; 32]);
+        let offer =
+            pairing::read_offer(&pairing::offer(&inviter, id, &peer.device_id(), None).unwrap())
+                .unwrap()
+                .0;
+        let join = pairing::join_blob(&peer, "peer", inviter.id, &id, None).unwrap();
+        fault.store(2, Ordering::SeqCst);
+        assert!(pairing::welcome(&mut inviter, id, peer.device_id(), &join, None).is_err());
+        assert!(inviter.ensure_usable().is_err());
+        drop(inviter);
+        let mut inviter = Loaded::open(inviter_dir.path(), b"test").unwrap();
+        assert!(inviter.vault(&id).is_member(&peer.device_id()));
+        let (welcome, _) =
+            pairing::welcome(&mut inviter, id, peer.device_id(), &join, None).unwrap();
+        let welcomed = pairing::verify_welcome(
+            &peer.device_id(),
+            inviter.id,
+            offer,
+            pairing::test_replay(&inviter, welcome),
+        )
+        .unwrap();
+        let (mut joiner, fault) = fault_store(joiner_dir.path(), [8; 32]);
+        // Adopt is already past signature/identity validation; its store append
+        // must fail closed regardless of whether this is the first held vault.
+        fault.store(2, Ordering::SeqCst);
+        assert!(pairing::adopt(&mut joiner, welcomed).is_err());
+        assert!(joiner.ensure_usable().is_err());
+        assert!(joiner.held(&id).is_none());
+        assert!(joiner.create_vault("personal").is_err());
+        drop(joiner);
+        let reopened = Loaded::open(joiner_dir.path(), b"test").unwrap();
+        assert!(reopened.held(&id).is_some());
+    }
+
+    #[test]
+    fn validation_failure_does_not_poison_or_attempt_an_append() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut loaded, fault) = fault_store(dir.path(), [7; 32]);
+        let id = loaded.create_vault("personal").unwrap();
+        let heads = loaded.vault(&id).heads();
+        fault.store(2, Ordering::SeqCst);
+        assert!(
+            loaded
+                .update(id, |v, key| -> Result<()> {
+                    v.rename(key, "staged")?;
+                    bail!("validation rejected the command")
+                })
+                .is_err()
+        );
+        assert_eq!(fault.load(Ordering::SeqCst), 2);
+        assert_eq!(loaded.vault(&id).heads(), heads);
+        loaded.ensure_usable().unwrap();
+        fault.store(0, Ordering::SeqCst);
+        loaded
+            .update(id, |v, key| Ok(v.rename(key, "accepted")?))
+            .unwrap();
+    }
 
     #[test]
     fn an_over_budget_history_is_visible_and_isolated_without_losing_entries() {
@@ -922,10 +1181,9 @@ mod tests {
         let secret = DeviceSecret::from_bytes(&[1; 32]);
         let (mut vault, _) = Vault::create(&secret, "test").unwrap();
         let before = vault.heads();
-        let result = update(
-            &mut vault,
-            |_| bail!("injected disk full"),
+        let result = vault.transact(
             |v| Ok(v.rename(&secret, "lost")?),
+            |_| bail!("injected disk full"),
         );
         assert!(result.is_err());
         assert_eq!(vault.heads(), before);

@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>DeadboltAutoFill</string>
+    <key>CFBundleDisplayName</key>
+    <string>Deadbolt</string>
+    <key>CFBundleIdentifier</key>
+    <string>pw.deadbolt.app.autofill</string>
+    <key>CFBundleExecutable</key>
+    <string>DeadboltAutoFill</string>
+    <key>CFBundlePackageType</key>
+    <string>XPC!</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@VERSION@</string>
+    <key>CFBundleVersion</key>
+    <string>@BUILD@</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSExtension</key>
+    <dict>
+        <key>NSExtensionPointIdentifier</key>
+        <string>com.apple.authentication-services-credential-provider-ui</string>
+        <key>NSExtensionPrincipalClass</key>
+        <string>DeadboltAutoFill.CredentialProviderViewController</string>
+        <key>NSExtensionAttributes</key>
+        <dict>
+            <key>ASCredentialProviderExtensionShowsConfigurationUI</key>
+            <true/>
+            <key>ASCredentialProviderExtensionCapabilities</key>
+            <dict>
+                <key>ProvidesPasswords</key>
+                <true/>
+            </dict>
+        </dict>
+    </dict>
+</dict>
+</plist>

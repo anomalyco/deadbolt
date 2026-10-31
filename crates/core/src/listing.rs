@@ -93,7 +93,7 @@ pub fn noun(kind: &str, count: usize) -> &str {
 
 /// The field an item is for, which clients copy or print by default: a
 /// login's password, a card's number, a secure note's body, an SSH key's
-/// private key, an identity's email, a passkey's username, an API
+/// public key, an identity's email, a passkey's username, an API
 /// credential's credential, a database's, server's or Wi-Fi network's
 /// password, a license's key, a bank account's number, a document's file,
 /// an ID's number, a membership's id, a wallet's recovery phrase. `None`
@@ -103,7 +103,7 @@ pub fn primary_field(kind: &str) -> Option<&'static str> {
         "login" | "database" | "server" | "wifi" => "password",
         "card" | "passport" | "driver-license" | "id-document" => "number",
         "note" => "notes",
-        "ssh" => "private-key",
+        "ssh" => "public-key",
         "identity" => "email",
         "passkey" => "username",
         "api" => "credential",

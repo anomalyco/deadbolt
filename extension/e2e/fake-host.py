@@ -7,7 +7,8 @@ DEADBOLT_FAKE_RATE_LIMIT=fill,generate-keep answers those with rate_limited,
 DEADBOLT_FAKE_FILL_DELAY holds each fill reply for that many seconds
 (DEADBOLT_FAKE_LIST_DELAY each list reply), and
 DEADBOLT_FAKE_SIGNIN adds "Sign in with Google" logins, and
-DEADBOLT_FAKE_GOOGLE lists three Google logins instead of its own. Saves
+DEADBOLT_FAKE_GOOGLE lists three Google logins instead of its own, and
+DEADBOLT_FAKE_KEYLOGIN adds a login with no username. Saves
 are checked against the spec's title and URL rules. Generated passwords are held per
 origin, as the agent holds them: candidates until generate-keep, then
 pending, and check and save resolve only pending ones. Fields that allow
@@ -57,6 +58,15 @@ if os.environ.get("DEADBOLT_FAKE_USERNAME"):
     ACCOUNTS[0]["username"] = VALUES[REF1]["username"] = os.environ["DEADBOLT_FAKE_USERNAME"]
 if os.environ.get("DEADBOLT_FAKE_PASSWORD"):
     VALUES[REF1]["password"] = os.environ["DEADBOLT_FAKE_PASSWORD"]
+# DEADBOLT_FAKE_KEYLOGIN=1 adds a login with no username, as an imported key
+# or PIN often is.
+if os.environ.get("DEADBOLT_FAKE_KEYLOGIN"):
+    REF5 = "a" * 64 + ":" + "5" * 32
+    ACCOUNTS.append({"ref": REF5, "vault": "Work", "title": "Acme API key", "hasPassword": True, "hasTotp": False, "urls": []})
+    VALUES[REF5] = {"password": "acme api key"}
+# Universal sign-in needs the fixture's exact origin, including its port.
+if os.environ.get("DEADBOLT_FAKE_ORIGIN"):
+    ACCOUNTS[0]["urls"] = [os.environ["DEADBOLT_FAKE_ORIGIN"]]
 # DEADBOLT_FAKE_SIGNIN=1 adds a "Sign in with Google" login for the site, and
 # the Google account's own login it signs in with.
 if os.environ.get("DEADBOLT_FAKE_SIGNIN"):

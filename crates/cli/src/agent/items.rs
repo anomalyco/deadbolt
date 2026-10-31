@@ -16,6 +16,7 @@
 //! A passkey's private key never leaves the agent: items come back without
 //! it (see `passkeys`).
 
+use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
@@ -44,7 +45,10 @@ pub use deadbolt_core::listing::{host, label};
 mod tests;
 
 pub(super) fn matches(item: &Item, query: &[String], has_any_tagged: bool) -> bool {
-    let parsed = Query::from_words(query);
+    matches_parsed(item, &Query::from_words(query), has_any_tagged)
+}
+
+fn matches_parsed(item: &Item, parsed: &Query, has_any_tagged: bool) -> bool {
     if parsed.favorite && !item.favorite {
         return false;
     }
@@ -71,20 +75,27 @@ pub(super) fn matches(item: &Item, query: &[String], has_any_tagged: bool) -> bo
 
 /// Shortest unique id prefix of `id` among `ids` (sorted), at least 4.
 fn short_id(ids: &[String], id: &str) -> String {
-    let common = |other: &String| {
+    let at = ids
+        .binary_search_by(|x| x.as_str().cmp(id))
+        .unwrap_or_else(|i| i);
+    let neighbours = [at.checked_sub(1), Some(at + 1)];
+    short_between(
+        id,
+        neighbours
+            .into_iter()
+            .flatten()
+            .filter_map(|i| ids.get(i).map(String::as_str)),
+    )
+}
+
+fn short_between<'a>(id: &str, neighbours: impl Iterator<Item = &'a str>) -> String {
+    let common = |other: &str| {
         id.bytes()
             .zip(other.bytes())
             .take_while(|(a, b)| a == b)
             .count()
     };
-    let at = ids
-        .binary_search_by(|x| x.as_str().cmp(id))
-        .unwrap_or_else(|i| i);
-    let neighbours = [at.checked_sub(1), Some(at + 1)];
     let shared = neighbours
-        .into_iter()
-        .flatten()
-        .filter_map(|i| ids.get(i))
         .filter(|other| *other != id)
         .map(common)
         .max()
@@ -142,7 +153,16 @@ impl Listing {
     /// one-time password secrets unless `with_otp` too. Files come as their
     /// names alone.
     pub(super) fn info(&self, item: &Item, with_fields: bool, with_otp: bool) -> ItemInfo {
-        let id = item.id.to_string();
+        self.info_with(item, with_fields, with_otp, true)
+    }
+
+    pub(super) fn info_with(
+        &self,
+        item: &Item,
+        with_fields: bool,
+        with_otp: bool,
+        with_ssh_private: bool,
+    ) -> ItemInfo {
         let mut fields = Vec::new();
         if with_fields {
             let known: Vec<&str> = schema(&item.kind)
@@ -165,6 +185,12 @@ impl Listing {
                     kind: item.fields[name].kind.to_string(),
                     value: match item.fields[name].kind {
                         FieldType::Otp if !with_otp => String::new(),
+                        _ if !with_ssh_private
+                            && item.kind == "ssh"
+                            && matches!(name, "private-key" | "passphrase") =>
+                        {
+                            String::new()
+                        }
                         FieldType::File => {
                             deadbolt_core::item::file_parts(&item.fields[name].value)
                                 .0
@@ -175,48 +201,92 @@ impl Listing {
                 })
                 .collect();
         }
-        ItemInfo {
-            short: short_id(&self.ids, &id),
-            id,
-            kind: item.kind.clone(),
-            label: label(item),
-            detail: detail(item),
+        summarize(
+            item,
+            short_id(&self.ids, &item.id.to_string()),
             fields,
-            source: super::mirror::source_app(item.source.as_ref()),
-            favorite: item.favorite,
-            tags: item.tags.iter().cloned().collect(),
-            deleted_at: self
-                .deleted
+            self.deleted
                 .as_ref()
                 .and_then(|at| at.get(&item.id).copied()),
-        }
+        )
     }
 
     pub(super) fn find(&self, query: &[String]) -> Result<&Item> {
-        let any_tagged = self.has_any_tagged();
-        let found: Vec<&Item> = self
-            .items
-            .iter()
-            .filter(|i| matches(i, query, any_tagged))
-            .collect();
+        let parsed = Query::from_words(query);
+        let tagged = parsed.any_tag && self.has_any_tagged();
+        unique_match(
+            self.items
+                .iter()
+                .filter(|i| matches_parsed(i, &parsed, tagged)),
+            query,
+            self.deleted.is_some(),
+            |item| self.info(item, false, false),
+        )
+    }
+}
+
+/// Single-target writes search one materialized item at a time. Only on an
+/// ambiguous query do we retain multiple rows, and then just public labels.
+pub(super) fn find_live(vault: &Vault, query: &[String]) -> Result<Item> {
+    let parsed = Query::from_words(query);
+    let tagged = parsed.any_tag && vault.iter_items().any(|i| !i.tags.is_empty());
+    unique_match(
+        vault
+            .iter_items()
+            .filter(|item| matches_parsed(item, &parsed, tagged)),
+        query,
+        false,
+        |item| live_summary(vault, item),
+    )
+}
+
+fn unique_match<T: Borrow<Item>>(
+    mut found: impl Iterator<Item = T>,
+    query: &[String],
+    deleted: bool,
+    describe: impl Fn(&Item) -> ItemInfo,
+) -> Result<T> {
+    let Some(first) = found.next() else {
         let query = query.join(" ");
-        match found.as_slice() {
-            [item] => Ok(item),
-            [] if self.deleted.is_some() => bail!("no deleted item matches {query:?}"),
-            [] => bail!("no item matches {query:?}"),
-            many => {
-                let mut lines: Vec<String> = many
-                    .iter()
-                    .map(|item| line(&self.info(item, false, false)))
-                    .collect();
-                lines.sort();
-                bail!(
-                    "{query:?} matches {} items; add words or use the id:\n{}",
-                    many.len(),
-                    lines.join("\n")
-                )
-            }
+        if deleted {
+            bail!("no deleted item matches {query:?}");
         }
+        bail!("no item matches {query:?}");
+    };
+    let Some(second) = found.next() else {
+        return Ok(first);
+    };
+    let mut lines: Vec<_> = [first, second]
+        .into_iter()
+        .chain(found)
+        .map(|item| line(&describe(item.borrow())))
+        .collect();
+    lines.sort();
+    let query = query.join(" ");
+    bail!(
+        "{query:?} matches {} items; add words or use the id:\n{}",
+        lines.len(),
+        lines.join("\n")
+    )
+}
+
+fn summarize(
+    item: &Item,
+    short: String,
+    fields: Vec<FieldInfo>,
+    deleted_at: Option<u64>,
+) -> ItemInfo {
+    ItemInfo {
+        short,
+        id: item.id.to_string(),
+        kind: item.kind.clone(),
+        label: label(item),
+        detail: detail(item),
+        fields,
+        source: super::mirror::source_app(item.source.as_ref()),
+        favorite: item.favorite,
+        tags: item.tags.iter().cloned().collect(),
+        deleted_at,
     }
 }
 
@@ -266,7 +336,20 @@ fn write(s: &mut Loaded, vault: VaultId, ops: Vec<DataOp>) -> Result<Entry> {
 fn info(s: &Loaded, vault: VaultId, id: &ItemId) -> ItemInfo {
     let vault = s.vault(&vault);
     let item = vault.item(id).expect("just written");
-    Listing::new(vault).info(&item, false, false)
+    live_summary(vault, &item)
+}
+
+// The caller already knows the precise item. Only its immediate live id
+// neighbours can lengthen its display prefix; never copy unrelated secrets.
+fn live_summary(vault: &Vault, item: &Item) -> ItemInfo {
+    let neighbours = vault
+        .live_neighbors(item.id)
+        .map(|id| id.map(|i| i.to_string()));
+    let short = short_between(
+        &item.id.to_string(),
+        neighbours.iter().filter_map(Option::as_deref),
+    );
+    summarize(item, short, Vec::new(), None)
 }
 
 /// "personal › GitHub": the one item `query` finds, without its values,
@@ -286,12 +369,13 @@ pub fn get(
     vault: Option<&str>,
     query: &[String],
     otp: bool,
+    ssh_private: bool,
     files: &[String],
     deleted: bool,
 ) -> Result<ItemInfo> {
     let listing = Listing::pick(s.vault(&s.resolve(vault)?), deleted);
     let item = listing.find(query)?;
-    let mut info = listing.info(item, true, otp);
+    let mut info = listing.info_with(item, true, otp, ssh_private);
     if !files.is_empty() {
         let named = |f: &&mut FieldInfo| f.kind == "file" && files.contains(&f.name);
         for field in info.fields.iter_mut().filter(named) {
@@ -409,7 +493,10 @@ pub fn create_with(
     tags: Vec<String>,
 ) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
-    let fields = fields(kind, None, inputs)?;
+    let mut fields = fields(kind, None, inputs)?;
+    if kind == "ssh" {
+        derive_ssh_create(&mut fields);
+    }
     let tags = clean_tags(tags)?;
     let stamp = deadbolt_core::health::audited_password_field(kind)
         .is_some_and(|pw| fields.iter().any(|(n, _)| n == pw));
@@ -423,6 +510,37 @@ pub fn create_with(
         Ok((id, entry))
     })?;
     Ok(info(s, vault, &id))
+}
+
+fn derive_ssh_create(fields: &mut Vec<(String, Field)>) {
+    let get = |name: &str| {
+        fields
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, f)| f.value.as_str())
+    };
+    let Some(private_key) = get("private-key") else {
+        return;
+    };
+    let Some((public_key, fingerprint, file_comment)) =
+        super::ssh::keys::derive_fields(private_key, get("passphrase"), get("comment"))
+    else {
+        return;
+    };
+    if !fields.iter().any(|(n, _)| n == "public-key") {
+        fields.push(("public-key".into(), Field::new(FieldType::Text, public_key)));
+    }
+    if !fields.iter().any(|(n, _)| n == "fingerprint") {
+        fields.push((
+            "fingerprint".into(),
+            Field::new(FieldType::Text, fingerprint),
+        ));
+    }
+    if !fields.iter().any(|(n, _)| n == "comment")
+        && let Some(comment) = file_comment
+    {
+        fields.push(("comment".into(), Field::new(FieldType::Text, comment)));
+    }
 }
 
 /// What makes two items the same to an import: a login's URL host,
@@ -553,11 +671,10 @@ const LINK_BATCH: usize = 256;
 
 /// The source of an item imported from 1Password, as it records a digest
 /// of the item as written: now with `field` as its `sign-in-account`.
-fn relinked_source(v: &Vault, id: &ItemId, field: &Field) -> Option<DataOp> {
-    let item = v.item(id)?;
+fn relinked_source(item: Item, field: &Field) -> Option<DataOp> {
     let source = item.source.as_ref()?;
     let mut version = MirrorVersion::parse(&source.version)?;
-    let mut fields = item.fields.clone();
+    let mut fields = item.fields;
     fields.insert("sign-in-account".into(), field.clone());
     version.digest = digest(
         &item.kind,
@@ -570,7 +687,7 @@ fn relinked_source(v: &Vault, id: &ItemId, field: &Field) -> Option<DataOp> {
         id: source.id.clone(),
         version: version.to_string(),
     };
-    Some(DataOp::source(*id, Some(source)))
+    Some(DataOp::source(item.id, Some(source)))
 }
 
 /// Imports a mapped export. Items the vault already has, or the export
@@ -685,7 +802,7 @@ pub fn import(
                 };
                 let id = ids[at];
                 let field = Field::new(FieldType::Text, hex(account.as_bytes()));
-                ops.extend(relinked_source(v, &id, &field));
+                ops.extend(v.item(&id).and_then(|item| relinked_source(item, &field)));
                 ops.push(DataOp::set(id, "sign-in-account", field));
             }
             for batch in ops.chunks(LINK_BATCH) {
@@ -725,7 +842,7 @@ pub fn set_with(
     remove_tags: &[String],
 ) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
-    let item = Listing::new(s.vault(&vault)).find(query)?.clone();
+    let item = find_live(s.vault(&vault), query)?;
     let set = fields(&item.kind, Some(&item), inputs)?;
     let mut seen: BTreeSet<&str> = set.iter().map(|(name, _)| name.as_str()).collect();
     for field in unset {
@@ -754,11 +871,54 @@ pub fn set_with(
         }
     });
     let mut ops: Vec<DataOp> = set
-        .into_iter()
+        .iter()
+        .cloned()
         .map(|(name, field)| DataOp::set(item.id, name, field))
         .collect();
     if let Some(date) = pw_changed {
         ops.push(DataOp::password_changed(item.id, date));
+    }
+    // When an SSH item's private key (or passphrase/comment) changes, keep
+    // derived `public-key` and `fingerprint` in sync unless set explicitly.
+    if item.kind == "ssh"
+        && (set
+            .iter()
+            .any(|(n, _)| matches!(n.as_str(), "private-key" | "passphrase" | "comment"))
+            || unset
+                .iter()
+                .any(|n| matches!(n.as_str(), "passphrase" | "comment")))
+    {
+        let merged = |name: &str| -> Option<&str> {
+            if unset.iter().any(|u| u == name) {
+                return None;
+            }
+            set.iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, f)| f.value.as_str())
+                .or_else(|| item.fields.get(name).map(|f| f.value.as_str()))
+        };
+        if let Some(private_key) = merged("private-key")
+            && let Some((public_key, fingerprint, _)) = super::ssh::keys::derive_fields(
+                private_key,
+                merged("passphrase"),
+                merged("comment"),
+            )
+        {
+            if !seen.contains("public-key") {
+                ops.push(DataOp::set(
+                    item.id,
+                    "public-key",
+                    Field::new(FieldType::Text, public_key),
+                ));
+            }
+            if !seen.contains("fingerprint") {
+                ops.push(DataOp::set(
+                    item.id,
+                    "fingerprint",
+                    Field::new(FieldType::Text, fingerprint),
+                ));
+            }
+        }
     }
     // A field already gone (removed on another device) has nothing left to
     // remove, but the name must still be one the item could have.
@@ -813,7 +973,7 @@ pub fn unset(
     field: &str,
 ) -> Result<ItemInfo> {
     let vault = s.resolve(vault)?;
-    let item = Listing::new(s.vault(&vault)).find(query)?.clone();
+    let item = find_live(s.vault(&vault), query)?;
     if !item.fields.contains_key(field) {
         bail!("{} has no field {field}", label(&item));
     }
@@ -849,7 +1009,7 @@ pub(super) fn remove_id(s: &mut Loaded, vault: VaultId, id: ItemId) -> Result<It
         .item(&id)
         .filter(|item| !item.deleted)
         .ok_or_else(|| anyhow!("no such item"))?;
-    let info = Listing::new(stored).info(&item, false, false);
+    let info = live_summary(stored, &item);
     write(s, vault, vec![DataOp::delete(id, crate::config::now())])?;
     Ok(info)
 }
