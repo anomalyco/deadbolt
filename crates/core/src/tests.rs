@@ -1663,6 +1663,9 @@ fn concurrent_removals_keep_the_larger_cutoff() {
     sync(&b, &mut c);
     a.remove(b.id());
     c.remove(b.id());
+    // Neither cutoff includes this tip; moving the cutoff from 0 to 1
+    // still changes the projection, even though membership did not change.
+    b.set(item, "password", "2");
     let vault = assert_order_independent(&all_entries(&[&a, &b, &c]), &[item]);
     assert_eq!(value(&vault.item(&item).unwrap(), "password"), "1");
     assert!(!vault.is_member(&b.id()));
@@ -1679,6 +1682,56 @@ fn data_from_device_with_cut_admission_is_ignored() {
     sync_both(&mut a, &mut b);
     assert_eq!(a.vault.item(&item), None);
     assert!(!a.vault.is_member(&d.id()));
+}
+
+#[test]
+fn surviving_add_restores_data_from_a_cut_admission_and_dependent_edits() {
+    let mut a = Dev::create();
+    let mut editor = a.invite();
+    let mut b = a.invite();
+    let (mut d, cut_add) = b.invite_with_entry();
+    let (item, create) = d.login_entry("original");
+    sync(&d, &mut editor);
+    let data = [create, editor.set(item, "password", "edited")];
+    let expected = editor.vault.item(&item).unwrap();
+    let history = editor.vault.history(&item);
+
+    a.remove(b.id()); // Did not see b's Add(d).
+    a.vault.apply(cut_add).unwrap();
+    assert!(!a.vault.is_member(&d.id()));
+    assert!(!a.vault.was_removed(&d.id()));
+    let consent = d.secret.join_consent(&a.vault.id(), &a.id());
+    let add = a.vault.clone().add(&a.secret, d.id(), consent).unwrap();
+
+    // Owned insertion during reload can encounter the old data before the new Add.
+    let prefix = a.vault.entries().into_iter().cloned();
+    let replay = Vault::load(prefix.chain(data.clone()).chain([add.clone()])).unwrap();
+    assert_eq!(replay.item(&item).unwrap(), expected);
+    assert_eq!(replay.history(&item), history);
+
+    // Split the same data across the borrowed prefix and already visited suffix.
+    // The membership change restores d's create *and* the other author's edit.
+    for split in 0..=data.len() {
+        let mut vault = a.vault.clone();
+        for entry in &data[..split] {
+            vault.apply(entry.clone()).unwrap();
+        }
+        vault
+            .transact(
+                |w| {
+                    for entry in &data[split..] {
+                        w.apply(entry.clone())?;
+                    }
+                    assert_eq!(w.item(&item), None);
+                    w.apply(add.clone())?;
+                    assert_eq!(w.item(&item).unwrap(), expected);
+                    Ok::<_, Error>(())
+                },
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(snapshot(&vault, &[item]), snapshot(&replay, &[item]));
+    }
 }
 
 // ---- sync -----------------------------------------------------------------

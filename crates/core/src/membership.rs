@@ -34,17 +34,21 @@ impl Membership {
         self.members.iter()
     }
 
-    pub(crate) fn counts(&self, author: &DeviceId, seq: u64) -> bool {
-        self.is_member(author)
-            || self
-                .removed
+    /// Last sequence that counts in this author's contiguous data log 0..=last.
+    pub(crate) fn counted_through(&self, author: &DeviceId, last: u64) -> Option<u64> {
+        if self.is_member(author) {
+            Some(last)
+        } else {
+            self.removed
                 .get(author)
-                .is_some_and(|cutoff| cutoff.is_some_and(|c| seq <= c))
+                .copied()
+                .flatten()
+                .map(|cutoff| cutoff.min(last))
+        }
     }
 
-    /// Whether [`Membership::counts`] agrees with `other` for every entry.
-    pub(crate) fn counts_like(&self, other: &Membership) -> bool {
-        self.members == other.members && self.removed == other.removed
+    pub(crate) fn counts(&self, author: &DeviceId, seq: u64) -> bool {
+        self.counted_through(author, seq) == Some(seq)
     }
 }
 

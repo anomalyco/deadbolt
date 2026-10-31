@@ -281,6 +281,9 @@ impl Vault {
             past_memberships,
             ..
         } = write;
+        // Only the committed prefix has been projected here. The suffix will
+        // be projected below under the final membership either way.
+        let rebuild = !membership_order.is_empty() && self.needs_reprojection(&membership);
         let start = self.data_order.len();
         for (id, offsets) in logs.into_iter().filter(|(_, v)| !v.is_empty()) {
             let prefix = self.order(id.log).len();
@@ -291,7 +294,6 @@ impl Vault {
         }
         self.nodes.extend(nodes);
         self.tips = tips;
-        let rebuild = !membership_order.is_empty() && !self.membership.counts_like(&membership);
         if !membership_order.is_empty() {
             self.membership_order.extend(membership_order);
             self.membership = membership;
@@ -884,7 +886,7 @@ impl<P: Prefix> VaultState<P> {
                     .collect();
                 let membership = membership::resolve(&self.id, ops);
                 self.past_memberships.clear();
-                let rebuild = !membership.counts_like(&self.membership);
+                let rebuild = self.needs_reprojection(&membership);
                 self.membership = membership;
                 if rebuild && self.prefix.base().is_some() {
                     self.rebuild_projection = true;
@@ -906,6 +908,28 @@ impl<P: Prefix> VaultState<P> {
         }
     }
 
+    /// Compare effective cutoffs only for data already visited by the projection.
+    /// A fresh Add has no such data, but an author whose earlier admission was
+    /// cut can have stored, ignored entries without appearing in `removed`.
+    fn needs_reprojection(&self, next: &Membership) -> bool {
+        self.logs.iter().any(|(log, offsets)| {
+            if log.log != Log::Data {
+                return false;
+            }
+            let suffix = if self.prefix.base().is_some() {
+                offsets.partition_point(|&i| i < self.projected)
+            } else {
+                offsets.len()
+            };
+            self.log_len(*log, suffix)
+                .checked_sub(1)
+                .is_some_and(|last| {
+                    self.membership.counted_through(&log.author, last)
+                        != next.counted_through(&log.author, last)
+                })
+        })
+    }
+
     fn inherited_items(&self) -> Option<&BTreeMap<ItemId, ItemState>> {
         self.prefix
             .base()
@@ -918,8 +942,8 @@ impl<P: Prefix> VaultState<P> {
             return;
         };
         if self.rebuild_projection {
-            // Changed removal cutoffs may invalidate any previous item. Only
-            // a later *local edit* needs that intermediate projection.
+            // An effective cutoff can hide or restore older data. Only local
+            // reads and edits need this intermediate projection.
             self.items.clear();
             self.inherit_items = false;
             project(
