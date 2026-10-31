@@ -3850,6 +3850,141 @@ fn release_service(
 }
 
 #[test]
+fn concurrent_updates_cannot_pass_a_pending_extension_install() {
+    use sha2::Digest;
+    for first in [
+        vec!["update", "--channel", "dev"],
+        vec!["browser", "switch", "--native", "--channel", "dev"],
+    ] {
+        let a = Device::new();
+        let ext = a.path("extension");
+        let output = a.output(
+            a.cmd(&[
+                "browser",
+                "install",
+                "--browser",
+                "chrome",
+                "--extension-dir",
+            ])
+            .arg(&ext)
+            .env("HOME", a.path("user")),
+        );
+        assert!(output.status.success());
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        zip.start_file("manifest.json", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(br#"{"version":"1.0","permissions":["nativeMessaging"]}"#)
+            .unwrap();
+        let zip = zip.finish().unwrap().into_inner();
+        let sha = data_encoding::HEXLOWER.encode(&sha2::Sha256::digest(&zip));
+        let file = format!("/release/deadbolt/files/{sha}/extension.zip");
+        let target = serde_json::json!({"url": file, "size": zip.len(), "sha256": sha});
+        let extension = serde_json::json!({
+            "schema": 1, "app": "deadbolt", "artifact": "extension", "channel": "dev",
+            "sequence": 7, "published_at": "2026-10-28T00:00:00Z",
+            "release": {"version": "1.0", "rollout_percent": 100,
+                "targets": {"chromium": target}, "distributions": []}
+        });
+        let mut cli = extension.clone();
+        cli["artifact"] = "cli".into();
+        cli["release"]["version"] = env!("CARGO_PKG_VERSION").into();
+        cli["release"]["targets"] = serde_json::json!({
+            "macos-arm64": target, "macos-x64": target,
+            "linux-arm64": target, "linux-x64": target
+        });
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}/release/", listener.local_addr().unwrap());
+        let (pending, ready) = mpsc::channel();
+        let (resume, proceed) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let path = request.split_whitespace().nth(1).unwrap();
+                let downloading = path == file;
+                let body = if downloading {
+                    pending.send(()).unwrap();
+                    proceed.recv_timeout(Duration::from_secs(15)).unwrap();
+                    zip.clone()
+                } else if path.ends_with("/cli/dev.json") {
+                    cli.to_string().into_bytes()
+                } else {
+                    assert!(path.ends_with("/extension/dev.json"), "{path}");
+                    extension.to_string().into_bytes()
+                };
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .unwrap();
+                stream.write_all(&body).unwrap();
+                if downloading {
+                    break;
+                }
+            }
+        });
+        let mut updating = a
+            .cmd(&first)
+            .env("DEADBOLT_RELEASE_URL", &base)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        ready.recv_timeout(Duration::from_secs(10)).unwrap();
+        // The floor is already written, but the payload has not arrived.
+        let paths = deadbolt_client::Paths::from_vars(|name| match name {
+            "DEADBOLT_HOME" => Some(a.path("home").into()),
+            "XDG_STATE_HOME" => Some(a.path("state").into()),
+            "XDG_CONFIG_HOME" => Some(a.path("config").into()),
+            _ => None,
+        });
+        let floors = paths.log.with_file_name("release-sequences.json");
+        let before = std::fs::read(&floors).unwrap();
+        let config = paths.config;
+        let registered = std::fs::read(&config).unwrap();
+        for contender in [
+            vec!["update", "--check", "--channel", "dev"],
+            vec!["browser", "switch", "--standalone", "--channel", "dev"],
+        ] {
+            let mut child = a
+                .cmd(&contender)
+                .env("DEADBOLT_RELEASE_URL", &base)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            assert!(!wait(&mut child, Duration::from_secs(5)).success());
+            let output = child.wait_with_output().unwrap();
+            assert!(String::from_utf8_lossy(&output.stderr).contains("another deadbolt update"));
+            assert_eq!(std::fs::read(&floors).unwrap(), before);
+            assert_eq!(std::fs::read(&config).unwrap(), registered);
+        }
+        resume.send(()).unwrap();
+        assert!(wait(&mut updating, Duration::from_secs(5)).success());
+        server.join().unwrap();
+        assert!(
+            std::fs::read_to_string(ext.join("manifest.json"))
+                .unwrap()
+                .contains("1.0")
+        );
+        // A process finishing releases the persistent lock file for the next one.
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(paths.log.with_file_name("update.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+    }
+}
+
+#[test]
 fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
     use sha2::Digest;
     let a = Device::new();
@@ -4120,6 +4255,30 @@ fn update_replaces_a_standalone_deadbolt_only_once_it_checks_out() {
         .env("HOME", a.path("user")),
     );
     assert!(output.status.success());
+
+    // A rejected extension manifest must not poison the replay floor.
+    let ext_feed = "/release/deadbolt/extension/dev.json";
+    let valid = files.lock().unwrap()[ext_feed].clone();
+    for (field, value) in [("artifact", "cli"), ("channel", "stable"), ("app", "other")] {
+        let mut invalid: serde_json::Value = serde_json::from_slice(&valid).unwrap();
+        invalid[field] = value.into();
+        invalid["sequence"] = 999.into();
+        files
+            .lock()
+            .unwrap()
+            .insert(ext_feed.into(), invalid.to_string().into_bytes());
+        let output = update(&["update", "--check", "--channel", "dev"]);
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("not a usable"));
+        files.lock().unwrap().insert(ext_feed.into(), valid.clone());
+        let output = update(&["update", "--check", "--channel", "dev"]);
+        assert_eq!(
+            output.status.code(),
+            Some(10),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 
     let output = update(&["update", "--check", "--channel", "dev"]);
     assert_eq!(output.status.code(), Some(10));
