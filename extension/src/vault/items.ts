@@ -99,9 +99,18 @@ export function kindsView(app: App): View {
  */
 export function deleteButton(app: App, ref: string, what: string): HTMLButtonElement {
   let armed = false
+  let disarm: ReturnType<typeof setTimeout> | undefined
   let asking: HTMLFormElement | null = null
+  const reset = () => {
+    clearTimeout(disarm)
+    disarm = undefined
+    armed = false
+    b.classList.remove("danger")
+    if (b.isConnected) b.replaceChildren(glyph("trash"), "Delete")
+  }
   /** Deletes it; what went wrong, or null (deleted, or the passphrase is asked for). */
   const remove = async (passphrase?: string): Promise<string | null> => {
+    const label = b.dataset.what ?? what
     const r = await app.run(passphrase ? { type: "device-item-delete", ref, passphrase } : { type: "device-item-delete", ref })
     if (!r.ok) {
       if (r.code === "passphrase_needed" && !passphrase) {
@@ -112,27 +121,29 @@ export function deleteButton(app: App, ref: string, what: string): HTMLButtonEle
       return r.message
     }
     await app.refresh()
-    app.announce(`Deleted ${what}.`)
+    app.announce(`Deleted ${label}.`)
     app.go({ name: "list" }, -1)
     return null
   }
   const b = button("btn", [glyph("trash"), "Delete"], async () => {
+    if (asking?.isConnected) {
+      asking.querySelector("input")?.focus()
+      return
+    }
     if (!armed) {
       armed = true
       b.classList.add("danger")
       b.replaceChildren(glyph("trash"), "Delete for good?")
-      setTimeout(() => {
-        armed = false
-        b.classList.remove("danger")
-        if (b.isConnected) b.replaceChildren(glyph("trash"), "Delete")
-      }, 4000)
+      disarm = setTimeout(reset, 4000)
       return
     }
+    reset()
     b.disabled = true
     const failed = await remove()
     b.disabled = false
     if (failed) app.announce(failed)
   })
+  b.dataset.what = what
   b.setAttribute("aria-label", `Delete ${what}`)
   return b
 }
@@ -172,6 +183,8 @@ export function itemDetailView(app: App, ref: string): View {
   let tick: ReturnType<typeof setInterval> | undefined
   /** The field and action waiting on Strict's passphrase. */
   let asking: { field: string; action: "show" | "copy" | "download" } | null = null
+  let removeBtn: HTMLButtonElement | null = null
+  let removeRow: HTMLElement | null = null
   const say = (m: string) => app.announce(m)
 
   const act = async (field: string, action: "show" | "copy" | "download", passphrase?: string, b?: HTMLElement | null): Promise<string | null> => {
@@ -277,14 +290,25 @@ export function itemDetailView(app: App, ref: string): View {
       }),
     ]
     if (d.editable) actions.push(button("btn", "Edit", () => app.go({ name: "edit", ref, kind: d.kind })))
-    keepFocus(el, () =>
-      el.replaceChildren(
-        toolbar("", () => app.go({ name: "list" }, -1), ...actions),
-        h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")), tagChips(app, d.tags))),
-        lines.length ? h("div", { class: "box" }, ...lines) : h("p", { class: "muted" }, "Nothing saved in it yet."),
-        h("div", { class: "buttons end" }, deleteButton(app, ref, d.title)),
-      ),
-    )
+    // Refreshes can arrive while confirming or awaiting the KDF: keep the
+    // deletion button and its passphrase form mounted in place.
+    removeBtn ??= deleteButton(app, ref, d.title)
+    removeBtn.dataset.what = d.title
+    removeBtn.setAttribute("aria-label", `Delete ${d.title}`)
+    removeRow ??= h("div", { class: "buttons end" }, removeBtn)
+    const content: Node[] = [
+      toolbar("", () => app.go({ name: "list" }, -1), ...actions),
+      h("div", { class: "detail-head" }, kindAvatar(d), h("div", { class: "text" }, h("h2", { class: "title" }, d.title), h("span", { class: "sub" }, [kindName(app, d.kind), d.detail].filter(Boolean).join(" · ")), tagChips(app, d.tags))),
+      lines.length ? h("div", { class: "box" }, ...lines) : h("p", { class: "muted" }, "Nothing saved in it yet."),
+    ]
+    keepFocus(el, () => {
+      if (removeRow!.parentElement === el) {
+        while (el.firstChild && el.firstChild !== removeRow) el.firstChild.remove()
+        removeRow!.before(...content)
+      } else {
+        el.replaceChildren(...content, removeRow!)
+      }
+    })
   }
 
   const load = async () => {
