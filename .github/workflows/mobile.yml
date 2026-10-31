@@ -1,0 +1,130 @@
+name: Mobile
+
+on:
+  pull_request:
+    paths: &mobile-paths
+      - mobile/**
+      - crates/mobile-core/**
+      - crates/core/**
+      - crates/store/**
+      - crates/net/**
+      - Cargo.lock
+      - .github/workflows/mobile.yml
+  push:
+    paths: *mobile-paths
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  ios:
+    name: iOS simulator
+    runs-on: macos-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        working-directory: mobile/ios
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: rustup target add aarch64-apple-ios-sim --toolchain stable
+      - run: scripts/build-core.sh sim
+      # Both projects have local sources only; there are no SPM packages to cache.
+      - name: Generate app and lifecycle test projects
+        run: |
+          command -v xcodegen || brew install xcodegen
+          xcodegen generate --spec project.yml
+          xcodegen generate --spec lifecycle-tests.yml
+      - name: Select an available iPhone for this Xcode
+        run: |
+          destinations=$(xcodebuild -showdestinations -project Deadbolt.xcodeproj -scheme Deadbolt)
+          echo "$destinations"
+          udid=$(sed -nE '/platform:iOS Simulator/ s/.*id:([[:xdigit:]-]{36}),.*name:iPhone.*/\1/p' <<< "$destinations" | sed -n '1p')
+          test -n "$udid"
+          echo "DESTINATION=platform=iOS Simulator,id=$udid" >> "$GITHUB_ENV"
+      - name: Build unsigned app with embedded AutoFill extension
+        run: |
+          xcodebuild build -project Deadbolt.xcodeproj -scheme Deadbolt \
+            -destination "$DESTINATION" -derivedDataPath build CODE_SIGNING_ALLOWED=NO
+          app=build/Build/Products/Debug-iphonesimulator/Deadbolt.app
+          test -x "$app/PlugIns/DeadboltAutoFill.appex/DeadboltAutoFill"
+          ditto -c -k --keepParent "$app" "$RUNNER_TEMP/Deadbolt.app.zip"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ios-simulator-app
+          path: ${{ runner.temp }}/Deadbolt.app.zip
+          if-no-files-found: error
+      - name: Test app against the Rust core
+        run: |
+          xcodebuild test -project Deadbolt.xcodeproj -scheme Deadbolt \
+            -destination "$DESTINATION" -parallel-testing-enabled NO -derivedDataPath build \
+            -resultBundlePath "$RUNNER_TEMP/Deadbolt.xcresult" CODE_SIGNING_ALLOWED=NO
+      - name: Test app and provider lifecycle
+        if: ${{ !cancelled() && env.DESTINATION != '' }}
+        run: |
+          xcodebuild test -project DeadboltLifecycle.xcodeproj -scheme DeadboltLifecycleTests \
+            -destination "$DESTINATION" -parallel-testing-enabled NO -derivedDataPath lifecycle-build \
+            -resultBundlePath "$RUNNER_TEMP/DeadboltLifecycle.xcresult" CODE_SIGNING_ALLOWED=NO
+      - name: Collect XCTest results
+        if: ${{ !cancelled() && env.DESTINATION != '' }}
+        run: |
+          for result in "$RUNNER_TEMP"/*.xcresult; do
+            ditto -c -k --keepParent "$result" "$result.zip"
+          done
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && env.DESTINATION != '' }}
+        with:
+          name: ios-xctest-results
+          path: ${{ runner.temp }}/*.xcresult.zip
+          if-no-files-found: error
+
+  android:
+    name: Android debug
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      NDK_VERSION: 27.1.12297006
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - run: rustup target add aarch64-linux-android --toolchain stable
+      - uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6.1.0
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+          cache-dependency-path: |
+            mobile/android/**/*.gradle.kts
+            mobile/android/gradle.properties
+            mobile/android/gradle/libs.versions.toml
+            mobile/android/gradle/wrapper/gradle-wrapper.properties
+      - name: Install Android SDK and NDK
+        run: |
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            'platforms;android-37.0' 'build-tools;37.0.0' "ndk;$NDK_VERSION"
+          echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/$NDK_VERSION" >> "$GITHUB_ENV"
+      # Gradle's buildDeadboltCoreDebug runs scripts/build-core.sh once for both tasks.
+      - name: Build Rust core, run unit tests and assemble APK
+        id: gradle
+        working-directory: mobile/android
+        run: ./gradlew :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: android-debug-apk
+          path: mobile/android/app/build/outputs/apk/debug/app-debug.apk
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.gradle.outcome != 'skipped' }}
+        with:
+          name: android-unit-test-reports
+          path: |
+            mobile/android/app/build/reports/tests/testDebugUnitTest
+            mobile/android/app/build/test-results/testDebugUnitTest/*.xml
+          if-no-files-found: error
