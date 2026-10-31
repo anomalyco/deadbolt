@@ -17,7 +17,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
 pub use crate::config::now;
-use crate::protocol::{DeviceInfo, VaultInfo};
+use crate::protocol::{DeviceInfo, ErrorCode, VaultInfo};
 
 const META_DEVICE_NAME: &str = "cli/device-name";
 const META_DEFAULT_VAULT: &str = "cli/default-vault";
@@ -137,7 +137,10 @@ pub(super) fn set_json<T: Serialize>(store: &Unlocked, name: &str, value: &T) ->
 impl Loaded {
     pub fn ensure_usable(&self) -> Result<()> {
         if self.append_uncertain {
-            bail!("store commit outcome is uncertain; unlock again to authenticate and reload");
+            return Err(super::fail(
+                ErrorCode::Locked,
+                "store commit outcome is uncertain; unlock again to authenticate and reload",
+            ));
         }
         Ok(())
     }
@@ -861,6 +864,24 @@ pub(super) mod tests {
         let reopened = Loaded::open(dir.path(), b"test").unwrap();
         assert!(!reopened.vault(&id).is_member(&peer.device_id()));
         assert_ne!(reopened.vault(&id).heads(), old_heads);
+    }
+
+    #[test]
+    fn quarantined_vault_reports_locked_to_clients() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut loaded, fault) = fault_store(dir.path(), [7; 32]);
+        let id = loaded.create_vault("personal").unwrap();
+        fault.store(2, Ordering::SeqCst);
+        loaded
+            .update(id, |v, key| Ok(v.rename(key, "changed")?))
+            .unwrap_err();
+
+        let error = loaded.resolve(None).unwrap_err();
+        assert_eq!(crate::client::code(&error), Some(ErrorCode::Locked));
+        assert_eq!(
+            error.to_string(),
+            "store commit outcome is uncertain; unlock again to authenticate and reload"
+        );
     }
 
     #[test]
