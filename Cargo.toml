@@ -3,17 +3,12 @@ resolver = "3"
 members = ["crates/*"]
 
 [patch.crates-io]
-# netwatch requires 0.46.x. This upstream commit still declares 0.46.3 and
-# fixes iOS public-API use (IPv6 flags, SystemConfiguration and resolver DNS).
-# It also includes upstream's intervening Illumos support, not a 0.47 upgrade.
-# https://github.com/shellrow/netdev/commit/b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313
-netdev = { git = "https://github.com/shellrow/netdev", rev = "b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313" }
-# Temporary iOS-only no-event monitor for upstream #261; real interfaces still
-# come from netdev. Mobile foreground/manual sync notifies iroh explicitly.
+# Reviewed netwatch 0.19.3 fork for upstream #261: iOS NWPathMonitor change
+# events and getifaddrs snapshots, with a bounded initial asynchronous wait.
 # https://github.com/n0-computer/net-tools/issues/261
-# Cargo patches are global: every target uses this source, but all non-iOS
-# backend implementations are unchanged from upstream netwatch 0.19.3.
-netwatch = { git = "https://github.com/anomalyco/net-tools", rev = "afcef9f16519ef065ae62f7b199926b0b3d5f80e" }
+# Cargo patches are global; shared interface classification was mechanically
+# refactored, with non-iOS semantics reviewed rather than byte-identical files.
+netwatch = { git = "https://github.com/anomalyco/net-tools", rev = "7c337433a67d6e93e88ac2037da18645e2a4019b" }
 
 [workspace.package]
 version = "0.0.0"

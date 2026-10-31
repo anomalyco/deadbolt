@@ -270,8 +270,9 @@ impl MobileDevice {
     }
 
     /// Call off the UI thread when the app enters foreground. On iOS this
-    /// refreshes iroh's network state and syncs while unlocked. It never unlocks
-    /// the store; a locked device is a no-op. Lock cancels an in-flight refresh.
+    /// runs a normal vault sync while unlocked, without forcing a network
+    /// refresh or rebind. It never unlocks the store; a locked device is a no-op.
+    /// Lock cancels an in-flight sync.
     pub fn foreground(&self) -> Result<()> {
         #[cfg(target_os = "ios")]
         match self.device.session() {

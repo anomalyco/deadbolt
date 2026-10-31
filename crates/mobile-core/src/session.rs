@@ -321,11 +321,6 @@ impl Session {
             _ = self.cancel.cancelled() => Err(MobileError::Cancelled),
             result = async {
                 let _round = self.sync.lock().await;
-                // Temporary iOS netwatch stub has no automatic change events.
-                // Both foreground and manual Sync use this path. Startup also
-                // refreshes; iroh documents repeated notifications as harmless.
-                #[cfg(target_os = "ios")]
-                self.node.network_change().await;
                 application::sync_round(&self.node, &self.handler).await
             } => result,
         }

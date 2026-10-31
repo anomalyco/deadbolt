@@ -4,68 +4,45 @@ Security review needed. This proof is not ready for real vaults or distribution.
 Use synthetic credentials only. Platform builds and verification results must be
 recorded below before treating a feature as working.
 
-### Build status and temporary networking limitation
+### Build status and iOS networking
 
-The Android debug app builds and launches. The Rust iOS simulator target now
-builds and passes its five core tests plus real public-network pairing, sync,
-foreground notification and restart. The current pinned native iOS build has
-also paired and displayed 1,000 synthetic logins; remaining native flows are
-separate gates.
-The initial iOS dependency failure was reproduced with:
+The workspace pins netwatch 0.19.3 to `anomalyco/net-tools`
+`7c337433a67d6e93e88ac2037da18645e2a4019b`. Its iOS backend uses Apple's public
+Network.framework path monitor and `getifaddrs`, not macOS routing constants.
+It feeds the existing debounce/rescan actor, owns cancellation through the last
+native callback, and bounds the initial path wait to one second. A timeout
+returns interface addresses without inventing a default route; later callbacks
+still work. A satisfied path may report no gateway.
 
-```sh
-cargo check -p deadbolt-mobile-core --target aarch64-apple-ios-sim --locked
-```
-
-Before the dependency fixes this failed with E0425 at
-`netdev-0.46.3/src/os/darwin/ipv6_addr_flags.rs:19`:
-`libc::in6_ifreq` is not defined for iOS. The dependency chain is
-`deadbolt-mobile-core → deadbolt-net → iroh 1.3.0 → netwatch 0.19.3 → netdev
-0.46.3` (also through portmapper). `libc 0.2.190` exposes this type only with
-`target_os = "macos"`. netdev 0.47.0 fixes this by gating the entire module on
-macOS, but netwatch 0.19.3 requires netdev `^0.46.1`, and iroh 1.3.0 requires
-netwatch `^0.19.3`. The compatible minimum 0.46.1 has the same failure; a routine
-patch-version update cannot select the fixed 0.47 series. Published iroh 1.4.1
-still selects netwatch 0.19.3; netwatch 0.20.0 also requires netdev 0.46.3.
-Ryan approved a reproducible upstream fix. The workspace now pins netdev to
-upstream commit `b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313`, which still declares
-0.46.3 and corrects iOS IPv6 flags, SystemConfiguration and resolver API use.
-It includes intervening upstream Illumos support; it is not a one-line local
-registry edit. The patch is commented in `Cargo.toml`, locked and explicitly
-allowed in `deny.toml`.
-
-Fixing netdev exposed the next dependency, netwatch 0.19.3, which failed with
-22 errors because it selects macOS/BSD routing constants on iOS. Current
-netwatch 0.20.0 has the same selection; see
+This replaces the authorized temporary no-event monitor at `afcef9f16519ef065ae62f7b199926b0b3d5f80e`
+and removes its forced network-change notifications on foreground/manual sync.
+Normal unlocked vault sync on foreground remains. The separate netdev git patch
+at `b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313` is no longer needed and was removed.
+Registry libc remains 0.2.190. The original failures were missing iOS
+`libc::in6_ifreq`, then 22 BSD-routing errors; see
 [upstream issue #261](https://github.com/n0-computer/net-tools/issues/261).
-Ryan authorized two stages: first an iOS-only temporary no-change monitor with
-explicit reconnect on foreground/manual sync, then a real public
-Network.framework monitor prepared for upstream review. The stub is pinned to
-`anomalyco/net-tools` commit `afcef9f16519ef065ae62f7b199926b0b3d5f80e`
-(`ios-stub`). All five target graphs resolve that fork because Cargo patches
-are global; Ryan explicitly accepted this provenance with byte-identical
-non-iOS backend code, which was verified. A real public Network.framework
-implementation is prepared separately at `anomalyco/net-tools`
-`e7bcd4b61d5d989a39ca450872259e5dbb2adbcb` (`ios-network-framework`, netwatch
-0.20.0); independent review and a compatible 0.19.3 backport precede adoption.
-Its upstream PR requires Ryan's approval before posting. Earlier simulator media
-came from a scratch build with libc 0.2.189 and are labeled experimental, not
-proof that this checkout builds.
 
-With the temporary monitor, a network switch while the app remains in the
-foreground will not trigger reconnection until the next foreground transition
-or manual **Sync now**. macOS, Linux, Android and wasm must retain upstream
-monitor behavior. The stub and explicit foreground workaround should be removed
-when the real monitor is adopted; record the exact source revisions and
-per-target dependency graphs with that change.
+Locked dependency trees were checked for iOS device/simulator, macOS, Linux,
+Android, wasm and Windows. Every target resolves the exact netwatch fork through
+iroh 1.3.0/portmapper 0.19.3. iOS and wasm have no netdev dependency; macOS,
+Linux and Android use registry netdev 0.46.3, Windows 0.45.1. Cargo's source
+override remains global. Existing non-iOS monitor behavior is preserved; shared
+address classification was mechanically extracted and independently reviewed,
+so the real implementation is not described as byte-identical source.
 
-`cargo tree --locked --target <target> -i netwatch` was checked for
-`aarch64-apple-ios-sim`, `aarch64-apple-darwin`,
-`x86_64-unknown-linux-gnu`, `aarch64-linux-android` and
-`wasm32-unknown-unknown`. Each resolves netwatch 0.19.3 at the pinned fork through
-iroh 1.3.0 (directly and through portmapper 0.19.3). Only iOS changes backend:
-it uses real netdev interface snapshots and the existing no-event monitor;
-macOS/BSD, Linux, Android and browser monitors retain their upstream code.
+The final pin passed five host and five simulator mobile-core tests, a rebuilt
+simulator's real public-network pairing/sync/foreground/restart test, Android
+library build, wasm extension-core check, host/iOS Clippy and source allowlist.
+Native app recordings made with the stub remain labeled with that older pin;
+earliest iOS recordings used an explicitly labeled scratch libc 0.2.189 build.
+Neither establishes native runtime proof of the final monitor build.
+
+The upstream 0.20 implementation is prepared on `ios-network-framework` at
+`93f76dcebac4e2a07e22bc213b5aef53583614f0`; no upstream PR has been posted.
+Posting requires Ryan's approval and coordination with the humans on #261/#263.
+Physical Wi-Fi/cellular handoff and suspension/resumption are untested. Path
+notifications are not a promise of every same-interface address-change event;
+these limits are documented in the fork rather than hidden behind the old stub.
 
 The computer-side synthetic CLI fixture initially refused initialization/import from
 OpenCode with its existing “an AI agent can't set Deadbolt up” policy. That guard
@@ -329,6 +306,15 @@ outstanding request; first valid answer wins, and authorization is consumed for
 that one resolve. Never approve from a click or a reusable unlocked-state flag.
 Default CLI policy remains unchanged unless the experimental path is enabled.
 
+Negative-case evidence lives in the existing tests, not just the phone demo:
+`net::approval` checks wrong signers, mutated scope, replay, expiry and monotonic
+deadlines; its transport test checks revocation and one response only. The CLI
+`experimental_read_from_a_real_mac_socket_requires_one_signed_answer` test
+refuses an undesignated approver and ordinary AI reads, releases exactly one
+field after approval, rejects a second answer and checks membership revocation.
+The mobile-core `approvals_require_fresh_slot_unwrap_and_lock_revokes_pending`
+test verifies that a cached unlocked session cannot replace a fresh slot unwrap.
+
 ## Verification and remaining work
 
 Build evidence and recordings belong under
@@ -346,9 +332,13 @@ Unrun gates are not passing gates.
 PR #194 is a draft. Existing GitHub CI covers workspace Rust and browser checks,
 not Xcode or Gradle: mobile build, native tests and OS-flow evidence are local
 checks. A green CI result must not be described as a complete mobile proof.
-Physical iOS Secure Enclave unlock, fresh-biometric approval and device jetsam
-validation are blocked on Anomaly signing/provisioning and a test device, not
-waived by simulator tests. These gates keep the proof incomplete.
+Physical iOS Secure Enclave unlock, fresh-biometric approval, user-verified
+passkey registration/sign-in and device jetsam validation are blocked on
+Anomaly signing/provisioning and a test device, not waived by simulator tests.
+Simulator password/OTP flows and rejection of passkeys that require biometric
+verification remain testable. A ceremony explicitly discouraging verification,
+if exercised, must not be labeled user-verified. These gates keep the proof
+incomplete.
 
 Completed checks during development (not a substitute for the final combined
 workspace/platform runs):
@@ -375,6 +365,11 @@ workspace/platform runs):
   the CLI `init` fixture step and two are setup timeouts; AI-caller setup refusal
   is a known restriction in this environment. This is not a green app-suite
   result, and production caller guards were not relaxed to make it pass.
+- [Initial PR #194 CI](https://github.com/anomalyco/deadbolt/actions/runs/41212530457)
+  on `86f783d`: all 15 PR jobs passed (nightly skipped), including
+  Linux/macOS Rust, cargo-deny, browser cores and extension native/standalone
+  smoke, security and end-to-end shards. This predates the provider and iOS
+  integration commits; final-head CI is still required.
 - `crates/app/scripts/snap.sh` before and after Rune `1b787190 → 3062e9b8`:
   all 174 headless PNGs are byte-identical. Theme tokens and font assets are
   unchanged by that update.

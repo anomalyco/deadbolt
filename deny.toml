@@ -40,8 +40,6 @@ unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
 allow-git = [
     "https://github.com/anomalyco/rune",
-    # Exact netdev 0.46.3 iOS fix rev is pinned in Cargo.toml.
-    "https://github.com/shellrow/netdev",
-    # Exact temporary iOS-only netwatch stub rev is pinned in Cargo.toml.
+    # Exact reviewed netwatch 0.19.3 iOS NWPathMonitor backend rev is pinned in Cargo.toml.
     "https://github.com/anomalyco/net-tools",
 ]

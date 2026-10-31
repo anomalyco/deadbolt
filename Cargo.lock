@@ -3287,7 +3287,8 @@ dependencies = [
 [[package]]
 name = "netdev"
 version = "0.46.3"
-source = "git+https://github.com/shellrow/netdev?rev=b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313#b3bfb0fb5595cd143bfa0b9f07d1ad6e0ef0c313"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3c52c2584961c68f5a6e3356797344061f818c93b8acc9cd6d7e284795e563e"
 dependencies = [
  "block2 0.6.2",
  "dispatch2",
@@ -3389,10 +3390,11 @@ dependencies = [
 [[package]]
 name = "netwatch"
 version = "0.19.3"
-source = "git+https://github.com/anomalyco/net-tools?rev=afcef9f16519ef065ae62f7b199926b0b3d5f80e#afcef9f16519ef065ae62f7b199926b0b3d5f80e"
+source = "git+https://github.com/anomalyco/net-tools?rev=7c337433a67d6e93e88ac2037da18645e2a4019b#7c337433a67d6e93e88ac2037da18645e2a4019b"
 dependencies = [
  "atomic-waker",
  "bytes",
+ "cc",
  "cfg_aliases",
  "derive_more",
  "ipnet",
