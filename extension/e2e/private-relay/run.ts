@@ -265,23 +265,26 @@ async function exercise() {
     const resumed = pb.bytes()
     await sync(b.page)
     await until("backlog transfer after offscreen restart", async () => pb.bytes() - resumed >= 96 * 1024)
-    // Traffic alone may be handshakes or a partial frame. Cut only once a
-    // validated backlog entry is visible; then identify the exact restart
-    // lower bound with B isolated, including from already-open relay sockets.
+    // Capture a lower bound on committed state, not an exact cut index. The
+    // live browser may commit more entries before its process actually exits.
+    let prefix: string[] = []
     await until("an incomplete backlog is visible before browser restart", async () => {
       const rows = await items(b.page)
       if (rows.some((i) => i.title === "File 1")) throw new Error("schedule precondition: tail arrived before restart")
-      return rows.some((i) => i.title.startsWith("Backlog "))
+      prefix = rows.filter((i) => i.title.startsWith("Backlog ")).map((i) => i.ref)
+      return prefix.length > 0
     })
-    pb.isolate(true)
-    const cutBytes = pb.bytes(),
-      cutRows = await items(b.page)
-    const prefix = cutRows.filter((i) => i.title.startsWith("Backlog ")).map((i) => i.ref)
-    check(
-      prefix.length > 0 && !cutRows.some((i) => i.title === "File 1"),
-      `isolated restart cut: ${prefix.length} backlog items, no tail`,
+    const prefixBytes = pb.bytes()
+    await until(
+      "fresh relay traffic after observing the incomplete prefix",
+      async () => pb.bytes() - prefixBytes >= 16 * 1024,
     )
-    await b.close()
+    console.log(
+      `live restart cut: ${prefix.length} backlog refs, no tail at capture, ${pb.bytes() - prefixBytes} subsequent relay bytes`,
+    )
+    await b.close() // Browser shutdown interrupts the live link, not a prior proxy cut.
+    pb.isolate(true) // No B process now; forbid even new tunnels throughout authenticated reopen.
+    const cutBytes = pb.bytes()
     await services.restart()
     b = await launch("b", pb.port)
     check((await state(b.page)) === "locked", "browser restart during catch-up starts locked")

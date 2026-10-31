@@ -720,11 +720,12 @@ It partitions the CLI and browser for ten seconds after concurrent edits,
 heals two cut/write/heal cycles, then appends **2,000 separately signed logins
 (2 KiB notes each) and two 64 KiB attachments** on the locked native store.
 It terminates the service worker and discards the offscreen owner during catch-up,
-checks lock and authenticated OPFS reopen, then cuts B after at least one backlog
-item is visible but the last attachment is absent. With every B proxy tunnel
-closed/denied, it records the visible backlog refs, restarts the browser and relay,
-unlocks and checks **every captured ref** survived with no additional relay bytes
-and still no tail. Only then can B reconnect. No test command is linked into WASM.
+checks lock and authenticated OPFS reopen, then records visible backlog refs
+while B is still connected and the last attachment is absent. After a further
+16 KiB of relay traffic it closes the browser **on that live path**. Only then
+does it close/deny B's proxy tunnels, restart the relay, relaunch B and unlock.
+Every captured ref must survive, with no further relay bytes and still no tail,
+before B can reconnect. More entries may have committed during shutdown. No test command is linked into WASM.
 A third device joins. An offline example reopens the three encrypted stores,
 rejects duplicate entries, compares heads and complete items, and checks both
 conflict versions and attachment contents. Finally, removed C contacts B while B
