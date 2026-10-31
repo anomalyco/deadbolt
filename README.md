@@ -2,7 +2,7 @@
 
 A decentralized password manager, in Rust. Your devices sync directly with each other over [iroh](https://www.iroh.computer); a new device joins only by pairing from one you already have. No accounts, no servers of our own.
 
-Status: design. No code yet.
+Status: alpha. Every push to `dev` ships a build; there is no stable release yet.
 
 ## Install
 
