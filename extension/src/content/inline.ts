@@ -134,6 +134,8 @@ let framedFor: Element | null = null
 let framedAt: Rect | null = null
 /** A new box for that field is on its way to the top page (see onFrameScroll). */
 let framedMoving = false
+/** Which menu for a field here that is: a move's answer for an earlier one says nothing of the one open now. */
+let framedSeq = 0
 
 /** In a frame: the menu the background opened in the top page for one of its fields goes (or went), with `tell`, by the user's doing here. */
 function framedGone(tell: boolean, dismissed = false) {
@@ -159,7 +161,9 @@ function onFrameScroll() {
   const box = visibleBox(el)
   if (!box) return framedGone(true)
   framedMoving = true
+  const seq = framedSeq
   void send<boolean>({ type: "db:menu-move", box }).then((moved) => {
+    if (seq !== framedSeq) return
     framedMoving = false
     if (framedFor !== el) return
     if (moved === true) framedAt = at
@@ -1034,6 +1038,7 @@ async function maybeOpen(el: FormControl, how: Asked = "focus") {
       const r = el.getBoundingClientRect()
       framedAt = { left: r.left, top: r.top, width: r.width, height: r.height }
       framedMoving = false
+      framedSeq++
       watchFramed()
     }
     else if (reply.token && deepActiveElement() === el) openMenu(el, reply.token, reply.rows)

@@ -347,12 +347,12 @@ export class Autofill {
       owner = top
       at = shown[0]
     }
-    // A sign-in session fills this step itself once the user goes on (see
-    // page): a field it waits for doesn't open the list on focus alone (a
-    // widget focusing the password box it just opened, say). In a frame, that
-    // list would also keep the step's fields from being measured. A click or
-    // ↓ still opens it.
-    if (!explicit && (focused === "password" || focused === "otp")) {
+    // In a frame, a sign-in session fills this step itself once the user goes
+    // on (see page): a field it waits for doesn't open the list on focus
+    // alone (a widget focusing the password box it just opened, say), as that
+    // list would keep the step's fields from being measured. A click or ↓
+    // still opens it. A top page's list never blocks its step.
+    if (!explicit && target.frameId !== 0 && (focused === "password" || focused === "otp")) {
       const s = await this.session(target.tabId)
       if (s && !s.filled.includes(focused) && siteOf(new URL(target.origin).hostname) === s.site) return { rows: 0 }
     }
@@ -585,6 +585,8 @@ export class Autofill {
         moved = true
         continue
       }
+      // Picked (it's a pill now) or closed while the box went up: not this move's to close.
+      if (t.picked || this.tokens.get(token) !== t) continue
       this.tokens.delete(token)
       await sendToFrame(t.owner, { type: "db:close-menu", token })
     }

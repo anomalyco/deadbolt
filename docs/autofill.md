@@ -531,9 +531,10 @@ not running without sending hello, which would start the agent again.
   on to anything else in the page, by the user or by the page's own script
   (an identifier-first sign-in focusing the password box it just opened),
   puts the list for the field it left away. So the list never stays over
-  the box the user is about to type into. While a sign-in session waits
-  for a password or code step, that field doesn't open the list on focus
-  alone (a click or ↓ still does); the session fills it.
+  the box the user is about to type into. In a frame, while a sign-in
+  session waits for a password or code step, that field doesn't open the
+  list on focus alone (a click or ↓ still does): the session fills it, and
+  the list would keep the frame's fields from being measured.
 - **Passwords masked with CSS.** A text box the page masks with
   `-webkit-text-security` (to keep the browser's own password handling
   away) is a password box like any other: it gets the password, and the
