@@ -77,6 +77,7 @@ beforeAll(() => {
   initProviderChain(state, { enabled: () => true, submit: (form, button) => void submits.push({ form, button }) })
 })
 afterAll(() => {
+  ;(window as unknown as { happyDOM: { setURL(u: string): void } }).happyDOM.setURL("https://example.com/login")
   Element.prototype.getBoundingClientRect = rect
   document.elementFromPoint = hit.one
   document.elementsFromPoint = hit.all
