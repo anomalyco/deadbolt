@@ -166,7 +166,7 @@ pub(crate) struct ItemState {
 
 impl ItemState {
     /// Concurrent edit (or restore) and delete: the edit wins.
-    fn deleted(&self) -> bool {
+    pub(crate) fn deleted(&self) -> bool {
         !self.alive.iter().any(|w| w.value == Life::Alive)
     }
 
@@ -184,10 +184,13 @@ impl ItemState {
     }
 
     fn field(&self, write: &Write<usize>) -> Option<&Field> {
-        match &self.history[write.value].change {
-            Change::Set { value, .. } => Some(value),
-            Change::Remove { .. } => None,
-            _ => unreachable!("only field changes enter a field frontier"),
+        match self.history.get(write.value).map(|record| &record.change) {
+            Some(Change::Set { value, .. }) => Some(value),
+            Some(Change::Remove { .. }) => None,
+            _ => {
+                debug_assert!(false, "only field changes enter a field frontier");
+                None
+            }
         }
     }
 
