@@ -1133,9 +1133,10 @@ private struct ProviderPicker: View {
                                 .buttonStyle(ProviderRowStyle())
                                 .disabled(model.filling)
                             }
-                            if !model.filteredLogins.isEmpty {
-                                ProviderSectionLabel(text: "Passwords")
-                            }
+                        }
+                        // The extension popup's "Logins" head.
+                        if !model.filteredLogins.isEmpty {
+                            ProviderSectionLabel(text: "Logins")
                         }
                         ForEach(Array(model.filteredLogins.enumerated()), id: \.offset) { index, login in
                             Button { model.fillRow(index) } label: {

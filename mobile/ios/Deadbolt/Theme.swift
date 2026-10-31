@@ -17,7 +17,8 @@
 // - type is Rune's sizes times `scale` (13pt `ui` becomes 15pt), then
 //   follows Dynamic Type;
 // - controls are at least 44pt tall (Rune's are 28 to 32) for touch;
-// - icons are SF Symbols until the extension's glyph set is ported.
+// - icons are SF Symbols at a light weight, close to Rune's 1.25pt strokes,
+//   except the login glyph, which is the app's own (view/theme.rs `LOGIN`).
 
 import CoreText
 import SwiftUI
@@ -43,6 +44,7 @@ enum Rune {
     static let hover = dynamic(0x000000, 0xFFFFFF, lightAlpha: 0x0A, darkAlpha: 0x0F)
     static let pressed = dynamic(0x000000, 0xFFFFFF, lightAlpha: 0x14, darkAlpha: 0x1A)
     static let text = dynamic(0x161616, 0xFAFAFA)
+    static let textStrong = dynamic(0x171717, 0xEDEDED)
     static let muted = dynamic(0x5C5C5C, 0xAEAEAE)
     static let faint = dynamic(0x808080, 0x808080)
     static let textFaint = dynamic(0x666666, 0xA3A3A3)
@@ -67,6 +69,9 @@ enum Rune {
     /// The neutral button and input's 0.5px ring (`--elevation-button`).
     static let buttonRing = dynamic(0x000000, 0xFFFFFF, lightAlpha: 0x24, darkAlpha: 0x33)
     static let buttonShadow = dynamic(0x000000, 0x000000, lightAlpha: 0x1A, darkAlpha: 0x66)
+    /// A floating panel's fill and its `--elevation-floating` shadow.
+    static let floating = dynamic(0xFFFFFF, 0x242424)
+    static let floatingShadow = dynamic(0x000000, 0x000000, lightAlpha: 0x14, darkAlpha: 0x66)
 
     // MARK: Radius (xs 2, sm 4, md 6, lg 8, xl 10)
 
@@ -121,10 +126,16 @@ extension Rune.TextStyle {
     static let smallMedium = Rune.TextStyle(size: 11, weight: 530, line: 12, tracking: 0.05, relativeTo: .caption1)
     /// The row detail's 11.5/440 `FACT` (vault.css `.vrow .sub`).
     static let fact = Rune.TextStyle(size: 11.5, weight: 440, line: 14, tracking: 0, relativeTo: .caption1)
+    /// Settings' explanations: `FACT` on a 16px line.
+    static let about = Rune.TextStyle(size: 11.5, weight: 440, line: 16, tracking: 0, relativeTo: .caption1)
+    static let textSmall = Rune.TextStyle(size: 13, weight: 400, line: 19.5, tracking: 0)
     static let textXSmall = Rune.TextStyle(size: 12, weight: 400, line: 18, tracking: 0, relativeTo: .footnote)
     static let hero = Rune.TextStyle(size: 17, weight: 530, line: 22, tracking: 0, relativeTo: .title3)
-    static let detailTitle = Rune.TextStyle(size: 20, weight: 600, line: 26, tracking: 0, relativeTo: .title2)
+    /// The app's page title (view/theme.rs `TITLE`): items and Settings.
+    static let title = Rune.TextStyle(size: 22, weight: 600, line: 28, tracking: 0, relativeTo: .title2)
     static let mono = Rune.TextStyle(size: 12, weight: 400, line: 18, tracking: 0, mono: true)
+    /// The item page's one-time code: `mono` at 15 on a 20px line.
+    static let otp = Rune.TextStyle(size: 15, weight: 400, line: 20, tracking: 0, mono: true)
     static let code = Rune.TextStyle(size: 17, weight: 500, line: 23, tracking: 0, mono: true, relativeTo: .title3)
 }
 
@@ -241,7 +252,7 @@ struct RuneIconButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.system(size: 17, weight: .regular))
+            .font(.system(size: 17, weight: .light))
             .foregroundStyle(configuration.isPressed ? Rune.icon : tint)
             .frame(width: 44, height: 44)
             .background(
@@ -292,6 +303,21 @@ extension View {
     /// A section's name: `small_medium`, muted.
     func runeLabel() -> some View {
         rune(.smallMedium).foregroundStyle(Rune.muted).textCase(nil)
+    }
+
+    /// A field's or a settings group's name: `small_medium` in text_faint.
+    func runeFieldLabel() -> some View {
+        rune(.smallMedium).foregroundStyle(Rune.textFaint).textCase(nil)
+    }
+
+    /// `--elevation-floating`: a raised panel with a hairline ring.
+    func runeFloating() -> some View {
+        background {
+            let shape = RoundedRectangle(cornerRadius: Rune.radiusXl, style: .continuous)
+            shape.fill(Rune.floating)
+                .overlay(shape.strokeBorder(Rune.border, lineWidth: 0.5))
+                .shadow(color: Rune.floatingShadow, radius: 4, y: 4)
+        }
     }
 
     /// vault.css `.box` / `.code-box`: layer_01 with a 1px border_muted inset.
@@ -352,6 +378,41 @@ struct LetterTile: View {
         Text(title.first.map { String($0).uppercased() } ?? "•")
             .rune(size > 40 ? .hero : .uiMedium)
             .foregroundStyle(Rune.icon)
+            .frame(width: size, height: size)
+            .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Rune.layer02))
+            .accessibilityHidden(true)
+    }
+}
+
+/// The app's login glyph (view/theme.rs `LOGIN`), drawn on its 16pt grid.
+struct LoginGlyph: View {
+    var size: CGFloat = 16 * Rune.scale
+    var color: Color = Rune.iconMuted
+
+    var body: some View {
+        Canvas { context, canvas in
+            let s = canvas.width / 16
+            var path = Path(ellipseIn: CGRect(x: (5.25 - 2.75) * s, y: (10.75 - 2.75) * s, width: 5.5 * s, height: 5.5 * s))
+            path.move(to: CGPoint(x: 7.2 * s, y: 8.8 * s))
+            path.addLine(to: CGPoint(x: 13 * s, y: 3 * s))
+            path.move(to: CGPoint(x: 10.6 * s, y: 5.4 * s))
+            path.addLine(to: CGPoint(x: 12.2 * s, y: 7 * s))
+            path.move(to: CGPoint(x: 12.1 * s, y: 3.9 * s))
+            path.addLine(to: CGPoint(x: 13.25 * s, y: 5.05 * s))
+            context.stroke(path, with: .color(color), style: StrokeStyle(lineWidth: 1.25 * s, lineCap: .round))
+        }
+        .frame(width: size, height: size)
+        .accessibilityHidden(true)
+    }
+}
+
+/// view/theme.rs `glyph_tile`: layer_02 with the kind's glyph at half its size.
+struct KindTile: View {
+    var size: CGFloat = 44
+    var radius: CGFloat = 11
+
+    var body: some View {
+        LoginGlyph(size: (size * 0.5).rounded(), color: Rune.icon)
             .frame(width: size, height: size)
             .background(RoundedRectangle(cornerRadius: radius, style: .continuous).fill(Rune.layer02))
             .accessibilityHidden(true)

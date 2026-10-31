@@ -273,7 +273,21 @@ struct VaultView: View {
                 SearchField(text: $model.query)
                     .padding(.horizontal, 14)
                     .padding(.top, 6)
-                    .padding(.bottom, 6)
+                    .padding(.bottom, 10)
+                // The app's vault head: the list's name, then how many show.
+                HStack {
+                    Text("Logins").runeLabel()
+                    Spacer(minLength: 8)
+                    if model.itemsLoaded {
+                        Text(model.items.count.formatted())
+                            .rune(.small)
+                            .monospacedDigit()
+                            .foregroundStyle(Rune.textFaint)
+                            .accessibilityLabel("\(model.items.count) logins")
+                    }
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 2)
                 ScrollView {
                     LazyVStack(spacing: 0) {
                         ForEach(model.items) { item in
@@ -312,21 +326,33 @@ struct VaultView: View {
 }
 
 /// A read authorizes this exact signed scope, not a computer-wide session.
+/// Drawn as the app's floating panel: who asks, for which field of which
+/// login, then Deny and Allow.
 struct ApprovalView: View {
     @EnvironmentObject private var model: AppModel
     let request: PendingApproval
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             ScrollView {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Computer read request").rune(.uiMedium)
-                    Text(request.originName).rune(.ui)
-                    Text("\(request.title) · \(request.field)").rune(.uiMedium)
-                    Text(request.caller).rune(.textXSmall)
-                    Text("Caller describes the verified socket peer. Ancestry and session hints are unverified.")
-                        .rune(.textXSmall).foregroundStyle(Rune.muted)
-                    DisclosureGroup("Exact request") {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("\(request.originName) wants to read").runeLabel()
+                    HStack(spacing: 12) {
+                        KindTile(size: 32, radius: Rune.radiusLg)
+                        VStack(alignment: .leading, spacing: 1) {
+                            Text(request.title).rune(.uiMedium).foregroundStyle(Rune.textStrong)
+                            Text(request.field).rune(.fact).foregroundStyle(Rune.textFaint)
+                        }
+                    }
+                    .accessibilityElement(children: .combine)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(request.caller).rune(.textXSmall).foregroundStyle(Rune.muted)
+                        Text("Deadbolt checked which program is asking. What it says about where it was started isn't checked.")
+                            .rune(.about)
+                            .foregroundStyle(Rune.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    DisclosureGroup {
                         VStack(alignment: .leading, spacing: 4) {
                             Text("Computer ID: \(request.origin)")
                             Text("Vault: \(request.vault)")
@@ -335,15 +361,28 @@ struct ApprovalView: View {
                             Text("Request: \(request.id)")
                         }
                         .rune(.fact)
+                        .foregroundStyle(Rune.textFaint)
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 4)
+                    } label: {
+                        Text("Exact request").rune(.textXSmall).foregroundStyle(Rune.muted)
                     }
-                    .rune(.textXSmall)
-                    NoticeLine(text: model.approvalNotice ?? model.biometricUnavailableReason
-                        ?? (model.biometricReady ? nil : "Enable biometrics in Settings to allow this read."))
+                    .tint(Rune.iconMuted)
+                    if let notice = model.approvalNotice {
+                        NoticeLine(text: notice)
+                    } else if let why = model.biometricUnavailableReason
+                        ?? (model.biometricReady ? nil : "Turn on \(model.biometryName) in Settings to allow reads.") {
+                        // Why Allow is off is a state, not an error: say it quietly.
+                        Text(why)
+                            .rune(.textXSmall)
+                            .foregroundStyle(Rune.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .frame(maxHeight: 240)
+            .fixedSize(horizontal: false, vertical: true)
             HStack(spacing: 10) {
                 Button("Deny") { Task { await model.respondToApproval(request, allow: false) } }
                     .buttonStyle(RuneButtonStyle(kind: .neutral, wide: true))
@@ -354,8 +393,9 @@ struct ApprovalView: View {
             }
         }
         .padding(14)
-        .background(Rune.layer01)
-        .overlay(alignment: .top) { Rune.border.frame(height: 1) }
+        .runeFloating()
+        .padding(.horizontal, 8)
+        .padding(.bottom, 8)
     }
 }
 
@@ -391,14 +431,15 @@ struct SearchField: View {
     }
 }
 
-/// vault.css `.vrow`: a letter tile, the title in `ui` over the username in
-/// `FACT`, a 46px row with an 8px radius; pressed fills `--pressed`.
+/// The app's `list_row`: the login glyph, the title in `ui` over the
+/// username in `FACT`, an 8px radius; pressed fills `--pressed`. Rows are
+/// 52pt (the app's are 46) for touch.
 struct ItemRow: View {
     let item: ItemSummary
 
     var body: some View {
-        HStack(spacing: 10) {
-            LetterTile(title: item.title)
+        HStack(spacing: 12) {
+            LoginGlyph()
             VStack(alignment: .leading, spacing: 1) {
                 Text(item.title.isEmpty ? "Untitled" : item.title)
                     .rune(.ui)
@@ -438,10 +479,10 @@ struct StatusFooter: View {
     @Binding var showingSettings: Bool
 
     var body: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 7) {
             SyncDot(state: model.sync)
             Text(statusText)
-                .rune(.textXSmall)
+                .rune(.small)
                 .foregroundStyle(Rune.muted)
                 .lineLimit(1)
             Spacer(minLength: 4)
@@ -451,16 +492,16 @@ struct StatusFooter: View {
             .buttonStyle(RuneIconButtonStyle())
             .disabled(model.sync == .syncing)
             .accessibilityLabel("Sync now")
+            Button { showingSettings = true } label: {
+                Image(systemName: "slider.horizontal.3")
+            }
+            .buttonStyle(RuneIconButtonStyle())
+            .accessibilityLabel("Settings")
             Button { Task { await model.lock() } } label: {
                 Image(systemName: "lock")
             }
             .buttonStyle(RuneIconButtonStyle())
             .accessibilityLabel("Lock")
-            Button { showingSettings = true } label: {
-                Image(systemName: "gearshape")
-            }
-            .buttonStyle(RuneIconButtonStyle())
-            .accessibilityLabel("Settings")
         }
         .padding(.leading, 16)
         .padding(.trailing, 6)
@@ -489,7 +530,7 @@ struct SyncDot: View {
         Circle()
             .fill(color)
             .frame(width: 6, height: 6)
-            .opacity(state == .syncing ? (breathe ? 0.35 : 1) : (isOn ? 1 : 0.6))
+            .opacity(state == .syncing && breathe ? 0.35 : 1)
             .scaleEffect(state == .syncing && breathe ? 0.8 : 1)
             .onChange(of: state, initial: true) { _, state in
                 if state == .syncing {
@@ -501,17 +542,12 @@ struct SyncDot: View {
             .accessibilityHidden(true)
     }
 
-    private var isOn: Bool {
-        if case .synced = state { return true }
-        return false
-    }
-
     private var color: Color {
         switch state {
         case .syncing: Rune.textAccent
         case .synced: Rune.success
         case .failed: Rune.danger
-        default: Rune.faint
+        default: Rune.iconFaint
         }
     }
 }
@@ -531,37 +567,29 @@ struct ItemView: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                // vault.css `.detail-head`: a 44 tile with a 10px radius by a 20/600 title.
-                HStack(spacing: 12) {
-                    LetterTile(title: summary.title, size: 44, radius: Rune.radiusXl)
+                // The app's item head: the kind's 44pt glyph tile by a 22/600
+                // title over the kind's name.
+                HStack(alignment: .top, spacing: 14) {
+                    KindTile().padding(.top, 2)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(summary.title.isEmpty ? "Untitled" : summary.title)
-                            .rune(.detailTitle)
+                            .rune(.title)
+                            .foregroundStyle(Rune.textStrong)
                             .lineLimit(2)
-                        if let host = detail?.url.flatMap({ URL(string: $0)?.host }) {
-                            Text(host)
-                                .rune(.ui)
-                                .foregroundStyle(Rune.muted)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                        }
+                        Text("Login")
+                            .rune(.textSmall)
+                            .foregroundStyle(Rune.muted)
                     }
                 }
+                .padding(.bottom, 8)
                 if let detail {
                     VStack(spacing: 2) {
-                        if let username = detail.username, !username.isEmpty {
-                            FieldLine(label: "Username") {
-                                Text(username).rune(.ui).lineLimit(1)
-                            } actions: {
-                                copyButton("username") { model.copy(username) }
-                            }
-                        }
                         if detail.hasPassword {
                             FieldLine(label: "Password") {
                                 if let revealed {
                                     Text(revealed).rune(.mono).textSelection(.disabled)
                                 } else {
-                                    Text("••••••••••••").rune(.ui).foregroundStyle(Rune.muted).tracking(1.3)
+                                    Text("••••••••••••").rune(.ui).tracking(1.3)
                                 }
                             } actions: {
                                 Button { toggleReveal() } label: {
@@ -572,24 +600,31 @@ struct ItemView: View {
                                 copyButton("password") { copyPassword() }
                             }
                         }
-                        if detail.hasOtp {
-                            FieldLine(label: "One-time code") {
-                                TimelineView(.periodic(from: .now, by: 1)) { context in
-                                    codeValue(now: context.date)
-                                }
+                        if let username = detail.username, !username.isEmpty {
+                            FieldLine(label: "Username") {
+                                Text(username).rune(.ui).lineLimit(1)
                             } actions: {
-                                copyButton("code") { if let code { model.copy(code.code) } }
+                                copyButton("username") { model.copy(username) }
                             }
                         }
                         if let url = detail.url, !url.isEmpty {
-                            FieldLine(label: "Website") {
+                            FieldLine(label: "URL") {
                                 if let link = URL(string: url), link.scheme == "https" || link.scheme == "http" {
                                     Link(url, destination: link).rune(.ui).foregroundStyle(Rune.textAccent).lineLimit(1)
                                 } else {
                                     Text(url).rune(.ui).lineLimit(1)
                                 }
                             } actions: {
-                                copyButton("url") { model.copy(url) }
+                                copyButton("URL") { model.copy(url) }
+                            }
+                        }
+                        if detail.hasOtp {
+                            FieldLine(label: "One-time code") {
+                                TimelineView(.periodic(from: .now, by: 1)) { context in
+                                    codeValue(now: context.date)
+                                }
+                            } actions: {
+                                copyButton("one-time code") { if let code { model.copy(code.code) } }
                             }
                         }
                     }
@@ -618,7 +653,7 @@ struct ItemView: View {
             action()
             flash(label)
         } label: {
-            Image(systemName: copied == label ? "checkmark" : "doc.on.doc")
+            Image(systemName: copied == label ? "checkmark" : "square.on.square")
                 .contentTransition(.symbolEffect(.replace))
         }
         .buttonStyle(RuneIconButtonStyle(tint: copied == label ? Rune.textSuccess : Rune.iconMuted))
@@ -629,20 +664,26 @@ struct ItemView: View {
     private func codeValue(now: Date) -> some View {
         if let code {
             let left = max(0, code.remaining - Int(now.timeIntervalSince(codeFetched)))
-            HStack(spacing: 10) {
+            // The app's code row: 3+3 groups beside a 40×3 bar that empties
+            // over the period.
+            HStack(spacing: 12) {
                 Text(Self.grouped(code.code))
-                    .rune(Rune.TextStyle(size: 15, weight: 500, line: 20, tracking: 0.9))
-                    .monospacedDigit()
-                Text("\(left)s")
-                    .rune(.textXSmall)
-                    .monospacedDigit()
-                    .foregroundStyle(left <= 5 ? Rune.danger : Rune.textFaint)
-                    .animation(.easeOut(duration: 0.2), value: left <= 5)
+                    .rune(.otp)
+                    .foregroundStyle(Rune.textStrong)
+                Capsule()
+                    .fill(Rune.layer03)
+                    .frame(width: 40, height: 3)
+                    .overlay(alignment: .leading) {
+                        Capsule()
+                            .fill(Rune.textAccent)
+                            .frame(width: 40 * CGFloat(left) / CGFloat(max(1, code.period)), height: 3)
+                            .animation(.linear(duration: 1), value: left)
+                    }
             }
-            .accessibilityElement(children: .combine)
+            .accessibilityElement(children: .ignore)
             .accessibilityLabel("Code \(code.code), \(left) seconds left")
         } else {
-            Text("—").rune(.ui).foregroundStyle(Rune.textFaint)
+            Text("••• •••").rune(.otp).foregroundStyle(Rune.textFaint)
         }
     }
 
@@ -738,8 +779,8 @@ struct FieldLine<Value: View, Actions: View>: View {
 
     var body: some View {
         HStack(spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label).runeLabel()
+            VStack(alignment: .leading, spacing: 3) {
+                Text(label).runeFieldLabel()
                 value
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -747,7 +788,7 @@ struct FieldLine<Value: View, Actions: View>: View {
         }
         .padding(.leading, 16)
         .padding(.trailing, 2)
-        .padding(.vertical, 6)
+        .padding(.vertical, 8)
         .frame(minHeight: 56)
     }
 }
@@ -760,34 +801,43 @@ struct SettingsView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
+            // The app's Settings page: a 22/600 title, groups named in
+            // text_faint, rows with a medium label over a faint line.
+            VStack(alignment: .leading, spacing: 24) {
                 HStack {
-                    Text("Settings").rune(.hero).accessibilityAddTraits(.isHeader)
+                    Text("Settings")
+                        .rune(.title)
+                        .foregroundStyle(Rune.textStrong)
+                        .accessibilityAddTraits(.isHeader)
                     Spacer()
                     Button("Done") { dismiss() }.buttonStyle(RuneButtonStyle())
                 }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Security").runeLabel()
-                    Toggle(isOn: Binding(
-                        get: { model.biometricReady },
-                        set: { on in if on { Task { await model.enableBiometrics() } } }
-                    )) {
-                        Text("Unlock with \(model.biometryName)").rune(.uiMedium)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Security").runeFieldLabel()
+                    VStack(alignment: .leading, spacing: 2) {
+                        Toggle(isOn: Binding(
+                            get: { model.biometricReady },
+                            set: { on in if on { Task { await model.enableBiometrics() } } }
+                        )) {
+                            Text("Unlock with \(model.biometryName)")
+                                .rune(.uiMedium)
+                                .foregroundStyle(Rune.textStrong)
+                        }
+                        .toggleStyle(RuneToggleStyle())
+                        .disabled(model.biometricUnavailableReason != nil || model.biometricReady || model.busy)
+                        // Outside the toggle so a disabled switch doesn't fade the reason.
+                        Text(model.biometricUnavailableReason
+                            ?? "Your passphrase is still needed every 14 days and when \(model.biometryName) changes.")
+                            .rune(.about)
+                            .foregroundStyle(Rune.textFaint)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
-                    .toggleStyle(RuneToggleStyle())
-                    .disabled(model.biometricUnavailableReason != nil || model.biometricReady || model.busy)
-                    .padding(.top, 10)
-                    // Outside the toggle so a disabled switch doesn't fade the reason.
-                    Text(model.biometricUnavailableReason
-                        ?? "Your passphrase is still needed every 14 days and when \(model.biometryName) changes.")
-                        .rune(.textXSmall)
-                        .foregroundStyle(Rune.muted)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .padding(.bottom, 10)
+                    .padding(.vertical, 10)
+                    .frame(minHeight: 56)
                     NoticeLine(text: model.notice)
                 }
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("This iPhone").runeLabel()
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("This iPhone").runeFieldLabel()
                     SettingFact(title: "Locks after", value: "5 minutes idle, or when you leave the app")
                     SettingFact(title: "Copied items", value: "Stay on this iPhone and clear after 30 seconds")
                 }
@@ -805,9 +855,10 @@ struct SettingFact: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            Text(title).rune(.uiMedium)
-            Text(value).rune(.textXSmall).foregroundStyle(Rune.muted)
+            Text(title).rune(.uiMedium).foregroundStyle(Rune.textStrong)
+            Text(value).rune(.about).foregroundStyle(Rune.textFaint)
         }
-        .padding(.vertical, 6)
+        .padding(.vertical, 10)
+        .frame(minHeight: 56, alignment: .leading)
     }
 }
