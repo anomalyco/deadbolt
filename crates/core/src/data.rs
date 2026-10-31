@@ -124,6 +124,12 @@ impl<T> Write<T> {
 
 fn write<T>(frontier: &mut Vec<Write<T>>, node: &Node, at: OpRef, value: T) {
     frontier.retain(|w| !w.superseded_by(node, at));
+    // Most registers have one winner for their whole lifetime. Don't reserve
+    // space for four full Write records on first insertion; genuine conflicts
+    // still grow geometrically.
+    if frontier.capacity() == 0 {
+        frontier.reserve_exact(1);
+    }
     frontier.push(Write::new(node, at, value));
 }
 
@@ -150,7 +156,9 @@ pub(crate) struct ItemState {
     tags: BTreeMap<String, Vec<Write<Option<String>>>>,
     password_changed: Vec<Write<Option<String>>>,
     ignored: BTreeMap<String, Vec<Write<Option<Hash>>>>,
-    fields: BTreeMap<String, Vec<Write<Option<Field>>>>,
+    /// Each write indexes its Set/Remove record in this item's append-only
+    /// history. Never retain a second copy of a winning password or file.
+    fields: BTreeMap<String, Vec<Write<usize>>>,
     /// Deletes, and every other change (which brings the item back).
     alive: Vec<Write<Life>>,
     history: Vec<Record>,
@@ -158,7 +166,7 @@ pub(crate) struct ItemState {
 
 impl ItemState {
     /// Concurrent edit (or restore) and delete: the edit wins.
-    fn deleted(&self) -> bool {
+    pub(crate) fn deleted(&self) -> bool {
         !self.alive.iter().any(|w| w.value == Life::Alive)
     }
 
@@ -175,12 +183,33 @@ impl ItemState {
             .max()
     }
 
+    fn field(&self, write: &Write<usize>) -> Option<&Field> {
+        match self.history.get(write.value).map(|record| &record.change) {
+            Some(Change::Set { value, .. }) => Some(value),
+            Some(Change::Remove { .. }) => None,
+            _ => {
+                debug_assert!(false, "only field changes enter a field frontier");
+                None
+            }
+        }
+    }
+
+    pub(crate) fn login_on(&self, site: &crate::site::Site) -> bool {
+        !self.deleted()
+            && self.kind == "login"
+            && site.matches(crate::autofill::field_urls(
+                self.fields
+                    .values()
+                    .filter_map(|frontier| self.field(winner(frontier)?)),
+            ))
+    }
+
     pub(crate) fn item(&self, id: ItemId) -> Item {
         let fields = self
             .fields
             .iter()
             .filter_map(|(name, frontier)| {
-                let value = winner(frontier)?.value.clone()?;
+                let value = self.field(winner(frontier)?)?.clone();
                 Some((name.clone(), value))
             })
             .collect();
@@ -206,7 +235,7 @@ impl ItemState {
             .fields
             .get(pw_field)
             .and_then(|frontier| winner(frontier))
-            .filter(|w| w.value.is_some())
+            .filter(|w| self.field(w).is_some())
             .map(|w| w.at.entry);
         let ignored = self
             .ignored
@@ -283,25 +312,11 @@ impl ItemState {
         }
     }
 
-    fn change(&mut self, node: &Node, at: OpRef, change: &Change) {
-        self.history.push(Record {
-            depth: node.depth,
-            at,
-            author: node.entry.author(),
-            change: change.clone(),
-        });
-        match change {
-            Change::Set { field, value } => {
+    fn change(&mut self, node: &Node, at: OpRef, change: Change) {
+        match &change {
+            Change::Set { field, .. } | Change::Remove { field } => {
                 let frontier = self.fields.entry(field.clone()).or_default();
-                write(frontier, node, at, Some(value.clone()));
-            }
-            Change::Remove { field } => {
-                write(
-                    self.fields.entry(field.clone()).or_default(),
-                    node,
-                    at,
-                    None,
-                );
+                write(frontier, node, at, self.history.len());
             }
             Change::Name(name) => write(&mut self.name, node, at, name.clone()),
             Change::Source(source) => write(&mut self.source, node, at, source.clone()),
@@ -327,10 +342,16 @@ impl ItemState {
             }
             Change::Delete { .. } | Change::Restore => {}
         }
-        let life = match change {
+        let life = match &change {
             Change::Delete { at } => Life::Deleted(*at),
             _ => Life::Alive,
         };
+        self.history.push(Record {
+            depth: node.depth,
+            at,
+            author: node.entry.author(),
+            change,
+        });
         write(&mut self.alive, node, at, life);
     }
 }
@@ -386,7 +407,7 @@ pub(crate) fn check_files<'a>(
                 .fields
                 .iter()
                 .filter_map(|(name, frontier)| {
-                    let field = winner(frontier)?.value.as_ref()?;
+                    let field = state.field(winner(frontier)?)?;
                     Some((name.clone(), item::files_size([field])))
                 })
                 .collect();
@@ -520,19 +541,19 @@ pub(crate) fn apply(
                 for (field, value) in fields {
                     let value = value.clone();
                     let field = field.clone();
-                    state.change(node, at, &Change::Set { field, value });
+                    state.change(node, at, Change::Set { field, value });
                 }
                 if name.is_some() {
-                    state.change(node, at, &Change::Name(name.clone()));
+                    state.change(node, at, Change::Name(name.clone()));
                 }
                 if source.is_some() {
-                    state.change(node, at, &Change::Source(source.clone()));
+                    state.change(node, at, Change::Source(source.clone()));
                 }
                 if *favorite {
-                    state.change(node, at, &Change::Favorite(true));
+                    state.change(node, at, Change::Favorite(true));
                 }
                 for tag in tags {
-                    state.change(node, at, &Change::TagAdd(tag.clone()));
+                    state.change(node, at, Change::TagAdd(tag.clone()));
                 }
                 items.entry(id).or_insert(state);
             }
@@ -551,7 +572,7 @@ pub(crate) fn apply(
                 {
                     continue;
                 }
-                state.change(node, at, change);
+                state.change(node, at, change.clone());
             }
         }
     }

@@ -823,3 +823,45 @@ fn normalizes_input() {
     assert_eq!(n("identity", "country", FieldType::Text, "gb"), "GB");
     assert_eq!(n("identity", "country", FieldType::Text, "Wales"), "Wales");
 }
+
+#[test]
+fn live_write_lookup_matches_the_listing_including_ambiguity() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut s = loaded(temp.path());
+    for title in ["A", "B"] {
+        create(
+            &mut s,
+            None,
+            "login",
+            Some(title.into()),
+            vec![
+                input("username", "shared"),
+                input("password", "not-a-search-term"),
+            ],
+        )
+        .unwrap();
+    }
+    let vid = s.resolve(None).unwrap();
+    let compare = |v: &Vault| {
+        let listing = Listing::new(v);
+        for q in [
+            "shared",
+            "#",
+            "#tag",
+            "A",
+            "absent",
+            "not-a-search-term",
+            &listing.items[0].id.to_string(),
+        ] {
+            let q = words(q);
+            assert_eq!(
+                find_live(v, &q).map_err(|e| e.to_string()),
+                listing.find(&q).cloned().map_err(|e| e.to_string())
+            );
+        }
+    };
+    compare(s.vault(&vid));
+    let id = s.vault(&vid).items()[0].id;
+    write(&mut s, vid, vec![DataOp::tag_add(id, "tag")]).unwrap();
+    compare(s.vault(&vid));
+}

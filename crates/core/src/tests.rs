@@ -737,6 +737,27 @@ fn one_device_key_across_vaults() {
 // ---- data -----------------------------------------------------------------
 
 #[test]
+fn live_neighbors_skip_deleted_ids_on_both_sides() {
+    let mut dev = Dev::create();
+    let mut ids = (0..7).map(|_| dev.login("synthetic")).collect::<Vec<_>>();
+    ids.sort();
+    for id in [ids[0], ids[2], ids[3], ids[6]] {
+        dev.write(vec![DataOp::delete(id, 1)]);
+    }
+    assert_eq!(dev.vault.live_neighbors(ids[1]), [None, Some(ids[4])]);
+    assert_eq!(
+        dev.vault.live_neighbors(ids[4]),
+        [Some(ids[1]), Some(ids[5])]
+    );
+    assert_eq!(dev.vault.live_neighbors(ids[5]), [Some(ids[4]), None]);
+    dev.write(vec![DataOp::restore(ids[3])]);
+    assert_eq!(
+        dev.vault.live_neighbors(ids[4]),
+        [Some(ids[3]), Some(ids[5])]
+    );
+}
+
+#[test]
 fn items_set_delete_and_restore() {
     let mut a = Dev::create();
     let fields = [
@@ -2054,6 +2075,43 @@ fn removals_do_not_consume_the_membership_budget() {
             max: MAX_MEMBERSHIP_ENTRIES
         })
     );
+}
+
+#[test]
+fn site_lookup_only_returns_live_logins_with_winning_urls() {
+    let mut a = Dev::create();
+    let item = a.login("local");
+    let mut b = a.invite();
+    let compare = |v: &Vault| {
+        for origin in ["https://a.test", "https://b.test", "https://c.test"] {
+            let page = site::Site::from_origin(origin).unwrap();
+            let reference: Vec<_> = v
+                .items()
+                .into_iter()
+                .filter(|i| i.kind == "login" && page.matches(autofill::urls(i)))
+                .collect();
+            assert_eq!(v.site_logins(&page).collect::<Vec<_>>(), reference);
+        }
+    };
+    a.set(item, "url", "https://a.test");
+    b.set(item, "url", "https://b.test");
+    sync_both(&mut a, &mut b);
+    compare(&a.vault);
+    a.write(vec![DataOp::set(
+        item,
+        "second",
+        Field::new(FieldType::Url, "https://c.test"),
+    )]);
+    compare(&a.vault);
+    a.write(vec![DataOp::remove(item, "url")]);
+    compare(&a.vault);
+    a.write(vec![DataOp::delete(item, 2)]);
+    compare(&a.vault);
+    a.write(vec![
+        DataOp::restore(item),
+        DataOp::set(item, "second", text("https://c.test")),
+    ]);
+    compare(&a.vault);
 }
 
 // The previous clone/change/diff path is the oracle. Exercise reads of the

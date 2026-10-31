@@ -649,12 +649,41 @@ impl Vault {
         self.items.get(id).map(|state| state.item(*id))
     }
 
+    /// Closest live item ids on either side of `id`, for unique display
+    /// prefixes. Tombstones do not compete with live items for a prefix.
+    pub fn live_neighbors(&self, id: ItemId) -> [Option<ItemId>; 2] {
+        use std::ops::Bound::{Excluded, Unbounded};
+        [
+            self.items
+                .range(..id)
+                .rev()
+                .find(|(_, state)| !state.deleted())
+                .map(|(id, _)| *id),
+            self.items
+                .range((Excluded(id), Unbounded))
+                .find(|(_, state)| !state.deleted())
+                .map(|(id, _)| *id),
+        ]
+    }
+
     /// Live items in id order, materialized one at a time.
     pub fn iter_items(&self) -> impl Iterator<Item = Item> + '_ {
         self.items
             .iter()
             .map(|(id, state)| state.item(*id))
             .filter(|item| !item.deleted)
+    }
+
+    /// Live logins for a page's registrable domain, in item-id order. Check
+    /// the winning URL fields before materializing any of an item's values.
+    pub fn site_logins<'a>(
+        &'a self,
+        site: &'a crate::site::Site,
+    ) -> impl Iterator<Item = Item> + 'a {
+        self.items
+            .iter()
+            .filter(|(_, state)| state.login_on(site))
+            .map(|(id, state)| state.item(*id))
     }
 
     /// All items that are not deleted, ordered by id.

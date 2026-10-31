@@ -550,15 +550,13 @@ fn list_logins(body: &Value) -> Result<Value> {
             .unwrap_or_default();
         let mut accounts: Vec<_> = s
             .vault
-            .items()
-            .iter()
-            .filter(|i| matches(i, &page))
+            .site_logins(&page)
             .map(|i| {
-                let mut account = account(i, &s.vault);
-                let urls: Vec<_> = urls(i).filter(|url| page.matches_url(url)).collect();
+                let mut account = account(&i, &s.vault);
+                let urls: Vec<_> = urls(&i).filter(|url| page.matches_url(url)).collect();
                 account["urls"] = json!(urls);
                 let used = filled.get(&reference(&s.vault, i.id)).copied().unwrap_or(0);
-                (autofill::rank(origin, i, used), account)
+                (autofill::rank(origin, &i, used), account)
             })
             .collect();
         accounts.sort_by(|(ra, a), (rb, b)| {
@@ -620,11 +618,7 @@ fn check_login(body: &Value) -> Result<Value> {
     }
     state().with(|s| {
         let password = generate::resolve(&mut s.generated, origin, body)?;
-        let (status, ids) = autofill::check(
-            s.vault.items().iter().filter(|i| matches(i, &page)),
-            username,
-            &password,
-        );
+        let (status, ids) = autofill::check(s.vault.site_logins(&page), username, &password);
         let status = match status {
             Status::New => "new",
             Status::Update => "update",

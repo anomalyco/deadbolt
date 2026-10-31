@@ -38,13 +38,9 @@ pub(super) fn logins<'a>(
     s: &'a Loaded,
     site: &'a Site,
 ) -> impl Iterator<Item = (VaultId, Item)> + 'a {
-    s.vaults.iter().flat_map(move |(id, vault)| {
-        vault
-            .items()
-            .into_iter()
-            .filter(|item| item.kind == "login" && site.matches(urls(item)))
-            .map(move |item| (*id, item))
-    })
+    s.vaults
+        .iter()
+        .flat_map(move |(id, vault)| vault.site_logins(site).map(move |item| (*id, item)))
 }
 
 /// The login `login` names, refused unless it's on `site`.
@@ -164,14 +160,7 @@ pub fn check(
     let mut status = Status::New;
     let mut matches = Vec::new();
     for (vault, saved) in &s.vaults {
-        let items = saved.items();
-        let (checked, ids) = autofill::check(
-            items
-                .iter()
-                .filter(|item| item.kind == "login" && site.matches(urls(item))),
-            username,
-            password.expose(),
-        );
+        let (checked, ids) = autofill::check(saved.site_logins(&site), username, password.expose());
         if checked > status {
             status = checked;
             matches.clear();
