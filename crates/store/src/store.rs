@@ -215,6 +215,15 @@ impl Unlocked {
     /// before entries are staged for persistence, so the store keeps only the
     /// sealed entry bytes in append order.
     pub fn append_batch<'a>(&self, entries: impl IntoIterator<Item = &'a [u8]>) -> Result<usize> {
+        self.append_encoded(entries)
+    }
+
+    /// As `append_batch`, accepting owned scratch buffers so a large verified
+    /// welcome can be encoded and sealed one entry at a time in one commit.
+    pub fn append_encoded<B: AsRef<[u8]>>(
+        &self,
+        entries: impl IntoIterator<Item = B>,
+    ) -> Result<usize> {
         let txn = begin_write(&self.db)?;
         let added = {
             let mut header = txn.open_table(HEADER)?;
@@ -226,7 +235,7 @@ impl Unlocked {
             }
             let mut len = start;
             for bytes in entries {
-                let row = crypto::seal(&self.keys.data, &log_aad(len), &[bytes])?;
+                let row = crypto::seal(&self.keys.data, &log_aad(len), &[bytes.as_ref()])?;
                 log.insert(len, row.as_slice())?;
                 len += 1;
             }

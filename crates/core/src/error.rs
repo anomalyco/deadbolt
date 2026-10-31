@@ -6,6 +6,8 @@ use crate::item::ItemError;
 pub enum Error {
     #[error("entry is for vault {found}, expected {expected}")]
     WrongVault { expected: VaultId, found: VaultId },
+    #[error("the selected history is no longer available")]
+    HistoryChanged,
     #[error("invalid signature")]
     BadSignature,
     #[error("sequence gap: expected seq {expected}, got {got}")]

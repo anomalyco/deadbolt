@@ -225,14 +225,7 @@ pub(super) async fn finish(body: &mut Value) -> Result<Value> {
             *fresh.secret.to_bytes(),
             KdfParams::DEFAULT,
         )?;
-        let entries: Vec<_> = fresh
-            .welcomed
-            .vault
-            .entries()
-            .into_iter()
-            .map(Entry::encode)
-            .collect();
-        store.append_batch(entries.iter().map(|entry| entry.as_slice()))?;
+        store.append_encoded(fresh.welcomed.vault.iter_entries().map(Entry::encode))?;
         let mut loaded = Loaded::open(store)?;
         loaded
             .store
@@ -296,7 +289,7 @@ impl SyncHandler for NoSync {
         &self,
         _: PeerId,
         _: Vec<u8>,
-    ) -> std::result::Result<Vec<Blob>, HandlerError> {
+    ) -> std::result::Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         Err("this device is not set up".into())
     }
     async fn receive(&self, _: PeerId, _: Vec<Blob>) -> std::result::Result<(), HandlerError> {
@@ -313,6 +306,7 @@ struct NewDevice {
 }
 
 impl Joiner for NewDevice {
+    type Welcome = application::WelcomeReplay;
     async fn join(
         &self,
         ctx: &PairingContext,
@@ -333,7 +327,7 @@ impl Joiner for NewDevice {
     async fn receive(
         &self,
         ctx: &PairingContext,
-        welcome: Vec<Blob>,
+        welcome: Self::Welcome,
     ) -> std::result::Result<(), HandlerError> {
         let offer = self
             .offer

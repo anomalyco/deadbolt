@@ -82,7 +82,7 @@ simulator shares the CLI's `Offer`, join consent and welcome helpers; its
 adapter omits display and live addresses. Rendezvous, code expiry, single use,
 burning on a wrong guess and TLS exporter wiring remain covered by the
 real-iroh tests in `crates/net/src/pair.rs` and `crates/net/tests/net/pair.rs`.
-Focused regressions also cut pairing during its exchange and check persistence
+Focused regressions interleave outgoing frame pulls with a new attachment and a durable removal. The stream stops at the original signed frontier or aborts on revocation, including on a pairing connection after its welcome header. Other regressions cut pairing during its exchange and check persistence
 across reopening. A cut after admission can leave the inviter with a member that
 never received its welcome; these traces check durability rather than
 convergence, and pairing such a device again finishes the join without a second

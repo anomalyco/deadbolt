@@ -52,13 +52,19 @@ impl SyncHandler for Handler {
         &self,
         peer: PeerId,
         peer_heads: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
-        self.0
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+        let history = self
+            .0
             .with(|s| {
                 let ready = *self.0.ready.borrow();
                 missing_for(s, &DeviceId::from_bytes(peer), &peer_heads, ready)
             })
-            .map_err(handler_error)
+            .map_err(handler_error)?;
+        Ok(history.outgoing(|h| {
+            self.0
+                .with(|s| Ok(h.next(&**s, *self.0.ready.borrow())?))
+                .map_err(handler_error)
+        }))
     }
 
     async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
@@ -98,7 +104,7 @@ pub(super) fn missing_for(
     peer: &DeviceId,
     bytes: &[u8],
     ready: bool,
-) -> Result<Vec<Blob>> {
+) -> Result<application::OutgoingHistory> {
     s.ensure_usable()?;
     application::missing_for(s, peer, bytes, ready)
 }
@@ -434,9 +440,11 @@ mod tests {
             &self,
             peer: PeerId,
             heads: Vec<u8>,
-        ) -> Result<Vec<Blob>, HandlerError> {
+        ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
             let mut s = self.0.lock().unwrap();
-            missing_for(&mut s, &DeviceId::from_bytes(peer), &heads, true).map_err(handler_error)
+            let history = missing_for(&mut s, &DeviceId::from_bytes(peer), &heads, true)
+                .map_err(handler_error)?;
+            Ok(history.outgoing(|h| Ok(h.next(&*self.0.lock().unwrap(), true)?)))
         }
 
         async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
@@ -500,7 +508,13 @@ mod tests {
         let join = super::super::pairing::join_blob(&b.secret, "b", a.id, &vault, None).unwrap();
         let (welcome, _) =
             super::super::pairing::welcome(&mut a, vault, b.id, &join, None).unwrap();
-        super::super::pairing::apply_welcome(&mut b, a.id, offer, welcome).unwrap();
+        super::super::pairing::apply_welcome(
+            &mut b,
+            a.id,
+            offer,
+            super::super::pairing::test_replay(&a, welcome),
+        )
+        .unwrap();
         assert_eq!(b.vault(&vault).items().len(), 3004);
 
         // Then sync a second import, one item near the limit and single edits.
@@ -617,13 +631,15 @@ mod tests {
             vaults,
         })
         .unwrap();
-        let logs = |blobs: Vec<Blob>| {
-            blobs
-                .into_iter()
+        let logs = |mut h: application::OutgoingHistory, s: &Loaded| {
+            std::iter::from_fn(|| h.next(s, true).unwrap())
                 .map(|bytes| deadbolt_core::Entry::decode(&bytes).unwrap().log())
                 .collect::<Vec<_>>()
         };
-        let all = logs(missing_for(&mut source, &peer.device_id(), &hello, true).unwrap());
+        let all = logs(
+            missing_for(&mut source, &peer.device_id(), &hello, true).unwrap(),
+            &source,
+        );
         assert!(all.contains(&deadbolt_core::Log::Data));
         let first_data = all
             .iter()
@@ -634,7 +650,10 @@ mod tests {
                 .iter()
                 .all(|log| *log == deadbolt_core::Log::Data)
         );
-        let startup = logs(missing_for(&mut source, &peer.device_id(), &hello, false).unwrap());
+        let startup = logs(
+            missing_for(&mut source, &peer.device_id(), &hello, false).unwrap(),
+            &source,
+        );
         assert_eq!(startup, all[..first_data]);
     }
 
@@ -685,11 +704,16 @@ mod tests {
         assert!(
             missing_for(&mut loaded, &peer, &heads, false)
                 .unwrap()
-                .is_empty()
+                .next(&loaded, false)
+                .unwrap()
+                .is_none()
         );
         assert_eq!(
-            missing_for(&mut loaded, &peer, &heads, true).unwrap(),
-            vec![entry.encode()]
+            missing_for(&mut loaded, &peer, &heads, true)
+                .unwrap()
+                .next(&loaded, true)
+                .unwrap(),
+            Some(entry.encode())
         );
     }
 }

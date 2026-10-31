@@ -615,7 +615,11 @@ impl Loaded {
         if self.contains_vault(&id) {
             bail!("this device already holds vault {}", vault.name());
         }
-        let result = persist(&self.store, vault.entries());
+        let result = self
+            .store
+            .append_encoded(vault.iter_entries().map(Entry::encode))
+            .map(drop)
+            .map_err(Into::into);
         self.check_append(result)?;
         self.vaults.insert(id, vault);
         self.changes.vaults = true;
@@ -950,8 +954,13 @@ pub(super) mod tests {
         assert!(inviter.vault(&id).is_member(&peer.device_id()));
         let (welcome, _) =
             pairing::welcome(&mut inviter, id, peer.device_id(), &join, None).unwrap();
-        let welcomed =
-            pairing::verify_welcome(&peer.device_id(), inviter.id, offer, welcome).unwrap();
+        let welcomed = pairing::verify_welcome(
+            &peer.device_id(),
+            inviter.id,
+            offer,
+            pairing::test_replay(&inviter, welcome),
+        )
+        .unwrap();
         let (mut joiner, fault) = fault_store(joiner_dir.path(), [8; 32]);
         // Adopt is already past signature/identity validation; its store append
         // must fail closed regardless of whether this is the first held vault.
