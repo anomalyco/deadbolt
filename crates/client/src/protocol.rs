@@ -64,7 +64,7 @@ pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -551,6 +551,16 @@ pub enum Command {
         refs: Vec<String>,
         purpose: Purpose,
     },
+    /// Experimental: release a single read only with this vault’s designated member’s answer.
+    ExperimentalMobileRead {
+        refs: Vec<String>,
+    },
+    /// Designate a vault member for this unlocked session. Never available to AI callers.
+    ExperimentalApproverSet {
+        vault: Option<String>,
+        device: Option<String>,
+        passphrase: Option<Zeroizing<String>>,
+    },
     /// Lets AI callers resolve `fields` (every field when empty) of the
     /// items `items` (titles or short ids in `vault`) for `purposes` (run,
     /// inject; never read) without asking, until `expires_at` (Unix seconds;
@@ -687,6 +697,7 @@ impl Command {
             Self::Setup { .. } | Self::Unlock { .. } | Self::Join { .. } => true,
             Self::AgentClientAdd { passphrase, .. }
             | Self::AgentGrantSet { passphrase, .. }
+            | Self::ExperimentalApproverSet { passphrase, .. }
             | Self::SecretGrantSet { passphrase, .. } => passphrase.is_some(),
             _ => false,
         }

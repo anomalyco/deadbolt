@@ -15,6 +15,7 @@ mod macos_autofill;
 mod mirror;
 mod pairing;
 mod passkeys;
+mod remote_read;
 mod secrets;
 mod send;
 mod session;
@@ -455,7 +456,7 @@ mod tests {
         let background = tokio::spawn(std::future::pending::<()>());
         let aborted = background.abort_handle();
         session.sync_task = Some(AbortOnDrop(background));
-        agent.refresh(&session);
+        agent.refresh(&mut session);
         *agent.session.lock().unwrap() = Some(session);
         agent.ready.send_replace(true);
         let peer_node = Node::spawn(
@@ -905,6 +906,28 @@ mod tests {
             closed: closed_rx,
         };
         (conv, client, closed)
+    }
+
+    /// Seed only this test process's unlocked agent. There is no corresponding
+    /// RPC, store row or environment switch. The caller must own the synthetic
+    /// session and know its passphrase; membership and proof checks still run.
+    #[cfg(target_os = "macos")]
+    pub(super) async fn designate_fixture_approver(
+        agent: &Agent,
+        vault: deadbolt_core::VaultId,
+        device: DeviceId,
+        fixture_passphrase: Zeroizing<String>,
+    ) -> Result<()> {
+        let (conv, _socket, _open) = conversation();
+        agent
+            .experimental_approver_set(
+                Some(&vault.to_string()),
+                Some(&device.to_string()),
+                Some(fixture_passphrase),
+                &conv,
+            )
+            .await?;
+        Ok(())
     }
 
     fn sync_op() -> Command {
@@ -2156,6 +2179,8 @@ impl Agent {
             Command::AgentClientAdd { .. }
             | Command::AgentGrantSet { .. }
             | Command::SecretGrantSet { .. }
+            | Command::ExperimentalApproverSet { .. }
+            | Command::ExperimentalMobileRead { .. }
             | Command::Resolve { .. }
             | Command::Health { .. }
             | Command::HealthIgnore { .. }
@@ -2343,7 +2368,8 @@ impl Agent {
 
     /// Updates the membership gate and closes open sync connections to devices
     /// that are no longer members of any vault.
-    pub fn refresh(&self, session: &Session) {
+    pub fn refresh(&self, session: &mut Session) {
+        session.revoke_stale_approvers();
         *self.members.write().unwrap_or_else(|e| e.into_inner()) = session.peer_set();
         let closed = session.node.enforce_membership();
         if closed > 0 {
@@ -3114,8 +3140,8 @@ impl Agent {
         });
         self.ready.send_replace(false);
         let node = Node::spawn(config, gate, sync::Handler(self.clone())).await?;
-        let session = Session::new(loaded, node);
-        self.refresh(&session);
+        let mut session = Session::new(loaded, node);
+        self.refresh(&mut session);
         self.ready.send_replace(session.peer_set().is_empty());
         let id: DeviceId = session.id;
         *self.session.lock().unwrap_or_else(|e| e.into_inner()) = Some(session);

@@ -343,6 +343,9 @@ enum BrowserCommand {
 
 #[derive(Args)]
 struct DevicesArgs {
+    /// Show full device keys instead of short id prefixes.
+    #[arg(long)]
+    full: bool,
     #[command(subcommand)]
     command: Option<DevicesCommand>,
 }
@@ -717,7 +720,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                         println!(
                             "{}\t{}\t{}",
                             device_name(device),
-                            short(&device.id),
+                            if args.full {
+                                &device.id
+                            } else {
+                                short(&device.id)
+                            },
                             presence(device)
                         );
                     }

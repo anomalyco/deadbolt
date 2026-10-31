@@ -26,6 +26,7 @@ use zeroize::Zeroizing;
 
 use crate::{
     Membership, PAIR_ALPN, PeerId, Rendezvous, SYNC_ALPN,
+    approval::{self, ApprovalInbox},
     error::{Error, Result, close},
     fmt_id,
     sync::{
@@ -87,6 +88,8 @@ pub struct NodeConfig {
     pub max_inbound: usize,
     /// Where a new device publishes its pairing record.
     pub rendezvous: Rendezvous,
+    /// Explicit opt-in to receiving experimental single-read approval requests.
+    pub approval_inbox: Option<ApprovalInbox>,
 }
 
 impl NodeConfig {
@@ -102,6 +105,7 @@ impl NodeConfig {
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
             max_inbound_per_peer: DEFAULT_MAX_INBOUND_PER_PEER,
             max_inbound: DEFAULT_MAX_INBOUND,
+            approval_inbox: None,
             rendezvous: Rendezvous::N0,
         }
     }
@@ -121,6 +125,7 @@ impl NodeConfig {
             inbound_sync_timeout: INBOUND_SYNC_TIMEOUT,
             max_inbound_per_peer: DEFAULT_MAX_INBOUND_PER_PEER,
             max_inbound: DEFAULT_MAX_INBOUND,
+            approval_inbox: None,
             rendezvous: Rendezvous::Dir(std::env::temp_dir().join("deadbolt-rendezvous")),
         }
     }
@@ -251,9 +256,13 @@ impl Node {
                     .collect::<Result<Vec<_>>>()?,
             ),
         };
+        let mut alpns = vec![SYNC_ALPN.to_vec(), PAIR_ALPN.to_vec()];
+        if config.approval_inbox.is_some() {
+            alpns.push(approval::ALPN.to_vec());
+        }
         let mut builder = Endpoint::builder(presets::Minimal)
             .secret_key(SecretKey::from_bytes(&config.secret_key))
-            .alpns(vec![SYNC_ALPN.to_vec(), PAIR_ALPN.to_vec()])
+            .alpns(alpns)
             .relay_mode(relay_mode)
             .hooks(GateHook(gate.clone()));
         if config.address_lookup {
@@ -286,6 +295,7 @@ impl Node {
             endpoint.clone(),
             gate.clone(),
             handler.clone(),
+            config.approval_inbox,
             Limits {
                 max_frame_len: config.max_frame_len,
                 session_timeout: config.inbound_sync_timeout,
@@ -410,6 +420,7 @@ async fn accept_loop(
     endpoint: Endpoint,
     gate: Arc<Gate>,
     handler: Arc<dyn DynSyncHandler>,
+    inbox: Option<ApprovalInbox>,
     limits: Limits,
 ) {
     let Limits {
@@ -422,6 +433,8 @@ async fn accept_loop(
     // handshakes. Pairing has its own bounds after handoff.
     let handshakes = Arc::new(Semaphore::new(MAX_INBOUND_HANDSHAKES));
     let syncs = Arc::new(Semaphore::new(total));
+    let approvals = Arc::new(Semaphore::new(2));
+    let local = *endpoint.id().as_bytes();
     let mut tasks = JoinSet::new();
     loop {
         tokio::select! {
@@ -445,6 +458,8 @@ async fn accept_loop(
                 let gate = gate.clone();
                 let handler = handler.clone();
                 let syncs = syncs.clone();
+                let approvals = approvals.clone();
+                let inbox = inbox.clone();
                 tasks.spawn(async move {
                     // The gate hook runs inside this await; a rejected peer never gets here.
                     let conn = match n0_future::time::timeout(HANDSHAKE_TIMEOUT, incoming).await {
@@ -472,6 +487,12 @@ async fn accept_loop(
                                 return;
                             };
                             serve_sync(conn, handler, max_frame_len, session_timeout).await;
+                        }
+                        approval::ALPN => {
+                            let (Some(inbox), Ok(_permit)) = (inbox, approvals.try_acquire_owned()) else {
+                                conn.close(close::BUSY, b"approval unavailable"); return;
+                            };
+                            approval::serve(conn, local, inbox).await;
                         }
                         PAIR_ALPN => gate.route_pairing(conn),
                         _ => conn.close(close::PROTOCOL, b"unknown alpn"),
@@ -503,6 +524,7 @@ impl Drop for InboundSlot {
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum ConnKind {
+    Approval,
     Sync,
     Pair,
 }
@@ -592,7 +614,7 @@ impl Gate {
 
     fn allow_dial(&self, peer: &PeerId, alpn: &[u8]) -> bool {
         match alpn {
-            SYNC_ALPN => self.check_dial(peer).is_ok(),
+            SYNC_ALPN | approval::ALPN => self.check_dial(peer).is_ok(),
             PAIR_ALPN => true,
             _ => false,
         }
@@ -611,11 +633,15 @@ impl Gate {
         let peer = *conn.remote_id().as_bytes();
         let mut st = self.lock();
         let kind = match conn.alpn() {
-            SYNC_ALPN => {
+            SYNC_ALPN | approval::ALPN => {
                 if !self.membership.is_member(&peer) {
                     return Err((close::NOT_MEMBER, b"not a member"));
                 }
-                ConnKind::Sync
+                if conn.alpn() == SYNC_ALPN {
+                    ConnKind::Sync
+                } else {
+                    ConnKind::Approval
+                }
             }
             PAIR_ALPN => {
                 if conn.side() == Side::Server
@@ -646,7 +672,7 @@ impl Gate {
                 continue;
             }
             list.retain(|t| {
-                if t.kind != ConnKind::Sync {
+                if t.kind == ConnKind::Pair {
                     return true;
                 }
                 if let Some(conn) = t.live() {

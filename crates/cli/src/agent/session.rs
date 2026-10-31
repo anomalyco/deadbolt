@@ -364,6 +364,8 @@ fn save_meta(store: &Unlocked, meta: &Meta) -> Result<()> {
 pub struct Session {
     state: Loaded,
     pub node: Node,
+    /// Locally proved designations; locking discards these and every pending read.
+    pub(super) approvers: BTreeMap<VaultId, super::remote_read::Designation>,
     pub(super) sync_task: Option<super::AbortOnDrop>,
     pub(super) health_task: Option<super::AbortOnDrop>,
     /// Passwords made for web forms, until saved; locking drops them.
@@ -387,11 +389,25 @@ impl Session {
     pub fn new(loaded: Loaded, node: Node) -> Self {
         Self {
             state: loaded,
+            approvers: BTreeMap::new(),
             node,
             sync_task: None,
             health_task: None,
             generated: Default::default(),
         }
+    }
+
+    /// A peer remaining in a *different* vault still passes the endpoint gate.
+    /// Drop obsolete per-vault designations and cancel their pending requests.
+    pub(super) fn revoke_stale_approvers(&mut self) {
+        self.approvers.retain(|id, cap| {
+            !self.state.append_uncertain
+                && self
+                    .state
+                    .vaults
+                    .get(id)
+                    .is_some_and(|v| v.is_member(&self.state.id) && v.is_member(&cap.device))
+        });
     }
 
     pub fn own_addr(&self) -> Addr {
