@@ -796,8 +796,8 @@ pub(crate) mod tests {
             &self,
             _: PeerId,
             _: Vec<u8>,
-        ) -> Result<Vec<crate::Blob>, HandlerError> {
-            Ok(vec![])
+        ) -> Result<crate::Outgoing<'_>, HandlerError> {
+            Ok(Box::new(std::iter::empty()))
         }
         async fn receive(&self, _: PeerId, _: Vec<crate::Blob>) -> Result<(), HandlerError> {
             Ok(())

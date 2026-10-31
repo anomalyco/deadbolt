@@ -1806,7 +1806,42 @@ fn indexed_delta_matches_a_full_scan_for_each_peer_frontier() {
             .map(Entry::hash)
             .collect();
         assert_eq!(actual, expected);
+        // This fixture has totally ordered entries within each phase. Even
+        // nonsensical (future) peer frontiers select exactly the same delta.
+        let streamed: Vec<_> = [Log::Membership, Log::Data]
+            .into_iter()
+            .flat_map(|log| {
+                let mut cursor = a.vault.missing_log(&heads, log);
+                std::iter::from_fn(|| cursor.next(&a.vault).unwrap().map(Entry::hash))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        assert_eq!(streamed, expected);
     }
+}
+
+#[test]
+fn stream_resumes_on_reordered_history_but_not_on_another_signed_branch() {
+    let mut a = Dev::create();
+    let mut b = a.invite();
+    let base = a.vault.clone();
+    let (_, left) = a.login_entry("left");
+    let (_, right) = b.login_entry("right");
+    // Two valid orders of the same independent entries.
+    sync_both(&mut a, &mut b);
+    assert_ne!(a.vault.entries(), b.vault.entries());
+    let mut stream = a.vault.missing_log(&base.heads(), Log::Data);
+    let first = stream.next(&a.vault).unwrap().unwrap();
+    let second = stream.next(&b.vault).unwrap().unwrap();
+    assert_ne!(first.hash(), second.hash());
+    assert!([left.hash(), right.hash()].contains(&second.hash()));
+    assert!(stream.next(&a.vault).unwrap().is_none());
+    let mut branch = base.clone();
+    branch
+        .create_item(&a.secret, "login", Some("fork".into()), [])
+        .unwrap();
+    let mut stream = a.vault.missing_log(&base.heads(), Log::Data);
+    assert_eq!(stream.next(&branch), Err(Error::HistoryChanged));
 }
 
 #[test]

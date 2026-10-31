@@ -236,7 +236,7 @@ attempts can start again; codes and secrets are never logged.
 
 Like the CLI's `Fresh`, the joining node uses a fresh device key and refuses all
 sync. It reuses `application::read_offer`, `join_blob` and `verify_welcome`, keeping
-the admitted vault and key only in memory. No local passphrase or OPFS write is
+a private, incrementally verified vault and key only in memory. It never keeps a second copy of the complete encoded welcome. No local passphrase or OPFS write is
 needed until admission. `device-join-finish {passphrase, deviceName}` writes the
 encrypted key, complete welcome log and peer hints into the exclusive pending
 OPFS file, closes it, and atomically publishes it without replacing an existing

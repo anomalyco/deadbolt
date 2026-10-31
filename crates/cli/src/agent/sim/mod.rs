@@ -179,15 +179,26 @@ impl SyncHandler for Handler {
         )
         .map_err(|e| e.to_string().into())
     }
-    async fn missing_for(&self, peer: PeerId, heads: Vec<u8>) -> Result<Vec<Blob>, HandlerError> {
+    async fn missing_for(
+        &self,
+        peer: PeerId,
+        heads: Vec<u8>,
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
         let mut guard = self.state.lock().unwrap();
-        sync::missing_for(
+        let history = sync::missing_for(
             guard.as_mut().ok_or("locked")?,
             &DeviceId::from_bytes(peer),
             &heads,
             self.ready.load(Ordering::SeqCst),
         )
-        .map_err(|e| e.to_string().into())
+        .map_err(|e| -> HandlerError { e.to_string().into() })?;
+        Ok(history.outgoing(|h| {
+            let g = self.state.lock().unwrap();
+            Ok(h.next(
+                g.as_ref().ok_or("locked")?,
+                self.ready.load(Ordering::SeqCst),
+            )?)
+        }))
     }
     async fn receive(&self, peer: PeerId, entries: Vec<Blob>) -> Result<(), HandlerError> {
         let mut guard = self.state.lock().unwrap();
@@ -224,16 +235,23 @@ impl Inviter for Invitation<'_> {
         &self,
         ctx: &PairingContext,
         join: Vec<u8>,
-    ) -> Result<Vec<Blob>, HandlerError> {
-        self.device
+    ) -> Result<deadbolt_net::Outgoing<'_>, HandlerError> {
+        let history = self
+            .device
             .with(|s| {
                 pairing::welcome(s, self.vault, DeviceId::from_bytes(ctx.remote), &join, None)
                     .map(|(blobs, _)| blobs)
             })
-            .map_err(|e| e.to_string().into())
+            .map_err(|e| -> HandlerError { e.to_string().into() })?;
+        Ok(history.outgoing(|h| {
+            self.device
+                .with(|s| Ok(h.next(s, self.device.ready.load(Ordering::SeqCst))?))
+                .map_err(|e| e.to_string().into())
+        }))
     }
 }
 impl Joiner for Device {
+    type Welcome = deadbolt_net::application::WelcomeReplay;
     async fn join(&self, ctx: &PairingContext, offer: Vec<u8>) -> Result<Vec<u8>, HandlerError> {
         let inviter = DeviceId::from_bytes(ctx.remote);
         let (offer, vault) =
@@ -247,7 +265,11 @@ impl Joiner for Device {
         *self.offer.lock().unwrap() = Some(offer);
         Ok(join)
     }
-    async fn receive(&self, ctx: &PairingContext, welcome: Vec<Blob>) -> Result<(), HandlerError> {
+    async fn receive(
+        &self,
+        ctx: &PairingContext,
+        welcome: Self::Welcome,
+    ) -> Result<(), HandlerError> {
         let offer = self.offer.lock().unwrap().take().ok_or("no offer")?;
         self.with(|s| {
             pairing::apply_welcome(s, DeviceId::from_bytes(ctx.remote), offer, welcome).map(|_| ())
@@ -1489,6 +1511,83 @@ fn files_never_reach_the_disk_in_the_clear() {
     assert!(contents.unwrap().starts_with(FILE_MARKER));
 }
 
+/// Pulls are separated by real durable writes. The sender must stop at its
+/// original signed tips, not chase the live tail; another stream opened at
+/// the same heads must stop entirely if the recipient loses membership.
+#[tokio::test]
+async fn outgoing_catchup_is_a_snapshot_and_rechecks_revocation() {
+    let mut world = World::new().unwrap();
+    world.pair(1).unwrap();
+    let source = world.devices[0].handler();
+    let target = world.devices[1].handler();
+    let (a, b) = (world.devices[0].id, world.devices[1].id);
+    let heads = target.heads(a).await.unwrap();
+    for i in 1..=2 {
+        world.step(&Action::Add(0, i)).unwrap();
+    }
+    // Use the non-streaming core selection as an independent oracle. A
+    // login creation can include an audit entry as well as the create.
+    let peer_heads = world.devices[1]
+        .with(|s| Ok(s.vault(&world.vault).heads()))
+        .unwrap();
+    let expected = world.devices[0]
+        .with(|s| {
+            Ok(s.vault(&world.vault)
+                .missing_for(&peer_heads)
+                .into_iter()
+                .map(Entry::encode)
+                .collect::<Vec<_>>())
+        })
+        .unwrap();
+    assert!(expected.len() > 1);
+    let mut first = source.missing_for(b, heads.clone()).await.unwrap();
+    let mut revoked = source.missing_for(b, heads.clone()).await.unwrap();
+    let prefix = first.next().unwrap().unwrap();
+    assert_eq!(revoked.next().unwrap().unwrap(), prefix);
+    world.step(&Action::Attach(0, 3)).unwrap();
+    assert_eq!(prefix, expected[0]);
+    assert_eq!(first.collect::<Result<Vec<_>, _>>().unwrap(), expected[1..]);
+    let full = source
+        .missing_for(b, heads)
+        .await
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(full.len() > expected.len());
+    assert!(full.starts_with(&expected));
+    world.step(&Action::Remove(1)).unwrap();
+    assert!(revoked.next().unwrap().is_err());
+    world.check().unwrap();
+}
+
+/// PAIR connections use their own gate. Removal after the welcome header
+/// must abort before the next entry even though admission was durable.
+#[test]
+fn outgoing_welcome_stops_after_removal() {
+    let mut world = World::new().unwrap();
+    let device = DeviceId::from_bytes(world.devices[1].id);
+    let inviter = DeviceId::from_bytes(world.devices[0].id);
+    let join = world.devices[1]
+        .with(|s| pairing::join_blob(&s.secret, "beta", inviter, &world.vault, None))
+        .unwrap();
+    let mut history = world.devices[0]
+        .with(|s| Ok(pairing::welcome(s, world.vault, device, &join, None)?.0))
+        .unwrap();
+    world.devices[0]
+        .with(|s| {
+            assert!(history.next(s, true)?.is_some());
+            Ok(())
+        })
+        .unwrap();
+    world.step(&Action::Remove(1)).unwrap();
+    assert!(
+        world.devices[0]
+            .with(|s| Ok(history.next(s, true)?))
+            .is_err()
+    );
+    world.check().unwrap();
+}
+
 /// Application batches can overlap across sessions. A child arriving before
 /// its parent is dropped, not persisted; the next heads exchange must recover
 /// it, including after reopening the accepted prefix.
@@ -1514,6 +1613,8 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
         let entries = source
             .missing_for(b, target.heads(a).await.unwrap())
             .await
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(entries.len(), 3);
         let mut reversed = entries.clone();
@@ -1536,6 +1637,8 @@ async fn reordered_batches_retry_missing_dependencies_after_a_crash() {
         let missing = source
             .missing_for(b, target.heads(a).await.unwrap())
             .await
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
             .unwrap();
         assert_eq!(missing, entries[1..]);
         // Resume one batch at a time, then replay the entire overlapping session.

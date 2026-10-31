@@ -102,7 +102,7 @@ pub use error::{DecodeError, Error};
 pub use id::{DeviceId, DeviceSecret, Hash, ItemId, Signature, VaultId};
 pub use item::{Field, FieldType, ItemError, Schema, SchemaField, schema, schemas};
 pub use vault::{
-    CREATE_BATCH_BYTES, Heads, MAX_ENTRY_LEN, MAX_MEMBERSHIP_ENTRIES, Vault, VaultWrite,
+    CREATE_BATCH_BYTES, Heads, MAX_ENTRY_LEN, MAX_MEMBERSHIP_ENTRIES, MissingLog, Vault, VaultWrite,
 };
 
 #[cfg(test)]
