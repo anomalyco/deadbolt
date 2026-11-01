@@ -23,6 +23,7 @@ mod sim;
 pub(crate) mod ssh;
 mod sync;
 mod system;
+mod updates;
 #[cfg(test)]
 mod watch_tests;
 mod watchers;
@@ -152,6 +153,8 @@ pub struct Agent {
     stopping: watch::Sender<bool>,
     /// SSH agent (`ssh.sock`) listener, Touch ID queue and TTY grants.
     ssh: ssh::SshState,
+    /// What the background update check last found (`updates`).
+    update: Mutex<Option<crate::protocol::UpdateInfo>>,
 }
 
 impl Agent {
@@ -195,6 +198,7 @@ impl Agent {
             send_server: tokio::sync::Mutex::default(),
             stopping: watch::channel(false).0,
             ssh: ssh::SshState::default(),
+            update: Mutex::default(),
         })
     }
 
@@ -1374,6 +1378,7 @@ pub async fn serve(paths: Paths) -> Result<()> {
     let (system, events) = mpsc::channel(8);
     let _sources = system::spawn(system);
     let _follow = AbortOnDrop(tokio::spawn(agent.clone().follow_system(events)));
+    let _updates = AbortOnDrop(tokio::spawn(updates::run(agent.clone())));
 
     let mut connections = JoinSet::new();
     let mut terminate = signal(SignalKind::terminate())?;
@@ -2441,6 +2446,11 @@ impl Agent {
             ssh_socket,
             // Filled in for the connection that asked (`handle`).
             caller: caller::nobody(),
+            update: self
+                .update
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone(),
         }
     }
 

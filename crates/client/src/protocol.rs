@@ -64,7 +64,7 @@ pub use reports::{
     Code, ImportReport, ImportSource, MirrorAction, MirrorItem, MirrorReport, SignInCounts, Tally,
 };
 
-pub const PROTOCOL_VERSION: u32 = 24;
+pub const PROTOCOL_VERSION: u32 = 25;
 
 /// The longest line the agent reads, large enough for `import` of a big export.
 pub const MAX_LINE: usize = 64 * 1024 * 1024;
@@ -1170,6 +1170,8 @@ pub enum Change {
     Activity,
     /// Password health findings or breach-check state changed.
     Health,
+    /// Whether a newer Deadbolt is available changed: fetch the status.
+    Update,
     /// Changes were dropped because the watcher fell behind. Fetch everything.
     Resync,
     /// The agent is stopping, which locks the store. The stream ends.
@@ -1622,6 +1624,21 @@ pub struct Status {
     pub ssh_socket: Option<String>,
     /// How the agent sees the client asking (`deadbolt whoami`).
     pub caller: CallerInfo,
+    /// A newer Deadbolt for this install, from the agent's background
+    /// check; `deadbolt update` installs it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateInfo>,
+}
+
+/// A newer Deadbolt the agent's background check found (docs/releasing.md,
+/// "Updater").
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UpdateInfo {
+    pub version: String,
+    /// How this Deadbolt is installed: `app`, `curl`, `standalone`, `brew`,
+    /// `npm`, `pnpm`, `bun`, `yarn` or `package` (a JavaScript package
+    /// manager that didn't say it has it).
+    pub method: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -184,8 +184,8 @@ path: on macOS the command is the app's own `Contents/Helpers/deadbolt`, so
 the CLI, the agent and the app are one install, Touch ID's helper sits beside
 it, and `deadbolt app` opens that Deadbolt.app, first linking it as
 `~/Applications/Deadbolt.app` when neither Applications folder has one (so
-Launchpad and Finder list it). `deadbolt update` leaves an npm install to npm
-(`npm i -g @deadbolt/cli@<tag>`).
+Launchpad and Finder list it). `deadbolt update` updates an npm, pnpm, bun or
+yarn install by running that manager (see Updater).
 
 - `build-npm` (macOS, no secrets) packs from the verified Linux tarballs and
   the signed app zip, so a run without the Apple values publishes no npm.
@@ -251,10 +251,43 @@ channel's current release isn't the build it runs, a rollback included.
     helper). The running files are moved into the stage, the new pair renamed
     in, and on any failure both old files come back. If the running agent is
     this binary it is stopped and started again from the new one.
-  - A path under `node_modules` (npm, checked before the bundle, as npm's
-    darwin package carries Deadbolt.app), Homebrew's `Cellar`, `/nix/store`,
-    `/usr` (not `/usr/local`) or `~/.cargo/bin` belongs to that package manager: `update` prints the
-    manifest's `command` (or a hint) and changes nothing.
+  - npm's package (checked before the bundle, as npm's darwin package
+    carries Deadbolt.app): a path under `node_modules` whose package (the
+    directory under `node_modules/@deadbolt/`) is `@deadbolt/cli` or one of
+    its platform packages, and whose `@deadbolt/cli` (beside it or above it)
+    has a `bin` resolving to this `deadbolt`. As OpenCode's updater does,
+    `update` asks `npm list -g --depth=0 @deadbolt/cli`,
+    `pnpm list -g --depth=0 @deadbolt/cli`, `bun pm ls -g` and
+    `yarn global list` at once (15 s each; a missing manager or a failure is
+    a no), those named in the path first (bun's `install/global/node_modules`
+    counts as bun), and takes the first that lists `@deadbolt/cli`. The
+    version is what the registry serves for the channel
+    (`registry.npmjs.org/-/package/@deadbolt/cli/dist-tags`, `latest` for
+    stable), which trails the release service by minutes: until it equals
+    the manifest's release (under the manifest's rollout rules), the update
+    is pending. Then, asked on a terminal unless `--yes`, it runs, pinned to
+    that version: `npm install --global @deadbolt/cli@<v>`,
+    `pnpm add --global --allow-build=@deadbolt/cli @deadbolt/cli@<v>`,
+    `bun install --global --trust --cache-dir <temp> @deadbolt/cli@<v>`
+    (`--trust` runs the wrapper's postinstall; the fresh cache, deleted
+    after, because bun never prunes its own) or
+    `yarn global add @deadbolt/cli@<v>`. The manager is found on PATH (bun
+    also in `$BUN_INSTALL/bin`, `~/.bun/bin` and beside the global install).
+    Afterwards it runs the new `deadbolt --version` through the user's link
+    (`~/.bun/bin/deadbolt`, `<prefix>/bin/deadbolt`, else the wrapper's
+    `bin/deadbolt`), which also lets the wrapper link itself, checks the
+    version, and restarts the agent from it (locked) if it ran from this
+    install. On failure it prints the manager's last 12 lines of output, the
+    command it ran and what to do next. A package no manager claims gets the
+    command to run by hand.
+  - Homebrew's `Cellar` (or a cask record) runs
+    `brew upgrade anomalyco/tap/deadbolt` (`--cask` for the app) when the
+    manifest's `brew` distribution has a new version, then checks
+    `<prefix>/bin/deadbolt --version`.
+  - `/nix/store`, `/usr` (not `/usr/local`) or `~/.cargo/bin` belongs to
+    that package manager: `update` prints its command and changes nothing.
+  - Commands `update` runs are always these fixed ones, never a command
+    from a manifest.
 - **Signatures:** a release build (published on a channel) on macOS always
   requires its replacement to satisfy the update requirement with identifier
   `pw.deadbolt.cli` (and `pw.deadbolt.app.enclave` for the helper), without
@@ -318,8 +351,32 @@ channel's current release isn't the build it runs, a rollback included.
   it's unpacked, run or moved. Nothing needs the vault, so it works locked.
   `--check` prints what's available and exits 10 if anything is, else 0.
   Requests send `User-Agent: deadbolt/<build channel or source>/<version>/cli`.
-- **Tests** point it at a fake service with `DEADBOLT_RELEASE_URL`, which only
-  debug builds read and only for a URL on 127.0.0.1 or [::1].
+- **Background checks:** the agent checks a minute or two after it starts
+  (jittered), then every 6 hours or so, whether `update` would install
+  something, with the same manifest rules, limits and User-Agent, npm's
+  version for npm's package and Homebrew's for Homebrew. It never downloads
+  or installs anything, nor writes the sequence floors, and ignores a
+  manifest older than them; it works locked. Release builds that know their
+  channel check; builds from source, Nix, Cargo and system installs, and an
+  app that can't be replaced where it is don't. A failure is logged and
+  tried again next time. `DEADBOLT_NO_UPDATE_CHECK=1` in the agent's
+  environment turns it off.
+- **Notifications:** what the check found is in `deadbolt status`
+  (`update	<version> available (installed with bun): deadbolt update`),
+  `deadbolt watch` emits `{"change":"update"}` when it changes, and the
+  desktop app's Settings show a quiet "Deadbolt <version> is out" row.
+  Interactive commands (stdin and stderr terminals, no `--json`; not
+  `status`, `watch`, `update`, `run`, the app or the agent) end with one
+  stderr line, at most once a day per version (`update-notice` in the state
+  directory): `deadbolt <version> is out (installed with bun): run deadbolt
+  update`. The CLI only reads the agent's answer; with no agent running it
+  says nothing and never asks the network. Nothing installs until the user
+  runs `deadbolt update`; the lock above keeps two from installing at once.
+- **Tests** point it at a fake service with `DEADBOLT_RELEASE_URL` and a fake
+  registry with `DEADBOLT_NPM_REGISTRY_URL`, which only debug builds read and
+  only for a URL on 127.0.0.1 or [::1]. `DEADBOLT_UPDATE_CHECK_CHANNEL`
+  (debug builds only) makes the agent check that channel at once and every
+  second.
 - It doesn't require the protocol's `install.json` receipt: `update` is a
   command the user runs on the install in front of them, and package-manager
   paths are refused instead.
@@ -382,5 +439,5 @@ separately (`cd site && bun run deploy`, with Dax's approval).
   not at a moved binary (`deadbolt update` replaces files in place, so the
   path stays valid).
 - Update offers in the app itself (it can run `deadbolt update`, which updates
-  a registered extension directory too), periodic checks, and a Chrome Web
-  Store listing for the extension.
+  a registered extension directory too), and a Chrome Web Store listing for
+  the extension.

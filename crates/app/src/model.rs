@@ -325,6 +325,7 @@ impl App {
                 self.on_agents_changed();
             }
             Change::Health => self.request_health(false),
+            Change::Update => self.agent.send(Job::Status),
             Change::Items { vault } if self.shows(&vault) => {
                 self.refresh();
                 self.on_trash_changed();

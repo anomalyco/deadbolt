@@ -1148,6 +1148,7 @@ fn changed(change: &Change) -> Option<&'static str> {
         | Change::Devices { .. }
         | Change::Activity
         | Change::Health
+        | Change::Update
         | Change::Activate { .. } => None,
     }
 }

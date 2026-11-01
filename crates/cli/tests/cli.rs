@@ -133,6 +133,9 @@ impl Device {
             .env("DEADBOLT_OP", self.path("op"))
             .env_remove("DEADBOLT_TEST_VERSION")
             .env_remove("DEADBOLT_TEST_PROTOCOL")
+            .env_remove("DEADBOLT_UPDATE_CHECK_CHANNEL")
+            .env_remove("DEADBOLT_NO_UPDATE_CHECK")
+            .env_remove("DEADBOLT_NPM_REGISTRY_URL")
             .env_remove("RUST_LOG")
             // Not an AI's claim: a test that wants one sets it (`as_ai`).
             .env_remove("OPENCODE_SESSION_ID")
@@ -5142,3 +5145,5 @@ fn favorites_and_tags() {
 mod health;
 #[path = "cli/ssh.rs"]
 mod ssh;
+#[path = "cli/updates.rs"]
+mod updates;
