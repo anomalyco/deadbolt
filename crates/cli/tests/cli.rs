@@ -3689,10 +3689,10 @@ fn send_files_secrets_and_items() {
 
     // Single use: the second open is refused, and the sender sees it picked up.
     assert!(matches!(receive(link), Err(deadbolt_send::Error::Used)));
-    let shown = a.run(&["sends", "show", id]);
+    let shown = a.run(&["send", "show", id]);
     assert!(shown.contains("state\tpicked up"), "{shown}");
     assert!(shown.contains("opens\t1 of 1"), "{shown}");
-    assert!(a.run(&["sends"]).contains(&format!("{id}\tpicked up")));
+    assert!(a.run(&["send", "ls"]).contains(&format!("{id}\tpicked up")));
 
     // One field; revoking ends a waiting send with exit code 5.
     let mut waiting = a
@@ -3715,19 +3715,19 @@ fn send_files_secrets_and_items() {
     BufReader::new(waiting.stdout.take().unwrap())
         .read_line(&mut first)
         .unwrap();
-    let pending = a.run(&["sends", "ls", "--json"]);
+    let pending = a.run(&["send", "ls", "--json"]);
     let pending: Vec<serde_json::Value> = serde_json::from_str(&pending).unwrap();
     let open = pending.iter().find(|s| s["state"] == "open").unwrap();
     let open_id = open["id"].as_str().unwrap();
     assert_eq!(open["label"], "github.com password");
-    assert!(a.run(&["sends", "revoke", open_id]).starts_with("revoked"));
+    assert!(a.run(&["send", "revoke", open_id]).starts_with("revoked"));
     assert_eq!(wait(&mut waiting, Duration::from_secs(30)).code(), Some(5));
     assert!(matches!(
         receive(&first),
         Err(deadbolt_send::Error::Revoked)
     ));
 
-    assert!(a.fail(&["sends", "show", "zzzz"]).contains("no send"));
+    assert!(a.fail(&["send", "show", "zzzz"]).contains("no send"));
 }
 
 #[test]
@@ -3755,7 +3755,7 @@ fn send_resolves_inputs_strictly_and_asks_first() {
         String::from_utf8_lossy(&out.stderr).contains("pass --yes"),
         "{out:?}"
     );
-    assert!(a.run(&["sends", "ls", "--json"]).trim() == "[]");
+    assert!(a.run(&["send", "ls", "--json"]).trim() == "[]");
 
     // Vault items: exact name or ID only, with suggestions.
     a.run(&["init"]);
@@ -3786,6 +3786,45 @@ fn send_resolves_inputs_strictly_and_asks_first() {
     assert_eq!(entry(&bundle.entries[1]).data, b"hi");
     let bundle = link(&["--item", &stripe, "--field", "password"]);
     assert_eq!(entry(&bundle.entries[0]).data, b"sk_live");
+}
+
+#[test]
+fn send_ls_show_and_revoke_manage_links() {
+    let a = Device::new();
+    // Bare `send` still makes a link: with no terminal, it has nothing to send.
+    let err = a.fail(&["send", "--yes"]);
+    assert!(err.contains("nothing to send"), "{err}");
+
+    // A file named like a subcommand goes as a path.
+    std::fs::write(a.path("ls"), "not a subcommand").unwrap();
+    let out = a.output(
+        a.cmd(&["send", "./ls", "--yes", "--json"])
+            .current_dir(a.dir.path()),
+    );
+    assert!(out.status.success());
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = json["id"].as_str().unwrap();
+    let link = json["link"].as_str().unwrap();
+
+    let listed = a.run(&["send", "ls"]);
+    assert!(
+        listed.contains(&format!("{id}\topen\t0/1 opened")),
+        "{listed}"
+    );
+    assert!(listed.trim_end().ends_with("\tls"), "{listed}");
+    let shown = a.run(&["send", "show", id]);
+    assert!(shown.contains("what\tls"), "{shown}");
+
+    assert_eq!(
+        a.run(&["send", "revoke", id]).trim(),
+        format!("revoked {id}")
+    );
+    assert!(matches!(receive(link), Err(deadbolt_send::Error::Revoked)));
+    assert!(a.run(&["send", "ls"]).contains(&format!("{id}\trevoked")));
+    let err = a.fail(&["send", "ls", "--vault", "x"]);
+    assert!(err.contains("--vault does not apply"), "{err}");
+    let err = a.fail(&["sends"]);
+    assert!(err.contains("unrecognized subcommand"), "{err}");
 }
 
 #[test]

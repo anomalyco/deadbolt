@@ -240,11 +240,16 @@ enum Commands {
     /// ever sent with --item, by exact name or ID. Each --field applies to
     /// the nearest --item before it. Shows what will be sent and asks
     /// first; scripts pass --yes (--json and no terminal require it).
-    /// Prints the link; see `deadbolt sends` for what was sent.
+    /// Prints the link.
+    ///
+    ///   deadbolt send ls                            what was sent
+    ///   deadbolt send show <id>                     one send and its opens
+    ///   deadbolt send revoke <id>                   stop a link working
+    ///
+    /// A first argument of ls, show or revoke is the subcommand, never a
+    /// path: send a file named ls as ./ls.
     #[command(verbatim_doc_comment)]
     Send(send::SendArgs),
-    /// List, show or revoke sends.
-    Sends(send::SendsArgs),
     /// Audit saved passwords for weak, reused, and breached credentials, and
     /// sites supporting authenticator codes or passkeys.
     Health(health::HealthArgs),
@@ -535,7 +540,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
     let from_stdin = cli.passphrase_stdin;
     let vault = cli.vault;
     if vault.is_some()
-        && matches!(
+        && (matches!(
             cli.command,
             Commands::Init { .. }
                 | Commands::Join { .. }
@@ -555,15 +560,13 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Browser(_)
                 | Commands::BrowserHost { .. }
                 | Commands::Update(_)
-                | Commands::Sends(_)
-        )
+        ) || matches!(&cli.command, Commands::Send(args) if args.manages()))
     {
         bail!("--vault does not apply to this command");
     }
     caller::install();
     match cli.command {
         Commands::Send(args) => return send::send(&paths, args, vault, from_stdin).await,
-        Commands::Sends(args) => send::sends(&paths, args).await?,
         Commands::Item(command) => {
             client::ensure_running(&paths).await?;
             items::run(&paths, command, vault, from_stdin).await?;

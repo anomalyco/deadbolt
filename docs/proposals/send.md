@@ -10,7 +10,7 @@
   `version(1) || sender endpoint id(32) || access secret(32) || content key(32) || relay_len(1) || relay url || addr_count(1) || addrs`.
   Browsers never send a fragment to a server. Direct addresses go in only when there is no relay (local networks and tests); with one, they'd only lengthen the link and tell its holder the sender's network addresses.
 - **A send endpoint of its own.** The agent serves sends from a second iroh endpoint with a random key per agent run, not the device key: a link doesn't identify the device, and it stops working when the agent stops. Sends need no vault and no unlock (the agent holds only sealed bytes), so they keep working while the store is locked and on a device that isn't set up.
-- **The agent never sees the content key.** The CLI builds the bundle, seals it, and sends the agent only the sealed bytes and the access secret (`send-create`); the key goes straight from the CLI into the link. So `deadbolt sends` can't show a link again.
+- **The agent never sees the content key.** The CLI builds the bundle, seals it, and sends the agent only the sealed bytes and the access secret (`send-create`); the key goes straight from the CLI into the link. So `deadbolt send ls` can't show a link again.
 - **Bundle.** Minimal and general: `Bundle { title?, note?, entries: [Entry | Group] }`, `Entry { name, data, mime?, sensitive }`, `Group { name?, entries }`. Names and types are inside the encryption. Files are entries, folders groups, a vault item a group of its fields (secret and otp fields sensitive). At most 32 MiB sealed.
 - **Sealing.** Chunked XChaCha20-Poly1305 (STREAM): 64 KiB chunks, nonce `prefix(15) || last(1) || index(8)`, key `BLAKE3 derive_key("deadbolt send 2026-10 bundle", content key)`. Truncation, reordering and extension fail.
 
@@ -35,7 +35,7 @@ The secret is proved, never sent, and the proof is bound to the connection, so i
 
 ## Threat model
 
-- **Whoever holds the link is the recipient.** Anyone who sees it (a chat log, a shoulder, a link scanner) can open it instead. Single use plus "picked up" make that visible: if the intended recipient finds the link already used, the sender's `deadbolt sends show` says when it was opened, and they should treat the contents as exposed.
+- **Whoever holds the link is the recipient.** Anyone who sees it (a chat log, a shoulder, a link scanner) can open it instead. Single use plus "picked up" make that visible: if the intended recipient finds the link already used, the sender's `deadbolt send show` says when it was opened, and they should treat the contents as exposed.
 - **The sender must be online.** Their computer must be awake with the agent running until the link is opened. Nothing waits on a server.
 - **Link scanners.** The receive page only connects when the recipient presses "Receive", so a mail or chat scanner that runs scripts doesn't spend a one-time link. Previews that don't run scripts never see the fragment at all.
 - **The page.** It reads the fragment once, removes it from the address bar and history (`history.replaceState`), keeps it only in memory, and never logs or sends it. It sets `Referrer-Policy: no-referrer` (also as a meta tag), loads nothing from third parties (CSP allows connections only to the site, and to https/wss for the relays), has no analytics and can't be framed. Trust in the page is trust in deadbolt.pw serving honest code, as with any web client; the page is static and built from this repository.
@@ -48,8 +48,10 @@ The secret is proved, never sent, and the proof is bound to the connection, so i
 ```text
 deadbolt send [PATH|-]... [--item NAME|ID [--field NAME]]... [--title T] [--note N]
               [--sensitive] [--opens N] [--ttl 1h] [--qr] [--yes] [--json] [--wait]
-deadbolt sends [ls [--json] | show <id> [--json] | revoke <id>]
+deadbolt send ls [--json] | show <id> [--json] | revoke <id>
 ```
+
+`ls`, `show` and `revoke` are subcommands when they come first, never paths: a file named `ls` goes as `./ls`.
 
 - `deadbolt send ./file ./folder/` sends files (media type sniffed) and folders (as groups). Arguments are always paths and must exist: `deadbolt send ./prod.env.typo` fails with "./prod.env.typo: no such file" and never looks in the vault.
 - `deadbolt send` with no arguments asks for a secret with hidden input.
