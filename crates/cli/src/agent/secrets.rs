@@ -887,7 +887,7 @@ mod tests {
             let message = error.to_string();
             assert!(
                 message.contains("This shell runs under OpenCode (OpenCode › zsh › deadbolt)")
-                    && message.contains("see `deadbolt whoami`"),
+                    && message.contains("see `deadbolt debug whoami`"),
                 "{message}"
             );
         }

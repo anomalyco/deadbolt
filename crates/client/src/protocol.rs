@@ -1622,7 +1622,7 @@ pub struct Status {
     /// Where SSH clients reach this agent's SSH socket when `ssh_agent` is on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ssh_socket: Option<String>,
-    /// How the agent sees the client asking (`deadbolt whoami`).
+    /// How the agent sees the client asking (`deadbolt debug whoami`).
     pub caller: CallerInfo,
     /// A newer Deadbolt for this install, from the agent's background
     /// check; `deadbolt update` installs it.

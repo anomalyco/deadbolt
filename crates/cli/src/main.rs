@@ -115,15 +115,6 @@ enum Commands {
         #[command(subcommand)]
         command: Option<SyncCommand>,
     },
-    /// Print what changes in the agent as JSON lines: lock state, items,
-    /// vaults and devices, never values. Ends when the agent stops.
-    Watch,
-    /// Show how the agent sees this process: its verified program, terminal
-    /// and parents, and what it claims (DEADBOLT_CALLER, OPENCODE_SESSION_ID).
-    Whoami {
-        #[arg(long)]
-        json: bool,
-    },
     /// List what callers asked the agent for, and what the app showed or
     /// copied, newest first. Names items and fields, never values.
     Activity {
@@ -280,10 +271,26 @@ enum Commands {
     /// Homebrew or another package manager get its command instead. The agent
     /// restarts on the new build, locked. Works while the vault is locked.
     Update(update::UpdateArgs),
+    /// Diagnostics: how the agent sees you, its live change stream.
+    #[command(subcommand)]
+    Debug(DebugCommand),
     /// Serve the browser extension at ORIGIN over stdin/stdout. Browsers
     /// run this; `deadbolt browser install` sets it up.
     #[command(hide = true)]
     BrowserHost { origin: String },
+}
+
+#[derive(Subcommand)]
+enum DebugCommand {
+    /// Show how the agent sees this process: its verified program, terminal
+    /// and parents, and what it claims (DEADBOLT_CALLER, OPENCODE_SESSION_ID).
+    Whoami {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Print what changes in the agent as JSON lines: lock state, items,
+    /// vaults and devices, never values. Ends when the agent stops.
+    Watch,
 }
 
 #[derive(Subcommand)]
@@ -494,7 +501,7 @@ fn main() -> ExitCode {
 
 /// Whether `command` may end with the agent's update notice: not the
 /// agent, hosts and helpers other programs run, `update` and `status`
-/// (which say it themselves), `watch`, the app, or `run`, whose output is
+/// (which say it themselves), `debug watch`, the app, or `run`, whose output is
 /// its program's.
 fn notices_updates(command: &Commands) -> bool {
     !matches!(
@@ -504,7 +511,7 @@ fn notices_updates(command: &Commands) -> bool {
             | Commands::SshSign { .. }
             | Commands::Update(_)
             | Commands::Status
-            | Commands::Watch
+            | Commands::Debug(DebugCommand::Watch)
             | Commands::App
             | Commands::Run(_)
     )
@@ -539,8 +546,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 | Commands::Unlock { .. }
                 | Commands::Lock
                 | Commands::Status
-                | Commands::Watch
-                | Commands::Whoami { .. }
+                | Commands::Debug(_)
                 | Commands::Activity { .. }
                 | Commands::Agent { .. }
                 | Commands::TouchId { .. }
@@ -826,11 +832,11 @@ async fn run(cli: Cli) -> Result<ExitCode> {
             let status = client::ensure_running(&paths).await?;
             print_status(&status);
         }
-        Commands::Whoami { json } => caller::whoami(&paths, json).await?,
+        Commands::Debug(DebugCommand::Whoami { json }) => caller::whoami(&paths, json).await?,
         Commands::Activity { since, limit, json } => {
             caller::activity(&paths, since, limit, json, from_stdin).await?;
         }
-        Commands::Watch => {
+        Commands::Debug(DebugCommand::Watch) => {
             client::ensure_running(&paths).await?;
             let mut changes = deadbolt_client::watch(&paths, false).await?;
             while let Some(change) = changes.next().await? {

@@ -28,7 +28,7 @@ hint, so it only ever refuses):
 
 A refusal names the AI host it saw ("This shell runs under OpenCode
 (OpenCode › zsh › deadbolt)") and points to a terminal outside it, the app,
-and `deadbolt whoami`. On Linux the app has no signature to check, so
+and `deadbolt debug whoami`. On Linux the app has no signature to check, so
 Deadbolt.app started from inside an AI's tree is a caller like any other
 there and is refused the same; start it from the desktop instead.
 
@@ -200,7 +200,7 @@ That sorts every connection into one of three:
 **Linux is labels only.** There are no code signatures, and `/proc/<pid>/exe`
 is read after the connection, so a process can race it. A Linux peer is
 always a caller, its check `unverified`, and its label ends "unverified
-(Linux)" in `whoami`, Activity and the app. Nothing a Linux peer sends is
+(Linux)" in `debug whoami`, Activity and the app. Nothing a Linux peer sends is
 taken on its word: the agent refuses every `ActivityReport`, so the app's
 reveals and copies aren't entries there. Its requests for the values it
 shows are, as an unverified caller's.
@@ -411,7 +411,7 @@ deadbolt inject -i config.tpl -o config.json          # {{ deadbolt://… }}; wr
 deadbolt read deadbolt://personal/GitHub/password     # a tap every time
 echo -n "$NEW_KEY" | deadbolt new note --name "OpenAI API Key" credential:secret=-
 deadbolt set deadbolt://personal/Stripe password=-    # value on stdin
-deadbolt whoami                            # how Deadbolt sees this caller
+deadbolt debug whoami                      # how Deadbolt sees this caller
 deadbolt grants                            # live grants; grants revoke <id> | --all
 deadbolt activity --since 1h
 ```
@@ -426,7 +426,7 @@ deadbolt activity --since 1h
 
 Version 11 (build order 1):
 
-- `Status.caller: CallerInfo`, for `whoami`.
+- `Status.caller: CallerInfo`, for `debug whoami`.
 - `Request.claimed`: what the client claims (`DEADBOLT_CALLER`,
   `OPENCODE_SESSION_ID`), on every request.
 - `ActivityList { since, limit, before }`, newest first, at most 1,000 a
@@ -464,7 +464,7 @@ Later:
 ## Build order
 
 1. **Caller identity and Activity, observe only.** Peer token, signature
-   check, tty, ancestry, `whoami`, `activity`, the app's Activity list. The
+   check, tty, ancestry, `debug whoami`, `activity`, the app's Activity list. The
    app and CLI check the agent they talk to. Nothing is refused yet.
 2. **Approvals.** The agent's queue, the app's panel, `confirm`, the
    passphrase fallback, grants and anchors, lock dropping them, limits.
