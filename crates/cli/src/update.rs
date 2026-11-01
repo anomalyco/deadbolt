@@ -84,6 +84,9 @@ pub enum Manager {
     /// `npm i -g @deadbolt/cli`: the command links into its platform
     /// package (Deadbolt.app's helper there, on macOS).
     Npm,
+    /// `bun add -g @deadbolt/cli`: npm's packages, in bun's global
+    /// `install/global/node_modules`.
+    Bun,
 }
 
 impl Manager {
@@ -93,7 +96,7 @@ impl Manager {
     fn distribution(self) -> &'static str {
         match self {
             Self::Brew | Self::BrewCask => "brew",
-            Self::Npm | Self::Nix | Self::Cargo | Self::System => "unknown",
+            Self::Npm | Self::Bun | Self::Nix | Self::Cargo | Self::System => "unknown",
         }
     }
 
@@ -105,6 +108,7 @@ impl Manager {
             Self::Cargo => "Cargo",
             Self::System => "its package manager",
             Self::Npm => "npm",
+            Self::Bun => "bun",
         }
     }
 
@@ -116,13 +120,18 @@ impl Manager {
             Self::Nix => "update it with Nix, which installed it",
             Self::Cargo => "reinstall it with cargo install, which installed it",
             Self::System => "update it with the package manager that installed it",
-            Self::Npm => {
+            Self::Npm | Self::Bun => {
                 let tag = if channel == "stable" {
                     "latest"
                 } else {
                     channel
                 };
-                return format!("npm i -g @deadbolt/cli@{tag}");
+                let install = if self == Self::Bun {
+                    "bun add -g"
+                } else {
+                    "npm i -g"
+                };
+                return format!("{install} @deadbolt/cli@{tag}");
             }
         };
         fixed.into()
@@ -140,7 +149,10 @@ const CASKROOMS: [&str; 2] = [
 pub fn classify(exe: &Path, macos: bool, exists: impl Fn(&Path) -> bool) -> Install {
     // Before the bundle: npm's darwin package carries Deadbolt.app.
     if exe.components().any(|c| c.as_os_str() == "node_modules") {
-        return Install::Managed(Manager::Npm);
+        let bun = exe
+            .ancestors()
+            .any(|dir| dir.ends_with("install/global/node_modules"));
+        return Install::Managed(if bun { Manager::Bun } else { Manager::Npm });
     }
     if macos && let Some(bundle) = crate::app::bundle_of(exe) {
         let text = bundle.to_string_lossy();
@@ -1944,6 +1956,14 @@ mod tests {
             (
                 "/usr/lib/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
                 Manager::Npm,
+            ),
+            (
+                "/home/me/.bun/install/global/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
+                Manager::Bun,
+            ),
+            (
+                "/Users/me/.bun/install/global/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app/Contents/Helpers/deadbolt",
+                Manager::Bun,
             ),
         ] {
             assert_eq!(

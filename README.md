@@ -16,11 +16,14 @@ There is no stable release yet, so install the latest build of `dev`:
 curl -fsSL https://deadbolt.pw/install | DEADBOLT_CHANNEL=dev sh
 ```
 
-Or with npm (Node 18+), which on macOS also brings Deadbolt.app (`deadbolt app` opens it and adds it to `~/Applications`):
+Or with bun or npm (Node 18+), which on macOS also brings Deadbolt.app (`deadbolt app` opens it and adds it to `~/Applications`):
 
 ```sh
-npm i -g @deadbolt/cli@dev    # the latest dev build; @deadbolt/cli once stable releases start
+bun add -g @deadbolt/cli@dev  # the latest dev build; @deadbolt/cli once stable releases start
+npm i -g @deadbolt/cli@dev
 ```
+
+bun skips the package's install script; the first `deadbolt` run links it instead.
 
 The script installs `deadbolt` to `~/.local/bin` (set `DEADBOLT_INSTALL` to change it) and checks its SHA-256. It works on macOS and Linux, x64 and arm64. On macOS you can get the app instead: [Deadbolt.app (dev)](https://anoma.ly/release/deadbolt/desktop/dev/macos-arm64-dmg), a universal build.
 

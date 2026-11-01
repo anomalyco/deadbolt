@@ -114,8 +114,9 @@ fn exec_arg(arg: &str) -> String {
     quoted.replace('%', "%%").replace('\\', "\\\\")
 }
 
-/// The command a launcher entry runs for `exe` (symlinks resolved): npm's
-/// own link to it when npm installed it (`<prefix>/bin/deadbolt`, or
+/// The command a launcher entry runs for `exe` (symlinks resolved): the
+/// package manager's own link to it when npm or bun installed it
+/// (`<prefix>/bin/deadbolt`, bun's `~/.bun/bin/deadbolt`, or
 /// `node_modules/.bin/deadbolt`), which stays put when an update or a
 /// fallback moves the platform package; else `exe`.
 pub fn launcher_program(exe: &Path) -> PathBuf {
@@ -128,7 +129,13 @@ pub fn launcher_program(exe: &Path) -> PathBuf {
         .collect();
     let global = modules.iter().filter_map(|m| {
         let lib = m.parent()?;
-        (lib.file_name()? == "lib").then(|| lib.parent().map(|p| p.join("bin/deadbolt")))?
+        if lib.file_name()? == "lib" {
+            return lib.parent().map(|p| p.join("bin/deadbolt"));
+        }
+        // bun: `<BUN_INSTALL>/install/global/node_modules`, linked from
+        // `<BUN_INSTALL>/bin`.
+        m.ends_with("install/global/node_modules")
+            .then(|| m.ancestors().nth(3).map(|root| root.join("bin/deadbolt")))?
     });
     let local = modules.iter().map(|m| m.join(".bin/deadbolt"));
     global
@@ -313,6 +320,23 @@ mod tests {
         std::fs::create_dir_all(other.parent().unwrap()).unwrap();
         std::fs::write(&other, "").unwrap();
         assert_eq!(launcher_program(&other), other);
+    }
+
+    #[test]
+    fn a_bun_install_launches_through_buns_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let exe = root.join("install/global/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt");
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        assert_eq!(launcher_program(&exe), exe);
+        let wrapper = root.join("install/global/node_modules/@deadbolt/cli/bin/deadbolt");
+        std::fs::create_dir_all(wrapper.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&exe, &wrapper).unwrap();
+        let bin = root.join("bin/deadbolt");
+        std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&wrapper, &bin).unwrap();
+        assert_eq!(launcher_program(&exe), bin);
     }
 
     #[test]
