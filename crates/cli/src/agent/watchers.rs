@@ -64,6 +64,8 @@ struct Pending {
     activity: bool,
     /// Password health memo or breach-check state changed.
     health: bool,
+    /// Whether an update is available changed.
+    update: bool,
     resync: bool,
     stopping: bool,
     /// Another launch asked for the window, with the latest token.
@@ -77,6 +79,7 @@ impl Pending {
             || self.vaults
             || self.activity
             || self.health
+            || self.update
             || self.resync
             || self.stopping)
             && self.items.is_empty()
@@ -123,6 +126,9 @@ impl Pending {
             }
             if pending.health {
                 out.push(Change::Health);
+            }
+            if pending.update {
+                out.push(Change::Update);
             }
         }
         if let Some(token) = pending.activate {
@@ -186,6 +192,7 @@ impl Watchers {
             *p = Pending {
                 locked: true,
                 resync: p.resync,
+                update: p.update,
                 stopping: p.stopping,
                 activate: p.activate.take(),
                 ..Pending::default()
@@ -203,6 +210,10 @@ impl Watchers {
 
     pub fn health(&self) {
         self.publish(|p| p.health = true);
+    }
+
+    pub fn update(&self) {
+        self.publish(|p| p.update = true);
     }
 
     /// Asks the most recent app watcher to bring its window forward, true

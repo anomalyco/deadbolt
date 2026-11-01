@@ -1,11 +1,15 @@
 //! `deadbolt update`: updates this Deadbolt from the Anomaly release service
 //! (docs/releasing.md, "Updater"), following the service's client rules
 //! (`anomalyco/release` docs/protocol.md). What it updates depends on how
-//! this binary is installed ([`classify`]): Deadbolt.app (the `desktop`
-//! artifact), a standalone CLI (`cli`), or nothing, for a package manager's
-//! install, which gets that manager's command instead. An unpacked browser
-//! extension registered with `deadbolt browser install --extension-dir` is
-//! updated too (`extension`).
+//! this binary is installed ([`method`]): Deadbolt.app (the `desktop`
+//! artifact) or a standalone CLI (`cli`) replace themselves; npm, pnpm, bun,
+//! yarn and Homebrew installs run that manager, pinned to the version it
+//! serves; Nix, Cargo and system installs get their manager's command. An
+//! unpacked browser extension registered with `deadbolt browser install
+//! --extension-dir` is updated too (`extension`).
+//!
+//! The agent checks in the background ([`available`]) and only ever says
+//! so: nothing is installed unless the user runs `deadbolt update`.
 //!
 //! Nothing downloaded runs or replaces anything before its size and SHA-256
 //! match the manifest and, on macOS, its code signature satisfies what the
@@ -13,6 +17,7 @@
 //! beside its destination and renamed into place.
 
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::time::Duration;
@@ -26,6 +31,7 @@ use url::Url;
 
 use crate::config::{ExtensionBuild, ExtensionDir};
 use crate::paths::Paths;
+use crate::protocol::UpdateInfo;
 
 /// Where the release service lives.
 const SERVICE: &str = "https://anoma.ly/release/";
@@ -33,6 +39,21 @@ const SERVICE: &str = "https://anoma.ly/release/";
 /// URL, so tests can serve a fake release and no environment can send a
 /// release build anywhere else.
 const SERVICE_OVERRIDE: &str = "DEADBOLT_RELEASE_URL";
+/// The npm registry, which says what npm, pnpm, bun and yarn can install.
+const REGISTRY: &str = "https://registry.npmjs.org/";
+/// Overrides [`REGISTRY`] as [`SERVICE_OVERRIDE`] does the service.
+const REGISTRY_OVERRIDE: &str = "DEADBOLT_NPM_REGISTRY_URL";
+/// npm's package, which links to its platform package's `deadbolt`.
+const PACKAGE: &str = "@deadbolt/cli";
+/// The platform packages `@deadbolt/cli` installs one of.
+const PLATFORM_PACKAGES: [&str; 6] = [
+    "@deadbolt/cli-linux-x64",
+    "@deadbolt/cli-linux-arm64",
+    "@deadbolt/cli-linux-x64-musl",
+    "@deadbolt/cli-linux-arm64-musl",
+    "@deadbolt/cli-darwin-arm64",
+    "@deadbolt/cli-darwin-x64",
+];
 /// What `Deadbolt.app` must satisfy (identifier, team, Developer ID,
 /// notarized), the release's `verify-macos` check.
 const APP_REQUIREMENT: &str = include_str!("../../app/update-requirement.txt");
@@ -81,23 +102,34 @@ pub enum Manager {
     Nix,
     Cargo,
     System,
-    /// `npm i -g @deadbolt/cli`: the command links into its platform
-    /// package (Deadbolt.app's helper there, on macOS).
+    /// `npm`, `pnpm`, `bun` or `yarn` said it has `@deadbolt/cli` globally:
+    /// the command links into its platform package (Deadbolt.app's helper
+    /// there, on macOS).
     Npm,
-    /// `bun add -g @deadbolt/cli`: npm's packages, in bun's global
-    /// `install/global/node_modules`.
+    Pnpm,
     Bun,
+    Yarn,
+    /// npm's package, but none of those managers said it has it.
+    Package,
 }
 
 impl Manager {
-    /// The release service's distribution kind. npm publishes in the same
-    /// release run, right after the service, so the channel's version is
-    /// npm's too.
+    /// The release service's distribution kind. npm's packages follow
+    /// what the registry serves instead ([`served_by_npm`]).
     fn distribution(self) -> &'static str {
         match self {
             Self::Brew | Self::BrewCask => "brew",
-            Self::Npm | Self::Bun | Self::Nix | Self::Cargo | Self::System => "unknown",
+            _ => "unknown",
         }
+    }
+
+    /// Whether it installs npm's package, so the registry says what it can
+    /// install.
+    fn npm(self) -> bool {
+        matches!(
+            self,
+            Self::Npm | Self::Pnpm | Self::Bun | Self::Yarn | Self::Package
+        )
     }
 
     /// Who updates it, for people.
@@ -108,33 +140,147 @@ impl Manager {
             Self::Cargo => "Cargo",
             Self::System => "its package manager",
             Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
             Self::Bun => "bun",
+            Self::Yarn => "yarn",
+            Self::Package => "its JavaScript package manager",
         }
     }
 
-    /// What to run when the manifest names no command, for `channel`.
+    /// The install method's name in `status` and the agent's check
+    /// ([`UpdateInfo`](crate::protocol::UpdateInfo)).
+    fn key(self) -> &'static str {
+        match self {
+            Self::Brew | Self::BrewCask => "brew",
+            Self::Nix => "nix",
+            Self::Cargo => "cargo",
+            Self::System => "system",
+            Self::Npm => "npm",
+            Self::Pnpm => "pnpm",
+            Self::Bun => "bun",
+            Self::Yarn => "yarn",
+            Self::Package => "package",
+        }
+    }
+
+    /// What to run by hand when `deadbolt update` doesn't run the manager,
+    /// for `channel`.
     fn hint(self, channel: &str) -> String {
-        let fixed = match self {
-            Self::Brew => "brew upgrade anomalyco/tap/deadbolt",
-            Self::BrewCask => "brew upgrade --cask anomalyco/tap/deadbolt",
-            Self::Nix => "update it with Nix, which installed it",
-            Self::Cargo => "reinstall it with cargo install, which installed it",
-            Self::System => "update it with the package manager that installed it",
-            Self::Npm | Self::Bun => {
-                let tag = if channel == "stable" {
-                    "latest"
-                } else {
-                    channel
-                };
-                let install = if self == Self::Bun {
-                    "bun add -g"
-                } else {
-                    "npm i -g"
-                };
-                return format!("{install} @deadbolt/cli@{tag}");
-            }
+        let tag = if channel == "stable" {
+            "latest"
+        } else {
+            channel
         };
-        fixed.into()
+        match self {
+            Self::Nix => "update it with Nix, which installed it".into(),
+            Self::Cargo => "reinstall it with cargo install, which installed it".into(),
+            Self::System => "update it with the package manager that installed it".into(),
+            Self::Package => format!(
+                "reinstall {PACKAGE}@{tag} with the package manager that installed it \
+                 (npm i -g, pnpm add -g, bun add -g or yarn global add)"
+            ),
+            _ => upgrade_command(self, tag).map_or_else(String::new, |c| c.shown),
+        }
+    }
+}
+
+/// The command that installs `version` with a package manager. Always this
+/// fixed command, never one from the network.
+#[derive(Debug, PartialEq, Eq)]
+struct Upgrade {
+    /// Looked up with [`find_program`].
+    program: &'static str,
+    args: Vec<String>,
+    /// As people would type it.
+    shown: String,
+    /// bun never prunes its shared cache, so it gets a fresh one, given
+    /// before the package and deleted afterwards (as OpenCode does).
+    own_cache: bool,
+}
+
+/// [`Upgrade`] for `manager`, pinned to `version`; `None` for the managers
+/// `deadbolt update` leaves to the user.
+fn upgrade_command(manager: Manager, version: &str) -> Option<Upgrade> {
+    let target = format!("{PACKAGE}@{version}");
+    let (program, args): (&str, Vec<String>) = match manager {
+        Manager::Npm => ("npm", vec!["install".into(), "--global".into(), target]),
+        Manager::Pnpm => (
+            "pnpm",
+            vec![
+                "add".into(),
+                "--global".into(),
+                format!("--allow-build={PACKAGE}"),
+                target,
+            ],
+        ),
+        // `--trust` runs the wrapper's postinstall, which links it.
+        Manager::Bun => (
+            "bun",
+            vec![
+                "install".into(),
+                "--global".into(),
+                "--trust".into(),
+                target,
+            ],
+        ),
+        Manager::Yarn => ("yarn", vec!["global".into(), "add".into(), target]),
+        Manager::Brew => (
+            "brew",
+            vec!["upgrade".into(), "anomalyco/tap/deadbolt".into()],
+        ),
+        Manager::BrewCask => (
+            "brew",
+            vec![
+                "upgrade".into(),
+                "--cask".into(),
+                "anomalyco/tap/deadbolt".into(),
+            ],
+        ),
+        Manager::Nix | Manager::Cargo | Manager::System | Manager::Package => return None,
+    };
+    Some(Upgrade {
+        program,
+        shown: std::iter::once(program)
+            .chain(args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+        args,
+        own_cache: manager == Manager::Bun,
+    })
+}
+
+/// The install method's name for `status` and the agent's check: the
+/// install script's directory (`$DEADBOLT_INSTALL`, else `~/.local/bin`)
+/// is `curl`, any other standalone `deadbolt` `standalone`.
+pub fn method_key(install: &Install) -> &'static str {
+    match install {
+        Install::App(_) | Install::Unmovable(_) => "app",
+        Install::Standalone(dir) => {
+            let script = crate::config::env("DEADBOLT_INSTALL")
+                .ok()
+                .filter(|d| !d.is_empty())
+                .map(PathBuf::from)
+                .or_else(|| {
+                    crate::config::env("HOME")
+                        .ok()
+                        .map(|h| PathBuf::from(h).join(".local/bin"))
+                });
+            let same = script.is_some_and(|s| s.canonicalize().unwrap_or(s) == *dir);
+            if same { "curl" } else { "standalone" }
+        }
+        Install::Managed(manager) => manager.key(),
+    }
+}
+
+/// How `status` and the notice name an install method ([`method_key`]).
+pub fn installed_with(key: &str) -> String {
+    match key {
+        "app" => "Deadbolt.app".into(),
+        "curl" => "installed with the install script".into(),
+        "standalone" => "standalone".into(),
+        "brew" => "installed with Homebrew".into(),
+        "package" => "installed with a JavaScript package manager".into(),
+        other => format!("installed with {other}"),
     }
 }
 
@@ -144,15 +290,13 @@ const CASKROOMS: [&str; 2] = [
     "/usr/local/Caskroom/deadbolt",
 ];
 
-/// How the `deadbolt` at `exe` (symlinks resolved) is installed. `exists`
-/// says whether a path exists (Homebrew's cask records).
+/// How the `deadbolt` at `exe` (symlinks resolved) is installed, by path
+/// alone: npm's package is [`Manager::Package`] until [`method`] asks the
+/// managers. `exists` says whether a path exists (Homebrew's cask records).
 pub fn classify(exe: &Path, macos: bool, exists: impl Fn(&Path) -> bool) -> Install {
     // Before the bundle: npm's darwin package carries Deadbolt.app.
     if exe.components().any(|c| c.as_os_str() == "node_modules") {
-        let bun = exe
-            .ancestors()
-            .any(|dir| dir.ends_with("install/global/node_modules"));
-        return Install::Managed(if bun { Manager::Bun } else { Manager::Npm });
+        return Install::Managed(Manager::Package);
     }
     if macos && let Some(bundle) = crate::app::bundle_of(exe) {
         let text = bundle.to_string_lossy();
@@ -181,6 +325,191 @@ pub fn classify(exe: &Path, macos: bool, exists: impl Fn(&Path) -> bool) -> Inst
     Install::Standalone(dir)
 }
 
+/// How the `deadbolt` at `exe` (symlinks resolved) is installed, as
+/// OpenCode's updater tells: [`classify`], and for npm's package (one whose
+/// `@deadbolt/cli` links to `exe`, [`package_of`]) the first of npm, pnpm,
+/// bun and yarn that says it has `@deadbolt/cli` globally, those named in
+/// `exe`'s path first.
+pub async fn method(exe: &Path) -> Install {
+    let install = classify(exe, cfg!(target_os = "macos"), Path::exists);
+    if install != Install::Managed(Manager::Package) || package_of(exe).is_none() {
+        return install;
+    }
+    // All at once; a missing manager, a failure or no answer is a no.
+    let asks: Vec<_> = manager_order(exe)
+        .into_iter()
+        .map(|manager| {
+            (
+                manager,
+                tokio::spawn(has_package(manager, exe.to_path_buf())),
+            )
+        })
+        .collect();
+    for (manager, ask) in asks {
+        if ask.await.unwrap_or(false) {
+            return Install::Managed(manager);
+        }
+    }
+    install
+}
+
+/// Whether `manager` says it has `@deadbolt/cli` globally.
+async fn has_package(manager: Manager, exe: PathBuf) -> bool {
+    let (program, args): (&str, &[&str]) = match manager {
+        Manager::Npm => ("npm", &["list", "-g", "--depth=0", PACKAGE]),
+        Manager::Pnpm => ("pnpm", &["list", "-g", "--depth=0", PACKAGE]),
+        Manager::Bun => ("bun", &["pm", "ls", "-g"]),
+        _ => ("yarn", &["global", "list"]),
+    };
+    let Some(program) = find_program(program, &exe) else {
+        return false;
+    };
+    let output = tokio::process::Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(Duration::from_secs(15), output).await {
+        Ok(Ok(output)) => lists_package(&String::from_utf8_lossy(&output.stdout)),
+        _ => false,
+    }
+}
+
+/// npm, pnpm, bun and yarn, those named in `exe`'s path first (`.bun`,
+/// `pnpm`, `yarn`), and bun's `install/global/node_modules` too.
+fn manager_order(exe: &Path) -> Vec<Manager> {
+    let parts: Vec<String> = exe
+        .components()
+        .map(|c| {
+            let part = c.as_os_str().to_string_lossy().to_lowercase();
+            part.trim_start_matches('.').to_string()
+        })
+        .collect();
+    let bun = exe
+        .ancestors()
+        .any(|dir| dir.ends_with("install/global/node_modules"));
+    let mut order = vec![Manager::Npm, Manager::Pnpm, Manager::Bun, Manager::Yarn];
+    order.sort_by_key(|m| {
+        let named = parts.iter().any(|p| p == m.key()) || (bun && *m == Manager::Bun);
+        !named
+    });
+    order
+}
+
+/// Whether a manager's list names `@deadbolt/cli` itself (`@deadbolt/cli@1`,
+/// `@deadbolt/cli 1`), not just a platform package.
+fn lists_package(text: &str) -> bool {
+    text.match_indices(PACKAGE).any(|(at, _)| {
+        text[at + PACKAGE.len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| c == '@' || c.is_whitespace() || c == '"')
+    })
+}
+
+/// The `@deadbolt/cli` package directory whose `deadbolt` is `exe`: `exe`
+/// is in `@deadbolt/cli` or one of its platform packages (the directory
+/// under `node_modules/@deadbolt/`), and that wrapper's `bin` resolves to
+/// `exe`. The wrapper sits beside its platform package, or above it when
+/// nested (`cli/node_modules/@deadbolt/…`, or the postinstall's own
+/// `cli/platform/node_modules/@deadbolt/…`).
+pub fn package_of(exe: &Path) -> Option<PathBuf> {
+    let scoped = |dir: &Path| {
+        dir.parent().is_some_and(|p| {
+            p.file_name().is_some_and(|n| n == "@deadbolt")
+                && p.parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|n| n == "node_modules")
+        })
+    };
+    let dir = exe.ancestors().skip(1).find(|d| scoped(d))?;
+    let name = package_name(dir)?;
+    if name != PACKAGE && !PLATFORM_PACKAGES.contains(&name.as_str()) {
+        return None;
+    }
+    let mut wrappers: Vec<PathBuf> = vec![dir.to_path_buf(), dir.with_file_name("cli")];
+    wrappers.extend(
+        dir.ancestors()
+            .skip(1)
+            .filter(|d| d.file_name().is_some_and(|n| n == "cli") && scoped(d))
+            .map(Path::to_path_buf),
+    );
+    wrappers.into_iter().find(|w| wrapper_links(w, exe))
+}
+
+fn package_json(dir: &Path) -> Option<serde_json::Value> {
+    serde_json::from_slice(&std::fs::read(dir.join("package.json")).ok()?).ok()
+}
+
+fn package_name(dir: &Path) -> Option<String> {
+    Some(package_json(dir)?.get("name")?.as_str()?.to_string())
+}
+
+/// Whether `wrapper` is `@deadbolt/cli` and its `deadbolt` bin resolves to
+/// `exe`.
+fn wrapper_links(wrapper: &Path, exe: &Path) -> bool {
+    let Some(json) = package_json(wrapper) else {
+        return false;
+    };
+    if json.get("name").and_then(|n| n.as_str()) != Some(PACKAGE) {
+        return false;
+    }
+    let bin = match json.get("bin") {
+        Some(serde_json::Value::String(bin)) => Some(bin.as_str()),
+        Some(serde_json::Value::Object(bins)) => bins.get("deadbolt").and_then(|b| b.as_str()),
+        _ => None,
+    };
+    bin.and_then(|bin| wrapper.join(bin).canonicalize().ok())
+        .is_some_and(|bin| bin == exe)
+}
+
+/// `name`'s executable on PATH; bun also in `$BUN_INSTALL/bin`,
+/// `~/.bun/bin` and beside the global install `exe` is in, Homebrew in its
+/// usual prefixes, as a program started without a login shell's PATH (the
+/// agent from a launcher) may not find them otherwise.
+fn find_program(name: &str, exe: &Path) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let mut dirs: Vec<PathBuf> = crate::config::env("PATH")
+        .map(|path| std::env::split_paths(&path).collect())
+        .unwrap_or_default();
+    match name {
+        "bun" => {
+            dirs.extend(
+                exe.ancestors()
+                    .find(|d| d.ends_with("install/global/node_modules"))
+                    .and_then(|d| d.ancestors().nth(3))
+                    .map(|root| root.join("bin")),
+            );
+            dirs.extend(
+                crate::config::env("BUN_INSTALL")
+                    .ok()
+                    .map(|d| PathBuf::from(d).join("bin")),
+            );
+            dirs.extend(
+                crate::config::env("HOME")
+                    .ok()
+                    .map(|h| PathBuf::from(h).join(".bun/bin")),
+            );
+        }
+        "brew" => dirs.extend(
+            [
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/home/linuxbrew/.linuxbrew/bin",
+            ]
+            .map(PathBuf::from),
+        ),
+        _ => {}
+    }
+    dirs.into_iter()
+        .filter(|d| d.is_absolute())
+        .map(|d| d.join(name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
 /// The release service's name for this build's platform: the static musl
 /// build follows its own target, `linux-<arch>-musl`.
 fn target() -> Result<String> {
@@ -203,7 +532,7 @@ fn target() -> Result<String> {
 }
 
 /// The channel this build was published on; none for builds from source.
-fn build_channel() -> Option<&'static str> {
+pub(crate) fn build_channel() -> Option<&'static str> {
     Some(env!("DEADBOLT_BUILD_CHANNEL")).filter(|c| !c.is_empty())
 }
 
@@ -400,12 +729,19 @@ fn rollout_bucket(dir: &Path) -> u8 {
 
 struct Service {
     base: Url,
+    registry: Url,
     client: reqwest::Client,
 }
 
 impl Service {
     fn new(channel: Option<&str>) -> Result<Self> {
-        let base = service_base(crate::config::env(SERVICE_OVERRIDE).ok().as_deref())?;
+        let env = |name| crate::config::env(name).ok();
+        let base = loopback_or(SERVICE, SERVICE_OVERRIDE, env(SERVICE_OVERRIDE).as_deref())?;
+        let registry = loopback_or(
+            REGISTRY,
+            REGISTRY_OVERRIDE,
+            env(REGISTRY_OVERRIDE).as_deref(),
+        )?;
         // reqwest takes the process's rustls provider; Deadbolt's is ring.
         rustls::crypto::ring::default_provider()
             .install_default()
@@ -413,13 +749,17 @@ impl Service {
         let agent = format!("deadbolt/{}/{VERSION}/cli", channel.unwrap_or("source"));
         let client = reqwest::Client::builder()
             .user_agent(agent)
-            .https_only(base.scheme() == "https")
+            .https_only(base.scheme() == "https" && registry.scheme() == "https")
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
             .read_timeout(Duration::from_secs(60))
             .build()
             .context("setting up HTTPS")?;
-        Ok(Self { base, client })
+        Ok(Self {
+            base,
+            registry,
+            client,
+        })
     }
 
     fn manifest_url(&self, artifact: &str, channel: &str) -> Result<Url> {
@@ -432,6 +772,30 @@ impl Service {
     /// of `artifact`.
     async fn manifest(&self, artifact: &str, channel: &str) -> Result<Option<(Url, String)>> {
         let url = self.manifest_url(artifact, channel)?;
+        Ok(self.small(&url).await?.map(|text| (url, text)))
+    }
+
+    /// The version npm serves for `channel` (its dist-tag: `latest` for
+    /// stable), which is all npm, pnpm, bun and yarn can install.
+    async fn npm_version(&self, channel: &str) -> Result<Option<String>> {
+        let url = self
+            .registry
+            .join(&format!("-/package/{PACKAGE}/dist-tags"))?;
+        let tag = if channel == "stable" {
+            "latest"
+        } else {
+            channel
+        };
+        let Some(text) = self.small(&url).await? else {
+            return Ok(None);
+        };
+        let tags: BTreeMap<String, serde_json::Value> =
+            serde_json::from_str(&text).with_context(|| format!("reading {url}"))?;
+        Ok(tags.get(tag).and_then(|v| v.as_str()).map(str::to_string))
+    }
+
+    /// A small document's text, as manifests are read: `None` on 404.
+    async fn small(&self, url: &Url) -> Result<Option<String>> {
         let fetch = async {
             let mut response = self.client.get(url.clone()).send().await?;
             if response.status() == reqwest::StatusCode::NOT_FOUND {
@@ -447,15 +811,12 @@ impl Service {
                     bail!("it is too large for a manifest");
                 }
             }
-            Ok(Some(
-                String::from_utf8(body).context("the manifest is not UTF-8")?,
-            ))
+            Ok(Some(String::from_utf8(body).context("it is not UTF-8")?))
         };
-        let text = tokio::time::timeout(Duration::from_secs(30), fetch)
+        tokio::time::timeout(Duration::from_secs(30), fetch)
             .await
             .with_context(|| format!("no answer from {url}"))?
-            .with_context(|| format!("fetching {url}"))?;
-        Ok(text.map(|text| (url, text)))
+            .with_context(|| format!("fetching {url}"))
     }
 
     /// Downloads `target`, listed in the manifest at `manifest`, to `file`,
@@ -506,19 +867,19 @@ impl Service {
     }
 }
 
-/// The service's base URL: [`SERVICE`], or in debug builds an override on
-/// 127.0.0.1 or [::1].
-fn service_base(over: Option<&str>) -> Result<Url> {
+/// A base URL: `default`, or in debug builds `over` (from the variable
+/// `var`) on 127.0.0.1 or [::1].
+fn loopback_or(default: &str, var: &str, over: Option<&str>) -> Result<Url> {
     let Some(over) = over.filter(|o| cfg!(debug_assertions) && !o.is_empty()) else {
-        return Ok(Url::parse(SERVICE)?);
+        return Ok(Url::parse(default)?);
     };
-    let mut url = Url::parse(over).with_context(|| format!("{SERVICE_OVERRIDE} {over}"))?;
+    let mut url = Url::parse(over).with_context(|| format!("{var} {over}"))?;
     let loopback = matches!(
         url.host(),
         Some(url::Host::Ipv4(ip)) if ip.is_loopback()
     ) || matches!(url.host(), Some(url::Host::Ipv6(ip)) if ip.is_loopback());
     if !loopback || !matches!(url.scheme(), "http" | "https") {
-        bail!("{SERVICE_OVERRIDE} must be a URL on 127.0.0.1 or [::1]");
+        bail!("{var} must be a URL on 127.0.0.1 or [::1]");
     }
     if !url.path().ends_with('/') {
         url.set_path(&format!("{}/", url.path()));
@@ -542,31 +903,23 @@ fn file_url(manifest: &Url, reference: &str) -> Result<Url> {
 
 // Running the update.
 
-pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
-    let built = build_channel();
-    let Some(channel) = args.channel.as_deref().or(built) else {
-        bail!(
-            "this deadbolt was built from source and follows no release channel; \
-             pass --channel dev or --channel stable"
-        );
-    };
-    let exe = crate::app::this_binary()?;
-    let install = classify(&exe, cfg!(target_os = "macos"), Path::exists);
-    let service = Service::new(built)?;
-    let state = paths
-        .log
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-    let state = UpdateState::open(&state)?;
-    let bucket = rollout_bucket(&state.dir);
-    let target = target()?;
-    let shown = match built {
-        Some(built) => format!("{VERSION} ({built})"),
-        None => format!("{VERSION} (source)"),
-    };
+/// For npm's package: npm, pnpm, bun and yarn install only what the
+/// registry serves for the channel (`served`), which trails the release
+/// service by minutes, so until it serves the release the update is
+/// pending, and never offered before the manager can install it.
+fn served_by_npm(decision: Decision, served: Option<&str>) -> Decision {
+    match decision {
+        Decision::Notify { ref version, .. } if served != Some(version.as_str()) => {
+            Decision::None("distribution_pending")
+        }
+        decision => decision,
+    }
+}
 
-    let (artifact, what, distribution) = match &install {
+/// The artifact `install` follows, what to call it, and its distribution
+/// kind for [`decide`].
+fn artifact_of(install: &Install) -> Result<(&'static str, &'static str, &'static str)> {
+    Ok(match install {
         Install::App(_) => ("desktop", "Deadbolt.app", "direct"),
         Install::Unmovable(bundle) => bail!(
             "{} runs from a disk image or under App Translocation; \
@@ -578,7 +931,117 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
             ("desktop", "Deadbolt.app", manager.distribution())
         }
         Install::Managed(manager) => ("cli", "deadbolt", manager.distribution()),
+    })
+}
+
+/// The channel's manifest for `artifact` and what to do about it, `None`
+/// when the channel has none: [`decide`], then for npm's package
+/// [`served_by_npm`].
+async fn find(
+    service: &Service,
+    install: &Install,
+    artifact: &str,
+    channel: &str,
+    running: &Running<'_>,
+) -> Result<Option<(Url, String, Decision)>> {
+    let Some((url, text)) = service.manifest(artifact, channel).await? else {
+        return Ok(None);
     };
+    let mut decision = decide(artifact, channel, &text, running);
+    if let Install::Managed(manager) = install
+        && manager.npm()
+        && matches!(decision, Decision::Notify { .. })
+    {
+        let served = service.npm_version(channel).await?;
+        decision = served_by_npm(decision, served.as_deref());
+    }
+    Ok(Some((url, text, decision)))
+}
+
+/// The agent's background check: whether this install has an update on
+/// `channel` that `deadbolt update` would install (the release service's
+/// rules, npm's version for npm's package, Homebrew's for Homebrew). It
+/// never downloads or installs anything, nor writes the sequence floors
+/// `update` keeps, but it ignores a manifest older than them. `None` for
+/// installs it can't update: Nix, Cargo and system packages, and an app
+/// that can't be replaced where it is.
+pub async fn available(paths: &Paths, channel: &str) -> Result<Option<UpdateInfo>> {
+    let exe = crate::app::this_binary()?;
+    let install = method(&exe).await;
+    if matches!(
+        install,
+        Install::Unmovable(_) | Install::Managed(Manager::Nix | Manager::Cargo | Manager::System)
+    ) {
+        return Ok(None);
+    }
+    let (artifact, _, distribution) = artifact_of(&install)?;
+    let state = state_dir(paths);
+    let target = target()?;
+    let running = Running {
+        version: VERSION,
+        target: &target,
+        distribution,
+        bucket: rollout_bucket(&state),
+        channel: Some(channel),
+    };
+    let service = Service::new(Some(channel))?;
+    let Some((url, text, decision)) = find(&service, &install, artifact, channel, &running).await?
+    else {
+        return Ok(None);
+    };
+    if let Ok(manifest) = validated(artifact, channel, &text) {
+        let floor = read_floors(&state)?
+            .get(&format!("{artifact}/{channel}"))
+            .copied()
+            .unwrap_or(0);
+        if manifest.sequence < floor {
+            bail!(
+                "{url} is older than one seen (sequence {} < {floor})",
+                manifest.sequence
+            );
+        }
+    }
+    Ok(match decision {
+        Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),
+        Decision::Install { version, .. } | Decision::Notify { version, .. } => Some(UpdateInfo {
+            version,
+            method: method_key(&install).into(),
+        }),
+        Decision::None(_) => None,
+    })
+}
+
+/// The state directory: the log's.
+fn state_dir(paths: &Paths) -> PathBuf {
+    paths
+        .log
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default()
+}
+
+pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
+    let built = build_channel();
+    let Some(channel) = args.channel.as_deref().or(built) else {
+        bail!(
+            "this deadbolt was built from source and follows no release channel; \
+             pass --channel dev or --channel stable"
+        );
+    };
+    let exe = crate::app::this_binary()?;
+    let install = method(&exe).await;
+    let service = Service::new(built)?;
+    // Held through the install, so two updates never install at once.
+    let state = UpdateState::open(&state_dir(paths))?;
+    let bucket = rollout_bucket(&state.dir);
+    let target = target()?;
+    let shown = match built {
+        Some(built) => format!("{VERSION} ({built})"),
+        None => format!("{VERSION} (source)"),
+    };
+    let how = installed_with(method_key(&install));
+
+    let (artifact, what, distribution) = artifact_of(&install)?;
     let running = Running {
         version: VERSION,
         target: &target,
@@ -586,11 +1049,11 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         bucket,
         channel: built,
     };
-    let Some((url, text)) = service.manifest(artifact, channel).await? else {
+    let Some((url, text, decision)) = find(&service, &install, artifact, channel, &running).await?
+    else {
         bail!("there is no {channel} release of {what} yet");
     };
     let mut available = false;
-    let decision = decide(artifact, channel, &text, &running);
     if let Decision::Reject(reason) = decision {
         bail!("{url} is not a usable {artifact} manifest ({reason})");
     }
@@ -598,8 +1061,10 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
     match decision {
         Decision::Reject(reason) => bail!("{url} is not a usable {artifact} manifest ({reason})"),
         Decision::None("up_to_date") => {
-            println!("{what} {shown} is up to date on {channel}");
-            if let Install::Managed(manager) = &install {
+            println!("{what} {shown} is up to date on {channel} ({how})");
+            if let Install::Managed(manager) = &install
+                && upgrade_command(*manager, "").is_none()
+            {
                 println!("{} updates it: {}", manager.name(), manager.hint(channel));
             }
         }
@@ -619,23 +1084,34 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
         }
         Decision::None(reason) => bail!("{channel} has no {what} for {target} ({reason})"),
         Decision::Notify {
+            reason,
             version,
             command,
             notes_url,
-            ..
         } => {
             let Install::Managed(manager) = install else {
                 bail!("unexpected decision for {what}");
             };
-            println!("{what} {version} is available on {channel} (this is {shown})");
-            match command {
-                Some(command) => println!("Update it with: {command}"),
-                None => println!("To update: {}", manager.hint(channel)),
-            }
+            available = true;
+            println!("{what} {version} is available on {channel} (this is {shown}, {how})");
             if let Some(notes) = notes_url {
                 println!("Release notes: {notes}");
             }
-            available = true;
+            match upgrade_command(manager, &version) {
+                Some(upgrade) if args.check => println!("deadbolt update runs: {}", upgrade.shown),
+                Some(upgrade) => {
+                    if reason == Reason::Switch {
+                        confirm_switch(built.unwrap_or("source"), channel, &version, args.yes)?;
+                    } else {
+                        confirm_upgrade(&upgrade.shown, args.yes)?;
+                    }
+                    update_package(paths, manager, &upgrade, &exe, &version).await?;
+                }
+                None => match command {
+                    Some(command) => println!("Update it with: {command}"),
+                    None => println!("To update: {}", manager.hint(channel)),
+                },
+            }
         }
         Decision::Install {
             reason,
@@ -687,6 +1163,178 @@ pub async fn run(paths: &Paths, args: UpdateArgs) -> Result<ExitCode> {
     } else {
         ExitCode::SUCCESS
     })
+}
+
+/// Running a package manager is asked on a terminal, unless `--yes`.
+fn confirm_upgrade(command: &str, yes: bool) -> Result<()> {
+    if yes || !crate::prompt::interactive() {
+        return Ok(());
+    }
+    if !crate::prompt::confirm(&format!("Run {command}?"))? {
+        bail!("cancelled");
+    }
+    Ok(())
+}
+
+/// The most of a failed manager's output shown.
+const OUTPUT_LINES: usize = 12;
+
+/// The last [`OUTPUT_LINES`] non-empty lines of `text`, without terminal
+/// escapes.
+fn output_tail(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                for c in chars.by_ref() {
+                    if c.is_ascii_alphabetic() {
+                        break;
+                    }
+                }
+            }
+            continue;
+        }
+        plain.push(if c == '\r' { '\n' } else { c });
+    }
+    let lines: Vec<&str> = plain
+        .lines()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    lines[lines.len().saturating_sub(OUTPUT_LINES)..].join("\n")
+}
+
+/// What to say when `who` failed to install `version`.
+fn upgrade_failure(who: &str, version: &str, detail: &str, shown: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "{who} couldn't install deadbolt {version}:\n{detail}\n\n\
+         It ran: {shown}\n\
+         Fix the problem above, then run `deadbolt update` again, or run that command yourself."
+    )
+}
+
+/// The command people run for the install `exe` belongs to, which a package
+/// manager's update leaves in place: its own link (`~/.bun/bin/deadbolt`,
+/// `<prefix>/bin/deadbolt`), else `@deadbolt/cli`'s `bin/deadbolt` in
+/// `wrapper`, Homebrew's `<prefix>/bin/deadbolt`, or the cask's app helper.
+fn user_link(manager: Manager, exe: &Path, wrapper: Option<&Path>) -> PathBuf {
+    match manager {
+        Manager::Brew => exe
+            .ancestors()
+            .find(|d| d.file_name().is_some_and(|n| n == "Cellar"))
+            .and_then(Path::parent)
+            .map_or_else(|| exe.to_path_buf(), |prefix| prefix.join("bin/deadbolt")),
+        Manager::BrewCask => exe.to_path_buf(),
+        _ => {
+            let link = crate::desktop::launcher_program(exe);
+            match wrapper {
+                Some(wrapper) if link == exe => wrapper.join("bin/deadbolt"),
+                _ => link,
+            }
+        }
+    }
+}
+
+/// Updates the install `exe` with its package manager to `version`, then
+/// runs the new `deadbolt --version` through the user's link (which lets
+/// npm's wrapper link itself where the manager skipped its postinstall)
+/// and restarts the agent on it, locked, if it ran from `exe`.
+async fn update_package(
+    paths: &Paths,
+    manager: Manager,
+    upgrade: &Upgrade,
+    exe: &Path,
+    version: &str,
+) -> Result<()> {
+    let who = manager.name();
+    let Some(program) = find_program(upgrade.program, exe) else {
+        bail!(
+            "{who} installed deadbolt, but `{}` isn't on PATH; run it yourself: {}",
+            upgrade.program,
+            upgrade.shown
+        );
+    };
+    let wrapper = package_of(exe);
+    let link = user_link(manager, exe, wrapper.as_deref());
+    let ours = agent_runs(paths, |p| p == exe).await;
+    let cache = match upgrade.own_cache {
+        true => Some(
+            tempfile::Builder::new()
+                .prefix("deadbolt-update-")
+                .tempdir()
+                .context("making a cache directory for bun")?,
+        ),
+        false => None,
+    };
+    let mut args: Vec<OsString> = upgrade.args.iter().map(OsString::from).collect();
+    if let Some(cache) = &cache {
+        let at = args.len().saturating_sub(1);
+        args.insert(at, cache.path().into());
+        args.insert(at, "--cache-dir".into());
+    }
+    println!("Running {}", upgrade.shown);
+    let output = tokio::process::Command::new(&program)
+        .args(&args)
+        .stdin(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = match tokio::time::timeout(Duration::from_secs(10 * 60), output).await {
+        Err(_) => {
+            return Err(upgrade_failure(
+                who,
+                version,
+                "it was still running after 10 minutes",
+                &upgrade.shown,
+            ));
+        }
+        Ok(Err(error)) => {
+            return Err(upgrade_failure(
+                who,
+                version,
+                &format!("couldn't run {}: {error}", program.display()),
+                &upgrade.shown,
+            ));
+        }
+        Ok(Ok(output)) => output,
+    };
+    drop(cache);
+    if !output.status.success() {
+        let detail = [&output.stderr, &output.stdout]
+            .into_iter()
+            .map(|o| output_tail(&String::from_utf8_lossy(o)))
+            .find(|t| !t.is_empty())
+            .unwrap_or_else(|| format!("it exited with {} and said nothing", output.status));
+        return Err(upgrade_failure(who, version, &detail, &upgrade.shown));
+    }
+    let said = tokio::process::Command::new(&link)
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let said = match tokio::time::timeout(Duration::from_secs(120), said).await {
+        Ok(Ok(output)) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => String::new(),
+    };
+    let new = link.canonicalize().unwrap_or_else(|_| link.clone());
+    // Whatever is in place now, its agent comes back.
+    if ours && stop_agent(paths).await {
+        restart_agent(paths, new).await;
+    }
+    if said.split_whitespace().nth(1) != Some(version) {
+        bail!(
+            "{who} ran, but {} --version says {:?}, not deadbolt {version}; run {} yourself",
+            link.display(),
+            said,
+            upgrade.shown
+        );
+    }
+    println!("Updated {} to {version} with {who}", link.display());
+    Ok(())
 }
 
 /// A channel switch is the user's choice: asked on a terminal, else `--yes`.
@@ -864,20 +1512,7 @@ fn check_sequence(
         .map_err(|reason| anyhow::anyhow!("not a usable {artifact} manifest ({reason})"))?
         .sequence;
     let path = state.dir.join("release-sequences.json");
-    let recovery = || {
-        format!(
-            "reading {}: cannot use release sequence state; restore this file from a trusted \
-             backup (or correct its read permissions). Deleting it loses all remembered \
-             replay floors; deadbolt will not delete it automatically",
-            path.display()
-        )
-    };
-    let mut seen: BTreeMap<String, u64> = match std::fs::read(&path) {
-        Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
-        Ok(bytes) => serde_json::from_slice(&bytes).with_context(recovery)?,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
-        Err(error) => return Err(error).with_context(recovery),
-    };
+    let mut seen = read_floors(&state.dir)?;
     let key = format!("{artifact}/{channel}");
     let highest = seen.get(&key).copied().unwrap_or(0);
     if sequence < highest && !allow_rollback {
@@ -891,6 +1526,26 @@ fn check_sequence(
         crate::browser::write_atomic(&path, &serde_json::to_string(&seen)?)?;
     }
     Ok(())
+}
+
+/// The highest manifest sequences seen, from `release-sequences.json` in
+/// `dir`, the state directory.
+fn read_floors(dir: &Path) -> Result<BTreeMap<String, u64>> {
+    let path = dir.join("release-sequences.json");
+    let recovery = || {
+        format!(
+            "reading {}: cannot use release sequence state; restore this file from a trusted \
+             backup (or correct its read permissions). Deleting it loses all remembered \
+             replay floors; deadbolt will not delete it automatically",
+            path.display()
+        )
+    };
+    Ok(match std::fs::read(&path) {
+        Ok(bytes) if bytes.is_empty() => BTreeMap::new(),
+        Ok(bytes) => serde_json::from_slice(&bytes).with_context(recovery)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => BTreeMap::new(),
+        Err(error) => return Err(error).with_context(recovery),
+    })
 }
 
 /// Whether the agent that runs is this `program`, so replacing it should
@@ -1369,6 +2024,54 @@ fn trash(path: &Path, name: &str) -> Option<PathBuf> {
         })
         .find(|p| !p.exists())?;
     std::fs::rename(path, &dest).ok().map(|()| dest)
+}
+
+// Telling people.
+
+/// Remembers the last notice, `<version> <unix seconds>`, in the state
+/// directory.
+const NOTICE_FILE: &str = "update-notice";
+/// How often one version's notice may show.
+const NOTICE_EVERY: u64 = 24 * 3600;
+
+/// Whether to tell of `version` at `now`, after the notice `last`
+/// ([`NOTICE_FILE`]'s text): another version at once, the same one a day
+/// later.
+fn notice_due(last: Option<&str>, version: &str, now: u64) -> bool {
+    let Some((seen, at)) = last.and_then(|t| t.trim().split_once(' ')) else {
+        return true;
+    };
+    let Ok(at) = at.parse::<u64>() else {
+        return true;
+    };
+    seen != version || at > now || now - at >= NOTICE_EVERY
+}
+
+fn notice_line(update: &UpdateInfo) -> String {
+    format!(
+        "deadbolt {} is out ({}): run deadbolt update",
+        update.version,
+        installed_with(&update.method)
+    )
+}
+
+/// Ends a command at a terminal with one line on stderr when the running
+/// agent's check found an update, at most once a day for each version.
+/// With no agent running it says nothing, and never asks the network.
+pub async fn notice(paths: &Paths) {
+    let status = tokio::time::timeout(Duration::from_secs(1), crate::client::status(paths)).await;
+    let Some(update) = status.ok().flatten().and_then(|s| s.update) else {
+        return;
+    };
+    let file = state_dir(paths).join(NOTICE_FILE);
+    let now = crate::config::now();
+    let last = std::fs::read_to_string(&file).ok();
+    if !notice_due(last.as_deref(), &update.version, now) {
+        return;
+    }
+    eprintln!("{}", notice_line(&update));
+    std::fs::create_dir_all(state_dir(paths)).ok();
+    crate::browser::write_atomic(&file, &format!("{} {now}\n", update.version)).ok();
 }
 
 // The browser extension.
@@ -1947,23 +2650,19 @@ mod tests {
             ("/home/me/.cargo/bin/deadbolt", Manager::Cargo),
             (
                 "/usr/local/lib/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
-                Manager::Npm,
+                Manager::Package,
             ),
             (
                 "/opt/homebrew/lib/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app/Contents/Helpers/deadbolt",
-                Manager::Npm,
+                Manager::Package,
             ),
             (
                 "/usr/lib/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
-                Manager::Npm,
+                Manager::Package,
             ),
             (
                 "/home/me/.bun/install/global/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
-                Manager::Bun,
-            ),
-            (
-                "/Users/me/.bun/install/global/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app/Contents/Helpers/deadbolt",
-                Manager::Bun,
+                Manager::Package,
             ),
         ] {
             assert_eq!(
@@ -1979,6 +2678,254 @@ mod tests {
                 Install::Standalone(path.parent().unwrap().into())
             );
         }
+    }
+
+    fn service_base(over: Option<&str>) -> Result<Url> {
+        loopback_or(SERVICE, SERVICE_OVERRIDE, over)
+    }
+
+    #[test]
+    fn asks_the_manager_in_the_path_first() {
+        use Manager::*;
+        let order = |p: &str| manager_order(Path::new(p));
+        assert_eq!(
+            order("/home/me/.bun/install/global/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt"),
+            [Bun, Npm, Pnpm, Yarn]
+        );
+        assert_eq!(
+            order("/opt/bun-root/install/global/node_modules/@deadbolt/cli/bin/deadbolt"),
+            [Bun, Npm, Pnpm, Yarn]
+        );
+        assert_eq!(
+            order(
+                "/home/me/.local/share/pnpm/global/5/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt"
+            ),
+            [Pnpm, Npm, Bun, Yarn]
+        );
+        assert_eq!(
+            order("/home/me/.config/yarn/global/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt"),
+            [Yarn, Npm, Pnpm, Bun]
+        );
+        assert_eq!(
+            order("/usr/local/lib/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt"),
+            [Npm, Pnpm, Bun, Yarn]
+        );
+    }
+
+    #[test]
+    fn reads_whether_a_manager_lists_the_package() {
+        for yes in [
+            "/usr/lib\n└── @deadbolt/cli@0.0.0-dev-140\n",
+            "dependencies:\n@deadbolt/cli 0.0.0-dev-140\n",
+            "├── @deadbolt/cli@0.0.0-dev-136\n├── cf@1.0.0\n",
+            "info \"@deadbolt/cli@0.0.0-dev-1\" has binaries:\n",
+            "@deadbolt/cli",
+        ] {
+            assert!(lists_package(yes), "{yes}");
+        }
+        for no in [
+            "/usr/lib\n└── (empty)\n",
+            "├── @deadbolt/cli-linux-x64@0.0.0-dev-136\n",
+            "@deadbolt/client@1.0.0",
+            "",
+        ] {
+            assert!(!lists_package(no), "{no}");
+        }
+    }
+
+    /// Lays out `@deadbolt/cli` and a platform package under `modules`,
+    /// the wrapper's `bin/deadbolt` linked to `exe` (relative to the
+    /// platform package) as the postinstall links it; returns `exe`.
+    fn npm_layout(modules: &Path, platform: &str, exe: &str, wrapper: &Path) -> PathBuf {
+        let package = modules.join("@deadbolt").join(platform);
+        let exe = package.join(exe);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "").unwrap();
+        std::fs::write(
+            package.join("package.json"),
+            format!(r#"{{"name":"@deadbolt/{platform}","version":"1"}}"#),
+        )
+        .unwrap();
+        std::fs::create_dir_all(wrapper.join("bin")).unwrap();
+        std::fs::write(
+            wrapper.join("package.json"),
+            r#"{"name":"@deadbolt/cli","bin":{"deadbolt":"./bin/deadbolt"}}"#,
+        )
+        .unwrap();
+        std::os::unix::fs::symlink(&exe, wrapper.join("bin/deadbolt")).unwrap();
+        exe.canonicalize().unwrap()
+    }
+
+    #[test]
+    fn knows_its_own_package_by_the_wrappers_link() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        // Hoisted, as bun and npm install it.
+        let modules = root.join("bun/install/global/node_modules");
+        let wrapper = modules.join("@deadbolt/cli");
+        let exe = npm_layout(&modules, "cli-linux-x64", "bin/deadbolt", &wrapper);
+        assert_eq!(package_of(&exe), Some(wrapper.clone()));
+        // A Deadbolt.app helper in the darwin package.
+        let modules = root.join("brew/lib/node_modules");
+        let wrapper = modules.join("@deadbolt/cli");
+        let app = "Deadbolt.app/Contents/Helpers/deadbolt";
+        let exe = npm_layout(&modules, "cli-darwin-arm64", app, &wrapper);
+        assert_eq!(package_of(&exe), Some(wrapper));
+        // Nested in the wrapper, where the postinstall installs it itself.
+        let wrapper = root.join("npm/lib/node_modules/@deadbolt/cli");
+        let nested = wrapper.join("platform/node_modules");
+        let exe = npm_layout(&nested, "cli-linux-x64", "bin/deadbolt", &wrapper);
+        assert_eq!(package_of(&exe), Some(wrapper));
+        // A wrapper that links elsewhere, or another package, isn't ours.
+        let modules = root.join("other/node_modules");
+        let wrapper = modules.join("@deadbolt/cli");
+        let exe = npm_layout(&modules, "cli-linux-x64", "bin/deadbolt", &wrapper);
+        let other = modules.join("@deadbolt/cli-linux-x64/bin/other");
+        std::fs::write(&other, "").unwrap();
+        assert_eq!(package_of(&other), None);
+        std::fs::write(
+            modules.join("@deadbolt/cli-linux-x64/package.json"),
+            r#"{"name":"@evil/cli"}"#,
+        )
+        .unwrap();
+        assert_eq!(package_of(&exe), None);
+        assert_eq!(package_of(Path::new("/usr/local/bin/deadbolt")), None);
+    }
+
+    #[test]
+    fn runs_each_managers_own_command_pinned_to_the_version() {
+        let shown = |m| upgrade_command(m, "0.0.0-dev-140").map(|u| u.shown);
+        assert_eq!(
+            shown(Manager::Npm).unwrap(),
+            "npm install --global @deadbolt/cli@0.0.0-dev-140"
+        );
+        assert_eq!(
+            shown(Manager::Pnpm).unwrap(),
+            "pnpm add --global --allow-build=@deadbolt/cli @deadbolt/cli@0.0.0-dev-140"
+        );
+        assert_eq!(
+            shown(Manager::Bun).unwrap(),
+            "bun install --global --trust @deadbolt/cli@0.0.0-dev-140"
+        );
+        assert_eq!(
+            shown(Manager::Yarn).unwrap(),
+            "yarn global add @deadbolt/cli@0.0.0-dev-140"
+        );
+        assert_eq!(
+            shown(Manager::Brew).unwrap(),
+            "brew upgrade anomalyco/tap/deadbolt"
+        );
+        assert_eq!(
+            shown(Manager::BrewCask).unwrap(),
+            "brew upgrade --cask anomalyco/tap/deadbolt"
+        );
+        for manual in [
+            Manager::Nix,
+            Manager::Cargo,
+            Manager::System,
+            Manager::Package,
+        ] {
+            assert_eq!(shown(manual), None);
+            assert!(!manual.hint("dev").is_empty());
+        }
+        let bun = upgrade_command(Manager::Bun, "1").unwrap();
+        assert!(bun.own_cache && bun.program == "bun");
+        assert!(!upgrade_command(Manager::Npm, "1").unwrap().own_cache);
+        assert_eq!(
+            Manager::Bun.hint("stable"),
+            "bun install --global --trust @deadbolt/cli@latest"
+        );
+        assert!(Manager::Package.hint("dev").contains("@deadbolt/cli@dev"));
+    }
+
+    #[test]
+    fn npm_installs_only_offer_what_npm_serves() {
+        let notify = |version: &str| Decision::Notify {
+            reason: Reason::Update,
+            version: version.into(),
+            command: None,
+            notes_url: None,
+        };
+        assert_eq!(served_by_npm(notify("2"), Some("2")), notify("2"));
+        assert_eq!(
+            served_by_npm(notify("2"), Some("1")),
+            Decision::None("distribution_pending")
+        );
+        assert_eq!(
+            served_by_npm(notify("2"), None),
+            Decision::None("distribution_pending")
+        );
+        assert_eq!(
+            served_by_npm(Decision::None("up_to_date"), None),
+            Decision::None("up_to_date")
+        );
+        // The manifest's rules still hold: npm's version alone offers nothing.
+        let text = manifest(0, false);
+        let d = decide("cli", "stable", &text, &running("2.3.8", "unknown", 50));
+        assert_eq!(
+            served_by_npm(d, Some("2.4.0")),
+            Decision::None("rollout_deferred")
+        );
+    }
+
+    #[test]
+    fn tells_of_each_version_at_most_once_a_day() {
+        let day = NOTICE_EVERY;
+        assert!(notice_due(None, "2", 1000));
+        assert!(notice_due(Some("garbage"), "2", 1000));
+        assert!(notice_due(Some("2 x"), "2", 1000));
+        assert!(!notice_due(Some("2 1000\n"), "2", 1000));
+        assert!(!notice_due(Some("2 1000"), "2", 1000 + day - 1));
+        assert!(notice_due(Some("2 1000"), "2", 1000 + day));
+        assert!(notice_due(Some("1 1000"), "2", 1001));
+        // A clock that went back doesn't silence it for good.
+        assert!(notice_due(Some("2 5000"), "2", 1000));
+        let line = notice_line(&UpdateInfo {
+            version: "0.0.0-dev-140".into(),
+            method: "bun".into(),
+        });
+        assert_eq!(
+            line,
+            "deadbolt 0.0.0-dev-140 is out (installed with bun): run deadbolt update"
+        );
+        assert_eq!(installed_with("brew"), "installed with Homebrew");
+        assert_eq!(installed_with("curl"), "installed with the install script");
+    }
+
+    #[test]
+    fn shows_the_end_of_a_failed_managers_output() {
+        let text: String = (1..=20)
+            .map(|n| format!("\x1b[31mline {n}\x1b[0m\r\n\n"))
+            .collect();
+        let tail = output_tail(&text);
+        assert_eq!(tail.lines().count(), OUTPUT_LINES);
+        assert!(
+            tail.starts_with("line 9") && tail.ends_with("line 20"),
+            "{tail}"
+        );
+        assert_eq!(output_tail("  \n\n"), "");
+        let error =
+            upgrade_failure("bun", "2", "boom", "bun install --global --trust x").to_string();
+        assert!(error.contains("bun couldn't install deadbolt 2"));
+        assert!(error.contains("It ran: bun install --global --trust x"));
+        assert!(error.contains("deadbolt update"));
+    }
+
+    #[test]
+    fn homebrew_updates_are_checked_through_its_link() {
+        let exe = Path::new("/opt/homebrew/Cellar/deadbolt/0.1.0/bin/deadbolt");
+        assert_eq!(
+            user_link(Manager::Brew, exe, None),
+            Path::new("/opt/homebrew/bin/deadbolt")
+        );
+        let app = Path::new("/Applications/Deadbolt.app/Contents/Helpers/deadbolt");
+        assert_eq!(user_link(Manager::BrewCask, app, None), app);
+        let exe = Path::new("/nowhere/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt");
+        let wrapper = Path::new("/nowhere/node_modules/@deadbolt/cli");
+        assert_eq!(
+            user_link(Manager::Pnpm, exe, Some(wrapper)),
+            wrapper.join("bin/deadbolt")
+        );
     }
 
     #[test]

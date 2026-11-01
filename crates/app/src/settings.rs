@@ -272,6 +272,7 @@ pub fn page(s: &App, k: &Kit) -> El {
         .child(group(k, "Security", security))
         .child(group(k, "Getting to it", getting))
         .child(group(k, "Devices", vec![devices(s, k)]))
+        .children(update(s, k).map(|row| group(k, "Updates", vec![row])))
         .child(group(k, "1Password", vec![sync]))
         .child(group(k, "Agents", agents))
         .child(group(k, "Activity", activity))
@@ -384,6 +385,15 @@ fn devices(s: &App, k: &Kit) -> El {
         n => format!("Shares with {n} other devices, {online} online"),
     };
     setting(k, "devices", false, device, about(k, &shares), el())
+}
+
+/// A newer Deadbolt the agent's background check found, quietly: nothing
+/// installs until `deadbolt update` runs.
+fn update(s: &App, k: &Kit) -> Option<El> {
+    let update = s.status.as_ref()?.update.as_ref()?;
+    let label = format!("Deadbolt {} is out", update.version);
+    let words = "Run deadbolt update in a terminal to install it";
+    Some(setting(k, "update", false, &label, about(k, words), el()))
 }
 
 /// A value ←→ steps through, its arrows showing while the keys are on it.

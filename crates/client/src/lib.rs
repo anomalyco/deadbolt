@@ -757,6 +757,7 @@ mod tests {
             ssh_agent: false,
             ssh_socket: None,
             caller: protocol::CallerInfo::unverified("test"),
+            update: None,
         }
     }
 

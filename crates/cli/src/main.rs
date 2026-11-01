@@ -446,8 +446,11 @@ fn main() -> ExitCode {
     {
         return ExitCode::SUCCESS;
     }
+    let json = args.iter().any(|a| a == "--json");
     let cli = Cli::parse_from(args);
     let agent = matches!(cli.command, Commands::Agent { command: None });
+    // The agent's update notice: only to a person at a terminal.
+    let notice = !json && notices_updates(&cli.command) && prompt::interactive();
     // Commands die quietly when piped into `head`. The agent and the browser
     // host keep Rust's ignored SIGPIPE: a client hanging up mid-reply must
     // not kill them before they clean up.
@@ -469,7 +472,14 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    match runtime.block_on(run(cli)) {
+    let result = runtime.block_on(async {
+        let result = run(cli).await;
+        if notice {
+            update::notice(&Paths::get()).await;
+        }
+        result
+    });
+    match result {
         Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error:#}");
@@ -480,6 +490,24 @@ fn main() -> ExitCode {
             }
         }
     }
+}
+
+/// Whether `command` may end with the agent's update notice: not the
+/// agent, hosts and helpers other programs run, `update` and `status`
+/// (which say it themselves), `watch`, the app, or `run`, whose output is
+/// its program's.
+fn notices_updates(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Agent { .. }
+            | Commands::BrowserHost { .. }
+            | Commands::SshSign { .. }
+            | Commands::Update(_)
+            | Commands::Status
+            | Commands::Watch
+            | Commands::App
+            | Commands::Run(_)
+    )
 }
 
 /// The extension build `--standalone` picks (else the native one).
@@ -1082,5 +1110,12 @@ fn print_status(status: &Status) {
             .collect();
         println!("vaults\t{}", vaults.join(" "));
         println!("peers\t{}/{} online", status.peers_online, status.peers);
+    }
+    if let Some(update) = &status.update {
+        println!(
+            "update\t{} available ({}): deadbolt update",
+            update.version,
+            update::installed_with(&update.method)
+        );
     }
 }
