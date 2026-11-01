@@ -439,7 +439,7 @@ fn create_a_vault_in_the_app() {
 }
 
 /// Shows a code on `device`'s app and pairs it from `inviter`; returns the
-/// inviter's `deadbolt pair`.
+/// inviter's `deadbolt approve`.
 fn pair_from(rt: &mut Runtime<App>, inviter: &Device, form: bool) -> std::process::Child {
     if form {
         fill_form(rt, Flow::Join, "beta");
@@ -447,11 +447,11 @@ fn pair_from(rt: &mut Runtime<App>, inviter: &Device, form: bool) -> std::proces
         rt.update(|s, _| s.submit_join());
     }
     until(rt, "the code", |s| s.onboarding.code.is_some());
-    assert!(shows(rt, "Pair from your other device"));
+    assert!(shows(rt, "Approve from your other device"));
     let code = rt.state.onboarding.code.as_ref().unwrap().clone();
     assert_eq!(code.split('-').count(), 5, "{}", code.as_str());
-    assert!(shows(rt, &format!("deadbolt pair {}", code.as_str())));
-    inviter.spawn(&["pair", &code])
+    assert!(shows(rt, &format!("deadbolt approve {}", code.as_str())));
+    inviter.spawn(&["approve", &code])
 }
 
 #[test]
@@ -515,8 +515,10 @@ fn cancelling_a_join_keeps_the_device_set_up_and_ends_the_code() {
         assert!(rt.state.onboarding.code.is_none());
         until(&mut rt, "the device set up", |s| s.onboarding.device_ready);
         // The cancelled code no longer works.
-        let mut pair =
-            inviter.spawn_with(&["pair", &code], &[("DEADBOLT_TEST_PAIR_FIND_SECS", "2")]);
+        let mut pair = inviter.spawn_with(
+            &["approve", &code],
+            &[("DEADBOLT_TEST_PAIR_FIND_SECS", "2")],
+        );
         assert!(!pair.wait().unwrap().success());
     }
     assert!(device.output(&["vault", "ls"]).trim().is_empty());

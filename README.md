@@ -50,7 +50,7 @@ To add another device, start on the new one and finish on one that has the vault
 
 ```sh
 deadbolt join          # on the new device: shows a code
-deadbolt pair <code>   # on a device with the vault
+deadbolt approve <code>   # on a device with the vault
 ```
 
 In the app, the new device's **Join from another device** does the same. A code works once, for 5 minutes.
@@ -81,7 +81,7 @@ Then load it:
 
 1. Download [the zip](https://anoma.ly/release/deadbolt/extension/dev/chromium-standalone) and unzip it.
 2. In `chrome://extensions`, turn on **Developer mode**, click **Load unpacked** and choose the unzipped folder.
-3. Choose **Pair with an existing device** (then run `deadbolt pair <code>` on a device with your vault) or **Create a new vault**.
+3. Choose **Pair with an existing device** (then run `deadbolt approve <code>` on a device with your vault) or **Create a new vault**.
 
 An unpacked extension can't update itself. To update by hand, download the zip again and put it in place of the old folder. With the CLI installed, let it keep a folder current instead, and load that folder:
 

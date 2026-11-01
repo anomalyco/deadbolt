@@ -330,13 +330,13 @@ pub(super) fn code(s: &App, k: &Kit) -> Paged {
         return page("code", None, col());
     };
     let copied = o.copied.is_some();
-    let command = format!("deadbolt pair {}", code.as_str());
+    let command = format!("deadbolt approve {}", code.as_str());
     let mut panel = col()
         .key("panel")
         .w(PANEL_W)
         .gap(14.0)
         .items_start()
-        .child(title(k, "title", "Pair from your other device"))
+        .child(title(k, "title", "Approve from your other device"))
         .child(
             // Spaces, so it wraps between words; the command keeps the hyphens.
             text(code.replace('-', " "))

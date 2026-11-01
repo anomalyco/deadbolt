@@ -316,7 +316,7 @@ fn refused(command: &Command) -> Option<&'static str> {
         Command::VaultDefault { .. } => "change the default vault",
         Command::DeviceRemove { .. } => "remove a device",
         Command::Join { .. } => "join a vault",
-        Command::Pair { .. } => "pair a device",
+        Command::Pair { .. } => "approve a device",
         Command::ItemRemove { .. } => "delete an item",
         Command::Import { .. } => "import items",
         Command::SyncOnePassword { .. } => "sync from 1Password",

@@ -134,7 +134,7 @@ function Pair({ t, light, story }: { t: number; light: Light; story: StoryApi })
   // The hints under the codes print in once the digits have locked.
   const hinted = span(t, CODE_AT + .3, CODE_AT + .6)
   const phoneNote = rolling(t, [[0, "public key · secret · hint"], [sConsent.at, "signed consent · personal"], [ADMITTED, "vault history applied"]], 5)
-  const deskNote = rolling(t, [[0, "waiting for ticket"], [timing(sCarry).lands, "$ deadbolt pair DBPAIR…"], [ADD_AT, "signed Add(phone)"]], 9)
+  const deskNote = rolling(t, [[0, "waiting for ticket"], [timing(sCarry).lands, "$ deadbolt approve DBPAIR…"], [ADD_AT, "signed Add(phone)"]], 9)
 
   return <>
     <Wire id="carry" d={carryTicket.d} t={t} story={story} dashed />

@@ -260,8 +260,8 @@ export function settingsView(app: App): View {
     const code = h("input", { class: "input mono-input", placeholder: "word-word-word-word-word", "aria-label": "Pairing code", spellcheck: "false", autocomplete: "off" })
     const error = h("p", { class: "error", role: "alert" })
     error.hidden = true
-    const label = h("span", { class: "roll-label" }, "Pair")
-    label.dataset.text = "Pair"
+    const label = h("span", { class: "roll-label" }, "Approve")
+    label.dataset.text = "Approve"
     const go = h("button", { class: "btn primary", type: "submit" }, label)
     const form = h(
       "form",
@@ -277,18 +277,18 @@ export function settingsView(app: App): View {
       if (!value) return refuse(code)
       go.disabled = true
       code.disabled = true
-      rollLabel(label, "Pairing…")
+      rollLabel(label, "Approving…")
       const r = await app.run({ type: "device-pair", code: value })
       if (!r.ok) {
         go.disabled = code.disabled = false
-        rollLabel(label, "Pair")
+        rollLabel(label, "Approve")
         error.textContent = r.message
         error.hidden = false
         return code.focus()
       }
       pairArea.replaceChildren(pairStart)
       await app.refresh()
-      app.announce("Paired.")
+      app.announce("Approved.")
     })
     pairArea.replaceChildren(form)
     code.focus()

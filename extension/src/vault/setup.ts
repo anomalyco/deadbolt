@@ -162,7 +162,7 @@ export class Setup {
       if (!cli) return
       const mac = (await chrome.runtime.getPlatformInfo().catch(() => null))?.os === "mac"
       const title = `Pair with Deadbolt on this ${mac ? "Mac" : "computer"}`
-      const sub = "Use the vault you already have here: this browser shows a code to run deadbolt pair with"
+      const sub = "Use the vault you already have here: this browser shows a code to run deadbolt approve with"
       pair.querySelector(".choice-title")!.textContent = title
       pair.querySelector(".choice-sub")!.textContent = sub
     })
@@ -181,7 +181,7 @@ export class Setup {
   private code(code: string | null): View {
     const copy = button("btn", [icon("copy"), "Copy code"], (b) => code && void copied(b, code, (m) => this.app.announce(m), "Copied the code"))
     // The whole command, for a terminal on the other device (or this one).
-    const command = code ? `deadbolt pair ${code}` : ""
+    const command = code ? `deadbolt approve ${code}` : ""
     const copyCommand = button("btn", "Copy command", (b) => command && void copied(b, command, (m) => this.app.announce(m), "Copied the command"))
     // Both wait for the code in place, so nothing moves when it comes.
     if (!code) copy.disabled = copyCommand.disabled = true
@@ -196,7 +196,7 @@ export class Setup {
         { class: "view" },
         toolbar("Pair with a device", () => void this.cancel()),
         // The same words before and after the code comes: it shows once, below, on its own line.
-        para("On a device that has your vault, run ", h("code", {}, "deadbolt pair"), " with this code, or choose Pair in the Deadbolt app."),
+        para("On a device that has your vault, run ", h("code", {}, "deadbolt approve"), " with this code, or choose Approve in the Deadbolt app."),
         h("div", { class: "code-box pair" }, shown, h("div", { class: "code-actions" }, copy, copyCommand)),
         h("div", { class: "waiting" }, h("span", { class: "sync-dot busy", "aria-hidden": "true" }), h("span", {}, code ? "Waiting for the other device…" : "Connecting to Deadbolt's sync service…")),
         h("p", { class: "faint small" }, "The code works once, for five minutes. Keep this open, or come back to it: it waits either way."),

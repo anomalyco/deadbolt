@@ -814,7 +814,7 @@ OPFS, so switching back and forth keeps it.
 3. Reload Deadbolt in `chrome://extensions`.
 4. First run offers **Pair with Deadbolt on this Mac** (on this computer
    elsewhere) when the CLI keeps this copy. It shows a pairing code; run
-   `deadbolt pair <code>` (copyable from the page) or choose Pair in the app,
+   `deadbolt approve <code>` (copyable from the page) or choose Approve in the app,
    then choose this browser's passphrase.
 
 The native host's manifest stays installed: the standalone build doesn't ask
@@ -823,11 +823,11 @@ more than step 2 with `--native`.
 
 ### Why pairing doesn't go through the native host
 
-The first run could ask the native host to run `deadbolt pair <code>` itself.
+The first run could ask the native host to run `deadbolt approve <code>` itself.
 It doesn't, for three reasons:
 
 - Pairing admits a device to the vault: whoever holds the code's other end
-  gets every item. The CLI's `pair` runs on an unlocked agent without asking
+  gets every item. The CLI's `approve` runs on an unlocked agent without asking
   again, so a native message that triggers it would turn any compromise of the
   extension (the threat this document already accepts for the standalone
   vault) into silent admission of an attacker's device into the native vault,
@@ -835,7 +835,7 @@ It doesn't, for three reasons:
 - The standalone build has no `nativeMessaging` permission, and adding it
   would give the standalone build a channel to the native agent's whole host
   protocol (`docs/autofill.md`), contradicting "no native-host fallback" above.
-- The user's terminal (or the app's Pair) is the confirmation the code
+- The user's terminal (or the app's Approve) is the confirmation the code
   exchange needs anyway: it proves the person at this browser also controls the
   native device.
 

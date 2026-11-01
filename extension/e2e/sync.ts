@@ -59,8 +59,8 @@ async function cli(...args: string[]) {
     ]))
     // Pairing diagnostics can include its one-time code. Never print argv or
     // successful output; redact the code but retain connection failure evidence.
-    const detail = args[0] === "pair" ? error.replaceAll(args[1]!, "[pairing code]") : error
-    if (exit !== 0) throw new CliError(args[0]!, exit, args[0] === "pair" ? out.replaceAll(args[1]!, "[pairing code]") : out, detail)
+    const detail = args[0] === "approve" ? error.replaceAll(args[1]!, "[pairing code]") : error
+    if (exit !== 0) throw new CliError(args[0]!, exit, args[0] === "approve" ? out.replaceAll(args[1]!, "[pairing code]") : out, detail)
     return out.trim()
   } finally {
     if (child.exitCode === null) { child.kill(); await child.exited }
@@ -109,7 +109,7 @@ async function admitted(page: Page) {
   const started = await request(page, { type: "device-join-start" })
   const code = started.reply.code
   check(started.reply.phase === "waiting" && typeof code === "string", "browser reaches its relay and publishes a join code")
-  await cli("pair", code)
+  await cli("approve", code)
   await until("browser admission", async () => (await request(page, { type: "device-join-status" })).reply.phase === "admitted")
 }
 async function finish(page: Page) {

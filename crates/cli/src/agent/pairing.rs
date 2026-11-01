@@ -491,7 +491,7 @@ impl Inviter for ExistingDevice<'_> {
     }
 }
 
-/// `deadbolt pair`: admit the device showing `code` into a vault.
+/// `deadbolt approve`: admit the device showing `code` into a vault.
 pub async fn pair(
     agent: &Arc<Agent>,
     conv: &Conversation,

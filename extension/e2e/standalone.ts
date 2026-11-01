@@ -1439,7 +1439,7 @@ async function joinExistingVault(device: Page, worker: Worker) {
   await device.getByText(code, { exact: true }).first().waitFor()
   check((await request(device, { type: "device-join-status" })).reply.code === code, "waiting join survives device-page reload")
   // Never print the code or CLI argv to the test log.
-  await cli("pair", code)
+  await cli("approve", code)
   await until("browser receives the existing vault", async () => (await request(device, { type: "device-join-status" })).reply.phase === "admitted", 60_000)
   check(await state(device) === "not-set-up", "admission alone does not publish an unencrypted local store")
   await device.getByLabel("Passphrase", { exact: true }).fill(passphrase)

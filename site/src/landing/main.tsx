@@ -42,7 +42,7 @@ function Landing() {
 
       <section>
         <h2>cli</h2>
-        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on a new phone\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt pair DBPAIRAGMRLX…\n`}{out("code 411308: adding device phone\nconfirm code 411308 matches the other device? [y/N] y\nadded phone to personal")}</pre>
+        <pre>{`$ deadbolt init\n`}{out("passphrase: \nrepeat passphrase: \ncreated vault personal (default)")}{`\n\n$ deadbolt new login username=kit url=github.com\n`}{out("3f9a")}{`\n$ deadbolt get github\n`}{out("Xk2mv9QpRt7…")}{`\n\n# on a new phone\n$ deadbolt join\n`}{out("DBPAIRAGMRLX…   (and a qr code)")}{`\n\n# on a device you already have\n$ deadbolt approve DBPAIRAGMRLX…\n`}{out("code 411308: adding device phone\nconfirm code 411308 matches the other device? [y/N] y\nadded phone to personal")}</pre>
       </section>
 
       <section>

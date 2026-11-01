@@ -75,7 +75,7 @@ enum Commands {
         device_name: Option<String>,
     },
     /// Join a vault from one of your other devices: shows a code, then
-    /// waits until `deadbolt pair <code>` runs on a device with the vault.
+    /// waits until `deadbolt approve <code>` runs on a device with the vault.
     ///
     /// Codes work once, for 5 minutes. On a device that isn't set up yet,
     /// the passphrase for this device is asked once it has joined (or taken
@@ -86,9 +86,9 @@ enum Commands {
         #[arg(long)]
         device_name: Option<String>,
     },
-    /// Add the device showing a code from `deadbolt join` to a vault (the
-    /// default vault, or --vault).
-    Pair {
+    /// Approve the device showing a code from `deadbolt join`: adds it to a
+    /// vault (the default vault, or --vault).
+    Approve {
         /// The code, such as violin-garden-tiger-lamp-zoo.
         #[arg(required = true, num_args = 1.., value_name = "CODE")]
         code: Vec<String>,
@@ -736,7 +736,7 @@ async fn run(cli: Cli) -> Result<ExitCode> {
                 bail!("unexpected reply");
             };
         }
-        Commands::Pair { code } => {
+        Commands::Approve { code } => {
             let code = code.join(" ");
             code.parse::<PairingCode>()?;
             client::ensure_running(&paths).await?;
@@ -995,7 +995,7 @@ async fn join(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply
         Ok(match event {
             Event::Code { code } => {
                 println!("Code: {code}");
-                eprintln!("On a device with your vault, run: deadbolt pair {code}");
+                eprintln!("On a device with your vault, run: deadbolt approve {code}");
                 eprintln!("waiting…");
                 None
             }
@@ -1017,7 +1017,7 @@ async fn join(paths: &Paths, command: Command, from_stdin: bool) -> Result<Reply
     .await
 }
 
-/// The vault `pair` adds to when `--vault` isn't given: the only one, else
+/// The vault `approve` adds to when `--vault` isn't given: the only one, else
 /// asked on a terminal (the default first), else an error.
 async fn choose_vault(paths: &Paths, from_stdin: bool) -> Result<Option<String>> {
     let Reply::Vaults { vaults } = request(paths, Command::VaultList, from_stdin).await? else {

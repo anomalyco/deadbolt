@@ -392,10 +392,10 @@ fn finish_join(mut child: Child) -> (std::process::ExitStatus, String) {
     (status, err)
 }
 
-/// `new` runs `deadbolt join`, `inviter` runs `deadbolt pair <code>`.
+/// `new` runs `deadbolt join`, `inviter` runs `deadbolt approve <code>`.
 fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) {
     let (child, rx, code) = start_join(new, device_name);
-    let mut args = vec!["pair", &code];
+    let mut args = vec!["approve", &code];
     if let Some(vault) = vault {
         args.extend(["--vault", vault]);
     }
@@ -406,7 +406,10 @@ fn pair(inviter: &Device, new: &Device, device_name: &str, vault: Option<&str>) 
     );
     let (status, err) = finish_join(child);
     assert!(status.success(), "join failed");
-    assert!(err.contains(&format!("run: deadbolt pair {code}")), "{err}");
+    assert!(
+        err.contains(&format!("run: deadbolt approve {code}")),
+        "{err}"
+    );
     let joined = rx.recv_timeout(Duration::from_secs(5)).unwrap();
     assert!(joined.starts_with("✓ joined \""), "{joined}");
 }
@@ -540,7 +543,7 @@ fn pairing_membership_and_removal() {
     // Re-pairing gamma into family (from which it was removed) is refused, and
     // that spends the code; gamma's next code into a's other vault works.
     let (child, _rx, code) = start_join(&c, "gamma");
-    let err = a.fail(&["pair", &code, "--vault", "family"]);
+    let err = a.fail(&["approve", &code, "--vault", "family"]);
     assert!(
         err.contains("that device was removed from family and can't rejoin it"),
         "{err}"
@@ -549,7 +552,7 @@ fn pairing_membership_and_removal() {
     assert!(!status.success());
     assert!(err.contains("can't rejoin"), "{err}");
     let (child, rx, code) = start_join(&c, "gamma");
-    let out = a.run(&["pair", &code, "--vault", "other"]);
+    let out = a.run(&["approve", &code, "--vault", "other"]);
     assert_eq!(out, "✓ added \"gamma\" to other\n");
     assert!(finish_join(child).0.success());
     let joined = rx.recv_timeout(Duration::from_secs(5)).unwrap();
@@ -575,14 +578,14 @@ fn second_device_cannot_join_twice_or_pair_unknown_vault() {
     // Joining another vault on an existing device.
     pair(&a, &b, "beta", Some("personal"));
     assert_eq!(b.run(&["vault", "ls"]).lines().count(), 2);
-    let err = a.fail(&["pair", "violin-garden-tiger-lamp-zoo", "--vault", "nope"]);
+    let err = a.fail(&["approve", "violin-garden-tiger-lamp-zoo", "--vault", "nope"]);
     assert!(err.contains("no vault named nope"), "{err}");
-    let err = a.fail(&["pair", "DBPAIRAAAA"]);
+    let err = a.fail(&["approve", "DBPAIRAAAA"]);
     assert!(err.contains("invalid pairing code"), "{err}");
-    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp"]);
+    let err = a.fail(&["approve", "violin", "garden", "tiger", "lamp"]);
     assert!(err.contains("update both devices"), "{err}");
     // Several vaults and no terminal to choose on: name one.
-    let err = a.fail(&["pair", "violin", "garden", "tiger", "lamp", "zoo"]);
+    let err = a.fail(&["approve", "violin", "garden", "tiger", "lamp", "zoo"]);
     assert!(err.contains("several vaults (personal, work)"), "{err}");
 }
 
@@ -597,7 +600,7 @@ fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
     c.run(&["init", "--device-name", "gamma"]);
     let (child, _rx, code) = start_join(&b, "beta");
 
-    let mut wrong = c.cmd(&["pair", "violin-garden-tiger-lamp-zoo"]);
+    let mut wrong = c.cmd(&["approve", "violin-garden-tiger-lamp-zoo"]);
     wrong.env("DEADBOLT_TEST_PAIR_FIND_SECS", "1");
     let out = c.output(&mut wrong);
     assert!(!out.status.success());
@@ -605,9 +608,9 @@ fn codes_are_single_use_and_a_wrong_one_finds_nothing() {
     assert!(err.contains("no device is waiting for that code"), "{err}");
 
     // c gets there first; a, the legitimate device, hears it was used.
-    assert_eq!(c.run(&["pair", &code]), "✓ added \"beta\" to personal\n");
+    assert_eq!(c.run(&["approve", &code]), "✓ added \"beta\" to personal\n");
     assert!(finish_join(child).0.success());
-    let err = a.fail(&["pair", &code]);
+    let err = a.fail(&["approve", &code]);
     assert!(err.contains("that code was already used"), "{err}");
     assert!(err.contains("someone else may have used it"), "{err}");
     assert_eq!(a.devices(), ["alpha"]);
@@ -659,7 +662,7 @@ fn a_new_device_asks_for_its_passphrase_last() {
         let code = next();
         assert_eq!(code["event"]["event"], "code", "{code}");
         let code = code["event"]["code"].as_str().unwrap().to_string();
-        assert_eq!(a.run(&["pair", &code]), "✓ added \"beta\" to personal\n");
+        assert_eq!(a.run(&["approve", &code]), "✓ added \"beta\" to personal\n");
         let joined = next();
         assert_eq!(joined["event"]["event"], "joined", "{joined}");
         assert_eq!(joined["event"]["vault"], "personal");
@@ -735,7 +738,7 @@ fn a_new_device_join_needs_a_passphrase_source() {
     let mut line = String::new();
     stdout.read_line(&mut line).unwrap();
     let code = line.trim().strip_prefix("Code: ").unwrap().to_string();
-    a.run(&["pair", &code]);
+    a.run(&["approve", &code]);
     let (status, _) = finish_join(child);
     assert!(status.success());
     b.run(&["lock"]);
