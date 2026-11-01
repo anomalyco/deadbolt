@@ -11,7 +11,9 @@ import type { FormControl } from "./detect"
 import { ownBoxes } from "./embed"
 import { clippedBox, fillable, hiddenByStyle, noteFilled, onTop, typedByUser } from "./fill"
 import { formFieldInPlace, sectionFields, type FormField } from "./forms"
-import { splitNumber, valueFor } from "./transform"
+import { withAddressParts } from "./address"
+import { chooseOption, isCombobox } from "./combobox"
+import { CHOICE_ROLES, choiceFor, shows, splitNumber, valueFor } from "./transform"
 
 export interface FormsState {
   fields(): FormField[]
@@ -81,14 +83,28 @@ const DEPENDENT_WAIT_MS = 2500
 /**
  * Fills one section's fields from `values`: each field gets what its role
  * and its element want (see transform.ts); a card number split over boxes
- * goes in only as a whole, one slice per box. Fields with nothing to write
- * are left alone, and so are fields holding what the user typed themselves
-(a value Deadbolt filled before may be replaced). Returns the roles written.
+ * goes in only as a whole, one slice per box; a whole address in the first
+ * line is split for a form that asks for its parts (see address.ts); a
+ * country or state combobox gets its option chosen (see combobox.ts), the
+ * country first. Fields with nothing to write are left alone, and so are
+ * fields holding what the user typed themselves (a value Deadbolt filled
+ * before may be replaced). Returns the roles written.
  */
-export async function fillForm(fields: FormField[], values: FormValues, check: (el: FormControl) => boolean = fillable): Promise<{ filled: FormRole[]; last?: FormControl }> {
+export async function fillForm(fields: FormField[], given: FormValues, check: (el: FormControl) => boolean = fillable): Promise<{ filled: FormRole[]; last?: FormControl }> {
   const filled: FormRole[] = []
   let last: FormControl | undefined
-  const ordered = [...fields].sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+  const roles = fields.map((f) => f.role)
+  const values = withAddressParts(given, roles)
+  let ordered = [...fields].sort((a, b) => (a.el.compareDocumentPosition(b.el) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1))
+  // The country before the region, wherever it is: a state list can depend on it.
+  const region = ordered.findIndex((f) => f.role === "address-level1")
+  const late = ordered.filter((f, i) => region >= 0 && i > region && f.role === "country")
+  if (late.length) {
+    ordered = ordered.filter((f) => !late.includes(f))
+    ordered.splice(region, 0, ...late)
+  }
+  // With a calling code box of its own, the number box takes the national number.
+  const national = roles.includes("tel-country-code")
   const ok = (group: FormField[]) => (el: FormControl) => group.every(formFieldInPlace) && check(el)
   const done = new Set<FormField>()
   const later: FormField[] = []
@@ -115,7 +131,18 @@ export async function fillForm(fields: FormField[], values: FormValues, check: (
       later.push(f)
       continue
     }
-    const value = valueFor(f.role, f.el, values)
+    // A combobox for a country or state is chosen in, not typed in (see combobox.ts).
+    if (isCombobox(f.el) && CHOICE_ROLES.has(f.role)) {
+      const choice = choiceFor(f.role, values)
+      if (!choice || shows(f.el.value, choice) || !ok([f])(f.el) || (await typedByUser(f.el, f.el.value))) continue
+      if (filled.length) await sleep(30)
+      if (await chooseOption(f.el, choice, ok([f]), () => formFieldInPlace(f))) {
+        filled.push(f.role)
+        last = f.el
+      }
+      continue
+    }
+    const value = valueFor(f.role === "tel" && national ? "tel-national" : f.role, f.el, values)
     if (value === undefined || value === "" || !ok([f])(f.el)) continue
     if (!(f.el instanceof HTMLSelectElement) && (await typedByUser(f.el, f.el.value))) continue
     // A beat between fields for pages that react to each one (a country that redraws the region list).

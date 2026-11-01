@@ -20,7 +20,7 @@ const LABELS: Record<string, string> = {
   ssid: "Network name",
   iban: "IBAN",
   swift: "SWIFT / BIC",
-  "address-line1": "Address",
+  "address-line1": "Street address",
   "address-line2": "Address line 2",
   "address-line3": "Address line 3",
   "postal-code": "Postal code",

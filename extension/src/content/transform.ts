@@ -1,9 +1,10 @@
 // Turns an identity's or card's values (by the host's field names) into what
 // each detected field wants: a full or split name, a street address joined
 // or in lines, a phone number national or international, a country or region
-// as a code, a name or the matching <select> option, birthday parts, an
-// expiry as MM/YY, MM/YYYY or separate month and year, and a card number
-// with or without spaces, or split across boxes. Pure functions: the element
+// as a code, a name, the matching <select> option or the option to choose in
+// a custom combobox, birthday parts, an expiry as MM/YY, MM/YYYY or separate
+// month and year, and a card number with or without spaces, or split across
+// boxes. Pure functions: the element
 // is read (its options, maxlength, placeholder, type), never written.
 
 import type { FormRole, FormValues } from "../messages"
@@ -25,7 +26,7 @@ const CALLING: Record<string, string> = {
 /** Countries that write a trunk 0 before national numbers. */
 const TRUNK_ZERO = new Set(["GB", "IE", "DE", "FR", "IT", "NL", "BE", "CH", "AT", "SE", "NO", "FI", "PL", "AU", "NZ", "JP", "CN", "IN"])
 
-const REGIONS: Record<string, Record<string, string>> = {
+export const REGIONS: Record<string, Record<string, string>> = {
   US: {
     AL: "Alabama", AK: "Alaska", AZ: "Arizona", AR: "Arkansas", CA: "California", CO: "Colorado", CT: "Connecticut", DE: "Delaware",
     DC: "District of Columbia", FL: "Florida", GA: "Georgia", HI: "Hawaii", ID: "Idaho", IL: "Illinois", IN: "Indiana", IA: "Iowa",
@@ -43,7 +44,7 @@ const REGIONS: Record<string, Record<string, string>> = {
 }
 
 /** Other names a country goes by in option lists. */
-const COUNTRY_ALIASES: Record<string, string[]> = {
+export const COUNTRY_ALIASES: Record<string, string[]> = {
   US: ["usa", "us", "united states of america", "america"],
   GB: ["uk", "great britain", "britain", "england"],
   NL: ["holland"],
@@ -290,6 +291,67 @@ export function valueFor(role: FormRole, el: FormControl, v: FormValues): string
       return maxLen(el) === 2 || /(?<!y)yy(?!y)/.test(attr(el, "placeholder")) ? pad(e.y % 100) : String(e.y)
     }
   }
+}
+
+// ---- Comboboxes ----------------------------------------------------------------------
+
+/**
+ * What a custom combobox (an input whose choices are a list the page draws)
+ * takes: the texts to type to bring the option up, tried in order, and the
+ * option it wants, by its text (plain): one of `names`, or for a calling
+ * code, any option showing "+code", the country's own first.
+ */
+export interface Choice {
+  type: string[]
+  names: string[]
+  code?: string
+}
+
+/** The comboboxes a fill chooses an option in; any other combobox is written as a text box. */
+export const CHOICE_ROLES = new Set<FormRole>(["country", "address-level1", "tel-country-code"])
+
+export function choiceFor(role: FormRole, v: FormValues): Choice | undefined {
+  const named = (code: string) => [...new Set([regionName(code, pageLang()), regionName(code, "en")].filter((n): n is string => !!n && n !== code))]
+  switch (role) {
+    case "country": {
+      if (!v.country) return undefined
+      const c = v.country.toUpperCase()
+      const type = named(c)
+      return { type: type.length ? type : [v.country], names: countryNames(c) }
+    }
+    case "address-level1": {
+      if (!v.region) return undefined
+      const forms = regionForms(v.region, v.country ?? "")
+      const table = REGIONS[(v.country ?? "").toUpperCase()] ?? {}
+      const name = Object.entries(table).find(([code, n]) => code.toLowerCase() === forms[0] || plain(n).trim() === forms[0])?.[1]
+      return { type: [name ?? v.region], names: forms }
+    }
+    case "tel-country-code": {
+      if (!v.phone) return undefined
+      const code = phoneParts(v.phone, v.country ?? "").code
+      if (!code) return undefined
+      return { type: [...(v.country ? named(v.country.toUpperCase()) : []), `+${code}`], names: v.country ? countryNames(v.country) : [], code }
+    }
+  }
+  return undefined
+}
+
+const callingCode = (code: string) => new RegExp(`\\+\\s?${code}(?!\\d)`)
+
+/** How well an option's text matches: 0 not at all; higher is better. */
+export function optionScore(text: string, c: Choice): number {
+  const t = plain(text).trim()
+  if (c.code) return callingCode(c.code).test(text) ? (c.names.some((n) => n.length > 2 && t.includes(n)) ? 2 : 1) : 0
+  if (c.names.includes(t)) return 3
+  return c.names.some((n) => n.length > 2 && t.startsWith(n)) ? 2 : 0
+}
+
+/** Whether a combobox showing `value` holds the choice: the option chosen (`chosen`'s text), or one of its names. */
+export function shows(value: string, c: Choice, chosen?: string): boolean {
+  const v = plain(value).trim()
+  if (!v) return false
+  if (chosen !== undefined && v === plain(chosen).trim()) return true
+  return c.code ? callingCode(c.code).test(value) : c.names.includes(v)
 }
 
 /** The field's form also has a box (or select) for the calling code. */
