@@ -263,6 +263,8 @@ hivemind run --kind cargo --fetch .lab-output -- bash crates/app/scripts/bundle.
 
 The script builds `deadbolt` (and the helper) with `--locked`, assembles into a temporary directory, generates the icon, signs ad hoc and checks the plist, signature, bundled CLI's `--version` and the app's headless `--list-scenes` (through `MacOS/Deadbolt`) before moving the bundle into `.lab-output/Deadbolt.app`. An optional final argument selects a fresh output path; an existing output is refused. Native is the default to reuse the build cache; universal builds both Rust targets and combines each executable with `lipo`. These bundles aren't distribution releases.
 
+npm's darwin packages carry the release's signed Deadbolt.app, and `npm i -g @deadbolt/cli` links the command to its `Contents/Helpers/deadbolt` ([releasing.md](releasing.md#npm)), so the first `deadbolt app` opens it and links it into `~/Applications`.
+
 Releases are built by the Release workflow ([releasing.md](releasing.md)), which runs this script with `--universal` against a Developer ID-signed Touch ID helper (`DEADBOLT_ENCLAVE_PREBUILT`), then signs `Contents/Helpers/deadbolt` and the bundle inside-out with the Developer ID and hardened runtime, notarizes and staples the app, and publishes `Deadbolt-<version>-macos-universal.zip` (for an updater) and `.dmg` to the release service's `desktop` artifact, the GitHub release, and the Homebrew cask (`brew install --cask anomalyco/tap/deadbolt`). `CFBundleVersion` is numeric: a dev build's run number, or `X.Y.Z` as `XXYYZZ`.
 
 Remaining work:

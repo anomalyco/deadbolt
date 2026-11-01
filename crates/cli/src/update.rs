@@ -81,6 +81,9 @@ pub enum Manager {
     Nix,
     Cargo,
     System,
+    /// `npm i -g @deadbolt/cli`: the command links into its platform
+    /// package (Deadbolt.app's helper there, on macOS).
+    Npm,
 }
 
 impl Manager {
@@ -88,6 +91,7 @@ impl Manager {
     fn distribution(self) -> &'static str {
         match self {
             Self::Brew | Self::BrewCask => "brew",
+            Self::Npm => "npm",
             Self::Nix | Self::Cargo | Self::System => "unknown",
         }
     }
@@ -100,6 +104,11 @@ impl Manager {
             Self::Nix => "update it with Nix, which installed it",
             Self::Cargo => "reinstall it with cargo install, which installed it",
             Self::System => "update it with the package manager that installed it",
+            Self::Npm => match build_channel() {
+                Some("dev") => "npm i -g @deadbolt/cli@dev",
+                Some("beta") => "npm i -g @deadbolt/cli@beta",
+                _ => "npm i -g @deadbolt/cli@latest",
+            },
         }
     }
 }
@@ -113,6 +122,10 @@ const CASKROOMS: [&str; 2] = [
 /// How the `deadbolt` at `exe` (symlinks resolved) is installed. `exists`
 /// says whether a path exists (Homebrew's cask records).
 pub fn classify(exe: &Path, macos: bool, exists: impl Fn(&Path) -> bool) -> Install {
+    // Before the bundle: npm's darwin package carries Deadbolt.app.
+    if exe.components().any(|c| c.as_os_str() == "node_modules") {
+        return Install::Managed(Manager::Npm);
+    }
     if macos && let Some(bundle) = crate::app::bundle_of(exe) {
         let text = bundle.to_string_lossy();
         if text.starts_with("/Volumes/") || text.contains("/AppTranslocation/") {
@@ -1893,6 +1906,18 @@ mod tests {
             ("/nix/store/abc-deadbolt/bin/deadbolt", Manager::Nix),
             ("/usr/bin/deadbolt", Manager::System),
             ("/home/me/.cargo/bin/deadbolt", Manager::Cargo),
+            (
+                "/usr/local/lib/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
+                Manager::Npm,
+            ),
+            (
+                "/opt/homebrew/lib/node_modules/@deadbolt/cli-darwin-arm64/Deadbolt.app/Contents/Helpers/deadbolt",
+                Manager::Npm,
+            ),
+            (
+                "/usr/lib/node_modules/@deadbolt/cli-linux-x64/bin/deadbolt",
+                Manager::Npm,
+            ),
         ] {
             assert_eq!(
                 classify(Path::new(path), true, none),

@@ -31,6 +31,10 @@ name: Release
 # - stable: a push to production or of tag v<version>, or a dispatch from
 #   production, publishes the workspace version with macOS signed, then the
 #   GitHub release and Homebrew.
+#
+# Signed runs also publish npm (@deadbolt/cli and its platform packages,
+# dist-tag dev or latest) through npm trusted publishing: publish-npm's OIDC
+# token is the credential, and there is no npm token.
 on:
   workflow_dispatch:
     inputs:
@@ -543,6 +547,65 @@ jobs:
           digests: sign-macos=${{ needs.sign-macos.outputs.digest }}
       - run: scripts/verify-macos-release.sh "$RUNNER_TEMP/in/sign-macos" "$DEADBOLT_VERSION"
 
+  # The npm packages (scripts/package-npm.sh): @deadbolt/cli and one package
+  # per platform, the darwin ones carrying the signed, notarized Deadbolt.app.
+  # Signed builds only; then checks the app survived npm's packing.
+  build-npm:
+    name: Build npm packages
+    needs: [plan, build-linux-x64, build-linux-arm64, build-linux-x64-musl, build-linux-arm64-musl, sign-macos, verify-macos]
+    if: >-
+      ${{ !cancelled()
+      && needs.build-linux-x64.result == 'success' && needs.build-linux-arm64.result == 'success'
+      && needs.build-linux-x64-musl.result == 'success' && needs.build-linux-arm64-musl.result == 'success'
+      && needs.verify-macos.result == 'success' }}
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+    outputs:
+      digest: ${{ steps.upload.outputs.digest }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ needs.plan.outputs.sha }}
+          persist-credentials: false
+      - &setup-node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: "24.11.0"
+      - uses: ./.github/release/download
+        with:
+          pattern: "{build-cli-linux-*,sign-macos}"
+          digests: >-
+            build-cli-linux-x64=${{ needs.build-linux-x64.outputs.digest }}
+            build-cli-linux-arm64=${{ needs.build-linux-arm64.outputs.digest }}
+            build-cli-linux-x64-musl=${{ needs.build-linux-x64-musl.outputs.digest }}
+            build-cli-linux-arm64-musl=${{ needs.build-linux-arm64-musl.outputs.digest }}
+            sign-macos=${{ needs.sign-macos.outputs.digest }}
+      - name: Pack
+        run: scripts/package-npm.sh "$DEADBOLT_VERSION" "$RUNNER_TEMP/in" "$RUNNER_TEMP/npm"
+      - name: Check
+        run: |
+          for arch in arm64 x64; do
+            check=$(mktemp -d)
+            tar -xzf "$RUNNER_TEMP/npm/deadbolt-cli-darwin-$arch-$DEADBOLT_VERSION.tgz" -C "$check"
+            app="$check/package/Deadbolt.app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            spctl --assess --type execute --verbose=2 "$app"
+            xcrun stapler validate "$app"
+          done
+          # Installed as users install it: the command is the app's helper.
+          prefix=$(mktemp -d)
+          npm install --global --prefix "$prefix" --no-fund --no-audit \
+            "$RUNNER_TEMP/npm/deadbolt-cli-darwin-arm64-$DEADBOLT_VERSION.tgz" "$RUNNER_TEMP/npm/deadbolt-cli-$DEADBOLT_VERSION.tgz"
+          readlink "$prefix/lib/node_modules/@deadbolt/cli/bin/deadbolt" | grep -q 'Deadbolt.app/Contents/Helpers/deadbolt$'
+          "$prefix/bin/deadbolt" --version | grep -qF "deadbolt $DEADBOLT_VERSION"
+      - id: upload
+        uses: ./.github/release/upload
+        with:
+          name: build-npm
+          path: ${{ runner.temp }}/npm
+
   # ---- Publish: release environment; only .github/release/ is checked out ----
 
   # The only job that publishes to the release service; its OIDC token is the
@@ -602,6 +665,55 @@ jobs:
           for manifest in "$RUNNER_TEMP"/dist/manifest-*.json; do
             { echo "### $(basename "$manifest")"; echo '```json'; cat "$manifest"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           done
+
+  # Build provenance for the npm tarballs, which publish-npm checks. No
+  # secrets; id-token only for Sigstore.
+  publish-attestations:
+    name: Attest npm packages
+    needs: [plan, build-npm]
+    if: ${{ !cancelled() && needs.build-npm.result == 'success' && needs.plan.outputs.channel != 'check' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - *checkout-release
+      - uses: ./.github/release/download
+        with:
+          pattern: build-npm
+          digests: build-npm=${{ needs.build-npm.outputs.digest }}
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: ${{ runner.temp }}/in/build-npm/*.tgz
+
+  # npm, through trusted publishing: this job's OIDC token is the credential
+  # (no npm token exists). After the release service, so both offer the same
+  # version.
+  publish-npm:
+    name: Publish to npm
+    needs: [plan, build-npm, publish-attestations, publish]
+    if: ${{ !cancelled() && needs.publish-attestations.result == 'success' && needs.publish.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      id-token: write
+      attestations: read
+    env:
+      DEADBOLT_VERSION: ${{ needs.plan.outputs.release-version }}
+      DEADBOLT_RELEASE_CHANNEL: ${{ needs.plan.outputs.release-channel }}
+    steps:
+      - *checkout-release
+      - *setup-node
+      - uses: ./.github/release/download
+        with:
+          pattern: build-npm
+          digests: build-npm=${{ needs.build-npm.outputs.digest }}
+      - name: Publish
+        run: bash .github/release/publish-npm.sh "$RUNNER_TEMP/in/build-npm"
+        env:
+          GH_TOKEN: ${{ github.token }}
 
   github:
     name: GitHub release
